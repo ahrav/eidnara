@@ -25,6 +25,7 @@ use support::projection_gate::{identity, passing_evaluator};
 
 const DIMENSION: u32 = 8;
 const TOLERANCE: f64 = 1e-3;
+const KERNEL: &str = "test-incarnation";
 
 fn unit(raw: [f32; 8]) -> Vec<f32> {
     let norm = raw
@@ -58,6 +59,8 @@ fn export() -> LiveRows {
     ];
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     LiveRows {
+        generation: generation(&identity(KERNEL, DIMENSION)),
+        kernel_incarnation_id: KERNEL.to_owned(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: 3,
             checkpoint_commit_seq: 9,
@@ -99,7 +102,7 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let store = GenerationStore::open(Some(root.path())).unwrap();
         let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
-        let identity = identity("test-incarnation", DIMENSION);
+        let identity = identity(KERNEL, DIMENSION);
         let gate = HookGate::closed();
         gate.install(passing_evaluator(&identity, 0, &ProjectionHook::ALL));
         let admission = gate
@@ -404,6 +407,52 @@ fn build_refuses_no_rows_out_of_order_rows_and_rows_outside_the_layout() {
         fs::read_dir(&dir).unwrap().next().is_none(),
         "a refused build writes nothing"
     );
+}
+
+#[test]
+fn build_refuses_an_export_whose_generation_or_kernel_is_not_the_expected_one() {
+    let fixture = Fixture::new();
+    let dir = fixture.work_dir();
+    for (field, mutate) in [
+        (
+            "generation_id",
+            Box::new(|e: &mut LiveRows| e.generation.generation_id = "gen-vectors-2".to_owned())
+                as Box<dyn Fn(&mut LiveRows)>,
+        ),
+        (
+            "embedding_model",
+            Box::new(|e: &mut LiveRows| e.generation.embedding_model = "another-model".to_owned()),
+        ),
+        (
+            "tokenizer_fingerprint",
+            Box::new(|e: &mut LiveRows| e.generation.tokenizer_fingerprint = "f".repeat(64)),
+        ),
+        (
+            "vector_dimension",
+            Box::new(|e: &mut LiveRows| e.generation.vector_dimension = 4),
+        ),
+        (
+            "generation_epoch",
+            Box::new(|e: &mut LiveRows| e.generation.generation_epoch = 2),
+        ),
+        (
+            "kernel_incarnation_id",
+            Box::new(|e: &mut LiveRows| e.kernel_incarnation_id = "other-kernel".to_owned()),
+        ),
+    ] {
+        let mut foreign = export();
+        mutate(&mut foreign);
+        assert_eq!(
+            build(&fixture.expected(), &foreign, &dir),
+            Err(VectorRefusal::Export { field }),
+            "rows read under another {field} do not become this generation"
+        );
+    }
+    assert!(
+        fs::read_dir(&dir).unwrap().next().is_none(),
+        "a refused build writes nothing"
+    );
+    assert!(build(&fixture.expected(), &export(), &dir).is_ok());
 }
 
 #[test]

@@ -178,6 +178,8 @@ pub enum FileFault {
 pub enum VectorRefusal {
     #[error("the generation and the expectation disagree on {field}")]
     Identity { field: &'static str },
+    #[error("the export and the expectation disagree on {field}")]
+    Export { field: &'static str },
     #[error("no rows were supplied")]
     NoRows,
     #[error("row {index} is out of identifier order or repeats a row")]
@@ -228,18 +230,20 @@ impl BuiltVectors {
     }
 }
 
-/// Writes rows, codes, scales, and identifiers under `work_dir` and describes them in a sidecar bound to `expected` and the export's checkpoint.
+/// Writes rows, codes, scales, and identifiers under `work_dir` and describes them in a sidecar bound to `expected` and the export's generation, kernel incarnation, and checkpoint.
+/// The export names the generation and kernel it read the rows under; a disagreement with `expected` is refused rather than stamped, so the sidecar's provenance is the rows' provenance.
 /// Rows must arrive in strictly increasing identifier order so the artifact, the codes, and the identifier list agree on row numbering across builds.
 /// Files are created exclusively and never synced: the store copies and syncs them when it stages, so the work directory is scratch, and a retry needs a fresh one.
 ///
 /// # Errors
 ///
-/// No rows, rows out of order, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
+/// An export of another generation or kernel, no rows, rows out of order, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
 pub fn build(
     expected: &ExpectedVectors<'_>,
     export: &LiveRows,
     work_dir: &Path,
 ) -> Result<BuiltVectors, VectorRefusal> {
+    check_export(export, expected)?;
     let rows = &export.rows;
     if rows.is_empty() {
         return Err(VectorRefusal::NoRows);
@@ -280,17 +284,17 @@ pub fn build(
     }
     let sidecar = VectorSidecar {
         schema: SIDECAR_SCHEMA,
-        embedding_model: expected.generation.embedding_model.clone(),
-        tokenizer_fingerprint: expected.generation.tokenizer_fingerprint.clone(),
+        embedding_model: export.generation.embedding_model.clone(),
+        tokenizer_fingerprint: export.generation.tokenizer_fingerprint.clone(),
         vector_dimension: layout.dimension,
         metric: expected.metric.name().to_owned(),
         unit_norm_tolerance: layout.unit_norm_tolerance,
         quantizer_recipe: expected.recipe.id().to_owned(),
         calibrated_rows: calibration.identity.calibrated_rows,
         scales_sha256: sha256_hex(&calibration.scales.encode()),
-        generation_id: expected.generation.generation_id.clone(),
-        generation_epoch: expected.generation.generation_epoch,
-        kernel_incarnation_id: expected.kernel_incarnation_id.to_owned(),
+        generation_id: export.generation.generation_id.clone(),
+        generation_epoch: export.generation.generation_epoch,
+        kernel_incarnation_id: export.kernel_incarnation_id.clone(),
         snapshot_commit_seq: export.checkpoint.snapshot_commit_seq,
         checkpoint_commit_seq: export.checkpoint.checkpoint_commit_seq,
         hold_id: export.checkpoint.hold_id.clone(),
@@ -383,9 +387,11 @@ pub fn verify(
         return Err(VectorRefusal::NotVectors("manifest binding"));
     }
     check_identity(&sidecar, expected)?;
-    let layout = sidecar
-        .layout()
-        .ok_or(VectorRefusal::NotVectors("metric"))?;
+    let layout = RowLayout {
+        dimension: sidecar.vector_dimension,
+        metric: expected.metric,
+        unit_norm_tolerance: sidecar.unit_norm_tolerance,
+    };
     let rows = codec::decode_rows(&read_verified(&generation, ROWS_FILE)?, &layout)
         .map_err(VectorRefusal::Rows)?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
@@ -417,6 +423,30 @@ pub fn verify(
         sidecar,
         generation,
     })
+}
+
+fn check_export(export: &LiveRows, expected: &ExpectedVectors<'_>) -> Result<(), VectorRefusal> {
+    let generation = expected.generation;
+    let field = |field| VectorRefusal::Export { field };
+    if export.generation.generation_id != generation.generation_id {
+        return Err(field("generation_id"));
+    }
+    if export.generation.embedding_model != generation.embedding_model {
+        return Err(field("embedding_model"));
+    }
+    if export.generation.tokenizer_fingerprint != generation.tokenizer_fingerprint {
+        return Err(field("tokenizer_fingerprint"));
+    }
+    if export.generation.vector_dimension != generation.vector_dimension {
+        return Err(field("vector_dimension"));
+    }
+    if export.generation.generation_epoch != generation.generation_epoch {
+        return Err(field("generation_epoch"));
+    }
+    if export.kernel_incarnation_id != expected.kernel_incarnation_id {
+        return Err(field("kernel_incarnation_id"));
+    }
+    Ok(())
 }
 
 /// Every field is compared, so a different model space is refused even at an equal dimension.

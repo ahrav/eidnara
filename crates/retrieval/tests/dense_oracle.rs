@@ -1735,6 +1735,16 @@ fn the_original_row_artifact_round_trips_and_binds_dimension_and_metric() {
         DIMENSION
     );
     assert_eq!(u64::from_le_bytes(bytes[16..24].try_into().unwrap()), 3);
+    let filtered = codec::encode_rows(
+        &layout(),
+        rows.iter().map(Vec::as_slice).filter(|row| row[0] == 0.0),
+    )
+    .unwrap();
+    assert_eq!(u64::from_le_bytes(filtered[16..24].try_into().unwrap()), 2);
+    assert_eq!(
+        &filtered[ARTIFACT_HEADER_BYTES..],
+        &bytes[ARTIFACT_HEADER_BYTES + 32..]
+    );
     let decoded = codec::decode_rows(&bytes, &layout()).unwrap();
     assert_eq!(decoded.layout, layout());
     assert_eq!(decoded.rows, rows);
@@ -1888,6 +1898,8 @@ fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_boun
     }
     assert_eq!(exported.checkpoint.hold_id, HOLD);
     assert!(exported.checkpoint.checkpoint_commit_seq >= exported.checkpoint.snapshot_commit_seq);
+    assert_eq!(exported.generation, generation);
+    assert_eq!(exported.kernel_incarnation_id, fixture.incarnation);
     assert!(
         !format!("{:?}", exported.rows).contains("0.9"),
         "Debug hides coordinates"

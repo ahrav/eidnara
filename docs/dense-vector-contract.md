@@ -227,10 +227,16 @@ them is a change to the recipe.
 `daemon::vector_generation` builds one generation from a
 `retrieval::dense::export::live_rows` export: every live dense-required
 occurrence with a vector of the generation, validated against the layout, in
-occurrence identifier order, together with the projection checkpoint the same
-read transaction observed, so the provenance the sidecar records is the state
-the rows came from. The generation is five files staged through the shared
-`GenerationStore` under target `vector-generation`:
+occurrence identifier order, together with the generation and kernel
+incarnation the export checked against the projection and the projection
+checkpoint the same read transaction observed. The export walks the
+generation's `(generation_id, occurrence_id)` index in order and never sorts.
+`build` refuses an export whose generation or kernel incarnation is not the
+caller's expectation and stamps the sidecar's generation identifier, epoch,
+model, tokenizer fingerprint, and kernel incarnation from the export, so the
+provenance the sidecar records is the state the rows came from. The
+generation is five files staged through the shared `GenerationStore` under
+target `vector-generation`:
 
 | File | Bytes |
 | --- | --- |
