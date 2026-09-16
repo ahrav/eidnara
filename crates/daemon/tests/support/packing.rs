@@ -3,6 +3,8 @@
 
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use daemon::packing::{
     ClaudeTokens, CostEstimator, PackingTrace, PreparationRefusal, RequiredInputs,
@@ -317,4 +319,35 @@ pub fn bounds(token_limit: u64) -> RequiredBounds<ClaudeTokens> {
         max_item_bytes: NonZeroU64::new(1 << 19).unwrap(),
         token_limit: ClaudeTokens::new(token_limit),
     }
+}
+
+/// Holds the projection connection on another thread until `prepare` returns
+/// or `HOLD_CEILING` passes, then reports how long `prepare` took.
+pub fn while_connection_is_held<T>(
+    fixture: &Fixture,
+    prepare: impl FnOnce() -> T,
+) -> (Duration, T) {
+    const HOLD_CEILING: Duration = Duration::from_secs(5);
+    let (holding_tx, holding) = mpsc::channel::<()>();
+    let (release_tx, release) = mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            fixture
+                .store
+                .with_conn(|_| {
+                    holding_tx.send(()).unwrap();
+                    let _ = release.recv_timeout(HOLD_CEILING);
+                    Ok(())
+                })
+                .unwrap();
+        });
+        holding.recv_timeout(HOLD_CEILING).unwrap();
+        let started = Instant::now();
+        let outcome = prepare();
+        let waited = started.elapsed();
+        // The holder has already left once `HOLD_CEILING` passed; the elapsed
+        // assertion reports that, not this send.
+        let _ = release_tx.send(());
+        (waited, outcome)
+    })
 }

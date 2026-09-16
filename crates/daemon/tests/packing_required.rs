@@ -4,8 +4,8 @@
 mod support;
 
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use daemon::packing::{
@@ -18,7 +18,7 @@ use kernel::source_identity::encode;
 use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{RequiredBound, RequiredBounds, RequiredContextFailure, RequiredRequest};
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
-use support::packing::{Fixture, ToolSpan, bounds, tool_span};
+use support::packing::{Fixture, ToolSpan, bounds, tool_span, while_connection_is_held};
 
 fn required_failure(
     result: &Result<RequiredMaterialization, PreparationRefusal>,
@@ -345,44 +345,6 @@ fn an_expired_deadline_refuses_the_required_phase_before_any_optional_event() {
     assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
 }
 
-/// Holds the projection connection on another thread until `prepare` returns
-/// or `HOLD_CEILING` passes, then reports how long `prepare` took.
-fn while_connection_is_held(
-    fixture: &Fixture,
-    prepare: impl FnOnce() -> (
-        Result<daemon::packing::RequiredMaterialization, PreparationRefusal>,
-        PackingTrace,
-    ),
-) -> (
-    Duration,
-    Result<daemon::packing::RequiredMaterialization, PreparationRefusal>,
-    PackingTrace,
-) {
-    const HOLD_CEILING: Duration = Duration::from_secs(5);
-    let (holding_tx, holding) = mpsc::channel::<()>();
-    let (release_tx, release) = mpsc::channel::<()>();
-    std::thread::scope(|scope| {
-        scope.spawn(move || {
-            fixture
-                .store
-                .with_conn(|_| {
-                    holding_tx.send(()).unwrap();
-                    let _ = release.recv_timeout(HOLD_CEILING);
-                    Ok(())
-                })
-                .unwrap();
-        });
-        holding.recv_timeout(HOLD_CEILING).unwrap();
-        let started = Instant::now();
-        let (result, trace) = prepare();
-        let waited = started.elapsed();
-        // The holder has already left once `HOLD_CEILING` passed; the elapsed
-        // assertion reports that, not this send.
-        let _ = release_tx.send(());
-        (waited, result, trace)
-    })
-}
-
 #[test]
 fn a_deadline_that_passes_while_the_connection_is_held_refuses_without_reading() {
     let fixture = Fixture::new(&[FIRST]);
@@ -390,7 +352,7 @@ fn a_deadline_that_passes_while_the_connection_is_held_refuses_without_reading()
         Some(Instant::now() + Duration::from_millis(200)),
         Arc::new(AtomicBool::new(false)),
     );
-    let (waited, result, trace) = while_connection_is_held(&fixture, || {
+    let (waited, (result, trace)) = while_connection_is_held(&fixture, || {
         fixture.prepare(&[FIRST.request()], &bounds(1 << 20), &short)
     });
     assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
@@ -414,7 +376,7 @@ fn a_cancellation_while_the_connection_is_held_refuses_without_reading() {
         Arc::new(AtomicBool::new(false)),
     );
     let canceller = cancellable.clone();
-    let (waited, result, trace) = while_connection_is_held(&fixture, || {
+    let (waited, (result, trace)) = while_connection_is_held(&fixture, || {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 std::thread::sleep(Duration::from_millis(200));

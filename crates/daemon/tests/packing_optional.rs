@@ -4,6 +4,9 @@
 mod support;
 
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
 
 use daemon::packing::{
     ClaudeTokens, CostEstimator, OptionalAdmission, OptionalExclusion, OptionalRequest,
@@ -15,7 +18,9 @@ use kernel::applicability::EvalBudget;
 use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{OptionalBound, OptionalBounds};
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
-use support::packing::{ByteEstimator, Fixture, ToolSpan, bounds, tool_range, tool_span};
+use support::packing::{
+    ByteEstimator, Fixture, ToolSpan, bounds, tool_range, tool_span, while_connection_is_held,
+};
 
 const REQUIRED: ToolSpan = tool_span("req", "1", "required bytes\n");
 const PARENT: &str = "0123456789abcdefghij";
@@ -363,5 +368,49 @@ fn a_corrupt_optional_payload_is_excluded_and_the_scan_continues() {
         trace.payload_loads(),
         2,
         "the required payload and the sound optional payload; the corrupt load is not charged"
+    );
+}
+
+#[test]
+fn a_deadline_that_passes_while_the_connection_is_held_refuses_the_optional_phase_without_reading()
+{
+    let a = tool_span("opt-a", "1", "aaaa");
+    let fixture = Fixture::new(&[REQUIRED, a]);
+    let (required, _) = fixture.prepare(
+        &[REQUIRED.request()],
+        &bounds(1 << 20),
+        &EvalBudget::unbounded(),
+    );
+    let required = required.unwrap();
+    let short = EvalBudget::new(
+        Some(Instant::now() + Duration::from_millis(200)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let mut trace = PackingTrace::default();
+    let (waited, result) = while_connection_is_held(&fixture, || {
+        prepare_optional(
+            &fixture.store,
+            RequiredInputs {
+                kernel: &fixture.kernel,
+                project: &fixture.project,
+                destination: kernel::ArtifactDestination::Local,
+                budget: &short,
+                estimator: &ByteEstimator,
+            },
+            &required,
+            &[optional(&a)],
+            &wide(),
+            &mut trace,
+        )
+    });
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+    assert!(
+        waited < Duration::from_secs(2),
+        "the hold must end at the deadline, not when the holder releases: {waited:?}"
+    );
+    assert!(
+        trace.events().is_empty(),
+        "no optional row is read after the deadline: {:?}",
+        trace.events()
     );
 }
