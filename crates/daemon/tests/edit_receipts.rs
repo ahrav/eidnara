@@ -470,6 +470,46 @@ async fn a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uninstalling_the_limit_set_drops_the_receipts_like_a_restart_so_a_read_back_still_lands() {
+    let daemon = KernelDaemon::start().await;
+    daemon
+        .handler()
+        .set_edit_receipt_limits(Some(limits()))
+        .unwrap();
+    let consumer = Consumer::new(&daemon);
+    let ctx = context("rev-1", "repr-1", 10);
+    let key = id(&consumer.prepare(ctx.clone(), "append", 10).await);
+    let forwarded = consumer.apply(&key, ctx.clone()).await;
+    assert_eq!(forwarded["kind"], "forwarded");
+    let effect = forwarded["forwarded_identity"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    daemon.handler().set_edit_receipt_limits(None).unwrap();
+    assert_eq!(
+        terminal(&consumer.apply(&key, ctx.clone()).await),
+        "disabled"
+    );
+    daemon
+        .handler()
+        .set_edit_receipt_limits(Some(limits()))
+        .unwrap();
+    let answer = consumer.apply(&key, ctx.clone()).await;
+    assert_eq!(answer["kind"], "receipt", "{answer}");
+    assert_eq!(
+        answer["state"], "unknown",
+        "a key of the dropped store is unknown, not receipt_unavailable"
+    );
+    let read_back = consumer
+        .confirm(&key, &effect, Some(&effect), "append")
+        .await;
+    assert_eq!(read_back["state"], "complete", "{read_back}");
+    assert_eq!(consumer.effects().len(), 1, "nothing is forwarded twice");
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict() {
     let daemon = KernelDaemon::start().await;
     daemon
