@@ -180,6 +180,24 @@ reason `response_bytes`, never a body over the bound. A terminal answer is
 `disabled`; a `lane_unavailable` terminal adds a `reason` code naming the
 witness. A malformed request is the transport's `invalid_params` error.
 
+## Preparation and receipts
+
+`retrieval.prepare`, `retrieval.apply`, and `retrieval.confirm` in
+`crates/daemon/src/edit_receipts.rs` carry a selection from ranking to a
+confirmed edit; their literals are context-application protocol 1 in
+`docs/host-wire-protocol.md` Section 7.8. A preparation binds the RP2.7.U1
+preparation digest over the caller's context and mints a per-preparation
+identity whose fingerprint covers daemon incarnation, context revision,
+action, selection digest, and accounting profile. An apply that restates a
+different context is `stale_preparation` before any forward; a retry under the
+same identity returns the recorded state and forwards nothing; a retry with
+another digest after a forward is `conflict`. The receipt completes only on a
+confirm whose applied identity equals the identity the daemon forwarded; a
+key from another daemon incarnation or a lost acknowledgment is `unknown` and
+stays so until such a confirm. Receipts are in memory, keyed by the route's
+bound project, bounded per project by count and store-wide by retention, and
+an evicted key or a key of another project is refused rather than replayed.
+
 ## Probe and generation identities
 
 `ProbeOrdinal(u32)` is one compiled query atom's zero-based position in its

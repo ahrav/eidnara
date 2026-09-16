@@ -50,6 +50,7 @@ memchr = { workspace = true }
 tokio = { workspace = true, features = ["signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 sha2 = { workspace = true }
+getrandom = { workspace = true }
 # Keyed credential identities in the active harness selection.
 hmac = { workspace = true }
 # Artifact pages cross the JSON ring as base64.
