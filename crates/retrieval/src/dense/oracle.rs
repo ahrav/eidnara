@@ -523,6 +523,7 @@ impl<H: FnMut(Window<'_>)> Progress<H> {
     }
 
     /// One page can contribute at most `k` top rows, so when a page selects more rows than one batch its rows are judged in rank order, a batch at a time, and `top.admits` stops the page once it rejects the best unjudged row.
+    /// Batches are sized to the walk's admission rate only while that rate describes the page: a batch that admits nothing shows it does not, so the rows the set still admits are judged in one more batch, as a page without batching would be.
     fn judge_selected(
         &mut self,
         kernel: &KernelStore,
@@ -547,21 +548,33 @@ impl<H: FnMut(Window<'_>)> Progress<H> {
         });
         let mut slots: Vec<Option<OccurrenceCandidate>> =
             candidates.into_iter().map(Some).collect();
-        let mut next = 0;
-        let mut eligible_in_page = 0usize;
-        while next < total {
-            let best = order[next];
-            let best_id = slots[best]
+        let admits = |top: &TopK<OccurrenceCandidate>,
+                      slots: &[Option<OccurrenceCandidate>],
+                      index: usize| {
+            let id = slots[index]
                 .as_ref()
                 .expect("unjudged")
                 .occurrence_id
                 .as_str();
-            if !self.top.admits(scores[best], best_id) {
+            top.admits(scores[index], id)
+        };
+        let mut next = 0;
+        let mut eligible_in_page = 0usize;
+        let mut sized = true;
+        while next < total {
+            if !admits(&self.top, &slots, order[next]) {
                 break;
             }
-            let batch = self
-                .admissions
-                .next_batch(k, k - eligible_in_page.min(k), total - next);
+            let batch = if sized {
+                self.admissions
+                    .next_batch(k, k - eligible_in_page.min(k), total - next)
+            } else {
+                // Rank order makes the rows the set still admits a prefix of the unjudged rows.
+                order[next..]
+                    .iter()
+                    .take_while(|&&index| admits(&self.top, &slots, index))
+                    .count()
+            };
             // Visit order is identifier order, which keeps the kernel's per-candidate registry probes local; the verdicts stay positional.
             let mut picked = order[next..next + batch].to_vec();
             picked.sort_unstable();
@@ -580,7 +593,9 @@ impl<H: FnMut(Window<'_>)> Progress<H> {
             if flow.is_break() {
                 return Ok(flow);
             }
-            eligible_in_page += self.admissions.eligible - before;
+            let eligible = self.admissions.eligible - before;
+            sized &= eligible != 0;
+            eligible_in_page += eligible;
             next += batch;
         }
         Ok(ControlFlow::Continue(()))

@@ -106,7 +106,10 @@ generation inside the caller's read transaction:
   best rows, later batches are sized to the eligible rows still wanted at the
   admission rate the walk has observed so far, and the page stops once the set
   no longer admits its best unjudged row, so a page whose `k` best rows are all
-  eligible judges only those `k`. A page with no such row runs no batch.
+  eligible judges only those `k`. A batch that admits no row shows the walk's
+  rate does not describe the page, so the rows the set still admits are judged
+  in one more batch, as they would be without batching. A page with no such
+  row runs no batch.
   Eligibility precedes admission;
   enumeration order and score never decide eligibility, only whether a row is
   judged at all. The returned set equals the one a walk judging every row
