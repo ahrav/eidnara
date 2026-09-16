@@ -26,7 +26,7 @@ impl Lane {
         }
     }
 
-    fn index(self) -> usize {
+    pub(super) fn index(self) -> usize {
         match self {
             Self::Exact => 0,
             Self::Lexical => 1,
