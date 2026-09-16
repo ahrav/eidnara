@@ -320,6 +320,32 @@ fn read_members(
     }
 }
 
+/// A shared lock pins the directory; `prune` and `discard_unselected` skip directories they cannot
+/// exclusively lock.
+fn pin_dir(dir: &OwnedFd) -> Result<(), GenerationError> {
+    rustix::fs::flock(dir, rustix::fs::FlockOperation::NonBlockingLockShared)
+        .map_err(|_| invalid("generation is being reclaimed"))
+}
+
+/// The retained descriptor holds the shared lock. `manifest` is decoded canonical content; the
+/// files it lists are unhashed until [`GenerationStore::validate`] runs.
+pub struct PinnedGeneration {
+    pub digest: String,
+    pub manifest: GenerationManifest,
+    dir: OwnedFd,
+}
+
+impl PinnedGeneration {
+    /// Returns the members file's digests verified against the manifest entry; returns an empty vector when the manifest lists no members file.
+    ///
+    /// # Errors
+    ///
+    /// A members file the manifest names but that fails its hash, has an unknown schema, or names a noncanonical digest.
+    pub fn members(&self) -> Result<Vec<String>, GenerationError> {
+        read_members(&self.dir, &self.manifest)
+    }
+}
+
 impl ValidatedGeneration {
     /// The digests this generation requires retained, read through the retained descriptor; empty when the manifest lists no members file.
     ///
@@ -331,8 +357,7 @@ impl ValidatedGeneration {
     }
 
     pub fn pin(&self) -> Result<(), GenerationError> {
-        rustix::fs::flock(&self.dir, rustix::fs::FlockOperation::NonBlockingLockShared)
-            .map_err(|_| invalid("generation is being reclaimed"))
+        pin_dir(&self.dir)
     }
 
     /// In-process loaders may use the descriptor-rooted path only while `ValidatedGeneration` remains alive.
@@ -641,6 +666,21 @@ impl GenerationStore {
     /// The manifest alone: its bytes hash to `digest` and are canonical, but the files it lists are not opened. Cheap enough to run on every prune.
     pub fn manifest(&self, digest: &str) -> Result<GenerationManifest, GenerationError> {
         self.open_manifest(digest).map(|(_, manifest)| manifest)
+    }
+
+    /// Reads the manifest as [`Self::manifest`] does, then takes the reader's shared lock on the directory; the listed files are not opened.
+    ///
+    /// # Errors
+    ///
+    /// A noncanonical digest, a directory that is missing or fails its security checks, a manifest that does not hash to `digest`, or a generation another holder has locked for reclamation.
+    pub fn pin(&self, digest: &str) -> Result<PinnedGeneration, GenerationError> {
+        let (dir, manifest) = self.open_manifest(digest)?;
+        pin_dir(&dir)?;
+        Ok(PinnedGeneration {
+            digest: digest.to_owned(),
+            manifest,
+            dir,
+        })
     }
 
     fn open_manifest(
@@ -2935,6 +2975,82 @@ mod tests {
         assert!(home.join("search.sqlite").is_file());
         assert!(store.stage(&sources, &meta(), &BTreeSet::new()).is_err());
         assert!(home.join("search.sqlite").is_file());
+        drop(pin);
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap().removed_generations,
+            1
+        );
+    }
+
+    #[test]
+    fn a_manifest_only_pin_holds_a_generation_against_prune_without_proving_its_files() {
+        let root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        let member = stage_default(&store, src.path());
+        let members = serde_json::to_vec(&WireMembers {
+            schema: 1,
+            members: vec![member.clone()],
+        })
+        .unwrap();
+        let record = store
+            .stage(
+                &[
+                    SourceSpec {
+                        rel_path: MEMBERS_FILE_NAME.to_owned(),
+                        source: write_source(src.path(), "members", &members),
+                        executable: false,
+                        expected_size: None,
+                        expected_sha256: None,
+                    },
+                    SourceSpec {
+                        rel_path: "record.json".to_owned(),
+                        source: write_source(src.path(), "record", b"{\"record\":true}"),
+                        executable: false,
+                        expected_size: None,
+                        expected_sha256: None,
+                    },
+                ],
+                &meta(),
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(store.pin("not-a-digest").is_err());
+        assert!(store.pin(&"0".repeat(64)).is_err(), "an absent generation");
+
+        // The pin reads only the manifest: a payload corrupted afterwards is still pinned, and it is `validate` that refuses it.
+        std::fs::write(
+            store
+                .root()
+                .join(GENERATIONS_DIR_NAME)
+                .join(&record)
+                .join("record.json"),
+            b"{\"record\":false}",
+        )
+        .unwrap();
+        let pin = store.pin(&record).unwrap();
+        assert_eq!(pin.digest, record);
+        assert_eq!(pin.members().unwrap(), vec![member.clone()]);
+        assert!(store.validate(&record).is_err());
+        let record_bytes: u64 = pin.manifest.files.iter().map(|file| file.size).sum();
+
+        let report = store.prune(&BTreeSet::new()).unwrap();
+        assert_eq!(
+            (
+                report.removed_generations,
+                report.retained_pinned,
+                report.retained_bytes
+            ),
+            (0, 1, record_bytes)
+        );
+        assert!(
+            rustix::fs::flock(
+                open_child_dir(&store.generations_fd, &record).unwrap(),
+                rustix::fs::FlockOperation::NonBlockingLockExclusive
+            )
+            .is_err(),
+            "a competing exclusive lock fails while the pin lives"
+        );
         drop(pin);
         assert_eq!(
             store.prune(&BTreeSet::new()).unwrap().removed_generations,

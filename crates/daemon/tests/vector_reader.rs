@@ -18,13 +18,16 @@ use std::time::{Duration, Instant};
 
 use daemon::projection_gates::{Admission, Denial};
 use daemon::vector_admission::{Ledger, Pool, RESIDENT_LIMIT, Refusal, ResourceClass};
-use daemon::vector_generation::{ExpectedVectors, ROWS_FILE, VerifiedVectors};
+use daemon::vector_composition::publish;
+use daemon::vector_generation::{ExpectedVectors, ROWS_FILE, Staging, VerifiedVectors};
 use daemon::vector_reader::{
     AcquireEvent, AcquireRefusal, PinnedVectors, RankRefusal, RankRequest, ReaderBounds, acquire,
     rank,
 };
 use host_runtime::generation::{CurrentProfile, GenerationStore, VECTOR_PROFILE_NAME};
-use host_runtime::lifecycle::{TRANSACTION_LOCK_NAME, coordination_dir_path};
+use host_runtime::lifecycle::{
+    LifecycleTransactionLock, TRANSACTION_LOCK_NAME, coordination_dir_path,
+};
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
 use retrieval::batch::ProjectionCheckpoint;
@@ -218,21 +221,13 @@ fn map(rows: &[(&str, Vec<f32>)]) -> Vec<(String, Vec<f32>)> {
         .collect()
 }
 
-/// The bytes the view should keep resident, from the store's manifests rather than the reader.
+/// The bytes the view should keep resident: the store's manifests, summed through the resident set `VerifiedVectors` publishes rather than a list the reader keeps.
 fn resident_bytes(fixture: &Fixture, members: &[String]) -> u64 {
     members
         .iter()
-        .flat_map(|digest| fixture.store.manifest(digest).unwrap().files)
-        .filter(|file| {
-            [
-                "row-ids.json",
-                "tombstones.json",
-                "scales.f32",
-                "vector-sidecar.json",
-            ]
-            .contains(&file.path.as_str())
+        .map(|digest| {
+            daemon::vector_generation::resident_bytes(&fixture.store.manifest(digest).unwrap())
         })
-        .map(|file| file.size)
         .sum()
 }
 
@@ -435,8 +430,7 @@ fn identity_handoff_allocation_contract() {
 }
 
 #[test]
-fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusal_hands_nothing_out()
- {
+fn acquisition_frees_the_transaction_lock_before_hashing_and_a_late_refusal_hands_nothing_out() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
     let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
@@ -450,28 +444,35 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
     let refusal = {
         let mut observe = |event: AcquireEvent| {
             seen.push(event);
-            // Every pin and both reservations are held, and a publisher's exclusive lifecycle lock cannot be taken, at both windows.
+            // The transaction lock is free at every window: a reader never holds mutators off while it hashes or hands off; its pins and both reservations are what keep the files.
             assert!(
-                !try_exclusive(&lock),
-                "a competing mutator is refused the transaction lock at {event:?}"
+                try_exclusive(&lock),
+                "a mutator can take the transaction lock at {event:?}"
             );
             for pinned in members.iter().chain([&digest]) {
-                assert!(!try_exclusive(&fixture.generation_dir(pinned)));
+                assert!(
+                    !try_exclusive(&fixture.generation_dir(pinned)),
+                    "{pinned} is pinned at {event:?}"
+                );
             }
             assert!(held(&fixture.ledger, ResourceClass::LayerTables) > 0);
             assert!(fixture.ledger.census().pinned > 0);
-            if event == AcquireEvent::BeforeLastLayer {
-                // An attempted prune reclaims nothing the view needs; the files are witnessed on disk afterwards.
+            if event != AcquireEvent::BeforeSelectorRecheck {
+                // A mutator's exclusive transaction succeeds through the real API, and its prune reclaims nothing the view needs; the files are witnessed on disk afterwards.
+                let transaction =
+                    LifecycleTransactionLock::acquire_exclusive(Some(fixture.root.path()))
+                        .expect("a mutator is not held off by a reader");
                 let report = GenerationStore::open(Some(fixture.root.path()))
                     .unwrap()
                     .prune(&BTreeSet::new())
                     .unwrap();
+                drop(transaction);
                 assert_eq!(report.removed_generations, 0);
                 let present = fixture.generations();
                 assert!(members.iter().chain([&digest]).all(|d| present.contains(d)));
             }
             if event == AcquireEvent::BeforeSelectorRecheck {
-                // The last check before handoff fails: the selector no longer names what recovery observed.
+                // The last check before handoff fails: the selector no longer names what acquisition observed.
                 std::fs::remove_file(&selector).unwrap();
             }
         };
@@ -495,6 +496,7 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
     assert_eq!(
         seen,
         vec![
+            AcquireEvent::BeforeVerification,
             AcquireEvent::BeforeLastLayer,
             AcquireEvent::BeforeSelectorRecheck
         ]
@@ -515,6 +517,77 @@ fn acquisition_holds_the_shared_protection_through_the_recheck_and_a_late_refusa
         "no reservation outlives a failed acquisition"
     );
     fixture.reacquire_transaction();
+}
+
+#[test]
+fn a_publisher_that_runs_while_a_reader_verifies_moves_the_selector_and_the_reader_refuses() {
+    let mut fixture = Fixture::new();
+    let corpus = corpus();
+    let old_base = fixture.layer_from(&export(&corpus, &[], 10));
+    let old = fixture.compose(1, &old_base, &[]).unwrap();
+    let old_digest = fixture.publish(&old).unwrap();
+    // The replacement is staged while the fixture still holds the transaction; only its publication waits for the reader's verification window.
+    let mut replaced = corpus.clone();
+    replaced[0].1 = axis(7);
+    let new_base = fixture.layer_from(&export(&replaced, &[], 20));
+    let new = fixture.compose(2, &new_base, &[]).unwrap();
+    let mut published = None;
+    fixture.release_transaction();
+    let refusal = {
+        let mut observe = |event: AcquireEvent| {
+            if event == AcquireEvent::BeforeVerification {
+                let transaction =
+                    LifecycleTransactionLock::acquire_exclusive(Some(fixture.root.path()))
+                        .expect("a publisher is not held off by a verifying reader");
+                let staging = Staging {
+                    store: &fixture.store,
+                    transaction: &transaction,
+                    gate: &fixture.gate,
+                    admission: &fixture.admission,
+                    identity: &fixture.identity,
+                    ledger: &fixture.ledger,
+                    protected: &fixture.protected,
+                };
+                published = Some(
+                    publish(&new, &staging, &fixture.work_dir(), &mut |_| Ok(()))
+                        .map_err(|failure| failure.refusal)
+                        .unwrap(),
+                );
+            }
+        };
+        acquire(
+            Some(fixture.root.path()),
+            &fixture.expected(),
+            bounds(),
+            &fixture.ledger,
+            &fixture.admission,
+            &mut observe,
+        )
+        .unwrap_err()
+    };
+    let new_digest = published.expect("the publisher ran during verification");
+    assert_eq!(
+        refusal,
+        AcquireRefusal::SelectorMoved {
+            observed: daemon::vector_composition::SelectorState::Current,
+            current: CurrentProfile::Current(new_digest.clone())
+        }
+    );
+    assert!(
+        try_exclusive(&fixture.generation_dir(&old_digest)),
+        "the superseded record is not left pinned"
+    );
+    assert_eq!(
+        fixture.ledger.census(),
+        daemon::vector_admission::Census::default(),
+        "no reservation outlives the refused acquisition"
+    );
+    fixture.reacquire_transaction();
+
+    // The retry takes the set the publisher left.
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    assert_eq!(view.digest(), new_digest);
+    assert_eq!(view.members(), vec![new_base.digest.clone()]);
 }
 
 #[test]
