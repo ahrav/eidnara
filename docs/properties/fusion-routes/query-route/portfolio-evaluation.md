@@ -13,7 +13,7 @@ review threads on the pull request.
 
 The evaluator ran the four lenses (harness fit, coverage balance,
 implementability, wildcard) over the artifacts and verified every symbol the
-catalog names against HEAD: the 20 test functions in `Exercised:` and
+catalog names against HEAD: the 21 test functions in `Exercised:` and
 `Existing check:` fields all exist at the cited paths, and the four observation
 points (`RequestBudget::derive`, `SearchProjection::read_under`,
 `SqliteStore::with_conn_interruptible`, `RequestCtx::run_blocking`) resolve.
