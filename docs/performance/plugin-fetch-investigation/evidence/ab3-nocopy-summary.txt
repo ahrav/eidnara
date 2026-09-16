@@ -1,0 +1,9 @@
+baseline read/1000-rows/narrow-scope r1 iterations=519 ms=19.2678
+nocopy read/1000-rows/narrow-scope r1 iterations=563 ms=17.762
+typed read/1000-rows/narrow-scope r1 iterations=734 ms=13.624
+baseline read/1000-rows/narrow-scope r2 iterations=495 ms=20.202
+nocopy read/1000-rows/narrow-scope r2 iterations=599 ms=16.6945
+typed read/1000-rows/narrow-scope r2 iterations=685 ms=14.5985
+baseline read/1000-rows/narrow-scope r3 iterations=494 ms=20.2429
+nocopy read/1000-rows/narrow-scope r3 iterations=588 ms=17.0068
+typed read/1000-rows/narrow-scope r3 iterations=686 ms=14.5773

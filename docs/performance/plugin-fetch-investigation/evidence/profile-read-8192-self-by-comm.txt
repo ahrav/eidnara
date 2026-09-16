@@ -1,0 +1,219 @@
+     8.24%  tokio-rt-worker  read_route_scout  [.] sqlite3VdbeExec
+     6.76%  read_route_scou  libc.so.6         [.] malloc_consolidate
+     6.37%  read_route_scou  libc.so.6         [.] malloc
+     5.57%  read_route_scou  libc.so.6         [.] _int_free
+     3.16%  read_route_scou  libc.so.6         [.] __memmove_avx512_unaligned_erms
+     2.81%  read_route_scou  libc.so.6         [.] unlink_chunk.constprop.0
+     2.76%  tokio-rt-worker  libc.so.6         [.] __memcmp_evex_movbe
+     2.58%  tokio-rt-worker  read_route_scout  [.] sqlite3BtreeCursor
+     2.42%  tokio-rt-worker  read_route_scout  [.] sqlite3BtreeIndexMoveto
+     2.21%  read_route_scou  read_route_scout  [.] <serde_json::value::Value as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut daemon::dispatch::CountingWriter>>
+     2.04%  read_route_scou  read_route_scout  [.] <daemon::dispatch::CountingWriter as std::io::Write>::write_all
+     2.02%  read_route_scou  libc.so.6         [.] _int_malloc
+     2.01%  read_route_scou  read_route_scout  [.] <daemon::dispatch::BoundedWriter<alloc::vec::Vec<u8>> as std::io::Write>::write_all
+     1.83%  read_route_scou  read_route_scout  [.] <daemon::dispatch::CountingWriter as std::io::Write>::write
+     1.77%  read_route_scou  read_route_scout  [.] serde_json::ser::format_escaped_str::<&mut daemon::dispatch::CountingWriter, serde_json::ser::CompactFormatter>
+     1.66%  tokio-rt-worker  libc.so.6         [.] malloc
+     1.66%  tokio-rt-worker  libc.so.6         [.] __memmove_avx512_unaligned_erms
+     1.51%  read_route_scou  libc.so.6         [.] cfree@GLIBC_2.2.5
+     1.46%  read_route_scou  read_route_scout  [.] <serde_json::value::Value as serde_core::ser::Serialize>::serialize::<serde_json::value::ser::Serializer>
+     1.23%  tokio-rt-worker  read_route_scout  [.] sqlite3VdbeFreeCursorNN
+     1.23%  read_route_scou  read_route_scout  [.] <serde_json::value::Value as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut daemon::dispatch::BoundedWriter<alloc::vec::Vec<u8>>>>
+     1.21%  read_route_scou  read_route_scout  [.] <&mut serde_json::ser::Serializer<&mut daemon::dispatch::BoundedWriter<alloc::vec::Vec<u8>>> as serde_core::ser::Serializer>::serialize_str
+     1.11%  read_route_scou  read_route_scout  [.] core::ptr::drop_glue::<serde_json::value::Value>
+     1.11%  tokio-rt-worker  libc.so.6         [.] __GI___pthread_mutex_unlock_usercnt
+     1.10%  read_route_scou  read_route_scout  [.] <alloc::collections::btree::map::entry::VacantEntry<alloc::string::String, serde_json::value::Value>>::insert_entry
+     1.09%  tokio-rt-worker  read_route_scout  [.] vdbeRecordCompareString
+     1.04%  tokio-rt-worker  read_route_scout  [.] sqlite3BtreeTableMoveto
+     0.97%  tokio-rt-worker  libc.so.6         [.] pthread_mutex_lock@@GLIBC_2.2.5
+     0.85%  read_route_scou  read_route_scout  [.] <alloc::collections::btree::map::IntoIter<alloc::string::String, alloc::collections::vec_deque::VecDeque<alloc::string::String>>>::dying_next
+     0.77%  read_route_scou  read_route_scout  [.] <alloc::collections::btree::map::entry::VacantEntry<alloc::string::String, serde_json::value::Value>>::insert_entry
+     0.75%  read_route_scou  read_route_scout  [.] core::ptr::drop_glue::<alloc::collections::btree::map::IntoIter<alloc::string::String, serde_json::value::Value>>
+     0.71%  read_route_scou  libc.so.6         [.] __memcmp_evex_movbe
+     0.69%  tokio-rt-worker  read_route_scout  [.] sqlite3VdbeRecordCompareWithSkip
+     0.68%  tokio-rt-worker  read_route_scout  [.] <alloc::string::String as core::clone::Clone>::clone
+     0.65%  read_route_scou  read_route_scout  [.] <serde_json::value::ser::SerializeMap as serde_core::ser::SerializeMap>::serialize_entry::<alloc::string::String, serde_json::value::Value>
+     0.64%  tokio-rt-worker  read_route_scout  [.] daemon::kernel_routes::read::read_visible
+     0.63%  tokio-rt-worker  libc.so.6         [.] _int_malloc
+     0.63%  read_route_scou  read_route_scout  [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>>::insert
+     0.63%  read_route_scou  read_route_scout  [.] <serde_json::ser::Compound<&mut daemon::dispatch::CountingWriter, serde_json::ser::CompactFormatter> as serde_core::ser::SerializeMap>::serialize_entry::<alloc::string::String, serde_json::value::Value>
+     0.62%  read_route_scou  read_route_scout  [.] <alloc::collections::btree::map::IntoIter<alloc::string::String, serde_json::value::Value>>::dying_next
+     0.61%  read_route_scou  read_route_scout  [.] <alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>>::insert
+     0.53%  tokio-rt-worker  read_route_scout  [.] pcache1Fetch
+     0.52%  tokio-rt-worker  read_route_scout  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.52%  tokio-rt-worker  read_route_scout  [.] getPageNormal
+     0.46%  tokio-rt-worker  read_route_scout  [.] sqlite3VdbeSerialGet
+     0.46%  read_route_scou  read_route_scout  [.] <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, alloc::string::String, serde_json::value::Value, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<alloc::string::String, serde_json::value::Value>>::insert_entry::{closure#0}>
+     0.46%  read_route_scou  read_route_scout  [.] sqlite3VdbeExec
+     0.45%  tokio-rt-worker  read_route_scout  [.] kernel::admission::text_column
+     0.41%  tokio-rt-worker  read_route_scout  [.] 0x00000000012116f0
+     0.35%  read_route_scou  read_route_scout  [.] <daemon::HandlerCore>::dispatch_value_with_inbound_bytes::{closure#0}
+     0.34%  read_route_scou  read_route_scout  [.] <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, alloc::string::String, serde_json::value::Value, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<alloc::string::String, serde_json::value::Value>>::insert_entry::{closure#0}>
+     0.32%  read_route_scou  read_route_scout  [.] daemon::kernel_routes::read::row_json
+     0.32%  read_route_scou  read_route_scout  [.] sqlite3BtreeIndexMoveto
+     0.32%  tokio-rt-worker  read_route_scout  [.] balance_nonroot
+     0.32%  tokio-rt-worker  read_route_scout  [.] <alloc::collections::binary_heap::BinaryHeap<daemon::kernel_routes::read::ServingOrderLast>>::into_sorted_vec
+     0.32%  tokio-rt-worker  read_route_scout  [.] getAndInitPage
+     0.31%  tokio-rt-worker  read_route_scout  [.] sqlite3BtreeNext.constprop.0
+     0.31%  tokio-rt-worker  read_route_scout  [.] core::str::converts::from_utf8
+     0.31%  tokio-rt-worker  read_route_scout  [.] btreeParseCellPtr
+     0.28%  tokio-rt-worker  read_route_scout  [.] getCellInfo
+     0.28%  read_route_scou  libc.so.6         [.] alloc_perturb
+     0.28%  tokio-rt-worker  read_route_scout  [.] allocateCursor
+     0.28%  read_route_scou  libc.so.6         [.] pthread_mutex_lock@@GLIBC_2.2.5
+     0.27%  read_route_scou  read_route_scout  [.] core::ptr::drop_glue::<alloc::collections::btree::map::IntoIter<alloc::string::String, serde_json::value::Value>>
+     0.26%  tokio-rt-worker  libc.so.6         [.] cfree@GLIBC_2.2.5
+     0.26%  tokio-rt-worker  read_route_scout  [.] sqlite3MemCompare
+     0.25%  read_route_scou  read_route_scout  [.] <serde_json::value::ser::SerializeMap as serde_core::ser::SerializeMap>::end
+     0.23%  tokio-rt-worker  read_route_scout  [.] sqlite3PcacheRelease
+     0.23%  read_route_scou  [unknown]         [k] 0xffffffff91e00b90
+     0.23%  tokio-rt-worker  read_route_scout  [.] btreeParseCellPtrIndex
+     0.21%  tokio-rt-worker  read_route_scout  [.] sqlite3_column_type
+     0.21%  tokio-rt-worker  read_route_scout  [.] pageFreeArray
+     0.21%  tokio-rt-worker  read_route_scout  [.] sqlite3_value_text
+     0.21%  tokio-rt-worker  read_route_scout  [.] sqlite3_column_count
+     0.21%  tokio-rt-worker  read_route_scout  [.] sqlite3_column_bytes
+     0.21%  tokio-rt-worker  read_route_scout  [.] sqlite3_mutex_enter
+     0.21%  tokio-rt-worker  read_route_scout  [.] freeSpace
+     0.21%  tokio-rt-worker  read_route_scout  [.] sqlite3VdbeMemMakeWriteable
+     0.21%  tokio-rt-worker  libc.so.6         [.] _int_free
+     0.20%  tokio-rt-worker  read_route_scout  [.] <rusqlite::statement::Statement>::value_ref
+     0.19%  read_route_scou  read_route_scout  [.] sqlite3VdbeRecordCompareWithSkip
+     0.18%  read_route_scou  read_route_scout  [.] sqlite3PcacheRelease
+     0.16%  read_route_scou  read_route_scout  [.] <hashbrown::raw::RawTable<(alloc::string::String, kernel::slice::read::DecisionRow)> as core::ops::drop::Drop>::drop
+     0.16%  tokio-rt-worker  read_route_scout  [.] jsonTranslateTextToBlob
+     0.16%  tokio-rt-worker  read_route_scout  [.] btreeReleaseAllCursorPages.part.0
+     0.16%  tokio-rt-worker  read_route_scout  [.] <alloc::vec::Vec<alloc::string::String> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<alloc::string::String, core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::slice::iter::Iter<kernel::admission::VisibleRow>, daemon::kernel_routes::read::read_visible::{closure#0}>, daemon::kernel_routes::read::read_visible::{closure#1}>>>::from_iter
+     0.16%  tokio-rt-worker  read_route_scout  [.] moveToRoot
+     0.16%  tokio-rt-worker  read_route_scout  [.] binCollFunc
+     0.16%  tokio-rt-worker  read_route_scout  [.] 0x00000000012116b0
+     0.16%  read_route_scou  read_route_scout  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+     0.16%  tokio-rt-worker  read_route_scout  [.] <rusqlite::row::Row>::get::<usize, alloc::string::String>
+     0.15%  read_route_scou  read_route_scout  [.] <serde_json::value::Value as serde_core::ser::Serialize>::serialize::<serde_json::value::ser::Serializer>
+     0.15%  tokio-rt-worker  read_route_scout  [.] <kernel::admission::VisibilityRow as core::convert::TryFrom<&str>>::try_from
+     0.15%  read_route_scou  read_route_scout  [.] <serde_json::value::ser::SerializeMap as serde_core::ser::SerializeMap>::serialize_value::<serde_json::value::Value>
+     0.14%  read_route_scou  read_route_scout  [.] __rustc::__rdl_alloc
+     0.14%  read_route_scou  read_route_scout  [.] pcache1Fetch
+     0.14%  read_route_scou  read_route_scout  [.] balance_nonroot
+     0.13%  read_route_scou  read_route_scout  [.] serde_json::ser::format_escaped_str::<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter>
+     0.13%  read_route_scou  read_route_scout  [.] __rustc::__rust_alloc
+     0.13%  read_route_scou  read_route_scout  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.11%  tokio-rt-worker  read_route_scout  [.] applyAffinity
+     0.11%  tokio-rt-worker  read_route_scout  [.] <rusqlite::row::Row>::get::<usize, alloc::vec::Vec<u8>>
+     0.11%  tokio-rt-worker  read_route_scout  [.] kernel::slice::read::decision_row_from
+     0.11%  tokio-rt-worker  read_route_scout  [.] computeCellSize
+     0.11%  tokio-rt-worker  read_route_scout  [.] pcache1Unpin
+     0.11%  tokio-rt-worker  read_route_scout  [.] serde_json::de::from_trait::<serde_json::read::SliceRead, kernel::slice::DecisionPayload>
+     0.11%  read_route_scou  read_route_scout  [.] <serde_json::value::ser::SerializeMap as serde_core::ser::SerializeStruct>::end
+     0.11%  read_route_scou  read_route_scout  [.] <u64 as itoa::Unsigned>::fmt
+     0.11%  tokio-rt-worker  read_route_scout  [.] sqlite3VdbeFinishMoveto
+     0.11%  tokio-rt-worker  read_route_scout  [.] sqlite3GetVarint
+     0.11%  tokio-rt-worker  read_route_scout  [.] pcache1FetchStage2
+     0.11%  tokio-rt-worker  read_route_scout  [.] <&mut serde_json::de::Deserializer<serde_json::read::SliceRead> as serde_core::de::Deserializer>::deserialize_struct::<<kernel::slice::DecisionPayload as serde_core::de::Deserialize>::deserialize::__Visitor>
+     0.11%  tokio-rt-worker  libc.so.6         [.] pthread_mutex_unlock@@GLIBC_2.2.5
+     0.11%  tokio-rt-worker  read_route_scout  [.] <alloc::vec::into_iter::IntoIter<kernel::slice::read::DecisionRow> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<kernel::slice::read::DecisionRow, (alloc::string::String, kernel::slice::read::DecisionRow), (), daemon::kernel_routes::read::read_visible::{closure#5}, core::iter::traits::iterator::Iterator::for_each::call<(alloc::string::String, kernel::slice::read::DecisionRow), <hashbrown::map::HashMap<alloc::string::String, kernel::slice::read::DecisionRow, std::hash::random::RandomState> as core::iter::traits::collect::Extend<(alloc::string::String, kernel::slice::read::DecisionRow)>>::extend<core::iter::adapters::map::Map<alloc::vec::into_iter::IntoIter<kernel::slice::read::DecisionRow>, daemon::kernel_routes::read::read_visible::{closure#5}>>::{closure#0}>::{closure#0}>::{closure#0}>
+     0.11%  tokio-rt-worker  read_route_scout  [.] kernel::envelope::object_row_from
+     0.10%  tokio-rt-worker  read_route_scout  [.] zeroPage
+     0.10%  tokio-rt-worker  read_route_scout  [.] serde_json::ser::format_escaped_str::<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter>
+     0.10%  tokio-rt-worker  read_route_scout  [.] <rusqlite::row::Row>::get::<usize, bool>
+     0.10%  tokio-rt-worker  read_route_scout  [.] sqlite3_value_type
+     0.10%  tokio-rt-worker  read_route_scout  [.] sqlite3BtreeInsert
+     0.10%  tokio-rt-worker  read_route_scout  [.] saveCursorsOnList
+     0.09%  read_route_scou  read_route_scout  [.] kernel::envelope::commit_prepared_with_writer::<read_route_scout::seed_decisions::{closure#0}, <kernel::open::KernelStore>::commit<read_route_scout::seed_decisions::{closure#0}>::{closure#0}>
+     0.09%  read_route_scou  read_route_scout  [.] <serde_json::value::ser::SerializeMap as serde_core::ser::SerializeStruct>::serialize_field::<alloc::string::String>
+     0.09%  read_route_scou  read_route_scout  [.] pcache1TruncateUnsafe
+     0.09%  read_route_scou  read_route_scout  [.] <rusqlite::statement::Statement>::bind_parameter::<&&dyn rusqlite::types::to_sql::ToSql>
+     0.09%  read_route_scou  read_route_scout  [.] walChecksumBytes
+     0.09%  read_route_scou  read_route_scout  [.] 0x00000000012116b0
+     0.09%  read_route_scou  read_route_scout  [.] defragmentPage
+     0.09%  read_route_scou  read_route_scout  [.] allocateCursor
+     0.08%  tokio-rt-worker  libc.so.6         [.] __strlen_evex
+     0.06%  tokio-rt-worker  read_route_scout  [.] kernel::admission::decided_row
+     0.06%  tokio-rt-worker  [unknown]         [k] 0xffffffff91e00b90
+     0.06%  read_route_scou  read_route_scout  [.] __rustc::__rust_no_alloc_shim_is_unstable_v2
+     0.05%  tokio-rt-worker  read_route_scout  [.] <kernel::admission::SourceClass as core::convert::TryFrom<&str>>::try_from
+     0.05%  read_route_scou  read_route_scout  [.] <serde_json::number::Number as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut daemon::dispatch::BoundedWriter<alloc::vec::Vec<u8>>>>
+     0.05%  read_route_scou  read_route_scout  [.] <serde_json::number::Number as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut daemon::dispatch::CountingWriter>>
+     0.05%  read_route_scou  read_route_scout  [.] core::ptr::drop_glue::<kernel::slice::read::DecisionRow>
+     0.05%  tokio-rt-worker  read_route_scout  [.] <serde_json::read::SliceRead as serde_json::read::Read>::parse_str
+     0.05%  tokio-rt-worker  read_route_scout  [.] walFindFrame.constprop.0
+     0.05%  read_route_scou  read_route_scout  [.] <str as serde_json::value::index::Index>::index_into
+     0.05%  tokio-rt-worker  read_route_scout  [.] sqlite3_column_text
+     0.05%  tokio-rt-worker  libc.so.6         [.] alloc_perturb
+     0.05%  read_route_scou  read_route_scout  [.] <kernel::envelope::ObjectRow as serde_core::ser::Serialize>::serialize::<serde_json::value::ser::Serializer>
+     0.05%  tokio-rt-worker  read_route_scout  [.] sqlite3_step
+     0.05%  read_route_scou  read_route_scout  [.] <serde_json::value::ser::SerializeMap as serde_core::ser::SerializeStruct>::serialize_field::<core::option::Option<alloc::string::String>>
+     0.05%  tokio-rt-worker  read_route_scout  [.] sqlite3VdbeRecordCompare
+     0.05%  tokio-rt-worker  read_route_scout  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+     0.05%  tokio-rt-worker  read_route_scout  [.] pager_end_transaction
+     0.05%  tokio-rt-worker  read_route_scout  [.] <serde_json::read::SliceRead>::skip_to_escape
+     0.05%  tokio-rt-worker  read_route_scout  [.] jsonEachColumn
+     0.05%  tokio-rt-worker  read_route_scout  [.] sqlite3_column_blob
+     0.05%  tokio-rt-worker  read_route_scout  [.] <core::iter::adapters::GenericShunt<rusqlite::row::MappedRows<kernel::slice::read::decision_row_from>, core::result::Result<core::convert::Infallible, rusqlite::error::Error>> as core::iter::traits::iterator::Iterator>::next
+     0.05%  tokio-rt-worker  read_route_scout  [.] sqlite3VtabImportErrmsg
+     0.05%  tokio-rt-worker  read_route_scout  [.] <serde_json::de::MapAccess<_> as serde_core::de::MapAccess>::next_key_seed::has_next_key::<serde_json::read::SliceRead>
+     0.05%  tokio-rt-worker  read_route_scout  [.] 0x00000000012116e0
+     0.05%  read_route_scou  read_route_scout  [.] <<serde_json::value::Value as serde_core::de::Deserialize>::deserialize::ValueVisitor as serde_core::de::Visitor>::visit_map::<serde_json::de::MapAccess<serde_json::read::SliceRead>>
+     0.05%  tokio-rt-worker  read_route_scout  [.] <kernel::admission::TaintClass as core::convert::TryFrom<&str>>::try_from
+     0.05%  read_route_scou  read_route_scout  [.] __rustc::__rust_dealloc
+     0.05%  tokio-rt-worker  read_route_scout  [.] filterHash.isra.0
+     0.05%  tokio-rt-worker  read_route_scout  [.] <kernel::admission::Maturity as core::convert::TryFrom<&str>>::try_from
+     0.05%  tokio-rt-worker  libc.so.6         [.] unlink_chunk.constprop.0
+     0.05%  tokio-rt-worker  read_route_scout  [.] <alloc::collections::btree::map::IntoIter<rusqlite::util::small_cstr::SmallCString, usize>>::dying_next
+     0.05%  tokio-rt-worker  read_route_scout  [.] <kernel::admission::Disposition as core::convert::TryFrom<&str>>::try_from
+     0.05%  tokio-rt-worker  read_route_scout  [.] pageFindSlot
+     0.05%  tokio-rt-worker  read_route_scout  [.] <rusqlite::row::Row>::get::<usize, core::option::Option<alloc::string::String>>
+     0.05%  tokio-rt-worker  read_route_scout  [.] sqlite3RunParser
+     0.05%  tokio-rt-worker  libc.so.6         [.] __GI___pthread_enable_asynccancel
+     0.05%  tokio-rt-worker  read_route_scout  [.] jsonbPayloadSize
+     0.05%  read_route_scou  read_route_scout  [.] sqlite3_reset
+     0.05%  tokio-rt-worker  read_route_scout  [.] sqlite3VdbeMemGrow
+     0.05%  read_route_scou  read_route_scout  [.] sqlite3VdbeMemSetStr
+     0.05%  read_route_scou  [unknown]         [k] 0xffffffff91e00080
+     0.05%  read_route_scou  read_route_scout  [.] <regex_automata::nfa::thompson::compiler::Compiler>::c
+     0.05%  read_route_scou  read_route_scout  [.] <aho_corasick::nfa::noncontiguous::Compiler>::densify
+     0.05%  read_route_scou  read_route_scout  [.] <regex_automata::dfa::onepass::Builder>::build_from_nfa
+     0.05%  tokio-rt-worker  read_route_scout  [.] <core::iter::adapters::GenericShunt<rusqlite::row::MappedRows<kernel::admission::served_classes::{closure#2}>, core::result::Result<core::convert::Infallible, rusqlite::error::Error>> as core::iter::traits::iterator::Iterator>::next
+     0.05%  read_route_scou  read_route_scout  [.] <serde_json::read::SliceRead>::skip_to_escape
+     0.05%  read_route_scou  read_route_scout  [.] cellSizePtrIdxLeaf
+     0.05%  read_route_scou  read_route_scout  [.] secret_scanner::evaluator::evaluate
+     0.05%  read_route_scou  read_route_scout  [.] <rusqlite::statement::Statement>::bind_parameter::<&&dyn rusqlite::types::to_sql::ToSql>
+     0.05%  read_route_scou  read_route_scout  [.] <kernel::envelope::Envelope>::write_admission
+     0.05%  read_route_scou  read_route_scout  [.] <regex_syntax::ast::parse::ParserI<&mut regex_syntax::ast::parse::Parser>>::parse_uncounted_repetition
+     0.05%  read_route_scou  read_route_scout  [.] balance
+     0.05%  read_route_scou  read_route_scout  [.] sqlite3_bind_parameter_count
+     0.05%  read_route_scou  libc.so.6         [.] __GI___pthread_mutex_unlock_usercnt
+     0.05%  read_route_scou  read_route_scout  [.] core::ptr::drop_glue::<rusqlite::cache::CachedStatement>
+     0.05%  read_route_scou  read_route_scout  [.] insertCell
+     0.05%  read_route_scou  read_route_scout  [.] pageFindSlot
+     0.05%  read_route_scou  read_route_scout  [.] sqlite3DbMallocRawNN
+     0.05%  read_route_scou  read_route_scout  [.] <rusqlite::cache::StatementCache>::cache_stmt
+     0.05%  read_route_scou  read_route_scout  [.] <hashbrown::raw::RawTable<(kernel::admission::AdmissionKey, kernel::admission::StoredAdmission)>>::reserve_rehash::<hashbrown::map::make_hasher<kernel::admission::AdmissionKey, kernel::admission::StoredAdmission, std::hash::random::RandomState>::{closure#0}>
+     0.04%  read_route_scou  read_route_scout  [.] <context_core::redaction::Redactor>::redact
+     0.04%  tokio-rt-worker  libc.so.6         [.] malloc_consolidate
+     0.04%  read_route_scou  read_route_scout  [.] sqlite3Malloc.part.0
+     0.04%  read_route_scou  read_route_scout  [.] <regex_automata::dfa::onepass::DFA as regex_automata::dfa::remapper::Remappable>::remap::<<regex_automata::dfa::remapper::Remapper>::remap<regex_automata::dfa::onepass::DFA>::{closure#0}>
+     0.04%  read_route_scou  read_route_scout  [.] computeCellSize
+     0.04%  read_route_scou  read_route_scout  [.] aho_corasick::automaton::try_find_overlapping_fwd::<&aho_corasick::dfa::DFA>
+     0.04%  read_route_scou  read_route_scout  [.] core::ptr::drop_glue::<kernel::envelope::ObjectRow>
+     0.04%  read_route_scou  read_route_scout  [.] vdbeRecordCompareInt
+     0.04%  read_route_scou  read_route_scout  [.] <rusqlite::Connection as kernel::CachedSql>::query_row_cached::<(), [&str; 1], kernel::slice::write::require_live_decision_object::{closure#0}>
+     0.04%  read_route_scou  read_route_scout  [.] <rusqlite::Connection as kernel::CachedSql>::execute_cached::<&[&dyn rusqlite::types::to_sql::ToSql]>
+     0.04%  read_route_scou  read_route_scout  [.] <serde_json::value::ser::SerializeMap as serde_core::ser::SerializeMap>::serialize_entry::<alloc::string::String, serde_json::value::Value>
+     0.04%  read_route_scou  read_route_scout  [.] sqlite3_step
+     0.04%  read_route_scou  read_route_scout  [.] <alloc::string::String as core::fmt::Write>::write_char
+     0.04%  tokio-rt-worker  read_route_scout  [.] sqlite3_mutex_leave
+     0.04%  read_route_scou  read_route_scout  [.] <secret_scanner::rules::RuleSet>::preselect
+     0.04%  read_route_scou  read_route_scout  [.] vdbeRecordCompareString
+     0.04%  read_route_scou  read_route_scout  [.] <regex_syntax::hir::translate::TranslatorI as regex_syntax::ast::visitor::Visitor>::visit_class_set_item_post
+     0.04%  tokio-rt-worker  read_route_scout  [.] propagateConstantExprRewrite
+     0.04%  tokio-rt-worker  read_route_scout  [.] dbMallocRawFinish
+     0.04%  tokio-rt-worker  read_route_scout  [.] sqlite3ExprAnd
+     0.04%  tokio-rt-worker  read_route_scout  [.] kernel::schema::kernel_schema_digest
+     0.03%  read_route_scou  read_route_scout  [.] <regex_automata::meta::regex::Builder>::build
+     0.03%  read_route_scou  read_route_scout  [.] <aho_corasick::dfa::Builder>::build_from_noncontiguous
+     0.03%  tokio-rt-worker  read_route_scout  [.] sqlite3_free
+     0.02%  tokio-rt-worker  read_route_scout  [.] minmaxFunc
+     0.01%  tokio-rt-worker  read_route_scout  [.] moveToChild
+     0.01%  read_route_scou  read_route_scout  [.] unsafe_libyaml_norway::reader::yaml_parser_update_buffer
+     0.01%  tokio-rt-worker  read_route_scout  [.] sqlite3GetToken

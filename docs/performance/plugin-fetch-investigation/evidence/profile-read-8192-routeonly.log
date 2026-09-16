@@ -1,0 +1,4 @@
+ROUTE bytes=5285046 rows=8192 fixture_rows=8192 scopes=1
+TIME route/full min_ms=197.6697 median_ms=219.3710 max_ms=277.2225 reps=39 first_ms=246.8327
+[ perf record: Woken up 65 times to write data ]
+[ perf record: Captured and wrote 16.788 MB /tmp/pfi/perf-read-8192.data (1984 samples) ]

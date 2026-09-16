@@ -1,0 +1,45 @@
+{"n":256,"wire_bytes":172245}
+{"name":"parse/256","first_ms":0.38097299999999734,"min_ms":0.3368696,"median_ms":0.3403010999999999,"max_ms":0.3565121000000005,"reps":7,"ops_per_rep":10}
+{"n":256,"q":"common","hits":8}
+{"name":"rank/256/common","first_ms":0.37877799999999695,"min_ms":0.14869209999999952,"median_ms":0.15516970000000044,"max_ms":0.18593309999999974,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/256/common","first_ms":139.845542,"min_ms":0.5046369999999996,"median_ms":0.6209494000000007,"max_ms":0.7510931999999997,"reps":7,"ops_per_rep":10}
+{"n":256,"q":"rare","hits":3}
+{"name":"rank/256/rare","first_ms":0.134866000000045,"min_ms":0.11671820000000252,"median_ms":0.120061800000002,"max_ms":0.15296480000000087,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/256/rare","first_ms":0.5684989999999743,"min_ms":0.4109950000000026,"median_ms":0.4319617999999991,"max_ms":0.47650030000000354,"reps":7,"ops_per_rep":10}
+{"n":256,"q":"absent","hits":0}
+{"name":"rank/256/absent","first_ms":0.09278299999999717,"min_ms":0.09133719999999812,"median_ms":0.10563869999999724,"max_ms":0.17113090000000283,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/256/absent","first_ms":0.465707000000009,"min_ms":0.3877697000000012,"median_ms":0.41752039999999513,"max_ms":0.4678788999999995,"reps":7,"ops_per_rep":10}
+{"n":256,"q":"SQLite cache ordinary absent another last other word","hits":8}
+{"name":"rank/256/SQLite cache ordinary absent another last other word","first_ms":0.1760900000000447,"min_ms":0.1411008000000038,"median_ms":0.14428530000000137,"max_ms":0.15773450000000366,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/256/SQLite cache ordinary absent another last other word","first_ms":0.585138000000029,"min_ms":0.4964595000000031,"median_ms":0.5111978000000021,"max_ms":0.6353190999999981,"reps":7,"ops_per_rep":10}
+{"name":"pack_only/256","first_ms":0.583246000000031,"min_ms":0.07861750000000142,"median_ms":0.08127719999999954,"max_ms":0.08538639999999872,"reps":7,"ops_per_rep":10}
+{"n":1000,"wire_bytes":673771}
+{"name":"parse/1000","first_ms":1.1580369999999789,"min_ms":1.0658933999999989,"median_ms":1.1142068999999992,"max_ms":1.2734916999999997,"reps":7,"ops_per_rep":10}
+{"n":1000,"q":"common","hits":8}
+{"name":"rank/1000/common","first_ms":0.34526900000003025,"min_ms":0.3115624000000025,"median_ms":0.4222424999999987,"max_ms":0.4675499000000002,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/1000/common","first_ms":1.6943039999999883,"min_ms":1.4581460999999991,"median_ms":1.5118208999999978,"max_ms":1.6797135000000025,"reps":7,"ops_per_rep":10}
+{"n":1000,"q":"rare","hits":8}
+{"name":"rank/1000/rare","first_ms":0.2905319999999847,"min_ms":0.27535179999999854,"median_ms":0.2887258000000088,"max_ms":0.4214102999999909,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/1000/rare","first_ms":1.7604539999999815,"min_ms":1.437126699999999,"median_ms":1.4530395999999997,"max_ms":1.5780287999999927,"reps":7,"ops_per_rep":10}
+{"n":1000,"q":"absent","hits":0}
+{"name":"rank/1000/absent","first_ms":0.28445399999998244,"min_ms":0.2702340999999933,"median_ms":0.28549840000000587,"max_ms":0.4089200000000005,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/1000/absent","first_ms":1.410417999999936,"min_ms":1.344980099999998,"median_ms":1.3707471999999938,"max_ms":1.4676975999999968,"reps":7,"ops_per_rep":10}
+{"n":1000,"q":"SQLite cache ordinary absent another last other word","hits":8}
+{"name":"rank/1000/SQLite cache ordinary absent another last other word","first_ms":0.41610100000002603,"min_ms":0.40837229999999636,"median_ms":0.4179838000000018,"max_ms":0.561275599999999,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/1000/SQLite cache ordinary absent another last other word","first_ms":1.6487159999999221,"min_ms":1.5781824000000029,"median_ms":1.5896667999999976,"max_ms":1.7850189,"reps":7,"ops_per_rep":10}
+{"name":"pack_only/1000","first_ms":0.11173699999994824,"min_ms":0.06456249999999955,"median_ms":0.06942759999999452,"max_ms":0.07074180000000752,"reps":7,"ops_per_rep":10}
+{"n":8192,"wire_bytes":5543475}
+{"name":"parse/8192","first_ms":8.923817999999983,"min_ms":8.967016799999987,"median_ms":9.772524399999998,"max_ms":10.216947000000005,"reps":7,"ops_per_rep":10}
+{"n":8192,"q":"common","hits":8}
+{"name":"rank/8192/common","first_ms":3.9990040000000135,"min_ms":2.52173499999999,"median_ms":4.125369899999987,"max_ms":4.391253399999982,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/8192/common","first_ms":12.749364999999898,"min_ms":12.181529899999987,"median_ms":12.240067399999976,"max_ms":12.6571551,"reps":7,"ops_per_rep":10}
+{"n":8192,"q":"rare","hits":8}
+{"name":"rank/8192/rare","first_ms":4.543953999999758,"min_ms":2.4302130999999916,"median_ms":2.553786100000025,"max_ms":4.111279999999988,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/8192/rare","first_ms":13.737438000000111,"min_ms":12.17094949999996,"median_ms":12.374326400000019,"max_ms":12.663690799999994,"reps":7,"ops_per_rep":10}
+{"n":8192,"q":"absent","hits":0}
+{"name":"rank/8192/absent","first_ms":4.684346000000005,"min_ms":2.5847216000000115,"median_ms":2.6481162999999923,"max_ms":3.784393999999975,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/8192/absent","first_ms":12.70492699999977,"min_ms":11.662268700000004,"median_ms":12.008332799999971,"max_ms":12.787364799999978,"reps":7,"ops_per_rep":10}
+{"n":8192,"q":"SQLite cache ordinary absent another last other word","hits":8}
+{"name":"rank/8192/SQLite cache ordinary absent another last other word","first_ms":3.8244580000000497,"min_ms":3.694098599999961,"median_ms":4.553721600000062,"max_ms":6.1957150000000185,"reps":7,"ops_per_rep":10}
+{"name":"parse_rank_pack/8192/SQLite cache ordinary absent another last other word","first_ms":13.937183999999434,"min_ms":13.169782200000009,"median_ms":13.721128399999998,"max_ms":15.441949100000055,"reps":7,"ops_per_rep":10}
+{"name":"pack_only/8192","first_ms":0.14891399999942223,"min_ms":0.0754917999999634,"median_ms":0.07805179999995744,"max_ms":0.08382970000002388,"reps":7,"ops_per_rep":10}

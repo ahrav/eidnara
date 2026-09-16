@@ -1,0 +1,52 @@
+ROUTE bytes=10955 rows=17 fixture_rows=1000 scopes=64
+PARITY json_replica_bytes ok
+PARITY pushdown_rank_common ok
+PARITY pushdown_rank_selective ok
+PARITY pushdown_rank_absent ok
+PARITY pushdown_rank_long ok
+PARITY typed_bytes ok
+RANK common k=8 ids=store-decision-object-768,store-decision-object-832,store-decision-object-896,store-decision-object-960,store-decision-object-512,store-decision-object-576,store-decision-object-640,store-decision-object-704
+RANK absent k=0 ids=
+RANK long k=0 ids=
+RANK selective k=8 ids=store-decision-object-768,store-decision-object-832,store-decision-object-896,store-decision-object-960,store-decision-object-512,store-decision-object-576,store-decision-object-640,store-decision-object-704
+TIME route/full min_ms=2.5268 median_ms=2.5714 max_ms=2.6687 reps=20 first_ms=3.0742
+TIME stage/tip min_ms=0.0057 median_ms=0.0065 max_ms=0.0076 reps=20 first_ms=0.0141
+TIME stage/visible_as_of_in_scope min_ms=2.2306 median_ms=2.2601 max_ms=2.3367 reps=20 first_ms=2.2848
+TIME stage/newest_heap min_ms=0.0025 median_ms=0.0034 max_ms=0.0036 reps=20 first_ms=0.0159
+TIME stage/payload_sizes min_ms=0.0485 median_ms=0.0532 max_ms=0.0723 reps=20 first_ms=0.0747
+TIME stage/decisions_hydrate min_ms=0.0457 median_ms=0.0477 max_ms=0.0505 reps=20 first_ms=0.0535
+TIME json/row_json_trees min_ms=0.0473 median_ms=0.0536 max_ms=0.0557 reps=20 first_ms=0.0488
+TIME json/row_measure min_ms=0.0080 median_ms=0.0084 max_ms=0.0088 reps=20 first_ms=0.0087
+TIME json/wrap_response min_ms=0.0381 median_ms=0.0396 max_ms=0.0406 reps=20 first_ms=0.0355
+TIME json/measure_whole min_ms=0.0072 median_ms=0.0079 max_ms=0.0082 reps=20 first_ms=0.0076
+TIME json/write_whole min_ms=0.0117 median_ms=0.0127 max_ms=0.0146 reps=20 first_ms=0.0130
+TIME json/drop_trees min_ms=0.0106 median_ms=0.0110 max_ms=0.0121 reps=20 first_ms=0.0111
+TIME typed/build_rows min_ms=0.0071 median_ms=0.0076 max_ms=0.0085 reps=20 first_ms=0.0078
+TIME typed/row_measure min_ms=0.0070 median_ms=0.0075 max_ms=0.0080 reps=20 first_ms=0.0080
+TIME typed/measure_whole min_ms=0.0061 median_ms=0.0064 max_ms=0.0068 reps=20 first_ms=0.0069
+TIME typed/write_whole min_ms=0.0117 median_ms=0.0126 max_ms=0.0134 reps=20 first_ms=0.0132
+TIME rank/common min_ms=0.0170 median_ms=0.0172 max_ms=0.0175 reps=20 first_ms=0.0177
+TIME rank/encode_k_rows min_ms=0.0007 median_ms=0.0009 max_ms=0.0011 reps=20 first_ms=0.0009
+TIME rank/selective min_ms=0.0160 median_ms=0.0162 max_ms=0.0382 reps=20 first_ms=0.0158
+TIME rank/absent min_ms=0.0150 median_ms=0.0151 max_ms=0.0170 reps=20 first_ms=0.0151
+TIME rank/long min_ms=0.0164 median_ms=0.0166 max_ms=0.0197 reps=20 first_ms=0.0165
+TIME candidates/visible_named_8 min_ms=0.1694 median_ms=0.1769 max_ms=6.3769 reps=20 first_ms=6.8755
+TIME candidates/hydrate_named_8 min_ms=0.0294 median_ms=0.0317 max_ms=0.0593 reps=20 first_ms=0.0588
+TIME candidates/visible_named_64 min_ms=0.2207 median_ms=0.2245 max_ms=0.3743 reps=20 first_ms=0.2938
+TIME candidates/hydrate_named_64 min_ms=0.0402 median_ms=0.0423 max_ms=0.0816 reps=20 first_ms=0.0536
+TIME pushdown/common/scan_rank min_ms=0.0266 median_ms=0.0275 max_ms=0.0526 reps=20 first_ms=0.9182
+TIME pushdown/common/authorize min_ms=0.2091 median_ms=0.2141 max_ms=0.3221 reps=20 first_ms=0.2727
+TIME pushdown/common/hydrate_encode min_ms=0.0379 median_ms=0.0398 max_ms=0.0745 reps=20 first_ms=0.0606
+TIME pushdown/common/total min_ms=0.2767 median_ms=0.2836 max_ms=0.4509 reps=20 first_ms=1.2531
+TIME pushdown/selective/scan_rank min_ms=0.0184 median_ms=0.0191 max_ms=0.0436 reps=20 first_ms=0.0222
+TIME pushdown/selective/authorize min_ms=0.2014 median_ms=0.2074 max_ms=0.3980 reps=20 first_ms=0.2215
+TIME pushdown/selective/hydrate_encode min_ms=0.0350 median_ms=0.0363 max_ms=0.0987 reps=20 first_ms=0.0398
+TIME pushdown/selective/total min_ms=0.2564 median_ms=0.2640 max_ms=0.5413 reps=20 first_ms=0.2845
+TIME pushdown/absent/scan_rank min_ms=0.0125 median_ms=0.0130 max_ms=0.0355 reps=20 first_ms=0.0142
+TIME pushdown/absent/authorize min_ms=0.0016 median_ms=0.0019 max_ms=0.0023 reps=20 first_ms=0.0012
+TIME pushdown/absent/hydrate_encode min_ms=0.0064 median_ms=0.0069 max_ms=0.0209 reps=20 first_ms=0.0079
+TIME pushdown/absent/total min_ms=0.0213 median_ms=0.0224 max_ms=0.0514 reps=20 first_ms=0.0238
+TIME pushdown/long/scan_rank min_ms=0.0159 median_ms=0.0163 max_ms=0.0257 reps=20 first_ms=0.0167
+TIME pushdown/long/authorize min_ms=0.0001 median_ms=0.0006 max_ms=0.0007 reps=20 first_ms=0.0003
+TIME pushdown/long/hydrate_encode min_ms=0.0050 median_ms=0.0051 max_ms=0.0099 reps=20 first_ms=0.0053
+TIME pushdown/long/total min_ms=0.0221 median_ms=0.0227 max_ms=0.0370 reps=20 first_ms=0.0229
