@@ -8,7 +8,7 @@ RP2.9-approved limit, with the refusal naming the bound.
 ## Evidence trail
 
 - `fuse` checks the union size before inserting a new occurrence and returns
-  `FusionRefusal::UnionExceeds { bound }`.
+  `UnionExceeded { bound }`.
 - The bound is a caller-supplied `NonZeroUsize` with no default, matching the
   other retrieval bounds.
 

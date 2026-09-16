@@ -7,8 +7,8 @@ use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use retrieval::fusion::{
-    DeclaredLanes, Fused, FusionParameters, FusionRefusal, Lane, LaneHit, LaneRanking,
-    OccurrenceId, RawScore, fuse,
+    DeclaredLanes, Fused, FusionParameters, Lane, LaneHit, LaneRanking, LaneWeights, OccurrenceId,
+    ParameterRefusal, RawScore, UnionExceeded, fuse,
 };
 
 const SEED: [u8; 32] = *b"fusion-rrf-laws-seed-00000000001";
@@ -68,7 +68,23 @@ fn dense(ranked: impl IntoIterator<Item = (OccurrenceId, f64)>) -> LaneRanking {
 }
 
 fn params(exact: f64, lexical: f64, dense: f64, k: f64) -> FusionParameters {
-    FusionParameters::new([exact, lexical, dense], k).unwrap()
+    FusionParameters::new(
+        LaneWeights {
+            exact,
+            lexical,
+            dense,
+        },
+        k,
+    )
+    .unwrap()
+}
+
+fn weights_of(weights: [f64; 3]) -> LaneWeights {
+    LaneWeights {
+        exact: weights[0],
+        lexical: weights[1],
+        dense: weights[2],
+    }
 }
 
 fn order(fused: &Fused) -> Vec<(OccurrenceId, usize)> {
@@ -126,13 +142,16 @@ fn a_hand_computed_two_lane_example_matches_term_for_term() {
             oracle_score(&parameters, positions).to_bits()
         );
     }
-    assert_eq!(fused.absent_lanes().collect::<Vec<_>>(), vec![Lane::Exact]);
     assert_eq!(
-        fused.entries()[0].lane(Lane::Dense).unwrap().raw_score,
+        fused.undeclared_lanes().collect::<Vec<_>>(),
+        vec![Lane::Exact]
+    );
+    assert_eq!(
+        fused.entries()[0].lane(Lane::Dense).unwrap().raw_score(),
         RawScore::Dense(0.9)
     );
     assert_eq!(
-        fused.entries()[0].lane(Lane::Lexical).unwrap().raw_score,
+        fused.entries()[0].lane(Lane::Lexical).unwrap().raw_score(),
         RawScore::Lexical(-5.0)
     );
     assert!(fused.entries()[0].lane(Lane::Exact).is_none());
@@ -172,7 +191,7 @@ fn closed_fractions_and_another_summation_order_are_detected_as_different_arithm
                     .iter()
                     .find(|entry| *entry.occurrence() == a)
                     .unwrap();
-                let exact_position = entry.lane(Lane::Exact).unwrap().position.get();
+                let exact_position = entry.lane(Lane::Exact).unwrap().position().get();
                 assert_eq!(exact_position, re);
                 let implementation = entry.score();
                 let positions = [Some(exact_position), Some(rl), Some(rd)];
@@ -285,31 +304,35 @@ fn invalid_parameters_are_refused_before_scoring() {
         (
             [f64::NAN, 1.0, 1.0],
             60.0,
-            FusionRefusal::Weight(Lane::Exact),
+            ParameterRefusal::Weight(Lane::Exact),
         ),
         (
             [1.0, f64::INFINITY, 1.0],
             60.0,
-            FusionRefusal::Weight(Lane::Lexical),
+            ParameterRefusal::Weight(Lane::Lexical),
         ),
-        ([1.0, 1.0, -0.5], 60.0, FusionRefusal::Weight(Lane::Dense)),
-        ([1.0, 1.0, 1.0], 0.0, FusionRefusal::K),
-        ([1.0, 1.0, 1.0], -3.0, FusionRefusal::K),
-        ([1.0, 1.0, 1.0], f64::NAN, FusionRefusal::K),
-        ([1.0, 1.0, 1.0], f64::INFINITY, FusionRefusal::K),
+        (
+            [1.0, 1.0, -0.5],
+            60.0,
+            ParameterRefusal::Weight(Lane::Dense),
+        ),
+        ([1.0, 1.0, 1.0], 0.0, ParameterRefusal::K),
+        ([1.0, 1.0, 1.0], -3.0, ParameterRefusal::K),
+        ([1.0, 1.0, 1.0], f64::NAN, ParameterRefusal::K),
+        ([1.0, 1.0, 1.0], f64::INFINITY, ParameterRefusal::K),
         (
             [f64::MAX, f64::MAX, f64::MAX],
             0.5,
-            FusionRefusal::SumOverflow,
+            ParameterRefusal::SumOverflow,
         ),
     ] {
         assert_eq!(
-            FusionParameters::new(weights, k).unwrap_err(),
+            FusionParameters::new(weights_of(weights), k).unwrap_err(),
             refusal,
             "{weights:?} k={k}"
         );
     }
-    let negative_zero = FusionParameters::new([-0.0, 1.0, 1.0], 60.0).unwrap();
+    let negative_zero = FusionParameters::new(weights_of([-0.0, 1.0, 1.0]), 60.0).unwrap();
     assert_eq!(
         negative_zero.weight(Lane::Exact).to_bits(),
         0.0f64.to_bits()
@@ -324,7 +347,7 @@ fn empty_lanes_all_zero_weights_and_equal_scores_return_the_declared_result() {
     let empty = fuse(DeclaredLanes::admit([]).unwrap(), &parameters, UNBOUNDED).unwrap();
     assert!(empty.entries().is_empty());
     assert_eq!(
-        empty.absent_lanes().collect::<Vec<_>>(),
+        empty.undeclared_lanes().collect::<Vec<_>>(),
         Lane::ORDER.to_vec()
     );
 
@@ -336,7 +359,7 @@ fn empty_lanes_all_zero_weights_and_equal_scores_return_the_declared_result() {
     .unwrap();
     assert!(declared_empty.entries().is_empty());
     assert_eq!(
-        declared_empty.absent_lanes().collect::<Vec<_>>(),
+        declared_empty.undeclared_lanes().collect::<Vec<_>>(),
         vec![Lane::Dense]
     );
 
@@ -439,7 +462,7 @@ fn lane_order_probe_duplication_and_entry_order_change_nothing() {
                 },
             ),
             |((exact_hits, lexical_hits, dense_hits, weights, k), ex2, lx2, dn2, lane_order)| {
-                let parameters = FusionParameters::new(weights, k).unwrap();
+                let parameters = FusionParameters::new(weights_of(weights), k).unwrap();
                 let reference = fuse(
                     DeclaredLanes::admit([
                         lane(Lane::Exact, exact_hits.clone()),
@@ -467,14 +490,14 @@ fn lane_order_probe_duplication_and_entry_order_change_nothing() {
                 .unwrap();
                 prop_assert_eq!(snapshot(&permuted), snapshot(&reference));
                 prop_assert_eq!(
-                    permuted.absent_lanes().collect::<Vec<_>>(),
-                    reference.absent_lanes().collect::<Vec<_>>()
+                    permuted.undeclared_lanes().collect::<Vec<_>>(),
+                    reference.undeclared_lanes().collect::<Vec<_>>()
                 );
 
                 let mut previous: Option<(f64, OccurrenceId)> = None;
                 for (entry, expected) in reference.entries().iter().zip(1usize..) {
                     prop_assert_eq!(entry.position().get(), expected);
-                    let positions = Lane::ORDER.map(|l| entry.lane(l).map(|c| c.position.get()));
+                    let positions = Lane::ORDER.map(|l| entry.lane(l).map(|c| c.position().get()));
                     prop_assert_eq!(
                         entry.score().to_bits(),
                         oracle_score(&parameters, positions).to_bits()
@@ -509,7 +532,7 @@ fn lane_order_probe_duplication_and_entry_order_change_nothing() {
                         .iter()
                         .find(|e| *e.occurrence() == first.occurrence)
                         .unwrap();
-                    let positions = Lane::ORDER.map(|l| entry.lane(l).map(|c| c.position.get()));
+                    let positions = Lane::ORDER.map(|l| entry.lane(l).map(|c| c.position().get()));
                     let single = oracle_score(&parameters, positions);
                     let lexical_term = parameters.weight(Lane::Lexical)
                         / (parameters.k() + positions[1].unwrap() as f64);
@@ -539,7 +562,7 @@ fn the_union_bound_refuses_before_materializing_the_excess() {
     };
     assert_eq!(
         fuse(lanes(), &parameters, NonZeroUsize::new(5).unwrap()).unwrap_err(),
-        FusionRefusal::UnionExceeds { bound: 5 }
+        UnionExceeded { bound: 5 }
     );
     let exact_fit = fuse(lanes(), &parameters, NonZeroUsize::new(6).unwrap()).unwrap();
     assert_eq!(exact_fit.entries().len(), 6);
@@ -574,14 +597,14 @@ fn raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring
     .unwrap();
     let before = snapshot(&fused);
     assert_eq!(
-        fused.entries()[0].lane(Lane::Lexical).unwrap().raw_score,
+        fused.entries()[0].lane(Lane::Lexical).unwrap().raw_score(),
         RawScore::Lexical(-5.5)
     );
     assert_eq!(
-        fused.entries()[0].lane(Lane::Dense).unwrap().raw_score,
+        fused.entries()[0].lane(Lane::Dense).unwrap().raw_score(),
         RawScore::Dense(0.9375)
     );
-    let absent_before: Vec<Lane> = fused.absent_lanes().collect();
+    let absent_before: Vec<Lane> = fused.undeclared_lanes().collect();
     let filtered = fused.filter(|entry| *entry.occurrence() != c);
     let after = snapshot(&filtered);
     let expected: Vec<_> = before.iter().copied().filter(|(o, _, _)| *o != c).collect();
@@ -590,5 +613,8 @@ fn raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring
         after.iter().map(|(_, p, _)| *p).collect::<Vec<_>>(),
         vec![1, 3, 4]
     );
-    assert_eq!(filtered.absent_lanes().collect::<Vec<_>>(), absent_before);
+    assert_eq!(
+        filtered.undeclared_lanes().collect::<Vec<_>>(),
+        absent_before
+    );
 }

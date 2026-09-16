@@ -8,8 +8,9 @@ bytes with declared results for empty lanes, all-zero weights, and ties.
 
 ## Evidence trail
 
-- `fuse` builds the union in a `BTreeMap`, which yields identifier order, and
-  applies a stable sort by descending score, so ties keep identifier order.
+- `fuse` sorts by descending score then ascending occurrence identifier in
+  one comparator, so the tie order is stated rather than inherited from the
+  union map's iteration order.
 - `DeclaredLanes::admit` stores rankings in fixed slots, so admission order
   cannot change the summation order.
 

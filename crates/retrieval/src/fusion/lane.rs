@@ -146,8 +146,10 @@ impl LaneRanking {
                 .or_insert(hit.raw_score);
         }
         let mut ordered: Vec<(OccurrenceId, RawScore)> = best.into_iter().collect();
-        // The map yields identifier order; the stable sort preserves that order among equal scores.
-        ordered.sort_by(|(_, left), (_, right)| left.better_first(*right));
+        ordered.sort_unstable_by(|(left_id, left), (right_id, right)| {
+            left.better_first(*right)
+                .then_with(|| left_id.cmp(right_id))
+        });
         let entries = ordered
             .into_iter()
             .zip(1usize..)

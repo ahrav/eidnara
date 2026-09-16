@@ -31,7 +31,7 @@ occurrence is scored; an incomplete lane participates with the entries it
 reached, and reporting its completion beside the ranking is the route's
 obligation in the query-route part, since `LaneRanking` carries no completion
 state; an undeclared lane, including a dense lane reported unavailable,
-contributes zero and is listed by `Fused::absent_lanes` rather than treated
+contributes zero and is listed by `Fused::undeclared_lanes` rather than treated
 as an error.
 
 ## Reachability and observation contract
@@ -351,7 +351,7 @@ Guarantee: The caller-supplied fused union bound is enforced as the union is
 built; the refusal names the bound and is raised before the first occurrence
 beyond it is materialized.
 Check: `always` - a union of six distinct occurrences under a bound of five is
-refused with `UnionExceeds { bound: 5 }`, under a bound of six it fuses, and
+refused with `UnionExceeded { bound: 5 }`, under a bound of six it fuses, and
 occurrences already in the union do not consume the bound. That the refusal
 precedes the excess allocation is established by inspection of `fuse`, which
 checks the union size before inserting each new occurrence; no test observes

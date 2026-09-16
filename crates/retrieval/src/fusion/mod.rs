@@ -15,4 +15,7 @@ pub use identity::{
     SelectedSpan, SelectionDigest,
 };
 pub use lane::{DeclaredLanes, Lane, LaneEntry, LaneHit, LaneRanking, RawScore};
-pub use rrf::{Fused, FusedEntry, FusionParameters, FusionRefusal, LaneContribution, fuse};
+pub use rrf::{
+    Fused, FusedEntry, FusionParameters, LaneContribution, LaneWeights, ParameterRefusal,
+    UnionExceeded, fuse,
+};
