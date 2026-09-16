@@ -316,6 +316,10 @@ fn read_members(
             {
                 return Err(invalid("members name a noncanonical digest"));
             }
+            let mut distinct = BTreeSet::new();
+            if !members.members.iter().all(|digest| distinct.insert(digest)) {
+                return Err(invalid("members repeat a digest"));
+            }
             Ok(members.members)
         }
         SchemaDecode::UnknownSchema => Err(GenerationError::UnsupportedStateSchema),
@@ -328,7 +332,7 @@ impl ValidatedGeneration {
     ///
     /// # Errors
     ///
-    /// A members file the manifest names but that fails its hash, has an unknown schema, or names a noncanonical digest.
+    /// A members file the manifest names but that fails its hash, exceeds the metadata size limit, has an unknown schema, names a noncanonical digest, or repeats a digest.
     pub fn members(&self) -> Result<Vec<String>, GenerationError> {
         read_members(&self.dir, &self.manifest)
     }
@@ -2626,6 +2630,33 @@ mod tests {
             store.validate(&digest).unwrap().members(),
             Err(GenerationError::NativePayloadInvalid {
                 detail: "members file exceeds size limit"
+            })
+        ));
+    }
+
+    #[test]
+    fn a_members_file_that_repeats_a_digest_is_refused() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let member = stage_default(&store, src.path());
+        let members = serde_json::to_vec(&WireMembers {
+            schema: 1,
+            members: vec![member.clone(), member],
+        })
+        .unwrap();
+        let sources = [SourceSpec {
+            rel_path: MEMBERS_FILE_NAME.to_owned(),
+            source: write_source(src.path(), "members", &members),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        assert!(matches!(
+            store.validate(&digest).unwrap().members(),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "members repeat a digest"
             })
         ));
     }

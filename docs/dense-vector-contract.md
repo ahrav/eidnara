@@ -371,7 +371,7 @@ through the shared store under target `vector-composition`:
 | File | Bytes |
 | --- | --- |
 | `composition.json` | Canonical record: schema, publication sequence, model, tokenizer fingerprint, dimension, metric, tolerance, recipe, epoch, kernel incarnation, base digest, delta digests in application order. |
-| `members.json` | `{"schema":1,"members":[base, deltas...]}`; the lifecycle store reads it to retain every member while the composition is selected. |
+| `members.json` | `{"schema":1,"members":[base, deltas...]}`, distinct digests; the lifecycle store reads it to retain every member while the composition is selected. |
 
 `compose` refuses a base whose sidecar counts tombstones, a duplicate member, more deltas than
 the bound, a member whose sidecar does not carry the expectation's identity,
