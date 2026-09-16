@@ -1,4 +1,4 @@
-# fusion-runs-once
+# fusion-fuses-once-before-revalidation
 
 ## Discovery trigger
 

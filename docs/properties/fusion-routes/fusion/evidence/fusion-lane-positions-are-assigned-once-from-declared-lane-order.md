@@ -1,4 +1,4 @@
-# fusion-positions-assigned-once
+# fusion-lane-positions-are-assigned-once-from-declared-lane-order
 
 ## Discovery trigger
 

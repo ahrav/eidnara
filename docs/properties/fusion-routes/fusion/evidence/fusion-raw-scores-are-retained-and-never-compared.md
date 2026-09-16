@@ -1,4 +1,4 @@
-# fusion-raw-scores-retained
+# fusion-raw-scores-are-retained-and-never-compared
 
 ## Discovery trigger
 

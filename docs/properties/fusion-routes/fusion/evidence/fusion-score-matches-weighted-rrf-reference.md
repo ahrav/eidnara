@@ -1,4 +1,4 @@
-# fusion-rrf-formula-conformance
+# fusion-score-matches-weighted-rrf-reference
 
 ## Discovery trigger
 

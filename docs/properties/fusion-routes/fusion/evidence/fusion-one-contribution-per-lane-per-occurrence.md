@@ -1,4 +1,4 @@
-# fusion-one-contribution-per-lane
+# fusion-one-contribution-per-lane-per-occurrence
 
 ## Discovery trigger
 

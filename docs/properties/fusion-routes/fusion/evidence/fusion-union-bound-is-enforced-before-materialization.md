@@ -1,4 +1,4 @@
-# fusion-union-bounded-before-materialization
+# fusion-union-bound-is-enforced-before-materialization
 
 ## Discovery trigger
 

@@ -1,4 +1,4 @@
-# fusion-order-is-deterministic
+# fusion-order-is-deterministic-and-permutation-invariant
 
 ## Discovery trigger
 

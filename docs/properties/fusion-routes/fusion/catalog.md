@@ -14,8 +14,7 @@ bundle, whose fusion catalog proposed these obligations as unexercised
 ([#638](https://github.com/ahrav/eidnara/issues/638)) lands the identity
 records and the RP2.7.U2 ticket
 ([#640](https://github.com/ahrav/eidnara/issues/640)) lands the arithmetic
-records. The bundle's exact arithmetic slugs are not in this repository; the
-slugs below name the same obligations the U2 ticket lists.
+records under the bundle's slugs.
 
 This part owns identity and arithmetic: the occurrence ranking unit, lane
 consolidation, the selection and preparation digests, parent groups, and
@@ -50,14 +49,14 @@ restated.
 | [fusion-occurrence-identity-never-collapses-payload](#fusion-occurrence-identity-never-collapses-payload) | safety | test-only | always | active | high |
 | [fusion-selection-digest-tracks-identity-tuple](#fusion-selection-digest-tracks-identity-tuple) | safety | test-only | always | active | high |
 | [fusion-parent-groups-are-not-voters](#fusion-parent-groups-are-not-voters) | safety | test-only | always | active | high |
-| [fusion-one-contribution-per-lane](#fusion-one-contribution-per-lane) | safety | test-only | always | active | high |
-| [fusion-positions-assigned-once](#fusion-positions-assigned-once) | safety | test-only | always | active | high |
-| [fusion-rrf-formula-conformance](#fusion-rrf-formula-conformance) | safety | test-only | always | active | high |
-| [fusion-order-is-deterministic](#fusion-order-is-deterministic) | safety | test-only | always | active | high |
-| [fusion-parameters-validated-before-scoring](#fusion-parameters-validated-before-scoring) | safety | test-only | always | active | high |
-| [fusion-raw-scores-retained](#fusion-raw-scores-retained) | safety | test-only | always | active | high |
-| [fusion-union-bounded-before-materialization](#fusion-union-bounded-before-materialization) | safety | test-only | always | active | high |
-| [fusion-runs-once](#fusion-runs-once) | safety | test-only | always | active | high |
+| [fusion-one-contribution-per-lane-per-occurrence](#fusion-one-contribution-per-lane-per-occurrence) | safety | test-only | always | active | high |
+| [fusion-lane-positions-are-assigned-once-from-declared-lane-order](#fusion-lane-positions-are-assigned-once-from-declared-lane-order) | safety | test-only | always | active | high |
+| [fusion-score-matches-weighted-rrf-reference](#fusion-score-matches-weighted-rrf-reference) | safety | test-only | always | active | high |
+| [fusion-order-is-deterministic-and-permutation-invariant](#fusion-order-is-deterministic-and-permutation-invariant) | safety | test-only | always | active | high |
+| [fusion-parameters-are-validated-before-scoring](#fusion-parameters-are-validated-before-scoring) | safety | test-only | always | active | high |
+| [fusion-raw-scores-are-retained-and-never-compared](#fusion-raw-scores-are-retained-and-never-compared) | safety | test-only | always | active | high |
+| [fusion-union-bound-is-enforced-before-materialization](#fusion-union-bound-is-enforced-before-materialization) | safety | test-only | always | active | high |
+| [fusion-fuses-once-before-revalidation](#fusion-fuses-once-before-revalidation) | safety | test-only | always | active | high |
 
 ## Records
 
@@ -178,7 +177,7 @@ Open questions:
 - RP2.8 decides whether non-span classes group at all; this record only fixes
   the key. (needs human input)
 
-### fusion-one-contribution-per-lane
+### fusion-one-contribution-per-lane-per-occurrence
 
 Type: safety
 Reachability: test-only
@@ -199,7 +198,7 @@ the lane boundary, exercised by `crates/retrieval/tests/identity.rs`.
 Fault/timing angle: none; fusion is a pure function.
 Required faults and enabling state: Random lane sets under a fixed seed with
 every hit duplicated and the lane list shuffled.
-Confidence: high - [evidence](evidence/fusion-one-contribution-per-lane.md).
+Confidence: high - [evidence](evidence/fusion-one-contribution-per-lane-per-occurrence.md).
 Consolidation keys by occurrence before fusion and fusion reads one entry per
 occurrence per lane.
 Existing check: `crates/retrieval/tests/identity.rs`
@@ -209,7 +208,7 @@ Impact: A probe or generation voting twice would inflate one result over a
 stronger single match.
 Open questions: None.
 
-### fusion-positions-assigned-once
+### fusion-lane-positions-are-assigned-once-from-declared-lane-order
 
 Type: safety
 Reachability: test-only
@@ -227,13 +226,13 @@ position is part of the frozen entry.
 Fault/timing angle: none.
 Required faults and enabling state: Lane sets with ties; an exact set; a
 filtered result.
-Confidence: high - [evidence](evidence/fusion-positions-assigned-once.md).
+Confidence: high - [evidence](evidence/fusion-lane-positions-are-assigned-once-from-declared-lane-order.md).
 Existing check: none before this change.
 Impact: A re-ranked position would let the same lane rank change an
 occurrence's term between two evaluations.
 Open questions: None.
 
-### fusion-rrf-formula-conformance
+### fusion-score-matches-weighted-rrf-reference
 
 Type: safety
 Reachability: test-only
@@ -258,13 +257,13 @@ formula.
 Fault/timing angle: none.
 Required faults and enabling state: Non-calibration weights and `k`; fixtures
 with distinct lane positions.
-Confidence: high - [evidence](evidence/fusion-rrf-formula-conformance.md).
+Confidence: high - [evidence](evidence/fusion-score-matches-weighted-rrf-reference.md).
 Existing check: none before this change.
 Impact: A different arithmetic shape would produce rankings that RP2.9 cannot
 compare against the declared baseline.
 Open questions: None.
 
-### fusion-order-is-deterministic
+### fusion-order-is-deterministic-and-permutation-invariant
 
 Type: safety
 Reachability: test-only
@@ -287,14 +286,14 @@ per-evaluation property.
 Fault/timing angle: none.
 Required faults and enabling state: Shuffled lane order and doubled hits under
 a fixed seed; zero weights; an exact set.
-Confidence: high - [evidence](evidence/fusion-order-is-deterministic.md).
+Confidence: high - [evidence](evidence/fusion-order-is-deterministic-and-permutation-invariant.md).
 Existing check: `crates/retrieval/tests/lexical_retrieval.rs` order test for
 one lane, status unaudited.
 Impact: Results that depend on which lane finished first are not
 reproducible.
 Open questions: None.
 
-### fusion-parameters-validated-before-scoring
+### fusion-parameters-are-validated-before-scoring
 
 Type: safety
 Reachability: test-only
@@ -312,13 +311,13 @@ refuses finite weights whose rank-one sum overflows; `-0.0` is stored as
 Fault/timing angle: none.
 Required faults and enabling state: Each invalid parameter class; `f64::MAX`
 weights with a small `k`.
-Confidence: high - [evidence](evidence/fusion-parameters-validated-before-scoring.md).
+Confidence: high - [evidence](evidence/fusion-parameters-are-validated-before-scoring.md).
 Existing check: none before this change.
 Impact: An invalid parameter would produce NaN or infinite scores whose order
 is arbitrary.
 Open questions: None.
 
-### fusion-raw-scores-retained
+### fusion-raw-scores-are-retained-and-never-compared
 
 Type: safety
 Reachability: test-only
@@ -334,13 +333,13 @@ consolidation produced, and `RawScore` implements no cross-variant ordering.
 `always` because retention is part of every entry.
 Fault/timing angle: none.
 Required faults and enabling state: Lanes with distinctive raw values.
-Confidence: high - [evidence](evidence/fusion-raw-scores-retained.md).
+Confidence: high - [evidence](evidence/fusion-raw-scores-are-retained-and-never-compared.md).
 Existing check: none before this change.
 Impact: A consumer that lost raw scores could not explain or audit a fused
 position.
 Open questions: None.
 
-### fusion-union-bounded-before-materialization
+### fusion-union-bound-is-enforced-before-materialization
 
 Type: safety
 Reachability: test-only
@@ -359,7 +358,7 @@ the allocation. `always` because the bound protects every allocation.
 Fault/timing angle: none.
 Required faults and enabling state: Overlapping lane sets whose union exceeds
 the bound by one.
-Confidence: high - [evidence](evidence/fusion-union-bounded-before-materialization.md).
+Confidence: high - [evidence](evidence/fusion-union-bound-is-enforced-before-materialization.md).
 The check runs on each new occurrence before it is inserted.
 Existing check: the lexical and dense lanes bound their own candidate counts,
 status unaudited.
@@ -370,7 +369,7 @@ Open questions:
 - The production bound value is an RP2.9 approval; the route supplies it with
   no default. (needs human input)
 
-### fusion-runs-once
+### fusion-fuses-once-before-revalidation
 
 Type: safety
 Reachability: test-only
@@ -386,7 +385,7 @@ with a gap where the removed entry was. `always` because rescoring would
 change positions on every filter.
 Fault/timing angle: none.
 Required faults and enabling state: A fused ranking with one entry removed.
-Confidence: high - [evidence](evidence/fusion-runs-once.md).
+Confidence: high - [evidence](evidence/fusion-fuses-once-before-revalidation.md).
 Existing check: none before this change.
 Impact: Rescoring after revalidation would let eligibility filtering change
 relative order and make the selection digest depend on filter timing.

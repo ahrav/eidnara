@@ -9,10 +9,10 @@ System: `/local/home/ahrav/scratch/eidnara`. Base:
 | Duplicate and permuted hits | `LaneRanking::consolidate` over a fixed-seed shuffled list. | fusion-occurrence-identity-never-collapses-payload |
 | Non-canonical identifier spelling, foreign encoding version, duplicate lane | `OccurrenceId::parse`, `LaneRanking::consolidate`, `DeclaredLanes::admit`. | fusion-occurrence-identity-never-collapses-payload |
 | Single-component digest change, component split, malformed or whole-buffer span spelling | `SelectionDigest::derive`, `PreparationDigest::derive`. | fusion-selection-digest-tracks-identity-tuple |
-| Shuffled lane order, doubled hits, non-calibration parameters | `DeclaredLanes::admit`, `fuse`, `FusionParameters::new` under a fixed seed. | fusion-one-contribution-per-lane, fusion-order-is-deterministic, fusion-rrf-formula-conformance |
-| Invalid weight or `k`, rank-one overflow | `FusionParameters::new`. | fusion-parameters-validated-before-scoring |
-| Union one past the bound | `fuse` with a `NonZeroUsize` bound. | fusion-union-bounded-before-materialization |
-| Entry filtered after fusion | `Fused::filter`. | fusion-runs-once, fusion-positions-assigned-once, fusion-raw-scores-retained |
+| Shuffled lane order, doubled hits, non-calibration parameters | `DeclaredLanes::admit`, `fuse`, `FusionParameters::new` under a fixed seed. | fusion-one-contribution-per-lane-per-occurrence, fusion-order-is-deterministic-and-permutation-invariant, fusion-score-matches-weighted-rrf-reference |
+| Invalid weight or `k`, rank-one overflow | `FusionParameters::new`. | fusion-parameters-are-validated-before-scoring |
+| Union one past the bound | `fuse` with a `NonZeroUsize` bound. | fusion-union-bound-is-enforced-before-materialization |
+| Entry filtered after fusion | `Fused::filter`. | fusion-fuses-once-before-revalidation, fusion-lane-positions-are-assigned-once-from-declared-lane-order, fusion-raw-scores-are-retained-and-never-compared |
 | Altered derived column or damaged tuple byte | `ParentGroupKey::derive` with a revision, representation, or span that disagrees with the tuple, or one flipped tuple bit. | fusion-parent-groups-are-not-voters |
 
 Every seam is a pure function; no fault injection framework is needed for

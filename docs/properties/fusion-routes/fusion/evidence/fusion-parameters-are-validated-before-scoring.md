@@ -1,4 +1,4 @@
-# fusion-parameters-validated-before-scoring
+# fusion-parameters-are-validated-before-scoring
 
 ## Discovery trigger
 
