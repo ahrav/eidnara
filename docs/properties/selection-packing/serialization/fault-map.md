@@ -4,7 +4,8 @@ System: `/local/home/ahrav/scratch/eidnara`. Base: `016c7127`.
 
 | Fault or state | Available seam | Marker | Records |
 | --- | --- | --- | --- |
-| Serialized-bytes or accounting limit one below the closed render | `finalize` with a limit derived from the full render, then reduced by one. | `packing.serialization.bound_at_render_minus_one` | packing-adjustment-removes-last-admitted-within-the-cap, packing-body-serialized-once-through-the-guard |
+| Serialized-bytes limit one below the closed render | `finalize` with a limit derived from the full render, then reduced by one. | `packing.serialization.bound_at_render_minus_one` | packing-adjustment-removes-last-admitted-within-the-cap, packing-body-serialized-once-through-the-guard |
+| Accounting bound one below the closed render | `prepare_required` and `prepare_optional` under one `AccountingBounds` derived from the full render, then reduced by one; the refusal is the optional phase's, before `finalize`. | `packing.serialization.accounting_refused_before_serialization` | packing-adjustment-removes-last-admitted-within-the-cap, packing-limits-fail-closed-at-manifest-parse |
 | Pass cap spent with a bound still exceeded | A cap of zero, or a limit below the required render with a cap larger than the admitted count. | `packing.serialization.cap_exhausted` | packing-adjustment-removes-last-admitted-within-the-cap |
 | Evaluation budget exhausted before serialization | `EvalBudget::cancel` before `finalize`. | `packing.serialization.budget_exhausted` | packing-adjustment-removes-last-admitted-within-the-cap |
 | Guard measured or written more than once, or written after a refusal | The `guard_calls` per-thread counters in `crates/daemon/src/dispatch.rs`, reset before `finalize`. | `packing.serialization.guard_calls_counted` | packing-body-serialized-once-through-the-guard |

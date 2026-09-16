@@ -17,6 +17,16 @@ guard, overflow repair within the approved pass cap, the packing group of the
 runtime limit manifest, and byte-identical output across cache states, threads,
 and processes. Binding the profile through apply is the U5a part.
 
+The rendered-bytes and estimated-tokens bounds belong to the accounting part:
+`prepare_optional` refuses a closed render past either
+(`crates/daemon/src/packing/mod.rs:613`, recorded in
+`../accounting/catalog.md` as
+`packing-accounting-bounds-refuse-at-limit-plus-one`), so `finalize` receives
+no admission over them and re-checks neither. `SerializationBounds` carries the
+serialized-bytes limit and the pass cap only. Adjustment repairs a
+serialized-bytes overflow; a rebuilt ledger is a shorter prefix of an admitted
+render, so it cannot re-enter an accounting bound the admission passed.
+
 ## Observation contract
 
 `crates/daemon/src/packing/serialize.rs` holds the limits, the adjustment
@@ -40,6 +50,16 @@ Recorded by the repository owner at the U4b change:
 - There is one manifest protocol version and no legacy or migration path; the
   daemon compares the manifest's version with the identity's copy and gives no
   other meaning to the string.
+- Rollout order. A build without the packing group refuses a manifest that
+  carries any `packing_*` limit or the `search_projection.packing.approved`
+  flag as an unknown limit or hook, and that refusal closes the gate for every
+  hook (`crates/daemon/src/projection_admission.rs`, `AdmissionInputs::read`).
+  Deploy the daemon before `runtime-manifest.json` gains these keys, and a
+  rollback to an older build must also revert the manifest. In the other
+  direction nothing changes: this build reads a manifest without the group as
+  before and yields `PackingLimitRefusal::Absent` to the packing path only.
+  `../../search-projection/construction-contracts.md` CC9 records the same
+  order beside the vector group's.
 
 ## Index
 
@@ -71,13 +91,17 @@ Guarantee: An accepted preparation is measured once per pass by
 `PreparedOutput::measure`, reserved to exactly the measured length, and
 written exactly once through `MeasuredOutput::write_to`; a refused
 preparation is never written; the body equals the closed ledger's text and
-satisfies the serialized-bytes bound and both accounting bounds.
+satisfies the serialized-bytes bound. It satisfies both accounting bounds
+because the admission it came from passed them and adjustment only shortens
+the render.
 Check: `always` - the guard's per-thread call counters read `(1, 1)` for a
 fitting render under the byte profile and the exact tokenizer, `(2, 1)` after
-one adjustment pass, and `(4, 0)` when three passes end in refusal; the body's
-length equals the ledger's rendered bytes and the serialized-bytes limit set
-to that value admits it; the body's bytes equal the ledger text. `always`
-because one over-budget byte is a broken provider contract.
+one adjustment pass, `(4, 0)` when three passes end in refusal, `(1, 0)` when
+the serialized-bytes bound refuses at a pass cap of zero, and `(0, 0)` when
+the optional phase refuses an accounting bound; the body's length equals the
+ledger's rendered bytes and the serialized-bytes limit set to that value
+admits it; the body's bytes equal the ledger text. `always` because one
+over-budget byte is a broken provider contract.
 Fault/timing angle: none.
 Required faults and enabling state: A limit equal to the render's length; the
 `guard_calls` test-support counters in `crates/daemon/src/dispatch.rs`.
@@ -100,17 +124,19 @@ Status: active
 Exercised: yes - `crates/daemon/tests/packing_serialize.rs`
 `a_wrapper_overflow_removes_the_last_admitted_group_and_reclaims_its_wrappers`,
 `cap_exhaustion_emits_nothing_and_never_removes_required_items`,
-`an_accounting_overflow_is_repaired_the_same_way`, and
-`an_exhausted_budget_refuses_before_any_measurement`.
-Guarantee: When the closed render exceeds the serialized-bytes bound or an
-accounting bound, each pass removes exactly the last-admitted optional group
-and its wrappers, and the rebuilt ledger equals the ledger an admission of the
-remaining groups would have closed; the loop stops at the first fitting render
-or when the pass cap or the admitted list is spent, returning
-`AdjustmentCapExhausted` with the exceeded bound and emitting no bytes; an
-exhausted evaluation budget refuses with `Deadline` before any measurement;
-the required items are in every emitted body, because the admission carries
-the required render it was scanned onto and adjustment rebuilds from that.
+`an_accounting_overflow_is_refused_by_the_optional_phase_before_any_measurement`,
+and `an_exhausted_budget_refuses_before_any_measurement`.
+Guarantee: When the closed render exceeds the serialized-bytes bound, each
+pass removes exactly the last-admitted optional group and its wrappers, and
+the rebuilt ledger equals the ledger an admission of the remaining groups
+would have closed; the loop stops at the first fitting render or when the
+pass cap or the admitted list is spent, returning `AdjustmentCapExhausted`
+with the exceeded bound and emitting no bytes; an exhausted evaluation budget
+refuses with `Deadline` before any measurement; the required items are in
+every emitted body, because the admission carries the required render it was
+scanned onto and adjustment rebuilds from that. A render past a rendered-bytes
+or estimated-tokens bound never reaches adjustment: `prepare_optional`
+refuses it as `PreparationRefusal::Accounting` before any measurement.
 Check: `always` - a limit one below the full render removes the group with the
 highest partition index, and the body and ledger equal those of a fresh
 admission of the first two groups, with the total down by exactly the removed
@@ -118,12 +144,15 @@ group's charge; a cap of one suffices for that limit and a cap of zero returns
 the typed failure with zero passes; a limit equal to the required render
 removes all three groups in reverse admission order and emits the required
 render; one byte less returns the failure with three passes and no write; a cap
-of two stops at two; an estimated-tokens overflow yields the same body as the
-serialized-bytes overflow. `always` because a removed required item or an
+of two stops at two; each accounting bound one below the closed render, fed to
+both phases from one `AccountingBounds`, is refused by the optional phase
+with the guard counters at `(0, 0)`, and both bounds at the render admit and
+serialize with zero passes. `always` because a removed required item or an
 emitted over-budget body violates the contract.
 Fault/timing angle: none.
-Required faults and enabling state: Serialized-bytes and estimated-tokens
-limits one below the closed render; a limit below the required render.
+Required faults and enabling state: A serialized-bytes limit one below the
+closed render; a limit below the required render; each accounting bound one
+below the closed render at the optional phase.
 Confidence: high -
 [evidence](evidence/packing-adjustment-removes-last-admitted-within-the-cap.md).
 Existing check: none before this change.
@@ -153,12 +182,17 @@ maximum, fails at conversion; a manifest without the group parses and yields
 no limits. The packing path reaches no legacy clamp or truncation.
 Check: `always` - each refusal above returns its variant; the parsed limits
 feed the required, optional, and accounting bounds, compared whole against
-literal bound structs; a source tripwire finds none of the legacy budget
-helpers in the packing sources and no `selection.rs` under `packing/`. The
-tripwire is a name check, not a proof that no second authority exists: bounds
-are caller-supplied values, so the single-authority claim rests on the
-production caller, which U5a lands. `always` because an unapproved or partial
-limit set would let the packer run under a bound nobody approved.
+literal bound structs; one `PackingLimits` drives both phases in
+`each_serialization_bound_saturates_at_its_value_and_refuses_at_value_plus_one`,
+where each body bound at the render admits and one below refuses: the
+rendered-bytes and estimated-tokens bounds at the optional phase, the
+serialized-bytes bound at `finalize`; a source tripwire finds none of the
+legacy budget helpers in the packing sources and no `selection.rs` under
+`packing/`. The tripwire is a name check, not a proof that no second
+authority exists: bounds are caller-supplied values, so the single-authority
+claim rests on the production caller, which U5a lands. `always` because an
+unapproved or partial limit set would let the packer run under a bound nobody
+approved.
 Fault/timing angle: none.
 Required faults and enabling state: Manifest fixtures with the group and
 each malformation.
@@ -177,16 +211,19 @@ Status: active
 Exercised: yes - `crates/daemon/tests/packing_serialize.rs`
 `identical_inputs_give_byte_identical_output_across_cache_states_threads_and_processes`.
 Guarantee: The same selected set, bounds, and profile yield the same body,
-so the same SHA-256 identity, with the cost cache cleared, warm, or rotated,
-from four concurrent threads, and from a fresh process, both with slack and at
-an estimated-tokens edge where a count off by one would change the
-adjustment; the identity covers the rendered bytes, so a different adjustment
-gives a different identity where a digest of the member set would not.
+so the same SHA-256 identity, or the same typed refusal, with the cost cache
+cleared, warm, or rotated, from four concurrent threads, and from a fresh
+process, both with slack and at an estimated-tokens edge one below the closed
+render, where a count off by one would flip the optional phase between
+admission and `PreparationRefusal::Accounting`; the identity covers the
+rendered bytes, so a different adjustment gives a different identity where a
+digest of the member set would not.
 Check: `always` - every identity equals its reference under each cache state;
-the child process prints the same identity; the adjusted preparation's
-identity differs from the full one while the digests of their members,
-admitted plus removed, agree. `always` because a cache-dependent body would
-make the apply-time digest check fail on a retry.
+the refusal at the token edge, value and limit included, equals its reference
+under each cache state; the child process prints the same identity; the
+adjusted preparation's identity differs from the full one while the digests of
+their members, admitted plus removed, agree. `always` because a
+cache-dependent body would make the apply-time digest check fail on a retry.
 Fault/timing angle: Concurrent misses on the cost cache; the cache stores the
 same count under the same key, so the render is unaffected.
 Required faults and enabling state: `cost_cache::clear` and

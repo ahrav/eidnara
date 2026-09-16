@@ -264,6 +264,24 @@ section refuses these keys as unknown, which closes the gate for every hook,
 so the daemon is deployed before a manifest gains them and a rollback reverts
 the manifest with it.
 
+Selection packing reads eleven further limits the runtime manifest may carry
+as one all-or-none group: `packing_fused_candidates`, `packing_payload_loads`,
+`packing_payload_bytes`, `packing_item_bytes`, `packing_parents`,
+`packing_spans_per_parent`, `packing_rendered_bytes`,
+`packing_estimated_tokens`, `packing_serialized_bytes`,
+`packing_adjustment_passes`, and `packing_deadline_ms`. They are optional in
+the manifest and outside the required set above: a manifest that names none of
+them parses as before and yields no packing bounds, so the packing path alone
+is refused. A manifest that names any of them must name all eleven and must
+carry `search_projection.packing.approved` enabled in the `hooks` object; the
+flag is not a projection hook and defaults to disabled. A partial group, an
+unknown name, a non-numeric value, or a present group without the flag fails
+at parse (`crates/daemon/src/projection_gates.rs`, `RuntimeManifest::parse`;
+`docs/properties/selection-packing/serialization/catalog.md`). A build without
+the packing group refuses these keys as unknown, which closes the gate for
+every hook, so the daemon is deployed before a manifest gains them and a
+rollback reverts the manifest with it.
+
 Rules:
 
 - A missing, null, or unapproved limit fails closed at startup, reload, and

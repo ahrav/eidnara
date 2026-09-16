@@ -17,11 +17,12 @@ cost cache.
   written body, so two preparations agree exactly when their bytes agree.
 - `crates/daemon/tests/packing_serialize.rs` renders the same fixture with the
   cache cleared, warm, and rotated, both with slack and at an estimated-tokens
-  bound one below the full render where a count off by one would change the
-  adjustment, from four scoped threads, and from the test binary re-executed as
-  a child process, and compares each identity to its reference; the adjusted
-  and full preparations differ in identity while the digests of their members
-  agree.
+  bound one below the full render where a count off by one would flip the
+  optional phase between admission and `PreparationRefusal::Accounting`, from
+  four scoped threads, and from the test binary re-executed as a child
+  process, and compares each identity, or each typed refusal with its value
+  and limit, to its reference; the adjusted and full preparations differ in
+  identity while the digests of their members agree.
 
 ## Failure scenario
 

@@ -6,7 +6,7 @@ use kernel::applicability::EvalBudget;
 use retrieval::packing::{OptionalBounds, RequiredBounds};
 use sha2::{Digest, Sha256};
 
-use super::render::{AccountingBounds, AccountingExceeded, Ledger, admit_render};
+use super::render::{AccountingBounds, Ledger};
 use super::{ClaudeTokens, CostedGroup, OptionalAdmission};
 use crate::dispatch::{MAX_WIRE_BODY_BYTES, PreparedOutput, PreparedOutputError};
 use crate::projection_gates::{PackingManifest, RuntimeManifest};
@@ -114,7 +114,6 @@ impl PackingLimits {
 
     pub fn serialization_bounds(&self) -> SerializationBounds {
         SerializationBounds {
-            accounting: self.accounting_bounds(),
             max_serialized_bytes: self.serialized_bytes.get(),
             max_adjustment_passes: self.adjustment_passes,
         }
@@ -123,7 +122,6 @@ impl PackingLimits {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SerializationBounds {
-    pub accounting: AccountingBounds,
     pub max_serialized_bytes: usize,
     pub max_adjustment_passes: usize,
 }
@@ -132,7 +130,6 @@ pub struct SerializationBounds {
 pub enum SerializationBound {
     Transport,
     SerializedBytes,
-    Accounting(AccountingExceeded),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,8 +225,6 @@ enum Step {
 }
 
 fn serialize(ledger: &Ledger, bounds: &SerializationBounds) -> Result<Vec<u8>, Step> {
-    admit_render(ledger, &bounds.accounting)
-        .map_err(|exceeded| Step::Exceeded(SerializationBound::Accounting(exceeded)))?;
     let output = PreparedOutput::cached_bytes(ledger.text().as_bytes().to_vec());
     let measured = output
         .measure()
@@ -258,6 +253,8 @@ fn rebuild(base: &Ledger, admitted: &[CostedGroup]) -> Ledger {
     ledger
 }
 
+/// `prepare_optional` rejects closed renders that exceed accounting bounds;
+/// rebuilds can only shorten a render, so no accounting bound is re-checked here.
 pub fn finalize(
     admission: OptionalAdmission,
     bounds: &SerializationBounds,

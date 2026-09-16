@@ -19,6 +19,12 @@ fixed the pass unit as a group and the order as last-admitted first.
 - The loop returns `PackingFailure::AdjustmentCapExhausted` when the pass count
   reaches the cap or the admitted list is empty, before constructing any
   `PreparedOutput`.
+- Only the serialized-bytes bound (and the guard's transport maximum) can
+  start a pass. `prepare_optional` (`crates/daemon/src/packing/mod.rs:613`)
+  refuses a closed render past a rendered-bytes or estimated-tokens bound as
+  `PreparationRefusal::Accounting`, so `finalize` never sees one; the test
+  `an_accounting_overflow_is_refused_by_the_optional_phase_before_any_measurement`
+  drives both phases from one `AccountingBounds` and observes that refusal.
 - `crates/daemon/tests/packing_serialize.rs` checks the removed group's
   partition index, compares the repaired body and ledger with a fresh admission
   of the remaining groups, checks the total dropped by the removed group's
@@ -37,7 +43,9 @@ None.
 
 ## What a test must construct
 
-- A closed render and a limit one below its length, for both the
-  serialized-bytes and estimated-tokens bounds.
+- A closed render and a serialized-bytes limit one below its length.
+- Each accounting bound one below the closed render, fed to both phases from
+  one `AccountingBounds`, so the refusal is observed at the optional phase with
+  the guard counters at `(0, 0)`.
 - A limit below the required render, so every optional group is removed.
 - A cap smaller than the number of passes the limit demands.
