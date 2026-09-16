@@ -40,9 +40,11 @@ None.
 - Sources examined: `crates/daemon/src/packing.rs` `from_budget`; the
   `budgets_are_integers_and_never_clamped` test; review thread
   [#668 r4030901776](https://github.com/ahrav/eidnara/pull/668#discussion_r4030901776).
-- Findings: every integer up to 2^53 is exact in an `f64`; above it an odd
-  integer has already rounded before `from_budget` sees it, and `fract()`
-  cannot tell. The first cut at 2^64 accepted such values.
+- Findings: every integer below 2^53 is exact in an `f64`; 2^53 + 1 rounds
+  to 2^53 before `from_budget` sees it, so 2^53 itself cannot be told from a
+  rounded value, and `fract()` cannot tell either. The first cut at 2^64
+  accepted such values.
 - Missing evidence: none; the wire route that produces the `f64` lands with
   U5a, and whether it decodes an integer directly is that route's question.
-- Conclusion: resolved with answer - values above 2^53 are `TooLarge`.
+- Conclusion: resolved with answer - values of 2^53 and above are
+  `TooLarge`; 2^53 - 1 is the largest accepted budget.

@@ -543,8 +543,8 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
     );
     assert_eq!(
         trace.payload_loads(),
-        1,
-        "the bytes were read before the digest refused them"
+        2,
+        "both rows returned bytes before the first digest refused"
     );
     assert_eq!(
         required_events(&trace),
@@ -553,6 +553,7 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
             RequiredEvent::Read,
             RequiredEvent::Judged,
             RequiredEvent::Admitted,
+            RequiredEvent::Loaded,
             RequiredEvent::Loaded,
         ]
     );

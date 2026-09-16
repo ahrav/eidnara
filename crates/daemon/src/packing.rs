@@ -47,10 +47,11 @@ impl ClaudeTokens {
 
     /// A fractional, negative, non-finite, over-range, or absent budget is
     /// refused, never rounded, saturated, or clamped. Negative zero is
-    /// refused as negative. Values above 2^53 are over-range: an integer
-    /// there may already have rounded on its way into the `f64`.
+    /// refused as negative. Values of 2^53 and above are over-range: 2^53 is
+    /// also what 2^53 + 1 rounds to on its way into the `f64`, so only
+    /// values below it are known to have arrived unrounded.
     pub fn from_budget(value: Option<f64>) -> Result<Self, BudgetRefusal> {
-        const MAX_EXACT: f64 = 9_007_199_254_740_992.0;
+        const TWO_TO_THE_53: f64 = 9_007_199_254_740_992.0;
         let value = value.ok_or(BudgetRefusal::Absent)?;
         if value.is_nan() {
             return Err(BudgetRefusal::NotANumber);
@@ -58,7 +59,7 @@ impl ClaudeTokens {
         if value.is_sign_negative() {
             return Err(BudgetRefusal::Negative);
         }
-        if value > MAX_EXACT {
+        if value >= TWO_TO_THE_53 {
             return Err(BudgetRefusal::TooLarge);
         }
         if value.fract() != 0.0 {
@@ -339,17 +340,18 @@ pub fn prepare_required(
             fetch_payload(conn, &item.row().payload).map_err(|error| (item.row().occurrence, error))
         })))
     })?;
-    // Payload verification runs after `hold` releases the connection; a fetch
-    // fault is returned only after verifying earlier payloads, preserving
-    // request order.
-    for (item, payload) in admitted.iter().zip(&bytes) {
-        let occurrence = item.row().occurrence;
+    // Every payload that came back is a load, whatever its digest says.
+    // Verification runs after `hold` releases the connection; a fetch fault is
+    // returned only after verifying earlier payloads, preserving request order.
+    for (item, _) in admitted.iter().zip(&bytes) {
         trace.payload_loads += 1;
-        trace.required(RequiredEvent::Loaded, Some(occurrence));
+        trace.required(RequiredEvent::Loaded, Some(item.row().occurrence));
+    }
+    for (item, payload) in admitted.iter().zip(&bytes) {
         item.row()
             .payload
             .verify(payload)
-            .map_err(|_| RequiredContextFailure::Corrupt(occurrence))?;
+            .map_err(|_| RequiredContextFailure::Corrupt(item.row().occurrence))?;
     }
     if let Some((occurrence, error)) = fault {
         return Err(match error {
@@ -419,8 +421,8 @@ mod tests {
         assert_eq!(ClaudeTokens::from_budget(Some(0.0)), Ok(ClaudeTokens(0)));
         assert_eq!(ClaudeTokens::from_budget(Some(10.0)), Ok(ClaudeTokens(10)));
         assert_eq!(
-            ClaudeTokens::from_budget(Some(9_007_199_254_740_992.0)),
-            Ok(ClaudeTokens(1 << 53))
+            ClaudeTokens::from_budget(Some(9_007_199_254_740_991.0)),
+            Ok(ClaudeTokens((1 << 53) - 1))
         );
         assert_eq!(ClaudeTokens::from_budget(None), Err(BudgetRefusal::Absent));
         assert_eq!(
@@ -444,9 +446,9 @@ mod tests {
             Err(BudgetRefusal::TooLarge)
         );
         assert_eq!(
-            ClaudeTokens::from_budget(Some(9_007_199_254_740_994.0)),
+            ClaudeTokens::from_budget(Some(9_007_199_254_740_992.0)),
             Err(BudgetRefusal::TooLarge),
-            "above 2^53 an integer may already have rounded before it arrived"
+            "2^53 is also what 2^53 + 1 rounds to, so it cannot be told from a rounded value"
         );
         assert_eq!(
             ClaudeTokens::from_budget(Some(18_446_744_073_709_551_616.0)),

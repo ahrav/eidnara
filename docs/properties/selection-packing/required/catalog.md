@@ -98,7 +98,8 @@ packer that reports through the trace, while the rule that the packing module
 holds no lane call (`crates/retrieval/AGENTS.md`) is the guard against one
 that does not; admission-stage
 refusals record no `Loaded` event and `payload_loads()` stays zero, while a
-row whose bytes came back counts as loaded before its digest is checked; the
+every row whose bytes came back counts as loaded before any digest is
+checked; the
 deadline refusal and the load-bound refusal record no event; a deadline that
 passes, or a cancellation that lands, while another thread holds the
 projection connection refuses within the budget with no event; a budget that
@@ -153,8 +154,8 @@ Exercised: yes - `crates/daemon/src/packing.rs` tests
 Guarantee: The packer's budget and cost unit is the integer `ClaudeTokens`;
 a NaN, negative, non-integer, infinite, over-range, or absent budget is
 refused with a typed `BudgetRefusal`, never rounded, saturated, or clamped;
-over-range begins above 2^53, the last `f64` below which every integer
-arrives exact; `EmbedTokens` and
+over-range begins at 2^53, the first `f64` that a rounded integer
+(2^53 + 1) also lands on; `EmbedTokens` and
 `ClaudeTokens` do not substitute for each other at compile time.
 Check: `always` - each malformed value maps to its refusal variant; the
 legacy profile trim answers a NaN or negative budget as if it were one token
@@ -163,7 +164,7 @@ fail to compile. `always` because a single clamped budget is an over-budget
 edit.
 Fault/timing angle: none.
 Required faults and enabling state: NaN, negative zero, negative, fractional,
-infinite, 2^53 + 2, 2^64, and absent budget values.
+infinite, 2^53, 2^64, and absent budget values.
 Confidence: high - [evidence](evidence/packing-budget-is-an-integer-never-clamped.md).
 The negative control runs the retained legacy clamp and shows it answering.
 Existing check: `crates/daemon/src/m0_compose.rs`

@@ -5,7 +5,8 @@
 RP2.8's packing contract requires every required occurrence to be validated
 and reserved before any optional work, with exactly one `PreparationFailure`
 class when it cannot be, zero optional events, and no new retrieval.
-Acceptance row AC3 names the six fault classes.
+Acceptance row AC3 names six of the seven fault classes; `OverBudget` is
+the seventh, its own variant by the Q3 ruling in `../catalog.md`.
 
 ## Evidence trail
 
@@ -79,7 +80,7 @@ deadline is bounded only by the polls between stages.
   `payload_loads()` at zero.
 - Missing evidence: none.
 - Conclusion: resolved with answer - the count and the `Loaded` event are
-  recorded when the bytes come back, before the digest check.
+  recorded for every payload that came back, before any digest check.
 
 ### Q: Can a budget without a deadline stop a projection hold?
 
