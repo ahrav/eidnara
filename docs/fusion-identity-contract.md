@@ -70,9 +70,13 @@ ranking is the members in occurrence-identifier byte order with positions
 `ProbeOrdinal(u32)` is one compiled query atom's zero-based position in its
 request. `GenerationId` is one immutable vector generation spelled as its
 registered `generation_id`, constructed through `GenerationId::parse` or
-`TryFrom<&VectorGeneration>`. Both are provenance. Neither is a ranking unit
-and neither enters a lane ranking entry, so a probe or generation cannot vote
-more than once.
+`TryFrom<&VectorGeneration>`. Both apply the kernel identity-value rule
+(nonempty, at most `MAX_IDENTITY_VALUE_BYTES`, no control characters). The
+daemon applies the same rule to a consumer binding's `generation_id` before it
+records a lifecycle intent, so every generation this daemon registers has a
+`GenerationId` spelling and `TryFrom` cannot refuse a live generation. Both are
+provenance. Neither is a ranking unit and neither enters a lane ranking entry,
+so a probe or generation cannot vote more than once.
 
 ## Parent groups
 
