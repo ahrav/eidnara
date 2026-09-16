@@ -329,6 +329,7 @@ fn reads_refuse_unknown_identities_oversized_selections_and_disagreeing_columns(
         "UPDATE occurrences SET representation='tool_error'",
         "UPDATE occurrences SET revision=2",
         "UPDATE occurrences SET span_start=0,span_end=5",
+        "UPDATE occurrences SET class='messages',representation='text'",
         foreign_tuple.as_str(),
     ] {
         let raw = || rusqlite::Connection::open(dir.path().join("search.sqlite")).unwrap();
@@ -344,11 +345,109 @@ fn reads_refuse_unknown_identities_oversized_selections_and_disagreeing_columns(
         let tuple = encode(&span.occurrence(&identity), BUFFER).unwrap().tuple;
         raw()
             .execute(
-                "UPDATE occurrences SET representation='tool_output',revision=1,\
-                 span_start=NULL,span_end=NULL,tuple=?1",
+                "UPDATE occurrences SET class='raw_tool_spans',representation='tool_output',\
+                 revision=1,span_start=NULL,span_end=NULL,tuple=?1",
                 [tuple],
             )
             .unwrap();
+    }
+}
+
+/// One well-formed identity per class; the field values that carry a format
+/// rule get a value that passes it.
+fn whole_object_identity(class: OccurrenceClass) -> Vec<(&'static str, &'static str)> {
+    class
+        .identity_fields()
+        .iter()
+        .map(|field| match *field {
+            "harness" => (*field, "opencode"),
+            "object_format" => (*field, "sha1"),
+            "oid" => (*field, "0123456789abcdef0123456789abcdef01234567"),
+            _ => (*field, "value"),
+        })
+        .collect()
+}
+
+#[test]
+fn non_grouping_rows_whose_columns_disagree_with_the_tuple_are_refused() {
+    let non_grouping: Vec<OccurrenceClass> = OccurrenceClass::ALL
+        .into_iter()
+        .filter(|class| !Grouping::applies_to(*class))
+        .collect();
+    for class in &non_grouping {
+        let class = *class;
+        let identity = whole_object_identity(class);
+        let representation = class.representations()[0];
+        let occurrence = Occurrence {
+            class: class.code(),
+            identity: &identity,
+            revision: "1",
+            representation,
+            span: None,
+        };
+        let id = OccurrenceId::parse(&encode(&occurrence, BUFFER).unwrap().occurrence_id).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        store
+            .with_conn_fenced(|conn| {
+                let record = OccurrenceRecord {
+                    occurrence: occurrence.clone(),
+                    payload: Payload::Whole(BUFFER),
+                    domain_id: "domain-stable-id",
+                    sensitivity: Sensitivity::Normal,
+                    source_object_id: "src-1",
+                    source_evidence_id: "evidence-of-the-object",
+                    source_artifact_digest: DIGEST,
+                    created_commit_seq: 7,
+                };
+                persist_occurrences(conn, &[record], bounds(), 1).unwrap();
+                let read = read_selected(conn, &[id], MAX).unwrap();
+                assert_eq!(read[0].grouping, Grouping::NonGrouping(class), "{class:?}");
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+
+        let relabel = non_grouping
+            .iter()
+            .find(|other| **other != class)
+            .map(|other| {
+                format!(
+                    "UPDATE occurrences SET class='{}',representation='{}'",
+                    other.code(),
+                    other.representations()[0]
+                )
+            })
+            .unwrap();
+        let mut updates = vec![
+            "UPDATE occurrences SET revision=2".to_owned(),
+            "UPDATE occurrences SET span_start=0,span_end=5".to_owned(),
+            relabel,
+        ];
+        if let Some(other) = class.representations().get(1) {
+            updates.push(format!("UPDATE occurrences SET representation='{other}'"));
+        }
+        for update in updates {
+            let raw = || rusqlite::Connection::open(dir.path().join("search.sqlite")).unwrap();
+            raw().execute(&update, []).unwrap();
+            let store = open(dir.path());
+            let read = store
+                .with_conn(|conn| Ok(read_selected(conn, &[id], MAX)))
+                .unwrap();
+            assert_eq!(
+                read,
+                Err(ProjectionError::CorruptRow),
+                "{class:?}: {update}"
+            );
+            drop(store);
+            raw()
+                .execute(
+                    "UPDATE occurrences SET class=?1,revision=1,representation=?2,\
+                     span_start=NULL,span_end=NULL",
+                    [class.code(), representation],
+                )
+                .unwrap();
+        }
     }
 }
 
@@ -500,16 +599,7 @@ fn grouping_keys_need_parent_revision_and_representation_together() {
 #[test]
 fn classes_outside_the_grouping_set_yield_the_typed_non_grouping_result() {
     for class in OccurrenceClass::ALL {
-        let identity: Vec<(&str, &str)> = class
-            .identity_fields()
-            .iter()
-            .map(|field| match *field {
-                "harness" => (*field, "opencode"),
-                "object_format" => (*field, "sha1"),
-                "oid" => (*field, "0123456789abcdef0123456789abcdef01234567"),
-                _ => (*field, "value"),
-            })
-            .collect();
+        let identity = whole_object_identity(class);
         let representation = class.representations()[0];
         let encoded = encode(
             &Occurrence {
@@ -537,6 +627,11 @@ fn classes_outside_the_grouping_set_yield_the_typed_non_grouping_result() {
         } else {
             assert_eq!(grouping, Grouping::NonGrouping(class), "{class:?}");
         }
+        assert_eq!(
+            Grouping::derive(&encoded.tuple, class, 2, representation, encoded.span),
+            Err(IdentityRefusal::TupleMismatch),
+            "{class:?}: a revision the tuple does not carry is refused whether or not the class groups"
+        );
     }
 }
 

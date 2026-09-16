@@ -56,9 +56,11 @@ impl Grouping {
         class == OccurrenceClass::RawToolSpans
     }
 
-    /// `revision`, `representation`, and `span` are the stored columns; one
-    /// that disagrees with the tuple bytes is refused by
-    /// [`ParentGroupKey::derive`] rather than allowed to regroup the row.
+    /// [`ParentGroupKey::derive`] verifies that the tuple bytes match `class`,
+    /// `revision`, `representation`, and `span`, so it runs for every class,
+    /// not only the grouping one. A non-grouping class that skipped the
+    /// derivation would accept a column altered independently of the tuple,
+    /// relabelling a span row out of grouping or changing its revision.
     pub fn derive(
         tuple: &[u8],
         class: OccurrenceClass,
@@ -66,12 +68,13 @@ impl Grouping {
         representation: &str,
         span: Option<Span>,
     ) -> Result<Self, IdentityRefusal> {
+        let parent = ParentGroupKey::derive(tuple, class, revision, representation, span)?;
         if !Self::applies_to(class) {
             return Ok(Self::NonGrouping(class));
         }
         Ok(Self::Grouped(GroupingKey {
             class,
-            parent: ParentGroupKey::derive(tuple, class, revision, representation, span)?,
+            parent,
             representation: representation.to_owned(),
         }))
     }
@@ -133,9 +136,11 @@ impl SelectedOccurrence {
     }
 }
 
+// `length(p.bytes)` is answered from the record header. `p.byte_length` is
+// stored after the blob, so reading it walks every overflow page of the blob.
 const SELECTED_SQL: &str =
     "SELECT o.tuple,o.class,o.revision,o.representation,o.span_start,o.span_end,
-            o.payload_id,p.byte_length,o.domain_id,o.sensitivity,o.source_object_id,
+            o.payload_id,length(p.bytes),o.domain_id,o.sensitivity,o.source_object_id,
             o.source_evidence_id,o.source_artifact_digest,o.created_commit_seq,
             t.invalidated_commit_seq,t.reason
      FROM occurrences o
@@ -151,8 +156,9 @@ const SELECTED_SQL: &str =
 /// [`ProjectionError::TooManyRecords`] when more than `max` identities are
 /// given, [`ProjectionError::UnknownOccurrence`] for an identity with no row,
 /// [`ProjectionError::CorruptRow`] for a row outside the schema's shape, whose
-/// tuple does not digest to its identifier, or whose columns disagree with its
-/// tuple, and the SQLite error otherwise.
+/// tuple digest does not match its identifier, or whose class, revision,
+/// representation, or span column disagrees with its tuple, and the SQLite
+/// error otherwise.
 pub fn read_selected(
     conn: &GuardedConn<'_>,
     selected: &[OccurrenceId],

@@ -93,19 +93,19 @@ pub fn live_candidates(
     if rows.len() > max.get() {
         return Err(ProjectionError::TooManyRecords { count: rows.len() });
     }
-    rows.into_iter()
-        .map(
-            |(occurrence_id, class, source_object_id, revision, digest)| {
-                Ok(OccurrenceCandidate::new(
-                    occurrence_id,
-                    OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?,
-                    source_object_id,
-                    revision,
-                    digest,
-                ))
-            },
-        )
-        .collect()
+    rows.into_iter().map(candidate).collect()
+}
+
+fn candidate(
+    (occurrence_id, class, source_object_id, revision, digest): LiveRow,
+) -> Result<OccurrenceCandidate, ProjectionError> {
+    Ok(OccurrenceCandidate::new(
+        occurrence_id,
+        OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?,
+        source_object_id,
+        revision,
+        digest,
+    ))
 }
 
 /// `PolicyExcluded` carries the kernel's verdict itself, never a paraphrase.

@@ -11,10 +11,12 @@ pub mod codec;
 mod commit_stream;
 pub(crate) mod conditional_note_evaluation;
 pub(crate) mod config;
+pub mod context_capabilities;
 pub mod coverage;
 pub mod decay_render;
 pub mod dispatch;
 pub(crate) mod divergence;
+pub mod edit_receipts;
 pub mod edit_recipe;
 pub mod embedding_dispatch;
 pub mod embedding_publication;
@@ -65,6 +67,7 @@ pub mod production_inputs;
 pub mod projection_admission;
 pub mod projection_gates;
 pub mod projection_lifecycle;
+pub mod query_route;
 pub mod release_contract;
 pub mod request_budget;
 pub mod vector_admission;
@@ -272,6 +275,8 @@ pub struct SessionBinding {
     /// The binding does not use a newer harness-resolved value because config can change while the route remains open.
     pub history_budget_tokens: f64,
     pub credential_fingerprints: std::collections::BTreeMap<String, String>,
+    /// Read from the host backend once at bind and constant for the route epoch; consumer capability strings never change it.
+    pub context_capabilities: context_capabilities::LatchedCapabilities,
 }
 
 #[derive(Default)]
@@ -822,7 +827,9 @@ const HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND: usize = 32;
 ///
 /// Serde reads `null` into a plain `Option<Option<T>>` as the outer `None`, which would make a
 /// clear indistinguishable from omission.
-fn deserialize_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn deserialize_nullable<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -2998,6 +3005,11 @@ pub struct HandlerCore {
     scheduler_observations: Mutex<HashMap<String, SchedulerObservation>>,
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
+    query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
+    edit_receipts: Mutex<Option<edit_receipts::ReceiptStore>>,
+    capability_source: Mutex<Option<Arc<dyn context_capabilities::CapabilitySource>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    query_embedder_override: Mutex<Option<Arc<dyn query_route::QueryEmbedder>>>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
     /// Test-side mirror of a client: full input arrays and applied outputs per session, so wire
@@ -3716,9 +3728,34 @@ impl Handler {
         route: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
+        self.dispatch_value_on(route, request, transform_unit::DetachedRunner::default())
+            .await
+    }
+
+    /// Counts `run_unit` submissions; `cancel_before_step` cancels the request at its first `run_step` submission.
+    pub async fn dispatch_value_for_test_observed(
+        &self,
+        route: RouteHandle,
+        request: Value,
+        cancel_before_step: bool,
+    ) -> (PreparedOutcome, usize) {
+        let runner = transform_unit::DetachedRunner {
+            cancel_before_step,
+            ..Default::default()
+        };
+        let units = Arc::clone(&runner.units);
+        let outcome = self.dispatch_value_on(route, request, runner).await;
+        (outcome, units.load(Ordering::SeqCst))
+    }
+
+    async fn dispatch_value_on(
+        &self,
+        route: RouteHandle,
+        request: Value,
+        runner: transform_unit::DetachedRunner,
+    ) -> PreparedOutcome {
         let reserve = metered_decode::unbounded_reserve();
         let meter = ResidentMeter::new(&reserve);
-        let runner = transform_unit::DetachedRunner::default();
         let entry = PassEntry {
             core: &self.core,
             route,
@@ -3810,6 +3847,18 @@ impl Handler {
         self
     }
 
+    /// Without a source every route binding latches an unreadable declaration and every gated edit class is denied.
+    pub fn with_capability_source(
+        self,
+        source: Arc<dyn context_capabilities::CapabilitySource>,
+    ) -> Self {
+        *self
+            .capability_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
+        self
+    }
+
     /// Attaches the lane whose model and tokenizer name the search projection's identity and run its embedding work. Without one the daemon owns no projection.
     pub fn with_local_embeddings(
         self,
@@ -3866,6 +3915,11 @@ impl Handler {
             scheduler_observations: Mutex::new(HashMap::new()),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
+            query_route: Mutex::new(None),
+            edit_receipts: Mutex::new(None),
+            capability_source: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            query_embedder_override: Mutex::new(None),
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
             #[cfg(test)]
@@ -4209,6 +4263,15 @@ impl HandlerCore {
         Some(owner)
     }
 
+    fn latch_capabilities(&self, harness: &str) -> context_capabilities::LatchedCapabilities {
+        let source = self
+            .capability_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        context_capabilities::LatchedCapabilities::read(source.as_ref(), harness)
+    }
+
     fn lifecycle_owner(&self) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
         self.search_lifecycle
             .lock()
@@ -4294,6 +4357,11 @@ impl Handler {
             scheduler_observations: Mutex::new(HashMap::new()),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
+            query_route: Mutex::new(None),
+            edit_receipts: Mutex::new(None),
+            capability_source: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            query_embedder_override: Mutex::new(None),
             guidance_now_ms: Mutex::new(None),
             test_client: Mutex::new(HashMap::new()),
             reduction_injection: Mutex::new(HashMap::new()),
@@ -12504,6 +12572,7 @@ impl CompositeComponent for Handler {
 
     async fn bind(&self, route: RouteHandle, identity: RouteIdentity) -> BindOutcome {
         let config = self.effective_config(&identity.project_root);
+        let context_capabilities = self.latch_capabilities(&identity.harness);
         self.bind_route(
             route,
             SessionBinding {
@@ -12515,6 +12584,7 @@ impl CompositeComponent for Handler {
                 config,
                 history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
                 credential_fingerprints: identity.credential_fingerprints,
+                context_capabilities,
             },
         );
         BindOutcome::Accept
@@ -13423,6 +13493,13 @@ impl HandlerCore {
                 "kernel.artifact.ingest.finish" => {
                     self.handle_kernel_ingest_finish(channel, request).await
                 }
+                query_route::OPERATION => {
+                    self.handle_retrieval_query(channel, request, entry.runner)
+                        .await
+                }
+                edit_receipts::PREPARE => self.handle_retrieval_prepare(channel, request),
+                edit_receipts::APPLY => self.handle_retrieval_apply(channel, request),
+                edit_receipts::CONFIRM => self.handle_retrieval_confirm(channel, request),
                 // The handler echoes only explicit wire-debugging requests.
                 // Unknown request bodies must fail so misrouted callers cannot mistake an echo for success.
                 // An unconditional echo lets a misrouted caller mistake an echo for success.
@@ -19470,6 +19547,9 @@ mod tests {
             config: default_test_config(),
             history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
             credential_fingerprints: std::collections::BTreeMap::new(),
+            context_capabilities: context_capabilities::LatchedCapabilities::Unreadable(
+                "no_declaration",
+            ),
         }
     }
 

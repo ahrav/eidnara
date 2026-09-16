@@ -65,6 +65,154 @@ ranking is the members in occurrence-identifier byte order with positions
 `DeclaredLanes::admit(rankings)` holds at most one ranking per lane in
 `Lane::ORDER`. A second ranking for one lane is refused.
 
+## Fusion arithmetic
+
+`FusionParameters::new(LaneWeights { exact, lexical, dense }, k)` refuses
+before any scoring when a weight is negative or not finite, when `k` is not
+positive and finite, or when the finite inputs would sum to infinity at rank
+one. A negative-zero weight is admitted as `+0.0`, so an
+all-zero parameter set has one spelling. `k = 60` and equal weights are
+calibration points for tests, not defaults; the caller supplies the
+parameters and the fused union bound with no defaults.
+
+`fuse(lanes, parameters, bound)` returns one `Fused` ranking:
+
+1. The union of occurrences across lanes is built one entry at a time and
+   refused with `UnionExceeded { bound }` before the first occurrence past
+   `bound` is materialized.
+2. `score(o) = sum_lane(weight_lane / (k + position_lane(o)))`, summed in
+   `f64` left to right in `Lane::ORDER`, one term per lane. A lane that did
+   not rank the occurrence, and a lane that was not declared, adds nothing.
+   The reference oracle sums terms; it never evaluates a closed fraction.
+3. Fused order is descending score, then ascending occurrence-identifier
+   bytes. Fused positions are `1..=n` in that order.
+4. Each entry keeps every lane's own position and raw score unchanged.
+
+An undeclared lane, including a dense lane reported unavailable, contributes
+zero and is listed by `Fused::undeclared_lanes`; why it was undeclared is the
+route's knowledge, and fusion never treats it as an error. An incomplete lane participates with the entries it reached; a
+`LaneRanking` carries no completion state, so the route reports each lane's
+completion beside the ranking.
+
+`Fused` exposes no path back to lane rankings and `Fused::filter` leaves every
+survivor's position and score unchanged, so a revalidation pass never rescores
+and fusion runs once per query.
+
+## Query route
+
+`retrieval.query` in `crates/daemon/src/query_route.rs` is handler business
+semantics behind the existing `method` envelope; the host wire protocol is
+unchanged. A request carries `query`, `remaining_ms`, `destination`, and an
+optional `harness` claim, and nothing else. The route binding decides scope:
+the project root and session are compared before the body is parsed, and a
+`harness` claim that disagrees with the bound harness is refused. The route is
+enabled by installing a `QueryRouteLimits` set through
+`Handler::set_query_route_limits`; with none installed every authorized request
+whose kernel store is ready receives the `disabled` terminal and no canonical,
+projection, or lifecycle state is read, so rollback is disable, not mutation. A
+request that arrives while the store is still starting or unavailable receives
+the kernel routes' `state` answer for that condition, as every `kernel.*` route
+does, because the binding is decided before the limit set is consulted.
+`QueryRouteLimits::validate` refuses a `validation_batch` or `lexical_accepted`
+over the kernel's candidate batch, a `response_bytes` below the smallest
+empty fused envelope (one lane complete, the others undeclared, no entries),
+and a `response_bytes` above the host wire body maximum, so no installed set
+can produce an answer the route cannot bound or the host cannot send.
+
+The exact lane reads the query's `id:` mentions and the lexical lane scans the
+prose outside selector mentions inside one interruptible projection read under
+the request budget; for those two lanes the projection connection is released
+before any kernel reader is taken. The handler awaits the blocking work through
+`SharedBudget::bridge`, which raises the shared `EvalBudget` flag the moment
+the host cancels, so a kernel or retrieval stage holding only that budget
+stops on a host cancel instead of running to the deadline; the work is still
+joined before the request settles. When a dense limit set is installed and the
+query carries prose outside its selector mentions, the query is first embedded
+in process by the daemon's embedding lane as one tracked blocking step awaited
+in the handler; the dense lane then runs inside the same read through
+`DenseProducer`, whose first implementation is the exhaustive f32 oracle. The
+oracle judges each page it scores and re-judges its top-K before returning, so
+it is the one lane that holds a kernel reader under the projection connection;
+it hands the terms it judged each row under to revalidation. A selector-only
+query is never embedded and leaves the dense lane `undeclared`, as it does the
+lexical lane. An embedding lane that is busy, starting, disabled, failing, or
+that refuses the input or now serves another identity, leaves the dense lane
+`unavailable` and the answer `degraded`; the lane's own typed refusal decides
+the reason, so a lane that changes state during the call reports that state.
+Inference that runs and fails, including an artifact the backend declares
+unusable, or a stored vector outside the generation's layout ends the request
+as `lane_unavailable` with reason `embedding_failed` or `dense_corruption`.
+The exact and lexical lanes are then admitted by the kernel's eligibility
+adapter under the bound scope: the lexical lane through
+`retrieval::lexical::admit`, the exact lane by judging its rows in
+`validation_batch` slices before any position is assigned, so a row the caller
+may not see earns no lane position and consumes no union slot. The exact
+lane's page bound counts every row `exact::page` reads, tombstoned or
+ineligible rows included, because the kernel judges only after the projection
+connection is released; `page_bound` names a read bound, not a visible-row
+count. Fusion
+runs once, the fused set is revalidated by the same adapter in
+`validation_batch` slices, and only survivors are materialized within
+`result_rows` and `response_bytes`. Every judgment refuses to join verdicts
+from two kernel snapshots or incarnations: a lane whose kernel moved between
+its slices is `unavailable` with reason `snapshot_changed` or
+`kernel_incarnation_changed`, and a revalidation whose kernel moved is the
+`lane_unavailable` terminal with the same reason. A stored occurrence
+identifier outside the contract spelling makes its lane `unavailable` with
+reason `identity` rather than shrinking the result. No payload byte is read by
+the route.
+
+A fused answer is
+`{"kind":"fused","degraded":bool,"lanes":{...},"truncated":bool,"entries":[...]}`.
+Each lane reports `complete`, `incomplete` with a reason, `unavailable` with a
+reason, or `undeclared`; reasons are closed codes chosen by the route, never
+engine text; `degraded` is true when a lane is incomplete or unavailable. Each
+entry carries `occurrence_id`, fused `position`, fused `score`, and per-lane
+`position` and `raw` score; positions are the fused positions, so an entry
+revalidation withheld leaves a gap. Because both lanes are admitted before
+fusion, such a gap can arise only from a canonical change between admission
+and revalidation within one request, never from rows the caller was never
+allowed to see. The envelope is measured before any entry is added; an
+envelope alone over `response_bytes` is the `lane_unavailable` terminal with
+reason `response_bytes`, never a body over the bound. A terminal answer is
+`{"kind":"terminal","terminal":<code>}` with `code` one of `unauthorized`,
+`deadline`, `cancelled`, `lane_unavailable`, `required_context_failure`, or
+`disabled`; a `lane_unavailable` terminal adds a `reason` code naming the
+witness. A malformed request is the transport's `invalid_params` error.
+
+## Preparation and receipts
+
+`retrieval.prepare`, `retrieval.apply`, and `retrieval.confirm` in
+`crates/daemon/src/edit_receipts.rs` carry a selection from ranking to a
+confirmed edit; their literals are context-application protocol 2 in
+`docs/host-wire-protocol.md` Section 7.8. A preparation binds the RP2.7.U1
+preparation digest over the caller's context and mints a per-preparation
+identity whose fingerprint covers daemon incarnation, context revision,
+action, selection digest, and accounting profile. An apply that restates a
+different context is `stale_preparation` before any forward; a retry under the
+same identity returns the recorded state and forwards nothing; a retry with
+another digest after a forward is `conflict`. The receipt completes only on a
+confirm whose applied identity equals the identity the daemon forwarded; a
+key from another daemon incarnation or a lost acknowledgment is `unknown` and
+stays so until such a confirm. Receipts are in memory, keyed by the route's
+bound project, bounded per project by count and store-wide by retention, and
+an evicted key or a key of another project is refused rather than replayed.
+
+## Capability gate
+
+Suppression, replacement, and cross-step reuse are offered only when the host
+backend's `context_capabilities` declaration for the route's harness allows
+the class. The declaration is host-authored static data, read from the
+backend once at startup, latched when the route binds, and constant for the
+route epoch; a backend that overrides
+nothing declares no class, OpenCode declares whole-message suppression and
+replacement, and Pi declares nothing. Consumer capability strings are never
+read for this decision. A class the declaration does not allow answers
+`capability_unsupported`; a declaration that could not be read answers
+`capability_undeclared` with its reason. Both refuse before any identity is
+minted. Append is not a class. Suppression additionally requires the
+adapter's surviving set to confirm every selected occurrence whole.
+
 ## Probe and generation identities
 
 `ProbeOrdinal(u32)` is one compiled query atom's zero-based position in its

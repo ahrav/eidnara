@@ -7,6 +7,7 @@
 
 mod identity;
 mod lane;
+mod rrf;
 
 pub use identity::{
     ContextRepresentation, ContextRevision, GenerationId, IdentityRefusal, InvocationId,
@@ -14,3 +15,7 @@ pub use identity::{
     SelectedSpan, SelectionDigest,
 };
 pub use lane::{DeclaredLanes, Lane, LaneEntry, LaneHit, LaneRanking, RawScore};
+pub use rrf::{
+    Fused, FusedEntry, FusionParameters, LaneContribution, LaneWeights, ParameterRefusal,
+    UnionExceeded, fuse,
+};
