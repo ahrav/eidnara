@@ -248,12 +248,18 @@ conservative reading `compose` uses); a layer naming more or fewer
 occurrences than it holds rows; identifiers or tombstones out of strictly
 increasing order, which also catches repeats; an occurrence a layer both
 lists and tombstones; and more rows and tombstones together than the caller's
-bound. Equal-precedence conflicts are refused, not decided: the owners have
-not chosen a rule, and a refusal is not a default.
+bound. The resolver checks the total from slice lengths before inspecting
+any layer's identifiers or tombstones, so an oversized set cannot consume
+content-validation work. Equal-precedence conflicts are refused, not decided:
+the owners have not chosen a rule, and a refusal is not a default.
 
-`dense::layered::rank_layers` refuses layers whose base epoch is not the
-request generation's epoch, then ranks the resolved winners through the
-oracle's own walk. The population, visit order, paging, eligibility batches, top-`k`
+`dense::layered::rank_layers` checks the request budget and the layers' epochs
+against the request generation before resolving any layer contents. An ended
+budget refuses as `OracleRefusal::BudgetExhausted`. Resolution is synchronous
+and does not poll the budget; the oracle checks it again before reading the
+projection. If the budget ends while a valid layer set resolves, the oracle
+still refuses because no page has completed. The resolved winners then enter
+the oracle's own walk. The population, visit order, paging, eligibility batches, top-`k`
 admission, final re-judgment, coverage, budget, and completion rules are the
 oracle's without change; only the source of each visited row's vector
 differs. The walk reads the projection's live dense-required rows in
@@ -449,10 +455,16 @@ kernel's verdicts say which may be returned.
 `daemon::vector_generation` builds one generation from a
 `retrieval::dense::export::live_rows` export: every live dense-required
 occurrence with a vector of the generation, validated against the layout, in
-occurrence identifier order, together with the projection checkpoint the same
-read transaction observed, so the provenance the sidecar records is the state
-the rows came from. The generation is six files staged through the shared
-`GenerationStore` under target `vector-generation`:
+occurrence identifier order, together with the generation and kernel
+incarnation the export checked against the projection and the projection
+checkpoint the same read transaction observed. The export walks the
+generation's `(generation_id, occurrence_id)` index in order and never sorts.
+`build` refuses an export whose generation or kernel incarnation is not the
+caller's expectation and stamps the sidecar's generation identifier, epoch,
+model, tokenizer fingerprint, and kernel incarnation from the export, so the
+provenance the sidecar records is the state the rows came from. The
+generation is six files staged through the shared `GenerationStore` under
+target `vector-generation`:
 
 | File | Bytes |
 | --- | --- |
@@ -502,13 +514,14 @@ is `vector-generation`; a composition's is `vector-composition`, and
 `select_vector` refuses any other. Any generation may list `members.json`, digests the store must retain with
 it: pruning retains every member named by any complete generation in the
 store, so a member outlives every record that names it by one prune pass;
-discard refuses a member of any record; exchange repair refuses to replace a
-selected record. The store reads only a generation's manifest and members
-file for this, never its payload, so a corrupt payload of a selected
-generation does not stop pruning; a selected generation whose manifest or
-members file cannot be read, or any generation of unknown schema, makes the
-members unknown, and the store then behaves as with a quarantined selector:
-temps only are reclaimed and discard refuses. The members rule is owner
+discard and exchange repair refuse a member of any record; exchange repair
+also refuses to replace a selected record. The store reads only a
+generation's manifest and members file for this, never its payload, so a
+corrupt payload of a selected generation does not stop pruning; a selected or
+pinned generation whose manifest or members file cannot be read, or any
+generation of unknown schema, including one behind a directory mode this
+build rejects, makes the members unknown, and the store then behaves as with
+a quarantined selector: temps only are reclaimed and discard refuses. The members rule is owner
 agnostic: a search seed that lists members retains them the same way, though
 no search seed does. The store's selection primitive checks inventory, sizes, modes,
 hashes, the target, and that every listed member validates; the daemon's
@@ -529,7 +542,7 @@ through the shared store under target `vector-composition`:
 | File | Bytes |
 | --- | --- |
 | `composition.json` | Canonical record: schema, publication sequence, model, tokenizer fingerprint, dimension, metric, tolerance, recipe, epoch, kernel incarnation, base digest, delta digests in application order. |
-| `members.json` | `{"schema":1,"members":[base, deltas...]}`; the lifecycle store reads it to retain every member while the composition is selected. |
+| `members.json` | `{"schema":1,"members":[base, deltas...]}`, distinct digests; the lifecycle store reads it to retain every member while the composition is selected. |
 
 `compose` refuses a base whose sidecar counts tombstones, a duplicate member, more deltas than
 the bound, a member whose sidecar does not carry the expectation's identity,
@@ -537,12 +550,19 @@ and a delta whose checkpoint moves backwards from its predecessor's. This is a
 conservative reading of the base/delta checkpoint relation the owners have not
 yet frozen: every delta's snapshot and checkpoint are at or after the
 checkpoint of the layer before it. Equal-precedence conflicts among members
-are not decided here.
+are not decided here. Base/delta tombstone semantics are those of "Layer
+resolution and the layered ranking" above.
 
 `publish` refuses a sequence at or below the selected composition's, stages
 the composition under the caller's admission, and moves the selector in one
-rename. It reports how far the attempt got, recorded when each step returns:
-`NotStaged`, `Staged` when the store holds the record, `Acknowledged` when
+rename. The sequence gate reads the selected record the same way
+`verify_composition` and `recover` do: a selection whose record is not
+canonical, does not bind to its manifest, or whose generation fails inventory
+validation is not a composition this build accepts, so it sets no sequence
+floor and a repair publication proceeds. A selected record of a schema this
+build does not know refuses publication as `Quarantined`, because it may be a
+later build's selection. It reports how far the attempt got, recorded when each step returns:
+`NotStaged`, `Staged` when staging returned the record's digest, `Acknowledged` when
 the selector rename returned, `Durable` when the containing-directory sync
 returned. A failure carries the last stage reached; a failure at or after
 `Acknowledged` is an unknown outcome, and `reconcile` settles it by reading
@@ -555,18 +575,30 @@ sequence without a second record.
 
 `verify_composition` checks the record's target, schema, canonical bytes,
 manifest binding, agreement with `members.json`, and identity, verifies every
-member with `vector_generation::verify`, and re-checks the topology under the
-caller's delta bound, so a composition current admission would refuse does
-not verify. `recover` takes the selected composition when it verifies;
-otherwise it reads only the manifests of the other generations to find
-compositions, orders them by descending sequence, fully verifies at most
-`bound` of them, and takes the first that passes, reporting the selector as
-`Stale` or `Absent` rather than repointing it. An acknowledged selection is
-never displaced by a newer composition that was staged but not selected, and
-no verifying composition means explicit unavailability.
+member with `vector_generation::verify`, and re-checks the topology. A record
+of unknown schema is refused as `Quarantined`, not as a malformed record. It refuses
+an excessive delta count before opening any member, so the caller's delta bound
+limits member-verification work as well as the accepted topology.
+`recover` takes the selected composition when it verifies; otherwise it reads
+the manifests of the other generations and, for composition targets, only the
+manifest-listed `composition.json` (hash-checked and capped at 1 MiB). Discovery
+retains the newest `bound` `(sequence, digest)` pairs, not generation descriptors;
+equal sequences use descending digest order. It then fully verifies at most
+those `bound` generations, including inventory and member checks, and takes the
+first that passes. A candidate whose record is readable but whose other files
+are invalid consumes one attempt. Unreadable records are skipped during
+discovery. The directory listing and manifest scan still scale with the store's
+generation count; `bound` is not a bound on that scan or on total bytes in the
+members. Recovery reports the selector as `Stale` or `Absent` rather than
+repointing it. A verifying selection is never displaced by a newer composition
+that was staged but not selected, and no verifying composition within the bound
+means explicit unavailability.
 
 Readers hold a composition the way the store expects: pin the composition
 generation, then open every member, then re-read the selector. While the
 composition record exists, whether pinned or merely not yet reclaimed, its
 members stay retained, so a reader that pinned a superseded composition keeps
-its members after a later publication moves the selector.
+its members after a later publication moves the selector. `recover` does not
+pin the returned composition: its caller must validate and pin the returned
+digest while still holding the lifecycle transaction lock before handing it
+to a reader. Releasing the lock first leaves an unselected fallback reclaimable.

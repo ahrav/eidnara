@@ -39,7 +39,7 @@ use retrieval::dense::{
 };
 use support::dense_projection::{Projection, occurrence_id, reference};
 use support::flock::try_exclusive;
-use support::vector_store::{Fixture, unit};
+use support::vector_store::{Fixture, KERNEL, generation, unit};
 use tokio_util::sync::CancellationToken;
 
 const OBJECTS: [&str; 5] = ["alpha", "beta", "gamma", "delta", "epsilon"];
@@ -76,6 +76,8 @@ fn export(rows: &[(&str, Vec<f32>)], tombstones: &[&str], checkpoint: i64) -> Li
         .collect();
     tombstones.sort();
     LiveRows {
+        generation: generation(),
+        kernel_incarnation_id: KERNEL.to_owned(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: checkpoint - 1,
             checkpoint_commit_seq: checkpoint,
@@ -765,6 +767,42 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
     );
     fixture.set_limit(RESIDENT_LIMIT, u64::MAX);
 
+    // A row bound below the page size caps every page, so the charge is for the rows a page can hold, not the nominal page.
+    // Room for one row plus the raw row, and not for the nominal thousand-row page.
+    fixture.set_limit(RESIDENT_LIMIT, resident + (1 + 1) * 8 * 4);
+    let expected = fixture.expected();
+    let request = RankRequest {
+        expected: &expected,
+        query: &query,
+        authority: projection.authority(),
+        bounds: OracleBounds {
+            page_rows: NonZeroUsize::new(1000).unwrap(),
+            max_rows: NonZeroUsize::new(1).unwrap(),
+            ..oracle_bounds(8)
+        },
+        max_entries: NonZeroUsize::new(64).unwrap(),
+    };
+    let ranking = projection
+        .store
+        .with_conn(|conn| {
+            Ok(rank(
+                &view,
+                conn,
+                &projection.kernel,
+                &request,
+                &EvalBudget::unbounded(),
+                &fixture.admission,
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ranking.ranking.completion,
+        Completion::Incomplete(IncompleteReason::RowBound)
+    );
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
+    fixture.set_limit(RESIDENT_LIMIT, u64::MAX);
+
     for page_rows in [usize::MAX, usize::MAX / (8 * 4)] {
         let expected = fixture.expected();
         let request = RankRequest {
@@ -773,6 +811,7 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
             authority: projection.authority(),
             bounds: OracleBounds {
                 page_rows: NonZeroUsize::new(page_rows).unwrap(),
+                max_rows: NonZeroUsize::new(usize::MAX).unwrap(),
                 ..oracle_bounds(8)
             },
             max_entries: NonZeroUsize::new(64).unwrap(),

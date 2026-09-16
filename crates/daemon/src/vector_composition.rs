@@ -9,9 +9,9 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 
 use host_runtime::generation::{
-    CurrentProfile, GenerationError, GenerationManifest, GenerationStore, MEMBERS_FILE_NAME,
-    ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET, ValidatedGeneration,
-    WireMembers,
+    CurrentProfile, GenerationError, GenerationManifest, GenerationStore, MAX_MANIFEST_BYTES,
+    MEMBERS_FILE_NAME, ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET,
+    ValidatedGeneration, WireMembers,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 
@@ -146,8 +146,6 @@ pub enum CompositionRefusal {
     Quarantined,
     #[error("insufficient storage")]
     InsufficientStorage,
-    #[error("i/o failure: {0}")]
-    Io(String),
 }
 
 impl From<GenerationError> for CompositionRefusal {
@@ -248,7 +246,7 @@ fn check_topology(
 /// How far one publication attempt is known to have gone; each rung is recorded when its step returns, so a lost reply leaves the attempt on the last rung that returned without implying the next did not happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Progress {
-    /// Nothing reached the store.
+    /// Staging did not return a digest; the selector is unchanged.
     NotStaged,
     /// The composition generation is in the store; the selector is unchanged.
     Staged,
@@ -330,26 +328,85 @@ pub fn publish(
     }
 }
 
-/// The sequence of the composition the selector names, or `None` when nothing is selected or the selection is not a readable composition; the latter must not block a repair publication.
+/// Returns the selected composition's sequence, or `None` when no composition is selected or its record fails validation.
+///
+/// # Errors
+///
+/// Returns `Quarantined` when the selector is quarantined or the selected record has an unknown schema.
 fn selected_sequence(store: &GenerationStore) -> Result<Option<u64>, CompositionRefusal> {
     match store.read_vector_current()? {
         CurrentProfile::Quarantined => Err(CompositionRefusal::Quarantined),
         CurrentProfile::Absent => Ok(None),
-        CurrentProfile::Current(digest) => {
-            Ok(record(store, &digest).map(|(_, record)| record.sequence))
-        }
+        CurrentProfile::Current(digest) => Ok(record(store, &digest)?
+            .filter(|_| store.validate(&digest).is_ok())
+            .map(|record| record.sequence)),
     }
 }
 
-/// The validated generation and record of `digest`, or `None` when its manifest does not name a vector composition or its record does not decode. The manifest is read before the files are hashed, so a store full of other owners' generations costs one manifest read each.
-fn record(store: &GenerationStore, digest: &str) -> Option<(ValidatedGeneration, Composition)> {
-    if store.manifest(digest).ok()?.target != VECTOR_SELECTION_TARGET {
-        return None;
+/// Reads records only from manifests targeting `VECTOR_SELECTION_TARGET`. Full inventory and member verification still belong inside the candidate bound.
+///
+/// # Errors
+///
+/// Returns `Quarantined` when the generation manifest, the record, or the members file has an unknown schema.
+fn record(
+    store: &GenerationStore,
+    digest: &str,
+) -> Result<Option<Composition>, CompositionRefusal> {
+    let manifest = match store.manifest(digest) {
+        Ok(manifest) => manifest,
+        Err(GenerationError::UnsupportedStateSchema) => {
+            return Err(CompositionRefusal::Quarantined);
+        }
+        Err(_) => return Ok(None),
+    };
+    if manifest.target != VECTOR_SELECTION_TARGET {
+        return Ok(None);
     }
-    let generation = store.validate(digest).ok()?;
-    let record =
-        serde_json::from_slice(&generation.read_verified_file(COMPOSITION_FILE).ok()?).ok()?;
-    Some((generation, record))
+    let Ok(bytes) = store.read_manifest_file(digest, COMPOSITION_FILE) else {
+        return Ok(None);
+    };
+    if let Ok(members) = store.read_manifest_file(digest, MEMBERS_FILE_NAME) {
+        check_members_schema(&members)?;
+    }
+    match decode_record(&manifest, &bytes) {
+        Ok(record) => Ok(Some(record)),
+        Err(CompositionRefusal::Quarantined) => Err(CompositionRefusal::Quarantined),
+        Err(_) => Ok(None),
+    }
+}
+
+/// A members file of a schema this build does not know is refused as `Quarantined` before the manifest binding reports it as a mismatch.
+fn check_members_schema(bytes: &[u8]) -> Result<(), CompositionRefusal> {
+    let schema = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("schema").and_then(serde_json::Value::as_u64));
+    match schema {
+        Some(schema) if schema != u64::from(MEMBERS_SCHEMA) => Err(CompositionRefusal::Quarantined),
+        _ => Ok(()),
+    }
+}
+
+fn decode_record(
+    manifest: &GenerationManifest,
+    bytes: &[u8],
+) -> Result<Composition, CompositionRefusal> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| CompositionRefusal::NotComposition("record"))?;
+    match value.get("schema").and_then(serde_json::Value::as_u64) {
+        Some(schema) if schema == u64::from(COMPOSITION_SCHEMA) => {}
+        Some(_) => return Err(CompositionRefusal::Quarantined),
+        None => return Err(CompositionRefusal::NotComposition("record")),
+    }
+    let composition: Composition =
+        serde_json::from_value(value).map_err(|_| CompositionRefusal::NotComposition("record"))?;
+    if composition.canonical_bytes() != bytes {
+        return Err(CompositionRefusal::NotComposition("record not canonical"));
+    }
+    // Matching manifests bind the composition to the members file.
+    if composition.stage_manifest() != *manifest {
+        return Err(CompositionRefusal::NotComposition("manifest binding"));
+    }
+    Ok(composition)
 }
 
 /// What the selector durably names after an attempt with an unknown outcome.
@@ -399,13 +456,22 @@ impl std::fmt::Debug for VerifiedComposition {
 ///
 /// # Errors
 ///
-/// A generation of another owner or schema, a record that is not canonical or does not agree with its members file, a record whose identity is not `expected`, a member that fails [`verify`], or a topology outside the contract.
+/// A generation of another owner or schema, a record above the metadata size cap, a record that is not canonical or does not agree with its members file, a record whose identity is not `expected`, a member that fails [`verify`], or a topology outside the contract.
 pub fn verify_composition(
     store: &GenerationStore,
     digest: &str,
     expected: &ExpectedVectors<'_>,
     max_deltas: NonZeroUsize,
 ) -> Result<VerifiedComposition, CompositionRefusal> {
+    // The manifest is read before any listed file is hashed or held in memory.
+    let manifest = store.manifest(digest)?;
+    if manifest
+        .files
+        .iter()
+        .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
+    {
+        return Err(CompositionRefusal::NotComposition("record size"));
+    }
     let generation = store.validate(digest)?;
     verify_validated(store, generation, expected, max_deltas)
 }
@@ -419,18 +485,17 @@ fn verify_validated(
     if generation.manifest.target != VECTOR_SELECTION_TARGET {
         return Err(CompositionRefusal::NotComposition("manifest target"));
     }
+    if let Ok(members) = generation.read_verified_file(MEMBERS_FILE_NAME) {
+        check_members_schema(&members)?;
+    }
     let bytes = generation.read_verified_file(COMPOSITION_FILE)?;
-    let composition: Composition =
-        serde_json::from_slice(&bytes).map_err(|_| CompositionRefusal::NotComposition("record"))?;
-    if composition.schema != COMPOSITION_SCHEMA {
-        return Err(CompositionRefusal::NotComposition("record schema"));
-    }
-    if composition.canonical_bytes() != bytes {
-        return Err(CompositionRefusal::NotComposition("record not canonical"));
-    }
-    // The manifest names the members file by hash and the store verified that hash, so equal manifests mean the members file agrees with the record.
-    if composition.stage_manifest() != generation.manifest {
-        return Err(CompositionRefusal::NotComposition("manifest binding"));
+    let composition = decode_record(&generation.manifest, &bytes)?;
+    // Refuse before opening members: the bound limits verification work, not just the returned topology.
+    if composition.deltas.len() > max_deltas.get() {
+        return Err(CompositionRefusal::DeltasOverBound {
+            count: composition.deltas.len(),
+            max: max_deltas.get(),
+        });
     }
     if composition
         .identity()
@@ -495,7 +560,7 @@ pub struct Candidate {
     pub selector: SelectorState,
 }
 
-/// The compositions recovery examines, in order: the selected digest when `current` names one, then at most `bound` other records by descending sequence, equal sequences by descending digest. Only manifests and records are read; no member is opened. An acknowledged selection is never displaced by a newer composition that was staged but not selected.
+/// The compositions recovery examines, in order: the selected digest when `current` names one, then at most `bound` other records by descending sequence, equal sequences by descending digest. Only manifests and records are read; no member is opened and discovery retains no generation descriptors. An acknowledged selection is never displaced by a newer composition that was staged but not selected.
 ///
 /// # Errors
 ///
@@ -510,7 +575,7 @@ pub fn candidates(
         CurrentProfile::Current(digest) => Some(digest.as_str()),
         CurrentProfile::Absent => None,
     };
-    let mut others: Vec<(u64, String)> = Vec::new();
+    let mut others = BTreeSet::new();
     for digest in store
         .digests()
         .map_err(|error| Unavailable::Store(error.to_string()))?
@@ -518,16 +583,13 @@ pub fn candidates(
         if selected == Some(digest.as_str()) {
             continue;
         }
-        if let Some((_, record)) = record(store, &digest) {
-            others.push((record.sequence, digest));
+        if let Ok(Some(record)) = record(store, &digest) {
+            others.insert((record.sequence, digest));
+            if others.len() > bound.get() {
+                others.pop_first();
+            }
         }
     }
-    // Newest first; equal sequences fall back to digest order so the choice is deterministic.
-    others.sort_by(|(left_sequence, left), (right_sequence, right)| {
-        right_sequence
-            .cmp(left_sequence)
-            .then_with(|| right.cmp(left))
-    });
     let fallback = match selected {
         Some(current) => SelectorState::Stale(current.to_owned()),
         None => SelectorState::Absent,
@@ -539,13 +601,11 @@ pub fn candidates(
         })
         .into_iter()
         .chain(
-            others
-                .into_iter()
-                .take(bound.get())
-                .map(|(_, digest)| Candidate {
-                    digest,
-                    selector: fallback.clone(),
-                }),
+            // Newest first; equal sequences fall back to descending digest order.
+            others.into_iter().rev().map(|(_, digest)| Candidate {
+                digest,
+                selector: fallback.clone(),
+            }),
         )
         .collect())
 }
