@@ -92,9 +92,15 @@ generation inside the caller's read transaction:
   (`batch::dense_eligible`), visited in occurrence identifier byte order
   regardless of class, through bounded keyset pages of `page_rows` rows over
   the `occurrences` primary key. Visit order therefore equals tie order.
-- Each page is decoded and validated, then judged for canonical eligibility
-  in one kernel batch, then scored, then offered to a top-`k` set. Eligibility
-  precedes admission; enumeration order and score never decide eligibility.
+- Each page is decoded, validated, and scored. Only the rows that would enter
+  the top-`k` set as it stood before the page are judged for canonical
+  eligibility, in one kernel batch; the eligible ones are then offered to the
+  set. A page with no such row runs no batch. Eligibility precedes admission;
+  enumeration order and score never decide eligibility, only whether a row is
+  judged at all. The returned set equals the one a walk judging every row
+  would return: a member of the final top-`k` outranks the worst held member
+  at every earlier point of the walk. `Consumed.judged`, `batches`, and
+  `excluded` describe the judged rows, not the population.
   A row without a vector is counted and neither judged nor scored.
 - The top-`k` set is re-judged in one batch before it is returned. A row the
   kernel no longer admits is dropped and counted as an exclusion.

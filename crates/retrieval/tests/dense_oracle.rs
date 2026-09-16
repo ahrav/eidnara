@@ -67,8 +67,13 @@ fn a_population_larger_than_k_yields_the_reference_prefix_and_visits_every_requi
         }
     );
     assert!(ranking.consumed.pages >= 4, "{:?}", ranking.consumed);
-    assert_eq!(ranking.consumed.judged, 8 + 3);
-    assert_eq!(ranking.consumed.batches, ranking.consumed.pages + 1);
+    // Every row is scored, but only a row that could enter the top-3 when visited is judged, then the 3 held rows are re-judged.
+    assert!(
+        (3 + 3..8 + 3).contains(&ranking.consumed.judged),
+        "{:?}",
+        ranking.consumed
+    );
+    assert!(ranking.consumed.batches <= ranking.consumed.pages + 1);
     assert!(ranking.consumed.excluded.is_empty());
     assert!(ranking.snapshot.is_some());
     for row in &ranking.ranked {
@@ -211,6 +216,75 @@ fn a_higher_scoring_excluded_row_never_displaces_an_eligible_one_and_stays_a_pol
         "exclusion is not a coverage shortfall"
     );
     assert_eq!(ranking.coverage.missing(), 0);
+}
+
+#[test]
+fn a_row_that_cannot_enter_the_top_k_when_visited_is_scored_but_never_judged() {
+    // `theta` scores lowest against the axis; the kernel hides it.
+    let admitted: Vec<&str> = OBJECTS
+        .iter()
+        .copied()
+        .filter(|object| *object != "theta")
+        .collect();
+    let fixture = Fixture::new(&admitted, corpus());
+    let query = axis(0);
+    let reference = fixture.reference(&query, &admitted);
+    let theta = fixture.id("theta");
+    let before_theta = fixture
+        .dense_ids()
+        .iter()
+        .take_while(|id| **id != theta)
+        .count();
+    assert!(
+        before_theta >= 1,
+        "the visit order must reach theta after another row"
+    );
+
+    // One row per page: the top-K is full of better rows before theta is visited, so theta is not judged.
+    let lazy = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(1).unwrap(),
+                ..bounds(before_theta)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(lazy.completion, Completion::Complete);
+    assert_eq!(keyed(&lazy), reference[..before_theta]);
+    assert_eq!(
+        lazy.coverage.with_vector, 8,
+        "theta is still visited and scored"
+    );
+    assert!(
+        lazy.consumed.excluded.is_empty(),
+        "a row that could not enter the top-K is not judged: {:?}",
+        lazy.consumed
+    );
+    assert!(
+        lazy.consumed.judged < 8 + before_theta,
+        "{:?}",
+        lazy.consumed
+    );
+
+    // One page holding every row: theta is selected against an empty top-K and judged.
+    let eager = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(8).unwrap(),
+                ..bounds(before_theta)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(keyed(&eager), keyed(&lazy));
+    assert_eq!(
+        eager.consumed.excluded,
+        vec![(EligibilityVerdict::Hidden, 1)]
+    );
+    assert_eq!(eager.consumed.judged, 8 + before_theta);
 }
 
 #[test]
@@ -1016,7 +1090,11 @@ fn page_size_changes_the_batch_count_but_not_the_ranking() {
         );
         assert_eq!(keyed(&ranking), reference[..4], "page_rows={page_rows}");
         assert_visited_once(&fixture, &visited);
-        assert_eq!(ranking.consumed.batches, ranking.consumed.pages + 1);
+        assert!(
+            ranking.consumed.batches <= ranking.consumed.pages + 1,
+            "a page with no row that could enter the top-K runs no batch: {:?}",
+            ranking.consumed
+        );
         if let Some(previous) = &previous {
             assert_eq!(&keyed(&ranking), previous);
         }

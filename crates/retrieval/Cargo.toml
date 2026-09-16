@@ -47,7 +47,3 @@ harness = false
 [[bench]]
 name = "dense_resolve"
 harness = false
-
-[[bench]]
-name = "dense_walk"
-harness = false
