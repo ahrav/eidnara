@@ -246,18 +246,21 @@ Guarantee: `LlmExecutionBackend::context_capabilities` defaults to the empty
 set; the OpenCode declaration allows exactly suppression and replacement and
 the Pi declaration is empty; the declaration is read once at route bind,
 held for the route epoch, and re-read by a new bind; a class the latched
-declaration does not allow is `capability_unsupported` with reason
-`unsupported`, a declaration that could not be read is `capability_unsupported`
-with its own reason, and both fail closed before any capacity check or minted
-identity; append is never gated.
+declaration does not allow is `capability_unsupported`, a declaration that
+could not be read is `capability_undeclared` with its reason, both fail closed
+before any capacity check or minted identity, and the receipt's class is gated
+again on apply and confirm so a route whose declaration is closed cannot drive
+a receipt another route prepared; append is never gated.
 Check: `always` - a backend that overrides nothing denies every class for
 both harnesses; a daemon without a source denies every class as
 `no_declaration` and still prepares an append; under the recorded tables an
 `opencode` route prepares `replace` and `suppress` and is denied `reuse`
-while a `pi` route is denied all three and still prepares an append; a source
-whose answer changes after bind leaves the bound route denied and a new bind
-reads the new answer. `always` because every gated prepare reads the latched
-declaration.
+while a `pi` route is denied all three and still prepares an append; an
+oversized replace on an undeclared route is denied by the gate, not the
+capacity; a source whose answer changes after bind leaves the bound route
+denied while a second route bound afterwards on the same daemon prepares, and
+the first route cannot apply the second's preparation. `always` because every
+gated request reads the latched declaration.
 Fault/timing angle: The backend answer changes during a route epoch.
 Required faults and enabling state: A mutable capability source; the recorded
 harness tables; a daemon with no source.
@@ -308,10 +311,12 @@ a selected occurrence absent from it, or a survivor confirmed only for a
 span each fail as `preparation_failure` with a distinct reason and mint
 nothing.
 Check: `always` - no survivors is `no_survivor_proof`; one of two selected
-occurrences confirmed is `unconfirmed_survivor`; a survivor with a partial
-span is `span_granularity`; both confirmed whole, with a null span or a span
-covering the buffer, prepares. `always` because the check runs on every
-suppression.
+occurrences confirmed is `unconfirmed_survivor`, as is a survivor whose buffer
+length disagrees with the context's span for the same occurrence; a survivor
+with a partial span is `span_granularity`; a survivor that is not an
+occurrence identifier is `malformed_survivor`; both confirmed whole, with a
+null span or a span covering the context's buffer, prepares. `always` because
+the check runs on every suppression.
 Fault/timing angle: Partial visibility or a replaced slot between the plugin's
 observation and the prepare.
 Required faults and enabling state: A harness declaring suppression; survivor

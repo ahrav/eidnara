@@ -129,7 +129,6 @@ impl LlmExecutionBackend for PiBackend {
         ))
     }
 
-    /// Resolving every node `run_pi` needs re-proves the same closure invariants, so a rejected send and a failed run report the same subreason.
     fn context_capabilities(&self, harness: Harness) -> ContextCapabilities {
         match harness {
             Harness::Pi => PI_CONTEXT_CAPABILITIES,
@@ -137,6 +136,7 @@ impl LlmExecutionBackend for PiBackend {
         }
     }
 
+    /// Resolving every node `run_pi` needs re-proves the same closure invariants, so a rejected send and a failed run report the same subreason.
     fn unavailable_reason(&self, harness: Harness) -> Option<&'static str> {
         if harness != Harness::Pi {
             return None;

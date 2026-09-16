@@ -58,9 +58,23 @@ async fn call(daemon: &KernelDaemon, request: Value) -> Value {
 
 fn denied(value: &Value, class: &str, reason: &str) {
     assert_eq!(value["kind"], "terminal", "{value}");
-    assert_eq!(value["terminal"], "capability_unsupported", "{value}");
+    if reason == "unsupported" {
+        assert_eq!(value["terminal"], "capability_unsupported", "{value}");
+        assert!(value.get("reason").is_none(), "{value}");
+    } else {
+        assert_eq!(value["terminal"], "capability_undeclared", "{value}");
+        assert_eq!(value["reason"], reason, "{value}");
+    }
     assert_eq!(value["class"], class, "{value}");
-    assert_eq!(value["reason"], reason, "{value}");
+    assert!(value.get("preparation_id").is_none(), "{value}");
+}
+
+async fn call_on(daemon: &KernelDaemon, route: host_runtime::RouteHandle, request: Value) -> Value {
+    match daemon.outcome_on(route, request).await {
+        PreparedOutcome::Response(output) => output.json_for_test().unwrap().clone(),
+        PreparedOutcome::Error { code, message } => json!({"error": code, "message": message}),
+        PreparedOutcome::Streamed => panic!("streamed"),
+    }
 }
 
 struct Nothing;
@@ -147,6 +161,13 @@ async fn without_a_declaration_every_gated_class_is_denied_as_unreadable_and_app
             "no_declaration",
         );
     }
+    let mut oversized = prepare(&project, "replace", json!([]));
+    oversized["edit_bytes"] = json!(1 << 20);
+    denied(
+        &call(&daemon, oversized).await,
+        "replacement",
+        "no_declaration",
+    );
     let appended = call(&daemon, prepare(&project, "append", json!([]))).await;
     assert_eq!(appended["kind"], "prepared", "{appended}");
     daemon.shutdown().await;
@@ -232,6 +253,37 @@ async fn the_declaration_is_latched_at_bind_and_reread_by_a_new_bind() {
         "replacement",
         "unsupported",
     );
+    let later = daemon.bind_another(9, "test").await;
+    let prepared = call_on(&daemon, later, prepare(&project, "replace", json!([]))).await;
+    assert_eq!(prepared["kind"], "prepared", "{prepared}");
+    denied(
+        &call(&daemon, prepare(&project, "replace", json!([]))).await,
+        "replacement",
+        "unsupported",
+    );
+    let key = prepared["preparation_id"].as_str().unwrap();
+    let mut apply = json!({
+        "method": "retrieval.apply",
+        "v": 1,
+        "session_id": SESSION,
+        "project_root": project.to_str().unwrap(),
+        "preparation_id": key,
+        "context_revision": "rev-1",
+        "representation": "repr-1",
+        "spans": [whole(OCC_A), whole(OCC_B)],
+        "selection": [OCC_A, OCC_B],
+    });
+    denied(
+        &call(&daemon, apply.clone()).await,
+        "replacement",
+        "unsupported",
+    );
+    apply["project_root"] = json!(project.to_str().unwrap());
+    let forwarded = call_on(&daemon, later, apply).await;
+    assert_eq!(
+        forwarded["kind"], "forwarded",
+        "the route whose declaration allows the class applies it: {forwarded}"
+    );
     daemon.shutdown().await;
 
     let rebound = KernelDaemon::start_with(StartOptions {
@@ -278,6 +330,34 @@ async fn suppression_needs_whole_message_survivor_proof_for_every_selected_occur
     let none = call(&daemon, prepare(&project, "suppress", json!([]))).await;
     assert_eq!(none["outcome"], "preparation_failure", "{none}");
     assert_eq!(none["reason"], "no_survivor_proof");
+
+    let shorter = call(
+        &daemon,
+        prepare(
+            &project,
+            "suppress",
+            json!([
+                whole(OCC_A),
+                {"occurrence_id": OCC_B, "buffer_len": 40, "span": [0, 40]}
+            ]),
+        ),
+    )
+    .await;
+    assert_eq!(shorter["outcome"], "preparation_failure", "{shorter}");
+    assert_eq!(
+        shorter["reason"], "unconfirmed_survivor",
+        "a survivor's own length is not the context's"
+    );
+    let malformed = call(
+        &daemon,
+        prepare(
+            &project,
+            "suppress",
+            json!([whole(OCC_A), {"occurrence_id": "zz", "buffer_len": 100, "span": null}]),
+        ),
+    )
+    .await;
+    assert_eq!(malformed["reason"], "malformed_survivor", "{malformed}");
 
     let partial = call(
         &daemon,

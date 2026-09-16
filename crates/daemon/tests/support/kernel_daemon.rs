@@ -141,9 +141,31 @@ impl KernelDaemon {
     }
 
     pub async fn outcome(&self, request: Value) -> PreparedOutcome {
-        self.handler
-            .dispatch_value_for_test(self.route, request)
-            .await
+        self.outcome_on(self.route, request).await
+    }
+
+    pub async fn outcome_on(&self, route: RouteHandle, request: Value) -> PreparedOutcome {
+        self.handler.dispatch_value_for_test(route, request).await
+    }
+
+    /// Binds a second route on the same handler and project, so two bindings can be observed side by side.
+    pub async fn bind_another(&self, channel: u16, harness: &str) -> RouteHandle {
+        let route = RouteHandle { channel, epoch: 1 };
+        let identity = RouteIdentity {
+            project_root: self.project.clone(),
+            harness: harness.to_owned(),
+            session: SESSION.to_owned(),
+            consumer_module_id: None,
+            consumer_launch_nonce: None,
+            consumer_capabilities: Vec::new(),
+            admission_facts: None,
+            credential_fingerprints: std::collections::BTreeMap::new(),
+        };
+        assert!(matches!(
+            self.handler.bind(route, identity).await,
+            BindOutcome::Accept
+        ));
+        route
     }
 
     pub async fn call(&self, request: Value) -> Value {

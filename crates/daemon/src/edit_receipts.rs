@@ -109,8 +109,10 @@ impl Outcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     Disabled,
-    /// The route binding's latched declaration does not allow the edit class, or could not be read.
-    CapabilityUnsupported(CapabilityDenial),
+    /// The route binding's latched declaration does not allow the edit class.
+    CapabilityUnsupported(EditClass),
+    /// The route binding's declaration could not be read; distinct from a closed class so an operator repairs the source instead of enabling a class.
+    CapabilityUndeclared(EditClass, &'static str),
     /// The key names this incarnation but the store holds nothing for it: expired, evicted, or never prepared; it never authorizes a replay.
     ReceiptUnavailable,
     StalePreparation,
@@ -123,6 +125,7 @@ impl Refusal {
         match self {
             Self::Disabled => "disabled",
             Self::CapabilityUnsupported(_) => "capability_unsupported",
+            Self::CapabilityUndeclared(..) => "capability_undeclared",
             Self::ReceiptUnavailable => "receipt_unavailable",
             Self::StalePreparation => "stale_preparation",
             Self::Conflict => "conflict",
@@ -319,17 +322,33 @@ pub enum PrepareOutcome {
     Failure(&'static str),
 }
 
-/// Parent Q10: suppression is whole-message; a survivor confirmed only for a span, or a selected occurrence absent from the survivors, is not a confirmed survivor.
-fn unconfirmed_survivor(selection: &[String], survivors: &[WireSpan]) -> Option<&'static str> {
+/// Parent Q10: suppression is whole-message; a survivor confirmed only for a span, a survivor whose buffer length disagrees with the context's span for the same occurrence, or a selected occurrence absent from the survivors is not a confirmed survivor.
+fn unconfirmed_survivor(context: &Context, survivors: &[WireSpan]) -> Option<&'static str> {
     if survivors.is_empty() {
         return Some("no_survivor_proof");
     }
-    for occurrence_id in selection {
+    if survivors
+        .iter()
+        .any(|survivor| OccurrenceId::parse(&survivor.occurrence_id).is_err())
+    {
+        return Some("malformed_survivor");
+    }
+    for occurrence_id in &context.selection {
+        let Some(declared) = context
+            .spans
+            .iter()
+            .find(|span| span.occurrence_id == *occurrence_id)
+        else {
+            return Some("unconfirmed_survivor");
+        };
         match survivors
             .iter()
             .find(|survivor| survivor.occurrence_id == *occurrence_id)
         {
             None => return Some("unconfirmed_survivor"),
+            Some(survivor) if survivor.buffer_len != declared.buffer_len => {
+                return Some("unconfirmed_survivor");
+            }
             Some(survivor)
                 if survivor
                     .span
@@ -410,7 +429,7 @@ impl ReceiptStore {
             return Ok(PrepareOutcome::Failure(reason));
         }
         if action == Action::Suppress
-            && let Some(reason) = unconfirmed_survivor(&context.selection, survivors)
+            && let Some(reason) = unconfirmed_survivor(context, survivors)
         {
             return Ok(PrepareOutcome::Failure(reason));
         }
@@ -618,6 +637,12 @@ impl ReceiptStore {
     pub fn holds(&self, preparation_id: &str) -> bool {
         self.receipts.contains_key(preparation_id)
     }
+
+    pub fn action(&self, preparation_id: &str) -> Option<Action> {
+        self.receipts
+            .get(preparation_id)
+            .map(|receipt| receipt.action)
+    }
 }
 
 pub(crate) fn fresh_incarnation() -> String {
@@ -632,14 +657,35 @@ fn response(body: Value) -> PreparedOutcome {
 
 fn refusal(refusal: Refusal) -> PreparedOutcome {
     match refusal {
-        Refusal::CapabilityUnsupported(denial) => response(json!({
+        Refusal::CapabilityUnsupported(class) => response(json!({
             "kind": "terminal",
             "terminal": refusal.code(),
-            "class": denial.class().code(),
-            "reason": denial.reason(),
+            "class": class.code(),
+        })),
+        Refusal::CapabilityUndeclared(class, reason) => response(json!({
+            "kind": "terminal",
+            "terminal": refusal.code(),
+            "class": class.code(),
+            "reason": reason,
         })),
         _ => response(json!({ "kind": "terminal", "terminal": refusal.code() })),
     }
+}
+
+/// The route's latched declaration is read on prepare and again on apply and confirm, so a receipt cannot be driven from a route whose declaration does not allow its class.
+fn gate(scope: &RouteScope, action: Action) -> Result<(), Refusal> {
+    let Some(class) = action.gated_class() else {
+        return Ok(());
+    };
+    scope
+        .context_capabilities
+        .gate(class)
+        .map_err(|denial| match denial {
+            CapabilityDenial::Unsupported { class } => Refusal::CapabilityUnsupported(class),
+            CapabilityDenial::Unreadable { class, reason } => {
+                Refusal::CapabilityUndeclared(class, reason)
+            }
+        })
 }
 
 fn identity_refusal(operation: &str, refusal: IdentityRefusal) -> PreparedOutcome {
@@ -703,10 +749,8 @@ impl HandlerCore {
             request,
             PREPARE,
             |store, scope, parsed: PrepareRequest| {
-                if let Some(class) = parsed.action.gated_class()
-                    && let Err(denial) = scope.context_capabilities.gate(class)
-                {
-                    return refusal(Refusal::CapabilityUnsupported(denial));
+                if let Err(denied) = gate(&scope, parsed.action) {
+                    return refusal(denied);
                 }
                 match store.prepare(
                     Instant::now(),
@@ -742,37 +786,40 @@ impl HandlerCore {
             channel,
             request,
             APPLY,
-            |store, _scope, parsed: ApplyRequest| match store.apply(
-                Instant::now(),
-                &parsed.preparation_id,
-                &parsed.context,
-            ) {
-                Ok(ApplyOutcome::Forwarded {
-                    forwarded_identity,
-                    action,
-                    edit_bytes,
-                }) => response(json!({
-                    "kind": "forwarded",
-                    "preparation_id": parsed.preparation_id,
-                    "forwarded_identity": forwarded_identity,
-                    "action": action.code(),
-                    "edit_bytes": edit_bytes,
-                })),
-                Ok(ApplyOutcome::InFlight { forwarded_identity }) => response(json!({
-                    "kind": "receipt",
-                    "state": "in_flight",
-                    "forwarded_identity": forwarded_identity,
-                })),
-                Ok(ApplyOutcome::Complete { outcome }) => response(json!({
-                    "kind": "receipt",
-                    "state": "complete",
-                    "outcome": outcome.code(),
-                })),
-                Ok(ApplyOutcome::Unknown) => {
-                    response(json!({ "kind": "receipt", "state": "unknown" }))
+            |store, scope, parsed: ApplyRequest| {
+                if let Some(action) = store.action(&parsed.preparation_id)
+                    && let Err(denied) = gate(&scope, action)
+                {
+                    return refusal(denied);
                 }
-                Err(ApplyRefusal::Refused(refused)) => refusal(refused),
-                Err(ApplyRefusal::Invalid(identity)) => identity_refusal(APPLY, identity),
+                match store.apply(Instant::now(), &parsed.preparation_id, &parsed.context) {
+                    Ok(ApplyOutcome::Forwarded {
+                        forwarded_identity,
+                        action,
+                        edit_bytes,
+                    }) => response(json!({
+                        "kind": "forwarded",
+                        "preparation_id": parsed.preparation_id,
+                        "forwarded_identity": forwarded_identity,
+                        "action": action.code(),
+                        "edit_bytes": edit_bytes,
+                    })),
+                    Ok(ApplyOutcome::InFlight { forwarded_identity }) => response(json!({
+                        "kind": "receipt",
+                        "state": "in_flight",
+                        "forwarded_identity": forwarded_identity,
+                    })),
+                    Ok(ApplyOutcome::Complete { outcome }) => response(json!({
+                        "kind": "receipt",
+                        "state": "complete",
+                        "outcome": outcome.code(),
+                    })),
+                    Ok(ApplyOutcome::Unknown) => {
+                        response(json!({ "kind": "receipt", "state": "unknown" }))
+                    }
+                    Err(ApplyRefusal::Refused(refused)) => refusal(refused),
+                    Err(ApplyRefusal::Invalid(identity)) => identity_refusal(APPLY, identity),
+                }
             },
         )
     }
@@ -786,22 +833,29 @@ impl HandlerCore {
             channel,
             request,
             CONFIRM,
-            |store, _scope, parsed: ConfirmRequest| match store.confirm(
-                Instant::now(),
-                &parsed.preparation_id,
-                &parsed.forwarded_identity,
-                parsed.applied_identity.as_deref(),
-                parsed.outcome,
-            ) {
-                Ok(ConfirmOutcome::Complete { outcome }) => response(json!({
-                    "kind": "receipt",
-                    "state": "complete",
-                    "outcome": outcome.code(),
-                })),
-                Ok(ConfirmOutcome::Unknown) => {
-                    response(json!({ "kind": "receipt", "state": "unknown" }))
+            |store, scope, parsed: ConfirmRequest| {
+                if let Some(action) = store.action(&parsed.preparation_id)
+                    && let Err(denied) = gate(&scope, action)
+                {
+                    return refusal(denied);
                 }
-                Err(refused) => refusal(refused),
+                match store.confirm(
+                    Instant::now(),
+                    &parsed.preparation_id,
+                    &parsed.forwarded_identity,
+                    parsed.applied_identity.as_deref(),
+                    parsed.outcome,
+                ) {
+                    Ok(ConfirmOutcome::Complete { outcome }) => response(json!({
+                        "kind": "receipt",
+                        "state": "complete",
+                        "outcome": outcome.code(),
+                    })),
+                    Ok(ConfirmOutcome::Unknown) => {
+                        response(json!({ "kind": "receipt", "state": "unknown" }))
+                    }
+                    Err(refused) => refusal(refused),
+                }
             },
         )
     }
