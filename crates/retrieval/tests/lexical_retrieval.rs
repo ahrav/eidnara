@@ -304,6 +304,22 @@ impl Fixture {
             .unwrap();
     }
 
+    /// Makes `objects` decisions the kernel admits, so their occurrences become eligible contributions.
+    fn admit(&self, objects: &[&str]) {
+        self.kernel
+            .commit(
+                intent(&format!("admit-{}", objects.join("+"))),
+                |envelope| {
+                    for object in objects {
+                        envelope.insert_decision(decision(object))?;
+                        envelope.record_admission(admission(object))?;
+                    }
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+    }
+
     fn project(&self, rows: &[Row]) {
         let through = self.kernel.tip().unwrap();
         let identities: Vec<Vec<(&str, &str)>> = rows.iter().map(Row::identity).collect();
@@ -792,11 +808,20 @@ fn a_tombstoned_row_is_excluded_at_the_engine() {
 }
 
 /// Every `bulk` row says `parse` in three tokens, so their ranks tie and only identifier bytes order them.
-fn project_bulk(fixture: &Fixture, count: usize) {
+fn project_bulk(fixture: &Fixture, count: usize) -> Vec<Row> {
     let bulk: Vec<Row> = (0..count)
         .map(|n| Row::claim(&format!("bulk-{n}"), &format!("bulk parse {n}")))
         .collect();
     fixture.project(&bulk);
+    bulk
+}
+
+fn object_of<'a>(rows: &'a [Row], occurrence_id: &str) -> &'a str {
+    &rows
+        .iter()
+        .find(|row| row.occurrence_id() == occurrence_id)
+        .unwrap()
+        .object
 }
 
 fn tombstone_raw(fixture: &Fixture, occurrence_id: &str) {
@@ -812,10 +837,11 @@ fn tombstone_raw(fixture: &Fixture, occurrence_id: &str) {
 #[test]
 fn tombstoned_rows_inside_the_scan_bound_do_not_take_slots_or_hide_truncation() {
     let fixture = Fixture::all_admitted();
-    project_bulk(&fixture, 2500);
+    let bulk = project_bulk(&fixture, 2500);
     let request = probes("parse");
     let reference = fixture.reference(&request);
     let scan = bounds().scan_rows.get();
+    let page = scan + 1;
     assert!(reference.len() > 2 * scan);
 
     // Dead rows cover the whole first page and part of the second, so the live prefix spans three pages.
@@ -823,6 +849,27 @@ fn tombstoned_rows_inside_the_scan_bound_do_not_take_slots_or_hide_truncation() 
     for occurrence_id in &reference[..dead] {
         tombstone_raw(&fixture, occurrence_id);
     }
+    // Admitted sentinels sit at every edge a paging error could move, so the contributions are exactly the sentinels the scan took.
+    let boundary = (dead / page + 1) * page;
+    assert!(dead < boundary - 1 && boundary < dead + scan - 1);
+    let sentinels = [
+        dead - 1,
+        dead,
+        boundary - 1,
+        boundary,
+        dead + scan - 1,
+        dead + scan,
+    ];
+    let objects: Vec<&str> = sentinels
+        .iter()
+        .map(|&index| object_of(&bulk, &reference[index]))
+        .collect();
+    fixture.admit(&objects);
+    let expected: Vec<String> = [dead, boundary - 1, boundary, dead + scan - 1]
+        .iter()
+        .map(|&index| reference[index].clone())
+        .collect();
+
     let wide = RetrievalBounds {
         max_accepted: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
         batch_rows: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
@@ -831,15 +878,9 @@ fn tombstoned_rows_inside_the_scan_bound_do_not_take_slots_or_hide_truncation() 
     let retrieval = fixture
         .retrieve(&request, wide, &EvalBudget::unbounded())
         .unwrap();
-    assert_eq!(
-        ids_of(&retrieval),
-        fixture.eligible(&reference[dead..dead + scan])
-    );
+    assert_eq!(ids_of(&retrieval), expected);
     assert_eq!(retrieval.consumed.scanned_rows, scan);
-    assert_eq!(
-        retrieval.consumed.judged,
-        scan + retrieval.contributions.len()
-    );
+    assert_eq!(retrieval.consumed.judged, scan + expected.len());
     assert_eq!(
         retrieval.completion,
         Completion::Incomplete(IncompleteReason::ScanBound)
