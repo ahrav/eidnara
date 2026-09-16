@@ -507,8 +507,7 @@ pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
         .files
         .iter()
         .filter(|file| RESIDENT_FILES.contains(&file.path.as_str()))
-        .map(|file| file.size)
-        .sum()
+        .fold(0u64, |total, file| total.saturating_add(file.size))
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
@@ -546,8 +545,12 @@ pub fn verify(
         .layout()
         .ok_or(VectorRefusal::NotVectors("metric"))?;
     let rows_file = File::from(generation.open_verified_file(ROWS_FILE)?);
-    let rows_bytes = read_all(&rows_file, ROWS_FILE, declared_size(&generation, ROWS_FILE))?;
-    let rows = codec::decode_rows(&rows_bytes, &layout).map_err(VectorRefusal::Rows)?;
+    // The raw artifact is a temporary: only the decoded rows stay while the codes are computed.
+    let rows = codec::decode_rows(
+        &read_all(&rows_file, ROWS_FILE, declared_size(&generation, ROWS_FILE))?,
+        &layout,
+    )
+    .map_err(VectorRefusal::Rows)?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
     if rows.rows.len() as u64 != sidecar.rows {
         return Err(fault(ROWS_FILE, FileFault::RowCount));
@@ -725,6 +728,29 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_bytes_saturate_on_declared_sizes_that_overflow() {
+        let file = |path: &str, size: u64| ManifestFile {
+            path: path.to_owned(),
+            mode: 0o600,
+            size,
+            sha256: "0".repeat(64),
+        };
+        let manifest = GenerationManifest {
+            schema: 1,
+            target: VECTOR_TARGET.to_owned(),
+            release_contract_sha256: "a".repeat(64),
+            inputs_lock_sha256: "b".repeat(64),
+            source_payload_manifest_sha256: None,
+            files: vec![
+                file(ROWS_FILE, u64::MAX),
+                file(ROW_IDS_FILE, u64::MAX),
+                file(SCALES_FILE, 1),
+            ],
+        };
+        assert_eq!(resident_bytes(&manifest), u64::MAX);
+    }
 
     #[test]
     fn a_verified_file_is_read_no_further_than_its_manifest_size() {

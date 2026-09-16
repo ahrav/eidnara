@@ -719,6 +719,40 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
         }
     );
 
+    // A row bound below the page size caps every page, so the charge is for the rows a page can hold, not the nominal page.
+    let expected = fixture.expected();
+    let request = RankRequest {
+        expected: &expected,
+        query: &query,
+        authority: projection.authority(),
+        bounds: OracleBounds {
+            page_rows: NonZeroUsize::new(1000).unwrap(),
+            max_rows: NonZeroUsize::new(1).unwrap(),
+            ..oracle_bounds(8)
+        },
+        max_entries: NonZeroUsize::new(64).unwrap(),
+    };
+    let one_row_page = ByteBudget::new(((1 + 1) * 8 * 4) as u64);
+    let ranking = projection
+        .store
+        .with_conn(|conn| {
+            Ok(rank(
+                &view,
+                conn,
+                &projection.kernel,
+                &request,
+                &EvalBudget::unbounded(),
+                &one_row_page,
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ranking.ranking.completion,
+        Completion::Incomplete(IncompleteReason::RowBound)
+    );
+    assert!(one_row_page.try_charge((1 + 1) * 8 * 4).is_some());
+
     for page_rows in [usize::MAX, usize::MAX / (8 * 4)] {
         let expected = fixture.expected();
         let request = RankRequest {
@@ -727,6 +761,7 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
             authority: projection.authority(),
             bounds: OracleBounds {
                 page_rows: NonZeroUsize::new(page_rows).unwrap(),
+                max_rows: NonZeroUsize::new(usize::MAX).unwrap(),
                 ..oracle_bounds(8)
             },
             max_entries: NonZeroUsize::new(64).unwrap(),

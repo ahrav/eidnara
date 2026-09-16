@@ -474,6 +474,7 @@ pub fn rank(
     let bytes = request
         .bounds
         .page_rows
+        .min(request.bounds.max_rows)
         .get()
         .checked_add(1)
         .and_then(|rows| rows.checked_mul(view.layout.dimension as usize))

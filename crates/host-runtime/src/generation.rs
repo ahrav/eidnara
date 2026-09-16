@@ -1290,8 +1290,11 @@ impl GenerationStore {
                     report.retained_pinned += 1;
                     // A pinned generation's manifest may be unreadable; it is still retained, only its bytes are unknown.
                     if let Ok(manifest) = self.manifest(&name) {
-                        report.retained_bytes +=
-                            manifest.files.iter().map(|file| file.size).sum::<u64>();
+                        let declared = manifest
+                            .files
+                            .iter()
+                            .fold(0u64, |total, file| total.saturating_add(file.size));
+                        report.retained_bytes = report.retained_bytes.saturating_add(declared);
                     }
                     continue;
                 }
@@ -3055,6 +3058,59 @@ mod tests {
         assert_eq!(
             store.prune(&BTreeSet::new()).unwrap().removed_generations,
             1
+        );
+    }
+
+    /// A generation holding only a manifest; its declared sizes have no files behind them.
+    fn write_manifest_only(store: &GenerationStore, sizes: &[u64]) -> String {
+        let manifest = GenerationManifest {
+            schema: 1,
+            target: meta().target,
+            release_contract_sha256: meta().release_contract_sha256,
+            inputs_lock_sha256: meta().inputs_lock_sha256,
+            source_payload_manifest_sha256: None,
+            files: sizes
+                .iter()
+                .enumerate()
+                .map(|(index, size)| ManifestFile {
+                    path: format!("file-{index}"),
+                    mode: 0o600,
+                    size: *size,
+                    sha256: "0".repeat(64),
+                })
+                .collect(),
+        };
+        let digest = manifest.digest();
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join(GENERATION_MANIFEST_NAME);
+        std::fs::write(&path, manifest.canonical_bytes()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        digest
+    }
+
+    #[test]
+    fn retained_bytes_saturate_on_manifests_whose_declared_sizes_overflow() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store_at(root.path());
+        // One generation overflows on its own; the other two overflow only when added together.
+        let alone = write_manifest_only(&store, &[u64::MAX, 1]);
+        let first = write_manifest_only(&store, &[u64::MAX - 1]);
+        let second = write_manifest_only(&store, &[2, 3]);
+        let pins: Vec<PinnedGeneration> = [&alone, &first, &second]
+            .into_iter()
+            .map(|digest| store.pin(digest).unwrap())
+            .collect();
+
+        let report = store.prune(&BTreeSet::new()).unwrap();
+        assert_eq!(report.removed_generations, 0);
+        assert_eq!(report.retained_pinned, 3);
+        assert_eq!(report.retained_bytes, u64::MAX);
+        drop(pins);
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap().removed_generations,
+            3
         );
     }
 
