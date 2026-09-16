@@ -100,6 +100,33 @@ Codex review of the pushed branch added three findings:
 | Rows whose stored class is a non-claim class but still carry a `canonical_object` association are filtered by the class predicate rather than refused | bias | kept: the class predicate is the reader's scope, and a row whose class says `messages` is a message row to every reader; widening the scan to every associated row changes the query plan for a corruption that only removes the row from this reader |
 | No byte bound on the tuple and key blobs the live-claim read selects | bias | kept: `exact::lookup::page` reads the same `o.tuple` and `a.key` columns without one, and both are bounded at write time by `MAX_IDENTITY_VALUE_BYTES` and `MAX_CLAIM_OBJECT_ID_BYTES`; a projection-wide blob preflight is its own change |
 
+## Final-use gate change
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| Candidates were submitted without their artifact digest, so the artifact egress gate never ran and a `LocalOnly` artifact passed at `Remote` | gap | fixed: the live row carries `source_artifact_digest` and submits it; the remote case is asserted |
+| The serving view was read twice per judgement | refinement | fixed: `ServedClass` carries all three surfaces from the one read `egress_candidates_tx` already makes |
+| No budgeted variant of the surface judgement | gap | fixed: `judge_surface_eligibility_within_budget`; `validate_for_surface` takes an `EvalBudget` |
+| `expect` on the verdict zip in library code; lineage looked up by index into a batch the caller might not have passed | gap | fixed: one aligned pass with an error on a short verdict list; lineage keyed by object id |
+| Eligibility errors spelled as `Facts(Kernel(_))` | refinement | fixed: `ClaimCandidateError::Eligibility` |
+| `labeled: bool` paraphrased the kernel's visibility | refinement | fixed: `Permitted(SurfaceVisibility)` |
+| Per-surface visibility, `WrongScope`, `Remote`, `AutoSearch`, and a proper subset revalidation were untested | gap | fixed: an `adr_accepted` seed with an `Automatic` row, a foreign project, a remote destination, all three surfaces, and a subset |
+| `ValidatedCandidate` dropped the candidate's facts index | refinement | fixed: it holds the candidate |
+| Cacheability of the surface batch was undocumented | refinement | fixed: `is_reusable` on both batch types |
+| `SurfaceHidden` is unreachable on `ExplicitSearch` | bias | kept, documented on `judge_surface_in_tx` |
+| `validate_for_surface` duplicates the shape of `eligibility::judge_occurrences`, which judges the descriptor object | bias | kept for this change: the two judge different objects on purpose; converging them belongs with the descriptor path's owner |
+
+### Review comments on the final-use gate
+
+Codex review of the pull request; each code fix landed behind a test that
+failed first.
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The row's `artifact_digest` was submitted as read from the projection, so a corrupt or forged row digest with no evidence rows passed the local artifact gate | gap | fixed: a permitted row is reclassified against the kernel's occurrence inventory from the same snapshot; a digest the inventory does not list for the occurrence is `Stale` |
+| A descriptor retired between classification and validation left the row `Current` and the decision object `Ok`, so the withdrawn representation was permitted | gap | fixed: `judge_surface_eligibility_with_claims` returns the claim facts with the verdicts from one snapshot, and the reclassification denies a row whose occurrence is no longer listed (`Retracted`, the projection side's rule) |
+| `unknown_objects` came from the classification batch while the verdicts came from the fresh snapshot | refinement | fixed: the accounting reads causality from the validation snapshot; `validate_for_surface` no longer takes the batch |
+
 ## Biases for a human
 
 - Every record is `test-only` because no production path calls the reader or

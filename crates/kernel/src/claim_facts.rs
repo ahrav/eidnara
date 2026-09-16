@@ -254,19 +254,7 @@ impl KernelStore {
         incarnation: Option<CommitReadIncarnation>,
         limit: &AcquireLimit,
     ) -> Result<ClaimFactsSnapshot, ClaimFactsError> {
-        if object_ids.len() > bounds.max_claims.get() {
-            return Err(ClaimFactsError::TooManyClaims);
-        }
-        if object_ids
-            .iter()
-            .any(|id| id.is_empty() || id.len() > MAX_CLAIM_OBJECT_ID_BYTES)
-        {
-            return Err(KernelError::InvalidInput.into());
-        }
-        let mut distinct = HashSet::with_capacity(object_ids.len());
-        if !object_ids.iter().all(|id| distinct.insert(id.as_str())) {
-            return Err(ClaimFactsError::DuplicateClaim);
-        }
+        check_claim_bounds(object_ids, bounds)?;
         if requested < 0 {
             return Err(KernelError::InvalidInput.into());
         }
@@ -281,25 +269,7 @@ impl KernelStore {
         if incarnation.is_some_and(|expected| expected != self.incarnation()) {
             return Err(ClaimFactsError::IncarnationMismatch);
         }
-        let mut claims = Vec::with_capacity(object_ids.len());
-        let mut missing = Vec::new();
-        let mut served = load_served(&tx, requested, object_ids)?;
-        for object_id in object_ids {
-            limit.check()?;
-            match registry_row_at(&tx, requested, object_id)? {
-                None => missing.push(object_id.clone()),
-                Some(object) => {
-                    // A `load_claim` error aborts the request before later `object_ids` are read.
-                    claims.push(load_claim(
-                        &tx,
-                        requested,
-                        object,
-                        served.remove(object_id),
-                        bounds,
-                    )?);
-                }
-            }
-        }
+        let (claims, missing) = load_claims_in_tx(&tx, requested, object_ids, bounds, limit)?;
         tx.commit()?;
         limit.check()?;
         Ok(ClaimFactsSnapshot {
@@ -309,6 +279,55 @@ impl KernelStore {
             missing,
         })
     }
+}
+
+pub(crate) fn check_claim_bounds(
+    object_ids: &[String],
+    bounds: ClaimFactBounds,
+) -> Result<(), ClaimFactsError> {
+    if object_ids.len() > bounds.max_claims.get() {
+        return Err(ClaimFactsError::TooManyClaims);
+    }
+    if object_ids
+        .iter()
+        .any(|id| id.is_empty() || id.len() > MAX_CLAIM_OBJECT_ID_BYTES)
+    {
+        return Err(KernelError::InvalidInput.into());
+    }
+    let mut distinct = HashSet::with_capacity(object_ids.len());
+    if !object_ids.iter().all(|id| distinct.insert(id.as_str())) {
+        return Err(ClaimFactsError::DuplicateClaim);
+    }
+    Ok(())
+}
+
+/// The claims and missing ids of [`KernelStore::claim_facts_as_of`] as `tx`
+/// sees them at `requested`, for a caller that holds its own transaction;
+/// `limit` is polled before each claim so cancellation lands between claims.
+pub(crate) fn load_claims_in_tx(
+    tx: &Transaction<'_>,
+    requested: i64,
+    object_ids: &[String],
+    bounds: ClaimFactBounds,
+    limit: &AcquireLimit,
+) -> Result<(Vec<ClaimFacts>, Vec<String>), ClaimFactsError> {
+    let mut claims = Vec::with_capacity(object_ids.len());
+    let mut missing = Vec::new();
+    let mut served = load_served(tx, requested, object_ids)?;
+    for object_id in object_ids {
+        limit.check()?;
+        match registry_row_at(tx, requested, object_id)? {
+            None => missing.push(object_id.clone()),
+            Some(object) => claims.push(load_claim(
+                tx,
+                requested,
+                object,
+                served.remove(object_id),
+                bounds,
+            )?),
+        }
+    }
+    Ok((claims, missing))
 }
 
 fn load_served(

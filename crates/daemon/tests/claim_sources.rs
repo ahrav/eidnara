@@ -14,18 +14,23 @@ use daemon::search_projection::SearchProjection;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass, encode_preserving_span};
 use kernel::{
-    AdmissionEvent, AdmissionRequest, CausalClass, CausalEvidence, ClaimCausalityRequest,
-    ClaimFactBounds, CommitIntent, CommitPageBounds, DecisionPayload, DecisionRow, DecisionSpec,
-    Dimension, DomainSpec, EventKind, ExportWindow, KernelError, KernelStore, ObservationPayload,
-    ObservationSpec, ProviderEgress, RemediationTarget, ScopeSpec, ScopeTermSpec, Sensitivity,
+    AdmissionEvent, AdmissionRequest, ArtifactDeletionIdentity, ArtifactDeletionKind,
+    ArtifactDeletionRequest, ArtifactDestination, CausalClass, CausalEvidence,
+    ClaimCausalityRequest, ClaimFactBounds, CommitIntent, CommitPageBounds, DecisionPayload,
+    DecisionRow, DecisionSpec, Dimension, DomainSpec, EligibilityCandidate, EligibilityVerdict,
+    EventKind, ExportWindow, KernelError, KernelStore, ObservationPayload, ObservationSpec,
+    ProjectScope, ProviderEgress, RemediationTarget, ScopeSpec, ScopeTermSpec, Sensitivity,
     SourceClass, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
-    SourcePageBounds, SourceRow, TaintClass,
+    SourcePageBounds, SourceRow, Surface, TaintClass,
 };
 use retrieval::batch::{
     BatchBounds, MutationIdentity, VectorGeneration, batch_from_rows, register_generation,
     row_identities,
 };
-use retrieval::claims::{CandidateState, ClaimCandidateBounds, classify_live_claims};
+use retrieval::claims::{
+    CandidateState, ClaimCandidate, ClaimCandidateBatch, ClaimCandidateBounds, SurfaceValidation,
+    UseDenial, UseVerdict, classify_live_claims, validate_for_surface,
+};
 use retrieval::{PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -1813,5 +1818,668 @@ fn lagging_projection_classifies_claims_from_canonical_facts_and_rebuild_agrees(
     assert_eq!(
         live_rows(rebuilt_dir.path()).len(),
         live_rows(dir.path()).len()
+    );
+}
+
+fn validate_scoped(
+    projection: &SearchProjection,
+    corpus: &Corpus,
+    project: &str,
+    destination: ArtifactDestination,
+    surface: Surface,
+) -> (ClaimCandidateBatch, SurfaceValidation) {
+    let batch = projection
+        .read(|conn| {
+            Ok(classify_live_claims(
+                conn,
+                &corpus.kernel,
+                &EvalBudget::unbounded(),
+                candidate_bounds(),
+            )
+            .unwrap())
+        })
+        .unwrap();
+    let validation = validate_for_surface(
+        &corpus.kernel,
+        &batch.candidates,
+        &ProjectScope::new(project).unwrap(),
+        destination,
+        surface,
+        candidate_bounds().facts,
+        batch.incarnation,
+        &EvalBudget::unbounded(),
+    )
+    .unwrap();
+    (batch, validation)
+}
+
+fn validate(
+    projection: &SearchProjection,
+    corpus: &Corpus,
+    surface: Surface,
+) -> (ClaimCandidateBatch, SurfaceValidation) {
+    validate_scoped(
+        projection,
+        corpus,
+        PROJECT,
+        ArtifactDestination::Local,
+        surface,
+    )
+}
+
+/// Groups verdicts by object and rejects split verdicts, for fixtures whose
+/// representations share one artifact policy.
+fn verdicts_by_object(validation: &SurfaceValidation) -> BTreeMap<String, UseVerdict> {
+    let mut out: BTreeMap<String, UseVerdict> = BTreeMap::new();
+    for validated in &validation.candidates {
+        let object_id = validated.candidate.row.object_id.clone();
+        let previous = out.insert(object_id.clone(), validated.verdict);
+        assert!(
+            previous.is_none_or(|previous| previous == validated.verdict),
+            "{object_id} split verdicts"
+        );
+    }
+    out
+}
+
+/// U4, U5: final use is judged by current canonical policy per surface at a
+/// fresh snapshot. A labeled claim is permitted on explicit search with its
+/// label and denied on the automatic surfaces while an automatic one is
+/// permitted everywhere, from one batch verdict; a foreign project sees
+/// `WrongScope` and a remote destination `ProviderSensitive`; approve then
+/// quarantine and correction deny use while the projection still holds the
+/// rows; a known genuine claim and an Unknown one are permitted alike; rejected
+/// and Unknown objects are counted separately and may overlap; ordered
+/// duplicates keep their positions; two reads at one snapshot agree; and
+/// revalidating a subset of earlier survivors denies what was restricted since.
+#[test]
+fn final_use_is_judged_per_surface_from_current_canonical_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let rule = Seed::scoped("rule", MEMORY, "PROJECT_RULES", 1, CONTRACT, "Relied on.");
+    let quiet = Seed::scoped("quiet", MEMORY, "PROJECT_RULES", 1, "Keep quiet.", "");
+    let genuine = Seed::scoped("genuine", MEMORY, "PROJECT_RULES", 1, "Observed.", "");
+    // An accepted decision record admits itself to Approved under an automatic
+    // visibility row, so it is visible on every surface without a label.
+    let auto = Seed::scoped("auto", MEMORY, "adr_accepted", 1, "Accepted rule.", "");
+    for seed in [rule, quiet, genuine] {
+        corpus.decide(seed);
+    }
+    corpus
+        .kernel
+        .commit(intent("decide:auto"), |envelope| {
+            envelope.insert_decision(auto.spec())?;
+            let mut request = admission("auto");
+            request.event.kind = EventKind::AcceptedAdr;
+            envelope.record_admission(request)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let (evidence_id, digest) = {
+        let handle = corpus
+            .kernel
+            .ingest_exact_artifact(kernel::ArtifactIngestRequest {
+                intent: intent("acquisition"),
+                payload: b"observed".to_vec(),
+                evidence_id: "evidence-acquisition".to_string(),
+                object_id: "evidence-object-acquisition".to_string(),
+                object_kind: "evidence".to_string(),
+                domain_id: MEMORY.to_string(),
+                source_kind: "tool_output".to_string(),
+                source_id: "native/acquisition".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: "canonical".to_string(),
+                retain_until: None,
+                asserted_sensitivity: Sensitivity::Normal,
+                provider_egress: ProviderEgress::RemoteAllowed,
+                provenance: None,
+            })
+            .unwrap();
+        (handle.evidence_id, handle.digest)
+    };
+    corpus
+        .kernel
+        .commit(intent("causality:genuine"), |envelope| {
+            envelope
+                .record_claim_causality(&ClaimCausalityRequest {
+                    subject_object_id: "genuine",
+                    subject_revision: 1,
+                    evidence: CausalEvidence::DirectObservation {
+                        acquisition_evidence_id: evidence_id,
+                        artifact_digest: digest,
+                    },
+                    observed_at: NOW,
+                })
+                .unwrap();
+            Ok(String::new())
+        })
+        .unwrap();
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(dir.path(), &hold);
+    let labeled = UseVerdict::Permitted(kernel::SurfaceVisibility::Labeled);
+    let visible = UseVerdict::Permitted(kernel::SurfaceVisibility::Visible);
+    let all: [&str; 4] = ["rule", "quiet", "genuine", "auto"];
+    let expect = |verdict_for: &dyn Fn(&str) -> UseVerdict| -> BTreeMap<String, UseVerdict> {
+        all.iter()
+            .map(|object| (object.to_string(), verdict_for(object)))
+            .collect()
+    };
+
+    // One batch verdict, three surfaces: labeled claims are permitted only on
+    // explicit search and carry their label; the automatic one is visible on
+    // every surface.
+    let (batch, explicit) = validate(&projection, &corpus, Surface::ExplicitSearch);
+    assert_eq!(
+        verdicts_by_object(&explicit),
+        expect(&|object| if object == "auto" { visible } else { labeled })
+    );
+    assert_eq!(explicit.snapshot.tip, batch.known_as_of);
+    assert!(explicit.is_reusable());
+    for surface in [Surface::AutoInject, Surface::AutoSearch] {
+        let (_, automatic) = validate(&projection, &corpus, surface);
+        assert_eq!(
+            verdicts_by_object(&automatic),
+            expect(&|object| if object == "auto" {
+                visible
+            } else {
+                UseVerdict::Denied(UseDenial::SurfaceHidden)
+            }),
+            "{surface:?}"
+        );
+    }
+    let kernel_batch = corpus
+        .kernel
+        .judge_eligibility(
+            &ProjectScope::new(PROJECT).unwrap(),
+            ArtifactDestination::Local,
+            &[EligibilityCandidate {
+                object_id: "rule".to_string(),
+                source_revision: 1,
+                artifact_digest: None,
+            }],
+        )
+        .unwrap();
+    assert_eq!(kernel_batch.verdicts, [EligibilityVerdict::Ok]);
+
+    // The bound project and the destination travel with every judgement.
+    let foreign = "b".repeat(64);
+    let (_, elsewhere) = validate_scoped(
+        &projection,
+        &corpus,
+        &foreign,
+        ArtifactDestination::Local,
+        Surface::ExplicitSearch,
+    );
+    assert_eq!(
+        verdicts_by_object(&elsewhere),
+        expect(&|_| UseVerdict::Denied(UseDenial::Verdict(EligibilityVerdict::WrongScope)))
+    );
+    let (_, remote) = validate_scoped(
+        &projection,
+        &corpus,
+        PROJECT,
+        ArtifactDestination::Remote,
+        Surface::ExplicitSearch,
+    );
+    assert_eq!(
+        verdicts_by_object(&remote),
+        expect(&|_| UseVerdict::Denied(UseDenial::Verdict(EligibilityVerdict::ProviderSensitive))),
+        "claim artifacts are retained LocalOnly, so the artifact gate denies remote egress"
+    );
+
+    // Unknown neutrality at the gate: the genuine claim and the Unknown ones are
+    // permitted alike, and the accounting keeps the identities apart.
+    assert_eq!(
+        explicit.accounting.permitted_objects,
+        all.iter().map(|object| object.to_string()).collect()
+    );
+    assert_eq!(
+        explicit.accounting.unknown_objects,
+        BTreeSet::from(["rule".to_string(), "quiet".to_string(), "auto".to_string()])
+    );
+    assert!(explicit.accounting.rejected_objects.is_empty());
+    assert_eq!(explicit.accounting.attempted_rows, 8);
+
+    // Ordered duplicates keep their positions and two reads at one snapshot agree.
+    let doubled: Vec<_> = batch
+        .candidates
+        .iter()
+        .chain(batch.candidates.iter())
+        .cloned()
+        .collect();
+    let twice = || {
+        validate_for_surface(
+            &corpus.kernel,
+            &doubled,
+            &ProjectScope::new(PROJECT).unwrap(),
+            ArtifactDestination::Local,
+            Surface::ExplicitSearch,
+            candidate_bounds().facts,
+            batch.incarnation,
+            &EvalBudget::unbounded(),
+        )
+        .unwrap()
+    };
+    let (first, second) = (twice(), twice());
+    assert_eq!(first.candidates.len(), 16);
+    for (position, validated) in first.candidates.iter().enumerate() {
+        assert_eq!(validated.candidate, doubled[position]);
+    }
+    assert_eq!(first.candidates, second.candidates);
+    assert_eq!(first.snapshot, second.snapshot);
+    assert_eq!(first.accounting.attempted_rows, 16);
+    assert_eq!(
+        first.accounting.permitted_objects,
+        explicit.accounting.permitted_objects
+    );
+
+    // Approve then quarantine, and correct, while the projection lags: the
+    // stale projection cannot authorize use on any surface.
+    corpus
+        .kernel
+        .commit(intent("quarantine:quiet"), |envelope| {
+            let mut request = admission("quiet");
+            request.event.kind = EventKind::Quarantine;
+            envelope.record_admission(request)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let successor = Seed::scoped(
+        "rule-v2",
+        MEMORY,
+        "PROJECT_RULES",
+        2,
+        CONTRACT,
+        "Relied on.",
+    );
+    corpus.correct("rule", successor);
+    let (_, lagging) = validate(&projection, &corpus, Surface::ExplicitSearch);
+    assert!(lagging.snapshot.tip > explicit.snapshot.tip);
+    assert_eq!(
+        verdicts_by_object(&lagging),
+        expect(&|object| match object {
+            "rule" => UseVerdict::Denied(UseDenial::State(CandidateState::Superseded)),
+            "quiet" => UseVerdict::Denied(UseDenial::State(CandidateState::Hidden)),
+            "auto" => visible,
+            _ => labeled,
+        })
+    );
+    assert_eq!(
+        lagging.accounting.rejected_objects,
+        BTreeSet::from(["rule".to_string(), "quiet".to_string()])
+    );
+    assert_eq!(
+        lagging.accounting.unknown_objects,
+        BTreeSet::from(["rule".to_string(), "quiet".to_string(), "auto".to_string()]),
+        "rejected and unknown overlap without merging"
+    );
+    assert_eq!(
+        lagging.accounting.permitted_objects,
+        BTreeSet::from(["genuine".to_string(), "auto".to_string()])
+    );
+
+    // Revalidating a subset of survivors selected at the earlier snapshot
+    // denies the restricted ones: the kernel, not the earlier verdict, is
+    // authority.
+    let survivors: Vec<_> = batch
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.row.object_id != "genuine")
+        .cloned()
+        .collect();
+    assert_eq!(survivors.len(), 6);
+    let revalidated = validate_for_surface(
+        &corpus.kernel,
+        &survivors,
+        &ProjectScope::new(PROJECT).unwrap(),
+        ArtifactDestination::Local,
+        Surface::ExplicitSearch,
+        candidate_bounds().facts,
+        batch.incarnation,
+        &EvalBudget::unbounded(),
+    )
+    .unwrap();
+    assert_eq!(
+        verdicts_by_object(&revalidated),
+        BTreeMap::from([
+            (
+                "rule".to_string(),
+                UseVerdict::Denied(UseDenial::Verdict(EligibilityVerdict::Superseded))
+            ),
+            (
+                "quiet".to_string(),
+                UseVerdict::Denied(UseDenial::Verdict(EligibilityVerdict::Hidden))
+            ),
+            ("auto".to_string(), visible),
+        ])
+    );
+    assert_eq!(revalidated.accounting.attempted_rows, 6);
+}
+
+/// Each representation has a separate artifact; purging one denies only its row.
+/// Per-row verdicts remain distinct even when accounting sets contain the same
+/// object.
+#[test]
+fn a_purged_representation_splits_row_verdicts_and_both_accounting_sets_keep_the_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.decide(Seed::scoped(
+        "rule",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        CONTRACT,
+        "Relied on.",
+    ));
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(dir.path(), &hold);
+    let (batch, before) = validate(&projection, &corpus, Surface::ExplicitSearch);
+    let labeled = UseVerdict::Permitted(kernel::SurfaceVisibility::Labeled);
+    assert_eq!(batch.candidates.len(), 3);
+    assert!(before.candidates.iter().all(|row| row.verdict == labeled));
+    let rationale = batch
+        .candidates
+        .iter()
+        .find(|candidate| candidate.row.representation == "rationale")
+        .unwrap();
+    assert!(
+        batch
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.row.representation != "rationale")
+            .all(|other| other.row.artifact_digest != rationale.row.artifact_digest),
+        "the rationale is retained as its own artifact"
+    );
+
+    corpus
+        .kernel
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge:rationale"),
+            identity: ArtifactDeletionIdentity::Digest(rationale.row.artifact_digest.clone()),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator-1".to_string()),
+            target_locator: Some("incident://rationale".to_string()),
+            reason: Some("purged".to_string()),
+            deleted_at: NOW,
+        })
+        .unwrap();
+
+    let after = validate_for_surface(
+        &corpus.kernel,
+        &batch.candidates,
+        &ProjectScope::new(PROJECT).unwrap(),
+        ArtifactDestination::Local,
+        Surface::ExplicitSearch,
+        candidate_bounds().facts,
+        batch.incarnation,
+        &EvalBudget::unbounded(),
+    )
+    .unwrap();
+    assert!(after.snapshot.tip > before.snapshot.tip);
+    for validated in &after.candidates {
+        let expected = if validated.candidate.row.representation == "rationale" {
+            UseVerdict::Denied(UseDenial::Verdict(EligibilityVerdict::ProviderSensitive))
+        } else {
+            labeled
+        };
+        assert_eq!(
+            validated.verdict, expected,
+            "{}",
+            validated.candidate.row.representation
+        );
+    }
+    let rule = BTreeSet::from(["rule".to_string()]);
+    assert_eq!(after.accounting.attempted_rows, 3);
+    assert_eq!(
+        after.accounting.permitted_objects, rule,
+        "the row whose artifact survives keeps the object permitted"
+    );
+    assert_eq!(
+        after.accounting.rejected_objects, rule,
+        "the row whose artifact was purged keeps the object rejected"
+    );
+    assert_eq!(after.accounting.unknown_objects, rule);
+}
+
+/// One decision with its three representations, materialized and validated
+/// once so a test can change canonical state and validate the same batch again.
+fn one_decision_validated(
+    dir: &Path,
+) -> (
+    Corpus,
+    SearchProjection,
+    ClaimCandidateBatch,
+    SurfaceValidation,
+) {
+    let corpus = Corpus::open(dir);
+    corpus.seed();
+    corpus.decide(Seed::scoped(
+        "rule",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        CONTRACT,
+        "Relied on.",
+    ));
+    corpus.materialize();
+    let hold = corpus.capture();
+    let (projection, _) = corpus.bootstrap(dir, &hold);
+    let (batch, before) = validate(&projection, &corpus, Surface::ExplicitSearch);
+    assert_eq!(batch.candidates.len(), 3);
+    let labeled = UseVerdict::Permitted(kernel::SurfaceVisibility::Labeled);
+    assert!(before.candidates.iter().all(|row| row.verdict == labeled));
+    (corpus, projection, batch, before)
+}
+
+fn revalidate(
+    corpus: &Corpus,
+    batch: &ClaimCandidateBatch,
+    candidates: &[ClaimCandidate],
+) -> SurfaceValidation {
+    validate_for_surface(
+        &corpus.kernel,
+        candidates,
+        &ProjectScope::new(PROJECT).unwrap(),
+        ArtifactDestination::Local,
+        Surface::ExplicitSearch,
+        candidate_bounds().facts,
+        batch.incarnation,
+        &EvalBudget::unbounded(),
+    )
+    .unwrap()
+}
+
+/// A projection row naming an artifact other than the one its canonical
+/// occurrence carries is not judged on the substituted artifact.
+#[test]
+fn a_row_whose_digest_disagrees_with_its_canonical_occurrence_is_not_permitted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, _projection, batch, _) = one_decision_validated(dir.path());
+    let mut forged = batch.candidates[0].clone();
+    forged.row.artifact_digest = "a".repeat(64);
+    let after = revalidate(&corpus, &batch, std::slice::from_ref(&forged));
+    assert_eq!(
+        after.candidates[0].verdict,
+        UseVerdict::Denied(UseDenial::State(CandidateState::Stale)),
+        "a digest with no evidence rows would otherwise pass the local artifact gate"
+    );
+    assert!(after.accounting.permitted_objects.is_empty());
+}
+
+/// Retiring one representation's descriptor after classification denies that
+/// row at the validation snapshot while the projection still holds it.
+#[test]
+fn a_descriptor_retired_after_classification_is_denied_at_the_fresh_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, _projection, batch, before) = one_decision_validated(dir.path());
+    let retired = &batch.candidates[1];
+    let descriptor = batch
+        .claim(retired)
+        .unwrap()
+        .occurrences
+        .iter()
+        .find(|occurrence| occurrence.occurrence_id == retired.row.occurrence_id)
+        .unwrap()
+        .descriptor_object_id
+        .clone();
+    corpus
+        .kernel
+        .commit(intent("retire:descriptor"), |envelope| {
+            envelope.retire_observation(&descriptor)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let after = revalidate(&corpus, &batch, &batch.candidates);
+    assert!(after.snapshot.tip > before.snapshot.tip);
+    let labeled = UseVerdict::Permitted(kernel::SurfaceVisibility::Labeled);
+    for validated in &after.candidates {
+        let expected = if validated.candidate.row.occurrence_id == retired.row.occurrence_id {
+            UseVerdict::Denied(UseDenial::State(CandidateState::Retracted))
+        } else {
+            labeled
+        };
+        assert_eq!(
+            validated.verdict, expected,
+            "{}",
+            validated.candidate.row.representation
+        );
+    }
+}
+
+/// The lineage accounting is read at the validation snapshot, not the
+/// classification one.
+#[test]
+fn use_accounting_reads_causality_at_the_validation_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, _projection, batch, before) = one_decision_validated(dir.path());
+    assert_eq!(
+        before.accounting.unknown_objects,
+        BTreeSet::from(["rule".to_string()])
+    );
+    let handle = corpus
+        .kernel
+        .ingest_exact_artifact(kernel::ArtifactIngestRequest {
+            intent: intent("acquisition"),
+            payload: b"observed".to_vec(),
+            evidence_id: "evidence-acquisition".to_string(),
+            object_id: "evidence-object-acquisition".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: MEMORY.to_string(),
+            source_kind: "tool_output".to_string(),
+            source_id: "native/acquisition".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap();
+    corpus
+        .kernel
+        .commit(intent("causality:rule"), |envelope| {
+            envelope
+                .record_claim_causality(&ClaimCausalityRequest {
+                    subject_object_id: "rule",
+                    subject_revision: 1,
+                    evidence: CausalEvidence::DirectObservation {
+                        acquisition_evidence_id: handle.evidence_id,
+                        artifact_digest: handle.digest,
+                    },
+                    observed_at: NOW,
+                })
+                .unwrap();
+            Ok(String::new())
+        })
+        .unwrap();
+    let after = revalidate(&corpus, &batch, &batch.candidates);
+    assert!(after.snapshot.tip > before.snapshot.tip);
+    assert!(
+        after.accounting.unknown_objects.is_empty(),
+        "the verdicts are from the fresh snapshot; the accounting must be too"
+    );
+    // The class itself travels with the validation, so a caller reports it
+    // from this snapshot rather than from the classification batch.
+    assert!(batch.claims[0].causality.is_unknown());
+    assert_eq!(after.claims.len(), 1);
+    assert!(matches!(
+        after.claims[0].causality,
+        CausalClass::DirectObservation { .. }
+    ));
+}
+
+/// `MarkStale` leaves the revision alone, so the kernel batch still says `Ok`;
+/// the fresh classification denies the row.
+#[test]
+fn an_admission_marked_stale_after_classification_is_denied_at_the_fresh_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, _projection, batch, before) = one_decision_validated(dir.path());
+    corpus
+        .kernel
+        .commit(intent("stale:rule"), |envelope| {
+            let mut request = admission("rule");
+            request.event.kind = EventKind::MarkStale;
+            envelope.record_admission(request)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let after = revalidate(&corpus, &batch, &batch.candidates);
+    assert!(after.snapshot.tip > before.snapshot.tip);
+    for validated in &after.candidates {
+        assert_eq!(
+            validated.verdict,
+            UseVerdict::Denied(UseDenial::State(CandidateState::Stale)),
+            "{}",
+            validated.candidate.row.representation
+        );
+    }
+    assert_eq!(
+        after.accounting.rejected_objects,
+        BTreeSet::from(["rule".to_string()])
+    );
+}
+
+/// A batch classified against one kernel history is refused by a kernel of
+/// another incarnation, so a restore between classification and handoff cannot
+/// judge displaced candidates against reused identifiers.
+#[test]
+fn validation_refuses_a_kernel_of_another_incarnation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_corpus, _projection, batch, _) = one_decision_validated(dir.path());
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = Corpus::open(other_dir.path());
+    other.seed();
+    other.decide(Seed::scoped(
+        "rule",
+        MEMORY,
+        "PROJECT_RULES",
+        1,
+        CONTRACT,
+        "Relied on.",
+    ));
+    let result = validate_for_surface(
+        &other.kernel,
+        &batch.candidates,
+        &ProjectScope::new(PROJECT).unwrap(),
+        ArtifactDestination::Local,
+        Surface::ExplicitSearch,
+        candidate_bounds().facts,
+        batch.incarnation,
+        &EvalBudget::unbounded(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(retrieval::claims::ClaimCandidateError::Facts(
+                kernel::ClaimFactsError::IncarnationMismatch
+            ))
+        ),
+        "{result:?}"
     );
 }
