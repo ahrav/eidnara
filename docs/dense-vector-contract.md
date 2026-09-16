@@ -375,13 +375,15 @@ with the build, since the rows are then on disk; the files stay reserved as
 disk scratch until the caller discards the compacted output, which removes
 the work directory. A refused reservation writes nothing.
 
-`publish` reads the selected composition back under the exclusive lock and
-refuses as `PrefixMoved` unless the selection still stands on the cut's base
-with the cut's deltas as a prefix, before staging anything. Whatever deltas
-follow them are the tail: published independently of the compactor, they are
-carried over unchanged and in order, so a later insert, update, or delete
-keeps its precedence and is represented exactly once. Only then is the new
-base staged and the new composition, at the selection's sequence plus one,
+`publish` reads the selected composition's record back under the exclusive lock
+and refuses as `PrefixMoved` unless the selection still stands on the cut's
+base with the cut's deltas as a prefix, before staging anything. The cut's own
+members are not opened again: the view verified and pinned them at acquisition,
+and none of them belongs to the new composition. Whatever deltas follow them
+are the tail: published independently of the compactor, each is verified as a
+member and carried over unchanged and in order, so a later insert, update, or
+delete keeps its precedence and is represented exactly once. Only then is the
+new base staged and the new composition, at the selection's sequence plus one,
 sent through `vector_composition::publish`, so the delta count is admitted and
 the selector moves in one rename as for any publication. A failure before the
 rename is a known refusal and a retry from the same cut publishes once, with

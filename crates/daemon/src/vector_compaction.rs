@@ -11,9 +11,7 @@ use retrieval::dense::export::{ExportedRow, LiveRows};
 use retrieval::dense::{ResolveRefusal, RowAccess, RowFault, resolve};
 
 use crate::vector_admission::{self, Reservation, ResourceClass};
-use crate::vector_composition::{
-    self, Composition, CompositionRefusal, CompositionSpec, Progress, VerifiedComposition,
-};
+use crate::vector_composition::{self, Composition, CompositionRefusal, CompositionSpec, Progress};
 use crate::vector_generation::{self, BuiltVectors, ExpectedVectors, Staging, VectorRefusal};
 use crate::vector_reader::PinnedVectors;
 
@@ -222,7 +220,7 @@ pub struct Published {
     pub sequence: u64,
 }
 
-/// Reads the selected composition back, refuses unless it still stands on the cut, then stages the compacted base and publishes it under the deltas the selection carries past the cut. `staging` holds the exclusive transaction lock, so the selection cannot move between the readback and the publication.
+/// Only the deltas past the cut are verified here: the view verified and pinned the cut's members at acquisition, and none of them is a member of the new composition. `staging` holds the exclusive transaction lock, so the selection cannot move between the readback and the publication.
 ///
 /// # Errors
 ///
@@ -240,17 +238,16 @@ pub fn publish(
         CurrentProfile::Absent => return Err(CompactionRefusal::NoSelection),
         CurrentProfile::Quarantined => return Err(CompositionRefusal::Quarantined.into()),
     };
-    let VerifiedComposition {
-        composition: current,
-        deltas: current_deltas,
-        ..
-    } = vector_composition::verify_composition(staging.store, &selected, expected, max_deltas)?;
+    let current = vector_composition::verify_record(staging.store, &selected, expected)?;
     let prefix = compacted
         .cut
         .prefix_len(&current)
         .ok_or(CompactionRefusal::PrefixMoved)?;
-    let carried: Vec<_> = current_deltas.into_iter().skip(prefix).collect();
-    let tail: Vec<String> = carried.iter().map(|delta| delta.digest.clone()).collect();
+    let tail = current.deltas[prefix..].to_vec();
+    let carried = tail
+        .iter()
+        .map(|delta| vector_composition::verify_member(staging.store, delta, expected))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let base_digest =
         vector_generation::stage(&compacted.built, staging).map_err(CompactionRefusal::Stage)?;

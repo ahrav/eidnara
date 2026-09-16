@@ -650,11 +650,11 @@ fn encode_all<'a>(
     scales: &Scales,
     rows: impl Iterator<Item = &'a [f32]>,
 ) -> Result<Vec<u8>, (usize, codec::RowRejection)> {
-    let mut codes = Vec::new();
+    let mut codes = Vec::with_capacity(rows.size_hint().0 * layout.dimension as usize);
     for (index, row) in rows.enumerate() {
         let encoded =
             scalar::encode(layout, scales, row).map_err(|rejection| (index, rejection))?;
-        codes.extend(scalar::encode_codes(&encoded.codes));
+        codes.extend(encoded.codes.iter().map(|code| *code as u8));
     }
     Ok(codes)
 }

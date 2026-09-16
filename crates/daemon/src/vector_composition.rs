@@ -410,12 +410,23 @@ pub fn verify_composition(
     verify_validated(store, generation, expected, max_deltas)
 }
 
-fn verify_validated(
+/// Verifies the composition generation `digest` and its record without opening a member: the record is a canonical composition bound to its manifest and carrying `expected`.
+///
+/// # Errors
+///
+/// A generation of another owner or schema, or a record that is not canonical, does not agree with its members file, or carries another identity.
+pub fn verify_record(
     store: &GenerationStore,
-    generation: ValidatedGeneration,
+    digest: &str,
     expected: &ExpectedVectors<'_>,
-    max_deltas: NonZeroUsize,
-) -> Result<VerifiedComposition, CompositionRefusal> {
+) -> Result<Composition, CompositionRefusal> {
+    verify_record_of(&store.validate(digest)?, expected)
+}
+
+fn verify_record_of(
+    generation: &ValidatedGeneration,
+    expected: &ExpectedVectors<'_>,
+) -> Result<Composition, CompositionRefusal> {
     if generation.manifest.target != VECTOR_SELECTION_TARGET {
         return Err(CompositionRefusal::NotComposition("manifest target"));
     }
@@ -439,17 +450,21 @@ fn verify_validated(
     {
         return Err(CompositionRefusal::NotComposition("identity"));
     }
-    let member = |digest: &str| {
-        verify(store, digest, expected).map_err(|refusal| CompositionRefusal::Member {
-            digest: digest.to_owned(),
-            refusal,
-        })
-    };
-    let base = member(&composition.base)?;
+    Ok(composition)
+}
+
+fn verify_validated(
+    store: &GenerationStore,
+    generation: ValidatedGeneration,
+    expected: &ExpectedVectors<'_>,
+    max_deltas: NonZeroUsize,
+) -> Result<VerifiedComposition, CompositionRefusal> {
+    let composition = verify_record_of(&generation, expected)?;
+    let base = verify_member(store, &composition.base, expected)?;
     let deltas = composition
         .deltas
         .iter()
-        .map(|digest| member(digest))
+        .map(|digest| verify_member(store, digest, expected))
         .collect::<Result<Vec<_>, _>>()?;
     check_topology(expected, &base, &deltas, max_deltas)?;
     Ok(VerifiedComposition {
@@ -458,6 +473,20 @@ fn verify_validated(
         record: generation,
         base,
         deltas,
+    })
+}
+
+/// # Errors
+///
+/// Returns the failing member's `digest` in [`CompositionRefusal::Member`].
+pub fn verify_member(
+    store: &GenerationStore,
+    digest: &str,
+    expected: &ExpectedVectors<'_>,
+) -> Result<VerifiedVectors, CompositionRefusal> {
+    verify(store, digest, expected).map_err(|refusal| CompositionRefusal::Member {
+        digest: digest.to_owned(),
+        refusal,
     })
 }
 

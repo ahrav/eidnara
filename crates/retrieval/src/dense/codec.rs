@@ -216,21 +216,25 @@ pub fn encode_rows<'a>(
         return Err(ArtifactRejection::ZeroDimension);
     }
     layout.check().map_err(ArtifactRejection::Layout)?;
-    let mut body = Vec::new();
-    let mut count = 0u64;
-    for (index, row) in rows.into_iter().enumerate() {
-        validate(row, layout).map_err(|rejection| ArtifactRejection::Row { index, rejection })?;
-        body.extend(encode(row));
-        count += 1;
-    }
-    let mut bytes = Vec::with_capacity(ARTIFACT_HEADER_BYTES + body.len());
+    let rows = rows.into_iter();
+    let mut bytes = Vec::with_capacity(
+        ARTIFACT_HEADER_BYTES + rows.size_hint().0 * layout.dimension as usize * 4,
+    );
     bytes.extend_from_slice(&ARTIFACT_MAGIC);
     bytes.extend_from_slice(&ARTIFACT_VERSION.to_le_bytes());
     bytes.push(layout.metric.code());
     bytes.push(0);
     bytes.extend_from_slice(&layout.dimension.to_le_bytes());
-    bytes.extend_from_slice(&count.to_le_bytes());
-    bytes.extend(body);
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    let mut count = 0u64;
+    for (index, row) in rows.enumerate() {
+        validate(row, layout).map_err(|rejection| ArtifactRejection::Row { index, rejection })?;
+        for value in row {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        count += 1;
+    }
+    bytes[ARTIFACT_HEADER_BYTES - 8..ARTIFACT_HEADER_BYTES].copy_from_slice(&count.to_le_bytes());
     Ok(bytes)
 }
 
