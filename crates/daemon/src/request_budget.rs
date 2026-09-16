@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -55,6 +56,24 @@ pub struct SharedBudget {
 }
 
 impl SharedBudget {
+    /// Callers may hand the returned `EvalBudget` to a callee only inside [`Self::bridge`] or a stop-predicate poll.
+    pub fn eval(&self) -> &EvalBudget {
+        &self.budget
+    }
+
+    /// `bridge` awaits `work` after cancellation instead of dropping it; cancellation signals the `EvalBudget` that `work` polls.
+    pub async fn bridge<T>(&self, work: impl Future<Output = T>) -> T {
+        let mut work = std::pin::pin!(work);
+        tokio::select! {
+            biased;
+            output = &mut work => output,
+            () = self.cancel.cancelled() => {
+                self.exhaustion();
+                work.await
+            }
+        }
+    }
+
     pub fn deadline(&self) -> Instant {
         self.deadline
     }
@@ -64,8 +83,8 @@ impl SharedBudget {
     }
 
     /// Cancellation wins over the deadline when both hold, because a cancelled caller is not waiting for a deadline verdict.
-    /// The host's cancellation reaches the `EvalBudget` flag only through this poll or the stop predicate, which is why the
-    /// `EvalBudget` is not handed out on its own.
+    /// The host's cancellation reaches the `EvalBudget` flag only through this poll, the stop predicate, or [`Self::bridge`],
+    /// which is why [`Self::eval`] is for use under one of them.
     pub fn exhaustion(&self) -> Option<Exhaustion> {
         // The interrupt is read before the reason. The guard's drop publishes the reason, fences,
         // then raises the interrupt, so a poll that sees the interrupt and then reads the reason
@@ -287,6 +306,33 @@ mod tests {
             deadlines, 0,
             "{deadlines} of {TRIALS} polls read the guard's drop as a deadline"
         );
+    }
+
+    #[tokio::test]
+    async fn a_host_cancel_reaches_a_callee_holding_only_the_eval_budget_while_bridged() {
+        let (token, cancel) = signal();
+        let budget =
+            RequestBudget::derive(cancel, Some(3_600_000), Some(Duration::from_secs(3_600)))
+                .unwrap();
+        let eval = budget.shared().eval().clone();
+        let released = Arc::new(tokio::sync::Notify::new());
+        let wake = Arc::clone(&released);
+        let work = async move {
+            wake.notified().await;
+            eval.is_exhausted()
+        };
+        let shared = budget.shared().clone();
+        let bridged = tokio::spawn(async move { shared.bridge(work).await });
+        tokio::task::yield_now().await;
+        assert!(!budget.shared().eval().is_exhausted());
+        token.cancel();
+        tokio::task::yield_now().await;
+        released.notify_one();
+        assert!(
+            bridged.await.unwrap(),
+            "the callee's EvalBudget did not observe the host cancel"
+        );
+        assert_eq!(budget.exhaustion(), Some(Exhaustion::Cancelled));
     }
 
     #[test]

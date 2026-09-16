@@ -24,6 +24,7 @@ pub mod fusion;
 pub mod identity_sweep;
 pub mod lexical;
 pub mod message_cleanup;
+pub mod packing;
 pub mod retirement;
 mod scan;
 pub mod vectors;
@@ -335,7 +336,7 @@ impl From<OccurrenceRefusal> for ProjectionError {
     }
 }
 
-fn parse_sensitivity(value: &str) -> Option<Sensitivity> {
+pub(crate) fn parse_sensitivity(value: &str) -> Option<Sensitivity> {
     Sensitivity::ALL
         .iter()
         .copied()

@@ -94,6 +94,13 @@ impl UnitRunner for JoinedUnitRunner {
         Box::pin(async move { receive.await.expect("independent join owner must finish") })
     }
 
+    fn run_step(
+        &self,
+        work: Box<dyn FnOnce() + Send>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BlockingWorkFailed>> + Send + 'static>> {
+        self.worker.run_step(work)
+    }
+
     fn cancel_signal(&self) -> CancelSignal {
         self.worker.cancel_signal()
     }
@@ -856,6 +863,13 @@ impl UnitRunner for FailingRunner {
         } else {
             self.joined.run_unit(work)
         }
+    }
+
+    fn run_step(
+        &self,
+        work: Box<dyn FnOnce() + Send>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), BlockingWorkFailed>> + Send + 'static>> {
+        self.joined.run_step(work)
     }
 
     fn cancel_signal(&self) -> CancelSignal {

@@ -103,8 +103,7 @@ fn record(
     target: Option<i64>,
     identity: &retrieval::ProjectionIdentity,
 ) {
-    ProjectionLifecycle::open(root)
-        .unwrap()
+    support::flock::open_lifecycle(root)
         .record(gate, &request(target, identity), now())
         .unwrap();
 }
@@ -147,8 +146,7 @@ fn authorized_recovery_requires_both_transition_and_construction_grants() {
             authorization_ref: Some("operator:recovery".to_owned()),
             ..request(None, &config.identity)
         };
-        ProjectionLifecycle::open(root.path())
-            .unwrap()
+        support::flock::open_lifecycle(root.path())
             .record(&gate, &request, now())
             .unwrap();
         let mut evaluator =
@@ -191,7 +189,7 @@ fn database(root: &Path) -> std::path::PathBuf {
 }
 
 fn control(root: &Path) -> daemon::projection_lifecycle::LifecycleIntent {
-    match ProjectionLifecycle::open(root).unwrap().read() {
+    match support::flock::open_lifecycle(root).read() {
         ControlState::Intent(intent) => intent,
         other => panic!("{other:?}"),
     }
@@ -953,8 +951,7 @@ fn construction_refuses_to_adopt_a_registered_consumer_it_does_not_inherit() {
     let identity = spec(root.path()).identity;
     let mut request = request(None, &identity);
     request.consumer.consumer_id = foreign.to_owned();
-    ProjectionLifecycle::open(root.path())
-        .unwrap()
+    support::flock::open_lifecycle(root.path())
         .record(&gate, &request, now())
         .unwrap();
     let failure = ReplacementBuilder::open(root.path(), &corpus.kernel, &gate, spec(root.path()))
