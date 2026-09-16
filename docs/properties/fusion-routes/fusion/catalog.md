@@ -215,7 +215,9 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/retrieval/tests/fusion.rs`
 `lane_order_probe_duplication_and_entry_order_change_nothing`,
-`empty_lanes_all_zero_weights_and_equal_scores_return_the_declared_result`.
+`empty_lanes_all_zero_weights_and_equal_scores_return_the_declared_result`,
+and, for the filter clause,
+`raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring`.
 Guarantee: Lane positions are assigned once by consolidation as `1..=n` in the
 lane's own order, fused positions are assigned once as `1..=n` in fused order,
 and neither is recomputed by a later filter.
@@ -269,8 +271,9 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: yes - `crates/retrieval/tests/fusion.rs`
-`lane_order_probe_duplication_and_entry_order_change_nothing` and
-`empty_lanes_all_zero_weights_and_equal_scores_return_the_declared_result`.
+`lane_order_probe_duplication_and_entry_order_change_nothing`,
+`empty_lanes_all_zero_weights_and_equal_scores_return_the_declared_result`,
+and `ties_across_lanes_and_large_tied_sets_fall_to_identifier_order`.
 Guarantee: Fused order is descending score then ascending occurrence-identifier
 bytes, and it does not depend on lane completion order, hit order, or hit
 duplication; empty lanes, all-zero weights, and equal scores yield the
