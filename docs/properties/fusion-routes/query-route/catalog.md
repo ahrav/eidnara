@@ -56,7 +56,6 @@ Exercised: yes - `crates/daemon/src/request_budget.rs` unit tests
 `a_request_without_an_approved_ceiling_or_a_remaining_duration_is_refused`,
 `dropping_the_guard_cancels_every_clone_and_the_stop_predicate`; and
 `crates/daemon/tests/request_budget_reads.rs`
-`the_deadline_is_identical_in_the_guard_every_clone_and_the_blocking_thread`,
 `an_elapsed_remaining_duration_interrupts_a_held_read_the_same_way`,
 `a_cancelled_budget_leaves_the_connection_wait_before_the_holder_releases`.
 Guarantee: One absolute budget is derived at handler entry from the request's
@@ -91,7 +90,8 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/request_budget_reads.rs`
 `a_later_request_on_the_same_connection_is_not_interrupted_by_a_prior_cancellation`,
-`cancelling_the_request_interrupts_a_held_read_and_reports_exhaustion`; and
+`cancelling_the_request_interrupts_a_held_read_and_reports_exhaustion`,
+`an_interrupted_statement_is_the_deadline_error_on_every_access_mode`; and
 `crates/storage/src/lib.rs`
 `an_interruptible_read_stops_a_running_statement_and_a_later_read_is_untouched`
 plus the negative control
@@ -105,7 +105,9 @@ Check: `always` - after a cancelled read on the projection connection, a fresh
 request's interruptible read and a plain bounded read both complete; the
 cancelled read returns the store's deadline error because the engine reported
 `ProjectionError::Interrupted`, a variant only the progress handler produces,
-and the budget classifies it as cancellation; the negative control shows that
+and `SearchProjection::run` returns it as the deadline error on every access
+mode, so no consumer classifying a projection refusal can quarantine the
+projection for a cancellation; the negative control shows that
 a handler left installed does interrupt the next read, so the oracle detects a
 leak. `always` because
 every read on the connection must be free of the previous request's hook.
@@ -119,7 +121,7 @@ The storage scope clears the handler before the transaction finishes and in
 `Drop`; the daemon read passes a fresh predicate per request.
 Existing check: `crates/storage/src/lib.rs`
 `an_interruptible_read_stops_a_running_statement_and_a_later_read_is_untouched`,
-status unaudited; `crates/kernel/tests/budget_tests.rs`
+status unaudited; `crates/kernel/src/budget_tests.rs`
 `commit_clears_interrupt_before_sql_and_rearms_it_for_connection_reuse` for the
 kernel store, status unaudited.
 Impact: A leaked hook would fail an unrelated request with a spurious deadline
@@ -135,7 +137,10 @@ Exercised: partial - the bridge clauses are covered by
 `crates/daemon/src/request_budget/host_tests.rs`
 `cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling`,
 `the_guard_drop_alone_interrupts_the_held_read_when_the_host_aborts_the_handler`,
-and `a_panic_in_tracked_blocking_work_is_typed_and_still_settles`; the permit
+and `a_panic_in_tracked_blocking_work_is_typed_and_still_settles`, with the
+drop's classification under a concurrent poll covered by
+`crates/daemon/src/request_budget.rs`
+`a_poll_that_straddles_the_guard_drop_never_reports_a_deadline`; the permit
 and pin clauses wait for the route (U3b) and the dense lane (U3c) that hold
 them.
 Guarantee: After client cancellation the blocking worker is joined before the
@@ -147,12 +152,13 @@ at `run_blocking` with no `select!` arm; the read reports exhaustion at a time
 no later than the host's error publication for that channel; the projection
 connection is held before cancellation and free after settlement; with the
 budget derived from a token the test never cancels, the guard's drop alone
-stops the read and classifies it as cancellation; a panicking closure yields
+stops the read and classifies it as cancellation, including when a poll of
+`SharedBudget::exhaustion` straddles the drop; a panicking closure yields
 `BlockingFailure::Panicked` and the client sees one terminal error. `always`
 because every cancelled request must drain its blocking work.
 Fault/timing angle: The host aborts the handler future while the blocking
 read runs; in the drop-only variant the guard's drop is the only path raising
-the interrupt.
+the interrupt; a poll that reads the budget between the drop's two stores.
 Required faults and enabling state: A real host and client; a held
 search-projection read on the blocking pool; a request cancel frame; a panic
 inside tracked work.

@@ -395,25 +395,24 @@ impl SearchProjection {
         budget: &SharedBudget,
         f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
     ) -> Result<T, SearchProjectionError> {
-        let outcome = self.run(
+        self.run(
             f,
             Access::ReadUnder {
                 deadline: budget.deadline(),
                 stop: Box::new(budget.stop_predicate()),
             },
-        );
-        // The progress handler fires only once `stop` holds, so an interrupted statement is the budget's own verdict, not an engine failure.
-        match outcome {
-            Err(SearchProjectionError::Projection(ProjectionError::Interrupted)) => {
-                Err(StoreError::Deadline.into())
-            }
-            other => other,
-        }
+        )
     }
 
     /// Runs `f` under the store's transaction of the given access. A refusal
     /// from `f` rolls the transaction back and is returned as itself; a store
     /// failure is returned as the store's.
+    ///
+    /// An engine interrupt is the caller's budget ending the statement, so
+    /// [`ProjectionError::Interrupted`] leaves as [`StoreError::Deadline`] on
+    /// every access mode. Consumers that classify a returned
+    /// [`SearchProjectionError::Projection`] refusal never see the variant, so a
+    /// cancellation is never classified as a storage fault.
     fn run<T>(
         &self,
         f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
@@ -457,6 +456,7 @@ impl SearchProjection {
                 store_result?;
                 Ok(value)
             }
+            Some(Err(ProjectionError::Interrupted)) => Err(StoreError::Deadline.into()),
             Some(Err(error)) => Err(error.into()),
             None => {
                 store_result?;

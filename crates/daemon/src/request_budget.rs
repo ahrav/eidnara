@@ -70,11 +70,17 @@ impl SharedBudget {
     /// Cancellation wins over the deadline when both hold, because a cancelled caller is not waiting for a deadline verdict.
     /// The host's cancellation is folded into the flag here, so callees polling only the `EvalBudget` stop as well.
     pub fn exhaustion(&self) -> Option<Exhaustion> {
+        // The interrupt is read before the reason. The guard's drop publishes the reason, fences,
+        // then raises the interrupt, so a poll that sees the interrupt and then reads the reason
+        // after this acquire fence sees the drop; a poll that read the reason first could see the
+        // interrupt land in between and report a deadline the clock never reached.
+        let exhausted = self.budget.is_exhausted();
+        std::sync::atomic::fence(Ordering::Acquire);
         if self.cancelled() {
             self.budget.cancel();
             return Some(Exhaustion::Cancelled);
         }
-        self.budget.is_exhausted().then_some(Exhaustion::Deadline)
+        exhausted.then_some(Exhaustion::Deadline)
     }
 
     pub fn is_exhausted(&self) -> bool {
@@ -141,7 +147,10 @@ impl RequestBudget {
 
 impl Drop for RequestBudget {
     fn drop(&mut self) {
-        // The reason is published before the interrupt, and the fence keeps the two stores in that order, so a reader that sees the interrupt also sees the reason.
+        // This fence pairs with the acquire fence in `SharedBudget::exhaustion`, which reads the
+        // interrupt before the reason: a poll that observes the relaxed interrupt store below is
+        // then guaranteed to read `guard_dropped` as set, so a drop-cancel is never reported as a
+        // deadline.
         self.shared.guard_dropped.store(true, Ordering::SeqCst);
         std::sync::atomic::fence(Ordering::SeqCst);
         self.shared.budget.cancel();
@@ -232,6 +241,45 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         assert!(budget.is_exhausted());
         assert_eq!(budget.exhaustion(), Some(Exhaustion::Deadline));
+    }
+
+    /// A poller whose `exhaustion` call straddles the guard's drop must still read the drop as
+    /// cancellation: the deadline is an hour away, so `Deadline` can only come from observing the
+    /// interrupt flag without the reason that was published before it. The window is two atomic
+    /// loads wide, so the trial repeats until the drop has landed inside it many times over.
+    #[test]
+    fn a_poll_that_straddles_the_guard_drop_never_reports_a_deadline() {
+        const TRIALS: usize = 400;
+        let mut verdicts = Vec::with_capacity(TRIALS);
+        for _ in 0..TRIALS {
+            let (_, cancel) = signal();
+            let budget =
+                RequestBudget::derive(cancel, Some(3_600_000), Some(Duration::from_secs(3_600)))
+                    .unwrap();
+            let clone = budget.shared().clone();
+            let poller = std::thread::spawn(move || {
+                loop {
+                    if let Some(reason) = clone.exhaustion() {
+                        return reason;
+                    }
+                }
+            });
+            // A short spin lets the poller reach its loop before the drop lands.
+            let spin_until = Instant::now() + Duration::from_micros(20);
+            while Instant::now() < spin_until {
+                std::hint::spin_loop();
+            }
+            drop(budget);
+            verdicts.push(poller.join().unwrap());
+        }
+        let deadlines = verdicts
+            .iter()
+            .filter(|reason| **reason == Exhaustion::Deadline)
+            .count();
+        assert_eq!(
+            deadlines, 0,
+            "{deadlines} of {TRIALS} polls read the guard's drop as a deadline"
+        );
     }
 
     #[test]

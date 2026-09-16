@@ -137,6 +137,31 @@ fn a_later_request_on_the_same_connection_is_not_interrupted_by_a_prior_cancella
     );
 }
 
+/// An engine interrupt is the budget's verdict on every access mode, so no consumer classifying a
+/// `ProjectionError` refusal ever sees `Interrupted` and quarantines the projection for a cancellation.
+#[test]
+fn an_interrupted_statement_is_the_deadline_error_on_every_access_mode() {
+    let (_dir, projection) = open();
+    let (_token, budget) = derive(CEILING.as_millis() as u64);
+    let far = || Instant::now() + Duration::from_secs(5);
+    let interrupted =
+        |_: &GuardedConn<'_>| -> Result<(), ProjectionError> { Err(ProjectionError::Interrupted) };
+    let outcomes = [
+        ("read", projection.read(interrupted)),
+        ("read_within", projection.read_within(far(), interrupted)),
+        (
+            "read_under",
+            projection.read_under(budget.shared(), interrupted),
+        ),
+        ("write", projection.write(interrupted)),
+        ("write_within", projection.write_within(far(), interrupted)),
+    ];
+    for (mode, outcome) in outcomes {
+        let error = outcome.unwrap_err();
+        assert!(is_deadline(&error), "{mode}: {error:?}");
+    }
+}
+
 #[test]
 fn a_cancelled_budget_leaves_the_connection_wait_before_the_holder_releases() {
     let (_dir, projection) = open();
