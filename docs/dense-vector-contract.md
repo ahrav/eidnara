@@ -291,9 +291,10 @@ files being staged and a compactor's working files, on top of what the store
 holds. A reservation is atomic against everything already held: the ledger
 locks its tally, adds the increment, asks the gate whether the pool's total is
 within the limit under the caller's grant, and records the reservation only
-on a yes. A disk reservation measures the store itself first, every byte on
-disk under the generations directory, complete generations, staging residue,
-and corrupt entries alike, and counts it with the ledger's own disk
+on a yes. A disk reservation measures the store itself first, every regular
+file at any depth under the generations directory, complete generations,
+staging residue, corrupt entries, and other owners' nested payloads alike,
+without following symlinks, and counts it with the ledger's own disk
 reservations; every disk reserver runs under the lifecycle's exclusive
 transaction lock, which is what keeps one reserver's copy in flight from
 being counted twice by another's walk. Two reservations racing for the last
@@ -310,8 +311,10 @@ reservations.
 Staging reserves the payload inventory in the disk pool before it copies
 anything and releases the reservation when the copy is done, since the bytes
 are then the store's, measured by the next disk reservation. A manifest the
-store already holds is charged nothing, so a retry after an unknown outcome
-allocates and reserves nothing. Publication admits a composition's delta
+store already holds is reserved the same way: the store copies the inventory
+into a staging temp before it finds the occupant and publishes nothing twice,
+so a retry after an unknown outcome needs room for the copy and leaves the
+store's total unchanged. Publication admits a composition's delta
 count against `vector_delta_count` before anything is staged; the count is
 the composition's own, so nothing is held for it, and a delta layer's own
 staging is bounded by bytes alone. A reader's view reserves its resident
@@ -325,7 +328,10 @@ its working files in the disk pool the same way.
 
 Compressed activation, production use or full-corpus publication of
 compressed vector layers, is judged by the same gate through
-`HookGate::admit_compressed_activation`. The manifest's `hooks` object may
+`HookGate::admit_compressed_activation`, which probes the durable lifecycle
+record first as every hook admission does, so a stop written by another
+owner or before this process started denies activation too. The manifest's
+`hooks` object may
 carry `search_projection.vector.compressed_activation`; absent is disabled,
 and the flag is not a projection hook, so no class coverage or slice runs
 under it and the frozen hook map is unchanged. Enabled, the evaluator applies
@@ -340,12 +346,26 @@ cost), and carry a real full-path trace from each harness showing a real
 embedding, the exact, lexical, and dense lanes, canonical validation, fusion,
 span grouping, bounded packing, and validated application. A missing, stale,
 wrongly bound, failed, revoked, simulated, report-only, or incomplete record
-refuses. A refresh whose evidence turns an admitted activation into a refusal
-withdraws the grant like a changed manifest would. The daemon supplies no
-binding of its own here, so activation refuses as missing whatever the record
-says; a report fixture proves the evaluator and authorizes nothing. The
-vector limits and the activation flag are daemon vocabulary outside the
-construction contract's frozen limit and hook sets.
+refuses. The evidence record's `compression` section is read as raw JSON and
+judged only by the compression gate: a section this build cannot read, a
+trace keyed by an unknown harness included, denies activation as a malformed
+section and leaves every hook's admission as it was, so the section's shape
+never closes the gate. A refresh whose evidence turns an admitted activation
+into a refusal withdraws the grant like a changed manifest would. The daemon
+supplies no binding of its own here, so activation refuses as missing
+whatever the record says; a report fixture proves the evaluator and
+authorizes nothing. The vector limits and the activation flag are daemon
+vocabulary outside the construction contract's frozen limit and hook sets.
+
+Rollout order. A build without this section refuses a manifest that carries
+`vector_resident_bytes`, `vector_disk_bytes`, `vector_delta_count`, or the
+`search_projection.vector.compressed_activation` flag as an unknown limit or
+hook, and refuses an evidence record that carries a `compression` section as
+malformed; either refusal closes the gate for every hook. Deploy the daemon
+before the records gain these keys, and a rollback to an older build must
+also revert `runtime-manifest.json` and `campaign-evidence.json`. In the
+other direction nothing changes: this build reads records without the keys
+as before and refuses only the vector work that needs them.
 
 ## The pinned reader
 

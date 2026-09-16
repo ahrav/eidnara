@@ -201,12 +201,12 @@ pub const REQUIRED_LIMITS: [&str; 27] = [
     "decoded_heap_high_water_bytes",
 ];
 
+pub const VECTOR_RESIDENT_BYTES: &str = "vector_resident_bytes";
+pub const VECTOR_DISK_BYTES: &str = "vector_disk_bytes";
+pub const VECTOR_DELTA_COUNT: &str = "vector_delta_count";
+
 /// Limits the vector ledger reads when a manifest carries them. They are optional in the manifest: a manifest without one refuses the vector work that needs it, and nothing else, so an existing deployment keeps its other hooks.
-pub const VECTOR_LIMITS: [&str; 3] = [
-    "vector_resident_bytes",
-    "vector_disk_bytes",
-    "vector_delta_count",
-];
+pub const VECTOR_LIMITS: [&str; 3] = [VECTOR_RESIDENT_BYTES, VECTOR_DISK_BYTES, VECTOR_DELTA_COUNT];
 
 const MANIFEST_FIELDS: [&str; 4] = [
     "protocol_version",
@@ -488,6 +488,34 @@ pub struct CompressionEvidence {
     pub revoked: bool,
 }
 
+/// A compression section the gate cannot read is `Malformed`, not a refused record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompressionRecord {
+    Absent,
+    Malformed,
+    Campaign(Box<CompressionEvidence>),
+}
+
+impl CompressionRecord {
+    /// Treats traces keyed outside [`HARNESSES`] as malformed.
+    pub fn parse(section: Option<&serde_json::Value>) -> Self {
+        let Some(section) = section else {
+            return Self::Absent;
+        };
+        match serde_json::from_value::<CompressionEvidence>(section.clone()) {
+            Ok(evidence)
+                if evidence
+                    .traces
+                    .keys()
+                    .all(|harness| HARNESSES.contains(&harness.as_str())) =>
+            {
+                Self::Campaign(Box::new(evidence))
+            }
+            _ => Self::Malformed,
+        }
+    }
+}
+
 /// Everything the gates read, gathered under `identity`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evidence {
@@ -497,7 +525,7 @@ pub struct Evidence {
     /// `(harness, capability)` to what the harness proved.
     pub capabilities: BTreeMap<(String, String), CapabilityEvidence>,
     pub harness_runs: BTreeMap<String, HarnessRun>,
-    pub compression: Option<CompressionEvidence>,
+    pub compression: CompressionRecord,
 }
 
 /// Why a hook was denied. Variants name gates, hooks, harnesses, class codes, and sizes, never content.
@@ -628,11 +656,16 @@ impl EvidenceEvaluator {
     }
 
     fn compression(&self) -> Result<(), Denial> {
-        let evidence = self
-            .evidence
-            .compression
-            .as_ref()
-            .ok_or(Denial::Missing(Gate::Compression))?;
+        let evidence = match &self.evidence.compression {
+            CompressionRecord::Absent => return Err(Denial::Missing(Gate::Compression)),
+            CompressionRecord::Malformed => {
+                return Err(Denial::Failed(
+                    Gate::Compression,
+                    "the compression section is malformed".to_owned(),
+                ));
+            }
+            CompressionRecord::Campaign(evidence) => evidence,
+        };
         let binding = self
             .binding
             .as_ref()
@@ -1113,9 +1146,11 @@ impl HookGate {
     ///
     /// # Errors
     ///
-    /// Returns the [`Denial`]; a gate without a manifest, a disabled gate, or a manifest whose flag is off refuses before any evidence is read.
+    /// Returns the [`Denial`]; a gate without a manifest, a disabled gate, a durable stop record, or a manifest whose flag is off refuses before any evidence is read.
     pub fn admit_compressed_activation(&self) -> Result<ActivationGrant, Denial> {
-        let state = self.state.lock().map_err(|_| Denial::NoManifest)?;
+        let mut state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
+        self.observe_stop(state.as_deref_mut())?;
+        let state = state.ok_or(Denial::NoManifest)?;
         if state.disabled {
             return Err(Denial::RecoveryRequired);
         }

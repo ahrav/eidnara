@@ -4,18 +4,18 @@
 //! Static residents (model memory, tokenizer, SQLite cache) are charged once each; a second charge for the same class is refused rather than doubled.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use host_runtime::generation::{GENERATIONS_DIR_NAME, GenerationStore, PruneReport};
 
 use crate::projection_gates::{Admission, Denial, HookGate, InvalidationIdentity};
 
-/// The limits the ledger's two pools are judged against.
-pub const RESIDENT_LIMIT: &str = "vector_resident_bytes";
-pub const DISK_LIMIT: &str = "vector_disk_bytes";
-/// Deltas a composition may name; checked at publication through the same gate.
-pub const DELTA_LIMIT: &str = "vector_delta_count";
+/// The limits the ledger's two pools and delta admission are judged against, named where the manifest parser accepts them so the two cannot drift.
+pub use crate::projection_gates::{
+    VECTOR_DELTA_COUNT as DELTA_LIMIT, VECTOR_DISK_BYTES as DISK_LIMIT,
+    VECTOR_RESIDENT_BYTES as RESIDENT_LIMIT,
+};
 
 /// What a reservation holds. Every class belongs to one pool and one limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -173,35 +173,30 @@ impl Ledger {
         }
     }
 
-    /// The bytes on disk under the store's generations directory, complete generations, staging residue, and corrupt entries alike, measured by size rather than manifest so an entry whose manifest is unreadable still counts what it occupies. The layout is one directory of entries each holding files, so the walk goes one level down and no further.
+    /// Returns the total size of regular files under the store's generations directory. Uses file metadata instead of manifests so files with unreadable manifests still count. Does not follow symlinks.
     ///
     /// # Errors
     ///
-    /// A generations directory that cannot be read.
+    /// A directory under the generations directory that cannot be read.
     pub fn store_bytes(store: &GenerationStore) -> Result<u64, Refusal> {
-        fn files_in(dir: &Path, total: &mut u64) -> std::io::Result<()> {
-            for entry in std::fs::read_dir(dir)? {
-                let metadata = entry?.metadata()?;
-                if metadata.is_file() {
-                    *total = total.saturating_add(metadata.len());
-                }
-            }
-            Ok(())
-        }
-        fn walk(generations: &Path) -> std::io::Result<u64> {
+        fn walk(generations: PathBuf) -> std::io::Result<u64> {
             let mut total = 0u64;
-            for entry in std::fs::read_dir(generations)? {
-                let entry = entry?;
-                let metadata = entry.metadata()?;
-                if metadata.is_dir() {
-                    files_in(&entry.path(), &mut total)?;
-                } else if metadata.is_file() {
-                    total = total.saturating_add(metadata.len());
+            let mut pending = vec![generations];
+            while let Some(dir) = pending.pop() {
+                for entry in std::fs::read_dir(&dir)? {
+                    let entry = entry?;
+                    // `DirEntry::metadata` does not follow symlinks, so a link is neither a directory nor a file here.
+                    let metadata = entry.metadata()?;
+                    if metadata.is_dir() {
+                        pending.push(entry.path());
+                    } else if metadata.is_file() {
+                        total = total.saturating_add(metadata.len());
+                    }
                 }
             }
             Ok(total)
         }
-        walk(&store.root().join(GENERATIONS_DIR_NAME))
+        walk(store.root().join(GENERATIONS_DIR_NAME))
             .map_err(|error| Refusal::Store(error.kind().to_string()))
     }
 

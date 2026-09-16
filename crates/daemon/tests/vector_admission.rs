@@ -12,7 +12,7 @@ use daemon::vector_admission::{
     Census, DELTA_LIMIT, DISK_LIMIT, Ledger, Pool, RESIDENT_LIMIT, Refusal, ResourceClass,
 };
 use daemon::vector_composition::{CompositionRefusal, Progress, publish};
-use daemon::vector_generation::{VectorRefusal, build, stage};
+use daemon::vector_generation::{ROWS_FILE, VectorRefusal, build, stage};
 use host_runtime::generation::PruneReport;
 use support::projection_gate::{identity, passing_evaluator};
 use support::vector_store::{Fixture, export};
@@ -261,9 +261,58 @@ fn the_disk_pool_counts_the_store_and_staging_is_refused_before_it_would_exceed_
         compaction,
         Err(Refusal::Denied(Denial::LimitExceeded { .. }))
     ));
-    // Staging the same manifest again allocates nothing and is not charged again.
-    fixture.set_limit(DISK_LIMIT, Ledger::store_bytes(&fixture.store).unwrap());
+    // Restaging a manifest the store already holds still copies the inventory into a staging temp before the store finds its occupant, so the copy needs room in the pool even though the store publishes nothing twice and its total is unchanged afterwards.
+    let settled = Ledger::store_bytes(&fixture.store).unwrap();
+    fixture.set_limit(DISK_LIMIT, settled + staged_bytes - 1);
+    assert_eq!(
+        stage(&built, &fixture.staging()).unwrap_err(),
+        VectorRefusal::Reservation(exceeded(
+            DISK_LIMIT,
+            settled + staged_bytes,
+            settled + staged_bytes - 1
+        )),
+        "the retry's copy is charged like a first staging"
+    );
+    fixture.set_limit(DISK_LIMIT, settled + staged_bytes);
     assert_eq!(stage(&built, &fixture.staging()).unwrap(), digest);
+    assert_eq!(Ledger::store_bytes(&fixture.store).unwrap(), settled);
+    assert_eq!(held(&fixture.ledger, ResourceClass::Staging), 0);
+
+    // A readable manifest over a corrupt payload triggers an exchange repair, so staging reserves `staged_bytes` before replacing the occupant.
+    fixture.corrupt(&digest, ROWS_FILE);
+    assert!(fixture.store.manifest(&digest).is_ok());
+    assert!(fixture.store.validate(&digest).is_err());
+    fixture.set_limit(DISK_LIMIT, settled + staged_bytes - 1);
+    assert_eq!(
+        stage(&built, &fixture.staging()).unwrap_err(),
+        VectorRefusal::Reservation(exceeded(
+            DISK_LIMIT,
+            settled + staged_bytes,
+            settled + staged_bytes - 1
+        ))
+    );
+    assert!(
+        fixture.store.validate(&digest).is_err(),
+        "a refused reservation repairs nothing"
+    );
+    fixture.set_limit(DISK_LIMIT, settled + staged_bytes);
+    assert_eq!(stage(&built, &fixture.staging()).unwrap(), digest);
+    assert!(fixture.store.validate(&digest).is_ok());
+    assert_eq!(fixture.ledger.census().disk, 0);
+}
+
+#[test]
+fn the_store_walk_counts_bytes_nested_inside_a_generation() {
+    let fixture = Fixture::new();
+    fixture.layer(1, 10);
+    let flat = Ledger::store_bytes(&fixture.store).unwrap();
+    let payload = vec![7u8; 4096];
+    fixture.stage_foreign("host-release", "payload/bin/launcher", &payload);
+    let nested = Ledger::store_bytes(&fixture.store).unwrap();
+    assert!(
+        nested >= flat + payload.len() as u64,
+        "a generation's nested files are part of the store's total: {flat} then {nested}"
+    );
 }
 
 #[test]

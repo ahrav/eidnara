@@ -438,7 +438,7 @@ pub struct Staging<'a> {
 }
 
 impl Staging<'_> {
-    /// Charges the manifest's whole inventory against the staged-bytes limit, reserves it in the ledger's disk pool on top of what the store already holds unless the store already holds this manifest, then stages the files `resolve` names for each manifest path; a refused admission or reservation stages nothing. The reservation ends with the copy: the bytes then belong to the store, which the next disk reservation counts.
+    /// Charges the manifest's whole inventory against the staged-bytes limit, reserves it in the ledger's disk pool on top of what the store already holds, then stages the files `resolve` names for each manifest path; a refused admission or reservation stages nothing. The reservation ends with the copy: the bytes then belong to the store, which the next disk reservation counts. A manifest the store already holds is reserved the same way, because the store copies the inventory into a staging temp before it finds the occupant and publishes nothing twice.
     ///
     /// # Errors
     ///
@@ -457,20 +457,9 @@ impl Staging<'_> {
                 &[(STAGE_DISK_LIMIT, bytes)],
             )
             .map_err(VectorRefusal::Admission)?;
-        // A retry of a staged manifest allocates nothing: the store finds the occupant and publishes nothing twice, so only a missing occupant is charged.
-        let increment = if self.store.manifest(&manifest.digest()).is_ok() {
-            0
-        } else {
-            bytes
-        };
         let _staging = self
             .ledger
-            .reserve_disk(
-                self.admission,
-                ResourceClass::Staging,
-                increment,
-                self.store,
-            )
+            .reserve_disk(self.admission, ResourceClass::Staging, bytes, self.store)
             .map_err(VectorRefusal::Reservation)?;
         let sources = manifest_sources(manifest, |path| Some(resolve(path)))
             .expect("every manifest path resolves under the work directory");
