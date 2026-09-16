@@ -21,6 +21,19 @@ pub enum RecoveryProgress {
     Current,
 }
 
+/// Whether disposing a construction releases its source hold. A construction that became the selected family keeps the hold, since the family's checkpoint names it and catch-up extends it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstructionHold {
+    Release,
+    Retain,
+}
+
+/// The construction being disposed: one that completed into the selected family, or one abandoned under the record it left.
+enum Disposal<'a> {
+    Completed(&'a LifecycleIntent),
+    Abandoned(&'a ControlState),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryFailure<'a> {
     #[error("construction: {0:?}")]
@@ -187,7 +200,7 @@ impl SearchSelection {
                 kernel,
                 gate,
                 &lifecycle,
-                &ControlState::Disabled(disabled.clone()),
+                Disposal::Abandoned(&ControlState::Disabled(disabled.clone())),
                 &transaction,
                 budget,
             )?;
@@ -293,7 +306,7 @@ impl SearchSelection {
                     kernel,
                     gate,
                     &lifecycle,
-                    &ControlState::Intent(intent.clone()),
+                    Disposal::Abandoned(&ControlState::Intent(intent.clone())),
                     &transaction,
                     budget,
                 )?;
@@ -398,11 +411,12 @@ impl SearchSelection {
         }
         observer(RecoveryEvent::FinalAcknowledged);
         check()?;
+        // The selected family's checkpoint names this hold, and catch-up extends it over later windows; it is released with the consumer at retirement or disable, at the next incarnation's reconciliation, or by its own expiry.
         self.dispose_construction(
             kernel,
             gate,
             &lifecycle,
-            &ControlState::Intent(intent.clone()),
+            Disposal::Completed(&intent),
             &transaction,
             budget,
         )?;
@@ -456,10 +470,18 @@ impl SearchSelection {
         kernel: &KernelStore,
         gate: &HookGate,
         lifecycle: &ProjectionLifecycle,
-        expected: &ControlState,
+        disposal: Disposal<'_>,
         transaction: &LifecycleTransactionLock,
         budget: &EvalBudget,
     ) -> Result<(), BuildError> {
+        let (expected, hold) = match disposal {
+            Disposal::Completed(intent) => (
+                ControlState::Intent(intent.clone()),
+                ConstructionHold::Retain,
+            ),
+            Disposal::Abandoned(expected) => (expected.clone(), ConstructionHold::Release),
+        };
+        let expected = &expected;
         let intent = match expected {
             ControlState::Intent(intent) => intent,
             ControlState::Disabled(disabled) => {
@@ -506,7 +528,7 @@ impl SearchSelection {
                 Ok(())
             },
         )?;
-        if capture.lease_epoch == kernel.lease_epoch() {
+        if hold == ConstructionHold::Release && capture.lease_epoch == kernel.lease_epoch() {
             kernel.release_source_hold_within_budget(
                 budget,
                 &SourceHoldBinding {

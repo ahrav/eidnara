@@ -22,7 +22,7 @@ use super::source_identity::{
 };
 use super::{
     CachedSql, KernelError,
-    cas::{is_artifact_digest, is_exact_retention},
+    cas::{ExactEvidence, exact_evidence, is_artifact_digest},
     map_sqlite,
 };
 
@@ -34,7 +34,7 @@ pub const SOURCE_DESCRIPTOR_DETAIL_VERSION: u32 = 1;
 /// writes stay bounded under the single writer.
 pub const MAX_DESCRIPTORS_PER_COMMIT: usize = 1024;
 
-const OCCURRENCE_ID_PREFIX: &str = "srcocc:";
+pub(crate) const OCCURRENCE_ID_PREFIX: &str = "srcocc:";
 const DESCRIPTOR_OBJECT_ID_PREFIX: &str = "srcdesc:";
 
 /// Git policy versions identify the permitted refs and traversal boundary without changing occurrence identity.
@@ -264,26 +264,7 @@ pub(crate) fn reencoded_identity(detail: &SourceDescriptorDetail) -> Option<Enco
 impl Envelope<'_> {
     /// Registry inserts use several writers; commit validation admits reserved IDs only when this envelope's descriptor publisher owns them.
     pub(super) fn check_descriptor_ownership(&self) -> Result<(), KernelError> {
-        let mut statement = self
-            .tx
-            .prepare_cached(
-                "SELECT object_id,source_id FROM object_registry
-                 WHERE created_commit_seq=?1 AND object_id GLOB ?2",
-            )
-            .map_err(map_sqlite)?;
-        let rows = statement
-            .query_map(
-                rusqlite::params![self.commit_seq, format!("{DESCRIPTOR_OBJECT_ID_PREFIX}*")],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .map_err(map_sqlite)?;
-        for row in rows {
-            let (object_id, lineage_id) = row.map_err(map_sqlite)?;
-            if self.descriptor_objects.get(&lineage_id) != Some(&object_id) {
-                return Err(KernelError::InvalidInput);
-            }
-        }
-        Ok(())
+        self.check_reserved_ownership(DESCRIPTOR_OBJECT_ID_PREFIX, &self.descriptor_objects)
     }
 
     /// Publishes one descriptor; see [`Envelope::publish_source_descriptors`].
@@ -438,24 +419,12 @@ impl Envelope<'_> {
         &self,
         request: &SourceDescriptorRequest<'_>,
     ) -> Result<(), SourceDescriptorError> {
-        let stored: Option<(String, Vec<u8>)> = self
-            .tx
-            .query_row_cached(
-                "SELECT artifact_digest,redaction_metadata FROM evidence_meta
-                 WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL",
-                [request.evidence_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(map_sqlite)?;
-        let (digest, redactions) = stored.ok_or(SourceDescriptorError::EvidenceMissing)?;
-        if digest != request.artifact_digest {
-            return Err(SourceDescriptorError::ArtifactMismatch);
+        match exact_evidence(self.tx, request.evidence_id, request.artifact_digest, None)? {
+            ExactEvidence::Missing => Err(SourceDescriptorError::EvidenceMissing),
+            ExactEvidence::DigestMismatch => Err(SourceDescriptorError::ArtifactMismatch),
+            ExactEvidence::NotExact => Err(SourceDescriptorError::EvidenceNotExact),
+            ExactEvidence::Bound => Ok(()),
         }
-        if !is_exact_retention(&redactions) {
-            return Err(SourceDescriptorError::EvidenceNotExact);
-        }
-        Ok(())
     }
 
     /// The live descriptor of this lineage and its revision, if any. More

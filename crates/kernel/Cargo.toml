@@ -45,3 +45,7 @@ harness = false
 [[bench]]
 name = "scope_algebra"
 harness = false
+
+[[bench]]
+name = "claim_facts"
+harness = false

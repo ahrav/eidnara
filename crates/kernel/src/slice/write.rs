@@ -154,7 +154,9 @@ impl Envelope<'_> {
         spec: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
         self.guarded(|envelope| {
-            if crate::source_descriptor::uses_descriptor_namespace(&spec) {
+            if crate::source_descriptor::uses_descriptor_namespace(&spec)
+                || crate::claim_causality::uses_causality_namespace(&spec)
+            {
                 return Err(KernelError::InvalidInput);
             }
             envelope.insert_observation_inner(spec)
@@ -385,15 +387,25 @@ impl Envelope<'_> {
         replacement: ObservationSpec,
     ) -> Result<ObservationWriteOutcome, KernelError> {
         self.guarded(|envelope| {
-            if crate::source_descriptor::uses_descriptor_namespace(&replacement) {
+            if crate::source_descriptor::uses_descriptor_namespace(&replacement)
+                || crate::claim_causality::uses_causality_namespace(&replacement)
+            {
                 return Err(KernelError::InvalidInput);
             }
-            let descriptor: bool = envelope.tx.query_row_cached(
-                "SELECT EXISTS(SELECT 1 FROM observations WHERE object_id=?1 AND observation_kind=?2)",
-                params![replaced_object_id, crate::SOURCE_DESCRIPTOR_KIND],
-                |row| row.get(0),
-            ).map_err(map_sqlite)?;
-            if descriptor {
+            let reserved: bool = envelope
+                .tx
+                .query_row_cached(
+                    "SELECT EXISTS(SELECT 1 FROM observations
+                  WHERE object_id=?1 AND observation_kind IN (?2,?3))",
+                    params![
+                        replaced_object_id,
+                        crate::SOURCE_DESCRIPTOR_KIND,
+                        crate::CLAIM_CAUSALITY_KIND
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(map_sqlite)?;
+            if reserved {
                 return Err(KernelError::InvalidInput);
             }
             envelope.correct_observation_inner(replaced_object_id, replacement)

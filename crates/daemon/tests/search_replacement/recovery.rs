@@ -536,7 +536,10 @@ fn cleanup_revocation_and_changed_hold_preserve_owned_files_and_capture() {
         ));
         finish(&mut selection, &corpus, &gate, &config);
         assert_eq!(current(root.path()).episodes.consumed, 3);
-        assert_hold_released(root.path(), &hold);
+        assert!(
+            !hold_released(root.path(), &hold),
+            "the selected family's checkpoint names this hold; catch-up extends it, so completion keeps it"
+        );
         assert!(!database(root.path()).exists());
     }
 }
