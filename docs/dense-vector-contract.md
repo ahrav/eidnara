@@ -407,11 +407,12 @@ codec, so the same prefix compacts to the same bytes and the same digest. The
 resident reservation ends with the build, since the rows are then on disk; the
 files stay reserved as disk scratch until the compacted output is discarded or
 dropped, either of which unlinks the build's own files and removes the work
-directory. Discard deletes nothing the build did not write: a directory holding
-other entries is left standing and reported. A refused reservation writes
-nothing, and a build that fails after writing some of its files, or whose
-inventory exceeds its footprint, removes them before returning, so no refusal
-leaves an uncounted file behind. A dedicated, empty work directory per
+directory. Discard removes only the build's own file names, whoever wrote
+them, so a retry succeeds over a crashed attempt's leftovers; a directory
+holding other names is left standing and reported. A refused reservation
+writes nothing, and a build that fails after writing some of its files, or
+whose inventory exceeds its footprint, removes them before returning, so no
+refusal leaves an uncounted file behind. A dedicated, empty work directory per
 compaction is the caller's contract.
 
 `publish` reads the selected composition's record back under the exclusive lock

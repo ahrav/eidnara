@@ -107,7 +107,7 @@ impl Compacted {
         &self.cut
     }
 
-    /// Unlinks the build's files, removes the work directory, and releases the scratch reservation. Files the build did not write are left in place.
+    /// Unlinks the build's file names, removes the work directory, and releases the scratch reservation. Files under other names are left in place; the build's names are the module's own in its own work directory, whoever wrote them.
     ///
     /// # Errors
     ///
