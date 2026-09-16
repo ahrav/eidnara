@@ -177,7 +177,9 @@ fn bounded_name(name: &str) -> String {
 /// Every string a manifest refusal carries is copied from the record, so each one is bounded and escaped as a campaign key is. Variants are matched exhaustively so a new string-bearing variant cannot reach a log unbounded.
 fn bounded_manifest_refusal(refusal: ManifestRefusal) -> ManifestRefusal {
     match refusal {
-        ManifestRefusal::Shape | ManifestRefusal::MissingProtocolVersion => refusal,
+        ManifestRefusal::Shape
+        | ManifestRefusal::MissingProtocolVersion
+        | ManifestRefusal::PackingUnapproved => refusal,
         ManifestRefusal::ProtocolMismatch { manifest, identity } => {
             ManifestRefusal::ProtocolMismatch {
                 manifest: bounded_name(&manifest),

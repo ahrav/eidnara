@@ -109,7 +109,7 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
     let generous = generous.unwrap();
     let cost_of = |first_fused: usize| {
         generous
-            .admitted
+            .admitted()
             .iter()
             .find(|group| group.group.first_fused == first_fused)
             .map(|group| group.cost.get())
@@ -117,7 +117,7 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
     };
     let (big, small, medium) = (cost_of(0), cost_of(1), cost_of(2));
     assert!(small < medium && medium < big, "{small} {medium} {big}");
-    for group in &generous.admitted {
+    for group in generous.admitted() {
         assert_eq!(
             group.cost,
             ClaudeTokens::new(render::group_fragment(&group.group).len() as u64),
@@ -126,12 +126,12 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
     }
     assert_eq!(
         generous
-            .ledger
+            .ledger()
             .entries()
             .iter()
             .map(|entry| entry.bytes)
             .sum::<usize>(),
-        generous.ledger.text().len()
+        generous.ledger().text().len()
     );
 
     let remaining = small + medium;
@@ -139,20 +139,20 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
     let (result, trace) = run(&fixture, &requests, &wide(), required_charge + remaining);
     let admission = result.unwrap();
     let admitted: Vec<_> = admission
-        .admitted
+        .admitted()
         .iter()
         .map(|group| (group.group.first_fused, group.cost.get()))
         .collect();
     assert_eq!(admitted, vec![(1, small), (2, medium)]);
-    assert_eq!(admission.skipped.len(), 1);
-    assert_eq!(admission.skipped[0].group.first_fused, 0);
-    assert_eq!(admission.skipped[0].cost, ClaudeTokens::new(big));
-    assert_eq!(admission.remaining, ClaudeTokens::new(0));
-    assert!(admission.excluded.is_empty());
-    assert!(admission.ungrouped.is_empty());
+    assert_eq!(admission.skipped().len(), 1);
+    assert_eq!(admission.skipped()[0].group.first_fused, 0);
+    assert_eq!(admission.skipped()[0].cost, ClaudeTokens::new(big));
+    assert_eq!(admission.remaining(), ClaudeTokens::new(0));
+    assert!(admission.excluded().is_empty());
+    assert!(admission.ungrouped().is_empty());
     assert_eq!(trace.payload_loads(), 4);
     optional_starts_after_the_last_required_event(&trace);
-    let text = admission.ledger.text();
+    let text = admission.ledger().text();
     assert!(text.starts_with("<packed-context>\n<required"));
     assert!(text.ends_with("</group>\n</packed-context>\n"));
     assert!(
@@ -168,7 +168,7 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
         required_charge + remaining + 3,
     );
     assert_eq!(
-        spare.unwrap().remaining,
+        spare.unwrap().remaining(),
         ClaudeTokens::new(3),
         "unused budget is success"
     );
@@ -184,9 +184,9 @@ fn same_parent_spans_group_and_are_charged_as_one_merged_range() {
     let requests = [optional(&other), optional(&a), optional(&b), optional(&c)];
     let (result, _) = run(&fixture, &requests, &wide(), 1 << 20);
     let admission = result.unwrap();
-    assert_eq!(admission.admitted.len(), 2);
-    assert_eq!(admission.admitted[0].group.first_fused, 0);
-    let grouped = &admission.admitted[1];
+    assert_eq!(admission.admitted().len(), 2);
+    assert_eq!(admission.admitted()[0].group.first_fused, 0);
+    let grouped = &admission.admitted()[1];
     assert_eq!(grouped.group.first_fused, 1);
     assert_eq!(grouped.group.ranges.len(), 2);
     assert_eq!(grouped.group.ranges[0].bytes, PARENT.as_bytes()[0..10]);
@@ -196,7 +196,7 @@ fn same_parent_spans_group_and_are_charged_as_one_merged_range() {
         ClaudeTokens::new(render::group_fragment(&grouped.group).len() as u64)
     );
     let wrapper_entries: Vec<_> = admission
-        .ledger
+        .ledger()
         .entries()
         .iter()
         .filter(|entry| matches!(entry.item, Charged::GroupOpen(1) | Charged::GroupClose(1)))
@@ -207,7 +207,7 @@ fn same_parent_spans_group_and_are_charged_as_one_merged_range() {
         "the group wrapper is charged once, as its own entries"
     );
     let range_entries = admission
-        .ledger
+        .ledger()
         .entries()
         .iter()
         .filter(|entry| matches!(entry.item, Charged::Range(1, _)))
@@ -238,9 +238,9 @@ fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation()
     ];
     let (result, trace) = run(&fixture, &requests, &wide(), 1 << 20);
     let admission = result.unwrap();
-    assert_eq!(admission.admitted.len(), 1);
+    assert_eq!(admission.admitted().len(), 1);
     assert_eq!(
-        admission.excluded,
+        admission.excluded(),
         vec![
             (live.id(), OptionalExclusion::Duplicate),
             (unknown.id(), OptionalExclusion::Missing),
@@ -269,7 +269,7 @@ fn an_optional_bound_at_limit_plus_one_refuses_with_the_bound_before_any_load() 
         ..wide()
     };
     let (ok, _) = run(&fixture, &requests, &two, 1 << 20);
-    assert_eq!(ok.unwrap().admitted.len(), 2);
+    assert_eq!(ok.unwrap().admitted().len(), 2);
     let one = OptionalBounds {
         max_fused_candidates: NonZeroUsize::MIN,
         ..wide()

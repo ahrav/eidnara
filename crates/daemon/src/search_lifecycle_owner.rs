@@ -1649,6 +1649,7 @@ mod tests {
                 .collect(),
             enabled: Default::default(),
             compressed_activation: false,
+            packing: None,
         }
     }
 

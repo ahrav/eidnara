@@ -3,6 +3,7 @@
 
 pub mod accounting;
 pub mod render;
+pub mod serialize;
 
 use std::num::NonZeroUsize;
 
@@ -10,6 +11,10 @@ pub use accounting::{AccountingProfile, Authority, Charge, DECLARED_UNCHARGED};
 pub use render::{
     AccountingBound, AccountingBounds, AccountingExceeded, BLOCK_CLOSE_FRAGMENT,
     BLOCK_OPEN_FRAGMENT, Charged, Ledger, LedgerEntry, admit_render,
+};
+pub use serialize::{
+    PackingFailure, PackingLimitRefusal, PackingLimits, Preparation, PreparationIdentity,
+    SerializationBound, SerializationBounds, finalize,
 };
 
 use kernel::applicability::EvalBudget;
@@ -421,22 +426,51 @@ pub enum OptionalExclusion {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CostedGroup {
+    /// Position in the partition; `render_group` labels the ledger entries with it, so a rebuilt ledger keeps the admission's labels.
+    pub index: usize,
     pub group: Group,
     pub cost: ClaudeTokens,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionalAdmission {
+    base: Ledger,
     /// The closed render: block, required items, admitted groups.
-    pub ledger: Ledger,
-    pub admitted: Vec<CostedGroup>,
+    ledger: Ledger,
+    admitted: Vec<CostedGroup>,
     /// Groups visited and skipped, in fused order.
-    pub skipped: Vec<CostedGroup>,
+    skipped: Vec<CostedGroup>,
     /// In the order the exclusions were found: duplicates, then reads, then
     /// judgments, then loads.
-    pub excluded: Vec<(OccurrenceId, OptionalExclusion)>,
-    pub ungrouped: Vec<(OccurrenceId, Ungrouped)>,
-    pub remaining: ClaudeTokens,
+    excluded: Vec<(OccurrenceId, OptionalExclusion)>,
+    ungrouped: Vec<(OccurrenceId, Ungrouped)>,
+    remaining: ClaudeTokens,
+}
+
+impl OptionalAdmission {
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    pub fn admitted(&self) -> &[CostedGroup] {
+        &self.admitted
+    }
+
+    pub fn skipped(&self) -> &[CostedGroup] {
+        &self.skipped
+    }
+
+    pub fn excluded(&self) -> &[(OccurrenceId, OptionalExclusion)] {
+        &self.excluded
+    }
+
+    pub fn ungrouped(&self) -> &[(OccurrenceId, Ungrouped)] {
+        &self.ungrouped
+    }
+
+    pub fn remaining(&self) -> ClaudeTokens {
+        self.remaining
+    }
 }
 
 /// The wrapper is charged once, at the group's first admitted member, as its
@@ -553,7 +587,8 @@ pub fn prepare_optional(
     let partition = group(&selected);
     trace.optional(OptionalEvent::Grouped, None);
 
-    let mut ledger = required.ledger.clone();
+    let base = required.ledger.clone();
+    let mut ledger = base.clone();
     let mut costs: Vec<ClaudeTokens> = Vec::with_capacity(partition.groups.len());
     let scan = skip_and_continue(
         required.remaining,
@@ -581,9 +616,10 @@ pub fn prepare_optional(
         .into_iter()
         .zip(costs)
         .enumerate()
-        .map(|(index, (group, cost))| (index, CostedGroup { group, cost }))
+        .map(|(index, (group, cost))| (index, CostedGroup { index, group, cost }))
         .partition(|(index, _)| scan.admitted.binary_search(index).is_ok());
     Ok(OptionalAdmission {
+        base,
         ledger,
         admitted: admitted.into_iter().map(|(_, group)| group).collect(),
         skipped: skipped.into_iter().map(|(_, group)| group).collect(),
@@ -591,6 +627,11 @@ pub fn prepare_optional(
         ungrouped: partition.refused,
         remaining: scan.remaining,
     })
+}
+
+#[cfg(feature = "test-support")]
+pub mod cost_cache {
+    pub use crate::token_cache::{clear, rotate};
 }
 
 #[cfg(test)]
