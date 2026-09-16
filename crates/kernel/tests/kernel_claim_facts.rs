@@ -669,6 +669,43 @@ fn corrected_claims_report_succession_and_serving_standing_at_the_snapshot() {
             Surface::ExplicitSearch
         )
     );
+    let mut ids = vec![
+        "decision-object-1".to_string(),
+        "missing".to_string(),
+        "decision-object-2".to_string(),
+    ];
+    for _ in 0..2 {
+        for requested in [corrected_at - 1, corrected_at] {
+            let singles: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    fixture
+                        .store
+                        .claim_facts_as_of(std::slice::from_ref(id), requested, bounds())
+                        .unwrap()
+                })
+                .collect();
+            let batch = fixture
+                .store
+                .claim_facts_as_of(&ids, requested, bounds())
+                .unwrap();
+            assert_eq!(
+                batch.claims,
+                singles
+                    .iter()
+                    .flat_map(|s| s.claims.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                batch.missing,
+                singles
+                    .iter()
+                    .flat_map(|s| s.missing.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+        ids.reverse();
+    }
 }
 
 #[test]

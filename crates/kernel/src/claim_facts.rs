@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::LazyLock;
 
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Statement, Transaction, TransactionBehavior, params};
 
 use super::admission::{
     Disposition, EventKind, Maturity, Outcome, ServedRow, SourceClass, Surface, SurfaceVisibility,
@@ -284,19 +284,28 @@ impl KernelStore {
         let mut claims = Vec::with_capacity(object_ids.len());
         let mut missing = Vec::new();
         let mut served = load_served(&tx, requested, object_ids)?;
-        for object_id in object_ids {
+        if !object_ids.is_empty() {
             limit.check()?;
-            match registry_row_at(&tx, requested, object_id)? {
-                None => missing.push(object_id.clone()),
-                Some(object) => {
-                    // A `load_claim` error aborts the request before later `object_ids` are read.
-                    claims.push(load_claim(
-                        &tx,
-                        requested,
-                        object,
-                        served.remove(object_id),
-                        bounds,
-                    )?);
+            static OWN_SQL: LazyLock<String> = LazyLock::new(|| admission_sql(AdmissionScope::Own));
+            static LINEAGE_SQL: LazyLock<String> =
+                LazyLock::new(|| admission_sql(AdmissionScope::Lineage));
+            let mut own = tx.prepare_cached(&OWN_SQL).map_err(map_sqlite)?;
+            let mut lineage = tx.prepare_cached(&LINEAGE_SQL).map_err(map_sqlite)?;
+            for object_id in object_ids {
+                limit.check()?;
+                match registry_row_at(&tx, requested, object_id)? {
+                    None => missing.push(object_id.clone()),
+                    Some(object) => {
+                        claims.push(load_claim(
+                            &tx,
+                            requested,
+                            object,
+                            served.remove(object_id),
+                            bounds,
+                            &mut own,
+                            &mut lineage,
+                        )?);
+                    }
                 }
             }
         }
@@ -332,13 +341,15 @@ fn load_claim(
     object: ObjectRow,
     served: Option<ServedRow>,
     bounds: ClaimFactBounds,
+    own: &mut Statement<'_>,
+    lineage: &mut Statement<'_>,
 ) -> Result<ClaimFacts, ClaimFactsError> {
     if object.object_kind != "decision" {
         return Err(ClaimFactsError::NotADecision);
     }
     let decision = load_decision(tx, &object)?;
-    let own_admission = load_admission(tx, requested, &object, AdmissionScope::Own)?;
-    let lineage_admission = load_admission(tx, requested, &object, AdmissionScope::Lineage)?;
+    let own_admission = load_admission(own, requested, &object)?;
+    let lineage_admission = load_admission(lineage, requested, &object)?;
     let served = match served {
         Some(row) => ServedStanding::Served(ServedFacts {
             sensitivity: row.object.sensitivity,
@@ -473,18 +484,10 @@ fn admission_sql(scope: AdmissionScope) -> String {
 }
 
 fn load_admission(
-    tx: &Transaction<'_>,
+    statement: &mut Statement<'_>,
     requested: i64,
     object: &ObjectRow,
-    scope: AdmissionScope,
 ) -> Result<Option<AdmissionFacts>, ClaimFactsError> {
-    static OWN_SQL: LazyLock<String> = LazyLock::new(|| admission_sql(AdmissionScope::Own));
-    static LINEAGE_SQL: LazyLock<String> = LazyLock::new(|| admission_sql(AdmissionScope::Lineage));
-    let sql = match scope {
-        AdmissionScope::Own => OWN_SQL.as_str(),
-        AdmissionScope::Lineage => LINEAGE_SQL.as_str(),
-    };
-    let mut statement = tx.prepare_cached(sql).map_err(map_sqlite)?;
     let raw = statement
         .query_row(
             rusqlite::named_params! {
