@@ -779,6 +779,36 @@ fn a_tombstoned_row_is_excluded_at_the_engine() {
     assert_eq!(retrieval.consumed.scanned_rows, before.len() - 1);
     assert!(!ids_of(&retrieval).contains(&fixture.id("gamma")));
     assert_eq!(retrieval.contributions.len(), before.len() - 1);
+
+    let expected: Vec<String> = before
+        .iter()
+        .filter(|id| **id != fixture.id("gamma"))
+        .cloned()
+        .collect();
+    let gamma_at = before
+        .iter()
+        .position(|id| *id == fixture.id("gamma"))
+        .unwrap();
+    for scan_rows in 1..=before.len() {
+        let tight = RetrievalBounds {
+            scan_rows: NonZeroUsize::new(scan_rows).unwrap(),
+            ..bounds()
+        };
+        let retrieval = fixture
+            .retrieve(&request, tight, &EvalBudget::unbounded())
+            .unwrap();
+        let want = &expected[..scan_rows.min(expected.len())];
+        assert_eq!(ids_of(&retrieval), want, "scan_rows={scan_rows}");
+        assert_eq!(
+            retrieval.completion,
+            if scan_rows < expected.len() {
+                Completion::Incomplete(IncompleteReason::ScanBound)
+            } else {
+                Completion::Complete
+            },
+            "scan_rows={scan_rows} gamma_at={gamma_at}"
+        );
+    }
 }
 
 #[test]
@@ -1176,6 +1206,3 @@ fn a_held_kernel_reader_does_not_outlive_the_budget() {
     assert_eq!(retrieval.consumed.batches, 0);
     assert_eq!(retrieval.consumed.probes, 1);
 }
-
-#[path = "support/lexical_probe_research.rs"]
-mod lexical_probe_research;
