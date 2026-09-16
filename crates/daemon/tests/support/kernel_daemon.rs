@@ -20,6 +20,8 @@ pub const DOMAIN: &str = "stage1-domain";
 
 pub struct KernelDaemon {
     handler: Handler,
+    /// The engine behind the handler's embedding lane, so a test can script one inference outcome.
+    engine: Arc<super::embedding_fixtures::TestEngine>,
     route: RouteHandle,
     project: PathBuf,
     // Fields drop in declaration order; the directory must outlive the handler
@@ -41,8 +43,9 @@ impl KernelDaemon {
     /// Starts the daemon over `data`, so records written there before the start are found by it.
     pub async fn start_in(data: tempfile::TempDir, project_config: Option<Value>) -> Self {
         let descriptor: StorageDescriptor = dev_descriptor_at(data.path().to_str().unwrap());
+        let engine = super::embedding_fixtures::TestEngine::new();
         let handler = Handler::new().with_local_embeddings(super::embedding_fixtures::component(
-            &super::embedding_fixtures::TestEngine::new(),
+            &engine,
             host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
         ));
         handler.disable_kernel_sampler_for_test();
@@ -98,10 +101,15 @@ impl KernelDaemon {
         ));
         Self {
             handler,
+            engine,
             route,
             project,
             _data: data,
         }
+    }
+
+    pub fn engine(&self) -> &super::embedding_fixtures::TestEngine {
+        &self.engine
     }
 
     pub async fn outcome(&self, request: Value) -> PreparedOutcome {

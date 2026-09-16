@@ -6,8 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use host_runtime::RouteHandle;
-use host_runtime::local_embeddings::inference::InferenceError;
-use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsStatus};
+use host_runtime::local_embeddings::{
+    DenseUnavailable, InferenceFailureKind, LaneUnavailableState, LocalEmbeddingsComponent,
+    LocalEmbeddingsStatus,
+};
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
 use kernel::{ArtifactDestination, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES};
@@ -425,7 +427,7 @@ pub enum DenseLane<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbedFailure {
-    /// The lane is starting, disabled, failing, or busy, or it refused the input; the dense lane degrades.
+    /// When the lane is starting, disabled, failing, busy, rejects the input, or serves another identity, the dense lane degrades.
     Unavailable(&'static str),
     /// Inference ran and failed or broke an invariant; the request ends typed.
     Faulted,
@@ -438,8 +440,8 @@ pub trait QueryEmbedder: Send + Sync {
 /// Parent Q5: a busy lane degrades at once; the route does not retry inside the deadline.
 impl QueryEmbedder for LocalEmbeddingsComponent {
     fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedFailure> {
-        match self.status() {
-            LocalEmbeddingsStatus::Ready(_) => {}
+        let lane = match self.status() {
+            LocalEmbeddingsStatus::Ready(lane) => lane,
             LocalEmbeddingsStatus::Starting => return Err(EmbedFailure::Unavailable("starting")),
             LocalEmbeddingsStatus::Disabled { .. } => {
                 return Err(EmbedFailure::Unavailable("disabled"));
@@ -447,16 +449,56 @@ impl QueryEmbedder for LocalEmbeddingsComponent {
             LocalEmbeddingsStatus::Failing { .. } => {
                 return Err(EmbedFailure::Unavailable("failing"));
             }
+        };
+        let admitted = self
+            .preflight_embedding_for_lane(&lane, text)
+            .map_err(embed_refusal)?;
+        self.embed_admitted(&admitted).map_err(embed_refusal)
+    }
+}
+
+fn embed_refusal(refusal: DenseUnavailable) -> EmbedFailure {
+    match refusal {
+        DenseUnavailable::LaneUnavailable { state } => EmbedFailure::Unavailable(match state {
+            LaneUnavailableState::Starting => "starting",
+            LaneUnavailableState::Unsupported | LaneUnavailableState::Disabled => "disabled",
+            LaneUnavailableState::Failing => "failing",
+        }),
+        DenseUnavailable::LaneBusy { .. } => EmbedFailure::Unavailable("busy"),
+        DenseUnavailable::IdentityChanged => EmbedFailure::Unavailable("lane_changed"),
+        DenseUnavailable::EmptyInput
+        | DenseUnavailable::ByteOverflow { .. }
+        | DenseUnavailable::ZeroTokens { .. }
+        | DenseUnavailable::TokenOverflow { .. }
+        | DenseUnavailable::CountUnavailable(InferenceFailureKind::Input)
+        | DenseUnavailable::Inference(InferenceFailureKind::Input) => {
+            EmbedFailure::Unavailable("input")
         }
-        match self.embed_blocking(&[text]) {
-            Ok(mut vectors) if vectors.len() == 1 => Ok(vectors.swap_remove(0)),
-            Ok(_) => Err(EmbedFailure::Faulted),
-            Err(InferenceError::Artifact(_)) => Err(EmbedFailure::Unavailable("busy")),
-            Err(InferenceError::Input(_)) => Err(EmbedFailure::Unavailable("input")),
-            Err(InferenceError::Execution(_) | InferenceError::Invariant(_)) => {
-                Err(EmbedFailure::Faulted)
-            }
-        }
+        DenseUnavailable::CountUnavailable(
+            InferenceFailureKind::Execution
+            | InferenceFailureKind::Artifact
+            | InferenceFailureKind::Invariant,
+        )
+        | DenseUnavailable::Inference(
+            InferenceFailureKind::Execution
+            | InferenceFailureKind::Artifact
+            | InferenceFailureKind::Invariant,
+        ) => EmbedFailure::Faulted,
+    }
+}
+
+/// Whether `query` has non-whitespace text outside its selector mentions; the dense lane embeds prose, so a selector-only request declares no dense lane.
+fn has_prose(intent: &Intent, query: &str) -> bool {
+    intent
+        .lexical_segments(query)
+        .iter()
+        .any(|segment| !segment.trim().is_empty())
+}
+
+fn selector_bounds(limits: &QueryRouteLimits) -> SelectorBounds {
+    SelectorBounds {
+        max_input_bytes: limits.query_bytes,
+        max_value_bytes: limits.query_bytes,
     }
 }
 
@@ -679,11 +721,7 @@ pub fn execute(
 ) -> Result<QueryOutcome, QueryFailure> {
     before_phase(Phase::Probes);
     check(budget)?;
-    let bounds = SelectorBounds {
-        max_input_bytes: limits.query_bytes,
-        max_value_bytes: limits.query_bytes,
-    };
-    let intent = classify(query, bounds)
+    let intent = classify(query, selector_bounds(limits))
         .map_err(|refusal| QueryFailure::InvalidQuery(refusal.to_string()))?;
 
     let read = projection.read_under(budget, |conn| {
@@ -714,7 +752,11 @@ pub fn execute(
             }
             before_phase(Phase::Dense);
             check(budget)?;
-            let dense = dense_lane(conn, kernel, &identity, authority, &dense, budget)?;
+            let dense = if has_prose(&intent, query) {
+                dense_lane(conn, kernel, &identity, authority, &dense, budget)?
+            } else {
+                LaneOutput::undeclared()
+            };
             before_phase(Phase::Fusion);
             check(budget)?;
             let rankings = [exact.ranking, lexical.ranking, dense.ranking]
@@ -952,7 +994,11 @@ impl HandlerCore {
             harness: _,
         } = scope;
         let query = parsed.query;
-        let embedded = if limits.dense.is_some() {
+        // A request without prose declares no dense lane, so inference is not spent on it; `execute` classifies again and answers a refused selector itself.
+        let embeds = limits.dense.is_some()
+            && classify(&query, selector_bounds(&limits))
+                .is_ok_and(|intent| has_prose(&intent, &query));
+        let embedded = if embeds {
             let embedder = self.query_embedder(&lifecycle);
             let slot: Arc<Mutex<Option<EmbedResult>>> = Arc::default();
             let text = query.clone();

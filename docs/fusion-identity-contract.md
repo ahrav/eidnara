@@ -114,14 +114,19 @@ not mutation.
 The exact lane runs over the query's `id:` mentions, the lexical lane over the
 prose outside selector mentions, and both run inside one interruptible
 projection read under the request budget. When a dense limit set is installed
-the query is first embedded in process by the daemon's embedding lane as one
-tracked blocking step awaited in the handler; the dense lane then runs inside
-the same read through `DenseProducer`, whose first implementation is the
-exhaustive f32 oracle. An embedding lane that is busy, starting, disabled,
-failing, or refuses the input leaves the dense lane `unavailable` and the
-answer `degraded`; inference that fails or a stored vector outside the
-generation's layout ends the request as `lane_unavailable` with reason
-`embedding_failed` or `dense_corruption`. Fusion runs once, the fused set is
+and the query carries prose outside its selector mentions, the query is first
+embedded in process by the daemon's embedding lane as one tracked blocking step
+awaited in the handler; the dense lane then runs inside the same read through
+`DenseProducer`, whose first implementation is the exhaustive f32 oracle. A
+selector-only query is never embedded and leaves the dense lane `undeclared`,
+as it does the lexical lane. An embedding lane that is busy, starting,
+disabled, failing, or that refuses the input or now serves another identity,
+leaves the dense lane `unavailable` and the answer `degraded`; the lane's own
+typed refusal decides the reason, so a lane that changes state during the call
+reports that state. Inference that runs and fails, including an artifact the
+backend declares unusable, or a stored vector outside the generation's layout
+ends the request as `lane_unavailable` with reason `embedding_failed` or
+`dense_corruption`. Fusion runs once, the fused set is
 revalidated by the kernel's eligibility adapter under the bound scope, and only
 survivors are materialized within `result_rows` and `response_bytes`. No
 payload byte is read by the route.

@@ -380,6 +380,75 @@ async fn producer_corruption_is_typed_while_a_foreign_query_shape_degrades_the_l
     fixture.daemon.shutdown().await;
 }
 
+/// The dense lane embeds prose; a request that is one selector, or selectors and whitespace, has none, so a ready lane stays undeclared and no producer runs, as the lexical lane already does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_no_producer() {
+    let fixture = Fixture::build().await;
+    fixture.store_vectors(vector_for);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counting = Counting {
+        inner: ExhaustiveProducer {
+            limits: dense_limits(),
+        },
+        calls: Arc::clone(&calls),
+    };
+    let (_token, budget) = request_budget(10_000);
+    for query in ["id:rule", "id:rule  id:other"] {
+        let outcome = execute(
+            &fixture.projection,
+            &fixture.store,
+            Authority {
+                project: &fixture.project,
+                destination: ArtifactDestination::Local,
+            },
+            &with_dense(),
+            budget.shared(),
+            query,
+            DenseLane::Ready {
+                query: &query_vector(),
+                generation_id: GENERATION,
+                producer: &counting,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.statuses[1..],
+            [LaneStatus::Undeclared, LaneStatus::Undeclared],
+            "{query}: {}",
+            outcome.body
+        );
+        assert_eq!(outcome.body["lanes"]["dense"]["status"], "undeclared");
+        assert_eq!(outcome.body["degraded"], false);
+        assert!(!entry_ids(&outcome.body).is_empty(), "{}", outcome.body);
+        assert!(
+            outcome
+                .fused
+                .entries()
+                .iter()
+                .all(|entry| entry.lane(Lane::Dense).is_none())
+        );
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no producer runs for a request without prose"
+    );
+
+    let prose = run(
+        &fixture,
+        &with_dense(),
+        &query_vector(),
+        &counting,
+        budget.shared(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(prose.statuses[2], LaneStatus::Complete);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    fixture.daemon.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete() {
     let fixture = Fixture::build().await;

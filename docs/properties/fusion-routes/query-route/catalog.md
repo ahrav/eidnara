@@ -43,11 +43,15 @@ verdict, `cancelled` or `deadline`; a panic in tracked work is the transport's
 Parent Q5 and Q6 decisions for the dense lane recorded here: the query is
 embedded in process by the daemon's `LocalEmbeddingsComponent`, the lane the
 family was built under, so nothing is routed and no remaining duration crosses
-a process; a busy, starting, disabled, or failing lane, or one that refuses the
-input, degrades at once with no retry inside the deadline, and the answer is
-`fused` with the dense lane `unavailable` and `degraded` true; inference that
-runs and fails, or a stored vector that fails the generation's layout, ends the
-request as `lane_unavailable` with reason `embedding_failed` or
+a process; only a query with prose outside its selector mentions is embedded,
+and a selector-only query leaves the dense lane `undeclared` without an
+inference call; a busy, starting, disabled, or failing lane, one that refuses
+the input, or one whose identity changed (`lane_changed`), degrades at once
+with no retry inside the deadline, and the answer is `fused` with the dense
+lane `unavailable` and `degraded` true, the reason taken from the lane's typed
+refusal; inference that runs and fails, including an artifact the backend
+declares unusable, or a stored vector that fails the generation's layout, ends
+the request as `lane_unavailable` with reason `embedding_failed` or
 `dense_corruption` and is never a degraded success; a query vector outside the
 generation's shape degrades the lane as `query_shape`. The exhaustive f32
 oracle is the first producer behind `DenseProducer`; the dense limits are
@@ -601,39 +605,53 @@ Status: active
 Exercised: yes - `crates/daemon/tests/query_route_dense.rs`
 `an_unavailable_embedding_lane_degrades_to_a_nonempty_exact_and_lexical_answer`,
 `producer_corruption_is_typed_while_a_foreign_query_shape_degrades_the_lane`,
+`a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_no_producer`,
 and `a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete`;
 `crates/daemon/src/query_route.rs`
 `a_lane_that_is_not_ready_is_an_unavailability_never_a_fault`;
 `crates/daemon/tests/query_route_handler.rs`
-`the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`.
+`the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`,
+`a_selector_only_request_is_never_embedded_and_leaves_the_dense_lane_undeclared`,
+and
+`an_artifact_fault_during_inference_is_embedding_failed_and_the_lane_is_disabled_after`.
 Guarantee: An embedding lane that is busy, starting, disabled, or failing, or
 that refuses the input, degrades the request to the exact and lexical fusion
-with the dense lane reported `unavailable` and a closed reason, within the
-original deadline and never as `deadline` or as dense completion; inference
-that fails, a stored vector that fails the layout, and a lane-level
-cancellation end the request as their own typed outcomes, never as a degraded
-success.
+with the dense lane reported `unavailable` and a closed reason taken from the
+lane's typed refusal, within the original deadline and never as `deadline` or
+as dense completion; a request without prose outside its selector mentions is
+never embedded and leaves a ready dense lane `undeclared`; inference that
+fails, including an artifact the backend declares unusable, a stored vector
+that fails the layout, and a lane-level cancellation end the request as their
+own typed outcomes, never as a degraded success.
 Check: `always` - for each unavailability reason the answer is `fused`,
 `degraded`, nonempty, carries no dense contribution, and the budget is not
 exhausted; a wrong-shaped query vector degrades the lane as `query_shape` while
 the other lanes serve; a zero-norm stored vector ends the request as
 `lane_unavailable`/`dense_corruption`; a faulted embedder ends it as
-`lane_unavailable`/`embedding_failed`; no producer runs when the lane is
-unavailable; a live row without a vector leaves the lane `incomplete` with
-reason `coverage_shortfall` and a `max_rows` of one leaves it `row_bound`, both
+`lane_unavailable`/`embedding_failed`; an engine that answers one inference
+with an artifact fault ends that request as `embedding_failed` and the next
+request reports the lane `disabled`; a selector-only request, at the `execute`
+level with a ready lane and through the handler with a counting embedder,
+reports the dense lane `undeclared`, carries no dense contribution, and makes
+no embedding or producer call; no producer runs when the lane is unavailable;
+a live row without a vector leaves the lane `incomplete` with reason
+`coverage_shortfall` and a `max_rows` of one leaves it `row_bound`, both
 degraded; a NaN tolerance is refused at installation; a budget that lapses
 during the embedding step is `deadline` even when the embedder also faulted.
 `always` because every dense request classifies its lane.
 Fault/timing angle: None; the lane states are driven directly.
 Required faults and enabling state: A populated projection with vectors; the
-`DenseLane::Unavailable` input; a scripted embedder for the handler path; a
-corrupt stored vector.
+`DenseLane::Unavailable` input; a scripted embedder for the handler path; an
+engine scripted to fail one inference; a corrupt stored vector.
 Confidence: high - [evidence](evidence/route-dense-unavailable-degrades-typed-within-deadline.md).
 Existing check: `crates/host-runtime` local-embeddings busy and disabled
 tests, status unaudited.
-Impact: A busy lane reported as `deadline` would blame the caller's budget; a
-corrupt vector served as a degraded success would rank rows over bytes the
-generation does not own.
+Impact: A busy lane reported as `deadline` would blame the caller's budget; an
+artifact fault reported as `busy` would count a disabled lane as saturation in
+the RP2.9 retry calibration; a selector-only lookup embedded and scanned would
+fuse a ranking over selector syntax into a direct answer and spend the lane's
+inference permit on it; a corrupt vector served as a degraded success would
+rank rows over bytes the generation does not own.
 Open questions:
 
 - Whether a bounded retry inside the deadline should replace at-once
