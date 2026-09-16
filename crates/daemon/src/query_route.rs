@@ -52,6 +52,8 @@ pub enum LimitsRefusal {
     LexicalAccepted { value: usize },
     #[error("response_bytes {value} cannot hold the {floor}-byte empty fused envelope")]
     ResponseBytes { value: usize, floor: usize },
+    #[error("response_bytes {value} exceeds the {max}-byte wire body the host can send")]
+    ResponseBytesOverWire { value: usize, max: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +81,7 @@ impl QueryRouteLimits {
         NonZeroUsize::new(bytes).expect("the empty fused envelope is not empty")
     }
 
-    /// Refuses a limit the kernel's eligibility batch could never serve or a response bound no answer fits, so the refusal lands at installation instead of on every request.
+    /// `validate` rejects limits the kernel eligibility batch cannot serve, response bounds below the empty fused envelope, and response bounds above the host wire maximum at installation.
     pub fn validate(&self) -> Result<(), LimitsRefusal> {
         if self.validation_batch.get() > MAX_ELIGIBILITY_CANDIDATES {
             return Err(LimitsRefusal::ValidationBatch {
@@ -96,6 +98,12 @@ impl QueryRouteLimits {
             return Err(LimitsRefusal::ResponseBytes {
                 value: self.response_bytes.get(),
                 floor: floor.get(),
+            });
+        }
+        if self.response_bytes.get() > crate::dispatch::MAX_WIRE_BODY_BYTES {
+            return Err(LimitsRefusal::ResponseBytesOverWire {
+                value: self.response_bytes.get(),
+                max: crate::dispatch::MAX_WIRE_BODY_BYTES,
             });
         }
         Ok(())
@@ -1014,6 +1022,16 @@ mod tests {
             Err(LimitsRefusal::ResponseBytes {
                 value: below.get(),
                 floor: floor.get(),
+            })
+        );
+        let wire = NonZeroUsize::new(crate::dispatch::MAX_WIRE_BODY_BYTES).unwrap();
+        assert_eq!(limits(wire).validate(), Ok(()));
+        let over = NonZeroUsize::new(wire.get() + 1).unwrap();
+        assert_eq!(
+            limits(over).validate(),
+            Err(LimitsRefusal::ResponseBytesOverWire {
+                value: over.get(),
+                max: wire.get(),
             })
         );
     }

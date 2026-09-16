@@ -261,8 +261,9 @@ atoms against `probes` before any page or scan, scan rows and accepted rows
 inside the lexical lane, the fused union inside `fuse`, the validation batch
 per kernel call, result rows and response bytes before each entry is
 serialized and the response bytes against the envelope before any entry; an
-absent limit set disables the route; a limit set the kernel could not serve or
-whose `response_bytes` cannot hold the empty envelope is refused at
+absent limit set disables the route; a limit set the kernel could not serve,
+whose `response_bytes` cannot hold the empty envelope, or whose
+`response_bytes` exceeds `dispatch::MAX_WIRE_BODY_BYTES` is refused at
 installation; the U3a bridge refuses an unapproved deadline ceiling.
 Check: `always` - `result_rows = 1` materializes one entry and reports
 `truncated` while the fused ranking keeps every entry; a 200-byte
@@ -281,7 +282,8 @@ still serves; `lexical_accepted = 1` and `lexical_scan_rows = 1` report
 invalid at the handler and again by `classify`; a `validation_batch` over the
 kernel's candidate maximum is refused by `set_query_route_limits` and installs
 nothing; a `response_bytes` one below the floor is refused by `validate` with
-the floor named. `always` because each bound must hold on every request.
+the floor named, and one above the wire body maximum is refused with the
+maximum named. `always` because each bound must hold on every request.
 Fault/timing angle: None; saturation is reached by shrinking one limit at a
 time on a fixed corpus.
 Required faults and enabling state: A projection with more matching rows than
@@ -392,7 +394,12 @@ revalidation judge every candidate under the route binding's project scope
 before any position is assigned; an occurrence a lane reads is ranked only
 when the kernel judges it eligible under that scope, so no identifier a caller
 or a lane produces widens authorization, and a row the caller may not see
-earns no lane position, no fused position, and no page or union slot.
+earns no lane position, no fused position, and no union slot. The exact
+lane's `exact_page_rows` by `exact_pages` bound counts rows read, including
+tombstoned and ineligible rows, because `exact::page` carries no scope and the
+kernel judges only after the projection connection is released; `page_bound`
+therefore reports that the read bound was reached, not that every unread row
+would have been visible.
 Check: `always` - a request body with an `occurrence_ids` field is refused
 as invalid by `deny_unknown_fields`; under a foreign project scope the same
 projection rows yield a `fused` answer with no entries because every lane

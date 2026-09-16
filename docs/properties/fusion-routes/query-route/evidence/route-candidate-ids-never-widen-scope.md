@@ -62,7 +62,11 @@ None.
 - Findings: with unjudged rows in the ranking, a survivor's position counted
   rows the caller may not see, so a position gap disclosed how many hidden,
   foreign, or retired rows a named object has, and those rows consumed
-  `exact_pages` and `fused_union`. Judging before ranking removes both effects
-  and makes the exact lane's positions mean the same as the lexical lane's.
+  `fused_union`. Judging before ranking removes both effects and makes the
+  exact lane's positions mean the same as the lexical lane's. The rows still
+  occupy `exact::page` rows, so the `exact_page_rows` by `exact_pages` bound
+  is a read bound and a `page_bound` status can accompany fewer visible
+  entries than that bound; it discloses only that the named object has more
+  associations than the route reads, not which of them the caller may see.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

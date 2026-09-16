@@ -114,8 +114,10 @@ request that arrives while the store is still starting or unavailable receives
 the kernel routes' `state` answer for that condition, as every `kernel.*` route
 does, because the binding is decided before the limit set is consulted.
 `QueryRouteLimits::validate` refuses a `validation_batch` or `lexical_accepted`
-over the kernel's candidate batch and a `response_bytes` below the empty fused
-envelope, so no installed set can produce an answer the route cannot bound.
+over the kernel's candidate batch, a `response_bytes` below the empty fused
+envelope, and a `response_bytes` above the host wire body maximum, so no
+installed set can produce an answer the route cannot bound or the host cannot
+send.
 
 The exact lane reads the query's `id:` mentions and the lexical lane scans the
 prose outside selector mentions inside one interruptible projection read under
@@ -124,7 +126,11 @@ reader is taken. Both lanes are then admitted by the kernel's eligibility
 adapter under the bound scope: the lexical lane through
 `retrieval::lexical::admit`, the exact lane by judging its rows in
 `validation_batch` slices before any position is assigned, so a row the caller
-may not see earns no lane position and consumes no page or union slot. Fusion
+may not see earns no lane position and consumes no union slot. The exact
+lane's page bound counts every row `exact::page` reads, tombstoned or
+ineligible rows included, because the kernel judges only after the projection
+connection is released; `page_bound` names a read bound, not a visible-row
+count. Fusion
 runs once, the fused set is revalidated by the same adapter in
 `validation_batch` slices, and only survivors are materialized within
 `result_rows` and `response_bytes`. Every judgment refuses to join verdicts
