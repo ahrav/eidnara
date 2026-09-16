@@ -43,7 +43,3 @@ harness = false
 [[bench]]
 name = "dense_scalar"
 harness = false
-
-[[bench]]
-name = "claim_read"
-harness = false
