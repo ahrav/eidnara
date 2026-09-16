@@ -89,7 +89,16 @@ scan, status unaudited; `crates/retrieval/tests/lexical_retrieval.rs`
 drives the storage scope directly, status unaudited.
 Impact: A stage with its own fresh budget could outlive the caller's deadline,
 and a transport timeout could stand in for the caller's remaining duration.
-Open questions: None.
+Open questions:
+
+- A SQLite busy wait inside the read runs under the store's standing 5 s
+  `BUSY_TIMEOUT` (`crates/storage/src/lib.rs`), which neither the deadline
+  nor the stop predicate shortens; the progress handler polls only between VM
+  steps. In WAL mode a reader waits only during recovery or against an
+  exclusive-locking-mode connection, and an attempt to construct that wait
+  against a store that already holds the wal-index was refused with
+  `DatabaseBusy` on the blocker side. Unresolved, needs a reproducible busy
+  reader before the write path's `with_busy_timeout_until` is applied here.
 
 ### route-sql-cancellation-is-request-local
 
@@ -194,3 +203,18 @@ Open questions:
 
 - Which route-owned permits and dense pins the census must include is fixed
   when U3b and U3c add them. (needs human input)
+
+## Relationship map
+
+The derivation record is the precondition for the other two: the deadline and
+flag it mints are what the progress handler and the acquisition poll observe,
+so a re-derived or transport-supplied budget would make the request-local and
+join-before-settle checks pass against the wrong deadline. The request-local
+record constrains the connection while a request owns it and after its read
+returns; the join record constrains the worker and the ledger charge after the
+host aborts the handler, and hands the connection back through the same
+`read_on` release the request-local record relies on. Neither later record
+proves the derivation is unique, and the derivation record says nothing about
+what a leaked handler or an early settlement would do; each guarantee needs
+its own check. The permit and pin clauses of the join record wait on state the
+route and dense lane add, and will not change the other two records.
