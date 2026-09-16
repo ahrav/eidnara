@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use daemon::projection_gates::{Admission, EntryPoint, HookGate, ProjectionHook};
 use daemon::vector_generation::{
     BuiltVectors, CODES_FILE, ExpectedVectors, FileFault, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE,
-    SIDECAR_FILE, Staging, VECTOR_TARGET, VectorRefusal, VectorSidecar, build, stage, verify,
+    SIDECAR_FILE, Staging, TOMBSTONES_FILE, VECTOR_TARGET, VectorRefusal, VectorSidecar, build,
+    stage, verify,
 };
 use host_runtime::generation::{
     CurrentProfile, GENERATIONS_DIR_NAME, GenerationError, GenerationManifest, GenerationStore,
@@ -70,6 +71,7 @@ fn export() -> LiveRows {
                 vector,
             })
             .collect(),
+        tombstones: Vec::new(),
     }
 }
 
@@ -303,10 +305,12 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
             ROW_IDS_FILE,
             ROWS_FILE,
             SCALES_FILE,
+            TOMBSTONES_FILE,
             SIDECAR_FILE
         ]
     );
     assert_eq!(first.sidecar.rows, 4);
+    assert_eq!(first.sidecar.tombstones, 0);
     assert_eq!(first.sidecar.calibrated_rows, 4);
     assert_eq!(first.sidecar.metric, "inner_product");
     assert_eq!(
@@ -366,7 +370,7 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
 }
 
 #[test]
-fn build_refuses_no_rows_out_of_order_rows_and_rows_outside_the_layout() {
+fn build_refuses_no_rows_disordered_rows_or_tombstones_and_rows_outside_the_layout() {
     let fixture = Fixture::new();
     let dir = fixture.work_dir();
     let mut empty = export();
@@ -393,6 +397,18 @@ fn build_refuses_no_rows_out_of_order_rows_and_rows_outside_the_layout() {
         build(&fixture.expected(), &unnormalized, &dir),
         Err(VectorRefusal::Rows(_))
     ));
+    let mut unordered_tombstones = export();
+    unordered_tombstones.tombstones = vec!["ff".repeat(32), "ee".repeat(32)];
+    assert_eq!(
+        build(&fixture.expected(), &unordered_tombstones, &dir),
+        Err(VectorRefusal::TombstoneOrder { index: 1 })
+    );
+    let mut both = export();
+    both.tombstones = vec![both.rows[2].occurrence_id.clone()];
+    assert_eq!(
+        build(&fixture.expected(), &both, &dir),
+        Err(VectorRefusal::ListedAndTombstoned { index: 2 })
+    );
     assert!(
         fs::read_dir(&dir).unwrap().next().is_none(),
         "a refused build writes nothing"
@@ -545,6 +561,57 @@ fn verification_refuses_rehashed_state_whose_meaning_changed() {
         fixture.verify(&fewer_ids).unwrap_err(),
         VectorRefusal::File {
             path: ROW_IDS_FILE,
+            fault: FileFault::Identifiers
+        }
+    );
+
+    // Tombstones edited, every hash rewritten to match: a listed row cannot also be masked, and the count must be the sidecar's.
+    let listed_tombstone = fixture.restaged(&digest, |dir| {
+        let ids: Vec<String> =
+            serde_json::from_slice(&fs::read(dir.join(ROW_IDS_FILE)).unwrap()).unwrap();
+        rehash_file(
+            dir,
+            TOMBSTONES_FILE,
+            &serde_json::to_vec(&[&ids[0]]).unwrap(),
+        );
+        let mut sidecar = read_sidecar(dir);
+        sidecar.tombstones = 1;
+        write_bound(dir, &sidecar);
+    });
+    assert!(fixture.store.validate(&listed_tombstone).is_ok());
+    assert_eq!(
+        fixture.verify(&listed_tombstone).unwrap_err(),
+        VectorRefusal::File {
+            path: TOMBSTONES_FILE,
+            fault: FileFault::Identifiers
+        }
+    );
+    let tombstone_count = fixture.restaged(&digest, |dir| {
+        let mut sidecar = read_sidecar(dir);
+        sidecar.tombstones = 1;
+        write_bound(dir, &sidecar);
+    });
+    assert_eq!(
+        fixture.verify(&tombstone_count).unwrap_err(),
+        VectorRefusal::File {
+            path: TOMBSTONES_FILE,
+            fault: FileFault::Identifiers
+        }
+    );
+    let disordered_tombstones = fixture.restaged(&digest, |dir| {
+        rehash_file(
+            dir,
+            TOMBSTONES_FILE,
+            &serde_json::to_vec(&["ff".repeat(32), "ee".repeat(32)]).unwrap(),
+        );
+        let mut sidecar = read_sidecar(dir);
+        sidecar.tombstones = 2;
+        write_bound(dir, &sidecar);
+    });
+    assert_eq!(
+        fixture.verify(&disordered_tombstones).unwrap_err(),
+        VectorRefusal::File {
+            path: TOMBSTONES_FILE,
             fault: FileFault::Identifiers
         }
     );

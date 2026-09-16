@@ -43,3 +43,7 @@ harness = false
 [[bench]]
 name = "dense_scalar"
 harness = false
+
+[[bench]]
+name = "dense_resolve"
+harness = false

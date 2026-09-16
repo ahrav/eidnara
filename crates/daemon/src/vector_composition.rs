@@ -114,6 +114,8 @@ impl Composition {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum CompositionRefusal {
+    #[error("the base masks {tombstones} occurrences; only a delta carries tombstones")]
+    BaseTombstones { tombstones: u64 },
     #[error("delta {index} repeats a member digest")]
     DuplicateMember { index: usize },
     #[error("{count} deltas exceed the {max} delta bound")]
@@ -202,6 +204,11 @@ fn check_topology(
         return Err(CompositionRefusal::DeltasOverBound {
             count: deltas.len(),
             max: max_deltas.get(),
+        });
+    }
+    if base.sidecar.tombstones != 0 {
+        return Err(CompositionRefusal::BaseTombstones {
+            tombstones: base.sidecar.tombstones,
         });
     }
     let identity = VectorIdentity::from_expected(expected);

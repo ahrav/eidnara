@@ -1,4 +1,4 @@
-# Original-f32 rows and the exhaustive retrieval oracle
+# Original-f32 rows, the exhaustive retrieval oracle, and layer resolution
 
 Status: proposed contract, implemented in `crates/retrieval/src/dense/`.
 
@@ -222,6 +222,70 @@ here.
 Pinned bytes for a fixed corpus live in `tests/dense_scalar.rs`. A change to
 them is a change to the recipe.
 
+## Layer resolution and the layered ranking
+
+`dense::resolve::resolve` turns one base layer and its ordered deltas into the
+current occurrence set before anything is judged or scored. Each layer carries
+a precedence, the lexicographic pair `(base_epoch, delta_ordinal)`: the base
+is ordinal zero and every member of one composition shares the base epoch,
+which is the composition's generation epoch; the daemon's reader maps the
+composition's base and delta positions onto these ordinals. Resolution is
+newest first. A layer's row for an occurrence wins over every older layer's
+row for it (those are `superseded`); a layer's tombstone hides every older
+row for it (those are `masked`); a newer row after an older tombstone wins,
+since the tombstone is older. The order layers are handed in and the order
+rows sit in a layer decide nothing, and no score is consulted: the winners
+are the same function of the layer contents under every enumeration. Winners
+are returned in occurrence identifier byte order, each naming its layer and
+row, so a scorer that needs a layer's own scales knows which layer the row
+came from.
+
+The resolver refuses, before choosing any winner: no base or more than one;
+two layers of equal precedence; a layer whose base epoch is not the base's; a
+layer whose snapshot or checkpoint moves before the checkpoint of the layer
+before it, or whose snapshot follows its own checkpoint (the same
+conservative reading `compose` uses); a layer naming more or fewer
+occurrences than it holds rows; identifiers or tombstones out of strictly
+increasing order, which also catches repeats; an occurrence a layer both
+lists and tombstones; and more rows and tombstones together than the caller's
+bound. The resolver checks the total from slice lengths before inspecting
+any layer's identifiers or tombstones, so an oversized set cannot consume
+content-validation work. Equal-precedence conflicts are refused, not decided:
+the owners have not chosen a rule, and a refusal is not a default.
+
+`dense::layered::rank_layers` checks the request budget and the layers' epochs
+against the request generation before resolving any layer contents. An ended
+budget refuses as `OracleRefusal::BudgetExhausted`. Resolution is synchronous
+and does not poll the budget; the oracle checks it again before reading the
+projection. If the budget ends while a valid layer set resolves, the oracle
+still refuses because no page has completed. The resolved winners then enter
+the oracle's own walk. The population, visit order, paging, eligibility batches, top-`k`
+admission, final re-judgment, coverage, budget, and completion rules are the
+oracle's without change; only the source of each visited row's vector
+differs. The walk reads the projection's live dense-required rows in
+identifier order and merges them with the winners in the same order: a live
+row whose occurrence has a winner takes the winner's row, validated against
+the layout as a stored row is; a live row with no winner is a dense-coverage
+shortfall, pending or not as the oracle counts it, whether no layer ever held
+it or a newer tombstone masked it; a winner whose occurrence the projection
+no longer lists as live, or whose class requires no vector, is `revoked` and
+never scored, and no older row of its occurrence stands in for it. A walk
+whose last page still had rows after it reports the winners past its last
+visited row as `unvisited` rather than claiming they are live or not; a walk
+that read the last page knows the winners past it are revoked, however the
+walk then ended. Canonical eligibility is judged on winners only, and the
+final re-judgment rejects a winner whose authority moved after admission
+without falling back to any other row of its occurrence. `LayerAccount`
+carries the winner, superseded, masked, revoked, and unvisited counts beside
+the ranking.
+
+The layered ranking reads `occurrences`, `occurrence_tombstones`,
+`embedding_jobs`, and `vector_generations`; it never reads
+`occurrence_vectors` or payload bytes. Row bytes come from the caller's
+layers, which the daemon verifies before handing them over. Scoring mixed
+recipes on int8 codes with each layer's own scales is not part of this
+ranking; the winners name their layer so that a later scorer can do so.
+
 ## The immutable vector generation
 
 `daemon::vector_generation` builds one generation from a
@@ -229,7 +293,7 @@ them is a change to the recipe.
 occurrence with a vector of the generation, validated against the layout, in
 occurrence identifier order, together with the projection checkpoint the same
 read transaction observed, so the provenance the sidecar records is the state
-the rows came from. The generation is five files staged through the shared
+the rows came from. The generation is six files staged through the shared
 `GenerationStore` under target `vector-generation`:
 
 | File | Bytes |
@@ -238,13 +302,20 @@ the rows came from. The generation is five files staged through the shared
 | `codes.int8` | One two's-complement byte per coordinate per row, in the same row order, encoded under the generation's scales. |
 | `scales.f32` | The calibration scales, four little-endian bytes each. |
 | `row-ids.json` | A JSON array of the occurrence identifiers, in row order. |
+| `tombstones.json` | A JSON array of the occurrence identifiers the layer masks in every older layer, in identifier order; empty for a base. |
 | `vector-sidecar.json` | The sidecar, in its canonical byte form. |
 
 The sidecar names every other file by size and SHA-256 and binds the model,
 tokenizer fingerprint, dimension, metric, unit-norm tolerance, quantizer
 recipe, calibrated row count and scales digest, generation identifier and
-epoch, kernel incarnation, and the projection checkpoint the rows were taken
-at. Its hash fills the manifest's inputs slot, the compatibility identity's
+epoch, kernel incarnation, the projection checkpoint the rows were taken at,
+and the row and tombstone counts. A build refuses rows or tombstones out of
+identifier order and an occurrence the layer both lists and tombstones, so a
+layer never contradicts itself. A full export of the live population carries
+no tombstones; a delta export lists the occurrences tombstoned since the layer
+before it. A build still needs at least one row, since the scales are the
+calibration of the rows and calibration over no rows is an open owner
+question, so a delta that only masks cannot be built until that is settled. Its hash fills the manifest's inputs slot, the compatibility identity's
 digest fills the contract slot, and the row artifact's hash fills the payload
 slot, so the generation digest is a function of every declared input and two
 builds over byte-identical inputs yield the same directory name, the same
@@ -253,7 +324,7 @@ bytes, and the same digest. The `GenerationManifest` schema is unchanged.
 Verification (`vector_generation::verify`) does not trust the manifest to
 describe itself. The store checks inventory, sizes, modes, and hashes; the
 verifier then checks that the manifest is a vector manifest, that the sidecar
-bytes are canonical, inventory exactly the four payload files, and hash into
+bytes are canonical, inventory exactly the five payload files, and hash into
 the manifest, that every identity field of the sidecar equals the caller's
 expectation (model, tokenizer fingerprint, dimension, metric, tolerance,
 recipe, generation identifier and epoch, kernel incarnation, and the
@@ -261,8 +332,9 @@ checkpoint when the caller names one), and that the payload agrees with
 itself under the recipe: the row artifact holds the declared number of rows,
 recalibrating those rows reproduces the scale bytes and the calibrated row
 count and the scales hash the sidecar records, the identifiers number the
-rows in strictly increasing order, and the codes are exactly the rows encoded
-under the scales. A generation whose hashes were rewritten to match changed
+rows in strictly increasing order, the tombstones are as many as the sidecar
+says, strictly increasing, and disjoint from the identifiers, and the codes
+are exactly the rows encoded under the scales. A generation whose hashes were rewritten to match changed
 bytes is refused when its meaning changed. A different model space is refused
 at an equal dimension.
 
@@ -301,14 +373,14 @@ through the shared store under target `vector-composition`:
 | `composition.json` | Canonical record: schema, publication sequence, model, tokenizer fingerprint, dimension, metric, tolerance, recipe, epoch, kernel incarnation, base digest, delta digests in application order. |
 | `members.json` | `{"schema":1,"members":[base, deltas...]}`; the lifecycle store reads it to retain every member while the composition is selected. |
 
-`compose` refuses a duplicate member, more deltas than
+`compose` refuses a base whose sidecar counts tombstones, a duplicate member, more deltas than
 the bound, a member whose sidecar does not carry the expectation's identity,
 and a delta whose checkpoint moves backwards from its predecessor's. This is a
 conservative reading of the base/delta checkpoint relation the owners have not
 yet frozen: every delta's snapshot and checkpoint are at or after the
 checkpoint of the layer before it. Equal-precedence conflicts among members
-are not decided here. These layers export live rows only; base/delta tombstone
-semantics belong to the layer-resolution work.
+are not decided here. Base/delta tombstone semantics are those of "Layer
+resolution and the layered ranking" above.
 
 `publish` refuses a sequence at or below the selected composition's, stages
 the composition under the caller's admission, and moves the selector in one
