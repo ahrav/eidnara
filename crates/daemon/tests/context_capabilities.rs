@@ -358,6 +358,26 @@ async fn suppression_needs_whole_message_survivor_proof_for_every_selected_occur
     )
     .await;
     assert_eq!(malformed["reason"], "malformed_survivor", "{malformed}");
+    let misspelled = call(
+        &daemon,
+        prepare(
+            &project,
+            "suppress",
+            json!([whole(OCC_A), {"occurrence_id": OCC_B, "buffer_len": 100, "spn": null}]),
+        ),
+    )
+    .await;
+    assert_eq!(
+        misspelled["error"], "invalid_params",
+        "a survivor entry is parsed as strictly as a span: {misspelled}"
+    );
+    let mut malformed_selection = prepare(&project, "suppress", json!([]));
+    malformed_selection["selection"] = json!(["zz"]);
+    let malformed_selection = call(&daemon, malformed_selection).await;
+    assert_eq!(
+        malformed_selection["error"], "invalid_params",
+        "a malformed context is refused before the survivor proof is judged: {malformed_selection}"
+    );
 
     for survivors in [
         json!([whole(OCC_A), whole(OCC_B), {"occurrence_id": OCC_B, "buffer_len": 100, "span": [0, 40]}]),

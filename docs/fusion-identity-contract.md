@@ -143,7 +143,7 @@ witness. A malformed request is the transport's `invalid_params` error.
 
 `retrieval.prepare`, `retrieval.apply`, and `retrieval.confirm` in
 `crates/daemon/src/edit_receipts.rs` carry a selection from ranking to a
-confirmed edit; their literals are context-application protocol 1 in
+confirmed edit; their literals are context-application protocol 2 in
 `docs/host-wire-protocol.md` Section 7.8. A preparation binds the RP2.7.U1
 preparation digest over the caller's context and mints a per-preparation
 identity whose fingerprint covers daemon incarnation, context revision,

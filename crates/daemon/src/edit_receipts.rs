@@ -487,6 +487,9 @@ impl ReceiptStore {
         edit_bytes: u64,
         survivors: &[WireSpan],
     ) -> Result<PrepareOutcome, IdentityRefusal> {
+        // A malformed context is `invalid_params` for every action; the capacity and survivor answers below are outcomes for a well-formed request.
+        let digest = context.digest()?;
+        let selection = context.selection_digest()?;
         let capacity = match action {
             Action::Append => Some((self.limits.append_allowance_bytes, "append_allowance")),
             Action::Replace | Action::Reuse => Some((
@@ -505,8 +508,6 @@ impl ReceiptStore {
         {
             return Ok(PrepareOutcome::Failure(reason));
         }
-        let digest = context.digest()?;
-        let selection = context.selection_digest()?;
         self.expire(now);
         let max_keys = self.limits.max_keys;
         if !self.project(project).make_room(max_keys) {
@@ -1042,6 +1043,43 @@ mod tests {
     /// A key another daemon incarnation minted: sixteen hex characters, a dash, sixty-four hex characters.
     fn foreign_key(seed: &str) -> String {
         format!("{}-{}", seed.repeat(8), seed.repeat(32))
+    }
+
+    #[test]
+    fn a_malformed_context_is_invalid_before_capacity_or_survivor_proof_is_judged() {
+        let now = Instant::now();
+        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        let mut malformed = context("rev");
+        malformed.selection = vec!["zz".to_string()];
+        assert!(
+            store
+                .prepare(
+                    now,
+                    PROJECT,
+                    &malformed,
+                    Action::Suppress,
+                    "profile",
+                    0,
+                    &[]
+                )
+                .is_err(),
+            "a suppression without survivors is still a malformed context first"
+        );
+        assert!(
+            store
+                .prepare(
+                    now,
+                    PROJECT,
+                    &malformed,
+                    Action::Append,
+                    "profile",
+                    1000,
+                    &[]
+                )
+                .is_err(),
+            "an append over the allowance is still a malformed context first"
+        );
+        assert!(store.is_empty());
     }
 
     #[test]

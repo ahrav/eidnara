@@ -19,7 +19,7 @@ gate records.
 This part owns `crates/daemon/src/edit_receipts.rs`: the bounded in-memory
 receipt store behind `retrieval.prepare`, `retrieval.apply`, and
 `retrieval.confirm`, whose wire shape is Section 7.8 of
-`docs/host-wire-protocol.md` (context-application protocol 1).
+`docs/host-wire-protocol.md` (context-application protocol 2).
 
 Parent decisions recorded here. Q7: a deliberate second application of one
 selection is a legal intent, so the tuple (daemon incarnation, context
