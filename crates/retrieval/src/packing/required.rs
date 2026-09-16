@@ -14,6 +14,7 @@ pub trait TokenCount: Copy + Ord + fmt::Debug {
     const ZERO: Self;
     const MAX: Self;
     fn checked_add(self, other: Self) -> Option<Self>;
+    fn checked_sub(self, other: Self) -> Option<Self>;
 }
 
 impl TokenCount for u64 {
@@ -22,6 +23,10 @@ impl TokenCount for u64 {
 
     fn checked_add(self, other: Self) -> Option<Self> {
         u64::checked_add(self, other)
+    }
+
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        u64::checked_sub(self, other)
     }
 }
 

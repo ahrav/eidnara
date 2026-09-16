@@ -6,11 +6,13 @@ use std::num::NonZeroUsize;
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, KernelError, KernelStore, ProjectScope};
 use retrieval::ProjectionError;
-use retrieval::eligibility::judge_occurrences_within_budget;
+use retrieval::eligibility::{Disposition, judge_occurrences_within_budget};
 use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{
-    RequiredBound, RequiredBounds, RequiredContextFailure, RequiredFact, RequiredRequest,
-    SelectedOccurrence, TokenCount, admit_required, load_payload, read_selected, reserve_required,
+    BoundExceeded, Group, OptionalBounds, RequiredBound, RequiredBounds, RequiredContextFailure,
+    RequiredFact, RequiredRequest, Selected, SelectedOccurrence, TokenCount, Ungrouped,
+    admit_fused_candidates, admit_optional_set, admit_required, group, load_payload, read_selected,
+    reserve_required, skip_and_continue,
 };
 use storage::SqliteStore;
 
@@ -71,6 +73,10 @@ impl TokenCount for ClaudeTokens {
     fn checked_add(self, other: Self) -> Option<Self> {
         self.0.checked_add(other.0).map(Self)
     }
+
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        self.0.checked_sub(other.0).map(Self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,9 +117,19 @@ pub enum RequiredEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionalEvent {
+    Read,
+    Judged,
+    Bounded,
+    Loaded,
+    Grouped,
+    Scanned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageEvent {
     Required(RequiredEvent, Option<OccurrenceId>),
-    Optional,
+    Optional(OptionalEvent, Option<OccurrenceId>),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -131,7 +147,7 @@ impl PackingTrace {
     pub fn optional_events(&self) -> usize {
         self.events
             .iter()
-            .filter(|event| matches!(event, StageEvent::Optional))
+            .filter(|event| matches!(event, StageEvent::Optional(..)))
             .count()
     }
 
@@ -151,11 +167,16 @@ impl PackingTrace {
     fn required(&mut self, event: RequiredEvent, occurrence: Option<OccurrenceId>) {
         self.events.push(StageEvent::Required(event, occurrence));
     }
+
+    fn optional(&mut self, event: OptionalEvent, occurrence: Option<OccurrenceId>) {
+        self.events.push(StageEvent::Optional(event, occurrence));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreparationRefusal {
     Required(RequiredContextFailure<ClaudeTokens>),
+    OptionalBound(BoundExceeded),
     Deadline,
     Projection(ProjectionError),
     Storage(String),
@@ -208,6 +229,40 @@ pub struct RequiredMaterialization {
     pub profile: &'static str,
     pub items: Vec<MaterializedRequired>,
     pub charged: ClaudeTokens,
+    /// The token limit left for optional work.
+    pub remaining: ClaudeTokens,
+}
+
+fn deadline(inputs: &RequiredInputs<'_>) -> Result<(), PreparationRefusal> {
+    if inputs.budget.is_exhausted() {
+        Err(PreparationRefusal::Deadline)
+    } else {
+        Ok(())
+    }
+}
+
+type Reads = Vec<Result<Vec<SelectedOccurrence>, ProjectionError>>;
+
+fn read_each(
+    store: &SqliteStore,
+    occurrences: impl Iterator<Item = OccurrenceId>,
+) -> Result<Reads, PreparationRefusal> {
+    store
+        .with_conn(|conn| {
+            Ok(occurrences
+                .map(|occurrence| read_selected(conn, &[occurrence], NonZeroUsize::MIN))
+                .collect())
+        })
+        .map_err(|error| PreparationRefusal::Storage(error.to_string()))
+}
+
+fn load_each<'a>(
+    store: &SqliteStore,
+    rows: impl Iterator<Item = &'a SelectedOccurrence>,
+) -> Result<Vec<Result<Vec<u8>, ProjectionError>>, PreparationRefusal> {
+    store
+        .with_conn(|conn| Ok(rows.map(|row| load_payload(conn, &row.payload)).collect()))
+        .map_err(|error| PreparationRefusal::Storage(error.to_string()))
 }
 
 pub fn prepare_required(
@@ -217,16 +272,7 @@ pub fn prepare_required(
     bounds: &RequiredBounds<ClaudeTokens>,
     trace: &mut PackingTrace,
 ) -> Result<RequiredMaterialization, PreparationRefusal> {
-    let deadline = || {
-        if inputs.budget.is_exhausted() {
-            Err(PreparationRefusal::Deadline)
-        } else {
-            Ok(())
-        }
-    };
-    let storage = |error: storage::StoreError| PreparationRefusal::Storage(error.to_string());
-
-    deadline()?;
+    deadline(&inputs)?;
     if let Some(beyond) = requests.get(bounds.max_payload_loads.get()) {
         return Err(RequiredContextFailure::Oversized {
             occurrence: beyond.occurrence,
@@ -234,21 +280,9 @@ pub fn prepare_required(
         }
         .into());
     }
-    let rows = store
-        .with_conn(|conn| {
-            let mut rows = Vec::with_capacity(requests.len());
-            for request in requests {
-                rows.push(read_selected(
-                    conn,
-                    &[request.occurrence],
-                    NonZeroUsize::MIN,
-                ));
-            }
-            Ok(rows)
-        })
-        .map_err(storage)?;
-    let mut selected = Vec::with_capacity(rows.len());
-    for (request, read) in requests.iter().zip(rows) {
+    let reads = read_each(store, requests.iter().map(|request| request.occurrence))?;
+    let mut selected = Vec::with_capacity(reads.len());
+    for (request, read) in requests.iter().zip(reads) {
         let occurrence = request.occurrence;
         match read {
             Ok(mut read) => selected.push(read.swap_remove(0)),
@@ -263,7 +297,7 @@ pub fn prepare_required(
         trace.required(RequiredEvent::Read, Some(occurrence));
     }
 
-    deadline()?;
+    deadline(&inputs)?;
     let candidates: Vec<_> = selected
         .iter()
         .map(SelectedOccurrence::eligibility_candidate)
@@ -289,15 +323,8 @@ pub fn prepare_required(
     let admitted = admit_required(&facts, bounds)?;
     trace.required(RequiredEvent::Admitted, None);
 
-    deadline()?;
-    let loaded = store
-        .with_conn(|conn| {
-            Ok(admitted
-                .iter()
-                .map(|item| load_payload(conn, &item.row().payload))
-                .collect::<Vec<_>>())
-        })
-        .map_err(storage)?;
+    deadline(&inputs)?;
+    let loaded = load_each(store, admitted.iter().map(|item| item.row()))?;
     let mut bytes = Vec::with_capacity(loaded.len());
     for (item, load) in admitted.iter().zip(loaded) {
         let occurrence = item.row().occurrence;
@@ -332,6 +359,165 @@ pub fn prepare_required(
         profile: inputs.estimator.profile(),
         items,
         charged: reservation.charged,
+        remaining: bounds
+            .token_limit
+            .checked_sub(reservation.charged)
+            .unwrap_or(ClaudeTokens::ZERO),
+    })
+}
+
+pub type OptionalRequest = RequiredRequest;
+
+/// Why an optional occurrence left the scan before grouping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionalExclusion {
+    /// A later request for an identity an earlier request already named.
+    Duplicate,
+    Missing,
+    Stale,
+    Corrupt,
+    Excluded(kernel::EligibilityVerdict),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CostedGroup {
+    pub group: Group,
+    pub cost: ClaudeTokens,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionalAdmission {
+    pub admitted: Vec<CostedGroup>,
+    /// Groups visited and skipped, in fused order.
+    pub skipped: Vec<CostedGroup>,
+    /// In the order the exclusions were found: duplicates, then reads, then
+    /// judgments, then loads.
+    pub excluded: Vec<(OccurrenceId, OptionalExclusion)>,
+    pub ungrouped: Vec<(OccurrenceId, Ungrouped)>,
+    pub remaining: ClaudeTokens,
+}
+
+/// Runs after [`prepare_required`] over the budget it left; a required
+/// materialization is the witness that the required phase completed.
+pub fn prepare_optional(
+    store: &SqliteStore,
+    inputs: RequiredInputs<'_>,
+    required: &RequiredMaterialization,
+    requests: &[OptionalRequest],
+    bounds: &OptionalBounds,
+    trace: &mut PackingTrace,
+) -> Result<OptionalAdmission, PreparationRefusal> {
+    deadline(&inputs)?;
+    admit_fused_candidates(requests.len(), bounds).map_err(PreparationRefusal::OptionalBound)?;
+    let mut excluded = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let requests: Vec<OptionalRequest> = requests
+        .iter()
+        .filter(|request| {
+            let first = seen.insert(request.occurrence);
+            if !first {
+                excluded.push((request.occurrence, OptionalExclusion::Duplicate));
+            }
+            first
+        })
+        .copied()
+        .collect();
+    let reads = read_each(store, requests.iter().map(|request| request.occurrence))?;
+    let mut live: Vec<(OptionalRequest, SelectedOccurrence)> = Vec::new();
+    for (request, read) in requests.iter().zip(reads) {
+        match read {
+            Ok(mut read) => live.push((*request, read.swap_remove(0))),
+            Err(ProjectionError::UnknownOccurrence { .. }) => {
+                excluded.push((request.occurrence, OptionalExclusion::Missing));
+            }
+            Err(ProjectionError::CorruptRow) => {
+                excluded.push((request.occurrence, OptionalExclusion::Corrupt));
+            }
+            Err(other) => return Err(other.into()),
+        }
+        trace.optional(OptionalEvent::Read, Some(request.occurrence));
+    }
+
+    deadline(&inputs)?;
+    let candidates: Vec<_> = live
+        .iter()
+        .map(|(_, row)| row.eligibility_candidate())
+        .collect();
+    let report = judge_occurrences_within_budget(
+        inputs.kernel,
+        inputs.project,
+        inputs.destination,
+        &candidates,
+        inputs.budget,
+    )?;
+    trace.optional(OptionalEvent::Judged, None);
+    let mut rows: Vec<SelectedOccurrence> = Vec::with_capacity(live.len());
+    for ((request, row), judged) in live.into_iter().zip(&report.occurrences) {
+        let exclusion = if row.tombstone.is_some() || row.revision != request.revision {
+            Some(OptionalExclusion::Stale)
+        } else {
+            match judged.disposition {
+                Disposition::Eligible => None,
+                Disposition::PolicyExcluded(verdict) => Some(OptionalExclusion::Excluded(verdict)),
+            }
+        };
+        match exclusion {
+            Some(exclusion) => excluded.push((request.occurrence, exclusion)),
+            None => rows.push(row),
+        }
+    }
+    admit_optional_set(&rows, bounds).map_err(PreparationRefusal::OptionalBound)?;
+    trace.optional(OptionalEvent::Bounded, None);
+
+    deadline(&inputs)?;
+    let loaded = load_each(store, rows.iter())?;
+    let mut selected: Vec<(&SelectedOccurrence, Vec<u8>)> = Vec::with_capacity(rows.len());
+    for (row, load) in rows.iter().zip(loaded) {
+        match load {
+            Ok(payload) => selected.push((row, payload)),
+            Err(ProjectionError::CorruptRow) => {
+                excluded.push((row.occurrence, OptionalExclusion::Corrupt));
+                continue;
+            }
+            Err(other) => return Err(other.into()),
+        }
+        trace.payload_loads += 1;
+        trace.optional(OptionalEvent::Loaded, Some(row.occurrence));
+    }
+    let selected: Vec<Selected<'_>> = selected
+        .iter()
+        .map(|(row, bytes)| Selected { row, bytes })
+        .collect();
+    let partition = group(&selected);
+    trace.optional(OptionalEvent::Grouped, None);
+
+    let costs: Vec<ClaudeTokens> = partition
+        .groups
+        .iter()
+        .map(|group| {
+            group.ranges.iter().fold(ClaudeTokens::ZERO, |sum, range| {
+                sum.checked_add(inputs.estimator.cost(&range.bytes))
+                    .unwrap_or(ClaudeTokens::MAX)
+            })
+        })
+        .collect();
+    let scan = skip_and_continue(required.remaining, partition.groups.len(), |_, index| {
+        costs[index]
+    });
+    trace.optional(OptionalEvent::Scanned, None);
+    let (admitted, skipped): (Vec<_>, Vec<_>) = partition
+        .groups
+        .into_iter()
+        .zip(costs)
+        .enumerate()
+        .map(|(index, (group, cost))| (index, CostedGroup { group, cost }))
+        .partition(|(index, _)| scan.admitted.binary_search(index).is_ok());
+    Ok(OptionalAdmission {
+        admitted: admitted.into_iter().map(|(_, group)| group).collect(),
+        skipped: skipped.into_iter().map(|(_, group)| group).collect(),
+        excluded,
+        ungrouped: partition.refused,
+        remaining: scan.remaining,
     })
 }
 

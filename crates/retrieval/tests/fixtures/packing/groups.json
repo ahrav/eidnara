@@ -1,0 +1,98 @@
+{
+  "reference_version": "packing-reference-v1",
+  "parent": "alpha beta\ngamma δelta\nepsilon zeta\n",
+  "note": "Offsets are byte offsets into `parent`; the production packer never receives `parent`, only the selected bytes each span carries.",
+  "cases": [
+    {
+      "name": "overlap_adjacent_disjoint",
+      "spans": [
+        {
+          "id": "a",
+          "fused": 0,
+          "start": 0,
+          "end": 10
+        },
+        {
+          "id": "b",
+          "fused": 1,
+          "start": 6,
+          "end": 16
+        },
+        {
+          "id": "c",
+          "fused": 2,
+          "start": 16,
+          "end": 22
+        },
+        {
+          "id": "d",
+          "fused": 3,
+          "start": 25,
+          "end": 33
+        }
+      ],
+      "expected_groups": [
+        {
+          "ranges": [
+            {
+              "start": 0,
+              "end": 22,
+              "members": [
+                "a",
+                "b",
+                "c"
+              ]
+            },
+            {
+              "start": 25,
+              "end": 33,
+              "members": [
+                "d"
+              ]
+            }
+          ]
+        }
+      ],
+      "expected_refused": []
+    },
+    {
+      "name": "gap_with_multibyte_character",
+      "spans": [
+        {
+          "id": "a",
+          "fused": 0,
+          "start": 11,
+          "end": 16
+        },
+        {
+          "id": "b",
+          "fused": 1,
+          "start": 19,
+          "end": 24
+        }
+      ],
+      "expected_groups": [
+        {
+          "ranges": [
+            {
+              "start": 11,
+              "end": 16,
+              "members": [
+                "a"
+              ]
+            },
+            {
+              "start": 19,
+              "end": 24,
+              "members": [
+                "b"
+              ]
+            }
+          ]
+        }
+      ],
+      "expected_refused": [],
+      "gap_contains_multibyte": true
+    }
+  ]
+}
