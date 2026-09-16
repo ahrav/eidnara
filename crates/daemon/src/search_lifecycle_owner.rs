@@ -1648,6 +1648,7 @@ mod tests {
                 .map(|name| (name.to_owned(), LIMIT))
                 .collect(),
             enabled: Default::default(),
+            compressed_activation: false,
         }
     }
 

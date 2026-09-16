@@ -5,9 +5,13 @@ use std::fs;
 use std::num::NonZeroUsize;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::projection_gate::{identity, passing_evaluator};
-use daemon::projection_gates::{Admission, EntryPoint, HookGate, ProjectionHook};
+use daemon::projection_gates::{
+    Admission, CompressionRecord, EntryPoint, HookGate, InvalidationIdentity, ProjectionHook,
+};
+use daemon::vector_admission::Ledger;
 use daemon::vector_composition::{
     COMPOSITION_FILE, Composition, CompositionRefusal, CompositionSpec, SelectorState, Unavailable,
     compose, publish, recover, verify_composition,
@@ -86,7 +90,8 @@ pub struct Fixture {
     pub store: GenerationStore,
     /// The exclusive lifecycle transaction the fixture stages and publishes under; `release_transaction` gives it up so a reader's shared protection can be taken.
     pub tx: Option<LifecycleTransactionLock>,
-    pub gate: HookGate,
+    pub gate: Arc<HookGate>,
+    pub ledger: Arc<Ledger>,
     pub admission: Admission,
     pub identity: ProjectionIdentity,
     pub generation: VectorGeneration,
@@ -100,23 +105,39 @@ impl Fixture {
         let store = GenerationStore::open(Some(root.path())).unwrap();
         let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
         let identity = identity(KERNEL, DIMENSION);
-        let gate = HookGate::closed();
+        let gate = Arc::new(HookGate::closed());
         gate.install(passing_evaluator(&identity, 0, &ProjectionHook::ALL));
         let admission = gate
             .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
             .unwrap();
+        let ledger = Ledger::new(Arc::clone(&gate), InvalidationIdentity::from(&identity));
         let generation = generation();
         Self {
             root,
             store,
             tx: Some(tx),
             gate,
+            ledger,
             admission,
             identity,
             generation,
             protected: BTreeSet::new(),
             work_dirs: std::cell::Cell::new(0),
         }
+    }
+
+    /// Reinstalls the passing evaluator with `limit` set to `value` and takes a fresh grant, since an install invalidates every grant before it.
+    pub fn set_limit(&mut self, limit: &str, value: u64) {
+        let mut evaluator = passing_evaluator(&self.identity, 0, &ProjectionHook::ALL);
+        evaluator.manifest.limits.insert(limit.to_owned(), value);
+        if let CompressionRecord::Campaign(compression) = &mut evaluator.evidence.compression {
+            compression.limits.insert(limit.to_owned(), value);
+        }
+        self.gate.install(evaluator);
+        self.admission = self
+            .gate
+            .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
+            .unwrap();
     }
 
     pub fn transaction(&self) -> &LifecycleTransactionLock {
@@ -160,6 +181,7 @@ impl Fixture {
             gate: &self.gate,
             admission: &self.admission,
             identity: &self.identity,
+            ledger: &self.ledger,
             protected: &self.protected,
         }
     }
@@ -255,11 +277,20 @@ impl Fixture {
     }
 
     pub fn stage_search_seed(&self) -> String {
+        self.stage_foreign(
+            "search-projection-seed",
+            "search.sqlite",
+            b"not really a database",
+        )
+    }
+
+    pub fn stage_foreign(&self, target: &str, rel_path: &str, bytes: &[u8]) -> String {
         let dir = self.work_dir();
-        let path = dir.join("search.sqlite");
-        fs::write(&path, b"not really a database").unwrap();
+        let path = dir.join(rel_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
         let meta = StageMeta {
-            target: "search-projection-seed".to_owned(),
+            target: target.to_owned(),
             release_contract_sha256: "a".repeat(64),
             inputs_lock_sha256: "b".repeat(64),
             source_payload_manifest_sha256: "c".repeat(64),
@@ -267,7 +298,7 @@ impl Fixture {
         self.store
             .stage(
                 &[SourceSpec {
-                    rel_path: "search.sqlite".to_owned(),
+                    rel_path: rel_path.to_owned(),
                     source: path,
                     executable: false,
                     expected_size: None,

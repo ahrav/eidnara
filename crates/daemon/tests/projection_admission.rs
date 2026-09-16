@@ -15,10 +15,14 @@ use daemon::projection_admission::{
     ProjectionAdmission, Refresh, SelectedProjection,
 };
 use daemon::projection_gates::{
-    APPROVED_OBSERVERS, Denial, EntryPoint, Gate, HookGate, ManifestRefusal, ProjectionHook,
-    Renewal, ResourceEvidence,
+    APPROVED_OBSERVERS, COMPRESSED_ACTIVATION_ID, COMPRESSION_CRITERIA, CompressionRecord, Denial,
+    EntryPoint, Gate, HARNESSES, HookGate, InvalidationIdentity, ManifestRefusal, ProjectionHook,
+    Renewal, ResourceEvidence, TRACE_STAGES, VECTOR_LIMITS,
 };
 use daemon::projection_lifecycle::{MAX_RECORD_BYTES, ProjectionLifecycle};
+use daemon::vector_admission::{
+    DELTA_LIMIT, DISK_LIMIT, Ledger, RESIDENT_LIMIT, Refusal, ResourceClass,
+};
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, ProjectScope};
 use retrieval::ProjectionIdentity;
@@ -30,7 +34,8 @@ use support::embedding_fixtures::{
 use support::kernel_daemon::KernelDaemon;
 use support::projection_gate::{
     HEAP_BYTES, LAG_LIMIT, LIMIT, campaign_json, empty_coverage, fixture_limit, identity,
-    manifest_json, passed_run_json, passing_evaluator, write_record, write_records,
+    invalidation_json, manifest_json, passed_run_json, passing_evaluator, test_binding,
+    write_record, write_records,
 };
 
 /// Refreshes `admission` for `identity` with an empty projection's coverage observed at `tip`.
@@ -111,6 +116,13 @@ fn records_must_be_the_callers_own_regular_files_of_their_schemas() {
         observer: APPROVED_OBSERVERS[0].to_owned(),
         decoded_heap_high_water_bytes: HEAP_BYTES,
     });
+    // The records carry no vector limits, no compressed-activation flag, and no campaign, and the daemon names no binding of its own.
+    for name in VECTOR_LIMITS {
+        expected.manifest.limits.remove(name);
+    }
+    expected.manifest.compressed_activation = false;
+    expected.evidence.compression = CompressionRecord::Absent;
+    expected.binding = None;
     assert_eq!(
         AdmissionInputs::read(home)
             .unwrap()
@@ -356,6 +368,11 @@ fn refresh_installs_only_for_valid_records_and_a_selected_projection() {
         .filter(|entry| entry.verdict.is_ok())
         .count();
     assert_eq!(granted, ProjectionHook::ALL.len() * EntryPoint::ALL.len());
+    // The records carry no compressed-activation flag and no campaign: compressed activation refuses while every hook admits.
+    assert_eq!(
+        gate.admit_compressed_activation().unwrap_err(),
+        Denial::CompressionDisabled
+    );
 
     let mut other_epoch = current.clone();
     other_epoch.generation_epoch += 1;
@@ -833,4 +850,199 @@ fn record_fed_evidence_reaches_message_cleanup_and_all_disabled_records_reach_no
         Err(Denial::Disabled(ProjectionHook::MessageCleanup))
     );
     assert_eq!(ledger[1].verdict, Ok(()));
+}
+
+/// A campaign record that carries a passing compression section under `identity` and the given vector limits.
+fn compression_json(identity: &ProjectionIdentity, limits: u64) -> Value {
+    let traces: serde_json::Map<String, Value> = HARNESSES
+        .iter()
+        .map(|harness| {
+            (
+                (*harness).to_owned(),
+                json!({ "kind": "real", "stages": TRACE_STAGES }),
+            )
+        })
+        .collect();
+    let criteria: serde_json::Map<String, Value> = COMPRESSION_CRITERIA
+        .iter()
+        .map(|criterion| ((*criterion).to_owned(), json!("passed")))
+        .collect();
+    let vector_limits: serde_json::Map<String, Value> = VECTOR_LIMITS
+        .iter()
+        .map(|name| ((*name).to_owned(), json!(limits)))
+        .collect();
+    json!({
+        "identity": invalidation_json(identity),
+        "binding": {
+            "build": "eidnara-test-build",
+            "corpus_sha256": "c".repeat(64),
+            "quantizer_recipe": "scalar-int8-symmetric.v1",
+            "hardware": "test-hardware",
+            "harnesses": { "opencode": "test", "pi": "test" },
+        },
+        "limits": vector_limits,
+        "criteria": criteria,
+        "traces": traces,
+        "revoked": false,
+    })
+}
+
+#[test]
+fn a_recorded_campaign_and_flag_reach_the_evaluator_but_never_authorize_without_the_daemons_binding()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let current = identity("k", 8);
+    let admission = ProjectionAdmission::for_home(home);
+    let gate = admission.gate();
+
+    let mut manifest = manifest_json(&current, &ProjectionHook::ALL);
+    manifest["hooks"][COMPRESSED_ACTIVATION_ID] = json!({ "enabled": true });
+    for name in VECTOR_LIMITS {
+        manifest["limits"][name] = json!(LIMIT);
+    }
+    let mut campaign = campaign_json(&current);
+    campaign["compression"] = compression_json(&current, LIMIT);
+    write_records(home, &manifest, &campaign);
+    assert_eq!(
+        refresh_at(&admission, &current, 10),
+        Refresh::Installed(Renewal::Kept)
+    );
+    assert!(verdicts(gate).iter().all(Result::is_ok));
+    // Every recorded dimension is present and passing, and the flag is on; only the daemon's own binding is missing, so production stays refused.
+    assert_eq!(
+        gate.admit_compressed_activation().unwrap_err(),
+        Denial::Missing(Gate::Compression)
+    );
+    let inputs = AdmissionInputs::read(home).unwrap();
+    let mut evaluator = inputs.evaluator(&current, Some(empty_coverage(&current, 10)));
+    assert!(evaluator.manifest.compressed_activation);
+    assert!(matches!(
+        evaluator.evidence.compression,
+        CompressionRecord::Campaign(_)
+    ));
+    assert!(evaluator.binding.is_none());
+    // The missing binding is the only refusal.
+    evaluator.binding = Some(test_binding());
+    assert_eq!(evaluator.judge_compressed_activation(), Ok(()));
+
+    // Malformed compression evidence denies compressed activation but leaves hook admission open.
+    let hook_grant = gate
+        .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
+        .unwrap();
+    let malformed = Denial::Failed(
+        Gate::Compression,
+        "the compression section is malformed".to_owned(),
+    );
+    campaign["compression"]["traces"]["other"] = json!({ "kind": "real", "stages": TRACE_STAGES });
+    write_records(home, &manifest, &campaign);
+    assert_eq!(
+        refresh_at(&admission, &current, 10),
+        Refresh::Installed(Renewal::Kept)
+    );
+    assert!(!hook_grant.invalidated.is_cancelled());
+    assert!(verdicts(gate).iter().all(Result::is_ok));
+    assert_eq!(gate.admit_compressed_activation().unwrap_err(), malformed);
+    campaign["compression"] = json!({ "revoked": false });
+    write_records(home, &manifest, &campaign);
+    assert_eq!(
+        refresh_at(&admission, &current, 10),
+        Refresh::Installed(Renewal::Kept)
+    );
+    assert!(verdicts(gate).iter().all(Result::is_ok));
+    assert_eq!(gate.admit_compressed_activation().unwrap_err(), malformed);
+    assert_eq!(
+        AdmissionInputs::read(home)
+            .unwrap()
+            .evaluator(&current, Some(empty_coverage(&current, 10)))
+            .evidence
+            .compression,
+        CompressionRecord::Malformed
+    );
+}
+
+/// A durable `Disabled` record written under another owner denies compressed activation the way it denies every hook, before any hook admission has latched this owner's gate.
+#[test]
+fn a_durable_disabled_record_denies_compressed_activation_before_any_hook_observes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let current = identity("k", 8);
+    let mut manifest = manifest_json(&current, &ProjectionHook::ALL);
+    manifest["hooks"][COMPRESSED_ACTIVATION_ID] = json!({ "enabled": true });
+    for name in VECTOR_LIMITS {
+        manifest["limits"][name] = json!(LIMIT);
+    }
+    let mut campaign = campaign_json(&current);
+    campaign["compression"] = compression_json(&current, LIMIT);
+    write_records(home, &manifest, &campaign);
+    {
+        let writer = ProjectionAdmission::for_home(home);
+        assert_eq!(
+            refresh_at(&writer, &current, 10),
+            Refresh::Installed(Renewal::Kept)
+        );
+        ProjectionLifecycle::open(home)
+            .unwrap()
+            .disable(writer.gate(), 1_000)
+            .unwrap();
+    }
+
+    let admission = ProjectionAdmission::for_home(home);
+    assert_eq!(
+        refresh_at(&admission, &current, 10),
+        Refresh::Installed(Renewal::Kept)
+    );
+    assert_eq!(
+        admission.gate().admit_compressed_activation().unwrap_err(),
+        Denial::RecoveryRequired,
+        "the durable stop is observed by activation itself, not only by a hook admission"
+    );
+    assert_eq!(
+        admission
+            .gate()
+            .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
+            .unwrap_err(),
+        Denial::RecoveryRequired
+    );
+}
+
+/// The ledger's limit names are the manifest parser's: vector limits read from the admission record bound reservations and delta admission through the ledger at the exact values the record carries.
+#[test]
+fn parsed_vector_limits_bound_the_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let current = identity("k", 8);
+    let admission = ProjectionAdmission::for_home(home);
+    let gate = admission.gate();
+    let mut manifest = manifest_json(&current, &ProjectionHook::ALL);
+    manifest["limits"][RESIDENT_LIMIT] = json!(100);
+    manifest["limits"][DISK_LIMIT] = json!(100);
+    manifest["limits"][DELTA_LIMIT] = json!(1);
+    write_records(home, &manifest, &campaign_json(&current));
+    assert_eq!(
+        refresh_at(&admission, &current, 10),
+        Refresh::Installed(Renewal::Kept)
+    );
+    let grant = gate
+        .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
+        .unwrap();
+    let ledger = Ledger::new(Arc::clone(gate), InvalidationIdentity::from(&current));
+    let _held = ledger.reserve(&grant, ResourceClass::Text, 100).unwrap();
+    assert_eq!(
+        ledger.reserve(&grant, ResourceClass::Text, 1).unwrap_err(),
+        Refusal::Denied(Denial::LimitExceeded {
+            limit: RESIDENT_LIMIT.to_owned(),
+            observed: 101,
+            max: 100
+        })
+    );
+    assert_eq!(ledger.admit_deltas(&grant, 1), Ok(()));
+    assert_eq!(
+        ledger.admit_deltas(&grant, 2).unwrap_err(),
+        Denial::LimitExceeded {
+            limit: DELTA_LIMIT.to_owned(),
+            observed: 2,
+            max: 1
+        }
+    );
 }

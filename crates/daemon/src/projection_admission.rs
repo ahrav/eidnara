@@ -9,8 +9,9 @@ use serde::Deserialize;
 
 use crate::coverage::ProjectionCoverage;
 use crate::projection_gates::{
-    CAPABILITIES, CapabilityEvidence, Evidence, EvidenceEvaluator, HARNESSES, HarnessRun, HookGate,
-    InvalidationIdentity, ManifestRefusal, Renewal, ResourceEvidence, RuntimeManifest,
+    CAPABILITIES, CapabilityEvidence, CompressionRecord, Evidence, EvidenceEvaluator, HARNESSES,
+    HarnessRun, HookGate, InvalidationIdentity, ManifestRefusal, Renewal, ResourceEvidence,
+    RuntimeManifest,
 };
 use crate::projection_lifecycle::{RecordRead, read_owner_only_record};
 
@@ -62,6 +63,9 @@ struct CampaignRecord {
     resource: Option<ResourceEvidence>,
     capabilities: BTreeMap<String, BTreeMap<String, CapabilityEvidence>>,
     harness_runs: BTreeMap<String, HarnessRunRecord>,
+    /// Read as raw JSON so that only [`CompressionRecord::parse`] judges its shape; a section this build cannot read denies compressed activation and nothing else.
+    #[serde(default)]
+    compression: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +157,10 @@ impl AdmissionInputs {
                     })
                     .collect(),
                 identity: campaign.invalidation_identity,
+                compression: CompressionRecord::parse(campaign.compression.as_ref()),
             },
+            // Nothing here can name the daemon's own build, corpus, recipe, hardware, and harness versions, so compressed activation refuses as missing.
+            binding: None,
         }
     }
 }

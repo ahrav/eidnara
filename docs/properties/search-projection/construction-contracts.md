@@ -250,6 +250,20 @@ Named limits: `export_page_rows`, `export_page_encoded_bytes`,
 `embedding_recovery_attempts`, `query_service_opportunities`,
 `physical_drain_ms`, and `decoded_heap_high_water_bytes`.
 
+Vector work reads three further limits the runtime manifest may carry:
+`vector_resident_bytes`, `vector_disk_bytes`, and `vector_delta_count`. They
+are optional in the manifest and outside the required set above: a manifest
+without one refuses the vector work that needs it and nothing else, so a
+deployment without vector work keeps its other hooks. The `hooks` object may
+also carry `search_projection.vector.compressed_activation`, an enablement
+flag for production use and full-corpus publication of compressed vector
+layers; it is not a projection hook, it defaults to disabled, and enabling it
+admits nothing without the compression campaign evidence
+(`docs/dense-vector-contract.md`, "Vector admission"). A build without that
+section refuses these keys as unknown, which closes the gate for every hook,
+so the daemon is deployed before a manifest gains them and a rollback reverts
+the manifest with it.
+
 Rules:
 
 - A missing, null, or unapproved limit fails closed at startup, reload, and

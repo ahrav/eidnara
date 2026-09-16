@@ -4,8 +4,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use daemon::projection_gates::{Admission, EntryPoint, HookGate, ProjectionHook};
+use daemon::projection_gates::{
+    Admission, EntryPoint, HookGate, InvalidationIdentity, ProjectionHook,
+};
+use daemon::vector_admission::Ledger;
 use daemon::vector_generation::{
     BuiltVectors, CODES_FILE, ExpectedVectors, FileFault, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE,
     SIDECAR_FILE, Staging, TOMBSTONES_FILE, VECTOR_TARGET, VectorRefusal, VectorSidecar, build,
@@ -92,7 +96,8 @@ struct Fixture {
     root: tempfile::TempDir,
     store: GenerationStore,
     tx: LifecycleTransactionLock,
-    gate: HookGate,
+    gate: Arc<HookGate>,
+    ledger: Arc<Ledger>,
     admission: Admission,
     identity: ProjectionIdentity,
     generation: VectorGeneration,
@@ -106,17 +111,19 @@ impl Fixture {
         let store = GenerationStore::open(Some(root.path())).unwrap();
         let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
         let identity = identity(KERNEL, DIMENSION);
-        let gate = HookGate::closed();
+        let gate = Arc::new(HookGate::closed());
         gate.install(passing_evaluator(&identity, 0, &ProjectionHook::ALL));
         let admission = gate
             .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
             .unwrap();
+        let ledger = Ledger::new(Arc::clone(&gate), InvalidationIdentity::from(&identity));
         let generation = generation(&identity);
         Self {
             root,
             store,
             tx,
             gate,
+            ledger,
             admission,
             identity,
             generation,
@@ -165,6 +172,7 @@ impl Fixture {
                 gate: &self.gate,
                 admission,
                 identity: &self.identity,
+                ledger: &self.ledger,
                 protected: &self.protected,
             },
         )
@@ -541,11 +549,12 @@ fn staging_refuses_a_build_whose_provenance_is_not_the_admitted_identity() {
         // The gate holds evidence for identity B and admits under it; the build carries identity A.
         let mut other = fixture.identity.clone();
         mutate(&mut other);
-        let gate = HookGate::closed();
+        let gate = Arc::new(HookGate::closed());
         gate.install(passing_evaluator(&other, 0, &ProjectionHook::ALL));
         let admission = gate
             .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
             .unwrap();
+        let ledger = Ledger::new(Arc::clone(&gate), InvalidationIdentity::from(&other));
         assert_eq!(
             stage(
                 &built,
@@ -555,6 +564,7 @@ fn staging_refuses_a_build_whose_provenance_is_not_the_admitted_identity() {
                     gate: &gate,
                     admission: &admission,
                     identity: &other,
+                    ledger: &ledger,
                     protected: &BTreeSet::new(),
                 },
             ),

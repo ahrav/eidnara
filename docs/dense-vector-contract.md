@@ -300,6 +300,101 @@ layers, which the daemon verifies before handing them over. Scoring mixed
 recipes on int8 codes with each layer's own scales is not part of this
 ranking; the winners name their layer so that a later scorer can do so.
 
+## Vector admission
+
+`daemon::vector_admission::Ledger` is the one accounting owner for every byte
+vector work holds. It has two pools judged against the runtime manifest's
+optional vector limits through the evidence gate: `vector_resident_bytes` for
+model memory, tokenizer cache, SQLite cache, embedding text, row scratch,
+decoded row buffers, and a view's resident tables; `vector_disk_bytes` for
+files being staged and a compactor's working files, on top of what the store
+holds. A reservation is atomic against everything already held: the ledger
+locks its tally, adds the increment, asks the gate whether the pool's total is
+within the limit under the caller's grant, and records the reservation only
+on a yes. A disk reservation measures the store itself first, every regular
+file at any depth under the generations directory, complete generations,
+staging residue, corrupt entries, and other owners' nested payloads alike,
+without following symlinks, and counts it with the ledger's own disk
+reservations; every disk reserver runs under the lifecycle's exclusive
+transaction lock, which is what keeps one reserver's copy in flight from
+being counted twice by another's walk. Two reservations racing for the last
+bytes cannot both win; a total that leaves the byte domain is refused before
+the gate sees it; a class whose limit the manifest does not carry is refused
+by the gate as an absent limit; a grant the gate has withdrawn admits nothing
+new; a class asked of the wrong pool is refused. Model memory, tokenizer
+cache, and SQLite cache are static residents charged once each, and a second
+charge of one is refused as a double charge. Dropping a reservation releases
+it and nothing else does: cancelling the work that holds one releases nothing
+until that work lets go, and output that keeps its view keeps its
+reservations.
+
+Staging is judged by two limits, each charged its own bytes: the payload
+inventory alone against the admission manifest's `capture_disk_bytes`, as the
+construction contract requires, and then the payload inventory plus the
+`manifest.json` the store writes beside it against `vector_disk_bytes` as a
+disk-pool reservation, taken before anything is copied and released when the
+copy is done, since the bytes are then the store's, measured by the next disk
+reservation. A manifest the
+store already holds is reserved the same way: the store copies the inventory
+into a staging temp before it finds the occupant and publishes nothing twice,
+so a retry after an unknown outcome needs room for the copy and leaves the
+store's total unchanged. Publication admits a composition's delta
+count against `vector_delta_count` before anything is staged; the count is
+the composition's own, so nothing is held for it, and a delta layer's own
+staging is bounded by bytes alone. A reader's view reserves its resident
+tables and records the bytes it pins: pins are not reservations, since the
+store's total already carries those bytes, and they are what a prune's
+readback is reconciled against. `Ledger::reconcile` sets the prune's retained
+bytes beside the ledger's pinned bytes, and a readback above them means
+readers pin what the ledger was never told about. Ranking reserves one page
+of row scratch for the walk's duration in the ledger that holds the view's
+tables, taken from the view rather than named by the caller, so the two are
+judged against one resident total. The compactor's entry point reserves its
+working files in the disk pool the same way.
+
+Compressed activation, production use or full-corpus publication of
+compressed vector layers, is judged by the same gate through
+`HookGate::admit_compressed_activation`, which probes the durable lifecycle
+record first as every hook admission does, so a stop written by another
+owner or before this process started denies activation too. The manifest's
+`hooks` object may
+carry `search_projection.vector.compressed_activation`; absent is disabled,
+and the flag is not a projection hook, so no class coverage or slice runs
+under it and the frozen hook map is unchanged. Enabled, the evaluator applies
+every gate a dense hook passes and then the compression campaign in the
+evidence record: it must be gathered under the current projection identity
+and under the binding the daemon itself runs with (build, corpus digest,
+quantizer recipe, hardware, and the version of each harness; a binding that
+names a version for anything but exactly the known harnesses refuses), not be
+revoked,
+record the same vector limits the manifest carries (a changed cap
+invalidates it), pass every criterion (fidelity, request latency, startup and
+cold cache, concurrency, freshness, disk, compaction, cancellation, task
+cost), and carry a real full-path trace from each harness showing a real
+embedding, the exact, lexical, and dense lanes, canonical validation, fusion,
+span grouping, bounded packing, and validated application. A missing, stale,
+wrongly bound, failed, revoked, simulated, report-only, or incomplete record
+refuses. The evidence record's `compression` section is read as raw JSON and
+judged only by the compression gate: a section this build cannot read, a
+trace keyed by an unknown harness included, denies activation as a malformed
+section and leaves every hook's admission as it was, so the section's shape
+never closes the gate. A refresh whose evidence turns an admitted activation
+into a refusal withdraws the grant like a changed manifest would. The daemon
+supplies no binding of its own here, so activation refuses as missing
+whatever the record says; a report fixture proves the evaluator and
+authorizes nothing. The vector limits and the activation flag are daemon
+vocabulary outside the construction contract's frozen limit and hook sets.
+
+Rollout order. A build without this section refuses a manifest that carries
+`vector_resident_bytes`, `vector_disk_bytes`, `vector_delta_count`, or the
+`search_projection.vector.compressed_activation` flag as an unknown limit or
+hook, and refuses an evidence record that carries a `compression` section as
+malformed; either refusal closes the gate for every hook. Deploy the daemon
+before the records gain these keys, and a rollback to an older build must
+also revert `runtime-manifest.json` and `campaign-evidence.json`. In the
+other direction nothing changes: this build reads records without the keys
+as before and refuses only the vector work that needs them.
+
 ## The pinned reader
 
 `daemon::vector_reader::acquire` turns the selected composition into a view a
@@ -309,22 +404,23 @@ selector, lists the candidates `vector_composition::candidates` orders (the
 selected composition first, then other records newest first), pins the first
 candidate's record and every member its members file names with a shared lock
 on a directory descriptor opened by a manifest read alone
-(`GenerationStore::pin`), and charges the bytes the view will keep decoded in
+(`GenerationStore::pin`), and reserves the bytes the view will keep decoded in
 memory (identifiers, tombstones, scales, sidecar, at their manifest-declared
-sizes, the set `vector_generation::RESIDENT_FILES` names) to the caller's
-residency budget. It then releases the lock and verifies the candidate as
+sizes, the set `vector_generation::RESIDENT_FILES` names) in the ledger's
+resident pool and records with the ledger the bytes it pins. It then releases
+the lock and verifies the candidate as
 `vector_composition::verify_composition` does, hashing every member under the
-pins alone; a candidate that does not verify gives up its pins and charge and
-the next is pinned the same way. On success the validated descriptors take
+pins alone; a candidate that does not verify gives up its pins and
+reservations and the next is pinned the same way. On success the validated descriptors take
 their own shared locks before the manifest-read pins go, the row and code
 artifacts stay open on the descriptors verification hashed them through,
 together with the tables it decoded, and the selector is re-read under one
 more brief hold of the shared lock before the view is handed out. Verification
 already proved each artifact holds exactly one row per identifier, so every
 offset the reader will compute lies inside it. A selector that no longer names
-what acquisition observed, a budget that cannot hold the resident bytes, or
-any store refusal returns nothing, and the pins, descriptors, and charge are
-dropped with the failure.
+what acquisition observed, a ledger that cannot hold the resident bytes, or
+any store refusal returns nothing, and the pins, descriptors, and reservations
+are dropped with the failure.
 
 The lock discipline is the lifecycle's: a shared holder is meant to be a brief
 probe, and a mutator taking the exclusive lock gives up after a bounded wait
@@ -357,15 +453,15 @@ not re-hashed: pins protect lifetime, not contents, and a same-user write
 after verification is outside the cooperative-file threat model.
 
 `vector_reader::rank` checks every layer's sidecar against the request's
-expectation with the same identity check verification uses, charges one page
-of decoded rows plus one raw row of scratch to the caller's scratch budget
-for the walk's duration, and runs `dense::layered::rank_layers` over the
+expectation with the same identity check verification uses, reserves one page
+of decoded rows plus one raw row of scratch in the ledger for the walk's
+duration, and runs `dense::layered::rank_layers` over the
 view's layers inside the caller's projection read transaction; canonical
 eligibility, revalidation, coverage, and completion are the layered
 ranking's. A caller runs it through the request's existing blocking seam
 (`RequestCtx::run_blocking`, which the host's drain joins) with the
 `Arc<PinnedVectors>` moved into the work, so the view, its pins, and its
-charges live until the physical read returns whatever happens to the caller's
+reservations live until the physical read returns whatever happens to the caller's
 future, its deadline, or its cancellation, and whoever keeps the ranking's
 view keeps its pins until that view is dropped. The reader does not authorize
 anything: physical ownership of the files says which rows exist, and the

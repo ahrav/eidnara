@@ -1,14 +1,16 @@
 //! Gates for tests: an evaluator whose evidence passes every gate under the test identity, and a gate that admits every hook, for tests whose subject is the work behind the gate rather than the gate itself.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use daemon::coverage::ProjectionCoverage;
 use daemon::projection_admission::{ADMISSION_DIR, EVIDENCE_RECORD, MANIFEST_RECORD};
 use daemon::projection_gates::{
-    APPROVED_OBSERVERS, CAPABILITIES, CapabilityDisposition, CapabilityEvidence, Evidence,
-    EvidenceEvaluator, HARNESSES, HarnessRun, HookGate, InvalidationIdentity, ProjectionHook,
-    REQUIRED_LIMITS, ResourceEvidence, RuntimeManifest,
+    APPROVED_OBSERVERS, CAPABILITIES, COMPRESSION_CRITERIA, CapabilityDisposition,
+    CapabilityEvidence, CompressionBinding, CompressionEvidence, CompressionRecord, Evidence,
+    EvidenceEvaluator, FullPathTrace, HARNESSES, HarnessRun, HookGate, InvalidationIdentity,
+    Outcome, ProjectionHook, REQUIRED_LIMITS, ResourceEvidence, RuntimeManifest, TRACE_STAGES,
+    TraceKind, VECTOR_LIMITS,
 };
 use retrieval::ProjectionIdentity;
 use serde_json::{Value, json};
@@ -69,9 +71,11 @@ pub fn passing_evaluator(
             identity: current.clone(),
             limits: REQUIRED_LIMITS
                 .into_iter()
+                .chain(VECTOR_LIMITS)
                 .map(|name| (name.to_owned(), u64::MAX))
                 .collect(),
             enabled: enabled.iter().map(|hook| (*hook, true)).collect(),
+            compressed_activation: true,
         },
         current: current.clone(),
         evidence: Evidence {
@@ -93,7 +97,55 @@ pub fn passing_evaluator(
                     )
                 })
                 .collect(),
+            compression: CompressionRecord::Campaign(Box::new(passing_compression(&current))),
         },
+        binding: Some(test_binding()),
+    }
+}
+
+/// The binding the test daemon runs under; the passing compression evidence names the same one.
+pub fn test_binding() -> CompressionBinding {
+    CompressionBinding {
+        build: "eidnara-test-build".to_owned(),
+        corpus_sha256: "c".repeat(64),
+        quantizer_recipe: "scalar-int8-symmetric.v1".to_owned(),
+        hardware: "test-hardware".to_owned(),
+        harnesses: HARNESSES
+            .into_iter()
+            .map(|harness| (harness.to_owned(), "test".to_owned()))
+            .collect(),
+    }
+}
+
+/// A compression campaign that passed every criterion under `current`, the test binding, and unbounded vector limits, with a real full-path trace from both harnesses.
+pub fn passing_compression(current: &InvalidationIdentity) -> CompressionEvidence {
+    CompressionEvidence {
+        identity: current.clone(),
+        binding: test_binding(),
+        limits: VECTOR_LIMITS
+            .into_iter()
+            .map(|name| (name.to_owned(), u64::MAX))
+            .collect(),
+        criteria: COMPRESSION_CRITERIA
+            .into_iter()
+            .map(|criterion| (criterion.to_owned(), Outcome::Passed))
+            .collect(),
+        traces: HARNESSES
+            .into_iter()
+            .map(|harness| {
+                (
+                    harness.to_owned(),
+                    FullPathTrace {
+                        kind: TraceKind::Real,
+                        stages: TRACE_STAGES
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect::<BTreeSet<_>>(),
+                    },
+                )
+            })
+            .collect(),
+        revoked: false,
     }
 }
 
