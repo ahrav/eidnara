@@ -28,7 +28,8 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u3b-query-route` at
   for a lane that turned failing or disabled under it and for an artifact the
   backend declared unusable.
 - `crates/daemon/src/query_route.rs` `has_prose` and the handler's embedding
-  gate: a request without text outside its selector mentions is not embedded
+  gate: a request whose text outside its selector mentions analyzes to no
+  lexical atom (none, whitespace, or punctuation alone) is not embedded
   and the dense lane is `undeclared`, mirroring the lexical lane's `Direct`
   handling.
 - `crates/daemon/tests/query_route_dense.rs`

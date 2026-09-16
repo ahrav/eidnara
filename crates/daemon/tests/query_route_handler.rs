@@ -476,6 +476,16 @@ async fn a_selector_only_request_is_never_embedded_and_leaves_the_dense_lane_und
         "a request over the probe bound is refused before it is embedded"
     );
 
+    let refused = daemon.outcome(request(&project, "!!!")).await;
+    assert_eq!(error_code(refused), "invalid_params");
+    let answer = body(daemon.outcome(request(&project, "id:rule,id:other")).await);
+    assert_eq!(answer["lanes"]["dense"]["status"], "undeclared", "{answer}");
+    assert_eq!(
+        embedder.calls.load(Ordering::SeqCst),
+        0,
+        "punctuation outside selector mentions is not prose and is not embedded"
+    );
+
     let answer = body(
         daemon
             .outcome(request(&project, "id:rule explicit contract"))

@@ -696,7 +696,9 @@ with an artifact fault ends that request as `embedding_failed` and the next
 request reports the lane `disabled`; a selector-only request, at the `execute`
 level with a ready lane and through the handler with a counting embedder,
 reports the dense lane `undeclared`, carries no dense contribution, and makes
-no embedding or producer call; a request over the probe bound and one
+no embedding or producer call; punctuation alone outside the mentions is not
+prose (`!!!` is refused as no probe, `id:rule,id:other` serves with the dense
+lane `undeclared`); a request over the probe bound and one
 cancelled before its embedding step starts make no embedding call; no producer
 runs when the lane is unavailable; a prose query the lexical lane refuses is
 served by a ready dense lane alone, `degraded`, and is `no_lane` only when

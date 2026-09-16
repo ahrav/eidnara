@@ -538,12 +538,19 @@ fn embed_refusal(refusal: DenseUnavailable) -> EmbedFailure {
     }
 }
 
-/// Whether `query` has non-whitespace text outside its selector mentions; the dense lane embeds prose, so a selector-only request declares no dense lane.
-fn has_prose(intent: &Intent, query: &str) -> bool {
-    intent
-        .lexical_segments(query)
-        .iter()
-        .any(|segment| !segment.trim().is_empty())
+/// Whether the text outside `query`'s selector mentions analyzes to at least one lexical atom; punctuation alone is not prose, so it declares no dense lane.
+fn has_prose(intent: &Intent, query: &str, limits: &QueryRouteLimits) -> bool {
+    match analyze_segments(&intent.lexical_segments(query), lexical_bounds(limits)) {
+        Ok(analysis) => !analysis.is_empty(),
+        Err(_) => true,
+    }
+}
+
+fn lexical_bounds(limits: &QueryRouteLimits) -> LexicalBounds {
+    LexicalBounds {
+        max_input_bytes: limits.query_bytes,
+        max_atoms: limits.probes,
+    }
 }
 
 fn selector_bounds(limits: &QueryRouteLimits) -> SelectorBounds {
@@ -739,11 +746,7 @@ fn lexical_read(
         Intent::Direct(_) => Vec::new(),
         Intent::Hybrid(_) => intent.lexical_segments(query),
     };
-    let bounds = LexicalBounds {
-        max_input_bytes: limits.query_bytes,
-        max_atoms: limits.probes,
-    };
-    let analysis = match analyze_segments(&segments, bounds) {
+    let analysis = match analyze_segments(&segments, lexical_bounds(limits)) {
         Ok(analysis) => analysis,
         Err(refusal) => {
             return Ok(LaneRead::Ended(LaneStatus::Unavailable(lexical_refusal(
@@ -962,7 +965,7 @@ pub fn execute(
             let lexical = lexical_read(conn, &intent, query, limits, budget)?;
             before_phase(Phase::Dense);
             check(budget)?;
-            let dense = if has_prose(&intent, query) {
+            let dense = if has_prose(&intent, query, limits) {
                 dense_lane(conn, kernel, &identity, authority, &dense, budget)?
             } else {
                 DenseHits::ended(LaneOutput::undeclared())
@@ -1228,7 +1231,8 @@ impl HandlerCore {
         // Requests without prose or with more than `limits.probes` ID selectors skip dense inference.
         let embeds = limits.dense.is_some()
             && classify(&query, selector_bounds(&limits)).is_ok_and(|intent| {
-                has_prose(&intent, &query) && object_ids(&intent).len() <= limits.probes.get()
+                has_prose(&intent, &query, &limits)
+                    && object_ids(&intent).len() <= limits.probes.get()
             });
         let embedded = if embeds {
             let embedder = self.query_embedder(&lifecycle);

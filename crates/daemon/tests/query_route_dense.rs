@@ -434,6 +434,42 @@ async fn a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_n
         0,
         "no producer runs for a request without prose"
     );
+    for query in ["!!!", "id:rule,id:other"] {
+        let outcome = execute(
+            &fixture.projection,
+            &fixture.store,
+            Authority {
+                project: &fixture.project,
+                destination: ArtifactDestination::Local,
+            },
+            &with_dense(),
+            budget.shared(),
+            query,
+            DenseLane::Ready {
+                query: &query_vector(),
+                generation_id: GENERATION,
+                producer: &counting,
+            },
+            |_| {},
+        );
+        match query {
+            "!!!" => assert!(
+                matches!(outcome, Err(QueryFailure::InvalidQuery(_))),
+                "punctuation alone yields no probe: {:?}",
+                outcome.err()
+            ),
+            _ => assert_eq!(
+                outcome.unwrap().statuses[1..],
+                [LaneStatus::Undeclared, LaneStatus::Undeclared],
+                "{query}"
+            ),
+        }
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "residual punctuation between selectors is not prose"
+    );
 
     let prose = run(
         &fixture,
