@@ -39,13 +39,12 @@ fn is_deadline(error: &SearchProjectionError) -> bool {
 
 /// The first receiver fires from inside the read callback, after acquisition and interrupt-scope
 /// installation, so a cancellation raised after it is observed by the running statement.
+type ScanOutcome = (Instant, Result<i64, SearchProjectionError>);
+
 fn held_scan(
     projection: &Arc<SearchProjection>,
     shared: SharedBudget,
-) -> (
-    mpsc::Receiver<()>,
-    mpsc::Receiver<(Instant, Result<i64, SearchProjectionError>)>,
-) {
+) -> (mpsc::Receiver<()>, mpsc::Receiver<ScanOutcome>) {
     let (ready_tx, ready) = mpsc::channel();
     let (tx, rx) = mpsc::channel();
     let projection = Arc::clone(projection);
