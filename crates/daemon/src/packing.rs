@@ -453,7 +453,7 @@ pub fn prepare_optional(
     trace.optional(OptionalEvent::Judged, None);
     let mut rows: Vec<SelectedOccurrence> = Vec::with_capacity(live.len());
     for ((request, row), judged) in live.into_iter().zip(&report.occurrences) {
-        let exclusion = if row.tombstone.is_some() || row.revision != request.revision {
+        let exclusion = if row.is_stale_for(request.revision) {
             Some(OptionalExclusion::Stale)
         } else {
             match judged.disposition {

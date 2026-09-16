@@ -12,6 +12,7 @@ use daemon::packing::{
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
 use retrieval::packing::{OptionalBound, OptionalBounds};
+use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
 use support::packing::{ByteEstimator, Fixture, ToolSpan, bounds, tool_range, tool_span};
 
 const REQUIRED: ToolSpan = tool_span("req", "1", "required bytes\n");
@@ -148,10 +149,27 @@ fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation()
     let unknown = tool_span("opt-unknown", "1", "never");
     let excluded = tool_span("opt-excluded", "1", "excluded");
     let moved = tool_span("opt-moved", "1", "moved on");
+    let tombstoned = tool_span("opt-tombstoned", "1", "retired");
     let fixture = Fixture::with_admitted(
-        &[REQUIRED, live, excluded, moved],
-        &["req", "opt-live", "opt-moved"],
+        &[REQUIRED, live, excluded, moved, tombstoned],
+        &["req", "opt-live", "opt-moved", "opt-tombstoned"],
     );
+    fixture
+        .store
+        .with_conn_fenced(|conn| {
+            tombstone_occurrence(
+                conn,
+                &tombstoned.id().to_string(),
+                Tombstone {
+                    invalidated_commit_seq: 9,
+                    reason: TombstoneReason::Retired,
+                },
+                2,
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
     let stale = OptionalRequest {
         occurrence: moved.id(),
         revision: 2,
@@ -161,6 +179,7 @@ fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation()
         optional(&unknown),
         optional(&excluded),
         stale,
+        optional(&tombstoned),
         optional(&live),
     ];
     let (result, trace) = run(&fixture, &requests, &wide(), 1 << 20);
@@ -176,6 +195,7 @@ fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation()
                 OptionalExclusion::Excluded(EligibilityVerdict::Retracted)
             ),
             (moved.id(), OptionalExclusion::Stale),
+            (tombstoned.id(), OptionalExclusion::Stale),
         ]
     );
     assert_eq!(

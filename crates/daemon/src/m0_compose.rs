@@ -100,7 +100,10 @@ pub(crate) fn trim_memories_to_budget(
         positive.len(),
         |admitted, index| {
             for admitted in &admitted[seen_admitted..] {
-                open_categories.push(positive[*admitted].category.as_str());
+                let category = positive[*admitted].category.as_str();
+                if !open_categories.contains(&category) {
+                    open_categories.push(category);
+                }
             }
             seen_admitted = admitted.len();
             let memory = positive[index];

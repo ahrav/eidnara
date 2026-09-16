@@ -114,6 +114,11 @@ pub struct SelectedOccurrence {
 }
 
 impl SelectedOccurrence {
+    #[must_use]
+    pub fn is_stale_for(&self, selected_revision: i64) -> bool {
+        self.tombstone.is_some() || self.revision != selected_revision
+    }
+
     /// The verdict for this candidate lives only in the report
     /// [`crate::eligibility::judge_occurrences`] returns.
     pub fn eligibility_candidate(&self) -> OccurrenceCandidate {

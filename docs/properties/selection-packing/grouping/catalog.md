@@ -24,7 +24,7 @@ The pure functions are `crates/retrieval/src/packing/grouping.rs` `group` and
 `admit_optional_set`, exercised by `crates/retrieval/tests/packing_grouping.rs`
 against the oracle parent in `crates/retrieval/tests/fixtures/packing/groups.json`
 and the frozen reference in `crates/retrieval/tests/support/frozen_packer.rs`
-(`packing-reference-v1`). The daemon entry is `crates/daemon/src/packing.rs`
+(`packing-reference-v2`). The daemon entry is `crates/daemon/src/packing.rs`
 `prepare_optional`, exercised by `crates/daemon/tests/packing_optional.rs`;
 `PackingTrace` is the observation point for stage order and payload loads.
 The production packer receives selected bytes only; the parent buffer exists
@@ -47,8 +47,14 @@ Recorded by the repository owner at the U3 change:
 Rules the change fixes beneath those rulings, encoded in both the production
 grouper and the frozen reference:
 
-- A whole-buffer sibling bounds its key only after it passed the empty and
-  length checks itself.
+- A whole-buffer sibling bounds its key only after it passed the reversed,
+  empty, and length checks itself.
+- Within a key, members sort by `(start, end, occurrence)`. Two persisted
+  spans of one key never share offsets, because the identifier covers the
+  span; the identifier tiebreak fixes member order for damaged rows so the
+  production grouper and the frozen reference cannot disagree on it.
+- A whole-object (`NonGrouping`) row is keyed by its own occurrence
+  identifier in both the grouper and the reference.
 - A group's fused position is that of its earliest member that landed in a
   range; a refused span never advances a group.
 - A repeated optional identity is excluded as `Duplicate` before any read;
@@ -78,6 +84,8 @@ Status: active
 Exercised: yes - `crates/retrieval/tests/packing_grouping.rs`
 `oracle_parent_groups_match_the_expected_tables_without_a_parent_read`,
 `spans_of_another_revision_or_representation_never_merge_and_groups_follow_fused_order`,
+`tied_offsets_of_distinct_occurrences_order_by_identifier_in_both_implementations`,
+`whole_objects_of_one_class_are_their_own_group_in_both_implementations`,
 `production_grouping_and_scan_never_diverge_from_the_frozen_reference`;
 `crates/daemon/tests/packing_optional.rs`
 `same_parent_spans_group_and_are_charged_as_one_merged_range`.
@@ -93,7 +101,8 @@ the parent slice and the groups' total byte count passes the no-gap oracle
 gap holding a multibyte character fails that same oracle; revision and representation variants form separate
 groups; `first_fused` is increasing; the frozen reference, a coverage-map
 algorithm with no code in common with production, agrees on every generated
-set, including sets with flipped bytes, stretched ends, and empty spans.
+set, including sets with flipped bytes, stretched ends, reversed spans, empty
+spans, and whole-object rows.
 `always` because a single filled gap or dropped byte changes rendered context.
 Fault/timing angle: none; grouping is a pure function.
 Required faults and enabling state: Overlapping, adjacent, and disjoint spans
@@ -116,19 +125,22 @@ Reachability: test-only - same as the first record.
 Status: active
 Exercised: yes - `crates/retrieval/tests/packing_grouping.rs`
 `every_selected_span_is_grouped_or_carries_a_typed_reason`, and the
-differential test's refused-set comparison.
+differential test's refused-set comparison; `crates/daemon/tests/packing_optional.rs`
+`optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation`
+for the tombstoned and revision-moved optional rows.
 Guarantee: Every selected identity appears exactly once: as a member of one
 group or in the refused set with an `Ungrouped` reason; no identity is dropped
 without a reason and none is counted twice.
 Check: `always` - the set of identities across groups and refusals equals the
-selected set with no duplicate; the empty, overflowing, out-of-parent,
-disagreeing, and UTF-8-splitting spans each carry their named reason while a
-split pair that rejoins validly forms a group. `always` because coverage is
-asserted per identity, not by aggregate count.
+selected set with no duplicate; the reversed, empty, overflowing,
+out-of-parent, disagreeing, and UTF-8-splitting spans each carry their named
+reason while a split pair that rejoins validly forms a group. `always` because
+coverage is asserted per identity, not by aggregate count.
 Fault/timing angle: none.
-Required faults and enabling state: A stored span that is empty, longer than
-its payload, past its whole-buffer sibling, overlapping with different bytes,
-or cut inside a multibyte character.
+Required faults and enabling state: A stored span that is reversed, empty,
+longer than its payload, past its whole-buffer sibling, overlapping with
+different bytes, or cut inside a multibyte character; an optional row that is
+tombstoned or whose revision moved past the request's.
 Confidence: high - [evidence](evidence/packing-coverage-is-a-per-identity-partition.md).
 Existing check: none before this change.
 Impact: A silently dropped span is missing context with no signal; a

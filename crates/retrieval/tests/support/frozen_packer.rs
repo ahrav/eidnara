@@ -3,18 +3,18 @@
 
 use std::collections::BTreeMap;
 
-pub const VERSION: &str = "packing-reference-v1";
+pub const VERSION: &str = "packing-reference-v2";
 
 pub const RULE_TEXT: &str = "\
 Grouping: partition selected spans by grouping key; whole-object classes are \
-their own group. Within a key, refuse an empty span, a span whose length is not \
-its payload length or that reaches past a whole-buffer sibling that itself \
-passed those checks. Sort by (start, end); two spans of one key never tie. Two \
-spans merge when the second starts at or before the first ends; merged bytes are \
-the first's bytes followed by the second's bytes after the overlap. A run whose \
-overlapping bytes disagree is refused whole, as is a run whose bytes are not \
-UTF-8. Ranges keep offset order; groups keep the fused order of their earliest \
-member that landed in a range.\n\
+their own group. Within a key, refuse a reversed span as an overflow, refuse an \
+empty span, and refuse a span whose length is not its payload length or that \
+reaches past a whole-buffer sibling that itself passed those checks. Sort by \
+(start, end, identifier). Two spans merge when the second starts at or before \
+the first ends; merged bytes are the first's bytes followed by the second's \
+bytes after the overlap. A run whose overlapping bytes disagree is refused \
+whole, as is a run whose bytes are not UTF-8. Ranges keep offset order; groups \
+keep the fused order of their earliest member that landed in a range.\n\
 Scan: visit groups once in fused order; admit a group when its cost is at most \
 the remaining budget and subtract it; otherwise skip it and continue; the \
 remaining budget after the last group is success.";
@@ -67,7 +67,9 @@ pub fn group(spans: &[RefSpan]) -> (Vec<RefGroup>, Vec<(u64, RefReason)>) {
     for (key, members) in by_key {
         let mut valid = Vec::new();
         for span in members {
-            if span.end <= span.start {
+            if span.end < span.start {
+                refused.push((span.id, RefReason::Overflow));
+            } else if span.end == span.start {
                 refused.push((span.id, RefReason::Empty));
             } else if span.end - span.start != span.bytes.len() as u64 {
                 refused.push((span.id, RefReason::Overflow));

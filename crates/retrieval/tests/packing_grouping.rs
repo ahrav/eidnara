@@ -10,11 +10,12 @@ use std::path::Path;
 use kernel::Sensitivity;
 use kernel::source_identity::{Occurrence, OccurrenceClass, Span, encode};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};
 use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{
-    Grouping, OptionalBound, OptionalBounds, PayloadRef, Provenance, Selected, SelectedOccurrence,
-    Ungrouped, admit_fused_candidates, admit_optional_set, group, skip_and_continue,
+    Grouping, GroupingKey, OptionalBound, OptionalBounds, PayloadRef, Provenance, Selected,
+    SelectedOccurrence, Ungrouped, admit_fused_candidates, admit_optional_set, group,
+    skip_and_continue,
 };
 use serde_json::Value;
 use support::frozen_packer::{self, RefReason, RefSpan};
@@ -48,11 +49,44 @@ fn tool_span(
         ("result_revision", "1"),
         ("block_index", "0"),
     ];
+    row(
+        OccurrenceClass::RawToolSpans,
+        &identity,
+        call,
+        revision,
+        representation,
+        parent,
+        range,
+    )
+}
+
+fn promoted_memory(decision: &str, payload: &str) -> (SelectedOccurrence, Vec<u8>) {
+    let identity = [("decision_object_id", decision)];
+    row(
+        OccurrenceClass::PromotedMemory,
+        &identity,
+        decision,
+        "1",
+        "summary",
+        payload,
+        None,
+    )
+}
+
+fn row(
+    class: OccurrenceClass,
+    identity: &[(&str, &str)],
+    source_object_id: &str,
+    revision: &str,
+    representation: &str,
+    parent: &str,
+    range: Option<(u64, u64)>,
+) -> (SelectedOccurrence, Vec<u8>) {
     let span = range.map(|(start, end)| Span { start, end });
     let encoded = encode(
         &Occurrence {
-            class: OccurrenceClass::RawToolSpans.code(),
-            identity: &identity,
+            class: class.code(),
+            identity,
             revision,
             representation,
             span,
@@ -66,7 +100,7 @@ fn tool_span(
     };
     let row = SelectedOccurrence {
         occurrence: OccurrenceId::parse(&encoded.occurrence_id).unwrap(),
-        class: OccurrenceClass::RawToolSpans,
+        class,
         revision: encoded.revision,
         representation: representation.to_owned(),
         span: encoded.span,
@@ -77,7 +111,7 @@ fn tool_span(
         sensitivity: Sensitivity::Normal,
         provenance: Provenance {
             domain_id: "d".to_owned(),
-            source_object_id: call.to_owned(),
+            source_object_id: source_object_id.to_owned(),
             source_evidence_id: "e".to_owned(),
             source_artifact_digest: "0".repeat(64),
             created_commit_seq: 1,
@@ -85,7 +119,7 @@ fn tool_span(
         tombstone: None,
         grouping: Grouping::derive(
             &encoded.tuple,
-            OccurrenceClass::RawToolSpans,
+            class,
             encoded.revision,
             representation,
             encoded.span,
@@ -267,11 +301,12 @@ fn every_selected_span_is_grouped_or_carries_a_typed_reason() {
     let split_b = damaged_span("call-5", parent, 3, 2, 4, parent.as_bytes()[2..4].to_vec());
     let rejoined_a = damaged_span("call-6", parent, 1, 0, 2, parent.as_bytes()[0..2].to_vec());
     let rejoined_b = damaged_span("call-6", parent, 3, 2, 4, parent.as_bytes()[2..4].to_vec());
+    let reversed = damaged_span("call-1", parent, 5, 4, 2, Vec::new());
     assert!(std::str::from_utf8(&split_a.1).is_err());
 
     let rows = vec![
         empty, overflow, whole, beyond, agree_a, disagree_b, split_a, split_b, rejoined_a,
-        rejoined_b,
+        rejoined_b, reversed,
     ];
     let partition = group(&selected(&rows));
     let mut seen: BTreeMap<OccurrenceId, Option<Ungrouped>> = BTreeMap::new();
@@ -299,6 +334,7 @@ fn every_selected_span_is_grouped_or_carries_a_typed_reason() {
         Some(Ungrouped::Utf8Boundary),
         None,
         None,
+        Some(Ungrouped::SpanOverflow),
     ];
     for ((row, _), expected) in rows.iter().zip(expected) {
         assert_eq!(seen[&row.occurrence], expected, "{:?}", row.span);
@@ -419,19 +455,35 @@ fn optional_bounds_saturate_at_their_limit_and_refuse_at_limit_plus_one() {
     }
 }
 
+/// `id` is the sorted rank of `row.occurrence`.
 fn ref_spans(
     rows: &[(SelectedOccurrence, Vec<u8>)],
 ) -> (Vec<RefSpan>, BTreeMap<u64, OccurrenceId>) {
-    let mut keys: HashMap<Grouping, u64> = HashMap::new();
-    let mut ids = BTreeMap::new();
+    #[derive(PartialEq, Eq, Hash)]
+    enum RefKey {
+        Grouped(GroupingKey),
+        Single(OccurrenceId),
+    }
+    let mut ordered: Vec<OccurrenceId> = rows.iter().map(|(row, _)| row.occurrence).collect();
+    ordered.sort();
+    ordered.dedup();
+    let ids: BTreeMap<u64, OccurrenceId> = ordered
+        .iter()
+        .enumerate()
+        .map(|(rank, occurrence)| (rank as u64, *occurrence))
+        .collect();
+    let mut keys: HashMap<RefKey, u64> = HashMap::new();
     let spans = rows
         .iter()
         .enumerate()
         .map(|(fused, (row, bytes))| {
+            let ref_key = match &row.grouping {
+                Grouping::Grouped(grouping) => RefKey::Grouped(grouping.clone()),
+                Grouping::NonGrouping(_) => RefKey::Single(row.occurrence),
+            };
             let next = keys.len() as u64;
-            let key = *keys.entry(row.grouping.clone()).or_insert(next);
-            let id = fused as u64;
-            ids.insert(id, row.occurrence);
+            let key = *keys.entry(ref_key).or_insert(next);
+            let id = ordered.binary_search(&row.occurrence).unwrap() as u64;
             let (start, end) = match row.span {
                 Some(span) => (span.start, span.end),
                 None => (0, row.payload.byte_length),
@@ -466,7 +518,14 @@ fn production_grouping_and_scan_never_diverge_from_the_frozen_reference() {
         })
     };
     let set = proptest::collection::vec(
-        (0u8..3, 0u8..2, span, proptest::bool::weighted(0.15), 0u8..8),
+        (
+            0u8..3,
+            0u8..2,
+            span,
+            proptest::bool::weighted(0.15),
+            0u8..8,
+            proptest::bool::weighted(0.1),
+        ),
         0..8,
     );
     let costs = proptest::collection::vec(0u64..12, 0..8);
@@ -475,73 +534,38 @@ fn production_grouping_and_scan_never_diverge_from_the_frozen_reference() {
             let rows: Vec<_> = set
                 .iter()
                 .enumerate()
-                .map(|(index, (call, revision, (start, end), whole, damage))| {
-                    let call = format!("call-{call}");
-                    let revision = if *revision == 0 { "1" } else { "2" };
-                    let seed_end = boundaries[1 + index % (boundaries.len() - 1)];
-                    let slice =
-                        |end: u64| parent.as_bytes()[*start as usize..end as usize].to_vec();
-                    if *whole {
-                        tool_span(&call, revision, "tool_output", parent, None)
-                    } else if start == end {
-                        damaged_span(&call, parent, seed_end, *start, *end, Vec::new())
-                    } else if *damage == 5 {
-                        let mut bytes = slice(*end);
-                        bytes[0] ^= 0x01;
-                        damaged_span(&call, parent, seed_end, *start, *end, bytes)
-                    } else if *damage == 6 {
-                        damaged_span(&call, parent, seed_end, *start, *end + 1, slice(*end))
-                    } else if *damage == 7 {
-                        let end = (*end + 1).min(parent.len() as u64);
-                        damaged_span(&call, parent, seed_end, *start, end, slice(end))
-                    } else {
-                        tool_span(&call, revision, "tool_output", parent, Some((*start, *end)))
-                    }
-                })
+                .map(
+                    |(index, (call, revision, (start, end), whole, damage, object))| {
+                        let call = format!("call-{call}");
+                        let revision = if *revision == 0 { "1" } else { "2" };
+                        let seed_end = boundaries[1 + index % (boundaries.len() - 1)];
+                        let slice =
+                            |end: u64| parent.as_bytes()[*start as usize..end as usize].to_vec();
+                        if *object {
+                            let cut = (*end as usize).max(1);
+                            promoted_memory(&format!("decision-{call}"), &parent[..cut])
+                        } else if *whole {
+                            tool_span(&call, revision, "tool_output", parent, None)
+                        } else if start == end {
+                            damaged_span(&call, parent, seed_end, *start, *end, Vec::new())
+                        } else if *damage == 4 {
+                            damaged_span(&call, parent, seed_end, *end, *start, Vec::new())
+                        } else if *damage == 5 {
+                            let mut bytes = slice(*end);
+                            bytes[0] ^= 0x01;
+                            damaged_span(&call, parent, seed_end, *start, *end, bytes)
+                        } else if *damage == 6 {
+                            damaged_span(&call, parent, seed_end, *start, *end + 1, slice(*end))
+                        } else if *damage == 7 {
+                            let end = (*end + 1).min(parent.len() as u64);
+                            damaged_span(&call, parent, seed_end, *start, end, slice(end))
+                        } else {
+                            tool_span(&call, revision, "tool_output", parent, Some((*start, *end)))
+                        }
+                    },
+                )
                 .collect();
-            let production = group(&selected(&rows));
-            let (ref_spans, ids) = ref_spans(&rows);
-            let (reference_groups, reference_refused) = frozen_packer::group(&ref_spans);
-            prop_assert_eq!(
-                production.groups.len(),
-                reference_groups.len(),
-                "production {:?} reference {:?} refused {:?}",
-                production,
-                reference_groups,
-                reference_refused
-            );
-            for (group, reference) in production.groups.iter().zip(&reference_groups) {
-                prop_assert_eq!(group.first_fused, reference.first_fused);
-                prop_assert_eq!(group.ranges.len(), reference.ranges.len());
-                for (range, reference) in group.ranges.iter().zip(&reference.ranges) {
-                    prop_assert_eq!(
-                        (range.span.start, range.span.end),
-                        (reference.start, reference.end)
-                    );
-                    prop_assert_eq!(&range.bytes, &reference.bytes);
-                    let members: Vec<OccurrenceId> =
-                        reference.members.iter().map(|id| ids[id]).collect();
-                    prop_assert_eq!(&range.members, &members);
-                }
-            }
-            let mut refused = production.refused.clone();
-            refused.sort();
-            let mut reference_refused: Vec<(OccurrenceId, Ungrouped)> = reference_refused
-                .iter()
-                .map(|(id, reason)| {
-                    (
-                        ids[id],
-                        match reason {
-                            RefReason::Empty => Ungrouped::EmptySpan,
-                            RefReason::Overflow => Ungrouped::SpanOverflow,
-                            RefReason::Disagreement => Ungrouped::OverlapDisagreement,
-                            RefReason::Utf8 => Ungrouped::Utf8Boundary,
-                        },
-                    )
-                })
-                .collect();
-            reference_refused.sort();
-            prop_assert_eq!(refused, reference_refused);
+            grouping_agrees_with_reference(&rows)?;
 
             let scan = skip_and_continue(budget, costs.len(), |_, i| costs[i]);
             let (admitted, skipped, remaining) = frozen_packer::scan(&costs, budget);
@@ -552,4 +576,85 @@ fn production_grouping_and_scan_never_diverge_from_the_frozen_reference() {
             Ok(())
         })
         .unwrap();
+}
+
+fn grouping_agrees_with_reference(
+    rows: &[(SelectedOccurrence, Vec<u8>)],
+) -> Result<(), TestCaseError> {
+    let production = group(&selected(rows));
+    let (ref_spans, ids) = ref_spans(rows);
+    let (reference_groups, reference_refused) = frozen_packer::group(&ref_spans);
+    prop_assert_eq!(
+        production.groups.len(),
+        reference_groups.len(),
+        "production {:?} reference {:?} refused {:?}",
+        production,
+        reference_groups,
+        reference_refused
+    );
+    for (group, reference) in production.groups.iter().zip(&reference_groups) {
+        prop_assert_eq!(group.first_fused, reference.first_fused);
+        prop_assert_eq!(group.ranges.len(), reference.ranges.len());
+        for (range, reference) in group.ranges.iter().zip(&reference.ranges) {
+            prop_assert_eq!(
+                (range.span.start, range.span.end),
+                (reference.start, reference.end)
+            );
+            prop_assert_eq!(&range.bytes, &reference.bytes);
+            let members: Vec<OccurrenceId> = reference.members.iter().map(|id| ids[id]).collect();
+            prop_assert_eq!(&range.members, &members);
+        }
+    }
+    let mut refused = production.refused.clone();
+    refused.sort();
+    let mut reference_refused: Vec<(OccurrenceId, Ungrouped)> = reference_refused
+        .iter()
+        .map(|(id, reason)| {
+            (
+                ids[id],
+                match reason {
+                    RefReason::Empty => Ungrouped::EmptySpan,
+                    RefReason::Overflow => Ungrouped::SpanOverflow,
+                    RefReason::Disagreement => Ungrouped::OverlapDisagreement,
+                    RefReason::Utf8 => Ungrouped::Utf8Boundary,
+                },
+            )
+        })
+        .collect();
+    reference_refused.sort();
+    prop_assert_eq!(refused, reference_refused);
+    Ok(())
+}
+
+#[test]
+fn tied_offsets_of_distinct_occurrences_order_by_identifier_in_both_implementations() {
+    let parent = "0123456789abcdefghij";
+    let bytes = parent.as_bytes()[4..9].to_vec();
+    let first = damaged_span("call-1", parent, 1, 4, 9, bytes.clone());
+    let second = damaged_span("call-1", parent, 2, 4, 9, bytes.clone());
+    assert_ne!(first.0.occurrence, second.0.occurrence);
+    let rows = if first.0.occurrence > second.0.occurrence {
+        vec![first, second]
+    } else {
+        vec![second, first]
+    };
+    let partition = group(&selected(&rows));
+    assert_eq!(partition.groups.len(), 1);
+    assert_eq!(partition.groups[0].ranges.len(), 1);
+    let members = &partition.groups[0].ranges[0].members;
+    assert_eq!(members, &vec![rows[1].0.occurrence, rows[0].0.occurrence]);
+    grouping_agrees_with_reference(&rows).unwrap();
+}
+
+#[test]
+fn whole_objects_of_one_class_are_their_own_group_in_both_implementations() {
+    let rows = vec![
+        promoted_memory("decision-a", "alpha"),
+        promoted_memory("decision-b", "alpha"),
+        promoted_memory("decision-c", "beta"),
+    ];
+    let partition = group(&selected(&rows));
+    assert_eq!(partition.groups.len(), 3);
+    assert!(partition.refused.is_empty());
+    grouping_agrees_with_reference(&rows).unwrap();
 }

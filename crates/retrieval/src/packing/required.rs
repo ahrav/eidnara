@@ -122,7 +122,7 @@ pub fn admit_required<'a, C>(
         if row.occurrence != occurrence {
             return Err(RequiredContextFailure::Corrupt(occurrence));
         }
-        if row.tombstone.is_some() || row.revision != fact.request.revision {
+        if row.is_stale_for(fact.request.revision) {
             return Err(RequiredContextFailure::Stale(occurrence));
         }
         match fact.disposition {

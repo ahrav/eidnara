@@ -62,13 +62,6 @@ impl Group {
             .iter()
             .flat_map(|range| range.members.iter().copied())
     }
-
-    pub fn byte_length(&self) -> u64 {
-        self.ranges
-            .iter()
-            .map(|range| range.bytes.len() as u64)
-            .sum()
-    }
 }
 
 /// Every selected identity appears exactly once: in one group or in `refused`.
@@ -143,7 +136,9 @@ fn merge(
     refused: &mut Vec<(OccurrenceId, Ungrouped)>,
 ) -> Vec<MergedRange> {
     members.retain(|member| {
-        let reason = if member.end <= member.start {
+        let reason = if member.end < member.start {
+            Some(Ungrouped::SpanOverflow)
+        } else if member.end == member.start {
             Some(Ungrouped::EmptySpan)
         } else if member.end - member.start != member.bytes.len() as u64 {
             Some(Ungrouped::SpanOverflow)
