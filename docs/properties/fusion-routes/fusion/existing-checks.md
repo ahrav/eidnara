@@ -6,7 +6,7 @@ source inspection establishes its presence and assertions, not adequacy.
 
 | Location and check | Asserted behavior | Status | Limitation for this part |
 | --- | --- | --- | --- |
-| `crates/kernel/src/source_identity.rs`, `identity_matching_requires_the_complete_exact_prefix` | Tuple prefix matching fails on any damaged byte or wrong field. | unaudited | Covers the encoder, not a consumer's ranking unit. |
+| `crates/kernel/src/source_identity.rs`, `identity_matching_requires_the_complete_exact_prefix` | Tuple prefix matching fails on a truncated prefix, on any damaged byte within the class-and-identity prefix, and on a wrong identity field or value; bytes after the prefix (revision, representation, span) are not flipped, and a complete prefix is accepted at every longer slice. | unaudited | Covers the encoder's prefix, not the suffix components and not a consumer's ranking unit. |
 | `crates/retrieval/tests/lexical_retrieval.rs`, `contributions_follow_the_reference_order_and_survive_probe_duplication_and_permutation` | Lexical contributions keep one entry per occurrence under probe permutation and duplication. | unaudited | Lexical lane only; no cross-lane declaration. |
 | `crates/kernel/src/envelope.rs`, `operation_identity` | Commit receipt identity length-delimits components. | unaudited | Commit intents, not selections or preparations. |
 
