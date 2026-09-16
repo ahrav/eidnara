@@ -17,6 +17,7 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u3c-dense-lane` at
   `kernel_request` and answer `disabled` without a limit set.
 - `docs/host-wire-protocol.md` Section 7.8 fixes the literals.
 - `crates/daemon/tests/edit_receipts.rs` `a_changed_context_between_prepare_and_apply_is_stale_and_forwards_nothing`.
+- `crates/daemon/tests/edit_receipts.rs` `outcomes_are_distinct_and_capacity_is_bound_before_preparation`: a `spans` item with `spn` instead of `span` is `invalid_params`, so a misspelled key cannot silently become a whole-buffer span in the digest.
 
 ## Failure scenario
 

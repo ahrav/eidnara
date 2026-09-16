@@ -153,8 +153,9 @@ same identity returns the recorded state and forwards nothing; a retry with
 another digest after a forward is `conflict`. The receipt completes only on a
 confirm whose applied identity equals the identity the daemon forwarded; a
 key from another daemon incarnation or a lost acknowledgment is `unknown` and
-stays so until such a confirm. Receipts are in memory, bounded by count and
-retention, and an evicted key is refused rather than replayed.
+stays so until such a confirm. Receipts are in memory, keyed by the route's
+bound project, bounded per project by count and store-wide by retention, and
+an evicted key or a key of another project is refused rather than replayed.
 
 ## Capability gate
 

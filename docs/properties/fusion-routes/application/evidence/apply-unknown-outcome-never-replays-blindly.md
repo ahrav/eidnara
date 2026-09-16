@@ -18,6 +18,8 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u3c-dense-lane` at
 - `docs/host-wire-protocol.md` Section 7.8 fixes the literals.
 - `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`.
 - `crates/daemon/tests/edit_receipts.rs` `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`.
+- `crates/daemon/src/edit_receipts.rs` `a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete`: an uppercase pair, a key without the minted shape, and a mismatched applied identity leave `unknown`; a recorded read-back later confirmed with another outcome, no applied identity, or another applied identity is `conflict`.
+- `crates/daemon/src/edit_receipts.rs` `a_read_back_the_store_cannot_record_is_refused_rather_than_answered_complete`: a read-back over a project whose only receipt is in flight is `receipt_unavailable` and the key stays `unknown`.
 
 ## Failure scenario
 

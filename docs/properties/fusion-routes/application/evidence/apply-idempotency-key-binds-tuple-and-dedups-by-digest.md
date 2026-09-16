@@ -17,6 +17,7 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u3c-dense-lane` at
   `kernel_request` and answer `disabled` without a limit set.
 - `docs/host-wire-protocol.md` Section 7.8 fixes the literals.
 - `crates/daemon/tests/edit_receipts.rs` `same_key_and_digest_replays_the_known_outcome_with_one_effect`.
+- `crates/daemon/src/edit_receipts.rs` `a_changed_digest_against_an_unknown_receipt_is_a_conflict`: a changed digest against an `unknown` receipt is `conflict`, the same as against an in-flight or complete one.
 
 ## Failure scenario
 

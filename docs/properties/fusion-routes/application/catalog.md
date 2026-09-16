@@ -31,16 +31,22 @@ preparation identity carries as its prefix; a key of another incarnation is
 reclassifies it; a duplicate while an apply is in flight answers `in_flight`
 with the recorded forwarded identity and forwards nothing. Q9: retention has a
 count bound and a time bound enforced separately, the time bound must be at
-least `retention_floor`, the longest supported retry path, and an evicted or
-expired key is refused as `receipt_unavailable`; read-back is a confirm whose
-`applied_identity` equals the forwarded identity the daemon recorded, and for
-a key of another incarnation, where no record survives, a confirm whose
-well-formed forwarded and applied identities agree, recorded so the key does
-not fall back to `unknown`. The count bound is enforced when a key is minted:
-the oldest settled receipt makes room and a store of in-flight receipts
-refuses the new preparation with `preparation_failure`/`receipt_capacity`, so
-a read never evicts and an edit that may already be applied is never dropped.
-A limits change keeps the receipts.
+least `RETENTION_FLOOR`, twice the wire's 30 s request deadline, and an evicted
+or expired key is refused as `receipt_unavailable`; read-back is a confirm
+whose `applied_identity` equals the forwarded identity the daemon recorded, and
+for a key of another incarnation, where no record survives, a confirm whose
+`preparation_id` has the minted shape and whose lowercase well-formed
+forwarded and applied identities agree, recorded so the key does not fall back
+to `unknown`; a read-back the project cannot record is `receipt_unavailable`
+and records nothing. Receipts are keyed by the route's bound project, so a key
+is honored only on a route of the project that prepared it, and the count
+bound is per project: it is enforced when a key is minted or a read-back is
+recorded, the oldest settled receipts make room in one pass, and a project of
+in-flight receipts refuses the new preparation with
+`preparation_failure`/`receipt_capacity`, so a read never evicts, one project
+never evicts another's receipts, and an edit that may already be applied is
+never dropped. `max_keys` has a fixed ceiling, `MAX_KEYS_CEILING`, refused at
+installation. A limits change keeps the receipts.
 
 Parent decisions for the gate recorded here. RP2.8 Q7: the capability answer
 is not wire-visible except as the `capability_unsupported` and
@@ -78,6 +84,7 @@ witnesses drive a `KernelDaemon` through `dispatch_value_for_test` in
 | [apply-unknown-outcome-never-replays-blindly](#apply-unknown-outcome-never-replays-blindly) | safety | test-only | always | active | high |
 | [apply-daemon-receipt-does-not-mark-harness-edit-applied](#apply-daemon-receipt-does-not-mark-harness-edit-applied) | safety | test-only | always | active | high |
 | [apply-receipt-retention-is-bounded-and-eviction-cannot-authorize-replay](#apply-receipt-retention-is-bounded-and-eviction-cannot-authorize-replay) | safety | test-only | always | active | medium |
+| [apply-receipt-belongs-to-the-project-that-prepared-it](#apply-receipt-belongs-to-the-project-that-prepared-it) | safety | test-only | always | active | high |
 | [apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement](#apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement) | safety | test-only | always | active | high |
 | [apply-append-allowance-and-replacement-capacity-are-bound-before-preparation](#apply-append-allowance-and-replacement-capacity-are-bound-before-preparation) | safety | test-only | always | active | high |
 | [apply-healthy-prepared-application-terminates-with-known-outcome](#apply-healthy-prepared-application-terminates-with-known-outcome) | liveness | test-only | always | active | high |
@@ -110,9 +117,9 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `same_key_and_digest_replays_the_known_outcome_with_one_effect`.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `same_key_and_digest_replays_the_known_outcome_with_one_effect`; `crates/daemon/src/edit_receipts.rs` `a_changed_digest_against_an_unknown_receipt_is_a_conflict`.
 Guarantee: The preparation identity is minted per preparation and its fingerprint is a length-delimited derivation over daemon incarnation, context revision, action, selection digest, and accounting profile; a retry under one identity and one digest returns the recorded state with exactly one forwarded effect, and a retry with another digest is a typed conflict.
-Check: `always` - two prepares over one tuple yield two identities and one fingerprint; the second `apply` of one identity answers `in_flight` and the independent edit log holds one effect; an apply with a changed span after the forward is `conflict`; after the acknowledgment every replay answers `complete` with the same outcome and a second acknowledgment with another outcome is `conflict`. `always` because every apply compares the digest.
+Check: `always` - two prepares over one tuple yield two identities and one fingerprint; the second `apply` of one identity answers `in_flight` and the independent edit log holds one effect; an apply with a changed span after the forward is `conflict`, whether the receipt is in flight, complete, or unknown; after the acknowledgment every replay answers `complete` with the same outcome and a second acknowledgment with another outcome is `conflict`. `always` because every apply of an owned key compares the digest.
 Fault/timing angle: A duplicate arriving while the apply is in flight.
 Required faults and enabling state: Two prepares over one tuple; a changed span after a forward.
 Confidence: high - [evidence](evidence/apply-idempotency-key-binds-tuple-and-dedups-by-digest.md).
@@ -126,9 +133,9 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_changed_context_between_prepare_and_apply_is_stale_and_forwards_nothing`.
-Guarantee: An apply whose current context revision, representation, selected spans, or span set differs from the prepared one is refused as `stale_preparation` before anything is forwarded, and the preparation stays usable under its own context.
-Check: `always` - a changed revision, a changed representation, a changed span end, and a dropped span each answer `stale_preparation` with no effect logged; the same preparation then forwards under its original context. `always` because the digest is recomputed on every apply.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_changed_context_between_prepare_and_apply_is_stale_and_forwards_nothing`; `crates/daemon/tests/edit_receipts.rs` `outcomes_are_distinct_and_capacity_is_bound_before_preparation` for the misspelled span key.
+Guarantee: An apply whose current context revision, representation, selected spans, or span set differs from the prepared one is refused as `stale_preparation` before anything is forwarded, and the preparation stays usable under its own context; a `spans` item with an unknown field is `invalid_params` rather than a whole-buffer span.
+Check: `always` - a changed revision, a changed representation, a changed span end, and a dropped span each answer `stale_preparation` with no effect logged; the same preparation then forwards under its original context; a span item spelled `spn` is `invalid_params`. `always` because the digest is recomputed on every apply and every span item is parsed strictly.
 Fault/timing angle: Context changes, including compaction, between prepare and apply.
 Required faults and enabling state: A prepared receipt and a differing context body.
 Confidence: high - [evidence](evidence/apply-stale-preparation-is-rejected-before-edit.md).
@@ -142,9 +149,9 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back` and `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`; `crates/daemon/src/edit_receipts.rs` `a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete`.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back` and `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`; `crates/daemon/src/edit_receipts.rs` `a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete` and `a_read_back_the_store_cannot_record_is_refused_rather_than_answered_complete`.
 Guarantee: After a daemon restart every key of the prior incarnation is `unknown`, whether it had been forwarded or only prepared; after a lost acknowledgment the key is `unknown`; `unknown` is sticky, forwards nothing on retry, and is reclassified only by a confirm whose applied identity equals the forwarded identity.
-Check: `always` - a forwarded key and a prepared key from a shut-down daemon answer `unknown` on a fresh daemon and again on retry with an empty edit log; a confirm without an applied identity, with another identity, or with a malformed one leaves `unknown`; a confirm with the exact identity answers `complete`, later applies read `complete`, and another outcome is `conflict`; on one daemon a confirm without an applied identity turns an in-flight receipt `unknown`, the retry forwards nothing, and a read-back naming another forward or another applied identity is `conflict` because the forwarded identity stays recorded through `unknown`. `always` because the incarnation prefix and the state are read on every request.
+Check: `always` - a forwarded key and a prepared key from a shut-down daemon answer `unknown` on a fresh daemon and again on retry with an empty edit log; a confirm without an applied identity, with another identity, with an uppercase or otherwise malformed one, or for a key without the minted `<incarnation>-<identity>` shape leaves `unknown` and records nothing; a confirm with the exact identity answers `complete`, later applies read `complete`, and another outcome, a missing applied identity, or another applied identity is `conflict`; a read-back over a project whose every receipt is in flight is `receipt_unavailable`, records nothing, and the key stays `unknown`; on one daemon a confirm without an applied identity turns an in-flight receipt `unknown`, the retry forwards nothing, and a read-back naming another forward or another applied identity is `conflict` because the forwarded identity stays recorded through `unknown`. `always` because the incarnation prefix and the state are read on every request.
 Fault/timing angle: Daemon restart after forward, restart after prepare, lost acknowledgment.
 Required faults and enabling state: A second `KernelDaemon`; a confirm with `applied_identity: null`.
 Confidence: high - [evidence](evidence/apply-unknown-outcome-never-replays-blindly.md).
@@ -174,15 +181,31 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `the_count_bound_evicts_the_oldest_settled_key_and_never_an_in_flight_one` and `the_route_is_disabled_until_an_approved_limit_set_is_installed`; `crates/daemon/src/edit_receipts.rs` `a_key_expires_by_its_creation_time_not_by_its_last_use` and `a_full_store_of_in_flight_receipts_refuses_a_new_preparation`.
-Guarantee: Receipts are bounded by a key count enforced when a key is minted and by a retention measured from creation, not last use, enforced on every access; a key past either bound is dropped and any later apply or confirm for it is refused as `receipt_unavailable`; an in-flight receipt is never evicted for count, so a full store of in-flight receipts refuses the new preparation; a retention shorter than `RETENTION_FLOOR` is refused at installation; no limit set disables the routes.
-Check: `always` - with `max_keys = 2` a third prepare evicts the first, whose apply and confirm are `receipt_unavailable`, the survivors still forward, a fourth prepare over two in-flight receipts is `preparation_failure`/`receipt_capacity`, and a wider limit set keeps the receipts; with synthetic instants a key used every two seconds still expires ten seconds after creation; a retention one millisecond below the floor is refused and the routes stay `disabled`. `always` because expiry runs on every access and the count bound on every mint.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `the_count_bound_evicts_the_oldest_settled_key_and_never_an_in_flight_one` and `the_route_is_disabled_until_an_approved_limit_set_is_installed`; `crates/daemon/src/edit_receipts.rs` `a_key_expires_by_its_creation_time_not_by_its_last_use`, `a_full_store_of_in_flight_receipts_refuses_a_new_preparation`, and `max_keys_is_capped_and_a_narrower_limit_evicts_the_oldest_settled_receipts_at_the_next_mint`.
+Guarantee: Receipts are bounded per project by a key count enforced when a key is minted or a read-back is recorded, and by a retention measured from creation, not last use, enforced on every access; a key past either bound is dropped and any later apply or confirm for it is refused as `receipt_unavailable`; an in-flight receipt is never evicted for count, so a project of in-flight receipts refuses the new preparation; a narrower limit evicts the excess oldest settled receipts in one pass at the next mint; a retention shorter than `RETENTION_FLOOR` or a `max_keys` above `MAX_KEYS_CEILING` is refused at installation; no limit set disables the routes.
+Check: `always` - with `max_keys = 2` a third prepare evicts the first, whose apply and confirm are `receipt_unavailable`, the survivors still forward, a fourth prepare over two in-flight receipts is `preparation_failure`/`receipt_capacity`, and a wider limit set keeps the receipts; with synthetic instants a key used every two seconds still expires ten seconds after creation; eight receipts narrowed to three keep the in-flight one, the youngest settled one, and the new mint; a retention one millisecond below the floor is refused and the routes stay `disabled`; `MAX_KEYS_CEILING + 1` is refused and `MAX_KEYS_CEILING` accepted. `always` because expiry runs on every access and the count bound on every mint.
 Fault/timing angle: Time passing; count overflow.
 Required faults and enabling state: Narrow limits installed on a live daemon.
 Confidence: medium - [evidence](evidence/apply-receipt-retention-is-bounded-and-eviction-cannot-authorize-replay.md).
-Parent Q9: retention is bounded below by `RETENTION_FLOOR`, one route deadline ceiling plus one client retry; the eviction disposition is refusal, not a tombstone, because a dropped key cannot be told from one never minted.
+Parent Q9: retention is bounded below by `RETENTION_FLOOR`, twice the wire's fixed 30 s request deadline (`docs/host-wire-protocol.md` Section 11), not the operator's `deadline_ceiling` for `retrieval.query`; the eviction disposition is refusal, not a tombstone, because a dropped key cannot be told from one never minted.
 Existing check: `crates/daemon/tests/kernel_routes.rs` idempotent `kernel.commit` replay tests, status unaudited.
 Impact: An unbounded store would grow with every preparation; an evicted key that replayed would forward a second edit.
+Open questions: None.
+
+### apply-receipt-belongs-to-the-project-that-prepared-it
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_receipt_belongs_to_the_project_that_prepared_it`.
+Guarantee: A receipt is keyed by the route's bound project: a preparation identity of this incarnation is `receipt_unavailable` on a route bound to another project for apply and confirm, one project's mints never evict another project's receipts, and one project of in-flight receipts never makes another project's prepare fail `receipt_capacity`.
+Check: `always` - with `max_keys = 1` and two routes bound to two project roots on one daemon, the key prepared on the first is `receipt_unavailable` on the second for apply and confirm and still forwards on the first; a prepare on the second answers `prepared` while the first project's only receipt is in flight; the first project's receipt then still answers `in_flight`; the edit log holds one effect. `always` because every request looks the key up under the bound project's scope id.
+Fault/timing angle: None.
+Required faults and enabling state: A second route bound to another project root on one `KernelDaemon`.
+Confidence: high - [evidence](evidence/apply-receipt-belongs-to-the-project-that-prepared-it.md).
+The scope id is `ProjectBinding::scope_id`, the same per-project key prefix the kernel routes' durable idempotency receipts use.
+Existing check: `crates/daemon/tests/kernel_routes.rs` `replayed_intents_return_one_receipt_and_projects_never_collide`, status unaudited.
+Impact: A caller bound to one project could consume, reclassify, or evict another project's receipts on the same daemon.
 Open questions: None.
 
 ### apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement
