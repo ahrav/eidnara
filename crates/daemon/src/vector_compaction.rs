@@ -153,7 +153,7 @@ pub fn compact(
             .map(|winner| winner.occurrence_id.as_str()),
         std::iter::empty(),
     );
-    // Beyond the build's own peak, compaction holds each winner's identifier twice, in the resolution and in the export, and one row's bytes and decode in flight while the export fills.
+    // Beyond the build's own peak, compaction holds each winner's identifier twice, in the resolution and in the export, the prefix's checkpoint it hands the build, and one row's bytes and decode in flight while the export fills.
     let identifier_bytes = resolved.winners.iter().fold(0u64, |total, winner| {
         total.saturating_add(winner.occurrence_id.len() as u64)
     });
@@ -164,6 +164,7 @@ pub fn compact(
         .saturating_add(
             rows.saturating_mul((size_of::<Winner>() + size_of::<ExportedRow>()) as u64),
         )
+        .saturating_add(checkpoint.hold_id.len() as u64)
         .saturating_add(dimension.saturating_mul(8));
     let rows_held = staging.ledger.reserve(
         staging.admission,
@@ -206,6 +207,14 @@ pub fn compact(
             return Err(CompactionRefusal::Build(refusal));
         }
     };
+    // The inventory is sized while the rows' reservation still covers the sidecar's serialization.
+    let written: u64 = built
+        .sidecar
+        .stage_manifest()
+        .files
+        .iter()
+        .map(|file| file.size)
+        .sum();
     drop(rows_held);
     let compacted = Compacted {
         cut: Cut::of(view),
@@ -215,14 +224,6 @@ pub fn compact(
         masked: resolved.masked,
         _scratch: scratch,
     };
-    let written: u64 = compacted
-        .built
-        .sidecar
-        .stage_manifest()
-        .files
-        .iter()
-        .map(|file| file.size)
-        .sum();
     if written > footprint.disk {
         // Dropping `compacted` removes what the build wrote with the reservation.
         return Err(CompactionRefusal::ScratchUnderestimated {

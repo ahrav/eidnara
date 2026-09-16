@@ -29,20 +29,13 @@ fn axis(index: usize) -> Vec<f32> {
     raw
 }
 
-#[test]
-fn the_resident_reservation_bounds_the_compactors_heap_peak() {
-    let mut fixture = Fixture::with_dimension(DIMENSION);
-    let rows = (0..ROWS)
-        .map(|i| ExportedRow {
-            occurrence_id: format!("{i:064x}"),
-            vector: axis(i),
-        })
-        .collect();
+/// Publishes one base of `rows` under `hold_id`, then returns what compaction reserves for it and the heap it peaks at.
+fn reserved_and_peak(fixture: &mut Fixture, rows: Vec<ExportedRow>, hold_id: &str) -> (u64, u64) {
     let base = fixture.layer_from(&LiveRows {
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: 9,
             checkpoint_commit_seq: 10,
-            hold_id: "hold-7".to_owned(),
+            hold_id: hold_id.to_owned(),
         },
         rows,
         tombstones: Vec::new(),
@@ -50,7 +43,7 @@ fn the_resident_reservation_bounds_the_compactors_heap_peak() {
     fixture
         .publish(&fixture.compose(1, &base, &[]).unwrap())
         .unwrap();
-    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let view = acquire_view(fixture, &mut |_| {}).unwrap();
     let max_entries = NonZeroUsize::new(64).unwrap();
 
     // The reservation is what a limit exactly at the view's own bytes refuses.
@@ -78,7 +71,19 @@ fn the_resident_reservation_bounds_the_compactors_heap_peak() {
     let (compacted, ledger) =
         record_window(|| compact(&view, &expected, &staging, max_entries, &work_dir));
     drop(compacted.unwrap());
-    let peak = ledger.peak_live_bytes as u64;
+    (reserved, ledger.peak_live_bytes as u64)
+}
+
+#[test]
+fn the_resident_reservation_bounds_the_compactors_heap_peak() {
+    let mut fixture = Fixture::with_dimension(DIMENSION);
+    let rows = (0..ROWS)
+        .map(|i| ExportedRow {
+            occurrence_id: format!("{i:064x}"),
+            vector: axis(i),
+        })
+        .collect();
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7");
     let row_bytes = ROWS as u64 * u64::from(DIMENSION) * 4;
     assert!(
         peak <= reserved,
@@ -88,5 +93,26 @@ fn the_resident_reservation_bounds_the_compactors_heap_peak() {
     assert!(
         reserved < 4 * row_bytes,
         "the reservation is a bound, not a blank cheque: {reserved} for {row_bytes} row bytes"
+    );
+}
+
+#[test]
+fn a_long_checkpoint_in_the_sidecar_stays_within_the_reservation() {
+    // The sidecar's strings dwarf the rows: the build holds them in the sidecar and again in its serialized bytes.
+    let mut fixture = Fixture::new();
+    let hold_id = "h".repeat(1 << 20);
+    let rows = vec![ExportedRow {
+        occurrence_id: "alpha".to_owned(),
+        vector: support::vector_store::unit([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    }];
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, &hold_id);
+    assert!(
+        peak <= reserved,
+        "compaction peaked at {peak} heap bytes against a {reserved}-byte reservation"
+    );
+    assert!(
+        reserved < 8 * hold_id.len() as u64,
+        "the reservation is a bound, not a blank cheque: {reserved} for a {}-byte hold id",
+        hold_id.len()
     );
 }

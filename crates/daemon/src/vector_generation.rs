@@ -83,7 +83,7 @@ pub struct VectorSidecar {
 
 impl VectorSidecar {
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("sidecar serialization cannot fail")
+        exact_json(self)
     }
 
     pub fn sha256(&self) -> String {
@@ -141,12 +141,16 @@ impl VectorSidecar {
                 sha256: file.sha256.clone(),
             })
             .collect();
-        let sidecar = self.canonical_bytes();
+        // One serialization at a time: `stage_meta` serializes the sidecar again for its hash.
+        let (size, sha256) = {
+            let sidecar = self.canonical_bytes();
+            (sidecar.len() as u64, sha256_hex(&sidecar))
+        };
         files.push(ManifestFile {
             path: SIDECAR_FILE.to_owned(),
             mode: 0o600,
-            size: sidecar.len() as u64,
-            sha256: sha256_hex(&sidecar),
+            size,
+            sha256,
         });
         GenerationManifest::from_files(&self.stage_meta(), files)
     }
@@ -388,8 +392,8 @@ pub fn build(
         rows_bytes,
         codes,
         calibration.scales.encode(),
-        serde_json::to_vec(&ids).expect("identifier serialization cannot fail"),
-        serde_json::to_vec(tombstones).expect("identifier serialization cannot fail"),
+        exact_json(&ids),
+        exact_json(tombstones),
     ];
     let mut inventory = Vec::with_capacity(payloads.len());
     for (path, bytes) in PAYLOAD_FILES.iter().zip(&payloads) {
@@ -512,11 +516,11 @@ pub fn footprint<'a>(
     ]
     .into_iter()
     .fold(0u64, u64::saturating_add);
-    // Peak resident memory also holds the calibration's running maxima, the calibration's scales, and one borrowed identifier reference per serialized identifier.
+    // Peak resident memory also holds the calibration's running maxima, the calibration's scales, one borrowed identifier reference per serialized identifier, and the sidecar itself beside its serialized bytes: every string it owns appears in them, so the file's size bounds the struct's heap.
     let resident = row_bytes
         .saturating_add(payloads)
         .saturating_add(scales_file.saturating_mul(2))
-        .saturating_add(sidecar_file)
+        .saturating_add(sidecar_file.saturating_mul(2))
         .saturating_add(rows.saturating_mul(std::mem::size_of::<&str>() as u64));
     BuildFootprint {
         resident,
@@ -524,18 +528,30 @@ pub fn footprint<'a>(
     }
 }
 
-fn json_list_bytes<'a>(items: impl IntoIterator<Item = &'a str>) -> (u64, u64) {
-    struct Counting(u64);
-    impl Write for Counting {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0 = self.0.saturating_add(bytes.len() as u64);
-            Ok(bytes.len())
-        }
+struct Counting(u64);
 
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
+impl Write for Counting {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len() as u64);
+        Ok(bytes.len())
     }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serializes into a buffer of exactly the output's length, so the heap holds one copy of the JSON rather than a growing buffer's old and new halves.
+fn exact_json<T: serde::Serialize + ?Sized>(value: &T) -> Vec<u8> {
+    let mut counted = Counting(0);
+    serde_json::to_writer(&mut counted, value).expect("JSON serialization cannot fail");
+    let mut bytes = Vec::with_capacity(usize::try_from(counted.0).expect("a counted length fits"));
+    serde_json::to_writer(&mut bytes, value).expect("JSON serialization cannot fail");
+    debug_assert_eq!(bytes.len() as u64, counted.0);
+    bytes
+}
+
+fn json_list_bytes<'a>(items: impl IntoIterator<Item = &'a str>) -> (u64, u64) {
     let mut count = 0u64;
     let mut bytes = Counting(1);
     for item in items {
