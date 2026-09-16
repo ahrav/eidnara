@@ -723,6 +723,13 @@ async fn outcomes_are_distinct_and_capacity_is_bound_before_preparation() {
         refused["error"], "invalid_params",
         "a misspelled span key is refused instead of widening to the whole buffer: {refused}"
     );
+    let mut omitted_span = ctx.clone();
+    omitted_span["spans"][0] = json!({"occurrence_id": OCC_A, "buffer_len": 100});
+    let refused = consumer.apply(&key, omitted_span).await;
+    assert_eq!(
+        refused["error"], "invalid_params",
+        "an omitted span key is refused instead of widening to the whole buffer: {refused}"
+    );
     let mut extra = ctx.clone();
     extra["selections"] = json!([]);
     let refused = consumer.apply(&key, extra.clone()).await;
