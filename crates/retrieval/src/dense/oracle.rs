@@ -31,7 +31,7 @@ use crate::scan::ScanStop;
 pub struct OracleBounds {
     /// Rows returned; at most [`MAX_ELIGIBILITY_CANDIDATES`] so the final re-judgment fits one batch.
     pub k: NonZeroUsize,
-    /// Rows read, decoded, and judged per page; at most [`MAX_ELIGIBILITY_CANDIDATES`].
+    /// Rows read, decoded, and scored per page; at most [`MAX_ELIGIBILITY_CANDIDATES`] so the rows a page admits fit one judgment batch.
     pub page_rows: NonZeroUsize,
     /// Live required rows one request may visit before it stops as incomplete.
     pub max_rows: NonZeroUsize,
@@ -146,7 +146,7 @@ pub enum IncompleteReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Completion {
-    /// Every live required row was visited, carried a valid vector, and was judged under one snapshot.
+    /// Every live required row was visited, carried a valid vector and a well-formed eligibility identity, and every row that could rank was judged under one snapshot.
     Complete,
     Incomplete(IncompleteReason),
 }
@@ -471,6 +471,7 @@ fn decode_page(
 }
 
 /// The admission threshold is the top-K before this page: a row behind the worst member of a full top-K is dropped unjudged, since no later row can loosen the bound.
+/// Every row's eligibility identity is still validated here, so a malformed row refuses the request whether or not its score can rank; the kernel repeats the check on the rows it judges.
 /// A moved authority discards the page's verdicts and stops the walk with its reason; a budget that ends inside the judgment stops it with none, the reason already recorded.
 fn judge_and_score(
     kernel: &KernelStore,
@@ -487,6 +488,7 @@ fn judge_and_score(
         if budget.is_exhausted() {
             return Ok(ControlFlow::Break(None));
         }
+        candidate.candidate.validate()?;
         let ranked = Ranked {
             occurrence_id: candidate.occurrence_id.clone(),
             class: candidate.class,

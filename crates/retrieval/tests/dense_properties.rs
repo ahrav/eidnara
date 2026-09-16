@@ -70,16 +70,21 @@ fn top_k_equals_sort_then_truncate_for_every_offer_order() {
             }),
             |(rows, k, order)| {
                 let mut top: TopK<()> = TopK::new(NonZeroUsize::new(k).unwrap());
+                let mut offered: Vec<(f64, String)> = Vec::new();
                 for index in order {
                     let (score, id) = &rows[index];
-                    top.offer(
-                        Ranked {
-                            occurrence_id: id.clone(),
-                            class: OccurrenceClass::Messages,
-                            score: *score,
-                        },
-                        (),
-                    );
+                    let ranked = Ranked {
+                        occurrence_id: id.clone(),
+                        class: OccurrenceClass::Messages,
+                        score: *score,
+                    };
+                    // `admits` must say exactly whether the row belongs to the top-K of everything offered so far plus itself.
+                    let mut with_row = offered.clone();
+                    with_row.push((*score, id.clone()));
+                    let belongs = model(with_row, k).iter().any(|(_, member)| member == id);
+                    prop_assert_eq!(top.admits(&ranked), belongs, "row {} at k={}", id, k);
+                    top.offer(ranked, ());
+                    offered.push((*score, id.clone()));
                 }
                 let ranked: Vec<(u64, String)> = top
                     .into_ranked()

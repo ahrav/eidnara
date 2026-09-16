@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
-use kernel::{ArtifactDestination, EligibilityVerdict, KernelStore, MAX_ELIGIBILITY_CANDIDATES};
+use kernel::{
+    ArtifactDestination, EligibilityVerdict, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
+};
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
 use retrieval::dense::codec::{
@@ -246,6 +248,30 @@ fn a_row_behind_a_full_top_k_is_scored_but_never_judged_so_its_exclusion_is_not_
         ranking.consumed.excluded.is_empty(),
         "the unadmitted loser was never judged"
     );
+}
+
+#[test]
+fn a_row_with_malformed_eligibility_identity_refuses_the_request_whether_or_not_it_can_rank() {
+    // `theta` scores worst against `axis(0)` and is visited last; with `k = 1` it can never enter the top-K.
+    // The schema has no CHECK on the digest's shape, so a projection row can carry one the kernel refuses.
+    for k in [1, 8] {
+        let fixture = Fixture::all_admitted();
+        let changed = fixture
+            .raw()
+            .execute(
+                "UPDATE occurrences SET source_artifact_digest='not-a-digest' WHERE occurrence_id=?1",
+                [fixture.id("theta")],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+
+        let outcome = fixture.rank(&axis(0), bounds(k), &EvalBudget::unbounded());
+        assert_eq!(
+            outcome.map(|ranking| ranking.completion),
+            Err(OracleRefusal::Kernel(KernelError::InvalidInput)),
+            "k={k}: a malformed row refuses the request even when its score cannot rank"
+        );
+    }
 }
 
 #[test]
