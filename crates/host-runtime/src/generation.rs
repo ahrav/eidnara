@@ -300,6 +300,9 @@ fn read_members(
     else {
         return Ok(Vec::new());
     };
+    if entry.size > MAX_MANIFEST_BYTES as u64 {
+        return Err(invalid("members file exceeds size limit"));
+    }
     let fd =
         open_rel_file(dir, MEMBERS_FILE_NAME).ok_or_else(|| invalid("members file missing"))?;
     verify_file_against_entry(&fd, entry)?;
@@ -2604,6 +2607,27 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn an_oversized_members_file_is_refused_by_its_manifest_size_before_it_is_hashed() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let sources = [SourceSpec {
+            rel_path: MEMBERS_FILE_NAME.to_owned(),
+            source: write_source(src.path(), "members", &vec![b'x'; MAX_MANIFEST_BYTES + 1]),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        assert!(matches!(
+            store.validate(&digest).unwrap().members(),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "members file exceeds size limit"
+            })
+        ));
     }
 
     #[test]
