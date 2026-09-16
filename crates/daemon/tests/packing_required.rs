@@ -60,7 +60,8 @@ const SECOND: ToolSpan = tool_span("call-2", "1", "the second one, longer by a b
 fn required_cost_at_the_limit_succeeds_and_one_above_fails_without_truncation() {
     let fixture = Fixture::new(&[FIRST, SECOND]);
     let requests = [FIRST.request(), SECOND.request()];
-    let total = required_render_total(&[FIRST, SECOND]) - required_render_total(&[]);
+    let total = required_render_total(&[FIRST, SECOND]);
+    let items = total - required_render_total(&[]);
 
     let (ok, trace) = fixture.prepare(&requests, &bounds(total), &EvalBudget::unbounded());
     let materialized = ok.unwrap();
@@ -69,11 +70,7 @@ fn required_cost_at_the_limit_succeeds_and_one_above_fails_without_truncation() 
         materialized.ledger().profile().identity(),
         "one-token-per-byte"
     );
-    assert_eq!(
-        materialized.ledger().total(),
-        ClaudeTokens::new(required_render_total(&[FIRST, SECOND])),
-        "the ledger also carries the block open"
-    );
+    assert_eq!(materialized.ledger().total(), ClaudeTokens::new(total));
     assert_eq!(
         materialized
             .ledger()
@@ -95,8 +92,8 @@ fn required_cost_at_the_limit_succeeds_and_one_above_fails_without_truncation() 
             .iter()
             .map(|item| item.cost.get())
             .sum::<u64>(),
-        total,
-        "every rendered required byte is charged"
+        items,
+        "the items are charged every rendered byte past the block open"
     );
     assert_eq!(trace.payload_loads(), 2);
     assert_eq!(
@@ -335,7 +332,7 @@ fn a_required_payload_beyond_the_legacy_cut_is_materialized_and_charged_whole() 
     static BIG_PAYLOAD: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| "x".repeat(LEN));
     let big = tool_span("call-big", "1", BIG_PAYLOAD.as_str());
     let fixture = Fixture::new(&[big]);
-    let total = required_render_total(&[big]) - required_render_total(&[]);
+    let total = required_render_total(&[big]);
     let (result, _) = fixture.prepare(&[big.request()], &bounds(total), &EvalBudget::unbounded());
     let materialized = result.unwrap();
     assert_eq!(materialized.items().len(), 1);

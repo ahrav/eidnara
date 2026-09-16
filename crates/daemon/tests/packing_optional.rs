@@ -103,7 +103,7 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
     let six = tool_span("opt-c", "1", "sixsix");
     let fixture = Fixture::new(&[REQUIRED, eleven, four, six]);
     let requests = [optional(&eleven), optional(&four), optional(&six)];
-    let required_charge = required_render_total(&[REQUIRED]) - required_render_total(&[]);
+    let required_charge = required_render_total(&[REQUIRED]);
 
     let (generous, _) = run(&fixture, &requests, &wide(), 1 << 20);
     let generous = generous.unwrap();
