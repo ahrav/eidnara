@@ -276,8 +276,8 @@ identifier list is the one payload no other file derives: a rewrite that
 keeps it the same length and strictly increasing is indistinguishable from
 the original here, so which occurrence each row names is bound by the export
 at the recorded checkpoint, not by verification; the store's owner-only modes
-are the boundary against a same-user rewrite, and a caller that needs more
-compares the identifiers with `live_rows` under the sidecar's checkpoint. A
+exclude other users, a same-user writer is trusted, and a caller that needs
+more compares the identifiers with `live_rows` under the sidecar's checkpoint. A
 different model space is refused at an equal dimension.
 
 The vector selector is `vector-profile.json`, beside the host and search
