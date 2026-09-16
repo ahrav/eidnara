@@ -479,6 +479,19 @@ async fn suppression_needs_whole_message_survivor_proof_for_every_selected_occur
         misspelled["error"], "invalid_params",
         "a survivor entry is parsed as strictly as a span: {misspelled}"
     );
+    let omitted = call(
+        &daemon,
+        prepare(
+            &project,
+            "suppress",
+            json!([whole(OCC_A), {"occurrence_id": OCC_B, "buffer_len": 100}]),
+        ),
+    )
+    .await;
+    assert_eq!(
+        omitted["error"], "invalid_params",
+        "a survivor without the span key is not a whole-buffer proof: {omitted}"
+    );
     let mut malformed_selection = prepare(&project, "suppress", json!([]));
     malformed_selection["selection"] = json!(["zz"]);
     let malformed_selection = call(&daemon, malformed_selection).await;
