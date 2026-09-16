@@ -1,6 +1,7 @@
 //! Reads the original rows one generation holds for its live dense-required occurrences, in occurrence identifier order, together with the checkpoint the same transaction sees, so two builds over the same projection state see the same rows and the same provenance.
 
 use std::num::NonZeroUsize;
+use std::sync::LazyLock;
 
 use rusqlite::params;
 use storage::GuardedConn;
@@ -26,9 +27,11 @@ impl std::fmt::Debug for ExportedRow {
     }
 }
 
-/// The rows and the checkpoint one read transaction observed together.
+/// One read transaction observes `generation`, `kernel_incarnation_id`, `checkpoint`, and `rows` together.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveRows {
+    pub generation: VectorGeneration,
+    pub kernel_incarnation_id: String,
     pub checkpoint: ProjectionCheckpoint,
     pub rows: Vec<ExportedRow>,
     /// Occurrences the layer masks in every older layer, in identifier order; a full export of the live population masks none.
@@ -53,6 +56,25 @@ pub enum ExportRefusal {
     #[error(transparent)]
     Projection(#[from] ProjectionError),
 }
+
+/// `ORDER BY` names `v.occurrence_id`, the second column of the index the `generation_id` search drives, because the planner does not carry the join equality to `o.occurrence_id` and adds a sort for that spelling.
+static LIVE_ROWS_SQL: LazyLock<String> = LazyLock::new(|| {
+    let classes: Vec<String> = OccurrenceClass::ALL
+        .into_iter()
+        .filter(|class| dense_eligible(*class))
+        .map(|class| format!("'{}'", class.code()))
+        .collect();
+    format!(
+        "SELECT o.occurrence_id,v.vector
+         FROM occurrence_vectors v
+         JOIN occurrences o ON o.occurrence_id=v.occurrence_id
+         LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
+         WHERE v.generation_id=?1 AND t.occurrence_id IS NULL AND o.class IN ({})
+         ORDER BY v.occurrence_id
+         LIMIT ?2",
+        classes.join(",")
+    )
+});
 
 /// Every live dense-required occurrence with a vector of `generation`, validated against `layout`, in identifier order, with the checkpoint under `kernel_incarnation_id`; a population above `max_rows` is refused whole rather than truncated.
 ///
@@ -79,23 +101,10 @@ pub fn live_rows(
             kernel_incarnation_id: kernel_incarnation_id.to_owned(),
         }
     })?;
-    let classes: Vec<String> = OccurrenceClass::ALL
-        .into_iter()
-        .filter(|class| dense_eligible(*class))
-        .map(|class| format!("'{}'", class.code()))
-        .collect();
-    let sql = format!(
-        "SELECT o.occurrence_id,v.vector
-         FROM occurrence_vectors v
-         JOIN occurrences o ON o.occurrence_id=v.occurrence_id
-         LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
-         WHERE v.generation_id=?1 AND t.occurrence_id IS NULL AND o.class IN ({})
-         ORDER BY o.occurrence_id
-         LIMIT ?2",
-        classes.join(",")
-    );
     let limit = i64::try_from(max_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
-    let mut statement = conn.prepare(&sql).map_err(ProjectionError::from)?;
+    let mut statement = conn
+        .prepare(&LIVE_ROWS_SQL)
+        .map_err(ProjectionError::from)?;
     let mut rows = statement
         .query(params![generation.generation_id, limit])
         .map_err(ProjectionError::from)?;
@@ -119,8 +128,42 @@ pub fn live_rows(
         });
     }
     Ok(LiveRows {
+        generation: generation.clone(),
+        kernel_incarnation_id: kernel_incarnation_id.to_owned(),
         checkpoint,
         rows: exported,
         tombstones: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LIVE_ROWS_SQL;
+    use rusqlite::Connection;
+
+    /// The export must walk the generation's index in identifier order; a sort would copy every vector into a temporary tree and read the whole generation before the bound could refuse it.
+    #[test]
+    fn the_export_query_walks_the_generation_index_without_sorting() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::BASELINE).unwrap();
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", *LIVE_ROWS_SQL))
+            .unwrap()
+            .query_map(rusqlite::params!["gen", 3], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|detail| {
+                detail.contains(
+                    "SEARCH v USING INDEX idx_occurrence_vectors_generation (generation_id=?)",
+                )
+            }),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
 }

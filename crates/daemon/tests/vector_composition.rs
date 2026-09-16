@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 
 use daemon::vector_composition::{
     COMPOSITION_FILE, CompositionRefusal, CompositionSpec, Progress, Reconciled, SelectorState,
-    Unavailable, compose, publish, reconcile, recover,
+    Unavailable, compose, publish, reconcile, recover, verify_composition,
 };
 use daemon::vector_generation::{
     CODES_FILE, ExpectedVectors, VerifiedVectors, build, stage, verify,
@@ -447,6 +447,90 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
 }
 
 #[test]
+fn recovery_counts_full_validation_failures_against_its_candidate_bound() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&first).unwrap();
+    let second = fixture.compose(2, &base, &[]).unwrap();
+    fixture.publish(&second).unwrap();
+    fs::remove_file(fixture.lifecycle_dir().join(VECTOR_PROFILE_NAME)).unwrap();
+    fs::write(
+        fixture.generation_dir(&second.digest()).join("unlisted"),
+        b"bad",
+    )
+    .unwrap();
+
+    assert_eq!(
+        recover(
+            &fixture.store,
+            fixture.transaction(),
+            &fixture.expected(),
+            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap_err(),
+        Unavailable::NoCompatibleTarget { examined: 1 },
+        "inventory validation belongs inside the bound, not discovery"
+    );
+    assert_eq!(
+        fixture.recover().unwrap(),
+        (first.digest(), SelectorState::Absent)
+    );
+}
+
+#[test]
+fn recovery_does_not_retain_discovery_descriptors() {
+    const CHILD: &str = "EIDNARA_COMPOSITION_FD_BOUND_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "recovery_does_not_retain_discovery_descriptors",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    // Only this child lowers its FD limit; parallel tests keep the parent's limits.
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit {
+            current: Some(64),
+            maximum: Some(64),
+        },
+    )
+    .unwrap();
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let mut newest = String::new();
+    for sequence in 1..=80 {
+        newest = fixture
+            .publish(&fixture.compose(sequence, &base, &[]).unwrap())
+            .unwrap();
+    }
+    fs::remove_file(fixture.lifecycle_dir().join(VECTOR_PROFILE_NAME)).unwrap();
+    let recovered = recover(
+        &fixture.store,
+        fixture.transaction(),
+        &fixture.expected(),
+        NonZeroUsize::new(4).unwrap(),
+        NonZeroUsize::new(1).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovered.composition.digest, newest);
+    assert_eq!(recovered.selector, SelectorState::Absent);
+}
+
+#[test]
 fn the_vector_selector_refuses_layers_and_other_owners_and_a_composition_record_binds_its_members()
 {
     let fixture = Fixture::new();
@@ -570,6 +654,64 @@ fn a_reader_pinning_a_superseded_composition_keeps_its_members_through_prune() {
     );
     assert!(!fixture.generations().contains(&base.digest));
     assert!(fixture.generations().contains(&other_base.digest));
+}
+
+#[test]
+fn a_pinned_composition_whose_members_file_is_unreadable_quarantines_pruning() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&first).unwrap();
+    let pinned = fixture.store.validate(&first.digest()).unwrap();
+    pinned.pin().unwrap();
+    let other_base = fixture.layer(7, 11);
+    let second = fixture.compose(2, &other_base, &[]).unwrap();
+    fixture.publish(&second).unwrap();
+
+    // The pinned record is retained but its members cannot be read, so nothing may be reclaimed.
+    fixture.corrupt(&first.digest(), MEMBERS_FILE_NAME);
+    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
+    assert_eq!(report.removed_generations, 0);
+    assert!(report.quarantined >= 1);
+    assert!(fixture.generations().contains(&base.digest));
+    assert!(matches!(
+        fixture.store.discard_unselected(
+            &base.sidecar.stage_manifest(),
+            fixture.transaction(),
+            &BTreeSet::new()
+        ),
+        Err(GenerationError::UnsupportedStateSchema)
+    ));
+}
+
+#[test]
+fn exchange_repair_refuses_a_corrupt_member_of_a_pinned_composition() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&first).unwrap();
+    let pinned = fixture.store.validate(&first.digest()).unwrap();
+    pinned.pin().unwrap();
+    let other_base = fixture.layer(7, 11);
+    let second = fixture.compose(2, &other_base, &[]).unwrap();
+    fixture.publish(&second).unwrap();
+
+    fs::write(fixture.generation_dir(&base.digest).join("extra"), b"x").unwrap();
+    assert!(fixture.store.validate(&base.digest).is_err());
+    let rebuilt = build(&fixture.expected(), &export(1, 10), &fixture.work_dir()).unwrap();
+    assert_eq!(rebuilt.digest(), base.digest);
+    assert!(
+        stage(&rebuilt, &fixture.staging()).is_err(),
+        "a member of a pinned composition is not exchanged under its reader"
+    );
+    assert!(
+        fixture.generation_dir(&base.digest).join("extra").exists(),
+        "the occupant is left as it is"
+    );
+    drop(pinned);
+    fixture.store.prune(&BTreeSet::new()).unwrap();
+    let rebuilt = build(&fixture.expected(), &export(1, 10), &fixture.work_dir()).unwrap();
+    assert_eq!(stage(&rebuilt, &fixture.staging()).unwrap(), base.digest);
 }
 
 #[test]
@@ -778,6 +920,237 @@ fn equal_sequences_without_a_selector_recover_deterministically_and_a_selector_n
 }
 
 #[test]
+fn verification_refuses_an_oversized_record_before_opening_the_generation() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let template = fixture.compose(1, &base, &[]).unwrap();
+    let digest = fixture.stage_record(&vec![b'x'; 1024 * 1024 + 1], &template);
+    // The record is corrupted in place so that validating or reading it before the cap reports something other than its size.
+    fixture.corrupt(&digest, COMPOSITION_FILE);
+    assert_eq!(
+        fixture.verify_composition(&digest).unwrap_err(),
+        CompositionRefusal::NotComposition("record size")
+    );
+}
+
+#[test]
+fn verification_refuses_excess_deltas_before_opening_any_member() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let composition = fixture
+        .compose(1, &base, &[fixture.layer(5, 12), fixture.layer(6, 14)])
+        .unwrap();
+    fixture.publish(&composition).unwrap();
+    fixture.corrupt(&base.digest, CODES_FILE);
+
+    assert_eq!(
+        verify_composition(
+            &fixture.store,
+            &composition.digest(),
+            &fixture.expected(),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap_err(),
+        CompositionRefusal::DeltasOverBound { count: 2, max: 1 },
+        "the admission bound must refuse before even the base is verified"
+    );
+    assert!(matches!(
+        fixture.verify_composition(&composition.digest()),
+        Err(CompositionRefusal::Member { digest, .. }) if digest == base.digest
+    ));
+}
+
+#[test]
+fn a_selection_the_verifier_rejects_gates_publication_the_same_way_recovery_treats_it() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&first).unwrap();
+
+    // A hash-valid record that is not canonical: the store selects it, the verifier refuses it.
+    let loose = fixture.compose(5, &base, &[]).unwrap();
+    let selected = fixture.stage_record(&serde_json::to_vec_pretty(&loose).unwrap(), &loose);
+    fixture
+        .store
+        .select_vector(&selected, fixture.transaction(), &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(
+        fixture.verify_composition(&selected).unwrap_err(),
+        CompositionRefusal::NotComposition("record not canonical")
+    );
+    assert_eq!(
+        fixture.recover().unwrap(),
+        (first.digest(), SelectorState::Stale(selected.clone()))
+    );
+    // Recovery calls that selection stale, so its sequence must not gate the repair publication.
+    let repair = fixture.compose(2, &base, &[]).unwrap();
+    assert_eq!(fixture.publish(&repair).unwrap(), repair.digest());
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(repair.digest())
+    );
+
+    // A record of a schema this build does not know may be a later build's selection: nothing is published over it and nothing is concluded about it.
+    let mut future = fixture.compose(3, &base, &[]).unwrap();
+    future.schema = 2;
+    let selected = fixture.stage_record(&future.canonical_bytes(), &future);
+    fixture
+        .store
+        .select_vector(&selected, fixture.transaction(), &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(
+        fixture.verify_composition(&selected).unwrap_err(),
+        CompositionRefusal::Quarantined
+    );
+    let failure = publish(
+        &fixture.compose(9, &base, &[]).unwrap(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(failure.progress, Progress::NotStaged);
+    assert_eq!(failure.refusal, CompositionRefusal::Quarantined);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(selected.clone())
+    );
+    // Recovery still serves what this build can verify without repointing the selector.
+    assert_eq!(
+        fixture.recover().unwrap(),
+        (repair.digest(), SelectorState::Stale(selected.clone()))
+    );
+
+    // An unknown generation-manifest schema on the selected generation also refuses publication without moving the selector.
+    let manifest_path = fixture.generation_dir(&selected).join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["schema"] = 7.into();
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let failure = publish(
+        &fixture.compose(9, &base, &[]).unwrap(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(failure.progress, Progress::NotStaged);
+    assert_eq!(failure.refusal, CompositionRefusal::Quarantined);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(selected)
+    );
+}
+
+#[test]
+fn an_unknown_members_schema_on_the_selected_composition_quarantines_publication() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let future = fixture.compose(3, &base, &[]).unwrap();
+    let dir = fixture.work_dir();
+    fs::write(dir.join(COMPOSITION_FILE), future.canonical_bytes()).unwrap();
+    fs::write(
+        dir.join(MEMBERS_FILE_NAME),
+        serde_json::to_vec(&host_runtime::generation::WireMembers {
+            schema: 2,
+            members: future.members(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let sources: Vec<SourceSpec> = [COMPOSITION_FILE, MEMBERS_FILE_NAME]
+        .into_iter()
+        .map(|name| SourceSpec {
+            rel_path: name.to_owned(),
+            source: dir.join(name),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        })
+        .collect();
+    let selected = fixture
+        .store
+        .stage(&sources, &future.stage_meta(), &BTreeSet::new())
+        .unwrap();
+    // This build's store refuses to select it; a later build's selector may still name it.
+    assert!(
+        fixture
+            .store
+            .select_vector(&selected, fixture.transaction(), &mut |_| Ok(()))
+            .is_err()
+    );
+    fixture.write_selector(
+        VECTOR_PROFILE_NAME,
+        format!(r#"{{"schema":1,"current":"{selected}"}}"#).as_bytes(),
+    );
+
+    assert_eq!(
+        fixture.verify_composition(&selected).unwrap_err(),
+        CompositionRefusal::Quarantined
+    );
+    let failure = publish(
+        &fixture.compose(9, &base, &[]).unwrap(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(failure.progress, Progress::NotStaged);
+    assert_eq!(failure.refusal, CompositionRefusal::Quarantined);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(selected)
+    );
+}
+
+#[test]
+fn an_unknown_record_schema_without_a_members_file_still_quarantines_publication() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let mut future = fixture.compose(3, &base, &[]).unwrap();
+    future.schema = 2;
+    let dir = fixture.work_dir();
+    fs::write(dir.join(COMPOSITION_FILE), future.canonical_bytes()).unwrap();
+    let selected = fixture
+        .store
+        .stage(
+            &[SourceSpec {
+                rel_path: COMPOSITION_FILE.to_owned(),
+                source: dir.join(COMPOSITION_FILE),
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            }],
+            &future.stage_meta(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+    fixture
+        .store
+        .select_vector(&selected, fixture.transaction(), &mut |_| Ok(()))
+        .unwrap();
+    let selector_bytes = fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap();
+
+    assert_eq!(
+        fixture.verify_composition(&selected).unwrap_err(),
+        CompositionRefusal::Quarantined
+    );
+    let failure = publish(
+        &fixture.compose(9, &base, &[]).unwrap(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(failure.progress, Progress::NotStaged);
+    assert_eq!(failure.refusal, CompositionRefusal::Quarantined);
+    assert_eq!(
+        fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap(),
+        selector_bytes
+    );
+}
+
+#[test]
 fn a_forged_record_with_a_repeated_delta_fails_topology_at_verification() {
     let fixture = Fixture::new();
     let base = fixture.layer(1, 10);
@@ -821,6 +1194,8 @@ fn a_forged_record_with_a_repeated_delta_fails_topology_at_verification() {
     let same = fixture.layer(8, 12);
     assert!(fixture.compose(4, &base, &[same]).is_ok());
     let earlier_snapshot = LiveRows {
+        generation: generation(),
+        kernel_incarnation_id: KERNEL.to_owned(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: 9,
             checkpoint_commit_seq: 12,
@@ -838,6 +1213,8 @@ fn a_forged_record_with_a_repeated_delta_fails_topology_at_verification() {
     );
     // A layer whose snapshot follows its own checkpoint is refused at build.
     let inverted = LiveRows {
+        generation: generation(),
+        kernel_incarnation_id: KERNEL.to_owned(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: 13,
             checkpoint_commit_seq: 12,

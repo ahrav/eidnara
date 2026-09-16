@@ -84,7 +84,7 @@ fn is_profile_temp_name(name: &str) -> bool {
 }
 
 /// Manifest and lifecycle-evidence readers each cap input at 1 MiB.
-const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// Capacity preflight reserves 1 MiB for metadata that coexists until rename.
 const CAPACITY_FIXED_OVERHEAD_BYTES: u64 = 1024 * 1024;
@@ -300,6 +300,9 @@ fn read_members(
     else {
         return Ok(Vec::new());
     };
+    if entry.size > MAX_MANIFEST_BYTES as u64 {
+        return Err(invalid("members file exceeds size limit"));
+    }
     let fd =
         open_rel_file(dir, MEMBERS_FILE_NAME).ok_or_else(|| invalid("members file missing"))?;
     verify_file_against_entry(&fd, entry)?;
@@ -312,6 +315,10 @@ fn read_members(
                 .any(|digest| !is_canonical_payload_digest(digest))
             {
                 return Err(invalid("members name a noncanonical digest"));
+            }
+            let mut distinct = BTreeSet::new();
+            if !members.members.iter().all(|digest| distinct.insert(digest)) {
+                return Err(invalid("members repeat a digest"));
             }
             Ok(members.members)
         }
@@ -351,7 +358,7 @@ impl ValidatedGeneration {
     ///
     /// # Errors
     ///
-    /// A members file the manifest names but that fails its hash, has an unknown schema, or names a noncanonical digest.
+    /// A members file the manifest names but that fails its hash, exceeds the metadata size limit, has an unknown schema, names a noncanonical digest, or repeats a digest.
     pub fn members(&self) -> Result<Vec<String>, GenerationError> {
         read_members(&self.dir, &self.manifest)
     }
@@ -373,7 +380,7 @@ impl ValidatedGeneration {
         crate::harness_closure::descriptor_path(self.dir.as_raw_fd())
     }
 
-    /// The bytes of one manifest-listed file, read through [`Self::open_verified_file`]; the manifest cap bounds the read because every listed file's size was checked against it.
+    /// Returns file bytes only when their length equals the manifest entry size.
     pub fn read_verified_file(&self, rel_path: &str) -> Result<Vec<u8>, GenerationError> {
         let fd = self.open_verified_file(rel_path)?;
         let size = self
@@ -383,7 +390,15 @@ impl ValidatedGeneration {
             .find(|file| file.path == rel_path)
             .map_or(0, |file| file.size);
         let cap = usize::try_from(size).map_err(|_| invalid("file too large to read"))?;
-        read_all_fd(&fd, cap).map_err(|_| invalid("verified file read failed"))
+        let mut bytes = Vec::with_capacity(cap);
+        // One byte of slack distinguishes a file that grew after verification from one that matched.
+        let mut reader = std::io::Read::take(std::fs::File::from(fd), size.saturating_add(1));
+        std::io::Read::read_to_end(&mut reader, &mut bytes)
+            .map_err(|_| invalid("verified file read failed"))?;
+        if bytes.len() != cap {
+            return Err(invalid("file size diverges from the manifest"));
+        }
+        Ok(bytes)
     }
 
     /// `open_verified_file` opens a manifest-listed file through the retained directory descriptor and rechecks its shape and hash.
@@ -600,6 +615,7 @@ impl GenerationStore {
     }
 
     /// Members named by any complete generation in `digests`, so a member is never reclaimed before every record that names it is; a record of unknown schema may name members this build cannot read, so it counts as quarantined.
+    /// A record whose members cannot be read is also quarantined when it is retained anyway: a reader pins it, or its manifest carries an unknown schema behind a directory mode this build rejects.
     fn named_members(&self, digests: &[String]) -> (BTreeSet<String>, bool) {
         let mut members = BTreeSet::new();
         let mut quarantined = false;
@@ -607,7 +623,15 @@ impl GenerationStore {
             match self.members_of(digest) {
                 Ok(found) => members.extend(found),
                 Err(GenerationError::UnsupportedStateSchema) => quarantined = true,
-                Err(_) => {}
+                Err(_) => {
+                    let pinned = matches!(
+                        lock_for_reclamation(&self.generations_fd, digest),
+                        Err(Reclamation::Pinned)
+                    );
+                    if pinned || self.is_quarantined_schema(digest) {
+                        quarantined = true;
+                    }
+                }
             }
         }
         (members, quarantined)
@@ -681,6 +705,31 @@ impl GenerationStore {
             manifest,
             dir,
         })
+    }
+
+    /// This is a discovery read, not proof that the complete generation is valid. Call [`Self::validate`] before using it as a generation.
+    ///
+    /// # Errors
+    ///
+    /// Invalid manifest or path, an unlisted file, a file above the metadata limit, or a shape, size, hash, or read failure.
+    pub fn read_manifest_file(
+        &self,
+        digest: &str,
+        rel_path: &str,
+    ) -> Result<Vec<u8>, GenerationError> {
+        validate_rel_path(rel_path)?;
+        let (dir, manifest) = self.open_manifest(digest)?;
+        let entry = manifest
+            .files
+            .iter()
+            .find(|file| file.path == rel_path)
+            .ok_or_else(|| invalid("file is not named by the manifest"))?;
+        if entry.size > MAX_MANIFEST_BYTES as u64 {
+            return Err(invalid("metadata file exceeds size limit"));
+        }
+        let fd = open_rel_file(&dir, rel_path).ok_or_else(|| invalid("file missing"))?;
+        verify_file_against_entry(&fd, entry)?;
+        read_all_fd(&fd, entry.size as usize).map_err(|_| invalid("metadata file read failed"))
     }
 
     fn open_manifest(
@@ -985,6 +1034,15 @@ impl GenerationStore {
         }
         if selected.contains(digest) {
             return Err(invalid("corrupt owner selection is protected"));
+        }
+        let (named, named_quarantined) = self.named_members(&self.digests()?);
+        if named_quarantined {
+            return Err(GenerationError::UnsupportedStateSchema);
+        }
+        if named.contains(digest) {
+            return Err(invalid(
+                "corrupt member of a retained composition is protected",
+            ));
         }
         let _pin = lock_for_reclamation(&self.generations_fd, digest).map_err(|err| match err {
             Reclamation::Pinned => invalid("corrupt generation is pinned"),
@@ -2579,6 +2637,191 @@ mod tests {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).expect("read verified file");
         assert_eq!(bytes, b"#binary-bytes");
+    }
+
+    #[test]
+    fn manifest_file_discovery_checks_only_the_named_bounded_file() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let digest = stage_default(&store, src.path());
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        std::fs::write(dir.join("bin/eidnara-host"), b"corrupt").unwrap();
+        assert!(store.validate(&digest).is_err());
+        assert_eq!(
+            store.read_manifest_file(&digest, "notices.txt").unwrap(),
+            b"notice text"
+        );
+        for path in ["missing", "../notices.txt", "/notices.txt"] {
+            assert!(store.read_manifest_file(&digest, path).is_err(), "{path}");
+        }
+        std::fs::write(dir.join("notices.txt"), b"NOTICE TEXT").unwrap();
+        assert!(matches!(
+            store.read_manifest_file(&digest, "notices.txt"),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "file hash diverges from the manifest"
+            })
+        ));
+
+        for size in [MAX_MANIFEST_BYTES, MAX_MANIFEST_BYTES + 1] {
+            let sources = [SourceSpec {
+                rel_path: "metadata".to_owned(),
+                source: write_source(src.path(), "metadata", &vec![b'x'; size]),
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            }];
+            let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+            let result = store.read_manifest_file(&digest, "metadata");
+            if size == MAX_MANIFEST_BYTES {
+                assert_eq!(result.unwrap(), vec![b'x'; size]);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(GenerationError::NativePayloadInvalid {
+                        detail: "metadata file exceeds size limit"
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn an_oversized_members_file_is_refused_by_its_manifest_size_before_it_is_hashed() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let sources = [SourceSpec {
+            rel_path: MEMBERS_FILE_NAME.to_owned(),
+            source: write_source(src.path(), "members", &vec![b'x'; MAX_MANIFEST_BYTES + 1]),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        assert!(matches!(
+            store.validate(&digest).unwrap().members(),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "members file exceeds size limit"
+            })
+        ));
+    }
+
+    #[test]
+    fn a_members_file_that_repeats_a_digest_is_refused() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let member = stage_default(&store, src.path());
+        let members = serde_json::to_vec(&WireMembers {
+            schema: 1,
+            members: vec![member.clone(), member],
+        })
+        .unwrap();
+        let sources = [SourceSpec {
+            rel_path: MEMBERS_FILE_NAME.to_owned(),
+            source: write_source(src.path(), "members", &members),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        assert!(matches!(
+            store.validate(&digest).unwrap().members(),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "members repeat a digest"
+            })
+        ));
+    }
+
+    #[test]
+    fn a_future_schema_record_behind_a_rejected_directory_mode_still_protects_its_members() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let member = stage_default(&store, src.path());
+        let members = serde_json::to_vec(&WireMembers {
+            schema: 1,
+            members: vec![member.clone()],
+        })
+        .unwrap();
+        let sources = [SourceSpec {
+            rel_path: MEMBERS_FILE_NAME.to_owned(),
+            source: write_source(src.path(), "members", &members),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let record = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        // Another selection leaves both the record and its member unprotected by any selector.
+        let successor = vec![SourceSpec {
+            rel_path: "bin/eidnara-host".to_owned(),
+            source: write_source(src.path(), "launcher-b", b"#successor-binary"),
+            executable: true,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        store
+            .stage_and_promote(&successor, &meta(), &BTreeSet::new())
+            .unwrap();
+
+        let record_dir = store.root().join(GENERATIONS_DIR_NAME).join(&record);
+        let manifest_path = record_dir.join(GENERATION_MANIFEST_NAME);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        value["schema"] = 7.into();
+        std::fs::write(&manifest_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        std::fs::set_permissions(&record_dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+        let report = store.prune(&BTreeSet::new()).unwrap();
+        assert_eq!(report.removed_generations, 0);
+        assert!(report.quarantined >= 1);
+        assert!(
+            store.validate(&member).is_ok(),
+            "the member the record may name stays"
+        );
+        assert!(matches!(
+            store.discard_unselected(
+                &store.manifest(&member).unwrap(),
+                &LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap(),
+                &BTreeSet::new()
+            ),
+            Err(GenerationError::UnsupportedStateSchema)
+        ));
+    }
+
+    #[test]
+    fn verified_file_reads_return_whole_payloads_above_the_metadata_limit() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        // Larger than the metadata cap and not a multiple of any read chunk.
+        let payload: Vec<u8> = (0..(3 * MAX_MANIFEST_BYTES + 17))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let sources = [SourceSpec {
+            rel_path: "rows.f32".to_owned(),
+            source: write_source(src.path(), "rows", &payload),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let generation = store.validate(&digest).unwrap();
+        assert_eq!(generation.read_verified_file("rows.f32").unwrap(), payload);
+        assert!(generation.read_verified_file("missing").is_err());
+        assert!(matches!(
+            store.read_manifest_file(&digest, "rows.f32"),
+            Err(GenerationError::NativePayloadInvalid {
+                detail: "metadata file exceeds size limit"
+            })
+        ));
+
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        let mut grown = payload.clone();
+        grown.push(0);
+        std::fs::write(dir.join("rows.f32"), &grown).unwrap();
+        assert!(generation.read_verified_file("rows.f32").is_err());
     }
 
     /// Persisted manifest bytes must equal the canonical serialization of the decoded manifest.

@@ -9,11 +9,13 @@ use std::path::PathBuf;
 use super::projection_gate::{identity, passing_evaluator};
 use daemon::projection_gates::{Admission, EntryPoint, HookGate, ProjectionHook};
 use daemon::vector_composition::{
-    Composition, CompositionRefusal, CompositionSpec, SelectorState, Unavailable, compose, publish,
-    recover, verify_composition,
+    COMPOSITION_FILE, Composition, CompositionRefusal, CompositionSpec, SelectorState, Unavailable,
+    compose, publish, recover, verify_composition,
 };
 use daemon::vector_generation::{ExpectedVectors, Staging, VerifiedVectors, build, stage, verify};
-use host_runtime::generation::{GENERATIONS_DIR_NAME, GenerationStore, SourceSpec, StageMeta};
+use host_runtime::generation::{
+    GENERATIONS_DIR_NAME, GenerationStore, MEMBERS_FILE_NAME, SourceSpec, StageMeta, WireMembers,
+};
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use retrieval::ProjectionIdentity;
 use retrieval::batch::{ProjectionCheckpoint, VectorGeneration};
@@ -23,6 +25,18 @@ use retrieval::dense::scalar::ScalarRecipe;
 
 pub const DIMENSION: u32 = 8;
 pub const TOLERANCE: f64 = 1e-3;
+pub const KERNEL: &str = "test-incarnation";
+
+pub fn generation() -> VectorGeneration {
+    let identity = identity(KERNEL, DIMENSION);
+    VectorGeneration {
+        generation_id: "gen-vectors-1".to_owned(),
+        embedding_model: identity.embedding_model,
+        tokenizer_fingerprint: identity.tokenizer_fingerprint,
+        vector_dimension: identity.vector_dimension,
+        generation_epoch: identity.generation_epoch,
+    }
+}
 
 pub fn unit(raw: [f32; 8]) -> Vec<f32> {
     let norm = raw
@@ -55,6 +69,8 @@ pub fn rows(seed: u8) -> Vec<ExportedRow> {
 
 pub fn export(seed: u8, checkpoint: i64) -> LiveRows {
     LiveRows {
+        generation: generation(),
+        kernel_incarnation_id: KERNEL.to_owned(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: checkpoint - 1,
             checkpoint_commit_seq: checkpoint,
@@ -83,19 +99,13 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let store = GenerationStore::open(Some(root.path())).unwrap();
         let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
-        let identity = identity("test-incarnation", DIMENSION);
+        let identity = identity(KERNEL, DIMENSION);
         let gate = HookGate::closed();
         gate.install(passing_evaluator(&identity, 0, &ProjectionHook::ALL));
         let admission = gate
             .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
             .unwrap();
-        let generation = VectorGeneration {
-            generation_id: "gen-vectors-1".to_owned(),
-            embedding_model: identity.embedding_model.clone(),
-            tokenizer_fingerprint: identity.tokenizer_fingerprint.clone(),
-            vector_dimension: identity.vector_dimension,
-            generation_epoch: identity.generation_epoch,
-        };
+        let generation = generation();
         Self {
             root,
             store,
@@ -277,5 +287,33 @@ impl Fixture {
             NonZeroUsize::new(8).unwrap(),
         )
         .map(|recovered| (recovered.composition.digest, recovered.selector))
+    }
+
+    /// Stages a record another build or a foreign stager could have written, bypassing `publish`'s canonical encoding.
+    pub fn stage_record(&self, record: &[u8], template: &Composition) -> String {
+        let dir = self.work_dir();
+        fs::write(dir.join(COMPOSITION_FILE), record).unwrap();
+        fs::write(
+            dir.join(MEMBERS_FILE_NAME),
+            serde_json::to_vec(&WireMembers {
+                schema: 1,
+                members: template.members(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let sources: Vec<SourceSpec> = [COMPOSITION_FILE, MEMBERS_FILE_NAME]
+            .into_iter()
+            .map(|name| SourceSpec {
+                rel_path: name.to_owned(),
+                source: dir.join(name),
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            })
+            .collect();
+        self.store
+            .stage(&sources, &template.stage_meta(), &BTreeSet::new())
+            .unwrap()
     }
 }

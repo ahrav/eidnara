@@ -38,7 +38,7 @@ use retrieval::dense::{
 };
 use support::dense_projection::{Projection, occurrence_id, reference};
 use support::flock::try_exclusive;
-use support::vector_store::{Fixture, unit};
+use support::vector_store::{Fixture, KERNEL, generation, unit};
 
 const OBJECTS: [&str; 5] = ["alpha", "beta", "gamma", "delta", "epsilon"];
 
@@ -74,6 +74,8 @@ fn export(rows: &[(&str, Vec<f32>)], tombstones: &[&str], checkpoint: i64) -> Li
         .collect();
     tombstones.sort();
     LiveRows {
+        generation: generation(),
+        kernel_incarnation_id: KERNEL.to_owned(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: checkpoint - 1,
             checkpoint_commit_seq: checkpoint,
