@@ -20,7 +20,8 @@ budget rows; `rp27/u2-weighted-rrf` at
 | Retirement after the projection snapshot | `retire_decision` plus a `ClaimMaterializer` episode. | route-final-revalidation-precedes-every-result |
 | Foreign scope over the same rows | A second `ProjectScope` passed to `execute`. | route-candidate-ids-never-widen-scope, route-final-revalidation-precedes-every-result |
 | Route disabled | `Handler::set_query_route_limits(None)`. | route-rollback-disables-without-mutating-canonical-truth |
-| Lane failure other than the budget | Not yet injected; the lane primitives' `unavailable` reasons are mapped, no test drives one through the route. | route-required-context-failure-is-typed-and-terminal |
+| Lane failure other than the budget | A projection with an identity but no applied batch, so the exact lane has no checkpoint; `probes = 1` against two prose atoms. | route-required-context-failure-is-typed-and-terminal, route-bounds-are-enforced-before-protected-work |
+| Unapproved limit set | `validation_batch` over `MAX_ELIGIBILITY_CANDIDATES` passed to `set_query_route_limits`. | route-bounds-are-enforced-before-protected-work, route-rollback-disables-without-mutating-canonical-truth |
 
 Real durations are used because `EvalBudget` reads `std::time::Instant`, which
 virtual time cannot advance.

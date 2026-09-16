@@ -121,12 +121,15 @@ payload byte is read by the route.
 A fused answer is
 `{"kind":"fused","degraded":bool,"lanes":{...},"truncated":bool,"entries":[...]}`.
 Each lane reports `complete`, `incomplete` with a reason, `unavailable` with a
-reason, or `undeclared`; `degraded` is true when a lane is incomplete or
-unavailable. Each entry carries `occurrence_id`, fused `position`, fused
-`score`, and per-lane `position` and `raw` score. A terminal answer is
+reason, or `undeclared`; reasons are closed codes chosen by the route, never
+engine text; `degraded` is true when a lane is incomplete or unavailable. Each
+entry carries `occurrence_id`, fused `position`, fused `score`, and per-lane
+`position` and `raw` score; positions are the fused positions, so an entry
+revalidation withheld leaves a gap. A terminal answer is
 `{"kind":"terminal","terminal":<code>}` with `code` one of `unauthorized`,
 `deadline`, `cancelled`, `lane_unavailable`, `required_context_failure`, or
-`disabled`. A malformed request is the transport's `invalid_params` error.
+`disabled`; a `lane_unavailable` terminal adds a `reason` code naming the
+witness. A malformed request is the transport's `invalid_params` error.
 
 ## Probe and generation identities
 

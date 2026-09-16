@@ -93,19 +93,19 @@ pub fn live_candidates(
     if rows.len() > max.get() {
         return Err(ProjectionError::TooManyRecords { count: rows.len() });
     }
-    rows.into_iter()
-        .map(
-            |(occurrence_id, class, source_object_id, revision, digest)| {
-                Ok(OccurrenceCandidate::new(
-                    occurrence_id,
-                    OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?,
-                    source_object_id,
-                    revision,
-                    digest,
-                ))
-            },
-        )
-        .collect()
+    rows.into_iter().map(candidate).collect()
+}
+
+fn candidate(
+    (occurrence_id, class, source_object_id, revision, digest): LiveRow,
+) -> Result<OccurrenceCandidate, ProjectionError> {
+    Ok(OccurrenceCandidate::new(
+        occurrence_id,
+        OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?,
+        source_object_id,
+        revision,
+        digest,
+    ))
 }
 
 const LIVE_CANDIDATE_BY_ID_SQL: &str =
@@ -119,24 +119,18 @@ const LIVE_CANDIDATE_BY_ID_SQL: &str =
 /// # Errors
 ///
 /// Returns [`ProjectionError::CorruptRow`] for a stored class outside the contract, and the SQLite error otherwise.
-pub fn live_candidates_by_id(
+pub fn live_candidates_by_id<'a>(
     conn: &GuardedConn<'_>,
-    occurrence_ids: &[&str],
+    occurrence_ids: impl IntoIterator<Item = &'a str>,
 ) -> Result<Vec<OccurrenceCandidate>, ProjectionError> {
     let mut statement = conn.prepare_cached(LIVE_CANDIDATE_BY_ID_SQL)?;
-    let mut candidates = Vec::with_capacity(occurrence_ids.len());
+    let mut candidates = Vec::new();
     for occurrence_id in occurrence_ids {
         let row: Option<LiveRow> = statement
             .query_row(params![occurrence_id], live_row)
             .optional()?;
-        if let Some((occurrence_id, class, source_object_id, revision, digest)) = row {
-            candidates.push(OccurrenceCandidate::new(
-                occurrence_id,
-                OccurrenceClass::from_code(&class).ok_or(ProjectionError::CorruptRow)?,
-                source_object_id,
-                revision,
-                digest,
-            ));
+        if let Some(row) = row {
+            candidates.push(candidate(row)?);
         }
     }
     Ok(candidates)

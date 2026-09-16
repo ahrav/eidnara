@@ -4890,14 +4890,6 @@ impl HandlerCore {
 
     /// routes bind a real session id, while Claude Code facade routes bind an instance token;
     /// `resolve_facade_scope` applies the corresponding identity mode before touching the store.
-    pub(crate) fn harness_for_route(&self, channel: RouteHandle) -> Option<String> {
-        self.bindings
-            .lock()
-            .expect("bindings mutex")
-            .get(&channel)
-            .map(|binding| binding.harness.clone())
-    }
-
     fn facade_binding(&self, channel: RouteHandle) -> Result<SessionBinding, BindingError> {
         self.bindings
             .lock()

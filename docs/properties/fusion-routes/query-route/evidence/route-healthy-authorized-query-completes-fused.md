@@ -12,11 +12,13 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
 ## Evidence trail
 
 - `crates/daemon/tests/query_route.rs` `Fixture::oracle` builds the exact
-  and lexical rankings directly from `exact::page` and `lexical::retrieve`
-  and fuses them; `a_healthy_query_completes_fused_in_the_oracles_order`
-  compares the route's entry order to it.
+  and lexical rankings directly from `exact::page` and `lexical::retrieve`,
+  sums `weight / (k + position)` by hand with unequal weights and `k = 7`,
+  and orders by score then identifier bytes; it never calls `fuse`.
+  `a_healthy_query_completes_fused_in_the_oracles_order` compares the route's
+  entry order to it.
 - `crates/daemon/tests/query_route_handler.rs`
-  `the_running_daemon_answers_a_fused_query_from_its_converged_family` drives
+  `the_running_daemon_serves_the_route_from_its_converged_family` drives
   the handler against a family the daemon converged.
 
 ## Failure scenario

@@ -7,18 +7,22 @@ use std::time::Duration;
 
 use host_runtime::RouteHandle;
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
-use kernel::{ArtifactDestination, KernelError, KernelStore, ProjectScope};
-use retrieval::eligibility::{Disposition, judge_occurrences_within_budget, live_candidates_by_id};
+use kernel::{ArtifactDestination, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES};
+use retrieval::ProjectionError;
+use retrieval::eligibility::{
+    Authority, Disposition, judge_occurrences_within_budget, live_candidates_by_id,
+};
 use retrieval::exact::{
     ExactQuery, Family, Intent, LookupContext, LookupRefusal, Selector, SelectorBounds,
     SelectorValue, classify, page,
 };
+use retrieval::fusion::IdentityRefusal;
 use retrieval::fusion::{
     DeclaredLanes, Fused, FusedEntry, FusionParameters, Lane, LaneHit, LaneRanking, OccurrenceId,
     RawScore, fuse,
 };
 use retrieval::lexical::{
-    Authority, Completion, IncompleteReason, LexicalBounds, RetrievalBounds, RetrievalRefusal,
+    Completion, IncompleteReason, LexicalBounds, LexicalRefusal, RetrievalBounds, RetrievalRefusal,
     analyze_segments, compile, retrieve,
 };
 use serde::Deserialize;
@@ -36,6 +40,18 @@ use crate::{HandlerCore, invalid_params_error};
 
 pub(crate) const OPERATION: &str = "retrieval.query";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LimitsRefusal {
+    #[error(
+        "validation_batch {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
+    )]
+    ValidationBatch { value: usize },
+    #[error(
+        "lexical_accepted {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
+    )]
+    LexicalAccepted { value: usize },
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryRouteLimits {
     pub query_bytes: NonZeroUsize,
@@ -52,13 +68,46 @@ pub struct QueryRouteLimits {
     pub fusion: FusionParameters,
 }
 
+impl QueryRouteLimits {
+    /// Refuses a limit the kernel's eligibility batch could never serve, so the refusal lands at installation instead of on every request.
+    pub fn validate(&self) -> Result<(), LimitsRefusal> {
+        if self.validation_batch.get() > MAX_ELIGIBILITY_CANDIDATES {
+            return Err(LimitsRefusal::ValidationBatch {
+                value: self.validation_batch.get(),
+            });
+        }
+        if self.lexical_accepted.get() > MAX_ELIGIBILITY_CANDIDATES {
+            return Err(LimitsRefusal::LexicalAccepted {
+                value: self.lexical_accepted.get(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueryRequest {
     query: String,
     remaining_ms: Option<u64>,
-    destination: String,
+    destination: Destination,
     harness: Option<String>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum Destination {
+    Local,
+    Remote,
+}
+
+impl From<Destination> for ArtifactDestination {
+    fn from(destination: Destination) -> Self {
+        match destination {
+            Destination::Local => Self::Local,
+            Destination::Remote => Self::Remote,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +136,8 @@ impl Terminal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryFailure {
     Terminal(Terminal),
+    /// `lane_unavailable` with the witness that produced it.
+    Unavailable(&'static str),
     InvalidQuery(String),
 }
 
@@ -100,7 +151,7 @@ impl From<Terminal> for QueryFailure {
 pub enum LaneStatus {
     Complete,
     Incomplete(&'static str),
-    Unavailable(String),
+    Unavailable(&'static str),
     Undeclared,
 }
 
@@ -143,10 +194,10 @@ struct LaneOutput {
 }
 
 impl LaneOutput {
-    fn unavailable(reason: impl ToString) -> Self {
+    fn unavailable(reason: &'static str) -> Self {
         Self {
             ranking: None,
-            status: LaneStatus::Unavailable(reason.to_string()),
+            status: LaneStatus::Unavailable(reason),
         }
     }
 
@@ -163,8 +214,62 @@ impl LaneOutput {
                 ranking: Some(ranking),
                 status,
             },
-            Err(refusal) => Self::unavailable(refusal),
+            Err(refusal) => Self::unavailable(identity_reason(&refusal)),
         }
+    }
+}
+
+/// Engine text never reaches the wire; each refusal maps to one code.
+fn projection_reason(error: &ProjectionError) -> &'static str {
+    match error {
+        ProjectionError::Interrupted => "interrupted",
+        ProjectionError::Sqlite(_) => "engine",
+        _ => "projection",
+    }
+}
+
+fn identity_reason(refusal: &IdentityRefusal) -> &'static str {
+    match refusal {
+        IdentityRefusal::EncodingVersion { .. } => "encoding_version",
+        IdentityRefusal::ScoreLaneMismatch { .. } => "score_lane",
+        IdentityRefusal::NonFiniteScore => "non_finite_score",
+        _ => "identity",
+    }
+}
+
+enum LaneRefusal {
+    Budget,
+    Reason(&'static str),
+}
+
+fn lookup_refusal(refusal: &LookupRefusal) -> LaneRefusal {
+    match refusal {
+        LookupRefusal::BudgetExhausted
+        | LookupRefusal::Projection(ProjectionError::Interrupted) => LaneRefusal::Budget,
+        LookupRefusal::NoCheckpoint => LaneRefusal::Reason("no_checkpoint"),
+        LookupRefusal::StaleCursor { .. } => LaneRefusal::Reason("stale_cursor"),
+        LookupRefusal::ForeignCursor => LaneRefusal::Reason("foreign_cursor"),
+        LookupRefusal::ExtractionMismatch { .. } => LaneRefusal::Reason("extraction_version"),
+        LookupRefusal::Projection(error) => LaneRefusal::Reason(projection_reason(error)),
+    }
+}
+
+fn retrieval_refusal(refusal: &RetrievalRefusal) -> LaneRefusal {
+    match refusal {
+        RetrievalRefusal::BudgetExhausted
+        | RetrievalRefusal::Projection(ProjectionError::Interrupted)
+        | RetrievalRefusal::Kernel(KernelError::Deadline) => LaneRefusal::Budget,
+        RetrievalRefusal::ProbesOverBound { .. } => LaneRefusal::Reason("probes_over_bound"),
+        RetrievalRefusal::BatchOverBound { .. } => LaneRefusal::Reason("batch_over_bound"),
+        RetrievalRefusal::Projection(error) => LaneRefusal::Reason(projection_reason(error)),
+        RetrievalRefusal::Kernel(_) => LaneRefusal::Reason("kernel"),
+    }
+}
+
+fn lexical_refusal(refusal: &LexicalRefusal) -> &'static str {
+    match refusal {
+        LexicalRefusal::InputTooLong { .. } => "input_too_long",
+        LexicalRefusal::TooManyAtoms { .. } => "too_many_atoms",
     }
 }
 
@@ -197,7 +302,7 @@ fn exact_lane(
     intent: &Intent,
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
-) -> Result<LaneOutput, Terminal> {
+) -> Result<LaneOutput, QueryFailure> {
     let selectors: Vec<&Selector> = match intent {
         Intent::Direct(selector) => vec![selector],
         Intent::Hybrid(mentions) => mentions.iter().map(|mention| &mention.selector).collect(),
@@ -213,6 +318,13 @@ fn exact_lane(
     if object_ids.is_empty() {
         return Ok(LaneOutput::undeclared());
     }
+    if object_ids.len() > limits.probes.get() {
+        return Err(QueryFailure::InvalidQuery(format!(
+            "{} selectors exceed the {} probe bound",
+            object_ids.len(),
+            limits.probes
+        )));
+    }
     let context = LookupContext {
         kernel_incarnation_id,
         page_rows: limits.exact_page_rows,
@@ -226,8 +338,12 @@ fn exact_lane(
         for _ in 0..limits.exact_pages.get() {
             let page = match page(conn, &context, &query, cursor.as_ref()) {
                 Ok(page) => page,
-                Err(LookupRefusal::BudgetExhausted) => return Err(exhaustion(budget)),
-                Err(refusal) => return Ok(LaneOutput::unavailable(refusal)),
+                Err(refusal) => {
+                    return match lookup_refusal(&refusal) {
+                        LaneRefusal::Budget => Err(exhaustion(budget).into()),
+                        LaneRefusal::Reason(reason) => Ok(LaneOutput::unavailable(reason)),
+                    };
+                }
             };
             hits.extend(
                 page.rows
@@ -255,7 +371,7 @@ fn lexical_lane(
     query: &str,
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
-) -> Result<LaneOutput, Terminal> {
+) -> Result<LaneOutput, QueryFailure> {
     let segments = match intent {
         Intent::Direct(_) => Vec::new(),
         Intent::Hybrid(_) => intent.lexical_segments(query),
@@ -266,7 +382,7 @@ fn lexical_lane(
     };
     let analysis = match analyze_segments(&segments, bounds) {
         Ok(analysis) => analysis,
-        Err(refusal) => return Ok(LaneOutput::unavailable(refusal)),
+        Err(refusal) => return Ok(LaneOutput::unavailable(lexical_refusal(&refusal))),
     };
     if analysis.is_empty() {
         return Ok(LaneOutput::undeclared());
@@ -280,13 +396,17 @@ fn lexical_lane(
     };
     let retrieval = match retrieve(conn, kernel, &probes, authority, bounds, budget.eval()) {
         Ok(retrieval) => retrieval,
-        Err(RetrievalRefusal::BudgetExhausted) => return Err(exhaustion(budget)),
-        Err(refusal) => return Ok(LaneOutput::unavailable(refusal)),
+        Err(refusal) => {
+            return match retrieval_refusal(&refusal) {
+                LaneRefusal::Budget => Err(exhaustion(budget).into()),
+                LaneRefusal::Reason(reason) => Ok(LaneOutput::unavailable(reason)),
+            };
+        }
     };
     let status = match retrieval.completion {
         Completion::Complete | Completion::Empty => LaneStatus::Complete,
         Completion::Incomplete(IncompleteReason::BudgetExhausted) => {
-            return Err(exhaustion(budget));
+            return Err(exhaustion(budget).into());
         }
         Completion::Incomplete(IncompleteReason::ScanBound) => LaneStatus::Incomplete("scan_bound"),
         Completion::Incomplete(IncompleteReason::AcceptedBound) => {
@@ -313,12 +433,10 @@ struct Scanned {
     candidates: Vec<retrieval::eligibility::OccurrenceCandidate>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn execute(
     projection: &SearchProjection,
     kernel: &KernelStore,
-    project: &ProjectScope,
-    destination: ArtifactDestination,
+    authority: Authority<'_>,
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
     query: &str,
@@ -335,7 +453,7 @@ pub fn execute(
 
     let read = projection.read_under(budget, |conn| {
         let Some(identity) = retrieval::read_identity(conn)? else {
-            return Ok(Err(QueryFailure::Terminal(Terminal::LaneUnavailable)));
+            return Ok(Err(QueryFailure::Unavailable("no_identity")));
         };
         let mut phases = || -> Result<Scanned, QueryFailure> {
             before_phase(Phase::Exact);
@@ -349,10 +467,6 @@ pub fn execute(
             )?;
             before_phase(Phase::Lexical);
             check(budget)?;
-            let authority = Authority {
-                project,
-                destination,
-            };
             let lexical = lexical_lane(conn, kernel, authority, &intent, query, limits, budget)?;
             if exact.ranking.is_none() && lexical.ranking.is_none() {
                 let both_undeclared = exact.status == LaneStatus::Undeclared
@@ -360,27 +474,35 @@ pub fn execute(
                 return Err(if both_undeclared {
                     QueryFailure::InvalidQuery("the query yields no probe".to_string())
                 } else {
-                    Terminal::LaneUnavailable.into()
+                    QueryFailure::Unavailable("no_lane")
                 });
             }
             before_phase(Phase::Fusion);
             check(budget)?;
             let rankings = [exact.ranking, lexical.ranking].into_iter().flatten();
-            let lanes = DeclaredLanes::admit(rankings).map_err(|_| Terminal::LaneUnavailable)?;
+            let lanes = DeclaredLanes::admit(rankings)
+                .map_err(|_| QueryFailure::Unavailable("duplicate_lane"))?;
             let fused = fuse(lanes, &limits.fusion, limits.fused_union)
-                .map_err(|_| Terminal::LaneUnavailable)?;
-            before_phase(Phase::Revalidation);
-            check(budget)?;
+                .map_err(|_| QueryFailure::Unavailable("fused_union"))?;
             let ids: Vec<String> = fused
                 .entries()
                 .iter()
                 .map(|entry| entry.occurrence().to_string())
                 .collect();
-            let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             let candidates =
-                live_candidates_by_id(conn, &id_refs).map_err(|_| Terminal::LaneUnavailable)?;
+                live_candidates_by_id(conn, ids.iter().map(String::as_str)).map_err(|error| {
+                    match error {
+                        ProjectionError::Interrupted => QueryFailure::Terminal(exhaustion(budget)),
+                        _ => QueryFailure::Unavailable("candidate_read"),
+                    }
+                })?;
+            check(budget)?;
+            let mut statuses = [const { LaneStatus::Undeclared }; Lane::ORDER.len()];
+            for (lane, status) in [(Lane::Exact, exact.status), (Lane::Lexical, lexical.status)] {
+                statuses[lane_slot(lane)] = status;
+            }
             Ok(Scanned {
-                statuses: [exact.status, lexical.status, LaneStatus::Undeclared],
+                statuses,
                 fused,
                 candidates,
             })
@@ -392,33 +514,36 @@ pub fn execute(
         Err(SearchProjectionError::Store(StoreError::Deadline)) => {
             return Err(exhaustion(budget).into());
         }
-        Err(_) => return Err(Terminal::LaneUnavailable.into()),
+        Err(_) => return Err(QueryFailure::Unavailable("projection_read")),
     };
 
-    let eligible: BTreeSet<String> = if scanned.candidates.is_empty() {
-        BTreeSet::new()
-    } else {
+    before_phase(Phase::Revalidation);
+    check(budget)?;
+    let mut eligible: BTreeSet<OccurrenceId> = BTreeSet::new();
+    for batch in scanned.candidates.chunks(limits.validation_batch.get()) {
+        check(budget)?;
         let report = judge_occurrences_within_budget(
             kernel,
-            project,
-            destination,
-            &scanned.candidates,
+            authority.project,
+            authority.destination,
+            batch,
             budget.eval(),
         )
         .map_err(|error| match error {
-            KernelError::Deadline => exhaustion(budget),
-            _ => Terminal::LaneUnavailable,
+            KernelError::Deadline => QueryFailure::Terminal(exhaustion(budget)),
+            _ => QueryFailure::Unavailable("eligibility"),
         })?;
-        report
-            .occurrences
-            .into_iter()
-            .filter(|judged| judged.disposition == Disposition::Eligible)
-            .map(|judged| judged.occurrence_id)
-            .collect()
-    };
+        eligible.extend(
+            report
+                .occurrences
+                .into_iter()
+                .filter(|judged| judged.disposition == Disposition::Eligible)
+                .filter_map(|judged| OccurrenceId::parse(&judged.occurrence_id).ok()),
+        );
+    }
     let fused = scanned
         .fused
-        .filter(|entry| eligible.contains(&entry.occurrence().to_string()));
+        .filter(|entry| eligible.contains(entry.occurrence()));
 
     before_phase(Phase::Materialization);
     check(budget)?;
@@ -433,8 +558,8 @@ pub fn execute(
             "entries": entries,
         })
     };
-    let mut used =
-        measure_json(&envelope(Vec::new(), true)).map_err(|_| Terminal::LaneUnavailable)?;
+    let mut used = measure_json(&envelope(Vec::new(), true))
+        .map_err(|_| QueryFailure::Unavailable("response_measure"))?;
     let mut entries = Vec::new();
     let mut truncated = false;
     for entry in fused.entries() {
@@ -443,8 +568,8 @@ pub fn execute(
             break;
         }
         let value = entry_json(entry);
-        let separator = 1;
-        let size = measure_json(&value).map_err(|_| Terminal::LaneUnavailable)? + separator;
+        let size =
+            measure_json(&value).map_err(|_| QueryFailure::Unavailable("response_measure"))? + 1;
         if used + size > limits.response_bytes.get() {
             truncated = true;
             break;
@@ -462,6 +587,13 @@ pub fn execute(
         truncated,
         body,
     })
+}
+
+fn lane_slot(lane: Lane) -> usize {
+    Lane::ORDER
+        .iter()
+        .position(|candidate| *candidate == lane)
+        .expect("every lane has a slot in Lane::ORDER")
 }
 
 fn lanes_json(statuses: &[LaneStatus; Lane::ORDER.len()]) -> Value {
@@ -501,20 +633,27 @@ pub(crate) fn terminal_response(terminal: Terminal) -> PreparedOutcome {
     })))
 }
 
-fn parse_destination(value: &str) -> Option<ArtifactDestination> {
-    match value {
-        "local" => Some(ArtifactDestination::Local),
-        "remote" => Some(ArtifactDestination::Remote),
-        _ => None,
-    }
+fn unavailable_response(reason: &'static str) -> PreparedOutcome {
+    PreparedOutcome::Response(PreparedOutput::json(json!({
+        "kind": "terminal",
+        "terminal": Terminal::LaneUnavailable.code(),
+        "reason": reason,
+    })))
 }
 
 impl HandlerCore {
-    pub fn set_query_route_limits(&self, limits: Option<QueryRouteLimits>) {
+    pub fn set_query_route_limits(
+        &self,
+        limits: Option<QueryRouteLimits>,
+    ) -> Result<(), LimitsRefusal> {
+        if let Some(limits) = &limits {
+            limits.validate()?;
+        }
         *self
             .query_route
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = limits.map(Arc::new);
+        Ok(())
     }
 
     pub(crate) async fn handle_retrieval_query(
@@ -528,13 +667,10 @@ impl HandlerCore {
             Ok(bound) => bound,
             Err(outcome) => return outcome,
         };
-        let Some(bound_harness) = self.harness_for_route(channel) else {
-            return terminal_response(Terminal::Unauthorized);
-        };
         if parsed
             .harness
             .as_deref()
-            .is_some_and(|claimed| claimed != bound_harness)
+            .is_some_and(|claimed| claimed != scope.harness)
         {
             return terminal_response(Terminal::Unauthorized);
         }
@@ -552,11 +688,7 @@ impl HandlerCore {
                 limits.query_bytes
             ));
         }
-        let Some(destination) = parse_destination(&parsed.destination) else {
-            return invalid_params_error(format!(
-                "{OPERATION} destination must be local or remote"
-            ));
-        };
+        let destination = ArtifactDestination::from(parsed.destination);
         let budget = match RequestBudget::derive(
             runner.cancel_signal(),
             parsed.remaining_ms,
@@ -567,10 +699,14 @@ impl HandlerCore {
             Err(refusal) => return invalid_params_error(format!("{OPERATION}: {refusal}")),
         };
         let Some(lifecycle) = self.lifecycle_owner() else {
-            return terminal_response(Terminal::LaneUnavailable);
+            return unavailable_response("no_lifecycle");
         };
         let shared = budget.shared().clone();
-        let RouteScope { store, project } = scope;
+        let RouteScope {
+            store,
+            project,
+            harness: _,
+        } = scope;
         let query = parsed.query;
         let work = runner.run_unit(Box::new(move || {
             let reader = match lifecycle.pin(shared.eval()) {
@@ -579,14 +715,16 @@ impl HandlerCore {
                     return UnitOutcome::Terminal(terminal_response(exhaustion(&shared)));
                 }
                 Err(_) => {
-                    return UnitOutcome::Terminal(terminal_response(Terminal::LaneUnavailable));
+                    return UnitOutcome::Terminal(unavailable_response("no_family"));
                 }
             };
             let outcome = execute(
                 reader.projection(),
                 &store,
-                project.scope(),
-                destination,
+                Authority {
+                    project: project.scope(),
+                    destination,
+                },
                 &limits,
                 &shared,
                 &query,
@@ -595,6 +733,7 @@ impl HandlerCore {
             UnitOutcome::Terminal(match outcome {
                 Ok(outcome) => PreparedOutcome::Response(PreparedOutput::json(outcome.body)),
                 Err(QueryFailure::Terminal(terminal)) => terminal_response(terminal),
+                Err(QueryFailure::Unavailable(reason)) => unavailable_response(reason),
                 Err(QueryFailure::InvalidQuery(reason)) => {
                     invalid_params_error(format!("{OPERATION}: {reason}"))
                 }
@@ -604,7 +743,7 @@ impl HandlerCore {
         drop(budget);
         match outcome {
             Ok(UnitOutcome::Terminal(outcome)) => outcome,
-            Ok(UnitOutcome::Continue(_)) => terminal_response(Terminal::LaneUnavailable),
+            Ok(UnitOutcome::Continue(_)) => unavailable_response("unit_continued"),
             Err(failed) => match BlockingFailure::from(failed) {
                 BlockingFailure::Panicked => PreparedOutcome::Error {
                     code: "internal_error".to_string(),
@@ -656,7 +795,7 @@ mod tests {
             json!({"status": "incomplete", "reason": "scan_bound"})
         );
         assert_eq!(
-            LaneStatus::Unavailable("snapshot_changed".to_string()).json(),
+            LaneStatus::Unavailable("snapshot_changed").json(),
             json!({"status": "unavailable", "reason": "snapshot_changed"})
         );
         assert_eq!(
@@ -666,6 +805,6 @@ mod tests {
         assert!(!LaneStatus::Complete.degrades());
         assert!(!LaneStatus::Undeclared.degrades());
         assert!(LaneStatus::Incomplete("page_bound").degrades());
-        assert!(LaneStatus::Unavailable(String::new()).degrades());
+        assert!(LaneStatus::Unavailable("engine").degrades());
     }
 }

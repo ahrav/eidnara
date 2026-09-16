@@ -12,14 +12,17 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
 
 ## Evidence trail
 
-- `crates/daemon/src/query_route.rs`: `QueryRouteLimits` names every bound;
-  `handle_retrieval_query` checks `query_bytes` before the budget is derived;
-  `execute` passes `query_bytes` to `classify`, `probes` and `query_bytes` to
-  `analyze_segments`, `probes`/`lexical_scan_rows`/`lexical_accepted`/
-  `validation_batch` to `retrieve`, `exact_page_rows` and `exact_pages` to the
-  exact loop, `fused_union` to `fuse`, and `result_rows`/`response_bytes` to
-  the materialization loop, which measures each entry with `measure_json`
-  before pushing it.
+- `crates/daemon/src/query_route.rs`: `QueryRouteLimits` names every bound
+  and `validate` refuses a `validation_batch` or `lexical_accepted` over the
+  kernel's candidate maximum at installation; `handle_retrieval_query` checks
+  `query_bytes` before the budget is derived; `execute` passes `query_bytes`
+  to `classify`, refuses more `id:` selectors than `probes` before the first
+  page, passes `probes` and `query_bytes` to `analyze_segments`,
+  `probes`/`lexical_scan_rows`/`lexical_accepted`/`validation_batch` to
+  `retrieve`, `exact_page_rows` and `exact_pages` to the exact loop,
+  `fused_union` to `fuse`, judges revalidation in `validation_batch` slices,
+  and applies `result_rows`/`response_bytes` in the materialization loop,
+  which measures each entry with `measure_json` before pushing it.
 - `crates/daemon/tests/query_route.rs`
   `each_bound_saturates_before_its_protected_work`.
 

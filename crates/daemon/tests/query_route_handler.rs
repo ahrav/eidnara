@@ -11,8 +11,8 @@ use daemon::projection_gates::ProjectionHook;
 use daemon::projection_lifecycle::{
     Cause, ConsumerBinding, ControlState, LifecycleRequest, ProjectionLifecycle, Transition,
 };
-use daemon::query_route::QueryRouteLimits;
-use kernel::KernelStore;
+use daemon::query_route::{LimitsRefusal, QueryRouteLimits};
+use kernel::{KernelStore, MAX_ELIGIBILITY_CANDIDATES};
 use retrieval::fusion::{FusionParameters, LaneWeights};
 use serde_json::{Value, json};
 use support::embedding_fixtures::{GENERATION, identity, kernel_incarnation_id};
@@ -97,7 +97,23 @@ async fn scope_harness_and_disable_are_decided_before_any_candidate_read() {
     let disabled = body(daemon.outcome(request(&project, "id:rule")).await);
     assert_eq!(terminal(&disabled), "disabled");
 
-    daemon.handler().set_query_route_limits(Some(limits()));
+    let mut over = limits();
+    over.validation_batch = NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES + 1).unwrap();
+    assert_eq!(
+        daemon.handler().set_query_route_limits(Some(over)),
+        Err(LimitsRefusal::ValidationBatch {
+            value: MAX_ELIGIBILITY_CANDIDATES + 1
+        })
+    );
+    assert_eq!(
+        terminal(&body(daemon.outcome(request(&project, "id:rule")).await)),
+        "disabled",
+        "a refused limit set installs nothing"
+    );
+    daemon
+        .handler()
+        .set_query_route_limits(Some(limits()))
+        .unwrap();
 
     let mut mismatched = request(&project, "id:rule");
     mismatched["harness"] = json!("another-harness");
@@ -108,11 +124,9 @@ async fn scope_harness_and_disable_are_decided_before_any_candidate_read() {
 
     let mut claimed = request(&project, "id:rule");
     claimed["harness"] = json!("test");
-    assert_eq!(
-        terminal(&body(daemon.outcome(claimed).await)),
-        "lane_unavailable",
-        "a matching claim passes authorization; no family is selected yet"
-    );
+    let passed = body(daemon.outcome(claimed).await);
+    assert_eq!(terminal(&passed), "lane_unavailable");
+    assert_eq!(passed["reason"], "no_family");
 
     let mut missing = request(&project, "id:rule");
     missing.as_object_mut().unwrap().remove("remaining_ms");
@@ -120,6 +134,18 @@ async fn scope_harness_and_disable_are_decided_before_any_candidate_read() {
 
     let mut destination = request(&project, "id:rule");
     destination["destination"] = json!("cloud");
+    assert_eq!(
+        error_code(daemon.outcome(destination.clone()).await),
+        "invalid_params"
+    );
+    destination["destination"] = json!("remote");
+    assert_eq!(
+        terminal(&body(daemon.outcome(destination).await)),
+        "lane_unavailable"
+    );
+
+    let mut destination = request(&project, "id:rule");
+    destination["destination"] = json!(7);
     assert_eq!(
         error_code(daemon.outcome(destination).await),
         "invalid_params"
@@ -132,7 +158,7 @@ async fn scope_harness_and_disable_are_decided_before_any_candidate_read() {
     unknown["occurrence_ids"] = json!(["deadbeef"]);
     assert_eq!(error_code(daemon.outcome(unknown).await), "invalid_params");
 
-    daemon.handler().set_query_route_limits(None);
+    daemon.handler().set_query_route_limits(None).unwrap();
     assert_eq!(
         terminal(&body(daemon.outcome(request(&project, "id:rule")).await)),
         "disabled"
@@ -148,7 +174,7 @@ fn now() -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn the_running_daemon_answers_a_fused_query_from_its_converged_family() {
+async fn the_running_daemon_serves_the_route_from_its_converged_family() {
     let data = tempfile::tempdir().unwrap();
     let home = data.path().to_owned();
     let kernel_root = home.join("eidnara").join("context");
@@ -185,7 +211,10 @@ async fn the_running_daemon_answers_a_fused_query_from_its_converged_family() {
 
     let daemon = KernelDaemon::start_in(data, None).await;
     let project = daemon.project().to_owned();
-    daemon.handler().set_query_route_limits(Some(limits()));
+    daemon
+        .handler()
+        .set_query_route_limits(Some(limits()))
+        .unwrap();
     let started = Instant::now();
     loop {
         if let Ok(lifecycle) = ProjectionLifecycle::open(&home)
@@ -217,7 +246,9 @@ async fn the_running_daemon_answers_a_fused_query_from_its_converged_family() {
     claimed["harness"] = json!("test");
     assert_eq!(body(daemon.outcome(claimed).await)["kind"], "fused");
 
-    daemon.handler().set_query_route_limits(None);
+    let store = daemon.store();
+    let canonical = (store.tip().unwrap(), store.lease_epoch());
+    daemon.handler().set_query_route_limits(None).unwrap();
     assert_eq!(
         terminal(&body(
             daemon
@@ -226,16 +257,18 @@ async fn the_running_daemon_answers_a_fused_query_from_its_converged_family() {
         )),
         "disabled"
     );
-    daemon.handler().set_query_route_limits(Some(limits()));
-    assert_eq!(
-        body(
-            daemon
-                .outcome(request(&project, "id:rule explicit contract"))
-                .await
-        )["kind"],
-        "fused",
-        "re-enabling needs no data change"
+    assert_eq!((store.tip().unwrap(), store.lease_epoch()), canonical);
+    daemon
+        .handler()
+        .set_query_route_limits(Some(limits()))
+        .unwrap();
+    let again = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
     );
+    assert_eq!(again, fused, "re-enabling needs no data change");
+    assert_eq!((store.tip().unwrap(), store.lease_epoch()), canonical);
 
     let mut lapsed = request(&project, "id:rule explicit contract");
     lapsed["remaining_ms"] = json!(0);

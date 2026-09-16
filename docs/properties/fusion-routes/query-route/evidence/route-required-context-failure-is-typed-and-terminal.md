@@ -15,7 +15,12 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
   `Terminal::code` maps each to one wire code, `terminal_response` emits
   `{"kind":"terminal","terminal":<code>}`; the unit test
   `every_terminal_has_one_wire_code_and_the_response_names_it`.
-- `LaneStatus::Unavailable` and `degrades` carry the per-lane failure.
+- `LaneStatus::Unavailable` carries a closed reason code produced by
+  `lookup_refusal`, `retrieval_refusal`, `lexical_refusal`, and
+  `identity_reason`; engine text is never serialized. `degrades` marks the
+  answer. `crates/daemon/tests/query_route.rs`
+  `a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves` drives
+  the exact lane's `no_checkpoint` through the route.
 - No stage constructs `Terminal::RequiredContextFailure` yet.
 
 ## Failure scenario

@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,16 +21,14 @@ use kernel::{
     SourceRow,
 };
 use retrieval::batch::{BatchBounds, MutationIdentity, batch_from_rows, row_identities};
+use retrieval::eligibility::Authority;
 use retrieval::exact::{
     ExactQuery, Intent, LookupContext, SelectorBounds, SelectorValue, classify, page,
 };
 use retrieval::fusion::{
-    DeclaredLanes, FusionParameters, Lane, LaneHit, LaneRanking, LaneWeights, OccurrenceId,
-    RawScore, fuse,
+    FusionParameters, Lane, LaneHit, LaneRanking, LaneWeights, OccurrenceId, RawScore,
 };
-use retrieval::lexical::{
-    Authority, LexicalBounds, RetrievalBounds, analyze_segments, compile, retrieve,
-};
+use retrieval::lexical::{LexicalBounds, RetrievalBounds, analyze_segments, compile, retrieve};
 use retrieval::{PersistBounds, ProjectionIdentity, install_identity};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -46,6 +45,12 @@ const MODEL: &str = "tiny-test-model";
 const NOW: i64 = 1_700_000_000_000;
 const KERNEL: &str = "route-kernel";
 const QUERY: &str = "id:rule explicit contract";
+const WEIGHTS: LaneWeights = LaneWeights {
+    exact: 2.0,
+    lexical: 1.0,
+    dense: 1.0,
+};
+const K: f64 = 7.0;
 const ALL_PHASES: [Phase; 7] = [
     Phase::Probes,
     Phase::Exact,
@@ -126,15 +131,7 @@ fn limits() -> QueryRouteLimits {
         result_rows: NonZeroUsize::new(32).unwrap(),
         response_bytes: NonZeroUsize::new(1 << 16).unwrap(),
         deadline_ceiling: Duration::from_secs(20),
-        fusion: FusionParameters::new(
-            LaneWeights {
-                exact: 1.0,
-                lexical: 1.0,
-                dense: 1.0,
-            },
-            60.0,
-        )
-        .unwrap(),
+        fusion: FusionParameters::new(WEIGHTS, K).unwrap(),
     }
 }
 
@@ -299,8 +296,10 @@ impl Fixture {
         execute(
             &self.projection,
             &self.store,
-            &self.project,
-            ArtifactDestination::Local,
+            Authority {
+                project: &self.project,
+                destination: ArtifactDestination::Local,
+            },
             limits,
             shared,
             query,
@@ -316,8 +315,10 @@ impl Fixture {
         execute(
             &self.projection,
             &self.store,
-            project,
-            ArtifactDestination::Local,
+            Authority {
+                project,
+                destination: ArtifactDestination::Local,
+            },
             &limits(),
             shared,
             QUERY,
@@ -396,19 +397,28 @@ impl Fixture {
                     occurrence: OccurrenceId::parse(&c.occurrence_id).unwrap(),
                     raw_score: RawScore::Lexical(c.rank),
                 });
-                let lanes = DeclaredLanes::admit([
+                let exact =
                     LaneRanking::consolidate(Lane::Exact, OCCURRENCE_ENCODING_VERSION, exact)
-                        .unwrap(),
+                        .unwrap();
+                let lexical =
                     LaneRanking::consolidate(Lane::Lexical, OCCURRENCE_ENCODING_VERSION, lexical)
-                        .unwrap(),
-                ])
-                .unwrap();
-                let fused = fuse(lanes, &limits.fusion, limits.fused_union).unwrap();
-                Ok(fused
-                    .entries()
-                    .iter()
-                    .map(|entry| entry.occurrence().to_string())
-                    .collect())
+                        .unwrap();
+                assert!(!exact.entries().is_empty() && !lexical.entries().is_empty());
+                let mut scores: BTreeMap<OccurrenceId, f64> = BTreeMap::new();
+                for (ranking, weight) in [(&exact, WEIGHTS.exact), (&lexical, WEIGHTS.lexical)] {
+                    for entry in ranking.entries() {
+                        *scores.entry(*entry.occurrence()).or_insert(0.0) +=
+                            weight / (K + entry.position().get() as f64);
+                    }
+                }
+                let mut ordered: Vec<(OccurrenceId, f64)> = scores.into_iter().collect();
+                ordered.sort_by(|(left_id, left), (right_id, right)| {
+                    right
+                        .partial_cmp(left)
+                        .unwrap()
+                        .then_with(|| left_id.cmp(right_id))
+                });
+                Ok(ordered.into_iter().map(|(id, _)| id.to_string()).collect())
             })
             .unwrap()
     }
@@ -479,7 +489,9 @@ async fn cancellation_and_deadline_are_observed_in_every_phase() {
     let fixture = Fixture::build().await;
     for target in ALL_PHASES {
         let (token, budget) = budget(10_000);
+        let mut reached = Vec::new();
         let outcome = fixture.run(&limits(), budget.shared(), QUERY, |phase| {
+            reached.push(phase);
             if phase == target {
                 token.cancel();
             }
@@ -489,12 +501,15 @@ async fn cancellation_and_deadline_are_observed_in_every_phase() {
             Some(QueryFailure::Terminal(Terminal::Cancelled)),
             "cancelled at {target:?}"
         );
+        assert_eq!(reached.last(), Some(&target), "{reached:?}");
     }
     for target in ALL_PHASES {
-        let (_token, budget) = budget(200);
+        let (_token, budget) = budget(600);
+        let mut reached = Vec::new();
         let outcome = fixture.run(&limits(), budget.shared(), QUERY, |phase| {
+            reached.push(phase);
             if phase == target {
-                std::thread::sleep(Duration::from_millis(250));
+                std::thread::sleep(Duration::from_millis(700));
             }
         });
         assert_eq!(
@@ -502,6 +517,7 @@ async fn cancellation_and_deadline_are_observed_in_every_phase() {
             Some(QueryFailure::Terminal(Terminal::Deadline)),
             "deadline at {target:?}"
         );
+        assert_eq!(reached.last(), Some(&target), "{reached:?}");
     }
     fixture.daemon.shutdown().await;
 }
@@ -547,16 +563,28 @@ async fn revalidation_excludes_retired_and_foreign_occurrences() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_bound_saturates_before_its_protected_work() {
     let fixture = Fixture::build().await;
-    let (_token, budget) = budget(10_000);
-    let full = fixture
-        .run(&limits(), budget.shared(), QUERY, |_| {})
-        .unwrap();
+    let run = |limits: &QueryRouteLimits, query: &str| {
+        let (_token, budget) = budget(10_000);
+        let mut reached = Vec::new();
+        let outcome = fixture.run(limits, budget.shared(), query, |phase| reached.push(phase));
+        (outcome, reached)
+    };
+    let (full, _) = run(&limits(), QUERY);
+    let full = full.unwrap();
     let total = entry_ids(&full.body).len();
     assert!(total >= 2, "{}", full.body);
+    let lexical_hits = full
+        .fused
+        .entries()
+        .iter()
+        .filter(|entry| entry.lane(Lane::Lexical).is_some())
+        .count();
+    assert!(lexical_hits >= 2, "{}", full.body);
 
     let mut rows = limits();
     rows.result_rows = NonZeroUsize::new(1).unwrap();
-    let outcome = fixture.run(&rows, budget.shared(), QUERY, |_| {}).unwrap();
+    let (outcome, _) = run(&rows, QUERY);
+    let outcome = outcome.unwrap();
     assert_eq!(entry_ids(&outcome.body).len(), 1);
     assert!(outcome.truncated);
     assert_eq!(outcome.body["truncated"], true);
@@ -564,32 +592,121 @@ async fn each_bound_saturates_before_its_protected_work() {
 
     let mut bytes = limits();
     bytes.response_bytes = NonZeroUsize::new(200).unwrap();
-    let outcome = fixture.run(&bytes, budget.shared(), QUERY, |_| {}).unwrap();
+    let (outcome, _) = run(&bytes, QUERY);
+    let outcome = outcome.unwrap();
     assert!(entry_ids(&outcome.body).len() < total);
     assert!(outcome.truncated);
-    assert!(serde_json::to_vec(&outcome.body).unwrap().len() <= 200 + 64);
+    assert!(serde_json::to_vec(&outcome.body).unwrap().len() <= 200);
 
     let mut union = limits();
     union.fused_union = NonZeroUsize::new(1).unwrap();
-    let mut reached = Vec::new();
-    let outcome = fixture.run(&union, budget.shared(), QUERY, |phase| reached.push(phase));
+    let (outcome, reached) = run(&union, QUERY);
     assert_eq!(
         outcome.err(),
-        Some(QueryFailure::Terminal(Terminal::LaneUnavailable))
+        Some(QueryFailure::Unavailable("fused_union"))
     );
-    assert!(!reached.contains(&Phase::Materialization));
+    assert_eq!(reached.last(), Some(&Phase::Fusion), "{reached:?}");
 
     let mut pages = limits();
     pages.exact_page_rows = NonZeroUsize::new(1).unwrap();
     pages.exact_pages = NonZeroUsize::new(1).unwrap();
-    let outcome = fixture.run(&pages, budget.shared(), QUERY, |_| {}).unwrap();
+    let (outcome, _) = run(&pages, QUERY);
+    let outcome = outcome.unwrap();
     assert_eq!(outcome.statuses[0], LaneStatus::Incomplete("page_bound"));
     assert_eq!(outcome.body["degraded"], true);
     assert_eq!(outcome.body["lanes"]["exact"]["status"], "incomplete");
 
-    let long = "x".repeat(600);
-    let outcome = fixture.run(&limits(), budget.shared(), &long, |_| {});
+    let mut batches = limits();
+    batches.validation_batch = NonZeroUsize::new(1).unwrap();
+    let (outcome, _) = run(&batches, QUERY);
+    assert_eq!(entry_ids(&outcome.unwrap().body), entry_ids(&full.body));
+
+    let mut selectors = limits();
+    selectors.probes = NonZeroUsize::new(1).unwrap();
+    let (outcome, reached) = run(&selectors, "id:rule id:other");
     assert!(matches!(outcome, Err(QueryFailure::InvalidQuery(_))));
+    assert_eq!(reached.last(), Some(&Phase::Exact), "{reached:?}");
+
+    let mut accepted = limits();
+    accepted.lexical_accepted = NonZeroUsize::new(1).unwrap();
+    let (outcome, _) = run(&accepted, QUERY);
+    let outcome = outcome.unwrap();
+    assert_eq!(
+        outcome.statuses[1],
+        LaneStatus::Incomplete("accepted_bound"),
+        "{}",
+        outcome.body
+    );
+    assert_eq!(outcome.body["degraded"], true);
+
+    let mut scan = limits();
+    scan.lexical_scan_rows = NonZeroUsize::new(1).unwrap();
+    let (outcome, _) = run(&scan, QUERY);
+    let outcome = outcome.unwrap();
+    assert_eq!(
+        outcome.statuses[1],
+        LaneStatus::Incomplete("scan_bound"),
+        "{}",
+        outcome.body
+    );
+
+    let mut probes = limits();
+    probes.probes = NonZeroUsize::new(1).unwrap();
+    let (outcome, _) = run(&probes, "id:rule explicit contract public");
+    let outcome = outcome.unwrap();
+    assert!(
+        matches!(outcome.statuses[1], LaneStatus::Unavailable(_)),
+        "{}",
+        outcome.body
+    );
+    assert_eq!(outcome.body["degraded"], true);
+    assert!(
+        outcome
+            .fused
+            .entries()
+            .iter()
+            .all(|entry| entry.lane(Lane::Exact).is_some()),
+        "the exact lane still serves"
+    );
+
+    let long = "x".repeat(600);
+    let (outcome, _) = run(&limits(), &long);
+    assert!(matches!(outcome, Err(QueryFailure::InvalidQuery(_))));
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves() {
+    let fixture = Fixture::build().await;
+    let dir = tempfile::tempdir().unwrap();
+    let projection = SearchProjection::open(dir.path()).unwrap();
+    projection
+        .write(|conn| install_identity(conn, &projection_identity(), 1).map(|_| ()))
+        .unwrap();
+    let (_token, budget) = budget(10_000);
+    let outcome = execute(
+        &projection,
+        &fixture.store,
+        Authority {
+            project: &fixture.project,
+            destination: ArtifactDestination::Local,
+        },
+        &limits(),
+        budget.shared(),
+        QUERY,
+        |_| {},
+    )
+    .unwrap();
+    assert!(
+        matches!(outcome.statuses[0], LaneStatus::Unavailable(_)),
+        "{}",
+        outcome.body
+    );
+    assert_eq!(outcome.statuses[1], LaneStatus::Complete);
+    assert_eq!(outcome.body["kind"], "fused");
+    assert_eq!(outcome.body["degraded"], true);
+    assert_eq!(outcome.body["lanes"]["exact"]["status"], "unavailable");
+    assert_eq!(outcome.body["lanes"]["exact"]["reason"], "no_checkpoint");
     fixture.daemon.shutdown().await;
 }
 
