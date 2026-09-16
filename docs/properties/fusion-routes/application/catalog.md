@@ -194,7 +194,7 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `outcomes_are_distinct_and_capacity_is_bound_before_preparation`.
 Guarantee: `keep`, `append`, `applied_replacement`, and `preparation_failure` are the only outcomes a confirm may carry and each is distinct on the wire; `unknown` is a receipt state and is refused as an outcome; an empty replacement is prepared, forwarded with zero bytes, and confirmed as `applied_replacement`.
-Check: `always` - four receipts confirmed with the four literals read back through `apply` as exactly those four distinct literals; `applied` and `unknown` are `invalid_params`; a replace with `edit_bytes = 0` forwards and completes as `applied_replacement`. `always` because the outcome enum is closed.
+Check: `always` - four receipts confirmed with the four literals read back through `apply` as exactly those four distinct literals; `applied` and `unknown` are `invalid_params`, and so is a confirm that omits `applied_identity`, which leaves the receipt in flight rather than turning it `unknown`; a replace with `edit_bytes = 0` forwards and completes as `applied_replacement`. `always` because the outcome enum is closed.
 Fault/timing angle: None.
 Required faults and enabling state: A live daemon with limits installed.
 Confidence: high - [evidence](evidence/apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement.md).

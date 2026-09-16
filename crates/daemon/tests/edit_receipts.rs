@@ -703,6 +703,18 @@ async fn outcomes_are_distinct_and_capacity_is_bound_before_preparation() {
         .confirm(&key, &effect, Some(&effect), "unknown")
         .await;
     assert_eq!(unknown["error"], "invalid_params", "{unknown}");
+    let mut omitted = confirm(daemon.project(), &key, &effect, None, "append");
+    omitted.as_object_mut().unwrap().remove("applied_identity");
+    let refused = consumer.call(omitted).await;
+    assert_eq!(
+        refused["error"], "invalid_params",
+        "an omitted applied_identity is not a lost acknowledgment: {refused}"
+    );
+    assert_eq!(
+        consumer.apply(&key, ctx.clone()).await["state"],
+        "in_flight",
+        "a malformed confirm mutates nothing"
+    );
     let mut misspelled_span = ctx.clone();
     misspelled_span["spans"][0] =
         json!({"occurrence_id": OCC_A, "buffer_len": 100, "spn": [0, 10]});
