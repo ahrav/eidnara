@@ -1176,3 +1176,6 @@ fn a_held_kernel_reader_does_not_outlive_the_budget() {
     assert_eq!(retrieval.consumed.batches, 0);
     assert_eq!(retrieval.consumed.probes, 1);
 }
+
+#[path = "support/lexical_probe_research.rs"]
+mod lexical_probe_research;
