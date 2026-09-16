@@ -104,12 +104,14 @@ impl KernelDaemon {
         }
     }
 
-    pub async fn call(&self, request: Value) -> Value {
-        match self
-            .handler
+    pub async fn outcome(&self, request: Value) -> PreparedOutcome {
+        self.handler
             .dispatch_value_for_test(self.route, request)
             .await
-        {
+    }
+
+    pub async fn call(&self, request: Value) -> Value {
+        match self.outcome(request).await {
             PreparedOutcome::Response(output) => {
                 let mut bytes = Vec::new();
                 output.measure().unwrap().write_to(&mut bytes).unwrap();
@@ -173,6 +175,10 @@ impl KernelDaemon {
 
     pub fn handler(&self) -> &Handler {
         &self.handler
+    }
+
+    pub fn project(&self) -> &Path {
+        &self.project
     }
 
     /// Root path the store descriptor was composed from.

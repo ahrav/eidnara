@@ -98,6 +98,36 @@ completion beside the ranking.
 survivor's position and score unchanged, so a revalidation pass never rescores
 and fusion runs once per query.
 
+## Query route
+
+`retrieval.query` in `crates/daemon/src/query_route.rs` is handler business
+semantics behind the existing `method` envelope; the host wire protocol is
+unchanged. A request carries `query`, `remaining_ms`, `destination`, and an
+optional `harness` claim, and nothing else. The route binding decides scope:
+the project root and session are compared before the body is parsed, and a
+`harness` claim that disagrees with the bound harness is refused. The route is
+enabled by installing a `QueryRouteLimits` set through
+`Handler::set_query_route_limits`; with none installed every authorized request
+receives the `disabled` terminal and no state is read, so rollback is disable,
+not mutation.
+
+The exact lane runs over the query's `id:` mentions, the lexical lane over the
+prose outside selector mentions, and both run inside one interruptible
+projection read under the request budget. Fusion runs once, the fused set is
+revalidated by the kernel's eligibility adapter under the bound scope, and only
+survivors are materialized within `result_rows` and `response_bytes`. No
+payload byte is read by the route.
+
+A fused answer is
+`{"kind":"fused","degraded":bool,"lanes":{...},"truncated":bool,"entries":[...]}`.
+Each lane reports `complete`, `incomplete` with a reason, `unavailable` with a
+reason, or `undeclared`; `degraded` is true when a lane is incomplete or
+unavailable. Each entry carries `occurrence_id`, fused `position`, fused
+`score`, and per-lane `position` and `raw` score. A terminal answer is
+`{"kind":"terminal","terminal":<code>}` with `code` one of `unauthorized`,
+`deadline`, `cancelled`, `lane_unavailable`, `required_context_failure`, or
+`disabled`. A malformed request is the transport's `invalid_params` error.
+
 ## Probe and generation identities
 
 `ProbeOrdinal(u32)` is one compiled query atom's zero-based position in its

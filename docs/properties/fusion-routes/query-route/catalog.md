@@ -1,4 +1,4 @@
-# RP2.7 query-route budget and cancellation properties
+# RP2.7 query-route properties
 
 ## Scope and provenance
 
@@ -12,12 +12,29 @@ Source: the RP2.7 specification
 bundle, whose query-route catalog proposed these slugs as unexercised
 `test-only` obligations. The RP2.7.U3a ticket
 ([#639](https://github.com/ahrav/eidnara/issues/639)) lands the budget and
-cancellation bridge records. Authorization, degradation, and terminal records
-enter this file with RP2.7.U3b and U3c.
+cancellation bridge records. The RP2.7.U3b ticket
+([#641](https://github.com/ahrav/eidnara/issues/641)) lands the route records:
+authorization, bounds, cancellation in every phase, scope, revalidation,
+healthy completion, the closed terminal set, and disable as rollback. The
+dense-lane records enter with RP2.7.U3c.
 
-This part owns the request budget: one absolute `EvalBudget` derived at
+This part owns the request budget (one absolute `EvalBudget` derived at
 handler entry, tracked blocking work, and the interruptible search-projection
-read. The route that composes lanes over it is a later ticket.
+read) and the `retrieval.query` route in `crates/daemon/src/query_route.rs`
+that composes the exact and lexical lanes over it.
+
+Parent Q3 decisions recorded here: `retrieval.query` is handler business
+semantics behind the existing `method` envelope, so `docs/host-wire-protocol.md`
+is unchanged; the route binding's harness is authoritative, a `harness` claim
+that disagrees with it is refused as `unauthorized`, and an absent claim is
+accepted. Parent Q5 decisions recorded here: the wire terminal set is
+`unauthorized`, `deadline`, `cancelled`, `lane_unavailable`,
+`required_context_failure`, and `disabled`; a lane that fails for a reason
+other than the budget is reported `unavailable` for that lane and the answer is
+`degraded`; both lanes failing, a fused union over its bound, an unreadable
+projection, or a kernel failure during revalidation is `lane_unavailable`; a
+panic in tracked work is the transport's `internal_error`; a stopped runtime or
+closing route is `cancelled`.
 
 Parent Q4 decisions recorded here: the remaining-duration request field is
 `remaining_ms`, a positive integer of milliseconds, clamped to a route-supplied
@@ -29,12 +46,19 @@ tracked primitive.
 
 ## Reachability and observation contract
 
-Every record here is `test-only` until a production route consumes the
-bridge. Observation points: `crates/daemon/src/request_budget.rs`,
-`SearchProjection::read_under` in `crates/daemon/src/search_projection.rs`,
-`SqliteStore::with_conn_interruptible` in `crates/storage/src/lib.rs`, and the
-host's `RequestCtx::run_blocking`. The host-level witnesses run a real host
-with a real client in `crates/daemon/src/request_budget/host_tests.rs`.
+Every record here is `test-only`: the route is reachable through the
+handler's dispatch only after `Handler::set_query_route_limits` installs an
+approved limit set, and no production caller installs one yet. Observation
+points: `crates/daemon/src/request_budget.rs`, `SearchProjection::read_under`
+in `crates/daemon/src/search_projection.rs`, `SqliteStore::with_conn_interruptible`
+in `crates/storage/src/lib.rs`, the host's `RequestCtx::run_blocking`, and
+`execute` plus `HandlerCore::handle_retrieval_query` in
+`crates/daemon/src/query_route.rs`, whose `before_phase` hook exposes each
+budget check to a test. The host-level witnesses run a real host with a real
+client in `crates/daemon/src/request_budget/host_tests.rs`; the route
+witnesses run a `KernelDaemon` over a file-backed projection populated from
+its kernel in `crates/daemon/tests/query_route.rs` and drive the handler in
+`crates/daemon/tests/query_route_handler.rs`.
 
 ## Index
 
@@ -43,6 +67,15 @@ with a real client in `crates/daemon/src/request_budget/host_tests.rs`.
 | [route-budget-is-derived-once-before-queue-wait](#route-budget-is-derived-once-before-queue-wait) | safety | test-only | always | active | high |
 | [route-sql-cancellation-is-request-local](#route-sql-cancellation-is-request-local) | safety | test-only | always | active | high |
 | [route-permits-and-pins-outlive-client-cancellation](#route-permits-and-pins-outlive-client-cancellation) | safety | test-only | always | active | medium |
+| [route-authorization-precedes-materialization](#route-authorization-precedes-materialization) | safety | test-only | always | active | high |
+| [route-bounds-are-enforced-before-protected-work](#route-bounds-are-enforced-before-protected-work) | safety | test-only | always | active | medium |
+| [route-cancellation-is-observed-in-every-phase](#route-cancellation-is-observed-in-every-phase) | safety | test-only | always | active | high |
+| [route-cancelled-work-drains-within-approved-envelope](#route-cancelled-work-drains-within-approved-envelope) | liveness | test-only | always | active | low |
+| [route-candidate-ids-never-widen-scope](#route-candidate-ids-never-widen-scope) | safety | test-only | always | active | high |
+| [route-final-revalidation-precedes-every-result](#route-final-revalidation-precedes-every-result) | safety | test-only | always | active | high |
+| [route-healthy-authorized-query-completes-fused](#route-healthy-authorized-query-completes-fused) | liveness | test-only | always | active | medium |
+| [route-required-context-failure-is-typed-and-terminal](#route-required-context-failure-is-typed-and-terminal) | safety | test-only | always | active | medium |
+| [route-rollback-disables-without-mutating-canonical-truth](#route-rollback-disables-without-mutating-canonical-truth) | safety | test-only | always | active | high |
 
 ## Records
 
@@ -169,5 +202,301 @@ Impact: Settling before the join would release a connection or permit while
 work still uses it, or report a false completion.
 Open questions:
 
-- Which route-owned permits and dense pins the census must include is fixed
-  when U3b and U3c add them. (needs human input)
+- The route holds its `RequestBudget` guard across the `run_unit` join and the
+  lifecycle pin inside the blocking closure; a holder census over those and
+  the dense pins U3c adds is still to be written. (needs human input)
+
+### route-authorization-precedes-materialization
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/query_route_handler.rs`
+`scope_harness_and_disable_are_decided_before_any_candidate_read`.
+Guarantee: A request naming another project root, an unbound session, or a
+harness other than the route binding's is refused before the body is parsed,
+before any candidate row is read, and before any payload byte is touched; the
+binding is the only authority and no request field grants scope.
+Check: `always` - on a daemon whose kernel holds rows, a foreign
+`project_root` answers the kernel routes' `invalid`/`project_mismatch` state,
+an unknown `session_id` answers a transport error, and a `harness` claim other
+than the bound one answers the `unauthorized` terminal; a claim equal to the
+bound harness and an absent claim both pass to the next stage. `always`
+because every request crosses the same entry.
+Fault/timing angle: None; the decision is made on the bound route state before
+any blocking work is admitted.
+Required faults and enabling state: A bound route with a known harness; a
+second project root under the same parent; an installed limit set so the
+harness check is the refusing stage.
+Confidence: high - [evidence](evidence/route-authorization-precedes-materialization.md).
+The route reuses `kernel_request`, whose scope check runs before body parse,
+and compares the harness claim before it reads the limit set or the budget.
+Existing check: `crates/daemon/tests/kernel_routes.rs` project-mismatch
+assertions for `kernel.read` and `kernel.commit`, status unaudited.
+Impact: A request could read another project's candidate rows or prose, or a
+caller could name a harness to inherit its capability set.
+Open questions: None.
+
+### route-bounds-are-enforced-before-protected-work
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/query_route.rs`
+`each_bound_saturates_before_its_protected_work` and
+`crates/daemon/tests/query_route_handler.rs`
+`scope_harness_and_disable_are_decided_before_any_candidate_read`.
+Guarantee: Every bound in `QueryRouteLimits` is checked before the work it
+protects: query bytes before classification, probes and lane candidates
+inside the lane primitives, the fused union inside `fuse`, result rows and
+response bytes before each entry is serialized; an absent limit set disables
+the route; the U3a bridge refuses an unapproved deadline ceiling.
+Check: `always` - `result_rows = 1` materializes one entry and reports
+`truncated` while the fused ranking keeps every entry; a 200-byte
+`response_bytes` materializes fewer entries than the ranking holds and the
+serialized body stays within the bound plus its envelope; `fused_union = 1`
+ends the request as `lane_unavailable` before the materialization phase is
+reached; one exact page of one row reports the exact lane `incomplete` with
+reason `page_bound` and the answer `degraded`; a query over `query_bytes` is
+refused as invalid at the handler and again by `classify`. `always` because
+each bound must hold on every request.
+Fault/timing angle: None; saturation is reached by shrinking one limit at a
+time on a fixed corpus.
+Required faults and enabling state: A projection with more matching rows than
+the shrunken bound; the `before_phase` hook to show which phase was not
+reached.
+Confidence: medium - [evidence](evidence/route-bounds-are-enforced-before-protected-work.md).
+The lexical scan, accepted, and validation-batch bounds are witnessed inside
+`crates/retrieval/tests/lexical_retrieval.rs` rather than through the route;
+the route only maps their completion reasons.
+Existing check: `crates/retrieval/tests/lexical_retrieval.rs` scan and accepted
+bound tests, status unaudited; `crates/retrieval/tests/exact_lookup.rs` page
+cursor tests, status unaudited; `crates/retrieval/tests/fusion.rs` union bound
+test, status unaudited.
+Impact: An unbounded phase could read or serialize past the approved envelope
+under one request's budget.
+Open questions:
+
+- The approved values for every limit are an RP2.9 item; the tests use
+  test-local values. (needs human input)
+
+### route-cancellation-is-observed-in-every-phase
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/query_route.rs`
+`cancellation_and_deadline_are_observed_in_every_phase` and
+`a_healthy_query_completes_fused_in_the_oracles_order`.
+Guarantee: The request budget is checked at the start of probe compilation,
+the exact scan, the lexical scan, fusion, revalidation, materialization, and
+response construction; a cancellation or a lapsed deadline observed at any of
+them ends the request with `cancelled` or `deadline` and no ranking.
+Check: `always` - for each of the seven phases, a hook that cancels the
+budget's token when that phase begins yields `Terminal::Cancelled`, and a hook
+that sleeps past a 200 ms remaining duration yields `Terminal::Deadline`; a
+healthy run visits the seven phases once each in order. `always` because
+every phase transition performs the check.
+Fault/timing angle: Cancellation between phases; the projection read's own
+progress handler covers cancellation inside a statement, see
+`route-sql-cancellation-is-request-local`.
+Required faults and enabling state: A populated projection; the `before_phase`
+hook; a `CancellationToken` behind `CancelSignal::observing`.
+Confidence: high - [evidence](evidence/route-cancellation-is-observed-in-every-phase.md).
+The phases are enumerated in `Phase` and each check is one call site.
+Existing check: `crates/daemon/tests/request_budget_reads.rs` interruption
+tests for a single read, status unaudited.
+Impact: A phase without a check would run to completion under a dead budget
+and could return a ranking the caller no longer waits for.
+Open questions: None.
+
+### route-cancelled-work-drains-within-approved-envelope
+
+Type: liveness
+Reachability: test-only
+Status: active
+Exercised: partial - the join-before-settle clause is covered by
+`crates/daemon/src/request_budget/host_tests.rs`
+`cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling`;
+the route's own holders and the envelope bound are not yet measured.
+Guarantee: Once a request is cancelled, the tracked blocking work that runs
+its lanes finishes, the lifecycle pin and the projection connection it holds
+are released, and the request settles within an approved fault-free envelope;
+a permanently blocked read stays visible as unresolved work rather than being
+settled early.
+Check: `always` - the handler awaits `run_unit` with the budget guard alive
+and drops the guard only after the join; the closure owns the pin for its
+whole run. The envelope bound and a holder census over the pin and the guard
+are not yet asserted. `always` because every cancelled request must drain.
+Fault/timing angle: Cancellation while the lanes hold the projection
+connection; cancellation while the closure waits to pin the lifecycle.
+Required faults and enabling state: A real host and client; a held projection
+read; a pinned family; an approved drain envelope.
+Confidence: low - [evidence](evidence/route-cancelled-work-drains-within-approved-envelope.md).
+Only the ordering clause has a witness, and it runs on the bridge rather than
+the route.
+Existing check: `crates/host-runtime/tests/dispatch.rs`
+`cancel_waits_for_the_request_blocking_work`, status unaudited.
+Impact: A settle before the drain would release the connection or the pin while
+a lane still uses it; an unbounded drain would hide a wedged read.
+Open questions:
+
+- The drain envelope is an RP2.9 number; until it is approved the record has
+  no bound to assert. (needs human input)
+
+### route-candidate-ids-never-widen-scope
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/query_route.rs`
+`revalidation_excludes_retired_and_foreign_occurrences` and
+`crates/daemon/tests/query_route_handler.rs`
+`scope_harness_and_disable_are_decided_before_any_candidate_read`.
+Guarantee: The request carries no occurrence identifiers, and the lexical
+lane and revalidation judge every candidate under the route binding's project
+scope; an occurrence a lane ranks is materialized only when the kernel judges
+it eligible under that scope, so no identifier a caller or a lane produces
+widens authorization.
+Check: `always` - a request body with an `occurrence_ids` field is refused
+as invalid by `deny_unknown_fields`; under a foreign project scope the same
+projection rows yield a `fused` answer with no entries because every lane
+result is excluded before materialization. `always` because every entry passes
+revalidation.
+Fault/timing angle: None.
+Required faults and enabling state: A projection populated from one project;
+a second `ProjectScope` that owns none of its rows.
+Confidence: high - [evidence](evidence/route-candidate-ids-never-widen-scope.md).
+The scope is taken from `RouteScope`, never from the body.
+Existing check: `crates/daemon/tests/claim_eligibility.rs`
+`retrieval_adapter_agrees_with_daemon_and_kernel_on_one_snapshot` foreign-scope
+assertions, status unaudited.
+Impact: A caller could name an identifier from another project and receive
+its position or payload.
+Open questions: None.
+
+### route-final-revalidation-precedes-every-result
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/query_route.rs`
+`revalidation_excludes_retired_and_foreign_occurrences`.
+Guarantee: Every fused entry is judged by the kernel's budget-aware
+eligibility adapter under the bound scope and destination after fusion and
+before materialization; an entry the kernel no longer admits is filtered out
+without recomputing scores or positions; no retrieval-side verdict copy is
+consulted.
+Check: `always` - after a decision is retired in the kernel while the
+projection still holds its rows, the same query returns strictly fewer
+entries, every remaining entry was present before, and the answer is not
+degraded; under a foreign scope every entry is excluded. `always` because the
+filter runs on every result set.
+Fault/timing angle: The retirement lands between the projection snapshot and
+the query.
+Required faults and enabling state: A projection built from a kernel snapshot;
+a later `retire_decision` commit materialized into the kernel's source
+descriptors.
+Confidence: high - [evidence](evidence/route-final-revalidation-precedes-every-result.md).
+`live_candidates_by_id` reads the candidates the lanes produced and
+`judge_occurrences_within_budget` judges them; `Fused::filter` keeps positions.
+Existing check: `crates/daemon/tests/claim_eligibility.rs` retirement
+assertions, status unaudited; `crates/retrieval/tests/fusion.rs` filter test,
+status unaudited.
+Impact: A retired or corrected occurrence could be returned with a live
+position.
+Open questions: None.
+
+### route-healthy-authorized-query-completes-fused
+
+Type: liveness
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/query_route.rs`
+`a_healthy_query_completes_fused_in_the_oracles_order` and
+`a_single_declared_lane_serves_and_no_lane_is_refused`;
+`crates/daemon/tests/query_route_handler.rs`
+`the_running_daemon_answers_a_fused_query_from_its_converged_family`.
+Guarantee: An authorized query over healthy lanes with a sufficient budget
+returns a nonempty `fused` answer whose entry order equals the U2 fusion of
+the lanes' own rankings, with both declared lanes `complete`, the dense lane
+`undeclared`, and raw scores retained per lane.
+Check: `always` - over a projection populated from the daemon's kernel, the
+route's entry order equals `fuse` over rankings the test builds directly from
+`exact::page` and `lexical::retrieve`; at least one entry carries an exact
+contribution and one a lexical contribution; a selector-only query serves the
+exact lane alone, a prose-only query the lexical lane alone, and a query that
+declares no lane is refused as invalid. Through the handler, a daemon whose
+lifecycle converged a family answers `fused` with both lanes `complete`.
+`always` because every healthy request must complete.
+Fault/timing angle: None.
+Required faults and enabling state: A populated projection; an installed
+limit set; a converged family for the handler path.
+Confidence: medium - [evidence](evidence/route-healthy-authorized-query-completes-fused.md).
+The handler-level witness serves an empty family: committing decisions after
+convergence left the family behind the kernel's freshness limit in this
+harness, so the nonempty oracle comparison is made at the `execute` level.
+Existing check: `crates/retrieval/tests/fusion.rs` oracle tests, status
+unaudited.
+Impact: An always-refusing route would pass every safety record and serve
+nothing.
+Open questions:
+
+- A handler-level nonempty answer needs a harness that catches the family up
+  to decisions committed after convergence. (needs human input)
+
+### route-required-context-failure-is-typed-and-terminal
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - `crates/daemon/src/query_route.rs`
+`every_terminal_has_one_wire_code_and_the_response_names_it` fixes the closed
+set and its codes; no route stage raises `RequiredContextFailure` until the
+packing integration lands.
+Guarantee: The route's terminal set is closed - `unauthorized`, `deadline`,
+`cancelled`, `lane_unavailable`, `required_context_failure`, `disabled` - each
+with one wire code carried in a `terminal` response, and a required-context
+failure raised by packing is one of them rather than a degraded answer.
+Check: `always` - every variant maps to a distinct code and to a
+`{"kind":"terminal","terminal":<code>}` response; the failure of a
+non-dense lane for a non-budget reason is reported per lane as `unavailable`
+with the answer `degraded`, and both lanes failing is `lane_unavailable`.
+`always` because the set is the wire contract.
+Fault/timing angle: None.
+Required faults and enabling state: A packing stage that misses required
+context, which U4 supplies.
+Confidence: medium - [evidence](evidence/route-required-context-failure-is-typed-and-terminal.md).
+The variant exists and is serialized; its producer does not.
+Existing check: `crates/daemon/src/kernel_routes/state.rs` closed
+`KernelOutcome` set, status unaudited.
+Impact: A stringly or open terminal set would let a new failure reach the
+harness untyped.
+Open questions: None.
+
+### route-rollback-disables-without-mutating-canonical-truth
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/query_route_handler.rs`
+`scope_harness_and_disable_are_decided_before_any_candidate_read` and
+`the_running_daemon_answers_a_fused_query_from_its_converged_family`.
+Guarantee: The route is disabled by removing its limit set; while disabled
+every authorized request receives the `disabled` terminal and no kernel,
+projection, or lifecycle state is read or written by the route; re-enabling
+installs a limit set and requires no data change.
+Check: `always` - a fresh daemon answers `disabled`; after limits are
+installed it serves; after `set_query_route_limits(None)` it answers
+`disabled` again; after reinstalling it serves the same answer. `always`
+because the check is the first stage after authorization.
+Fault/timing angle: None.
+Required faults and enabling state: A converged family so the enabled answer
+is `fused`.
+Confidence: high - [evidence](evidence/route-rollback-disables-without-mutating-canonical-truth.md).
+The disable path returns before the budget is derived or the pin is taken.
+Existing check: `crates/daemon/tests/search_replacement/disable.rs` family
+disable tests, status unaudited.
+Impact: A rollback that mutated canonical rows to match a projection would be
+irreversible.
+Open questions: None.
