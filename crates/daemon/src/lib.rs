@@ -64,6 +64,7 @@ pub mod production_inputs;
 pub mod projection_admission;
 pub mod projection_gates;
 pub mod projection_lifecycle;
+pub mod query_route;
 pub mod release_contract;
 pub mod request_budget;
 pub mod vector_admission;
@@ -2997,6 +2998,7 @@ pub struct HandlerCore {
     scheduler_observations: Mutex<HashMap<String, SchedulerObservation>>,
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
+    query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
     /// Test-side mirror of a client: full input arrays and applied outputs per session, so wire
@@ -3865,6 +3867,7 @@ impl Handler {
             scheduler_observations: Mutex::new(HashMap::new()),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
+            query_route: Mutex::new(None),
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
             #[cfg(test)]
@@ -4293,6 +4296,7 @@ impl Handler {
             scheduler_observations: Mutex::new(HashMap::new()),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
+            query_route: Mutex::new(None),
             guidance_now_ms: Mutex::new(None),
             test_client: Mutex::new(HashMap::new()),
             reduction_injection: Mutex::new(HashMap::new()),
@@ -13421,6 +13425,10 @@ impl HandlerCore {
                 }
                 "kernel.artifact.ingest.finish" => {
                     self.handle_kernel_ingest_finish(channel, request).await
+                }
+                query_route::OPERATION => {
+                    self.handle_retrieval_query(channel, request, entry.runner)
+                        .await
                 }
                 // The handler echoes only explicit wire-debugging requests.
                 // Unknown request bodies must fail so misrouted callers cannot mistake an echo for success.

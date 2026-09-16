@@ -1,7 +1,9 @@
-# Query-route budget fault and enabling-state map
+# Query-route fault and enabling-state map
 
 System: `/local/home/ahrav/scratch/eidnara`. Base: the `rp27/u1-identity-contract`
-branch head on `main` at `8e0491225a7292ef077c675d44b94f94a24041d3`.
+branch head on `main` at `8e0491225a7292ef077c675d44b94f94a24041d3` for the
+budget rows; `rp27/u2-weighted-rrf` at
+`6dea07f455d536eec50556116c882c8dc6a00d98` for the route rows.
 
 | Fault or state | Available seam | Records |
 | --- | --- | --- |
@@ -12,6 +14,18 @@ branch head on `main` at `8e0491225a7292ef077c675d44b94f94a24041d3`.
 | Leaked progress handler | `GuardedConn::leak_progress_handler_for_test` in the storage test module. | route-sql-cancellation-is-request-local |
 | Handler aborted while suspended at `run_blocking` | A real host and client; `ResponseStream::cancel`; a drop-only variant whose budget observes a never-cancelled token. | route-permits-and-pins-outlive-client-cancellation |
 | Panic inside tracked blocking work | A closure that panics under `run_blocking`. | route-permits-and-pins-outlive-client-cancellation |
+| Cancel or lapse at one named phase | `execute`'s `before_phase` hook with a token or a sleep. | route-cancellation-is-observed-in-every-phase |
+| One bound saturated | A `QueryRouteLimits` with one field shrunk over a fixed corpus. | route-bounds-are-enforced-before-protected-work |
+| Foreign project, unbound session, harness mismatch | Request fields on a `KernelDaemon` route. | route-authorization-precedes-materialization, route-candidate-ids-never-widen-scope |
+| Retirement after the projection snapshot | `retire_decision` plus a `ClaimMaterializer` episode. | route-final-revalidation-precedes-every-result, route-candidate-ids-never-widen-scope |
+| Kernel commit between two revalidation slices | `validation_batch = 1` and a `retire_decision` commit placed by the `before_phase` hook at the second revalidation check. | route-final-revalidation-precedes-every-result |
+| Projection read while the lanes are judged | A second budgeted `read_under` placed by the `before_phase` hook at the admission, fusion, and revalidation phases. | route-cancelled-work-drains-within-approved-envelope |
+| Stored identifier outside the contract spelling | An occurrence row and its lexical row copied under a non-hex identifier through `SearchProjection::write`. | route-required-context-failure-is-typed-and-terminal |
+| Foreign scope over the same rows | A second `ProjectScope` passed to `execute`. | route-candidate-ids-never-widen-scope, route-final-revalidation-precedes-every-result |
+| Route disabled | `Handler::set_query_route_limits(None)`. | route-rollback-disables-without-mutating-canonical-truth |
+| Lane failure other than the budget | A projection with an identity but no applied batch, so the exact lane has no checkpoint; `probes = 1` against two prose atoms. | route-required-context-failure-is-typed-and-terminal, route-bounds-are-enforced-before-protected-work |
+| Unapproved limit set | `validation_batch` over `MAX_ELIGIBILITY_CANDIDATES` passed to `set_query_route_limits`; `response_bytes` one below `QueryRouteLimits::response_floor` passed to `validate`. | route-bounds-are-enforced-before-protected-work, route-rollback-disables-without-mutating-canonical-truth |
+| Envelope over the response bound | `response_bytes` equal to the floor with a degraded lane, so the envelope alone exceeds it. | route-bounds-are-enforced-before-protected-work |
 
 Real durations are used because `EvalBudget` reads `std::time::Instant`, which
 virtual time cannot advance.

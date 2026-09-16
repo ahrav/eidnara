@@ -1,6 +1,10 @@
 //! Each occurrence keeps its best probe; canonical eligibility is judged in bounded batches before acceptance; accepted contributions are re-judged before return.
 //! This module does not read payload bytes; each contribution contains an occurrence identifier and raw FTS rank.
 //!
+//! [`scan`] needs only the projection connection and [`admit`] needs only the kernel, so a caller
+//! can release the projection connection before any kernel reader is taken; [`retrieve`] runs both
+//! under one connection for callers that hold nothing else.
+//!
 //! Ordering is one comparator throughout: lower raw rank first, then occurrence identifier bytes ascending.
 //! An occurrence hit by several probes keeps the lowest rank, and among equal ranks the lowest probe ordinal, so duplicate or permuted probes leave the ranking unchanged.
 
@@ -11,8 +15,8 @@ use std::num::NonZeroUsize;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    CommitReadIncarnation, EgressSnapshot, EligibilityVerdict, KernelError, KernelStore,
-    MAX_ELIGIBILITY_CANDIDATES,
+    CommitReadIncarnation, EgressSnapshot, EligibilityCandidate, EligibilityVerdict, KernelError,
+    KernelStore, MAX_ELIGIBILITY_CANDIDATES,
 };
 use storage::GuardedConn;
 
@@ -46,6 +50,18 @@ pub struct Contribution {
     pub rank: f64,
     /// Breaks equal-rank ties by selecting the lowest probe ordinal.
     pub ordinal: usize,
+    /// The terms the kernel judged, kept so a later revalidation judges the same facts without another projection read.
+    pub candidate: EligibilityCandidate,
+}
+
+impl Contribution {
+    pub fn occurrence_candidate(&self) -> OccurrenceCandidate {
+        OccurrenceCandidate {
+            occurrence_id: self.occurrence_id.clone(),
+            class: self.class,
+            candidate: self.candidate.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +172,23 @@ const LATE_JOIN_SQL: &str = "SELECT l.occurrence_id, l.rank, o.class, o.source_o
      LEFT JOIN occurrences o ON o.occurrence_id=l.occurrence_id
      ORDER BY l.rank, l.occurrence_id";
 
+/// Probe hits read from the projection in comparator order, not yet judged by the kernel.
+///
+/// Retains its `RetrievalBounds` so admission uses the bounds that produced its hits.
+#[derive(Debug, Clone)]
+pub struct Scan {
+    ordered: Vec<(String, Hit)>,
+    retrieval: Retrieval,
+    bounds: RetrievalBounds,
+}
+
+impl Scan {
+    /// Distinct occurrences the probes hit, before any kernel verdict.
+    pub fn hits(&self) -> usize {
+        self.ordered.len()
+    }
+}
+
 /// # Errors
 ///
 /// A budget that ends before any probe completes is [`RetrievalRefusal::BudgetExhausted`]; one that ends later leaves the result [`Completion::Incomplete`] with no contributions.
@@ -168,7 +201,8 @@ pub fn retrieve(
     bounds: RetrievalBounds,
     budget: &EvalBudget,
 ) -> Result<Retrieval, RetrievalRefusal> {
-    retrieve_inner(conn, kernel, probes, authority, bounds, budget, |_| {})
+    let scanned = scan(conn, probes, bounds, budget)?;
+    admit_inner(kernel, authority, scanned, budget, |_| {})
 }
 
 /// `hook` runs after every admission batch and once before the final re-judgment, so a test can change the kernel or the budget in those windows.
@@ -182,18 +216,21 @@ pub fn retrieve_with_hook_for_test(
     budget: &EvalBudget,
     hook: impl FnMut(Window),
 ) -> Result<Retrieval, RetrievalRefusal> {
-    retrieve_inner(conn, kernel, probes, authority, bounds, budget, hook)
+    let scanned = scan(conn, probes, bounds, budget)?;
+    admit_inner(kernel, authority, scanned, budget, hook)
 }
 
-fn retrieve_inner(
+/// Runs every probe against the projection and keeps each occurrence's best hit.
+///
+/// # Errors
+///
+/// Refuses bounds the kernel's eligibility batch could never serve, more probes than `max_probes`, and a budget that ends before any probe completes; a budget that ends later yields a [`Scan`] whose admission is already [`Completion::Incomplete`] with no hits.
+pub fn scan(
     conn: &GuardedConn<'_>,
-    kernel: &KernelStore,
     probes: &[Probe],
-    authority: Authority<'_>,
     bounds: RetrievalBounds,
     budget: &EvalBudget,
-    mut hook: impl FnMut(Window),
-) -> Result<Retrieval, RetrievalRefusal> {
+) -> Result<Scan, RetrievalRefusal> {
     budget
         .check()
         .map_err(|_| RetrievalRefusal::BudgetExhausted)?;
@@ -225,9 +262,9 @@ fn retrieve_inner(
     let mut best: BTreeMap<String, Hit> = BTreeMap::new();
     for (ordinal, probe) in probes.iter().enumerate() {
         if budget.is_exhausted() {
-            return exhausted(retrieval);
+            return exhausted_scan(retrieval, bounds);
         }
-        match scan(conn, probe, ordinal, bounds.scan_rows, budget, &mut best) {
+        match scan_probe(conn, probe, ordinal, bounds.scan_rows, budget, &mut best) {
             Ok((rows, truncated)) => {
                 retrieval.consumed.probes += 1;
                 retrieval.consumed.scanned_rows += rows;
@@ -235,13 +272,49 @@ fn retrieve_inner(
                     incomplete(&mut retrieval, IncompleteReason::ScanBound);
                 }
             }
-            Err(ScanStop::Budget) => return exhausted(retrieval),
+            Err(ScanStop::Budget) => return exhausted_scan(retrieval, bounds),
             Err(ScanStop::Projection(error)) => return Err(error.into()),
         }
     }
     let mut ordered: Vec<(String, Hit)> = best.into_iter().collect();
     ordered.sort_by(comparator);
-    let accepted = admit(
+    Ok(Scan {
+        ordered,
+        retrieval,
+        bounds,
+    })
+}
+
+/// Judges the scan's hits in bounded kernel batches, accepts eligible ones until `max_accepted` fills, and re-judges the accepted set once before returning.
+///
+/// # Errors
+///
+/// Returns kernel errors except [`KernelError::Deadline`], which leaves the result [`Completion::Incomplete`] with no contributions.
+pub fn admit(
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    scanned: Scan,
+    budget: &EvalBudget,
+) -> Result<Retrieval, RetrievalRefusal> {
+    admit_inner(kernel, authority, scanned, budget, |_| {})
+}
+
+fn admit_inner(
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    scanned: Scan,
+    budget: &EvalBudget,
+    mut hook: impl FnMut(Window),
+) -> Result<Retrieval, RetrievalRefusal> {
+    let Scan {
+        ordered,
+        mut retrieval,
+        bounds,
+    } = scanned;
+    if retrieval.completion == Completion::Incomplete(IncompleteReason::BudgetExhausted) {
+        return Ok(retrieval);
+    }
+    let accepted = admit_batches(
         kernel,
         authority,
         bounds,
@@ -256,6 +329,15 @@ fn retrieve_inner(
         return exhausted(retrieval);
     }
     Ok(retrieval)
+}
+
+/// A budget-exhausted scan retains no hits; admission returns its recorded completion unchanged.
+fn exhausted_scan(retrieval: Retrieval, bounds: RetrievalBounds) -> Result<Scan, RetrievalRefusal> {
+    Ok(Scan {
+        ordered: Vec::new(),
+        retrieval: exhausted(retrieval)?,
+        bounds,
+    })
 }
 
 fn exhausted(mut retrieval: Retrieval) -> Result<Retrieval, RetrievalRefusal> {
@@ -277,7 +359,7 @@ fn incomplete(retrieval: &mut Retrieval, reason: IncompleteReason) {
 ///
 /// A stale shortlisted row can underfill the result, so rerun `PROBE_SQL`.
 /// Live rows already recorded in `best` are a prefix of `PROBE_SQL`'s rows.
-fn scan(
+fn scan_probe(
     conn: &GuardedConn<'_>,
     probe: &Probe,
     ordinal: usize,
@@ -376,7 +458,7 @@ fn judge_batch(
 
 /// Judges candidates in comparator order, `batch_rows` at a time, and accepts eligible ones until `max_accepted` fills.
 /// An ineligible leader consumes judgment work and no accepted slot, so eligible tails behind it are still reached.
-fn admit(
+fn admit_batches(
     kernel: &KernelStore,
     authority: Authority<'_>,
     bounds: RetrievalBounds,
@@ -459,6 +541,7 @@ fn revalidate(
                 class: hit.candidate.class,
                 rank: hit.rank,
                 ordinal: hit.ordinal,
+                candidate: hit.candidate.candidate,
             }),
             Disposition::PolicyExcluded(verdict) => retrieval.consumed.exclude(verdict),
         }

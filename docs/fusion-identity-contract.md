@@ -98,6 +98,72 @@ completion beside the ranking.
 survivor's position and score unchanged, so a revalidation pass never rescores
 and fusion runs once per query.
 
+## Query route
+
+`retrieval.query` in `crates/daemon/src/query_route.rs` is handler business
+semantics behind the existing `method` envelope; the host wire protocol is
+unchanged. A request carries `query`, `remaining_ms`, `destination`, and an
+optional `harness` claim, and nothing else. The route binding decides scope:
+the project root and session are compared before the body is parsed, and a
+`harness` claim that disagrees with the bound harness is refused. The route is
+enabled by installing a `QueryRouteLimits` set through
+`Handler::set_query_route_limits`; with none installed every authorized request
+whose kernel store is ready receives the `disabled` terminal and no canonical,
+projection, or lifecycle state is read, so rollback is disable, not mutation. A
+request that arrives while the store is still starting or unavailable receives
+the kernel routes' `state` answer for that condition, as every `kernel.*` route
+does, because the binding is decided before the limit set is consulted.
+`QueryRouteLimits::validate` refuses a `validation_batch` or `lexical_accepted`
+over the kernel's candidate batch, a `response_bytes` below the smallest
+empty fused envelope (one lane complete, the others undeclared, no entries),
+and a `response_bytes` above the host wire body maximum, so no installed set
+can produce an answer the route cannot bound or the host cannot send.
+
+The exact lane reads the query's `id:` mentions and the lexical lane scans the
+prose outside selector mentions inside one interruptible projection read under
+the request budget; the projection connection is released before any kernel
+reader is taken. The handler awaits the blocking work through
+`SharedBudget::bridge`, which raises the shared `EvalBudget` flag the moment
+the host cancels, so a kernel or retrieval stage holding only that budget
+stops on a host cancel instead of running to the deadline; the work is still
+joined before the request settles. Both lanes are then admitted by the kernel's eligibility
+adapter under the bound scope: the lexical lane through
+`retrieval::lexical::admit`, the exact lane by judging its rows in
+`validation_batch` slices before any position is assigned, so a row the caller
+may not see earns no lane position and consumes no union slot. The exact
+lane's page bound counts every row `exact::page` reads, tombstoned or
+ineligible rows included, because the kernel judges only after the projection
+connection is released; `page_bound` names a read bound, not a visible-row
+count. Fusion
+runs once, the fused set is revalidated by the same adapter in
+`validation_batch` slices, and only survivors are materialized within
+`result_rows` and `response_bytes`. Every judgment refuses to join verdicts
+from two kernel snapshots or incarnations: a lane whose kernel moved between
+its slices is `unavailable` with reason `snapshot_changed` or
+`kernel_incarnation_changed`, and a revalidation whose kernel moved is the
+`lane_unavailable` terminal with the same reason. A stored occurrence
+identifier outside the contract spelling makes its lane `unavailable` with
+reason `identity` rather than shrinking the result. No payload byte is read by
+the route.
+
+A fused answer is
+`{"kind":"fused","degraded":bool,"lanes":{...},"truncated":bool,"entries":[...]}`.
+Each lane reports `complete`, `incomplete` with a reason, `unavailable` with a
+reason, or `undeclared`; reasons are closed codes chosen by the route, never
+engine text; `degraded` is true when a lane is incomplete or unavailable. Each
+entry carries `occurrence_id`, fused `position`, fused `score`, and per-lane
+`position` and `raw` score; positions are the fused positions, so an entry
+revalidation withheld leaves a gap. Because both lanes are admitted before
+fusion, such a gap can arise only from a canonical change between admission
+and revalidation within one request, never from rows the caller was never
+allowed to see. The envelope is measured before any entry is added; an
+envelope alone over `response_bytes` is the `lane_unavailable` terminal with
+reason `response_bytes`, never a body over the bound. A terminal answer is
+`{"kind":"terminal","terminal":<code>}` with `code` one of `unauthorized`,
+`deadline`, `cancelled`, `lane_unavailable`, `required_context_failure`, or
+`disabled`; a `lane_unavailable` terminal adds a `reason` code naming the
+witness. A malformed request is the transport's `invalid_params` error.
+
 ## Probe and generation identities
 
 `ProbeOrdinal(u32)` is one compiled query atom's zero-based position in its
