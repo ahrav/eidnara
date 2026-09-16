@@ -28,7 +28,7 @@ pub(crate) const CONFIRM: &str = "retrieval.confirm";
 /// Two 30 s wire request deadlines (`docs/host-wire-protocol.md` Section 11), so one request plus one full-length retry never meets an expired key. The wire deadline is fixed; it is not the operator's `deadline_ceiling` for `retrieval.query`.
 pub const RETENTION_FLOOR: Duration = Duration::from_secs(60);
 
-/// Expiry and eviction scan one project's receipts on every request, so the count bound has a ceiling.
+/// Eviction scans one project's receipts on every mint, so `max_keys` is capped at `MAX_KEYS_CEILING`. Expiry scans every live receipt, so `retention` bounds receipts to those minted within the last `retention`.
 pub const MAX_KEYS_CEILING: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -180,7 +180,7 @@ impl ProjectReceipts {
             .retain(|_, receipt| now.duration_since(receipt.created) < retention);
     }
 
-    /// When adding a receipt exceeds `max_keys`, remove the oldest non-in-flight receipts; fail if too few are available, because an in-flight receipt's edit may already be applied.
+    /// When adding a receipt exceeds `max_keys`, remove the oldest settled receipts; fail if too few are available, because an in-flight or unknown receipt's edit may already be applied.
     fn make_room(&mut self, max_keys: NonZeroUsize) -> bool {
         let excess = (self.receipts.len() + 1).saturating_sub(max_keys.get());
         if excess == 0 {
@@ -189,7 +189,12 @@ impl ProjectReceipts {
         let mut settled: Vec<(Instant, &String)> = self
             .receipts
             .iter()
-            .filter(|(_, receipt)| !matches!(receipt.state, State::InFlight { .. }))
+            .filter(|(_, receipt)| {
+                !matches!(
+                    receipt.state,
+                    State::InFlight { .. } | State::Unknown { .. }
+                )
+            })
             .map(|(id, receipt)| (receipt.created, id))
             .collect();
         if settled.len() < excess {
@@ -487,6 +492,7 @@ impl ReceiptStore {
         edit_bytes: u64,
         survivors: &[WireSpan],
     ) -> Result<PrepareOutcome, IdentityRefusal> {
+        self.expire(now);
         // A malformed context is `invalid_params` for every action; the capacity and survivor answers below are outcomes for a well-formed request.
         let digest = context.digest()?;
         let selection = context.selection_digest()?;
@@ -508,7 +514,7 @@ impl ReceiptStore {
         {
             return Ok(PrepareOutcome::Failure(reason));
         }
-        self.expire(now);
+
         let max_keys = self.limits.max_keys;
         if !self.project(project).make_room(max_keys) {
             return Ok(PrepareOutcome::Failure("receipt_capacity"));
@@ -557,8 +563,8 @@ impl ReceiptStore {
         preparation_id: &str,
         context: &Context,
     ) -> Result<ApplyOutcome, ApplyRefusal> {
-        let digest = context.digest()?;
         self.expire(now);
+        let digest = context.digest()?;
         if !self.owns(preparation_id) {
             let recorded = self
                 .receipts(project)
@@ -752,7 +758,7 @@ impl ReceiptStore {
     }
 }
 
-pub(crate) fn fresh_incarnation() -> String {
+fn fresh_incarnation() -> String {
     let mut nonce = [0u8; INCARNATION_BYTES];
     getrandom::getrandom(&mut nonce).expect("OS entropy for the receipt incarnation");
     nonce.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -801,6 +807,7 @@ fn identity_refusal(operation: &str, refusal: IdentityRefusal) -> PreparedOutcom
 
 impl HandlerCore {
     /// A limits change keeps every receipt: the keys stay owned by this incarnation, so an in-flight edit can still be confirmed.
+    /// Uninstalling drops the store, and the next install mints a fresh incarnation.
     pub fn set_edit_receipt_limits(
         &self,
         limits: Option<ReceiptLimits>,
@@ -815,7 +822,7 @@ impl HandlerCore {
         match (limits, slot.as_mut()) {
             (Some(limits), Some(store)) => store.set_limits(limits),
             (Some(limits), None) => {
-                *slot = Some(ReceiptStore::new(limits, self.edit_incarnation.clone()));
+                *slot = Some(ReceiptStore::new(limits, fresh_incarnation()));
             }
             (None, _) => *slot = None,
         }
@@ -1208,6 +1215,80 @@ mod tests {
             Ok(PrepareOutcome::Failure("receipt_capacity"))
         ));
         assert!(store.holds(PROJECT, &key));
+    }
+
+    #[test]
+    fn an_unknown_receipt_is_never_the_victim_because_its_edit_may_be_applied() {
+        let now = Instant::now();
+        let mut store = ReceiptStore::new(limits(1, RETENTION_FLOOR), "inc".to_string());
+        let key = prepared(&mut store, now);
+        let Ok(ApplyOutcome::Forwarded {
+            forwarded_identity, ..
+        }) = store.apply(now, PROJECT, &key, &context("rev"))
+        else {
+            panic!("first apply forwards");
+        };
+        assert!(matches!(
+            store.confirm(now, PROJECT, &key, &forwarded_identity, None, Outcome::Keep),
+            Ok(ConfirmOutcome::Unknown)
+        ));
+        assert!(matches!(
+            store.prepare(
+                now,
+                PROJECT,
+                &context("rev"),
+                Action::Append,
+                "profile",
+                1,
+                &[]
+            ),
+            Ok(PrepareOutcome::Failure("receipt_capacity"))
+        ));
+        assert!(store.holds(PROJECT, &key));
+        assert!(matches!(
+            store.confirm(
+                now,
+                PROJECT,
+                &key,
+                &forwarded_identity,
+                Some(&forwarded_identity),
+                Outcome::Keep
+            ),
+            Ok(ConfirmOutcome::Complete {
+                outcome: Outcome::Keep
+            })
+        ));
+    }
+
+    #[test]
+    fn a_refused_request_still_expires_receipts_past_retention() {
+        let start = Instant::now();
+        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        prepared(&mut store, start);
+        let later = start + RETENTION_FLOOR;
+        assert!(matches!(
+            store.prepare(
+                later,
+                PROJECT,
+                &context("rev"),
+                Action::Append,
+                "profile",
+                101,
+                &[]
+            ),
+            Ok(PrepareOutcome::Failure("append_allowance"))
+        ));
+        assert!(store.is_empty(), "an over-capacity prepare expires");
+        prepared(&mut store, start);
+        let malformed = Context {
+            selection: vec!["zz".to_string()],
+            ..context("rev")
+        };
+        assert!(matches!(
+            store.apply(later, PROJECT, "inc-x", &malformed),
+            Err(ApplyRefusal::Invalid(_))
+        ));
+        assert!(store.is_empty(), "a malformed apply expires");
     }
 
     #[test]

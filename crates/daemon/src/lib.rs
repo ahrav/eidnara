@@ -3005,8 +3005,6 @@ pub struct HandlerCore {
     query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
     edit_receipts: Mutex<Option<edit_receipts::ReceiptStore>>,
     capability_source: Mutex<Option<Arc<dyn context_capabilities::CapabilitySource>>>,
-    /// Parent Q8: the incarnation signal every preparation identity carries; a fresh value per `HandlerCore` makes a key from a restarted daemon classify as `Unknown`.
-    edit_incarnation: String,
     #[cfg(any(test, feature = "test-support"))]
     query_embedder_override: Mutex<Option<Arc<dyn query_route::QueryEmbedder>>>,
     #[cfg(test)]
@@ -3892,7 +3890,6 @@ impl Handler {
             query_route: Mutex::new(None),
             edit_receipts: Mutex::new(None),
             capability_source: Mutex::new(None),
-            edit_incarnation: edit_receipts::fresh_incarnation(),
             #[cfg(any(test, feature = "test-support"))]
             query_embedder_override: Mutex::new(None),
             #[cfg(test)]
@@ -4335,7 +4332,6 @@ impl Handler {
             query_route: Mutex::new(None),
             edit_receipts: Mutex::new(None),
             capability_source: Mutex::new(None),
-            edit_incarnation: edit_receipts::fresh_incarnation(),
             #[cfg(any(test, feature = "test-support"))]
             query_embedder_override: Mutex::new(None),
             guidance_now_ms: Mutex::new(None),
