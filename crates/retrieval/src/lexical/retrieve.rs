@@ -3,9 +3,10 @@
 //!
 //! Ordering is one comparator throughout: lower raw rank first, then occurrence identifier bytes ascending.
 //! An occurrence hit by several probes keeps the lowest rank, and among equal ranks the lowest probe ordinal, so duplicate or permuted probes leave the ranking unchanged.
+//! A probe repeated later in the request therefore cannot change the ranking, and the engine runs it only once; the repeat replays the first run's counters.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
@@ -71,7 +72,9 @@ pub enum Completion {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Consumed {
+    /// Probes the request compiled to, repeats included; a repeated probe is counted here without running the engine again.
     pub probes: usize,
+    /// Live rows taken in comparator order, summed over `probes`; a repeated probe contributes its first run's count.
     pub scanned_rows: usize,
     pub judged: usize,
     pub batches: usize,
@@ -139,12 +142,17 @@ fn comparator((left_id, left): &(String, Hit), (right_id, right): &(String, Hit)
         .then_with(|| left_id.cmp(right_id))
 }
 
-const PROBE_SQL: &str = "SELECT l.occurrence_id, l.rank, o.class, o.source_object_id, o.revision, o.source_artifact_digest
-     FROM lexical l JOIN occurrences o ON o.occurrence_id=l.occurrence_id
-     WHERE lexical MATCH ?1
-       AND NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id)
-     ORDER BY l.rank, l.occurrence_id
-     LIMIT ?2";
+/// The inner `LIMIT` bounds join and tombstone lookup work by `scan_rows`, not match-set size.
+/// The `LEFT JOIN` keeps lexical rows with no occurrence, and the last column marks a missing or tombstoned occurrence dead,
+/// so [`scan`] can tell an exhausted match set from a page that lost rows to the filter.
+/// Under the [`super::index`] invariant that tombstoning deletes the lexical row, a dead row means an inconsistent projection.
+const PROBE_SQL: &str = "SELECT h.occurrence_id, h.rank, o.class, o.source_object_id, o.revision, o.source_artifact_digest,
+            o.occurrence_id IS NOT NULL
+            AND NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=h.occurrence_id)
+     FROM (SELECT occurrence_id, rank FROM lexical WHERE lexical MATCH ?1
+           ORDER BY rank, occurrence_id LIMIT ?2 OFFSET ?3) h
+     LEFT JOIN occurrences o ON o.occurrence_id=h.occurrence_id
+     ORDER BY h.rank, h.occurrence_id";
 
 /// # Errors
 ///
@@ -213,11 +221,20 @@ fn retrieve_inner(
         consumed: Consumed::default(),
     };
     let mut best: BTreeMap<String, Hit> = BTreeMap::new();
+    let mut outcomes: HashMap<&Probe, (usize, bool)> = HashMap::new();
     for (ordinal, probe) in probes.iter().enumerate() {
         if budget.is_exhausted() {
             return exhausted(retrieval);
         }
-        match scan(conn, probe, ordinal, bounds.scan_rows, budget, &mut best) {
+        let outcome = match outcomes.get(probe) {
+            Some(&replayed) => Ok(replayed),
+            None => scan(conn, probe, ordinal, bounds.scan_rows, budget, &mut best).inspect(
+                |&outcome| {
+                    outcomes.insert(probe, outcome);
+                },
+            ),
+        };
+        match outcome {
             Ok((rows, truncated)) => {
                 retrieval.consumed.probes += 1;
                 retrieval.consumed.scanned_rows += rows;
@@ -263,7 +280,9 @@ fn incomplete(retrieval: &mut Retrieval, reason: IncompleteReason) {
     }
 }
 
-/// The probe query reads one row past `scan_rows` to report truncation without retaining the extra row.
+/// Reads the ordered match set one page of `scan_rows + 1` rows at a time and stops at the first live row past `scan_rows`,
+/// which reports truncation without retaining that row.
+/// A page that came back full but lost rows to the dead filter is followed by the next page; a short page ends the match set.
 fn scan(
     conn: &GuardedConn<'_>,
     probe: &Probe,
@@ -272,38 +291,54 @@ fn scan(
     budget: &EvalBudget,
     best: &mut BTreeMap<String, Hit>,
 ) -> Result<(usize, bool), ScanStop> {
-    let limit = i64::try_from(scan_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
+    let page = i64::try_from(scan_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
     let mut statement = conn.prepare_cached(PROBE_SQL)?;
-    let mut rows = statement.query(rusqlite::params![probe, limit])?;
     let mut seen = 0;
-    while let Some(row) = rows.next()? {
-        budget.check().map_err(|_| ScanStop::Budget)?;
-        if seen == scan_rows.get() {
-            return Ok((seen, true));
+    let mut offset: i64 = 0;
+    loop {
+        let mut rows = statement.query(rusqlite::params![probe, page, offset])?;
+        let mut fetched: i64 = 0;
+        while let Some(row) = rows.next()? {
+            budget.check().map_err(|_| ScanStop::Budget)?;
+            fetched += 1;
+            if !row.get::<_, bool>(6)? {
+                continue;
+            }
+            if seen == scan_rows.get() {
+                return Ok((seen, true));
+            }
+            seen += 1;
+            let (occurrence_id, hit) = hit(row, ordinal)?;
+            if best
+                .get(&occurrence_id)
+                .is_none_or(|incumbent| better(&hit, incumbent))
+            {
+                best.insert(occurrence_id, hit);
+            }
         }
-        seen += 1;
-        let occurrence_id: String = row.get(0)?;
-        let class = OccurrenceClass::from_code(&row.get::<_, String>(2)?)
-            .ok_or(ProjectionError::CorruptRow)?;
-        let hit = Hit {
-            candidate: OccurrenceCandidate::new(
-                occurrence_id.clone(),
-                class,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-            ),
-            rank: row.get(1)?,
-            ordinal,
-        };
-        if best
-            .get(&occurrence_id)
-            .is_none_or(|incumbent| better(&hit, incumbent))
-        {
-            best.insert(occurrence_id, hit);
+        if fetched < page {
+            return Ok((seen, false));
         }
+        offset = offset.saturating_add(page);
     }
-    Ok((seen, false))
+}
+
+fn hit(row: &rusqlite::Row<'_>, ordinal: usize) -> Result<(String, Hit), ScanStop> {
+    let occurrence_id: String = row.get(0)?;
+    let class =
+        OccurrenceClass::from_code(&row.get::<_, String>(2)?).ok_or(ProjectionError::CorruptRow)?;
+    let hit = Hit {
+        candidate: OccurrenceCandidate::new(
+            occurrence_id.clone(),
+            class,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        ),
+        rank: row.get(1)?,
+        ordinal,
+    };
+    Ok((occurrence_id, hit))
 }
 
 /// Returns `SnapshotChanged` or `KernelIncarnationChanged` if kernel state differs from the first batch,
