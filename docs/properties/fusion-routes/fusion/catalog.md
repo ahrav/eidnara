@@ -28,9 +28,11 @@ so its declared ranking is occurrence-identifier order; terms are summed in
 closed fraction; a negative-zero weight is admitted as `+0.0`; a parameter set
 whose finite inputs would sum to infinity at rank one is refused before any
 occurrence is scored; an incomplete lane participates with the entries it
-reached and the route reports its completion beside the ranking; an
-undeclared lane, including a dense lane reported unavailable, contributes
-zero and is listed by `Fused::absent_lanes` rather than treated as an error.
+reached, and reporting its completion beside the ranking is the route's
+obligation in the query-route part, since `LaneRanking` carries no completion
+state; an undeclared lane, including a dense lane reported unavailable,
+contributes zero and is listed by `Fused::absent_lanes` rather than treated
+as an error.
 
 ## Reachability and observation contract
 
@@ -187,11 +189,13 @@ Exercised: yes - `crates/retrieval/tests/fusion.rs`
 Guarantee: Each lane adds at most one term per occurrence to the fused score,
 however many probes or generations discovered the occurrence.
 Check: `always` - a fused ranking over doubled and shuffled hits in every lane
-is bit-identical to the ranking over the original hits; the fused entry count
-equals the distinct occurrence count across lanes; the per-probe negative
-control, which adds one term per duplicate, differs from the single term
-whenever a duplicate exists. `always` because the property must hold for every
-input multiset.
+is bit-identical, as `(occurrence, position, score bits)` triples, to the
+ranking over the original hits; the fused entry count equals the distinct
+occurrence count across lanes; the fused score of a duplicated occurrence
+equals the single-term oracle and differs from the per-probe sum that adds the
+lane term once per duplicate. `always` because the property must hold for
+every input multiset. Duplicates with differing raw scores are consolidated at
+the lane boundary, exercised by `crates/retrieval/tests/identity.rs`.
 Fault/timing angle: none; fusion is a pure function.
 Required faults and enabling state: Random lane sets under a fixed seed with
 every hit duplicated and the lane list shuffled.
@@ -242,13 +246,15 @@ and the oracle comparison inside
 `lane_order_probe_duplication_and_entry_order_change_nothing`.
 Guarantee: `score(o) = sum_lane(weight_lane / (k + rank_lane(o)))` with
 one-based ranks, zero for an absent lane, summed in `f64` in `Lane::ORDER`.
-Check: `always` - every fused score is bit-identical to an independent oracle
-that sums one term per lane left to right; a hand-computed two-lane example
-matches term for term; over a grid of non-calibration parameters at least one
-fixture distinguishes the term sum from a closed fraction and from another
-summation order, so the oracle is not vacuous; a dense-heavy parameter set
-reverses the order the calibration point gives. `always` because every score
-must follow the formula.
+Check: `always` - every fused score is bit-identical to an oracle that sums
+one term per lane left to right; a hand-computed two-lane example matches
+term for term; over a grid of non-calibration parameters whose exact rank
+varies, at least one fixture distinguishes the term sum from a closed fraction
+and from another summation order, and three hand-written terms show the
+declared grouping differs in bits from a regrouping; a `k`-only change between
+5 and 60 reverses the order of two occurrences, and a dense-heavy weight set
+reverses what equal weights give. `always` because every score must follow the
+formula.
 Fault/timing angle: none.
 Required faults and enabling state: Non-calibration weights and `k`; fixtures
 with distinct lane positions.
@@ -274,7 +280,9 @@ Check: `always` - consecutive fused entries have strictly decreasing scores or
 equal bits with ascending identifiers; permuted and duplicated inputs give a
 bit-identical ranking; no lanes and declared empty lanes give an empty
 ranking with the undeclared lanes listed; all-zero weights give every score
-`+0.0` in identifier order. `always` because reproducibility is a
+`+0.0` in identifier order; a tie between an occurrence ranked only by the
+exact lane and one ranked only by the dense lane, and a forty-eight-member
+tied set, both fall to identifier order. `always` because reproducibility is a
 per-evaluation property.
 Fault/timing angle: none.
 Required faults and enabling state: Shuffled lane order and doubled hits under
@@ -344,8 +352,10 @@ built; the refusal names the bound and is raised before the first occurrence
 beyond it is materialized.
 Check: `always` - a union of six distinct occurrences under a bound of five is
 refused with `UnionExceeds { bound: 5 }`, under a bound of six it fuses, and
-occurrences already in the union do not consume the bound. `always` because
-the bound protects every allocation.
+occurrences already in the union do not consume the bound. That the refusal
+precedes the excess allocation is established by inspection of `fuse`, which
+checks the union size before inserting each new occurrence; no test observes
+the allocation. `always` because the bound protects every allocation.
 Fault/timing angle: none.
 Required faults and enabling state: Overlapping lane sets whose union exceeds
 the bound by one.
@@ -369,8 +379,8 @@ Exercised: yes - `crates/retrieval/tests/fusion.rs`
 `raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring`.
 Guarantee: Fusion runs one time per query; a later revalidation filter removes
 entries and leaves every survivor's position and score unchanged.
-Check: `always` - `fuse` consumes its `DeclaredLanes`, `Fused` has no path back
-to lane rankings, and filtering an entry out leaves the survivors'
+Check: `always` - `Fused` exposes no path back to lane rankings, so no
+consumer can rescore it, and filtering an entry out leaves the survivors'
 `(occurrence, position, score bits)` triples equal to their pre-filter values
 with a gap where the removed entry was. `always` because rescoring would
 change positions on every filter.

@@ -178,7 +178,7 @@ impl LaneRanking {
 }
 
 /// One slot per lane in [`Lane::ORDER`], so a second ranking for a lane is refused rather than summed twice.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct DeclaredLanes {
     slots: [Option<LaneRanking>; Lane::ORDER.len()],
 }

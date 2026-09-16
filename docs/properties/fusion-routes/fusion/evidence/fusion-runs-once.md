@@ -7,8 +7,8 @@ without recomputing scores or positions.
 
 ## Evidence trail
 
-- `fuse` takes `DeclaredLanes` by value and `Fused` exposes no lane rankings,
-  so a second fusion of the same input is not expressible.
+- `Fused` exposes no lane rankings and no scoring entry point, so a consumer
+  holding a fused ranking cannot rescore it.
 - `Fused::filter` retains entries and returns the same `Fused` with survivors
   untouched.
 

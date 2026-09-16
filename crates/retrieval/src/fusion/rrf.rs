@@ -25,15 +25,12 @@ pub struct FusionParameters {
 impl FusionParameters {
     /// `weights` are given in [`Lane::ORDER`]. A negative-zero weight is admitted as zero, so an all-zero parameter set has one spelling and every score it produces is `+0.0`.
     pub fn new(weights: [f64; Lane::ORDER.len()], k: f64) -> Result<Self, FusionRefusal> {
-        let mut admitted = [0.0; Lane::ORDER.len()];
-        for (slot, (lane, weight)) in admitted
-            .iter_mut()
-            .zip(Lane::ORDER.into_iter().zip(weights))
-        {
-            if !weight.is_finite() || weight < 0.0 {
+        let mut admitted = weights;
+        for (lane, weight) in Lane::ORDER.into_iter().zip(&mut admitted) {
+            if !weight.is_finite() || *weight < 0.0 {
                 return Err(FusionRefusal::Weight(lane));
             }
-            *slot = weight + 0.0;
+            *weight += 0.0;
         }
         if !k.is_finite() || k <= 0.0 {
             return Err(FusionRefusal::K);
@@ -93,12 +90,12 @@ impl FusedEntry {
     }
 
     /// The lane's own position and raw score, unchanged by fusion; `None` when the lane did not rank the occurrence.
-    pub fn lane(&self, lane: Lane) -> Option<&LaneContribution> {
-        self.contributions[lane.index()].as_ref()
+    pub fn lane(&self, lane: Lane) -> Option<LaneContribution> {
+        self.contributions[lane.index()]
     }
 }
 
-/// Fusion runs once: the only constructor is [`fuse`], and [`Fused::filter`] removes entries without touching a survivor's position or score.
+/// A `Fused` exposes no path back to lane rankings, so no consumer can rescore it; [`Fused::filter`] removes entries without touching a survivor's position or score.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fused {
     entries: Vec<FusedEntry>,
@@ -117,13 +114,12 @@ impl Fused {
             .filter(move |lane| self.absent[lane.index()])
     }
 
-    pub fn filter(mut self, mut keep: impl FnMut(&FusedEntry) -> bool) -> Self {
-        self.entries.retain(|entry| keep(entry));
+    pub fn filter(mut self, keep: impl FnMut(&FusedEntry) -> bool) -> Self {
+        self.entries.retain(keep);
         self
     }
 }
 
-/// Consumes the declared lanes so a second fusion of the same input is not expressible.
 /// Terms are summed in [`Lane::ORDER`] in `f64`; an undeclared lane or one that did not rank an occurrence adds nothing; order is descending score, then occurrence-identifier bytes.
 /// The union is refused as soon as it would hold more than `bound` occurrences, before the excess is materialized.
 pub fn fuse(
@@ -131,12 +127,11 @@ pub fn fuse(
     parameters: &FusionParameters,
     bound: NonZeroUsize,
 ) -> Result<Fused, FusionRefusal> {
+    let absent = Lane::ORDER.map(|lane| lanes.lane(lane).is_none());
     let mut union: BTreeMap<OccurrenceId, [Option<LaneContribution>; Lane::ORDER.len()]> =
         BTreeMap::new();
-    let mut absent = [true; Lane::ORDER.len()];
     for ranking in lanes.rankings() {
         let lane = ranking.lane();
-        absent[lane.index()] = false;
         for entry in ranking.entries() {
             let occurrence = *entry.occurrence();
             if !union.contains_key(&occurrence) && union.len() >= bound.get() {

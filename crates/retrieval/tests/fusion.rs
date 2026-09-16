@@ -146,7 +146,8 @@ fn closed_fractions_and_another_summation_order_are_detected_as_different_arithm
         for (we, wl, wd) in [(1.0, 1.0, 1.0), (0.3, 0.7, 1.1), (2.5, 0.1, 0.9)] {
             let parameters = params(we, wl, wd, k);
             for (re, rl, rd) in [(1usize, 2usize, 3usize), (5, 1, 9), (2, 2, 2), (11, 4, 1)] {
-                let a = id(0x01);
+                // The exact fillers sort below `a`, so `a` lands at exact rank `re`.
+                let a = id(0xff);
                 let (mut ex, mut lx, mut dn) = (Vec::new(), Vec::new(), Vec::new());
                 for filler in 1..re {
                     ex.push(id(0x10 + filler as u8));
@@ -172,6 +173,7 @@ fn closed_fractions_and_another_summation_order_are_detected_as_different_arithm
                     .find(|entry| *entry.occurrence() == a)
                     .unwrap();
                 let exact_position = entry.lane(Lane::Exact).unwrap().position.get();
+                assert_eq!(exact_position, re);
                 let implementation = entry.score();
                 let positions = [Some(exact_position), Some(rl), Some(rd)];
                 assert_eq!(
@@ -186,6 +188,11 @@ fn closed_fractions_and_another_summation_order_are_detected_as_different_arithm
             }
         }
     }
+    // Three hand-written terms (1/61, 1/62, 0.3/8) whose left-to-right sum and (exact + dense) + lexical grouping differ in bits.
+    let (exact_term, lexical_term, dense_term) = (1.0f64 / 61.0, 1.0f64 / 62.0, 0.3f64 / 8.0);
+    let declared = (exact_term + lexical_term) + dense_term;
+    let regrouped = (exact_term + dense_term) + lexical_term;
+    assert_ne!(declared.to_bits(), regrouped.to_bits());
     assert!(
         closed_differs,
         "a closed fraction must be distinguishable from the term sum"
@@ -198,15 +205,78 @@ fn closed_fractions_and_another_summation_order_are_detected_as_different_arithm
 
 #[test]
 fn non_calibration_parameters_change_the_order_the_calibration_point_gives() {
-    let (a, b) = (id(0x0a), id(0x0b));
+    let (a, b, c, d) = (id(0x0a), id(0x0b), id(0x0c), id(0x0d));
+    // Lexical ranks a then b; dense ranks c, b, d, a. Only k differs between the two runs.
     let lanes = || {
+        DeclaredLanes::admit([
+            lexical([(a, -9.0), (b, -1.0)]),
+            dense([(c, 0.9), (b, 0.7), (d, 0.5), (a, 0.1)]),
+        ])
+        .unwrap()
+    };
+    let small_k = fuse(lanes(), &params(0.0, 1.2, 0.8, 5.0), UNBOUNDED).unwrap();
+    assert_eq!(order(&small_k)[..2], [(a, 1), (b, 2)]);
+    let calibration_k = fuse(lanes(), &params(0.0, 1.2, 0.8, 60.0), UNBOUNDED).unwrap();
+    assert_eq!(order(&calibration_k)[..2], [(b, 1), (a, 2)]);
+
+    // A dense-heavy weight set reverses what equal weights give.
+    let mirrored = || {
         DeclaredLanes::admit([lexical([(a, -9.0), (b, -1.0)]), dense([(b, 0.9), (a, 0.1)])])
             .unwrap()
     };
-    let calibration = fuse(lanes(), &params(1.0, 1.0, 1.0, 60.0), UNBOUNDED).unwrap();
-    assert_eq!(order(&calibration), vec![(a, 1), (b, 2)]);
-    let dense_heavy = fuse(lanes(), &params(1.0, 0.5, 2.0, 17.0), UNBOUNDED).unwrap();
+    let equal = fuse(mirrored(), &params(1.0, 1.0, 1.0, 60.0), UNBOUNDED).unwrap();
+    assert_eq!(order(&equal), vec![(a, 1), (b, 2)]);
+    assert_eq!(
+        equal.entries()[0].score().to_bits(),
+        equal.entries()[1].score().to_bits(),
+        "mirrored positions under equal weights tie and fall to identifier order"
+    );
+    let dense_heavy = fuse(mirrored(), &params(1.0, 0.5, 2.0, 17.0), UNBOUNDED).unwrap();
     assert_eq!(order(&dense_heavy), vec![(b, 1), (a, 2)]);
+}
+
+#[test]
+fn ties_across_lanes_and_large_tied_sets_fall_to_identifier_order() {
+    let (x, y) = (id(0x0e), id(0x0f));
+    let across = fuse(
+        DeclaredLanes::admit([exact([y]), dense([(x, 0.5)])]).unwrap(),
+        &params(1.0, 1.0, 1.0, 60.0),
+        UNBOUNDED,
+    )
+    .unwrap();
+    assert_eq!(order(&across), vec![(x, 1), (y, 2)]);
+    assert_eq!(
+        across.entries()[0].score().to_bits(),
+        across.entries()[1].score().to_bits()
+    );
+
+    let mut ids: Vec<OccurrenceId> = (0u8..48).map(id).collect();
+    ids.reverse();
+    let tied = fuse(
+        DeclaredLanes::admit([exact(ids.clone())]).unwrap(),
+        &params(1.0, 0.0, 0.0, 60.0),
+        UNBOUNDED,
+    )
+    .unwrap();
+    ids.sort();
+    assert_eq!(
+        order(&tied),
+        ids.iter().copied().zip(1usize..).collect::<Vec<_>>()
+    );
+    let zero_weights = fuse(
+        DeclaredLanes::admit([
+            lexical((0u8..24).rev().map(|n| (id(n), -f64::from(n)))),
+            dense((24u8..48).rev().map(|n| (id(n), f64::from(n)))),
+        ])
+        .unwrap(),
+        &params(0.0, 0.0, 0.0, 60.0),
+        UNBOUNDED,
+    )
+    .unwrap();
+    assert_eq!(
+        order(&zero_weights),
+        (0u8..48).map(id).zip(1usize..).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -330,8 +400,16 @@ fn exact_hits() -> impl Strategy<Value = Vec<LaneHit>> {
 fn weights() -> impl Strategy<Value = ([f64; 3], f64)> {
     (
         [0u16..40, 0u16..40, 0u16..40].prop_map(|w| w.map(|v| f64::from(v) / 10.0)),
-        (1u16..120).prop_map(f64::from),
+        (1u32..12_000).prop_map(|n| f64::from(n) / 100.0),
     )
+}
+
+fn snapshot(fused: &Fused) -> Vec<(OccurrenceId, usize, u64)> {
+    fused
+        .entries()
+        .iter()
+        .map(|e| (*e.occurrence(), e.position().get(), e.score().to_bits()))
+        .collect()
 }
 
 type Fixture = (Vec<LaneHit>, Vec<LaneHit>, Vec<LaneHit>, [f64; 3], f64);
@@ -387,7 +465,11 @@ fn lane_order_probe_duplication_and_entry_order_change_nothing() {
                     UNBOUNDED,
                 )
                 .unwrap();
-                prop_assert_eq!(&permuted, &reference);
+                prop_assert_eq!(snapshot(&permuted), snapshot(&reference));
+                prop_assert_eq!(
+                    permuted.absent_lanes().collect::<Vec<_>>(),
+                    reference.absent_lanes().collect::<Vec<_>>()
+                );
 
                 let mut previous: Option<(f64, OccurrenceId)> = None;
                 for (entry, expected) in reference.entries().iter().zip(1usize..) {
@@ -414,6 +496,7 @@ fn lane_order_probe_duplication_and_entry_order_change_nothing() {
                     .collect();
                 prop_assert_eq!(reference.entries().len(), distinct.len());
 
+                // Negative control against the fused output: a per-probe vote would add the lexical term once per duplicate hit.
                 if let Some(first) = lexical_hits.first()
                     && weights[1] > 0.0
                 {
@@ -421,9 +504,21 @@ fn lane_order_probe_duplication_and_entry_order_change_nothing() {
                         .iter()
                         .filter(|h| h.occurrence == first.occurrence)
                         .count();
-                    let single = parameters.weight(Lane::Lexical) / (parameters.k() + 1.0);
-                    let per_probe = duplicates as f64 * single;
-                    prop_assert_eq!(duplicates > 1, per_probe.to_bits() != single.to_bits());
+                    let entry = reference
+                        .entries()
+                        .iter()
+                        .find(|e| *e.occurrence() == first.occurrence)
+                        .unwrap();
+                    let positions = Lane::ORDER.map(|l| entry.lane(l).map(|c| c.position.get()));
+                    let single = oracle_score(&parameters, positions);
+                    let lexical_term = parameters.weight(Lane::Lexical)
+                        / (parameters.k() + positions[1].unwrap() as f64);
+                    let per_probe = single + (duplicates - 1) as f64 * lexical_term;
+                    prop_assert_eq!(entry.score().to_bits(), single.to_bits());
+                    prop_assert_eq!(
+                        duplicates > 1,
+                        per_probe.to_bits() != entry.score().to_bits()
+                    );
                 }
                 Ok(())
             },
@@ -477,13 +572,6 @@ fn raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring
         UNBOUNDED,
     )
     .unwrap();
-    let snapshot = |fused: &Fused| -> Vec<(OccurrenceId, usize, u64)> {
-        fused
-            .entries()
-            .iter()
-            .map(|e| (*e.occurrence(), e.position().get(), e.score().to_bits()))
-            .collect()
-    };
     let before = snapshot(&fused);
     assert_eq!(
         fused.entries()[0].lane(Lane::Lexical).unwrap().raw_score,

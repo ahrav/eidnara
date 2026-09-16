@@ -27,14 +27,19 @@ None. Fusion is a pure function over values.
 ## What a test must construct
 
 - Random lane sets under a fixed seed, each hit duplicated, lanes shuffled.
-- The per-probe negative control: `duplicates * term` differs from `term`.
+- The per-probe negative control against the fused output: the duplicated
+  occurrence's fused score equals the single-term oracle and differs from the
+  sum that adds the lane term once per duplicate.
 
 ## Investigation log
 
 ### Q: Does the negative control detect a per-probe vote?
 
-- Sources examined: the property test's control arithmetic.
+- Sources examined: the property test's control, which reads the fused score
+  of the duplicated occurrence from `fuse`'s output.
 - Findings: whenever a duplicate exists and the lane weight is positive, the
-  per-probe sum differs bitwise from the single term.
+  fused score equals the single-term oracle and differs bitwise from the
+  per-probe sum, so an implementation that voted per probe would fail the
+  equality.
 - Missing evidence: none.
 - Conclusion: resolved with answer - yes.

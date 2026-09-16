@@ -75,8 +75,7 @@ all-zero parameter set has one spelling. `k = 60` and equal weights are
 calibration points for tests, not defaults; the caller supplies the
 parameters and the fused union bound with no defaults.
 
-`fuse(lanes, parameters, bound)` consumes the declared lanes and returns one
-`Fused` ranking:
+`fuse(lanes, parameters, bound)` returns one `Fused` ranking:
 
 1. The union of occurrences across lanes is built one entry at a time and
    refused with `UnionExceeds { bound }` before the first occurrence past
@@ -91,11 +90,13 @@ parameters and the fused union bound with no defaults.
 
 An undeclared lane, including a dense lane reported unavailable, contributes
 zero and is listed by `Fused::absent_lanes`; fusion never treats it as an
-error. An incomplete lane participates with the entries it reached, and the
-route reports the lane's completion beside the ranking.
+error. An incomplete lane participates with the entries it reached; a
+`LaneRanking` carries no completion state, so the route reports each lane's
+completion beside the ranking.
 
-`Fused::filter` removes entries and leaves every survivor's position and score
-unchanged, so a revalidation pass never rescores; fusion runs once per query.
+`Fused` exposes no path back to lane rankings and `Fused::filter` leaves every
+survivor's position and score unchanged, so a revalidation pass never rescores
+and fusion runs once per query.
 
 ## Probe and generation identities
 
