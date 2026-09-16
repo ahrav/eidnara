@@ -37,35 +37,26 @@ fn is_deadline(error: &SearchProjectionError) -> bool {
     matches!(error, SearchProjectionError::Store(StoreError::Deadline))
 }
 
+/// The first receiver fires from inside the read callback, after acquisition and interrupt-scope
+/// installation, so a cancellation raised after it is observed by the running statement.
 fn held_scan(
     projection: &Arc<SearchProjection>,
     shared: SharedBudget,
-) -> mpsc::Receiver<(Instant, Result<i64, SearchProjectionError>)> {
+) -> (
+    mpsc::Receiver<()>,
+    mpsc::Receiver<(Instant, Result<i64, SearchProjectionError>)>,
+) {
+    let (ready_tx, ready) = mpsc::channel();
     let (tx, rx) = mpsc::channel();
     let projection = Arc::clone(projection);
     thread::spawn(move || {
-        let result = projection.read_under(&shared, scan(LONG_SCAN));
+        let result = projection.read_under(&shared, |conn| {
+            ready_tx.send(()).unwrap();
+            scan(LONG_SCAN)(conn)
+        });
         let _ = tx.send((Instant::now(), result));
     });
-    rx
-}
-
-/// Returns once a short bounded read is refused with `Deadline`, which only a held connection
-/// produces; a cancellation raised after this point is observed by the running statement, not by
-/// acquisition.
-fn wait_until_held(projection: &SearchProjection) {
-    let give_up = Instant::now() + Duration::from_secs(5);
-    loop {
-        let probe = projection.read_within(Instant::now() + Duration::from_millis(20), |_| Ok(()));
-        match probe {
-            Err(SearchProjectionError::Store(StoreError::Deadline)) => return,
-            Ok(()) => assert!(
-                Instant::now() < give_up,
-                "the scan never took the connection"
-            ),
-            Err(other) => panic!("unexpected probe outcome: {other:?}"),
-        }
-    }
+    (ready, rx)
 }
 
 fn open() -> (tempfile::TempDir, Arc<SearchProjection>) {
@@ -79,8 +70,8 @@ fn cancelling_the_request_interrupts_a_held_read_and_reports_exhaustion() {
     let (_dir, projection) = open();
     let (token, budget) = derive(CEILING.as_millis() as u64);
     let started = Instant::now();
-    let rx = held_scan(&projection, budget.shared().clone());
-    wait_until_held(&projection);
+    let (ready, rx) = held_scan(&projection, budget.shared().clone());
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(
         rx.try_recv().is_err(),
         "the scan must still be running when cancellation arrives"
@@ -100,7 +91,7 @@ fn an_elapsed_remaining_duration_interrupts_a_held_read_the_same_way() {
     let (_dir, projection) = open();
     let (_token, budget) = derive(200);
     let started = Instant::now();
-    let rx = held_scan(&projection, budget.shared().clone());
+    let (_ready, rx) = held_scan(&projection, budget.shared().clone());
     let (finished, result) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(is_deadline(&result.unwrap_err()));
     assert!(finished >= budget.deadline());
@@ -132,8 +123,8 @@ fn an_exhausted_budget_is_refused() {
 fn a_later_request_on_the_same_connection_is_not_interrupted_by_a_prior_cancellation() {
     let (_dir, projection) = open();
     let (token, prior) = derive(CEILING.as_millis() as u64);
-    let rx = held_scan(&projection, prior.shared().clone());
-    wait_until_held(&projection);
+    let (ready, rx) = held_scan(&projection, prior.shared().clone());
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
     token.cancel();
     assert!(is_deadline(
         &rx.recv_timeout(Duration::from_secs(5))
