@@ -605,9 +605,17 @@ fn a_prefix_that_compacts_to_its_own_base_refuses_so_a_replay_publishes_nothing(
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let before = fixture.generations();
     let census = fixture.ledger.census();
+    let dir = fixture.work_dir();
     // Replaying a publication of this cut would bump the sequence with the same base every time; the compaction refuses instead.
     assert_eq!(
-        compact_view(&fixture, &view).unwrap_err(),
+        compact(
+            &view,
+            &fixture.expected(),
+            &fixture.staging(),
+            max_entries(),
+            &dir
+        )
+        .unwrap_err(),
         CompactionRefusal::BaseOnly {
             base: base.digest.clone()
         }
@@ -615,7 +623,7 @@ fn a_prefix_that_compacts_to_its_own_base_refuses_so_a_replay_publishes_nothing(
     assert_eq!(fixture.generations(), before, "nothing was staged");
     assert_eq!(fixture.ledger.census(), census, "nothing was reserved");
     assert!(
-        std::fs::read_dir(fixture.work_dir()).map_or(true, |mut d| d.next().is_none()),
+        std::fs::read_dir(&dir).unwrap().next().is_none(),
         "nothing was written"
     );
 }
@@ -639,8 +647,16 @@ fn a_prefix_whose_winners_cannot_be_calibrated_refuses_with_the_calibration_reje
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let before = fixture.generations();
+    let dir = fixture.work_dir();
     assert_eq!(
-        compact_view(&fixture, &view).unwrap_err(),
+        compact(
+            &view,
+            &fixture.expected(),
+            &fixture.staging(),
+            max_entries(),
+            &dir
+        )
+        .unwrap_err(),
         CompactionRefusal::Build(VectorRefusal::Calibration(
             retrieval::dense::scalar::CalibrationRejection::ScaleUnderflow { coordinate: 1 }
         ))
@@ -648,7 +664,7 @@ fn a_prefix_whose_winners_cannot_be_calibrated_refuses_with_the_calibration_reje
     assert_eq!(fixture.generations(), before);
     assert_eq!(held(&fixture.ledger, ResourceClass::CompactionScratch), 0);
     assert!(
-        std::fs::read_dir(fixture.work_dir()).map_or(true, |mut d| d.next().is_none()),
+        !dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none(),
         "the build's files are gone with the refusal"
     );
 }
