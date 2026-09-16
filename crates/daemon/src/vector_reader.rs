@@ -1,7 +1,8 @@
-//! Reads a vector composition through pinned files. Acquisition observes the selector under the lifecycle's shared protection, recovers and verifies the composition, pins the record and every member with shared locks, keeps the row and code artifacts open on the descriptors verification hashed them through, charges the bytes the view keeps resident, and re-reads the selector before the protection is released; a failure anywhere returns nothing, and the pins, descriptors, and charge go with it.
+//! Reads a vector composition through pinned files. Acquisition takes the lifecycle's shared protection only around manifest reads: it observes the selector, pins the candidate record and every member it names with shared locks, and charges the bytes the view keeps resident, then releases the protection before verification hashes the members under the pins alone; it keeps the row and code artifacts open on the descriptors verification hashed them through and re-reads the selector under the protection once more before handoff. A failure anywhere returns nothing, and the pins, descriptors, and charge go with it.
 //! Ranking reads only the rows the resolver names, each by its offset in the row artifact into scratch charged for one page, and decodes them through the original-row codec; the int8 codes are read the same way under the layer's own scales. Positioned reads after acquisition are not re-hashed: pins protect lifetime, and same-user writes after verification are outside the cooperative-file threat model.
 //! A caller runs the ranking through the request's blocking seam with the view moved into the work, so the view lives until the physical read returns whatever happens to the caller.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::os::unix::fs::FileExt;
@@ -9,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use host_runtime::generation::{
-    CurrentProfile, GenerationError, GenerationStore, ValidatedGeneration,
+    CurrentProfile, GenerationError, GenerationStore, PinnedGeneration, ValidatedGeneration,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use host_runtime::wire::{ByteBudget, ByteCharge};
@@ -25,10 +26,9 @@ use retrieval::dense::{
 use retrieval::eligibility::Authority;
 use storage::GuardedConn;
 
-use crate::vector_composition::{self, SelectorState, Unavailable, VerifiedComposition};
+use crate::vector_composition::{self, Candidate, SelectorState, Unavailable, VerifiedComposition};
 use crate::vector_generation::{
-    self, ExpectedVectors, ROW_IDS_FILE, SCALES_FILE, SIDECAR_FILE, TOMBSTONES_FILE, VectorRefusal,
-    VectorSidecar, VerifiedVectors,
+    self, ExpectedVectors, VectorRefusal, VectorSidecar, VerifiedVectors,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +41,8 @@ pub struct ReaderBounds {
 /// Where acquisition stands; a test may hold or mutate the store here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcquireEvent {
+    /// The candidate's record and members are pinned, its resident bytes are charged, and the transaction lock is released; verification is about to hash the members.
+    BeforeVerification,
     /// Every pin and every charge is held; the last layer is about to be taken.
     BeforeLastLayer,
     /// Every layer is held; the selector is about to be re-read.
@@ -183,7 +185,7 @@ impl RowAccess for PinnedLayer {
     }
 }
 
-/// A complete verified composition held open: the record and every member pinned, every artifact open, and the resident bytes charged until the view is dropped. Acquire a view once and share it; acquisition hashes every member and holds the lifecycle's shared lock while it does.
+/// A complete verified composition held open: the record and every member pinned, every artifact open, and the resident bytes charged until the view is dropped. Acquire a view once and share it; acquisition hashes every member, holding its pins but not the lifecycle lock while it does.
 pub struct PinnedVectors {
     digest: String,
     layout: RowLayout,
@@ -242,9 +244,6 @@ impl PinnedVectors {
     }
 }
 
-/// The files a view keeps decoded in memory for its lifetime, charged at their manifest-declared sizes; rows and codes stay on disk and are read by offset.
-const RESIDENT_FILES: [&str; 4] = [ROW_IDS_FILE, TOMBSTONES_FILE, SCALES_FILE, SIDECAR_FILE];
-
 impl SelectorState {
     /// Whether `current` still says what this state observed about `digest`.
     fn still_holds(&self, current: &CurrentProfile, digest: &str) -> bool {
@@ -257,11 +256,63 @@ impl SelectorState {
     }
 }
 
-/// Blocks on the lifecycle lock and hashes every member; run it on a blocking thread.
+/// The lifecycle's shared lock, or the refusal a mutator that outlasted the bounded wait leaves.
+fn protect(root: Option<&Path>) -> Result<LifecycleTransactionLock, AcquireRefusal> {
+    LifecycleTransactionLock::acquire_shared(root)
+        .map_err(|error| AcquireRefusal::Unprotected(error.to_string()))?
+        .ok_or_else(|| {
+            AcquireRefusal::Unprotected(
+                "no coordination root, or a mutator outlasted the wait".to_owned(),
+            )
+        })
+}
+
+/// One candidate secured before its files are hashed: the record and every member the record's members file names, each pinned by a manifest read, and the resident bytes of the members charged.
+struct Secured {
+    pins: Vec<PinnedGeneration>,
+    residency: ByteCharge,
+}
+
+/// Pins `candidate` and its members under `protection`, then charges the members' resident bytes. `None` when the record or a member cannot be pinned or does not name its members: the candidate would not verify either, and the next one is tried.
 ///
 /// # Errors
 ///
-/// No shared protection, no verifying composition, a store refusal, a residency budget that cannot hold the view's resident bytes, or a selector that moved while the view was being taken. Nothing is handed out on any of them.
+/// A residency budget that cannot hold the members' resident bytes; no other candidate can change that.
+fn secure(
+    store: &GenerationStore,
+    candidate: &Candidate,
+    residency: &ByteBudget,
+    protection: LifecycleTransactionLock,
+) -> Result<Option<Secured>, AcquireRefusal> {
+    let Ok(record) = store.pin(&candidate.digest) else {
+        return Ok(None);
+    };
+    let Ok(members) = record.members() else {
+        return Ok(None);
+    };
+    let mut pins = Vec::with_capacity(members.len() + 1);
+    pins.push(record);
+    let mut resident = 0u64;
+    for member in &members {
+        let Ok(pin) = store.pin(member) else {
+            return Ok(None);
+        };
+        resident = resident.saturating_add(vector_generation::resident_bytes(&pin.manifest));
+        pins.push(pin);
+    }
+    drop(protection);
+    let resident = usize::try_from(resident).unwrap_or(usize::MAX);
+    let residency = residency
+        .try_charge(resident)
+        .ok_or(AcquireRefusal::Residency { bytes: resident })?;
+    Ok(Some(Secured { pins, residency }))
+}
+
+/// Takes the lifecycle's shared lock only around manifest reads: once to list the candidates and pin one, once more to re-read the selector before handoff. Hashing every member runs between them under the pins alone, so a mutator waits on this reader for no longer than a pin; one that holds the exclusive lock past the bounded wait refuses the reader instead. Run it on a blocking thread.
+///
+/// # Errors
+///
+/// No shared protection within the wait, no verifying composition, a store refusal, a residency budget that cannot hold the view's resident bytes, or a selector that moved while the view was being taken. Nothing is handed out on any of them.
 pub fn acquire(
     root: Option<&Path>,
     expected: &ExpectedVectors<'_>,
@@ -269,43 +320,77 @@ pub fn acquire(
     residency: &ByteBudget,
     observe: &mut dyn FnMut(AcquireEvent),
 ) -> Result<Arc<PinnedVectors>, AcquireRefusal> {
-    let protection = LifecycleTransactionLock::acquire_shared(root)
-        .map_err(|error| AcquireRefusal::Unprotected(error.to_string()))?
-        .ok_or_else(|| {
-            AcquireRefusal::Unprotected(
-                "no coordination root, or a mutator outlasted the wait".to_owned(),
-            )
-        })?;
     let store = GenerationStore::open(root)?;
-    let recovered = vector_composition::recover(
-        &store,
-        &protection,
-        expected,
-        bounds.max_deltas,
-        bounds.recovery_bound,
-    )?;
+    let mut candidates: Option<VecDeque<Candidate>> = None;
+    let mut examined = 0;
+    loop {
+        let protection = protect(root)?;
+        let current = store.read_vector_current()?;
+        let queue = match &mut candidates {
+            Some(queue) => queue,
+            None => candidates.insert(
+                vector_composition::candidates(&store, &current, bounds.recovery_bound)?.into(),
+            ),
+        };
+        let Some(candidate) = queue.pop_front() else {
+            return Err(Unavailable::NoCompatibleTarget { examined }.into());
+        };
+        examined += 1;
+        if !candidate.selector.still_holds(&current, &candidate.digest) {
+            return Err(AcquireRefusal::SelectorMoved {
+                observed: candidate.selector,
+                current,
+            });
+        }
+        let Some(secured) = secure(&store, &candidate, residency, protection)? else {
+            continue;
+        };
+        observe(AcquireEvent::BeforeVerification);
+        let Ok(verified) = vector_composition::verify_composition(
+            &store,
+            &candidate.digest,
+            expected,
+            bounds.max_deltas,
+        ) else {
+            continue;
+        };
+        return hand_off(
+            root,
+            &store,
+            expected,
+            candidate.selector,
+            verified,
+            secured,
+            observe,
+        );
+    }
+}
+
+/// Moves the pins onto the descriptors verification hashed through, builds the layers, and re-reads the selector under the shared lock before the view is handed out.
+fn hand_off(
+    root: Option<&Path>,
+    store: &GenerationStore,
+    expected: &ExpectedVectors<'_>,
+    selector: SelectorState,
+    verified: VerifiedComposition,
+    secured: Secured,
+    observe: &mut dyn FnMut(AcquireEvent),
+) -> Result<Arc<PinnedVectors>, AcquireRefusal> {
     let VerifiedComposition {
         digest,
         composition,
         record,
         base,
         deltas,
-    } = recovered.composition;
+    } = verified;
+    // The validated descriptors take their own shared locks before the manifest-read pins go, so no instant leaves a member unpinned.
     record.pin()?;
     let members: Vec<VerifiedVectors> = std::iter::once(base).chain(deltas).collect();
     for member in &members {
         member.generation.pin()?;
     }
-    let resident: u64 = members
-        .iter()
-        .flat_map(|member| member.generation.manifest.files.iter())
-        .filter(|file| RESIDENT_FILES.contains(&file.path.as_str()))
-        .map(|file| file.size)
-        .sum();
-    let resident = usize::try_from(resident).unwrap_or(usize::MAX);
-    let residency = residency
-        .try_charge(resident)
-        .ok_or(AcquireRefusal::Residency { bytes: resident })?;
+    let Secured { pins, residency } = secured;
+    drop(pins);
     let epoch = composition.generation_epoch;
     let last = members.len() - 1;
     let mut layers = Vec::with_capacity(members.len());
@@ -316,14 +401,16 @@ pub fn acquire(
         layers.push(PinnedLayer::from_member(member, epoch, ordinal as u32));
     }
     observe(AcquireEvent::BeforeSelectorRecheck);
-    let current = store.read_vector_current()?;
-    if !recovered.selector.still_holds(&current, &digest) {
+    let current = {
+        let _protection = protect(root)?;
+        store.read_vector_current()?
+    };
+    if !selector.still_holds(&current, &digest) {
         return Err(AcquireRefusal::SelectorMoved {
-            observed: recovered.selector,
+            observed: selector,
             current,
         });
     }
-    drop(protection);
     Ok(Arc::new(PinnedVectors {
         digest,
         layout: RowLayout {

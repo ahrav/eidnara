@@ -481,7 +481,69 @@ pub enum Unavailable {
     Store(String),
 }
 
-/// Takes the selected composition when it verifies. Otherwise reads only the manifests of the store's other generations to find compositions, orders them by descending sequence, then fully verifies at most `bound` of them and takes the first that passes. An acknowledged selection is never displaced by a newer composition that was staged but not selected. `_transaction` keeps a concurrent mutator from reclaiming what recovery is examining.
+/// One composition recovery may take, with what the selector said about it when it was listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub digest: String,
+    pub selector: SelectorState,
+}
+
+/// The compositions recovery examines, in order: the selected digest when `current` names one, then at most `bound` other records by descending sequence, equal sequences by descending digest. Only manifests and records are read; no member is opened. An acknowledged selection is never displaced by a newer composition that was staged but not selected.
+///
+/// # Errors
+///
+/// A quarantined selector or a store that cannot list its generations; neither mutates the store.
+pub fn candidates(
+    store: &GenerationStore,
+    current: &CurrentProfile,
+    bound: NonZeroUsize,
+) -> Result<Vec<Candidate>, Unavailable> {
+    let selected = match current {
+        CurrentProfile::Quarantined => return Err(Unavailable::QuarantinedSelector),
+        CurrentProfile::Current(digest) => Some(digest.as_str()),
+        CurrentProfile::Absent => None,
+    };
+    let mut others: Vec<(u64, String)> = Vec::new();
+    for digest in store
+        .digests()
+        .map_err(|error| Unavailable::Store(error.to_string()))?
+    {
+        if selected == Some(digest.as_str()) {
+            continue;
+        }
+        if let Some((_, record)) = record(store, &digest) {
+            others.push((record.sequence, digest));
+        }
+    }
+    // Newest first; equal sequences fall back to digest order so the choice is deterministic.
+    others.sort_by(|(left_sequence, left), (right_sequence, right)| {
+        right_sequence
+            .cmp(left_sequence)
+            .then_with(|| right.cmp(left))
+    });
+    let fallback = match selected {
+        Some(current) => SelectorState::Stale(current.to_owned()),
+        None => SelectorState::Absent,
+    };
+    Ok(selected
+        .map(|digest| Candidate {
+            digest: digest.to_owned(),
+            selector: SelectorState::Current,
+        })
+        .into_iter()
+        .chain(
+            others
+                .into_iter()
+                .take(bound.get())
+                .map(|(_, digest)| Candidate {
+                    digest,
+                    selector: fallback.clone(),
+                }),
+        )
+        .collect())
+}
+
+/// Fully verifies the [`candidates`] in order and takes the first that passes. `_transaction` keeps a concurrent mutator from reclaiming what recovery is examining.
 ///
 /// # Errors
 ///
@@ -493,47 +555,17 @@ pub fn recover(
     max_deltas: NonZeroUsize,
     bound: NonZeroUsize,
 ) -> Result<Recovered, Unavailable> {
-    let store_error = |error: GenerationError| Unavailable::Store(error.to_string());
-    let selected = match store.read_vector_current().map_err(store_error)? {
-        CurrentProfile::Quarantined => return Err(Unavailable::QuarantinedSelector),
-        CurrentProfile::Current(digest) => Some(digest),
-        CurrentProfile::Absent => None,
-    };
-    let mut examined = 0;
-    if let Some(current) = &selected {
-        examined += 1;
-        if let Ok(composition) = verify_composition(store, current, expected, max_deltas) {
+    let current = store
+        .read_vector_current()
+        .map_err(|error| Unavailable::Store(error.to_string()))?;
+    let candidates = candidates(store, &current, bound)?;
+    let examined = candidates.len();
+    for candidate in candidates {
+        if let Ok(composition) = verify_composition(store, &candidate.digest, expected, max_deltas)
+        {
             return Ok(Recovered {
                 composition,
-                selector: SelectorState::Current,
-            });
-        }
-    }
-    let mut candidates: Vec<(u64, String, ValidatedGeneration)> = Vec::new();
-    for digest in store.digests().map_err(store_error)? {
-        if selected.as_deref() == Some(digest.as_str()) {
-            continue;
-        }
-        if let Some((generation, record)) = record(store, &digest) {
-            candidates.push((record.sequence, digest, generation));
-        }
-    }
-    // Newest first; equal sequences fall back to digest order so the choice is deterministic.
-    candidates.sort_by(|(left_sequence, left, _), (right_sequence, right, _)| {
-        right_sequence
-            .cmp(left_sequence)
-            .then_with(|| right.cmp(left))
-    });
-    for (_, _, generation) in candidates.into_iter().take(bound.get()) {
-        examined += 1;
-        if let Ok(composition) = verify_validated(store, generation, expected, max_deltas) {
-            let selector = match &selected {
-                Some(current) => SelectorState::Stale(current.clone()),
-                None => SelectorState::Absent,
-            };
-            return Ok(Recovered {
-                composition,
-                selector,
+                selector: candidate.selector,
             });
         }
     }

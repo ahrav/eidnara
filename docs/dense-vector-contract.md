@@ -283,29 +283,45 @@ ranking; the winners name their layer so that a later scorer can do so.
 ## The pinned reader
 
 `daemon::vector_reader::acquire` turns the selected composition into a view a
-ranking can run against, all or nothing. Under the lifecycle's shared
-transaction lock it recovers and verifies the composition as
-`vector_composition::recover` does, pins the composition record and every
-member with a shared lock on its directory descriptor, charges the bytes the
-view keeps decoded in memory (identifiers, tombstones, scales, sidecar, at
-their manifest-declared sizes) to the caller's residency budget, takes each
-member's row and code artifacts on the descriptors verification opened and
-hashed them through, together with the tables it decoded, re-reads the
-selector, and only then releases the shared lock. Verification already proved
-each artifact holds exactly one row per identifier, so every offset the
-reader will compute lies inside it. A selector that no longer names what
-recovery observed, a budget that cannot hold the resident bytes, or any store
-refusal returns nothing, and the pins, descriptors, and charge are dropped
-with the failure. Acquisition hashes every member and blocks on the lifecycle lock, so
-it runs on a blocking thread, and a view is acquired once and shared rather
-than taken per query: while the shared lock is held no publisher or pruner
-can take the exclusive transaction lock, and mutators give up after a bounded
-wait. Once the view exists its pins alone keep the record and members in
-place. `prune` takes no lock of its own; it relies on every mutator holding
-the exclusive transaction lock, and skips a pinned generation, reporting the
-ones it would otherwise have removed and their manifest-declared bytes as
-retained. A pinned generation that is also protected is not counted, since
-protection alone keeps it.
+ranking can run against, all or nothing. It takes the lifecycle's shared
+transaction lock only around manifest reads. Under one hold it observes the
+selector, lists the candidates `vector_composition::candidates` orders (the
+selected composition first, then other records newest first), pins the first
+candidate's record and every member its members file names with a shared lock
+on a directory descriptor opened by a manifest read alone
+(`GenerationStore::pin`), and charges the bytes the view will keep decoded in
+memory (identifiers, tombstones, scales, sidecar, at their manifest-declared
+sizes, the set `vector_generation::RESIDENT_FILES` names) to the caller's
+residency budget. It then releases the lock and verifies the candidate as
+`vector_composition::verify_composition` does, hashing every member under the
+pins alone; a candidate that does not verify gives up its pins and charge and
+the next is pinned the same way. On success the validated descriptors take
+their own shared locks before the manifest-read pins go, the row and code
+artifacts stay open on the descriptors verification hashed them through,
+together with the tables it decoded, and the selector is re-read under one
+more brief hold of the shared lock before the view is handed out. Verification
+already proved each artifact holds exactly one row per identifier, so every
+offset the reader will compute lies inside it. A selector that no longer names
+what acquisition observed, a budget that cannot hold the resident bytes, or
+any store refusal returns nothing, and the pins, descriptors, and charge are
+dropped with the failure.
+
+The lock discipline is the lifecycle's: a shared holder is meant to be a brief
+probe, and a mutator taking the exclusive lock gives up after a bounded wait
+of a few tens of milliseconds. The reader therefore never holds the shared
+lock across hashing, whose duration grows with the corpus; a publisher or
+pruner that runs while a reader verifies is not held off, and the reader
+observes the moved selector at handoff and refuses, leaving its caller to
+acquire again. The same bounded wait applies to the reader's shared
+acquisitions: a mutator that holds the exclusive lock past it refuses the
+reader as `Unprotected`, and the caller retries. Acquisition still hashes every
+member, so it runs on a blocking thread, and a view is acquired once and shared
+rather than taken per query. Once the view exists its pins alone keep the
+record and members in place. `prune` takes no lock of its own; it relies on
+every mutator holding the exclusive transaction lock, and skips a pinned
+generation, reporting the ones it would otherwise have removed and their
+manifest-declared bytes as retained. A pinned generation that is also protected
+is not counted, since protection alone keeps it.
 
 The view's layers map the composition onto the resolver's precedence, the
 base as ordinal zero and each delta by its position, all under the
