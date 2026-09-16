@@ -30,6 +30,18 @@ use support::projection_gate::{identity, passing_evaluator};
 
 const DIMENSION: u32 = 8;
 const TOLERANCE: f64 = 1e-3;
+const KERNEL: &str = "test-incarnation";
+
+fn generation() -> VectorGeneration {
+    let identity = identity(KERNEL, DIMENSION);
+    VectorGeneration {
+        generation_id: "gen-vectors-1".to_owned(),
+        embedding_model: identity.embedding_model,
+        tokenizer_fingerprint: identity.tokenizer_fingerprint,
+        vector_dimension: identity.vector_dimension,
+        generation_epoch: identity.generation_epoch,
+    }
+}
 
 fn unit(raw: [f32; 8]) -> Vec<f32> {
     let norm = raw
@@ -62,6 +74,8 @@ fn rows(seed: u8) -> Vec<ExportedRow> {
 
 fn export(seed: u8, checkpoint: i64) -> LiveRows {
     LiveRows {
+        generation: generation(),
+        kernel_incarnation_id: KERNEL.to_owned(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: checkpoint - 1,
             checkpoint_commit_seq: checkpoint,
@@ -89,19 +103,13 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let store = GenerationStore::open(Some(root.path())).unwrap();
         let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
-        let identity = identity("test-incarnation", DIMENSION);
+        let identity = identity(KERNEL, DIMENSION);
         let gate = HookGate::closed();
         gate.install(passing_evaluator(&identity, 0, &ProjectionHook::ALL));
         let admission = gate
             .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
             .unwrap();
-        let generation = VectorGeneration {
-            generation_id: "gen-vectors-1".to_owned(),
-            embedding_model: identity.embedding_model.clone(),
-            tokenizer_fingerprint: identity.tokenizer_fingerprint.clone(),
-            vector_dimension: identity.vector_dimension,
-            generation_epoch: identity.generation_epoch,
-        };
+        let generation = generation();
         Self {
             root,
             store,
@@ -1281,6 +1289,8 @@ fn a_forged_record_with_a_repeated_delta_fails_topology_at_verification() {
     let same = fixture.layer(8, 12);
     assert!(fixture.compose(4, &base, &[same]).is_ok());
     let earlier_snapshot = LiveRows {
+        generation: generation(),
+        kernel_incarnation_id: KERNEL.to_owned(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: 9,
             checkpoint_commit_seq: 12,
@@ -1298,6 +1308,8 @@ fn a_forged_record_with_a_repeated_delta_fails_topology_at_verification() {
     );
     // A layer whose snapshot follows its own checkpoint is refused at build.
     let inverted = LiveRows {
+        generation: generation(),
+        kernel_incarnation_id: KERNEL.to_owned(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: 13,
             checkpoint_commit_seq: 12,
