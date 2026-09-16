@@ -217,10 +217,13 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_handler.rs`
 `scope_harness_and_disable_are_decided_before_any_candidate_read`.
-Guarantee: A request naming another project root, an unbound session, or a
-harness other than the route binding's is refused before the body is parsed,
-before any candidate row is read, and before any payload byte is touched; the
-binding is the only authority and no request field grants scope.
+Guarantee: A request naming another project root or an unbound session is
+refused before the body is parsed; a `harness` claim other than the route
+binding's is refused as soon as the body is parsed, before the limit set,
+the budget, any candidate row, or any payload byte is read; the binding is
+the only authority and no request field grants scope. The claim lives in the
+body, so a body that fails to parse is refused as `invalid_params` whatever
+harness it names, and no protected work runs on either path.
 Check: `always` - on a daemon whose kernel holds rows, a foreign
 `project_root` answers the kernel routes' `invalid`/`project_mismatch` state,
 an unknown `session_id` answers a transport error, and a `harness` claim other

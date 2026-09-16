@@ -73,9 +73,10 @@ pub struct QueryRouteLimits {
 }
 
 impl QueryRouteLimits {
-    /// Bytes of a fused answer with no entries and every lane undeclared; no `response_bytes` below it can hold any answer.
+    /// An all-`Undeclared` lane array is larger than an array with one `Complete` lane.
     pub fn response_floor() -> NonZeroUsize {
-        let statuses = [const { LaneStatus::Undeclared }; Lane::ORDER.len()];
+        let mut statuses = [const { LaneStatus::Undeclared }; Lane::ORDER.len()];
+        statuses[0] = LaneStatus::Complete;
         let bytes = measure_json(&fused_envelope(&statuses, false, Vec::new(), false))
             .expect("the empty fused envelope measures");
         NonZeroUsize::new(bytes).expect("the empty fused envelope is not empty")
@@ -985,14 +986,18 @@ mod tests {
     #[test]
     fn a_response_bound_below_the_empty_envelope_is_refused_at_installation() {
         let floor = QueryRouteLimits::response_floor();
+        let mut statuses = [const { LaneStatus::Undeclared }; Lane::ORDER.len()];
+        statuses[0] = LaneStatus::Complete;
         let envelope = json!({
             "kind": "fused",
             "degraded": false,
-            "lanes": lanes_json(&[const { LaneStatus::Undeclared }; Lane::ORDER.len()]),
+            "lanes": lanes_json(&statuses),
             "truncated": false,
             "entries": [],
         });
         assert_eq!(floor.get(), measure_json(&envelope).unwrap());
+        let undeclared = lanes_json(&[const { LaneStatus::Undeclared }; Lane::ORDER.len()]);
+        assert!(measure_json(&undeclared).unwrap() > measure_json(&envelope["lanes"]).unwrap());
         let limits = |response_bytes: NonZeroUsize| QueryRouteLimits {
             query_bytes: NonZeroUsize::new(64).unwrap(),
             probes: NonZeroUsize::new(4).unwrap(),

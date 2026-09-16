@@ -114,10 +114,10 @@ request that arrives while the store is still starting or unavailable receives
 the kernel routes' `state` answer for that condition, as every `kernel.*` route
 does, because the binding is decided before the limit set is consulted.
 `QueryRouteLimits::validate` refuses a `validation_batch` or `lexical_accepted`
-over the kernel's candidate batch, a `response_bytes` below the empty fused
-envelope, and a `response_bytes` above the host wire body maximum, so no
-installed set can produce an answer the route cannot bound or the host cannot
-send.
+over the kernel's candidate batch, a `response_bytes` below the smallest
+empty fused envelope (one lane complete, the others undeclared, no entries),
+and a `response_bytes` above the host wire body maximum, so no installed set
+can produce an answer the route cannot bound or the host cannot send.
 
 The exact lane reads the query's `id:` mentions and the lexical lane scans the
 prose outside selector mentions inside one interruptible projection read under
