@@ -55,10 +55,6 @@ pub struct SharedBudget {
 }
 
 impl SharedBudget {
-    pub fn eval(&self) -> &EvalBudget {
-        &self.budget
-    }
-
     pub fn deadline(&self) -> Instant {
         self.deadline
     }
@@ -68,7 +64,8 @@ impl SharedBudget {
     }
 
     /// Cancellation wins over the deadline when both hold, because a cancelled caller is not waiting for a deadline verdict.
-    /// The host's cancellation is folded into the flag here, so callees polling only the `EvalBudget` stop as well.
+    /// The host's cancellation reaches the `EvalBudget` flag only through this poll or the stop predicate, which is why the
+    /// `EvalBudget` is not handed out on its own.
     pub fn exhaustion(&self) -> Option<Exhaustion> {
         // The interrupt is read before the reason. The guard's drop publishes the reason, fences,
         // then raises the interrupt, so a poll that sees the interrupt and then reads the reason
@@ -176,7 +173,7 @@ mod tests {
         let after = Instant::now();
         assert!(budget.deadline() <= after + Duration::from_secs(5));
         assert!(budget.deadline() >= before + Duration::from_secs(5));
-        assert_eq!(budget.shared().eval().deadline(), Some(budget.deadline()));
+        assert_eq!(budget.shared().budget.deadline(), Some(budget.deadline()));
         assert_eq!(budget.exhaustion(), None);
         assert!(!budget.is_exhausted());
     }
@@ -212,7 +209,7 @@ mod tests {
         let clone = budget.shared().clone();
         let mut stop = budget.shared().stop_predicate();
         assert_eq!(clone.deadline(), budget.deadline());
-        assert_eq!(clone.eval().deadline(), Some(budget.deadline()));
+        assert_eq!(clone.budget.deadline(), Some(budget.deadline()));
         assert!(!clone.is_exhausted());
         assert!(!stop());
         drop(budget);

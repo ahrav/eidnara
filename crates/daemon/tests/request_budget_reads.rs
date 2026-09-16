@@ -50,6 +50,24 @@ fn held_scan(
     rx
 }
 
+/// Returns once a short bounded read is refused with `Deadline`, which only a held connection
+/// produces; a cancellation raised after this point is observed by the running statement, not by
+/// acquisition.
+fn wait_until_held(projection: &SearchProjection) {
+    let give_up = Instant::now() + Duration::from_secs(5);
+    loop {
+        let probe = projection.read_within(Instant::now() + Duration::from_millis(20), |_| Ok(()));
+        match probe {
+            Err(SearchProjectionError::Store(StoreError::Deadline)) => return,
+            Ok(()) => assert!(
+                Instant::now() < give_up,
+                "the scan never took the connection"
+            ),
+            Err(other) => panic!("unexpected probe outcome: {other:?}"),
+        }
+    }
+}
+
 fn open() -> (tempfile::TempDir, Arc<SearchProjection>) {
     let dir = tempfile::tempdir().unwrap();
     let projection = Arc::new(SearchProjection::open(dir.path()).unwrap());
@@ -62,7 +80,7 @@ fn cancelling_the_request_interrupts_a_held_read_and_reports_exhaustion() {
     let (token, budget) = derive(CEILING.as_millis() as u64);
     let started = Instant::now();
     let rx = held_scan(&projection, budget.shared().clone());
-    thread::sleep(Duration::from_millis(150));
+    wait_until_held(&projection);
     assert!(
         rx.try_recv().is_err(),
         "the scan must still be running when cancellation arrives"
@@ -115,7 +133,7 @@ fn a_later_request_on_the_same_connection_is_not_interrupted_by_a_prior_cancella
     let (_dir, projection) = open();
     let (token, prior) = derive(CEILING.as_millis() as u64);
     let rx = held_scan(&projection, prior.shared().clone());
-    thread::sleep(Duration::from_millis(100));
+    wait_until_held(&projection);
     token.cancel();
     assert!(is_deadline(
         &rx.recv_timeout(Duration::from_secs(5))

@@ -66,9 +66,11 @@ Guarantee: One absolute budget is derived at handler entry from the request's
 cancellation and its clamped `remaining_ms`; every later stage, including the
 connection acquisition wait and SQLite VM steps, observes that same deadline
 and flag, and no stage re-derives a relative budget.
-Check: `always` - the guard, every `SharedBudget` clone, the `EvalBudget` a
-callee borrows, and the stop predicate a blocking thread carries report one
-identical deadline; a missing ceiling, a missing or zero `remaining_ms`, or an
+Check: `always` - the guard, every `SharedBudget` clone, the `EvalBudget`
+inside each clone, and the stop predicate a blocking thread carries report one
+identical deadline; the `EvalBudget` is never handed out alone, because host
+cancellation reaches its flag only through `SharedBudget::exhaustion` or the
+stop predicate; a missing ceiling, a missing or zero `remaining_ms`, or an
 already-cancelled request is refused before any work; an acquisition wait
 ends on cancellation before the holder releases and before the deadline.
 `always` because the property must hold on every derivation and every clone.
