@@ -3000,7 +3000,7 @@ pub struct HandlerCore {
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
-    edit_receipts: Mutex<Option<Arc<Mutex<edit_receipts::ReceiptStore>>>>,
+    edit_receipts: Mutex<Option<edit_receipts::ReceiptStore>>,
     /// Parent Q8: the incarnation signal every preparation identity carries; a fresh value per `HandlerCore` makes a key from a restarted daemon classify as `Unknown`.
     edit_incarnation: String,
     #[cfg(any(test, feature = "test-support"))]

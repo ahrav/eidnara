@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use daemon::dispatch::PreparedOutcome;
-use daemon::edit_receipts::{ReceiptLimits, ReceiptLimitsRefusal};
+use daemon::edit_receipts::{RETENTION_FLOOR, ReceiptLimits, ReceiptLimitsRefusal};
 use serde_json::{Value, json};
 use support::kernel_daemon::{KernelDaemon, SESSION};
 
@@ -15,8 +15,7 @@ const OCC_B: &str = "22222222222222222222222222222222222222222222222222222222222
 fn limits() -> ReceiptLimits {
     ReceiptLimits {
         max_keys: NonZeroUsize::new(16).unwrap(),
-        retention: Duration::from_secs(60),
-        retention_floor: Duration::from_secs(30),
+        retention: Duration::from_secs(120),
         append_allowance_bytes: 4096,
         replacement_capacity_bytes: 2048,
     }
@@ -171,12 +170,11 @@ async fn the_route_is_disabled_until_an_approved_limit_set_is_installed() {
         "disabled"
     );
     let mut short = limits();
-    short.retention = Duration::from_secs(1);
+    short.retention = RETENTION_FLOOR - Duration::from_millis(1);
     assert_eq!(
         daemon.handler().set_edit_receipt_limits(Some(short)),
         Err(ReceiptLimitsRefusal::RetentionBelowFloor {
-            retention: Duration::from_secs(1),
-            floor: Duration::from_secs(30),
+            retention: short.retention,
         })
     );
     assert_eq!(
@@ -341,6 +339,10 @@ async fn a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back
         .confirm(&forwarded_key, &forwarded_effect, Some("other"), "append")
         .await;
     assert_eq!(wrong["state"], "unknown");
+    let malformed = consumer
+        .confirm(&forwarded_key, "bogus", Some("bogus"), "append")
+        .await;
+    assert_eq!(malformed["state"], "unknown", "{malformed}");
     let read_back = consumer
         .confirm(
             &forwarded_key,
@@ -351,6 +353,22 @@ async fn a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back
         .await;
     assert_eq!(read_back["state"], "complete");
     assert_eq!(read_back["outcome"], "append");
+    let after = consumer.apply(&forwarded_key, ctx.clone()).await;
+    assert_eq!(after["state"], "complete", "a read-back is recorded");
+    assert_eq!(after["outcome"], "append");
+    assert_eq!(
+        terminal(
+            &consumer
+                .confirm(
+                    &forwarded_key,
+                    &forwarded_effect,
+                    Some(&forwarded_effect),
+                    "keep"
+                )
+                .await
+        ),
+        "conflict"
+    );
     assert!(consumer.effects().is_empty());
     restarted.shutdown().await;
 }
@@ -384,6 +402,15 @@ async fn a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_confl
     let retry = consumer.apply(&key, ctx.clone()).await;
     assert_eq!(retry["state"], "unknown");
     assert_eq!(consumer.effects(), vec![effect.clone()]);
+    assert_eq!(
+        terminal(&consumer.confirm(&key, "bogus", Some("bogus"), "keep").await),
+        "conflict",
+        "a read-back is judged against the recorded forward, not the caller's claim"
+    );
+    assert_eq!(
+        terminal(&consumer.confirm(&key, &effect, Some("bogus"), "keep").await),
+        "conflict"
+    );
     let read_back = consumer
         .confirm(&key, &effect, Some(&effect), "append")
         .await;
@@ -406,7 +433,7 @@ async fn a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_confl
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retention_is_bounded_by_count_and_time_and_an_evicted_key_is_refused() {
+async fn the_count_bound_evicts_the_oldest_settled_key_and_never_an_in_flight_one() {
     let daemon = KernelDaemon::start().await;
     let mut narrow = limits();
     narrow.max_keys = NonZeroUsize::new(2).unwrap();
@@ -417,8 +444,8 @@ async fn retention_is_bounded_by_count_and_time_and_an_evicted_key_is_refused() 
     let consumer = Consumer::new(&daemon);
     let ctx = context("rev-1", "repr-1", 10);
     let first = id(&consumer.prepare(ctx.clone(), "append", 10).await);
-    let _second = id(&consumer.prepare(ctx.clone(), "append", 10).await);
-    let _third = id(&consumer.prepare(ctx.clone(), "append", 10).await);
+    let second = id(&consumer.prepare(ctx.clone(), "append", 10).await);
+    let third = id(&consumer.prepare(ctx.clone(), "append", 10).await);
     assert_eq!(
         terminal(&consumer.apply(&first, ctx.clone()).await),
         "receipt_unavailable"
@@ -427,22 +454,36 @@ async fn retention_is_bounded_by_count_and_time_and_an_evicted_key_is_refused() 
         terminal(&consumer.confirm(&first, "f", Some("f"), "append").await),
         "receipt_unavailable"
     );
-    assert!(consumer.effects().is_empty());
+    assert_eq!(
+        consumer.apply(&second, ctx.clone()).await["kind"],
+        "forwarded",
+        "a read never evicts"
+    );
+    assert_eq!(
+        consumer.apply(&third, ctx.clone()).await["kind"],
+        "forwarded"
+    );
+    let refused = consumer.prepare(ctx.clone(), "append", 10).await;
+    assert_eq!(refused["outcome"], "preparation_failure", "{refused}");
+    assert_eq!(refused["reason"], "receipt_capacity");
+    assert_eq!(
+        consumer.apply(&second, ctx.clone()).await["state"],
+        "in_flight",
+        "an in-flight receipt is never the victim"
+    );
+    assert_eq!(consumer.effects().len(), 2);
 
-    let mut brief = limits();
-    brief.retention = Duration::from_millis(50);
-    brief.retention_floor = Duration::from_millis(50);
+    let mut wider = limits();
+    wider.max_keys = NonZeroUsize::new(8).unwrap();
     daemon
         .handler()
-        .set_edit_receipt_limits(Some(brief))
+        .set_edit_receipt_limits(Some(wider))
         .unwrap();
-    let key = id(&consumer.prepare(ctx.clone(), "append", 10).await);
-    std::thread::sleep(Duration::from_millis(80));
     assert_eq!(
-        terminal(&consumer.apply(&key, ctx).await),
-        "receipt_unavailable"
+        consumer.apply(&second, ctx).await["state"],
+        "in_flight",
+        "a limits change keeps the receipts"
     );
-    assert!(consumer.effects().is_empty());
     daemon.shutdown().await;
 }
 
@@ -464,12 +505,18 @@ async fn outcomes_are_distinct_and_capacity_is_bound_before_preparation() {
     assert_eq!(over_replace["outcome"], "preparation_failure");
     assert_eq!(over_replace["reason"], "replacement_capacity");
 
-    let mut seen = Vec::new();
+    const OUTCOMES: [&str; 4] = [
+        "keep",
+        "append",
+        "applied_replacement",
+        "preparation_failure",
+    ];
+    let mut keys = Vec::new();
     for (action, outcome) in [
-        ("append", "keep"),
-        ("append", "append"),
-        ("replace", "applied_replacement"),
-        ("replace", "preparation_failure"),
+        ("append", OUTCOMES[0]),
+        ("append", OUTCOMES[1]),
+        ("replace", OUTCOMES[2]),
+        ("replace", OUTCOMES[3]),
     ] {
         let key = id(&consumer.prepare(ctx.clone(), action, 0).await);
         let effect = consumer.apply(&key, ctx.clone()).await["forwarded_identity"]
@@ -480,12 +527,21 @@ async fn outcomes_are_distinct_and_capacity_is_bound_before_preparation() {
             .confirm(&key, &effect, Some(&effect), outcome)
             .await;
         assert_eq!(confirmed["state"], "complete");
-        assert_eq!(confirmed["outcome"], outcome);
-        seen.push(confirmed["outcome"].as_str().unwrap().to_string());
+        keys.push((key, outcome));
     }
-    seen.sort();
-    seen.dedup();
-    assert_eq!(seen.len(), 4);
+    let read_back: Vec<String> = {
+        let mut out = Vec::new();
+        for (key, _) in &keys {
+            out.push(
+                consumer.apply(key, ctx.clone()).await["outcome"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        out
+    };
+    assert_eq!(read_back, OUTCOMES.map(str::to_string).to_vec());
 
     let empty = id(&consumer.prepare(ctx.clone(), "replace", 0).await);
     let forwarded = consumer.apply(&empty, ctx.clone()).await;

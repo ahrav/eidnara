@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use host_runtime::RouteHandle;
@@ -22,36 +21,30 @@ pub(crate) const PREPARE: &str = "retrieval.prepare";
 pub(crate) const APPLY: &str = "retrieval.apply";
 pub(crate) const CONFIRM: &str = "retrieval.confirm";
 
+/// Parent Q9: the longest supported retry path, one route deadline ceiling plus one client retry of the same length; a retention below it would expire a key a legal retry still needs.
+pub const RETENTION_FLOOR: Duration = Duration::from_secs(60);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ReceiptLimitsRefusal {
-    #[error("retention {retention:?} is shorter than the longest supported retry path {floor:?}")]
-    RetentionBelowFloor {
-        retention: Duration,
-        floor: Duration,
-    },
-    #[error("retention must be positive")]
-    ZeroRetention,
+    #[error(
+        "retention {retention:?} is shorter than the longest supported retry path {RETENTION_FLOOR:?}"
+    )]
+    RetentionBelowFloor { retention: Duration },
 }
 
-/// Parent Q9: `retention` must cover `retention_floor`, the longest supported retry path, so a legal retry never meets an expired key.
 #[derive(Debug, Clone, Copy)]
 pub struct ReceiptLimits {
     pub max_keys: NonZeroUsize,
     pub retention: Duration,
-    pub retention_floor: Duration,
     pub append_allowance_bytes: u64,
     pub replacement_capacity_bytes: u64,
 }
 
 impl ReceiptLimits {
     pub fn validate(&self) -> Result<(), ReceiptLimitsRefusal> {
-        if self.retention.is_zero() {
-            return Err(ReceiptLimitsRefusal::ZeroRetention);
-        }
-        if self.retention < self.retention_floor {
+        if self.retention < RETENTION_FLOOR {
             return Err(ReceiptLimitsRefusal::RetentionBelowFloor {
                 retention: self.retention,
-                floor: self.retention_floor,
             });
         }
         Ok(())
@@ -126,15 +119,18 @@ enum State {
         forwarded_identity: String,
         outcome: Outcome,
     },
-    Unknown,
+    /// The forwarded identity stays recorded so a read-back is judged against it, never against the caller's own claim.
+    Unknown {
+        forwarded_identity: String,
+    },
 }
 
 #[derive(Debug, Clone)]
 struct Receipt {
-    digest: PreparationDigest,
+    digest: Option<PreparationDigest>,
     action: Action,
     edit_bytes: u64,
-    touched: Instant,
+    created: Instant,
     state: State,
 }
 
@@ -156,23 +152,33 @@ impl ReceiptStore {
         }
     }
 
-    fn sweep(&mut self, now: Instant) {
+    fn expire(&mut self, now: Instant) {
         let retention = self.limits.retention;
         self.receipts
-            .retain(|_, receipt| now.duration_since(receipt.touched) < retention);
+            .retain(|_, receipt| now.duration_since(receipt.created) < retention);
+    }
+
+    /// The count bound is enforced only when a key is minted: the oldest receipt that is not in flight makes room, and when every receipt is in flight the new preparation fails instead of dropping one whose edit may already be applied.
+    fn make_room(&mut self) -> bool {
         while self.receipts.len() >= self.limits.max_keys.get() {
-            let oldest = self
+            let victim = self
                 .receipts
                 .iter()
-                .min_by_key(|(_, receipt)| receipt.touched)
+                .filter(|(_, receipt)| !matches!(receipt.state, State::InFlight { .. }))
+                .min_by_key(|(_, receipt)| receipt.created)
                 .map(|(id, _)| id.clone());
-            match oldest {
+            match victim {
                 Some(id) => {
                     self.receipts.remove(&id);
                 }
-                None => break,
+                None => return false,
             }
         }
+        true
+    }
+
+    pub fn set_limits(&mut self, limits: ReceiptLimits) {
+        self.limits = limits;
     }
 
     fn owns(&self, preparation_id: &str) -> bool {
@@ -309,6 +315,28 @@ pub enum ConfirmOutcome {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyRefusal {
+    Refused(Refusal),
+    Invalid(IdentityRefusal),
+}
+
+impl From<IdentityRefusal> for ApplyRefusal {
+    fn from(refusal: IdentityRefusal) -> Self {
+        Self::Invalid(refusal)
+    }
+}
+
+impl From<Refusal> for ApplyRefusal {
+    fn from(refusal: Refusal) -> Self {
+        Self::Refused(refusal)
+    }
+}
+
+fn well_formed_identity(identity: &str) -> bool {
+    identity.len() == 64 && identity.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 impl ReceiptStore {
     /// Parent Q7: a second application of one selection is a legal intent, so the tuple is a fingerprint and the identity minted here is the key.
     pub fn prepare(
@@ -331,6 +359,10 @@ impl ReceiptStore {
         }
         let digest = context.digest()?;
         let selection = context.selection_digest()?;
+        self.expire(now);
+        if !self.make_room() {
+            return Ok(PrepareOutcome::Failure("receipt_capacity"));
+        }
         let fingerprint = derive(
             "eidnara-daemon-preparation-fingerprint-v1",
             &[
@@ -341,7 +373,6 @@ impl ReceiptStore {
                 accounting_profile.as_bytes(),
             ],
         );
-        self.sweep(now);
         self.sequence += 1;
         let preparation_id = format!(
             "{}-{}",
@@ -354,10 +385,10 @@ impl ReceiptStore {
         self.receipts.insert(
             preparation_id.clone(),
             Receipt {
-                digest,
+                digest: Some(digest),
                 action,
                 edit_bytes,
-                touched: now,
+                created: now,
                 state: State::Prepared,
             },
         );
@@ -374,20 +405,25 @@ impl ReceiptStore {
         now: Instant,
         preparation_id: &str,
         context: &Context,
-    ) -> Result<Result<ApplyOutcome, Refusal>, IdentityRefusal> {
-        if !self.owns(preparation_id) {
-            return Ok(Ok(ApplyOutcome::Unknown));
-        }
+    ) -> Result<ApplyOutcome, ApplyRefusal> {
         let digest = context.digest()?;
-        self.sweep(now);
+        self.expire(now);
+        if !self.owns(preparation_id) {
+            return Ok(match self.receipts.get(preparation_id).map(|r| &r.state) {
+                Some(State::Complete { outcome, .. }) => {
+                    ApplyOutcome::Complete { outcome: *outcome }
+                }
+                _ => ApplyOutcome::Unknown,
+            });
+        }
         let Some(receipt) = self.receipts.get_mut(preparation_id) else {
-            return Ok(Err(Refusal::ReceiptUnavailable));
+            return Err(Refusal::ReceiptUnavailable.into());
         };
-        receipt.touched = now;
+        let prepared = receipt.digest;
         let outcome = match &receipt.state {
             State::Prepared => {
-                if receipt.digest != digest {
-                    return Ok(Err(Refusal::StalePreparation));
+                if prepared != Some(digest) {
+                    return Err(Refusal::StalePreparation.into());
                 }
                 let forwarded_identity = derive(
                     "eidnara-daemon-forwarded-identity-v1",
@@ -403,25 +439,26 @@ impl ReceiptStore {
                 }
             }
             State::InFlight { forwarded_identity } => {
-                if receipt.digest != digest {
-                    return Ok(Err(Refusal::Conflict));
+                if prepared != Some(digest) {
+                    return Err(Refusal::Conflict.into());
                 }
                 ApplyOutcome::InFlight {
                     forwarded_identity: forwarded_identity.clone(),
                 }
             }
             State::Complete { outcome, .. } => {
-                if receipt.digest != digest {
-                    return Ok(Err(Refusal::Conflict));
+                if prepared != Some(digest) {
+                    return Err(Refusal::Conflict.into());
                 }
                 ApplyOutcome::Complete { outcome: *outcome }
             }
-            State::Unknown => ApplyOutcome::Unknown,
+            State::Unknown { .. } => ApplyOutcome::Unknown,
         };
-        Ok(Ok(outcome))
+        Ok(outcome)
     }
 
     /// Applied is recorded only when the acknowledgment's applied identity equals the identity the daemon forwarded; an acknowledgment without one leaves the key `Unknown`.
+    /// Parent Q9 read-back: for a key of another incarnation the daemon holds no record, so the adapter's own forwarded and applied identities are the evidence; they must be well formed and equal, and the reclassification is recorded so the key does not fall back to `Unknown`.
     pub fn confirm(
         &mut self,
         now: Instant,
@@ -430,22 +467,51 @@ impl ReceiptStore {
         applied_identity: Option<&str>,
         outcome: Outcome,
     ) -> Result<ConfirmOutcome, Refusal> {
+        self.expire(now);
         if !self.owns(preparation_id) {
+            if let Some(receipt) = self.receipts.get(preparation_id)
+                && let State::Complete {
+                    forwarded_identity: recorded,
+                    outcome: known,
+                } = &receipt.state
+            {
+                return if recorded == forwarded_identity && *known == outcome {
+                    Ok(ConfirmOutcome::Complete { outcome })
+                } else {
+                    Err(Refusal::Conflict)
+                };
+            }
             return match applied_identity {
-                Some(applied) if applied == forwarded_identity => {
+                Some(applied) if applied == forwarded_identity && well_formed_identity(applied) => {
+                    if self.make_room() {
+                        self.receipts.insert(
+                            preparation_id.to_string(),
+                            Receipt {
+                                digest: None,
+                                action: Action::Append,
+                                edit_bytes: 0,
+                                created: now,
+                                state: State::Complete {
+                                    forwarded_identity: forwarded_identity.to_string(),
+                                    outcome,
+                                },
+                            },
+                        );
+                    }
                     Ok(ConfirmOutcome::Complete { outcome })
                 }
                 _ => Ok(ConfirmOutcome::Unknown),
             };
         }
-        self.sweep(now);
         let Some(receipt) = self.receipts.get_mut(preparation_id) else {
             return Err(Refusal::ReceiptUnavailable);
         };
-        receipt.touched = now;
         match &receipt.state {
             State::Prepared => Err(Refusal::Conflict),
             State::InFlight {
+                forwarded_identity: recorded,
+            }
+            | State::Unknown {
                 forwarded_identity: recorded,
             } => {
                 if recorded != forwarded_identity {
@@ -461,7 +527,9 @@ impl ReceiptStore {
                     }
                     Some(_) => Err(Refusal::Conflict),
                     None => {
-                        receipt.state = State::Unknown;
+                        receipt.state = State::Unknown {
+                            forwarded_identity: recorded.clone(),
+                        };
                         Ok(ConfirmOutcome::Unknown)
                     }
                 }
@@ -479,16 +547,6 @@ impl ReceiptStore {
                     Err(Refusal::Conflict)
                 }
             }
-            State::Unknown => match applied_identity {
-                Some(applied) if applied == forwarded_identity => {
-                    receipt.state = State::Complete {
-                        forwarded_identity: forwarded_identity.to_string(),
-                        outcome,
-                    };
-                    Ok(ConfirmOutcome::Complete { outcome })
-                }
-                _ => Ok(ConfirmOutcome::Unknown),
-            },
         }
     }
 
@@ -498,6 +556,10 @@ impl ReceiptStore {
 
     pub fn is_empty(&self) -> bool {
         self.receipts.is_empty()
+    }
+
+    pub fn holds(&self, preparation_id: &str) -> bool {
+        self.receipts.contains_key(preparation_id)
     }
 }
 
@@ -520,6 +582,7 @@ fn identity_refusal(operation: &str, refusal: IdentityRefusal) -> PreparedOutcom
 }
 
 impl HandlerCore {
+    /// A limits change keeps every receipt: the keys stay owned by this incarnation, so an in-flight edit can still be confirmed.
     pub fn set_edit_receipt_limits(
         &self,
         limits: Option<ReceiptLimits>,
@@ -531,20 +594,38 @@ impl HandlerCore {
             .edit_receipts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = limits.map(|limits| {
-            Arc::new(Mutex::new(ReceiptStore::new(
-                limits,
-                self.edit_incarnation.clone(),
-            )))
-        });
+        match (limits, slot.as_mut()) {
+            (Some(limits), Some(store)) => store.set_limits(limits),
+            (Some(limits), None) => {
+                *slot = Some(ReceiptStore::new(limits, self.edit_incarnation.clone()));
+            }
+            (None, _) => *slot = None,
+        }
         Ok(())
     }
 
-    fn receipt_store(&self) -> Option<Arc<Mutex<ReceiptStore>>> {
-        self.edit_receipts
+    fn with_receipts<T>(
+        &self,
+        channel: RouteHandle,
+        request: Value,
+        operation: &str,
+        f: impl FnOnce(&mut ReceiptStore, T) -> PreparedOutcome,
+    ) -> PreparedOutcome
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let (_scope, parsed) = match self.kernel_request::<T>(channel, request, operation) {
+            Ok(bound) => bound,
+            Err(outcome) => return outcome,
+        };
+        let mut slot = self
+            .edit_receipts
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(store) = slot.as_mut() else {
+            return refusal(Refusal::Disabled);
+        };
+        f(store, parsed)
     }
 
     pub(crate) fn handle_retrieval_prepare(
@@ -552,37 +633,31 @@ impl HandlerCore {
         channel: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
-        let (_scope, parsed) =
-            match self.kernel_request::<PrepareRequest>(channel, request, PREPARE) {
-                Ok(bound) => bound,
-                Err(outcome) => return outcome,
-            };
-        let Some(store) = self.receipt_store() else {
-            return refusal(Refusal::Disabled);
-        };
-        let mut store = store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match store.prepare(
-            Instant::now(),
-            &parsed.context,
-            parsed.action,
-            &parsed.accounting_profile,
-            parsed.edit_bytes,
-        ) {
-            Ok(PrepareOutcome::Prepared(prepared)) => response(json!({
-                "kind": "prepared",
-                "preparation_id": prepared.preparation_id,
-                "preparation_digest": prepared.preparation_digest,
-                "fingerprint": prepared.fingerprint,
-            })),
-            Ok(PrepareOutcome::Failure(reason)) => response(json!({
-                "kind": "outcome",
-                "outcome": Outcome::PreparationFailure.code(),
-                "reason": reason,
-            })),
-            Err(refusal) => identity_refusal(PREPARE, refusal),
-        }
+        self.with_receipts(
+            channel,
+            request,
+            PREPARE,
+            |store, parsed: PrepareRequest| match store.prepare(
+                Instant::now(),
+                &parsed.context,
+                parsed.action,
+                &parsed.accounting_profile,
+                parsed.edit_bytes,
+            ) {
+                Ok(PrepareOutcome::Prepared(prepared)) => response(json!({
+                    "kind": "prepared",
+                    "preparation_id": prepared.preparation_id,
+                    "preparation_digest": prepared.preparation_digest,
+                    "fingerprint": prepared.fingerprint,
+                })),
+                Ok(PrepareOutcome::Failure(reason)) => response(json!({
+                    "kind": "outcome",
+                    "outcome": Outcome::PreparationFailure.code(),
+                    "reason": reason,
+                })),
+                Err(identity) => identity_refusal(PREPARE, identity),
+            },
+        )
     }
 
     pub(crate) fn handle_retrieval_apply(
@@ -590,44 +665,43 @@ impl HandlerCore {
         channel: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
-        let (_scope, parsed) = match self.kernel_request::<ApplyRequest>(channel, request, APPLY) {
-            Ok(bound) => bound,
-            Err(outcome) => return outcome,
-        };
-        let Some(store) = self.receipt_store() else {
-            return refusal(Refusal::Disabled);
-        };
-        let mut store = store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match store.apply(Instant::now(), &parsed.preparation_id, &parsed.context) {
-            Ok(Ok(ApplyOutcome::Forwarded {
-                forwarded_identity,
-                action,
-                edit_bytes,
-            })) => response(json!({
-                "kind": "forwarded",
-                "preparation_id": parsed.preparation_id,
-                "forwarded_identity": forwarded_identity,
-                "action": action.code(),
-                "edit_bytes": edit_bytes,
-            })),
-            Ok(Ok(ApplyOutcome::InFlight { forwarded_identity })) => response(json!({
-                "kind": "receipt",
-                "state": "in_flight",
-                "forwarded_identity": forwarded_identity,
-            })),
-            Ok(Ok(ApplyOutcome::Complete { outcome })) => response(json!({
-                "kind": "receipt",
-                "state": "complete",
-                "outcome": outcome.code(),
-            })),
-            Ok(Ok(ApplyOutcome::Unknown)) => {
-                response(json!({ "kind": "receipt", "state": "unknown" }))
-            }
-            Ok(Err(refused)) => refusal(refused),
-            Err(identity) => identity_refusal(APPLY, identity),
-        }
+        self.with_receipts(
+            channel,
+            request,
+            APPLY,
+            |store, parsed: ApplyRequest| match store.apply(
+                Instant::now(),
+                &parsed.preparation_id,
+                &parsed.context,
+            ) {
+                Ok(ApplyOutcome::Forwarded {
+                    forwarded_identity,
+                    action,
+                    edit_bytes,
+                }) => response(json!({
+                    "kind": "forwarded",
+                    "preparation_id": parsed.preparation_id,
+                    "forwarded_identity": forwarded_identity,
+                    "action": action.code(),
+                    "edit_bytes": edit_bytes,
+                })),
+                Ok(ApplyOutcome::InFlight { forwarded_identity }) => response(json!({
+                    "kind": "receipt",
+                    "state": "in_flight",
+                    "forwarded_identity": forwarded_identity,
+                })),
+                Ok(ApplyOutcome::Complete { outcome }) => response(json!({
+                    "kind": "receipt",
+                    "state": "complete",
+                    "outcome": outcome.code(),
+                })),
+                Ok(ApplyOutcome::Unknown) => {
+                    response(json!({ "kind": "receipt", "state": "unknown" }))
+                }
+                Err(ApplyRefusal::Refused(refused)) => refusal(refused),
+                Err(ApplyRefusal::Invalid(identity)) => identity_refusal(APPLY, identity),
+            },
+        )
     }
 
     pub(crate) fn handle_retrieval_confirm(
@@ -635,33 +709,135 @@ impl HandlerCore {
         channel: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
-        let (_scope, parsed) =
-            match self.kernel_request::<ConfirmRequest>(channel, request, CONFIRM) {
-                Ok(bound) => bound,
-                Err(outcome) => return outcome,
-            };
-        let Some(store) = self.receipt_store() else {
-            return refusal(Refusal::Disabled);
-        };
-        let mut store = store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match store.confirm(
-            Instant::now(),
-            &parsed.preparation_id,
-            &parsed.forwarded_identity,
-            parsed.applied_identity.as_deref(),
-            parsed.outcome,
-        ) {
-            Ok(ConfirmOutcome::Complete { outcome }) => response(json!({
-                "kind": "receipt",
-                "state": "complete",
-                "outcome": outcome.code(),
-            })),
-            Ok(ConfirmOutcome::Unknown) => {
-                response(json!({ "kind": "receipt", "state": "unknown" }))
-            }
-            Err(refused) => refusal(refused),
+        self.with_receipts(
+            channel,
+            request,
+            CONFIRM,
+            |store, parsed: ConfirmRequest| match store.confirm(
+                Instant::now(),
+                &parsed.preparation_id,
+                &parsed.forwarded_identity,
+                parsed.applied_identity.as_deref(),
+                parsed.outcome,
+            ) {
+                Ok(ConfirmOutcome::Complete { outcome }) => response(json!({
+                    "kind": "receipt",
+                    "state": "complete",
+                    "outcome": outcome.code(),
+                })),
+                Ok(ConfirmOutcome::Unknown) => {
+                    response(json!({ "kind": "receipt", "state": "unknown" }))
+                }
+                Err(refused) => refusal(refused),
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limits(max_keys: usize, retention: Duration) -> ReceiptLimits {
+        ReceiptLimits {
+            max_keys: NonZeroUsize::new(max_keys).unwrap(),
+            retention,
+            append_allowance_bytes: 100,
+            replacement_capacity_bytes: 100,
         }
+    }
+
+    fn context(revision: &str) -> Context {
+        Context {
+            context_revision: revision.to_string(),
+            representation: "repr".to_string(),
+            spans: Vec::new(),
+            selection: vec!["11".repeat(32)],
+        }
+    }
+
+    fn prepared(store: &mut ReceiptStore, now: Instant) -> String {
+        match store
+            .prepare(now, &context("rev"), Action::Append, "profile", 1)
+            .unwrap()
+        {
+            PrepareOutcome::Prepared(prepared) => prepared.preparation_id,
+            PrepareOutcome::Failure(reason) => panic!("{reason}"),
+        }
+    }
+
+    #[test]
+    fn a_key_expires_by_its_creation_time_not_by_its_last_use() {
+        let start = Instant::now();
+        let mut store = ReceiptStore::new(limits(8, Duration::from_secs(10)), "inc".to_string());
+        let key = prepared(&mut store, start);
+        for step in 1..5 {
+            let now = start + Duration::from_secs(step * 2);
+            assert!(store.apply(now, &key, &context("rev")).is_ok(), "{step}");
+        }
+        assert!(matches!(
+            store.apply(start + Duration::from_secs(10), &key, &context("rev")),
+            Err(ApplyRefusal::Refused(Refusal::ReceiptUnavailable))
+        ));
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete() {
+        let now = Instant::now();
+        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        let key = "other-abc";
+        assert!(matches!(
+            store.apply(now, key, &context("rev")),
+            Ok(ApplyOutcome::Unknown)
+        ));
+        assert!(matches!(
+            store.confirm(now, key, "bogus", Some("bogus"), Outcome::Keep),
+            Ok(ConfirmOutcome::Unknown)
+        ));
+        let identity = "ab".repeat(32);
+        assert!(matches!(
+            store.confirm(
+                now,
+                key,
+                &identity,
+                Some("cd".repeat(32).as_str()),
+                Outcome::Keep
+            ),
+            Ok(ConfirmOutcome::Unknown)
+        ));
+        assert!(matches!(
+            store.confirm(now, key, &identity, Some(&identity), Outcome::Keep),
+            Ok(ConfirmOutcome::Complete {
+                outcome: Outcome::Keep
+            })
+        ));
+        assert!(matches!(
+            store.apply(now, key, &context("rev")),
+            Ok(ApplyOutcome::Complete {
+                outcome: Outcome::Keep
+            })
+        ));
+        assert!(matches!(
+            store.confirm(now, key, &identity, Some(&identity), Outcome::Append),
+            Err(Refusal::Conflict)
+        ));
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn a_full_store_of_in_flight_receipts_refuses_a_new_preparation() {
+        let now = Instant::now();
+        let mut store = ReceiptStore::new(limits(1, RETENTION_FLOOR), "inc".to_string());
+        let key = prepared(&mut store, now);
+        assert!(matches!(
+            store.apply(now, &key, &context("rev")),
+            Ok(ApplyOutcome::Forwarded { .. })
+        ));
+        assert!(matches!(
+            store.prepare(now, &context("rev"), Action::Append, "profile", 1),
+            Ok(PrepareOutcome::Failure("receipt_capacity"))
+        ));
+        assert!(store.holds(&key));
     }
 }

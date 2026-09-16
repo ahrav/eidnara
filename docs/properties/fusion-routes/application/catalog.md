@@ -32,7 +32,14 @@ with the recorded forwarded identity and forwards nothing. Q9: retention has a
 count bound and a time bound enforced separately, the time bound must be at
 least `retention_floor`, the longest supported retry path, and an evicted or
 expired key is refused as `receipt_unavailable`; read-back is a confirm whose
-`applied_identity` equals the forwarded identity the daemon recorded.
+`applied_identity` equals the forwarded identity the daemon recorded, and for
+a key of another incarnation, where no record survives, a confirm whose
+well-formed forwarded and applied identities agree, recorded so the key does
+not fall back to `unknown`. The count bound is enforced when a key is minted:
+the oldest settled receipt makes room and a store of in-flight receipts
+refuses the new preparation with `preparation_failure`/`receipt_capacity`, so
+a read never evicts and an edit that may already be applied is never dropped.
+A limits change keeps the receipts.
 
 ## Reachability and observation contract
 
@@ -113,9 +120,9 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`; `crates/daemon/tests/edit_receipts.rs` `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back` and `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`; `crates/daemon/src/edit_receipts.rs` `a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete`.
 Guarantee: After a daemon restart every key of the prior incarnation is `unknown`, whether it had been forwarded or only prepared; after a lost acknowledgment the key is `unknown`; `unknown` is sticky, forwards nothing on retry, and is reclassified only by a confirm whose applied identity equals the forwarded identity.
-Check: `always` - a forwarded key and a prepared key from a shut-down daemon answer `unknown` on a fresh daemon and again on retry with an empty edit log; a confirm without an applied identity or with another identity leaves `unknown`; a confirm with the exact identity answers `complete`; on one daemon a confirm without an applied identity turns an in-flight receipt `unknown` and the retry forwards nothing. `always` because the incarnation prefix and the state are read on every request.
+Check: `always` - a forwarded key and a prepared key from a shut-down daemon answer `unknown` on a fresh daemon and again on retry with an empty edit log; a confirm without an applied identity, with another identity, or with a malformed one leaves `unknown`; a confirm with the exact identity answers `complete`, later applies read `complete`, and another outcome is `conflict`; on one daemon a confirm without an applied identity turns an in-flight receipt `unknown`, the retry forwards nothing, and a read-back naming another forward or another applied identity is `conflict` because the forwarded identity stays recorded through `unknown`. `always` because the incarnation prefix and the state are read on every request.
 Fault/timing angle: Daemon restart after forward, restart after prepare, lost acknowledgment.
 Required faults and enabling state: A second `KernelDaemon`; a confirm with `applied_identity: null`.
 Confidence: high - [evidence](evidence/apply-unknown-outcome-never-replays-blindly.md).
@@ -145,13 +152,13 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `retention_is_bounded_by_count_and_time_and_an_evicted_key_is_refused`; `crates/daemon/tests/edit_receipts.rs` `the_route_is_disabled_until_an_approved_limit_set_is_installed`.
-Guarantee: Receipts are bounded by a key count and a retention duration enforced separately; a key past either bound is dropped and any later apply or confirm for it is refused as `receipt_unavailable`; a retention shorter than the longest supported retry path is refused at installation; no limit set disables the routes.
-Check: `always` - with `max_keys = 2` a third prepare evicts the first, whose apply and confirm are `receipt_unavailable`; with a 50 ms retention a key is refused after 80 ms; a retention below `retention_floor` is refused by `set_edit_receipt_limits` and the routes stay `disabled`. `always` because the sweep runs on every mutation.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `the_count_bound_evicts_the_oldest_settled_key_and_never_an_in_flight_one` and `the_route_is_disabled_until_an_approved_limit_set_is_installed`; `crates/daemon/src/edit_receipts.rs` `a_key_expires_by_its_creation_time_not_by_its_last_use` and `a_full_store_of_in_flight_receipts_refuses_a_new_preparation`.
+Guarantee: Receipts are bounded by a key count enforced when a key is minted and by a retention measured from creation, not last use, enforced on every access; a key past either bound is dropped and any later apply or confirm for it is refused as `receipt_unavailable`; an in-flight receipt is never evicted for count, so a full store of in-flight receipts refuses the new preparation; a retention shorter than `RETENTION_FLOOR` is refused at installation; no limit set disables the routes.
+Check: `always` - with `max_keys = 2` a third prepare evicts the first, whose apply and confirm are `receipt_unavailable`, the survivors still forward, a fourth prepare over two in-flight receipts is `preparation_failure`/`receipt_capacity`, and a wider limit set keeps the receipts; with synthetic instants a key used every two seconds still expires ten seconds after creation; a retention one millisecond below the floor is refused and the routes stay `disabled`. `always` because expiry runs on every access and the count bound on every mint.
 Fault/timing angle: Time passing; count overflow.
 Required faults and enabling state: Narrow limits installed on a live daemon.
 Confidence: medium - [evidence](evidence/apply-receipt-retention-is-bounded-and-eviction-cannot-authorize-replay.md).
-Parent Q9: retention is bounded below by `retention_floor`, the longest supported retry path; the eviction disposition is refusal, not a tombstone, because a dropped key cannot be told from one never minted.
+Parent Q9: retention is bounded below by `RETENTION_FLOOR`, one route deadline ceiling plus one client retry; the eviction disposition is refusal, not a tombstone, because a dropped key cannot be told from one never minted.
 Existing check: `crates/daemon/tests/kernel_routes.rs` idempotent `kernel.commit` replay tests, status unaudited.
 Impact: An unbounded store would grow with every preparation; an evicted key that replayed would forward a second edit.
 Open questions: None.
@@ -163,7 +170,7 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `outcomes_are_distinct_and_capacity_is_bound_before_preparation`.
 Guarantee: `keep`, `append`, `applied_replacement`, and `preparation_failure` are the only outcomes a confirm may carry and each is distinct on the wire; `unknown` is a receipt state and is refused as an outcome; an empty replacement is prepared, forwarded with zero bytes, and confirmed as `applied_replacement`.
-Check: `always` - four confirms yield four distinct outcome literals; `applied` and `unknown` are `invalid_params`; a replace with `edit_bytes = 0` forwards and completes as `applied_replacement`. `always` because the outcome enum is closed.
+Check: `always` - four receipts confirmed with the four literals read back through `apply` as exactly those four distinct literals; `applied` and `unknown` are `invalid_params`; a replace with `edit_bytes = 0` forwards and completes as `applied_replacement`. `always` because the outcome enum is closed.
 Fault/timing angle: None.
 Required faults and enabling state: A live daemon with limits installed.
 Confidence: high - [evidence](evidence/apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement.md).

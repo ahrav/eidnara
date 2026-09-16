@@ -16,7 +16,8 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u3c-dense-lane` at
   unapproved retention; the three handlers bind scope through
   `kernel_request` and answer `disabled` without a limit set.
 - `docs/host-wire-protocol.md` Section 7.8 fixes the literals.
-- `crates/daemon/tests/edit_receipts.rs` `retention_is_bounded_by_count_and_time_and_an_evicted_key_is_refused`.
+- `crates/daemon/tests/edit_receipts.rs` `the_count_bound_evicts_the_oldest_settled_key_and_never_an_in_flight_one`.
+- `crates/daemon/src/edit_receipts.rs` `a_key_expires_by_its_creation_time_not_by_its_last_use` and `a_full_store_of_in_flight_receipts_refuses_a_new_preparation`.
 - `crates/daemon/tests/edit_receipts.rs` `the_route_is_disabled_until_an_approved_limit_set_is_installed`.
 
 ## Failure scenario
