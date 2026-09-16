@@ -11,7 +11,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use host_runtime::generation::{
-    GenerationError, GenerationManifest, GenerationStore, ManifestFile, StageMeta, VECTOR_TARGET,
+    GenerationError, GenerationManifest, GenerationStore, ManifestFile, StageMeta,
     ValidatedGeneration,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
@@ -26,14 +26,23 @@ use sha2::{Digest, Sha256};
 use crate::projection_gates::{Admission, Denial, HookGate, InvalidationIdentity};
 use crate::search_seed::manifest_sources;
 
+/// The manifest target of one vector layer: a base or a delta of original rows, codes, and scales.
+pub const VECTOR_TARGET: &str = "vector-generation";
 pub const ROWS_FILE: &str = "rows.f32";
 pub const CODES_FILE: &str = "codes.int8";
 pub const SCALES_FILE: &str = "scales.f32";
 pub const ROW_IDS_FILE: &str = "row-ids.json";
+pub const TOMBSTONES_FILE: &str = "tombstones.json";
 pub const SIDECAR_FILE: &str = "vector-sidecar.json";
 pub const SIDECAR_SCHEMA: u32 = 1;
 /// Every file the sidecar inventories, in the order the build writes them.
-const PAYLOAD_FILES: [&str; 4] = [ROWS_FILE, CODES_FILE, SCALES_FILE, ROW_IDS_FILE];
+const PAYLOAD_FILES: [&str; 5] = [
+    ROWS_FILE,
+    CODES_FILE,
+    SCALES_FILE,
+    ROW_IDS_FILE,
+    TOMBSTONES_FILE,
+];
 /// The disk limit the admission manifest names for staged bytes; the vector build charges its whole inventory against it.
 const STAGE_DISK_LIMIT: &str = "capture_disk_bytes";
 
@@ -65,6 +74,7 @@ pub struct VectorSidecar {
     pub checkpoint_commit_seq: i64,
     pub hold_id: String,
     pub rows: u64,
+    pub tombstones: u64,
     pub files: Vec<SidecarFile>,
 }
 
@@ -93,30 +103,20 @@ impl VectorSidecar {
         }
     }
 
-    fn inventories_exactly(&self, paths: &[&str]) -> bool {
-        self.files.len() == paths.len()
+    fn inventories_exactly(&self) -> bool {
+        self.files.len() == PAYLOAD_FILES.len()
             && self
                 .files
                 .iter()
-                .zip(paths)
-                .all(|(file, path)| file.path == *path)
+                .zip(PAYLOAD_FILES)
+                .all(|(file, path)| file.path == path)
     }
 
     /// The compatibility identity's digest fills the contract slot, the sidecar's hash the inputs slot, and the row artifact's hash the payload slot; no release contract or inputs lock exists for a vector generation.
     pub fn stage_meta(&self) -> StageMeta {
-        let compatibility = serde_json::to_vec(&[
-            serde_json::Value::from(self.embedding_model.as_str()),
-            serde_json::Value::from(self.tokenizer_fingerprint.as_str()),
-            serde_json::Value::from(self.vector_dimension),
-            serde_json::Value::from(self.metric.as_str()),
-            serde_json::Value::from(self.unit_norm_tolerance.to_bits()),
-            serde_json::Value::from(self.quantizer_recipe.as_str()),
-            serde_json::Value::from(self.generation_epoch),
-        ])
-        .expect("identity serialization cannot fail");
         StageMeta {
             target: VECTOR_TARGET.to_owned(),
-            release_contract_sha256: sha256_hex(&compatibility),
+            release_contract_sha256: VectorIdentity::from_sidecar(self).compatibility_sha256(),
             inputs_lock_sha256: self.sha256(),
             source_payload_manifest_sha256: self
                 .files
@@ -149,6 +149,101 @@ impl VectorSidecar {
     }
 }
 
+/// The compatibility identity every layer and composition carries: what must agree before two artifacts share a metric space. Metric and recipe are their textual names, which `Metric::name` and `ScalarRecipe::id` map to one to one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorIdentity {
+    pub embedding_model: String,
+    pub tokenizer_fingerprint: String,
+    pub vector_dimension: u32,
+    pub metric: String,
+    pub unit_norm_tolerance_bits: u64,
+    pub quantizer_recipe: String,
+    pub generation_epoch: u64,
+    pub kernel_incarnation_id: String,
+}
+
+impl VectorIdentity {
+    pub fn from_expected(expected: &ExpectedVectors<'_>) -> Self {
+        Self {
+            embedding_model: expected.generation.embedding_model.clone(),
+            tokenizer_fingerprint: expected.generation.tokenizer_fingerprint.clone(),
+            vector_dimension: expected.generation.vector_dimension,
+            metric: expected.metric.name().to_owned(),
+            unit_norm_tolerance_bits: expected.unit_norm_tolerance.to_bits(),
+            quantizer_recipe: expected.recipe.id().to_owned(),
+            generation_epoch: expected.generation.generation_epoch,
+            kernel_incarnation_id: expected.kernel_incarnation_id.to_owned(),
+        }
+    }
+
+    pub fn from_sidecar(sidecar: &VectorSidecar) -> Self {
+        Self {
+            embedding_model: sidecar.embedding_model.clone(),
+            tokenizer_fingerprint: sidecar.tokenizer_fingerprint.clone(),
+            vector_dimension: sidecar.vector_dimension,
+            metric: sidecar.metric.clone(),
+            unit_norm_tolerance_bits: sidecar.unit_norm_tolerance.to_bits(),
+            quantizer_recipe: sidecar.quantizer_recipe.clone(),
+            generation_epoch: sidecar.generation_epoch,
+            kernel_incarnation_id: sidecar.kernel_incarnation_id.clone(),
+        }
+    }
+
+    /// The first field on which `self` and `other` disagree, in the order the fields are declared.
+    pub fn first_mismatch(&self, other: &Self) -> Option<&'static str> {
+        let checks: [(&'static str, bool); 8] = [
+            (
+                "embedding_model",
+                self.embedding_model == other.embedding_model,
+            ),
+            (
+                "tokenizer_fingerprint",
+                self.tokenizer_fingerprint == other.tokenizer_fingerprint,
+            ),
+            (
+                "vector_dimension",
+                self.vector_dimension == other.vector_dimension,
+            ),
+            ("metric", self.metric == other.metric),
+            (
+                "unit_norm_tolerance",
+                self.unit_norm_tolerance_bits == other.unit_norm_tolerance_bits,
+            ),
+            (
+                "quantizer_recipe",
+                self.quantizer_recipe == other.quantizer_recipe,
+            ),
+            (
+                "generation_epoch",
+                self.generation_epoch == other.generation_epoch,
+            ),
+            (
+                "kernel_incarnation_id",
+                self.kernel_incarnation_id == other.kernel_incarnation_id,
+            ),
+        ];
+        checks
+            .into_iter()
+            .find(|(_, holds)| !holds)
+            .map(|(field, _)| field)
+    }
+
+    /// The digest of the fields that decide compatibility, for a manifest's contract slot; the kernel incarnation is provenance, not compatibility, and stays out.
+    pub fn compatibility_sha256(&self) -> String {
+        let fields = serde_json::to_vec(&[
+            serde_json::Value::from(self.embedding_model.as_str()),
+            serde_json::Value::from(self.tokenizer_fingerprint.as_str()),
+            serde_json::Value::from(self.vector_dimension),
+            serde_json::Value::from(self.metric.as_str()),
+            serde_json::Value::from(self.unit_norm_tolerance_bits),
+            serde_json::Value::from(self.quantizer_recipe.as_str()),
+            serde_json::Value::from(self.generation_epoch),
+        ])
+        .expect("identity serialization cannot fail");
+        sha256_hex(&fields)
+    }
+}
+
 /// What a caller expects a generation to carry, compared with the sidecar field by field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpectedVectors<'a> {
@@ -168,7 +263,7 @@ pub enum FileFault {
     RowCount,
     /// The scales are not the calibration of the rows, or the sidecar's provenance does not name them.
     Calibration,
-    /// The identifiers do not number the rows in strictly increasing order.
+    /// The identifiers do not number the rows in strictly increasing order, or the tombstones are not as many as declared, strictly increasing, and disjoint from them.
     Identifiers,
     /// The codes are not the rows encoded under the scales.
     Codes,
@@ -184,6 +279,10 @@ pub enum VectorRefusal {
     NoRows,
     #[error("row {index} is out of identifier order or repeats a row")]
     RowOrder { index: usize },
+    #[error("tombstone {index} is out of identifier order or repeats a tombstone")]
+    TombstoneOrder { index: usize },
+    #[error("row {index} is both listed and tombstoned by the layer")]
+    ListedAndTombstoned { index: usize },
     #[error("original rows: {0}")]
     Rows(codec::ArtifactRejection),
     #[error("calibration: {0}")]
@@ -232,14 +331,14 @@ impl BuiltVectors {
     }
 }
 
-/// Writes rows, codes, scales, and identifiers under `work_dir` and describes them in a sidecar bound to `expected` and the export's generation, kernel incarnation, and checkpoint.
+/// Writes rows, codes, scales, identifiers, and tombstones under `work_dir` and describes them in a sidecar bound to `expected` and the export's generation, kernel incarnation, and checkpoint.
 /// The export names the generation, kernel, and checkpoint it read the rows under; a disagreement with `expected` is refused rather than stamped, so the sidecar's provenance is the rows' provenance.
-/// Rows must arrive in strictly increasing identifier order so the artifact, the codes, and the identifier list agree on row numbering across builds.
+/// Rows and tombstones must arrive in strictly increasing identifier order, and no occurrence may be both, so the artifact, the codes, the identifier list, and the resolver agree on what the layer says across builds.
 /// Files are created exclusively and never synced: the store copies and syncs them when it stages, so the work directory is scratch, and a retry needs a fresh one.
 ///
 /// # Errors
 ///
-/// An export of another generation, kernel, or named checkpoint, no rows, rows out of order, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
+/// An export of another generation, kernel, or named checkpoint, no rows, rows or tombstones out of order, an occurrence both listed and tombstoned, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
 pub fn build(
     expected: &ExpectedVectors<'_>,
     export: &LiveRows,
@@ -254,6 +353,21 @@ pub fn build(
         (1..rows.len()).find(|i| rows[*i - 1].occurrence_id >= rows[*i].occurrence_id)
     {
         return Err(VectorRefusal::RowOrder { index });
+    }
+    let tombstones = &export.tombstones;
+    if let Some(index) = (1..tombstones.len()).find(|i| tombstones[*i - 1] >= tombstones[*i]) {
+        return Err(VectorRefusal::TombstoneOrder { index });
+    }
+    if let Some(index) = rows
+        .iter()
+        .position(|row| tombstones.binary_search(&row.occurrence_id).is_ok())
+    {
+        return Err(VectorRefusal::ListedAndTombstoned { index });
+    }
+    if export.checkpoint.snapshot_commit_seq > export.checkpoint.checkpoint_commit_seq {
+        return Err(VectorRefusal::Identity {
+            field: "checkpoint",
+        });
     }
     let layout = RowLayout {
         dimension: expected.generation.vector_dimension,
@@ -274,6 +388,7 @@ pub fn build(
         codes,
         calibration.scales.encode(),
         serde_json::to_vec(&ids).expect("identifier serialization cannot fail"),
+        serde_json::to_vec(tombstones).expect("identifier serialization cannot fail"),
     ];
     let mut inventory = Vec::with_capacity(payloads.len());
     for (path, bytes) in PAYLOAD_FILES.iter().zip(&payloads) {
@@ -301,6 +416,7 @@ pub fn build(
         checkpoint_commit_seq: export.checkpoint.checkpoint_commit_seq,
         hold_id: export.checkpoint.hold_id.clone(),
         rows: rows.len() as u64,
+        tombstones: tombstones.len() as u64,
         files: inventory,
     };
     write_new(&work_dir.join(SIDECAR_FILE), &sidecar.canonical_bytes())?;
@@ -310,23 +426,55 @@ pub fn build(
     })
 }
 
-/// Stages a build into `store` after the admission gate accepts its whole inventory against the staged-bytes limit; a refused admission stages nothing.
+/// Everything a stager needs from the lifecycle and the admission gate. `transaction` is the caller's exclusive hold on the store's transaction lock; hold it until the digest is pinned or protected.
+pub struct Staging<'a> {
+    pub store: &'a GenerationStore,
+    pub transaction: &'a LifecycleTransactionLock,
+    pub gate: &'a HookGate,
+    pub admission: &'a Admission,
+    pub identity: &'a ProjectionIdentity,
+    /// Digests a corrupt same-digest target may never be exchange-repaired over.
+    pub protected: &'a BTreeSet<String>,
+}
+
+impl Staging<'_> {
+    /// Charges the manifest's whole inventory against the staged-bytes limit, then stages the files `resolve` names for each manifest path; a refused admission stages nothing.
+    ///
+    /// # Errors
+    ///
+    /// An admission denial or the store's refusal.
+    pub(crate) fn stage_manifest(
+        &self,
+        manifest: &GenerationManifest,
+        meta: &StageMeta,
+        resolve: impl Fn(&str) -> PathBuf,
+    ) -> Result<String, VectorRefusal> {
+        let bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
+        self.gate
+            .check_limits(
+                self.admission,
+                &InvalidationIdentity::from(self.identity),
+                &[(STAGE_DISK_LIMIT, bytes)],
+            )
+            .map_err(VectorRefusal::Admission)?;
+        let sources = manifest_sources(manifest, |path| Some(resolve(path)))
+            .expect("every manifest path resolves under the work directory");
+        let digest = self.store.stage(&sources, meta, self.protected)?;
+        // The store checked every source against the manifest's size and hash, so the digest it returns is the manifest's.
+        debug_assert_eq!(digest, manifest.digest());
+        Ok(digest)
+    }
+}
+
+/// Stages a build through `staging`.
 /// The build's provenance must be the identity the admission is bound to: a sidecar for another model, tokenizer, dimension, epoch, or kernel incarnation is refused before the gate is consulted, so no generation is published under another identity's evidence and none is published that `verify` under this identity would refuse.
-/// `_transaction` is the caller's exclusive hold on the store's transaction lock; hold it until the digest is pinned or protected.
 ///
 /// # Errors
 ///
 /// A build of another identity, an admission denial, or the store's refusal.
-pub fn stage(
-    built: &BuiltVectors,
-    store: &GenerationStore,
-    _transaction: &LifecycleTransactionLock,
-    gate: &HookGate,
-    admission: &Admission,
-    identity: &ProjectionIdentity,
-    protected: &BTreeSet<String>,
-) -> Result<String, VectorRefusal> {
+pub fn stage(built: &BuiltVectors, staging: &Staging<'_>) -> Result<String, VectorRefusal> {
     let sidecar = &built.sidecar;
+    let identity = staging.identity;
     let field = |field| VectorRefusal::Identity { field };
     if sidecar.embedding_model != identity.embedding_model {
         return Err(field("embedding_model"));
@@ -343,20 +491,9 @@ pub fn stage(
     if sidecar.kernel_incarnation_id != identity.kernel_incarnation_id {
         return Err(field("kernel_incarnation_id"));
     }
-    let manifest = sidecar.stage_manifest();
-    let bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
-    gate.check_limits(
-        admission,
-        &InvalidationIdentity::from(identity),
-        &[(STAGE_DISK_LIMIT, bytes)],
-    )
-    .map_err(VectorRefusal::Admission)?;
-    let sources = manifest_sources(&manifest, |path| Some(built.dir.join(path)))
-        .expect("every manifest path resolves under the work directory");
-    let digest = store.stage(&sources, &built.sidecar.stage_meta(), protected)?;
-    // The store checked every source against the manifest's size and hash, so the digest it returns is the manifest's.
-    debug_assert_eq!(digest, manifest.digest());
-    Ok(digest)
+    staging.stage_manifest(&sidecar.stage_manifest(), &sidecar.stage_meta(), |path| {
+        built.dir.join(path)
+    })
 }
 
 /// A generation whose files, sidecar, and meaning were all checked.
@@ -404,7 +541,7 @@ pub fn verify(
             max: max_bytes,
         });
     }
-    let sidecar_bytes = read_verified(&generation, SIDECAR_FILE)?;
+    let sidecar_bytes = generation.read_verified_file(SIDECAR_FILE)?;
     let sidecar: VectorSidecar =
         serde_json::from_slice(&sidecar_bytes).map_err(|_| VectorRefusal::NotVectors("sidecar"))?;
     if sidecar.schema != SIDECAR_SCHEMA {
@@ -413,7 +550,7 @@ pub fn verify(
     if sidecar.canonical_bytes() != sidecar_bytes {
         return Err(VectorRefusal::NotVectors("sidecar not canonical"));
     }
-    if !sidecar.inventories_exactly(&PAYLOAD_FILES) {
+    if !sidecar.inventories_exactly() {
         return Err(VectorRefusal::NotVectors("inventory"));
     }
     if sidecar.stage_manifest() != *manifest {
@@ -432,7 +569,7 @@ pub fn verify(
         metric: expected.metric,
         unit_norm_tolerance: sidecar.unit_norm_tolerance,
     };
-    let rows = codec::decode_rows(&read_verified(&generation, ROWS_FILE)?, &layout)
+    let rows = codec::decode_rows(&generation.read_verified_file(ROWS_FILE)?, &layout)
         .map_err(VectorRefusal::Rows)?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
     if rows.rows.len() as u64 != sidecar.rows {
@@ -441,21 +578,30 @@ pub fn verify(
     let vectors = rows.rows.iter().map(Vec::as_slice);
     let calibration =
         scalar::calibrate(&layout, vectors.clone()).map_err(VectorRefusal::Calibration)?;
-    let scales_bytes = read_verified(&generation, SCALES_FILE)?;
+    let scales_bytes = generation.read_verified_file(SCALES_FILE)?;
     if calibration.scales.encode() != scales_bytes
         || calibration.identity.calibrated_rows != sidecar.calibrated_rows
         || sha256_hex(&scales_bytes) != sidecar.scales_sha256
     {
         return Err(fault(SCALES_FILE, FileFault::Calibration));
     }
-    let ids: Vec<String> = serde_json::from_slice(&read_verified(&generation, ROW_IDS_FILE)?)
+    let ids: Vec<String> = serde_json::from_slice(&generation.read_verified_file(ROW_IDS_FILE)?)
         .map_err(|_| fault(ROW_IDS_FILE, FileFault::Identifiers))?;
     if ids.len() != rows.rows.len() || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(fault(ROW_IDS_FILE, FileFault::Identifiers));
     }
+    let tombstones: Vec<String> =
+        serde_json::from_slice(&generation.read_verified_file(TOMBSTONES_FILE)?)
+            .map_err(|_| fault(TOMBSTONES_FILE, FileFault::Identifiers))?;
+    if tombstones.len() as u64 != sidecar.tombstones
+        || tombstones.windows(2).any(|pair| pair[0] >= pair[1])
+        || ids.iter().any(|id| tombstones.binary_search(id).is_ok())
+    {
+        return Err(fault(TOMBSTONES_FILE, FileFault::Identifiers));
+    }
     let codes = encode_all(&layout, &calibration.scales, vectors)
         .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
-    if read_verified(&generation, CODES_FILE)? != codes {
+    if generation.read_verified_file(CODES_FILE)? != codes {
         return Err(fault(CODES_FILE, FileFault::Codes));
     }
     Ok(VerifiedVectors {
@@ -500,40 +646,28 @@ fn check_identity(
     sidecar: &VectorSidecar,
     expected: &ExpectedVectors<'_>,
 ) -> Result<(), VectorRefusal> {
-    let generation = expected.generation;
-    let field = |field| VectorRefusal::Identity { field };
-    if sidecar.embedding_model != generation.embedding_model {
-        return Err(field("embedding_model"));
+    if let Some(field) = VectorIdentity::from_sidecar(sidecar)
+        .first_mismatch(&VectorIdentity::from_expected(expected))
+    {
+        return Err(VectorRefusal::Identity { field });
     }
-    if sidecar.tokenizer_fingerprint != generation.tokenizer_fingerprint {
-        return Err(field("tokenizer_fingerprint"));
-    }
-    if sidecar.vector_dimension != generation.vector_dimension {
-        return Err(field("vector_dimension"));
-    }
-    if Metric::from_name(&sidecar.metric) != Some(expected.metric) {
-        return Err(field("metric"));
-    }
-    if sidecar.unit_norm_tolerance.to_bits() != expected.unit_norm_tolerance.to_bits() {
-        return Err(field("unit_norm_tolerance"));
-    }
-    if ScalarRecipe::from_id(&sidecar.quantizer_recipe) != Some(expected.recipe) {
-        return Err(field("quantizer_recipe"));
-    }
-    if sidecar.generation_id != generation.generation_id {
-        return Err(field("generation_id"));
-    }
-    if sidecar.generation_epoch != generation.generation_epoch {
-        return Err(field("generation_epoch"));
-    }
-    if sidecar.kernel_incarnation_id != expected.kernel_incarnation_id {
-        return Err(field("kernel_incarnation_id"));
+    if sidecar.generation_id != expected.generation.generation_id {
+        return Err(VectorRefusal::Identity {
+            field: "generation_id",
+        });
     }
     if expected
         .checkpoint
         .is_some_and(|checkpoint| sidecar.checkpoint() != *checkpoint)
     {
-        return Err(field("checkpoint"));
+        return Err(VectorRefusal::Identity {
+            field: "checkpoint",
+        });
+    }
+    if sidecar.snapshot_commit_seq > sidecar.checkpoint_commit_seq {
+        return Err(VectorRefusal::Identity {
+            field: "checkpoint",
+        });
     }
     Ok(())
 }
@@ -553,20 +687,8 @@ fn encode_all<'a>(
     Ok(codes)
 }
 
-fn read_verified(
-    generation: &ValidatedGeneration,
-    path: &'static str,
-) -> Result<Vec<u8>, VectorRefusal> {
-    let fd = generation.open_verified_file(path)?;
-    let mut file = fs::File::from(fd);
-    let mut bytes = Vec::new();
-    io::Read::read_to_end(&mut file, &mut bytes)
-        .map_err(|error| VectorRefusal::Io(error.kind().to_string()))?;
-    Ok(bytes)
-}
-
 /// `O_EXCL` so a build never overwrites a file another build left behind.
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> {
     let io = |error: io::Error| VectorRefusal::Io(error.kind().to_string());
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -578,6 +700,6 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), VectorRefusal> {
     file.write_all(bytes).map_err(io)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }

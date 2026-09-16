@@ -1,6 +1,7 @@
 //! Walks every live occurrence whose class requires a vector in occurrence identifier order through bounded keyset pages, inside the caller's read transaction.
 //! Each page is decoded and validated, judged for canonical eligibility in one kernel batch, scored, and offered to a bounded top-K; the top-K is re-judged once before return.
 //! A live required row without a vector is a coverage shortfall, so the result is incomplete even when every scored row was eligible; a kernel snapshot or incarnation that moves between batches ends the walk the same way.
+//! The walk itself is shared: a `RowSource` supplies the page query and the vector of each visited row, so the oracle reads `occurrence_vectors` and the layered ranking reads resolved layer rows through one judgment, admission, and revalidation path.
 
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
@@ -47,13 +48,69 @@ pub struct ExhaustiveQuery<'a> {
     pub bounds: OracleBounds,
 }
 
-impl ExhaustiveQuery<'_> {
-    fn layout(&self) -> RowLayout {
-        RowLayout {
-            dimension: self.generation.vector_dimension,
-            metric: self.metric,
-            unit_norm_tolerance: self.unit_norm_tolerance,
+impl<'a> ExhaustiveQuery<'a> {
+    fn walk(&self) -> Walk<'a> {
+        Walk {
+            generation: self.generation,
+            layout: RowLayout {
+                dimension: self.generation.vector_dimension,
+                metric: self.metric,
+                unit_norm_tolerance: self.unit_norm_tolerance,
+            },
+            query: self.query,
+            authority: self.authority,
+            bounds: self.bounds,
         }
+    }
+}
+
+/// What every walk needs of a request, whichever source supplies the rows.
+pub(super) struct Walk<'a> {
+    pub generation: &'a VectorGeneration,
+    pub layout: RowLayout,
+    pub query: &'a [f32],
+    pub authority: Authority<'a>,
+    pub bounds: OracleBounds,
+}
+
+/// Supplies the live required rows in identifier order and the vector each carries.
+pub(super) trait RowSource {
+    /// The page query, in the shape [`read_page`] documents.
+    fn page_sql(&self) -> &str;
+
+    /// The validated vector of a visited row, or `None` when the source holds none for it.
+    fn vector(
+        &mut self,
+        row: &PageRow,
+        layout: &RowLayout,
+    ) -> Result<Option<Vec<f32>>, OracleRefusal>;
+
+    /// Runs after every page whose rows were all visited, with whether rows remain past it.
+    fn after_page(&mut self, _more: bool) {}
+}
+
+/// The projection's own `occurrence_vectors` of the generation.
+struct StoredVectors;
+
+impl RowSource for StoredVectors {
+    fn page_sql(&self) -> &str {
+        &PAGE_SQL
+    }
+
+    fn vector(
+        &mut self,
+        row: &PageRow,
+        layout: &RowLayout,
+    ) -> Result<Option<Vec<f32>>, OracleRefusal> {
+        row.stored
+            .as_deref()
+            .map(|bytes| {
+                codec::decode(bytes, layout).map_err(|rejection| OracleRefusal::StoredRow {
+                    occurrence_id: row.candidate.occurrence_id.clone(),
+                    rejection,
+                })
+            })
+            .transpose()
     }
 }
 
@@ -147,20 +204,27 @@ pub enum Window<'a> {
     BeforeRevalidation,
 }
 
-struct PageRow {
-    candidate: OccurrenceCandidate,
-    vector: Option<Vec<u8>>,
-    pending: bool,
+pub(super) struct PageRow {
+    pub candidate: OccurrenceCandidate,
+    /// The projection's stored vector bytes, when the page query selects them.
+    pub stored: Option<Vec<u8>>,
+    /// Durable work for the row's vector is still open.
+    pub pending: bool,
 }
+
+/// The quoted codes of every class that requires a vector, for an SQL `IN` list.
+pub(super) static DENSE_CLASSES: LazyLock<String> = LazyLock::new(|| {
+    OccurrenceClass::ALL
+        .into_iter()
+        .filter(|class| dense_eligible(*class))
+        .map(|class| format!("'{}'", class.code()))
+        .collect::<Vec<_>>()
+        .join(",")
+});
 
 /// One keyset over the primary key covers every dense class, so no page sorts a class and visit order equals identifier order.
 /// The unary `+` on `o.class` keeps the planner off the class index, which would sort the whole class on every page.
 static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
-    let classes: Vec<String> = OccurrenceClass::ALL
-        .into_iter()
-        .filter(|class| dense_eligible(*class))
-        .map(|class| format!("'{}'", class.code()))
-        .collect();
     format!(
         "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest,v.vector,
                 CASE WHEN v.vector IS NULL THEN {CURRENT_PENDING} ELSE 0 END
@@ -170,7 +234,7 @@ static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
          WHERE t.occurrence_id IS NULL AND +o.class IN ({}) AND o.occurrence_id>?2
          ORDER BY o.occurrence_id
          LIMIT ?3",
-        classes.join(",")
+        *DENSE_CLASSES
     )
 });
 
@@ -184,7 +248,14 @@ pub fn exhaustive(
     request: &ExhaustiveQuery<'_>,
     budget: &EvalBudget,
 ) -> Result<ExhaustiveRanking, OracleRefusal> {
-    exhaustive_inner(conn, kernel, request, budget, |_| {})
+    walk(
+        conn,
+        kernel,
+        &request.walk(),
+        budget,
+        &mut StoredVectors,
+        |_| {},
+    )
 }
 
 /// `hook` runs before each visited row is decoded, after every page, and once before the final re-judgment, so a test can change the kernel or the budget in those windows.
@@ -196,14 +267,23 @@ pub fn exhaustive_with_hook_for_test(
     budget: &EvalBudget,
     hook: impl FnMut(Window<'_>),
 ) -> Result<ExhaustiveRanking, OracleRefusal> {
-    exhaustive_inner(conn, kernel, request, budget, hook)
+    walk(
+        conn,
+        kernel,
+        &request.walk(),
+        budget,
+        &mut StoredVectors,
+        hook,
+    )
 }
 
-fn exhaustive_inner(
+/// Walks `source`'s live required rows under `request`'s bounds; see [`exhaustive`] for the result's meaning.
+pub(super) fn walk(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
-    request: &ExhaustiveQuery<'_>,
+    request: &Walk<'_>,
     budget: &EvalBudget,
+    source: &mut impl RowSource,
     mut hook: impl FnMut(Window<'_>),
 ) -> Result<ExhaustiveRanking, OracleRefusal> {
     budget.check().map_err(|_| OracleRefusal::BudgetExhausted)?;
@@ -213,7 +293,7 @@ fn exhaustive_inner(
             return Err(OracleRefusal::BatchOverBound { bound, value });
         }
     }
-    let layout = request.layout();
+    let layout = request.layout;
     layout.check().map_err(OracleRefusal::Query)?;
     codec::validate(request.query, &layout).map_err(OracleRefusal::Query)?;
     crate::vectors::check_generation(conn, request.generation)?;
@@ -238,6 +318,7 @@ fn exhaustive_inner(
             .min(bounds.max_rows.get() - ranking.coverage.required);
         let (page, more) = match read_page(
             conn,
+            source.page_sql(),
             &request.generation.generation_id,
             &after,
             take,
@@ -249,9 +330,12 @@ fn exhaustive_inner(
         };
         if let Some(last) = page.last() {
             after.clone_from(&last.candidate.occurrence_id);
-            let Some(present) = decode_page(page, &layout, budget, &mut ranking, &mut hook)? else {
+            let Some(present) =
+                decode_page(page, &layout, source, budget, &mut ranking, &mut hook)?
+            else {
                 return exhausted(ranking);
             };
+            source.after_page(more);
             let flow = judge_and_score(
                 kernel,
                 request,
@@ -270,6 +354,8 @@ fn exhaustive_inner(
                 ControlFlow::Break(None) => return exhausted(ranking),
                 ControlFlow::Continue(()) => {}
             }
+        } else {
+            source.after_page(more);
         }
         if !more {
             break;
@@ -309,15 +395,17 @@ fn incomplete(ranking: &mut ExhaustiveRanking, reason: IncompleteReason) {
 }
 
 /// Reads one row past `take` to learn whether rows remain without retaining the extra row; `take == 0` is a pure remainder probe.
+/// `sql` selects the seven columns of [`PAGE_SQL`] in that order and binds the generation identifier, the identifier to start after, and the limit as `?1`, `?2`, `?3`.
 fn read_page(
     conn: &GuardedConn<'_>,
+    sql: &str,
     generation_id: &str,
     after: &str,
     take: usize,
     budget: &EvalBudget,
 ) -> Result<(Vec<PageRow>, bool), ScanStop> {
     let limit = i64::try_from(take.saturating_add(1)).unwrap_or(i64::MAX);
-    let mut statement = conn.prepare_cached(&PAGE_SQL)?;
+    let mut statement = conn.prepare_cached(sql)?;
     let mut rows = statement.query(params![generation_id, after, limit])?;
     let mut page = Vec::with_capacity(take);
     while let Some(row) = rows.next()? {
@@ -335,7 +423,7 @@ fn read_page(
                 row.get(3)?,
                 row.get(4)?,
             ),
-            vector: row.get(5)?,
+            stored: row.get(5)?,
             pending: row.get(6)?,
         });
     }
@@ -344,10 +432,11 @@ fn read_page(
 
 type DecodedPage = (Vec<OccurrenceCandidate>, Vec<Vec<f32>>);
 
-/// Every present vector of the page is decoded and validated before any row of it is judged; a missing vector is counted and its row is neither judged nor scored.
+/// Every present vector of the page is obtained and validated before any row of it is judged; a missing vector is counted and its row is neither judged nor scored.
 fn decode_page(
     page: Vec<PageRow>,
     layout: &RowLayout,
+    source: &mut impl RowSource,
     budget: &EvalBudget,
     ranking: &mut ExhaustiveRanking,
     hook: &mut impl FnMut(Window<'_>),
@@ -361,14 +450,8 @@ fn decode_page(
             return Ok(None);
         }
         ranking.coverage.required += 1;
-        match row.vector {
-            Some(bytes) => {
-                let vector = codec::decode(&bytes, layout).map_err(|rejection| {
-                    OracleRefusal::StoredRow {
-                        occurrence_id: row.candidate.occurrence_id.clone(),
-                        rejection,
-                    }
-                })?;
+        match source.vector(&row, layout)? {
+            Some(vector) => {
                 ranking.coverage.with_vector += 1;
                 candidates.push(row.candidate);
                 vectors.push(vector);
@@ -384,7 +467,7 @@ fn decode_page(
 /// A moved authority discards the page's verdicts and stops the walk with its reason; a budget that ends inside the judgment stops it with none, the reason already recorded.
 fn judge_and_score(
     kernel: &KernelStore,
-    request: &ExhaustiveQuery<'_>,
+    request: &Walk<'_>,
     (candidates, vectors): DecodedPage,
     budget: &EvalBudget,
     ranking: &mut ExhaustiveRanking,
@@ -419,7 +502,7 @@ fn judge_and_score(
             let ranked = Ranked {
                 occurrence_id: candidate.occurrence_id.clone(),
                 class: candidate.class,
-                score: score(request.metric, request.query, &vector),
+                score: score(request.layout.metric, request.query, &vector),
             };
             top.offer(ranked, candidate);
         }

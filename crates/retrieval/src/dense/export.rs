@@ -34,6 +34,8 @@ pub struct LiveRows {
     pub kernel_incarnation_id: String,
     pub checkpoint: ProjectionCheckpoint,
     pub rows: Vec<ExportedRow>,
+    /// Occurrences the layer masks in every older layer, in identifier order; a full export of the live population masks none.
+    pub tombstones: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -131,6 +133,7 @@ pub fn live_rows(
         kernel_incarnation_id: kernel_incarnation_id.to_owned(),
         checkpoint,
         rows: exported,
+        tombstones: Vec::new(),
     })
 }
 

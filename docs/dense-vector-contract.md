@@ -1,4 +1,4 @@
-# Original-f32 rows and the exhaustive retrieval oracle
+# Original-f32 rows, the exhaustive retrieval oracle, and layer resolution
 
 Status: proposed contract, implemented in `crates/retrieval/src/dense/`.
 
@@ -236,6 +236,70 @@ here.
 Pinned bytes for a fixed corpus live in `tests/dense_scalar.rs`. A change to
 them is a change to the recipe.
 
+## Layer resolution and the layered ranking
+
+`dense::resolve::resolve` turns one base layer and its ordered deltas into the
+current occurrence set before anything is judged or scored. Each layer carries
+a precedence, the lexicographic pair `(base_epoch, delta_ordinal)`: the base
+is ordinal zero and every member of one composition shares the base epoch,
+which is the composition's generation epoch; the daemon's reader maps the
+composition's base and delta positions onto these ordinals. Resolution is
+newest first. A layer's row for an occurrence wins over every older layer's
+row for it (those are `superseded`); a layer's tombstone hides every older
+row for it (those are `masked`); a newer row after an older tombstone wins,
+since the tombstone is older. The order layers are handed in and the order
+rows sit in a layer decide nothing, and no score is consulted: the winners
+are the same function of the layer contents under every enumeration. Winners
+are returned in occurrence identifier byte order, each naming its layer and
+row, so a scorer that needs a layer's own scales knows which layer the row
+came from.
+
+The resolver refuses, before choosing any winner: no base or more than one;
+two layers of equal precedence; a layer whose base epoch is not the base's; a
+layer whose snapshot or checkpoint moves before the checkpoint of the layer
+before it, or whose snapshot follows its own checkpoint (the same
+conservative reading `compose` uses); a layer naming more or fewer
+occurrences than it holds rows; identifiers or tombstones out of strictly
+increasing order, which also catches repeats; an occurrence a layer both
+lists and tombstones; and more rows and tombstones together than the caller's
+bound. The resolver checks the total from slice lengths before inspecting
+any layer's identifiers or tombstones, so an oversized set cannot consume
+content-validation work. Equal-precedence conflicts are refused, not decided:
+the owners have not chosen a rule, and a refusal is not a default.
+
+`dense::layered::rank_layers` checks the request budget and the layers' epochs
+against the request generation before resolving any layer contents. An ended
+budget refuses as `OracleRefusal::BudgetExhausted`. Resolution is synchronous
+and does not poll the budget; the oracle checks it again before reading the
+projection. If the budget ends while a valid layer set resolves, the oracle
+still refuses because no page has completed. The resolved winners then enter
+the oracle's own walk. The population, visit order, paging, eligibility batches, top-`k`
+admission, final re-judgment, coverage, budget, and completion rules are the
+oracle's without change; only the source of each visited row's vector
+differs. The walk reads the projection's live dense-required rows in
+identifier order and merges them with the winners in the same order: a live
+row whose occurrence has a winner takes the winner's row, validated against
+the layout as a stored row is; a live row with no winner is a dense-coverage
+shortfall, pending or not as the oracle counts it, whether no layer ever held
+it or a newer tombstone masked it; a winner whose occurrence the projection
+no longer lists as live, or whose class requires no vector, is `revoked` and
+never scored, and no older row of its occurrence stands in for it. A walk
+whose last page still had rows after it reports the winners past its last
+visited row as `unvisited` rather than claiming they are live or not; a walk
+that read the last page knows the winners past it are revoked, however the
+walk then ended. Canonical eligibility is judged on winners only, and the
+final re-judgment rejects a winner whose authority moved after admission
+without falling back to any other row of its occurrence. `LayerAccount`
+carries the winner, superseded, masked, revoked, and unvisited counts beside
+the ranking.
+
+The layered ranking reads `occurrences`, `occurrence_tombstones`,
+`embedding_jobs`, and `vector_generations`; it never reads
+`occurrence_vectors` or payload bytes. Row bytes come from the caller's
+layers, which the daemon verifies before handing them over. Scoring mixed
+recipes on int8 codes with each layer's own scales is not part of this
+ranking; the winners name their layer so that a later scorer can do so.
+
 ## The immutable vector generation
 
 `daemon::vector_generation` builds one generation from a
@@ -249,7 +313,7 @@ generation's `(generation_id, occurrence_id)` index in order and never sorts.
 caller's expectation and stamps the sidecar's generation identifier, epoch,
 model, tokenizer fingerprint, and kernel incarnation from the export, so the
 provenance the sidecar records is the state the rows came from. The
-generation is five files staged through the shared `GenerationStore` under
+generation is six files staged through the shared `GenerationStore` under
 target `vector-generation`:
 
 | File | Bytes |
@@ -258,13 +322,20 @@ target `vector-generation`:
 | `codes.int8` | One two's-complement byte per coordinate per row, in the same row order, encoded under the generation's scales. |
 | `scales.f32` | The calibration scales, four little-endian bytes each. |
 | `row-ids.json` | A JSON array of the occurrence identifiers, in row order. |
+| `tombstones.json` | A JSON array of the occurrence identifiers the layer masks in every older layer, in identifier order; empty for a base. |
 | `vector-sidecar.json` | The sidecar, in its canonical byte form. |
 
 The sidecar names every other file by size and SHA-256 and binds the model,
 tokenizer fingerprint, dimension, metric, unit-norm tolerance, quantizer
 recipe, calibrated row count and scales digest, generation identifier and
-epoch, kernel incarnation, and the projection checkpoint the rows were taken
-at. Its hash fills the manifest's inputs slot, the compatibility identity's
+epoch, kernel incarnation, the projection checkpoint the rows were taken at,
+and the row and tombstone counts. A build refuses rows or tombstones out of
+identifier order and an occurrence the layer both lists and tombstones, so a
+layer never contradicts itself. A full export of the live population carries
+no tombstones; a delta export lists the occurrences tombstoned since the layer
+before it. A build still needs at least one row, since the scales are the
+calibration of the rows and calibration over no rows is an open owner
+question, so a delta that only masks cannot be built until that is settled. Its hash fills the manifest's inputs slot, the compatibility identity's
 digest fills the contract slot, and the row artifact's hash fills the payload
 slot, so the generation digest is a function of every declared input and two
 builds over byte-identical inputs yield the same directory name, the same
@@ -273,7 +344,7 @@ bytes, and the same digest. The `GenerationManifest` schema is unchanged.
 Verification (`vector_generation::verify`) does not trust the manifest to
 describe itself. The store checks inventory, sizes, modes, and hashes; the
 verifier then checks that the manifest is a vector manifest, that the sidecar
-bytes are canonical, inventory exactly the four payload files, and hash into
+bytes are canonical, inventory exactly the five payload files, and hash into
 the manifest, that the sidecar's checkpoint is one the projection schema
 could hold (a non-negative snapshot, a checkpoint at or after it, and a hold),
 that every identity field of the sidecar equals the caller's
@@ -283,42 +354,129 @@ checkpoint when the caller names one), and that the payload agrees with
 itself under the recipe: the row artifact holds the declared number of rows,
 recalibrating those rows reproduces the scale bytes and the calibrated row
 count and the scales hash the sidecar records, the identifiers number the
-rows in strictly increasing order, and the codes are exactly the rows encoded
-under the scales. A generation whose hashes were rewritten to match changed
-bytes is refused when the payload itself can reveal the change. The
-identifier list is the one payload no other file derives: a rewrite that
-keeps it the same length and strictly increasing is indistinguishable from
-the original here, so which occurrence each row names is bound by the export
-at the recorded checkpoint, not by verification; the store's owner-only modes
-exclude other users, a same-user writer is trusted, and a caller that needs
-more compares the identifiers with `live_rows` under the sidecar's checkpoint. A
-different model space is refused at an equal dimension.
+rows in strictly increasing order, the tombstones are as many as the sidecar
+says, strictly increasing, and disjoint from the identifiers, and the codes
+are exactly the rows encoded under the scales. A generation whose hashes were
+rewritten to match changed bytes is refused when the payload itself can reveal
+the change. The identifier list is the one payload no other file derives: a
+rewrite that keeps it the same length and strictly increasing is
+indistinguishable from the original here, so which occurrence each row names
+is bound by the export at the recorded checkpoint, not by verification; the
+store's owner-only modes exclude other users, a same-user writer is trusted,
+and a caller that needs more compares the identifiers with `live_rows` under
+the sidecar's checkpoint. A different model space is refused at an equal
+dimension. Verification holds a generation's payload in memory and takes a
+caller byte bound; a manifest whose files total more than it is refused before
+any payload is held. The store's validation has already streamed each file
+through a fixed buffer to check its hash, so the bound limits memory, not I/O.
 
 The vector selector is `vector-profile.json`, beside the host and search
-selectors. `select_vector` refuses a generation whose manifest target is not
-`vector-generation`; the search selector keeps its existing behavior and
-checks no target. Pruning retains every owner-selected generation, discard
-refuses one, and exchange repair refuses to replace one. An owner selector of
-unknown schema is quarantined: it may name any digest, so `prune` removes only
-temps and counts each such selector, `discard_unselected` and exchange repair
-refuse, and selection through that selector refuses, as the search selector
-already did. A corrupt owner selector (malformed bytes, a noncanonical digest,
-or failed security checks) is an error from every path that reads it: `prune`,
-`discard_unselected`, and exchange repair fail before removing anything, and
-selection through it fails. Neither stops staging new bytes or selecting
-through the other selectors: those touch nothing the uncertain selector could
-name, and a host or daemon rolled back to a build that predates the selector's
-schema must still be able to launch and publish. Verification holds a
-generation's payload in memory and takes a caller byte bound; a manifest whose
-files total more than it is refused before any payload is held. The store's
-validation has already streamed each file through a fixed buffer to check its
-hash, so the bound limits memory, not I/O. The store's selection primitive checks
-inventory, sizes, modes, and hashes only; the daemon's semantic verification
-of a generation precedes selection, and selecting or recovering a complete
-composition is a separate contract.
+selectors. It names a composition, never a layer. A layer's manifest target
+is `vector-generation`; a composition's is `vector-composition`, and
+`select_vector` refuses any other; the search selector keeps its existing
+behavior and checks no target. Any generation may list `members.json`, digests the store must retain with
+it: pruning retains every member named by any complete generation in the
+store, so a member outlives every record that names it by one prune pass;
+discard and exchange repair refuse a member of any record; exchange repair
+also refuses to replace a selected record. The store reads only a
+generation's manifest and members file for this, never its payload, so a
+corrupt payload of a selected generation does not stop pruning; a selected or
+pinned generation whose manifest or members file cannot be read, or any
+generation of unknown schema, including one behind a directory mode this
+build rejects, makes the members unknown, and the store then behaves as with
+a quarantined selector: temps only are reclaimed and discard refuses. An owner
+selector of unknown schema is quarantined: it may name any digest, so `prune`
+removes only temps and counts each such selector, `discard_unselected` and
+exchange repair refuse, and selection through that selector refuses, as the
+search selector already did. A corrupt owner selector (malformed bytes, a
+noncanonical digest, or failed security checks) is an error from every path
+that reads it: `prune`, `discard_unselected`, and exchange repair fail before
+removing anything, and selection through it fails. Neither stops staging new
+bytes or selecting through the other selectors: those touch nothing the
+uncertain selector could name, and a host or daemon rolled back to a build
+that predates the selector's schema must still be able to launch and publish.
+The members rule is owner agnostic: a search seed that lists members retains
+them the same way, though no search seed does. The store's selection primitive
+checks inventory, sizes, modes, hashes, the target, and that every listed
+member validates; the daemon's semantic verification of the composition and
+its members precedes selection.
 
 Staging charges the whole payload inventory against the admission manifest's
 `capture_disk_bytes` limit under the caller's admission; a denial stages
 nothing. The build's work directory is scratch: files are created exclusively
 and not synced there, because the store copies and syncs them when it stages,
 and a retry uses a fresh directory.
+
+## The vector composition
+
+`daemon::vector_composition` names one base layer and up to a caller-bounded
+number of ordered delta layers in one immutable composition generation, staged
+through the shared store under target `vector-composition`:
+
+| File | Bytes |
+| --- | --- |
+| `composition.json` | Canonical record: schema, publication sequence, model, tokenizer fingerprint, dimension, metric, tolerance, recipe, epoch, kernel incarnation, base digest, delta digests in application order. |
+| `members.json` | `{"schema":1,"members":[base, deltas...]}`, distinct digests; the lifecycle store reads it to retain every member while the composition is selected. |
+
+`compose` refuses a base whose sidecar counts tombstones, a duplicate member, more deltas than
+the bound, a member whose sidecar does not carry the expectation's identity,
+and a delta whose checkpoint moves backwards from its predecessor's. This is a
+conservative reading of the base/delta checkpoint relation the owners have not
+yet frozen: every delta's snapshot and checkpoint are at or after the
+checkpoint of the layer before it. Equal-precedence conflicts among members
+are not decided here. Base/delta tombstone semantics are those of "Layer
+resolution and the layered ranking" above.
+
+`publish` refuses a sequence at or below the selected composition's, stages
+the composition under the caller's admission, and moves the selector in one
+rename. The sequence gate reads the selected record the same way
+`verify_composition` and `recover` do: a selection whose record is not
+canonical, does not bind to its manifest, or whose generation fails inventory
+validation is not a composition this build accepts, so it sets no sequence
+floor and a repair publication proceeds. A selected record of a schema this
+build does not know refuses publication as `Quarantined`, because it may be a
+later build's selection. It reports how far the attempt got, recorded when each step returns:
+`NotStaged`, `Staged` when staging returned the record's digest, `Acknowledged` when
+the selector rename returned, `Durable` when the containing-directory sync
+returned. A failure carries the last stage reached; a failure at or after
+`Acknowledged` is an unknown outcome, and `reconcile` settles it by reading
+the selector back, syncing its directory, and comparing digests: `Published`
+when it names the attempt, `Other` with whatever it names otherwise,
+`Quarantined` when its schema is unknown. An interrupted publication
+therefore leaves the old complete selection or the new one, never a partial
+or mixed view, and a retry of an acknowledged publication is refused by
+sequence without a second record.
+
+`verify_composition` checks the record's target, schema, canonical bytes,
+manifest binding, agreement with `members.json`, and identity, verifies every
+member with `vector_generation::verify`, and re-checks the topology. A record
+of unknown schema is refused as `Quarantined`, not as a malformed record. It refuses
+an excessive delta count before opening any member, so the caller's delta bound
+limits member-verification work as well as the accepted topology. Each member
+is verified under the caller's per-member byte bound, the one
+`vector_generation::verify` takes; every member's payload is held at once, so
+the memory a verification may hold is that bound times one more than the delta
+bound. `recover` takes the same two bounds.
+`recover` takes the selected composition when it verifies; otherwise it reads
+the manifests of the other generations and, for composition targets, only the
+manifest-listed `composition.json` (hash-checked and capped at 1 MiB). Discovery
+retains the newest `bound` `(sequence, digest)` pairs, not generation descriptors;
+equal sequences use descending digest order. It then fully verifies at most
+those `bound` generations, including inventory and member checks, and takes the
+first that passes. A candidate whose record is readable but whose other files
+are invalid consumes one attempt. Unreadable records are skipped during
+discovery. The directory listing and manifest scan still scale with the store's
+generation count; `bound` is not a bound on that scan or on total bytes in the
+members. Recovery reports the selector as `Stale` or `Absent` rather than
+repointing it. A verifying selection is never displaced by a newer composition
+that was staged but not selected, and no verifying composition within the bound
+means explicit unavailability.
+
+Readers hold a composition the way the store expects: pin the composition
+generation, then open every member, then re-read the selector. While the
+composition record exists, whether pinned or merely not yet reclaimed, its
+members stay retained, so a reader that pinned a superseded composition keeps
+its members after a later publication moves the selector. `recover` does not
+pin the returned composition: its caller must validate and pin the returned
+digest while still holding the lifecycle transaction lock before handing it
+to a reader. Releasing the lock first leaves an unselected fallback reclaimable.

@@ -19,7 +19,10 @@ authorization step. Every retrieval bound is caller-supplied with no default.
 
 `src/dense/` implements `docs/dense-vector-contract.md`. `dense::oracle` reads
 `occurrences`, `occurrence_tombstones`, `occurrence_vectors`,
-`embedding_jobs`, and `vector_generations` only; it never reads payload
-bytes. Every dense bound is caller-supplied with no default. Changing the row
-encoding, the metric, the scoring arithmetic, or the tie order requires the
-matching document edit in the same change.
+`embedding_jobs`, and `vector_generations` only; `dense::layered` reads the
+same tables except `occurrence_vectors`, taking rows from the caller's
+resolved layers; neither reads payload bytes. `dense::resolve` is pure and
+imports no host-runtime or daemon type. Every dense bound is caller-supplied
+with no default. Changing the row encoding, the metric, the scoring
+arithmetic, the tie order, or the layer precedence rule requires the matching
+document edit in the same change.
