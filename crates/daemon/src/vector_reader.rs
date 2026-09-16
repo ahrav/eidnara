@@ -186,10 +186,10 @@ impl RowAccess for PinnedLayer {
 
 /// A complete verified composition held open: the record and every member pinned, every artifact open, and the resident and pinned bytes reserved until the view is dropped. Acquire a view once and share it; acquisition hashes every member and holds the lifecycle's shared lock while it does.
 pub struct PinnedVectors {
-    pub digest: String,
-    pub layout: RowLayout,
+    digest: String,
+    layout: RowLayout,
     /// The base first, then the deltas in application order.
-    pub layers: Vec<PinnedLayer>,
+    layers: Vec<PinnedLayer>,
     _record: ValidatedGeneration,
     _resident: Reservation,
     _pinned: Pinned,
@@ -205,6 +205,24 @@ impl std::fmt::Debug for PinnedVectors {
 }
 
 impl PinnedVectors {
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn layout(&self) -> RowLayout {
+        self.layout
+    }
+
+    /// ```compile_fail,E0616
+    /// use daemon::vector_reader::PinnedVectors;
+    /// fn detach(view: &mut PinnedVectors) {
+    ///     let _layers = std::mem::take(&mut view.layers);
+    /// }
+    /// ```
+    pub fn layers(&self) -> &[PinnedLayer] {
+        &self.layers
+    }
+
     pub fn members(&self) -> Vec<String> {
         self.layers
             .iter()
@@ -379,8 +397,11 @@ pub fn rank(
         })?;
     }
     // The page's decoded rows plus the one raw row being read.
-    let bytes = (request.bounds.page_rows.get() as u64 + 1)
-        .checked_mul(u64::from(view.layout.dimension) * 4)
+    let bytes = u64::try_from(request.bounds.page_rows.get())
+        .ok()
+        .and_then(|rows| rows.checked_add(1))
+        .and_then(|rows| rows.checked_mul(u64::from(view.layout.dimension)))
+        .and_then(|elements| elements.checked_mul(size_of::<f32>() as u64))
         .ok_or(RankRefusal::Scratch {
             bytes: u64::MAX,
             refusal: vector_admission::Refusal::Overflow {

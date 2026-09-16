@@ -607,20 +607,50 @@ pub(crate) fn check_identity(
     sidecar: &VectorSidecar,
     expected: &ExpectedVectors<'_>,
 ) -> Result<(), VectorRefusal> {
-    if let Some(field) = VectorIdentity::from_sidecar(sidecar)
-        .first_mismatch(&VectorIdentity::from_expected(expected))
-    {
+    let generation = expected.generation;
+    let checks = [
+        (
+            "embedding_model",
+            sidecar.embedding_model == generation.embedding_model,
+        ),
+        (
+            "tokenizer_fingerprint",
+            sidecar.tokenizer_fingerprint == generation.tokenizer_fingerprint,
+        ),
+        (
+            "vector_dimension",
+            sidecar.vector_dimension == generation.vector_dimension,
+        ),
+        ("metric", sidecar.metric == expected.metric.name()),
+        (
+            "unit_norm_tolerance",
+            sidecar.unit_norm_tolerance.to_bits() == expected.unit_norm_tolerance.to_bits(),
+        ),
+        (
+            "quantizer_recipe",
+            sidecar.quantizer_recipe == expected.recipe.id(),
+        ),
+        (
+            "generation_epoch",
+            sidecar.generation_epoch == generation.generation_epoch,
+        ),
+        (
+            "kernel_incarnation_id",
+            sidecar.kernel_incarnation_id == expected.kernel_incarnation_id,
+        ),
+        (
+            "generation_id",
+            sidecar.generation_id == generation.generation_id,
+        ),
+    ];
+    if let Some((field, _)) = checks.into_iter().find(|(_, holds)| !holds) {
         return Err(VectorRefusal::Identity { field });
     }
-    if sidecar.generation_id != expected.generation.generation_id {
-        return Err(VectorRefusal::Identity {
-            field: "generation_id",
-        });
-    }
-    if expected
-        .checkpoint
-        .is_some_and(|checkpoint| sidecar.checkpoint() != *checkpoint)
-    {
+    if expected.checkpoint.is_some_and(|checkpoint| {
+        sidecar.snapshot_commit_seq != checkpoint.snapshot_commit_seq
+            || sidecar.checkpoint_commit_seq != checkpoint.checkpoint_commit_seq
+            || sidecar.hold_id != checkpoint.hold_id
+    }) {
         return Err(VectorRefusal::Identity {
             field: "checkpoint",
         });
