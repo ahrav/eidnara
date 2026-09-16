@@ -1472,13 +1472,18 @@ async fn a_submission_whose_row_is_retired_before_its_charge_claims_no_result() 
         Arc::new(|| NOW),
         sender,
     );
-    // The row is retired on the slice thread between the host's acceptance and the charge, so the charge finds it no longer pending.
+    // Tombstone the occurrence after submission so the charge reports `Orphaned`, and read the row there: the sweep slice after the backfill deletes a finished job of a tombstoned occurrence.
     let retire = Arc::clone(&projection);
     let retired_occurrence = occurrence.clone();
-    supervisor.tap_dispatch_events_for_test(move |event| {
-        if matches!(event, DispatchEvent::Submitted { .. }) {
-            tombstone(&retire, &retired_occurrence, 50);
+    let data_home = dir.path().to_path_buf();
+    let at_orphan = Arc::new(std::sync::Mutex::new(None));
+    let captured = Arc::clone(&at_orphan);
+    supervisor.tap_dispatch_events_for_test(move |event| match event {
+        DispatchEvent::Submitted { .. } => tombstone(&retire, &retired_occurrence, 50),
+        DispatchEvent::Orphaned { .. } => {
+            *captured.lock().unwrap() = Some(row(&data_home, &retired_occurrence));
         }
+        _ => {}
     });
     let running = tokio::spawn(Arc::clone(&supervisor).run());
     assert_eq!(
@@ -1490,7 +1495,11 @@ async fn a_submission_whose_row_is_retired_before_its_charge_claims_no_result() 
             dispositions: 0,
         }
     );
-    let retired = row(dir.path(), &occurrence);
+    let retired = at_orphan
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the refused charge reports the submission orphaned");
     assert_eq!(
         (retired.0.as_str(), retired.1, retired.2),
         ("obsolete", 0, None)

@@ -399,6 +399,8 @@ pub(crate) fn state_only(state: KernelOutcome) -> PreparedOutcome {
 pub(crate) struct RouteScope {
     pub(crate) store: Arc<KernelStore>,
     pub(crate) project: ProjectBinding,
+    pub(crate) harness: String,
+    pub(crate) context_capabilities: crate::context_capabilities::LatchedCapabilities,
 }
 
 impl HandlerCore {
@@ -421,7 +423,12 @@ impl HandlerCore {
             )));
         }
         let store = self.kernel.kernel_store().map_err(state_only)?;
-        Ok(RouteScope { store, project })
+        Ok(RouteScope {
+            store,
+            project,
+            harness: binding.harness,
+            context_capabilities: binding.context_capabilities,
+        })
     }
 
     /// Binds the route scope, then parses the request body with the transport

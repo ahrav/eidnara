@@ -300,6 +300,11 @@ impl SearchLifecycleOwner {
         self
     }
 
+    /// The lane the daemon's families are built under; a query embedded by it lives in the same vector space as the stored rows.
+    pub fn embeddings(&self) -> &LocalEmbeddingsComponent {
+        &self.local_embeddings
+    }
+
     pub fn admission(&self) -> &ProjectionAdmission {
         &self.admission
     }

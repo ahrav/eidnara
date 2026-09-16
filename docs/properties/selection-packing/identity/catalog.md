@@ -95,31 +95,38 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `Grouping::derive` is called from
-`crates/retrieval/src/packing.rs` `into_selected` and from
+`crates/retrieval/src/packing.rs` `decode` and from
 `crates/retrieval/tests/packing_identity.rs`; the read itself has no
 production caller at this base (same grep as the first record).
 Status: active
 Exercised: yes - `crates/retrieval/tests/packing_identity.rs`
 `grouping_keys_need_parent_revision_and_representation_together`,
-`classes_outside_the_grouping_set_yield_the_typed_non_grouping_result`, and
-`grouping_refuses_columns_that_disagree_with_the_tuple`.
+`classes_outside_the_grouping_set_yield_the_typed_non_grouping_result`,
+`grouping_refuses_columns_that_disagree_with_the_tuple`, and
+`non_grouping_rows_whose_columns_disagree_with_the_tuple_are_refused`.
 Guarantee: A grouping key is class, parent identity, canonical revision, and
 representation together; occurrences of one parent that differ only in
 revision or only in representation derive unequal keys; a class outside the
 grouping set derives the typed non-grouping result rather than a parent-only
-key; stored columns that disagree with the tuple bytes are refused.
+key; stored columns that disagree with the tuple bytes are refused for every
+class, grouping or not.
 Check: `always` - spans of one tool call at one revision and representation
 derive one key regardless of span; a revision, representation, or tool-call
 change derives another key, and the parent alone matches exactly when only
 revision changed; every class outside `raw_tool_spans` derives
 `Grouping::NonGrouping(class)`; a revision, representation, or span column
-that disagrees with the tuple is refused with `TupleMismatch`; every single
-flipped tuple bit is refused or derives a different key. `always` because the
-key is a pure function of the row on every derivation.
+that disagrees with the tuple is refused with `TupleMismatch` for every class;
+a stored row of every non-grouping class whose revision, span, representation,
+or class-and-representation column pair was rewritten under its tuple is
+refused by `read_selected` as `CorruptRow`, as is a `raw_tool_spans` row
+relabelled to a non-grouping class; every single flipped tuple bit is refused
+or derives a different key. `always` because the key is a pure function of the
+row on every derivation.
 Fault/timing angle: none.
 Required faults and enabling state: Spans of one tool call at two revisions
-and two representations; one occurrence of every class; a tuple presented
-with an altered column or a flipped bit.
+and two representations; one occurrence of every class, persisted and then
+rewritten column by column; a tuple presented with an altered column or a
+flipped bit.
 Confidence: high - [evidence](evidence/packing-group-key-is-never-parent-alone.md).
 Every clause is asserted by a test at this base over the kernel's real tuple
 encoding.

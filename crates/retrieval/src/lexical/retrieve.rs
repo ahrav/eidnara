@@ -1,18 +1,23 @@
 //! Each occurrence keeps its best probe; canonical eligibility is judged in bounded batches before acceptance; accepted contributions are re-judged before return.
 //! This module does not read payload bytes; each contribution contains an occurrence identifier and raw FTS rank.
 //!
+//! [`scan`] needs only the projection connection and [`admit`] needs only the kernel, so a caller
+//! can release the projection connection before any kernel reader is taken; [`retrieve`] runs both
+//! under one connection for callers that hold nothing else.
+//!
 //! Ordering is one comparator throughout: lower raw rank first, then occurrence identifier bytes ascending.
 //! An occurrence hit by several probes keeps the lowest rank, and among equal ranks the lowest probe ordinal, so duplicate or permuted probes leave the ranking unchanged.
+//! A probe repeated later in the request therefore cannot change the ranking, and the engine runs it only once; the repeat replays the first run's counters.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    CommitReadIncarnation, EgressSnapshot, EligibilityVerdict, KernelError, KernelStore,
-    MAX_ELIGIBILITY_CANDIDATES,
+    CommitReadIncarnation, EgressSnapshot, EligibilityCandidate, EligibilityVerdict, KernelError,
+    KernelStore, MAX_ELIGIBILITY_CANDIDATES,
 };
 use storage::GuardedConn;
 
@@ -46,6 +51,18 @@ pub struct Contribution {
     pub rank: f64,
     /// Breaks equal-rank ties by selecting the lowest probe ordinal.
     pub ordinal: usize,
+    /// The terms the kernel judged, kept so a later revalidation judges the same facts without another projection read.
+    pub candidate: EligibilityCandidate,
+}
+
+impl Contribution {
+    pub fn occurrence_candidate(&self) -> OccurrenceCandidate {
+        OccurrenceCandidate {
+            occurrence_id: self.occurrence_id.clone(),
+            class: self.class,
+            candidate: self.candidate.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +88,9 @@ pub enum Completion {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Consumed {
+    /// Probes the request compiled to, repeats included; a repeated probe is counted here without running the engine again.
     pub probes: usize,
+    /// Live rows taken in comparator order, summed over `probes`; a repeated probe contributes its first run's count.
     pub scanned_rows: usize,
     pub judged: usize,
     pub batches: usize,
@@ -139,12 +158,34 @@ fn comparator((left_id, left): &(String, Hit), (right_id, right): &(String, Hit)
         .then_with(|| left_id.cmp(right_id))
 }
 
-const PROBE_SQL: &str = "SELECT l.occurrence_id, l.rank, o.class, o.source_object_id, o.revision, o.source_artifact_digest
-     FROM lexical l JOIN occurrences o ON o.occurrence_id=l.occurrence_id
-     WHERE lexical MATCH ?1
-       AND NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id)
-     ORDER BY l.rank, l.occurrence_id
-     LIMIT ?2";
+/// The inner `LIMIT` bounds join and tombstone lookup work by `scan_rows`, not match-set size.
+/// The `LEFT JOIN` keeps lexical rows with no occurrence, and the last column marks a missing or tombstoned occurrence dead,
+/// so [`scan_probe`] can tell an exhausted match set from a page that lost rows to the filter.
+/// Under the [`super::index`] invariant that tombstoning deletes the lexical row, a dead row means an inconsistent projection.
+const PROBE_SQL: &str = "SELECT h.occurrence_id, h.rank, o.class, o.source_object_id, o.revision, o.source_artifact_digest,
+            o.occurrence_id IS NOT NULL
+            AND NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=h.occurrence_id)
+     FROM (SELECT occurrence_id, rank FROM lexical WHERE lexical MATCH ?1
+           ORDER BY rank, occurrence_id LIMIT ?2 OFFSET ?3) h
+     LEFT JOIN occurrences o ON o.occurrence_id=h.occurrence_id
+     ORDER BY h.rank, h.occurrence_id";
+
+/// Probe hits read from the projection in comparator order, not yet judged by the kernel.
+///
+/// Retains its `RetrievalBounds` so admission uses the bounds that produced its hits.
+#[derive(Debug, Clone)]
+pub struct Scan {
+    ordered: Vec<(String, Hit)>,
+    retrieval: Retrieval,
+    bounds: RetrievalBounds,
+}
+
+impl Scan {
+    /// Distinct occurrences the probes hit, before any kernel verdict.
+    pub fn hits(&self) -> usize {
+        self.ordered.len()
+    }
+}
 
 /// # Errors
 ///
@@ -158,7 +199,8 @@ pub fn retrieve(
     bounds: RetrievalBounds,
     budget: &EvalBudget,
 ) -> Result<Retrieval, RetrievalRefusal> {
-    retrieve_inner(conn, kernel, probes, authority, bounds, budget, |_| {})
+    let scanned = scan(conn, probes, bounds, budget)?;
+    admit_inner(kernel, authority, scanned, budget, |_| {})
 }
 
 /// `hook` runs after every admission batch and once before the final re-judgment, so a test can change the kernel or the budget in those windows.
@@ -172,18 +214,21 @@ pub fn retrieve_with_hook_for_test(
     budget: &EvalBudget,
     hook: impl FnMut(Window),
 ) -> Result<Retrieval, RetrievalRefusal> {
-    retrieve_inner(conn, kernel, probes, authority, bounds, budget, hook)
+    let scanned = scan(conn, probes, bounds, budget)?;
+    admit_inner(kernel, authority, scanned, budget, hook)
 }
 
-fn retrieve_inner(
+/// Runs every probe against the projection and keeps each occurrence's best hit.
+///
+/// # Errors
+///
+/// Refuses bounds the kernel's eligibility batch could never serve, more probes than `max_probes`, and a budget that ends before any probe completes; a budget that ends later yields a [`Scan`] whose admission is already [`Completion::Incomplete`] with no hits.
+pub fn scan(
     conn: &GuardedConn<'_>,
-    kernel: &KernelStore,
     probes: &[Probe],
-    authority: Authority<'_>,
     bounds: RetrievalBounds,
     budget: &EvalBudget,
-    mut hook: impl FnMut(Window),
-) -> Result<Retrieval, RetrievalRefusal> {
+) -> Result<Scan, RetrievalRefusal> {
     budget
         .check()
         .map_err(|_| RetrievalRefusal::BudgetExhausted)?;
@@ -213,11 +258,20 @@ fn retrieve_inner(
         consumed: Consumed::default(),
     };
     let mut best: BTreeMap<String, Hit> = BTreeMap::new();
+    let mut outcomes: HashMap<&Probe, (usize, bool)> = HashMap::new();
     for (ordinal, probe) in probes.iter().enumerate() {
         if budget.is_exhausted() {
-            return exhausted(retrieval);
+            return exhausted_scan(retrieval, bounds);
         }
-        match scan(conn, probe, ordinal, bounds.scan_rows, budget, &mut best) {
+        let outcome = match outcomes.get(probe) {
+            Some(&replayed) => Ok(replayed),
+            None => scan_probe(conn, probe, ordinal, bounds.scan_rows, budget, &mut best).inspect(
+                |&outcome| {
+                    outcomes.insert(probe, outcome);
+                },
+            ),
+        };
+        match outcome {
             Ok((rows, truncated)) => {
                 retrieval.consumed.probes += 1;
                 retrieval.consumed.scanned_rows += rows;
@@ -225,13 +279,49 @@ fn retrieve_inner(
                     incomplete(&mut retrieval, IncompleteReason::ScanBound);
                 }
             }
-            Err(ScanStop::Budget) => return exhausted(retrieval),
+            Err(ScanStop::Budget) => return exhausted_scan(retrieval, bounds),
             Err(ScanStop::Projection(error)) => return Err(error.into()),
         }
     }
     let mut ordered: Vec<(String, Hit)> = best.into_iter().collect();
     ordered.sort_by(comparator);
-    let accepted = admit(
+    Ok(Scan {
+        ordered,
+        retrieval,
+        bounds,
+    })
+}
+
+/// Judges the scan's hits in bounded kernel batches, accepts eligible ones until `max_accepted` fills, and re-judges the accepted set once before returning.
+///
+/// # Errors
+///
+/// Returns kernel errors except [`KernelError::Deadline`], which leaves the result [`Completion::Incomplete`] with no contributions.
+pub fn admit(
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    scanned: Scan,
+    budget: &EvalBudget,
+) -> Result<Retrieval, RetrievalRefusal> {
+    admit_inner(kernel, authority, scanned, budget, |_| {})
+}
+
+fn admit_inner(
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    scanned: Scan,
+    budget: &EvalBudget,
+    mut hook: impl FnMut(Window),
+) -> Result<Retrieval, RetrievalRefusal> {
+    let Scan {
+        ordered,
+        mut retrieval,
+        bounds,
+    } = scanned;
+    if retrieval.completion == Completion::Incomplete(IncompleteReason::BudgetExhausted) {
+        return Ok(retrieval);
+    }
+    let accepted = admit_batches(
         kernel,
         authority,
         bounds,
@@ -246,6 +336,15 @@ fn retrieve_inner(
         return exhausted(retrieval);
     }
     Ok(retrieval)
+}
+
+/// A budget-exhausted scan retains no hits; admission returns its recorded completion unchanged.
+fn exhausted_scan(retrieval: Retrieval, bounds: RetrievalBounds) -> Result<Scan, RetrievalRefusal> {
+    Ok(Scan {
+        ordered: Vec::new(),
+        retrieval: exhausted(retrieval)?,
+        bounds,
+    })
 }
 
 fn exhausted(mut retrieval: Retrieval) -> Result<Retrieval, RetrievalRefusal> {
@@ -263,8 +362,10 @@ fn incomplete(retrieval: &mut Retrieval, reason: IncompleteReason) {
     }
 }
 
-/// The probe query reads one row past `scan_rows` to report truncation without retaining the extra row.
-fn scan(
+/// Reads the ordered match set one page of `scan_rows + 1` rows at a time and stops at the first live row past `scan_rows`,
+/// which reports truncation without retaining that row.
+/// A page that came back full but lost rows to the dead filter is followed by the next page; a short page ends the match set.
+fn scan_probe(
     conn: &GuardedConn<'_>,
     probe: &Probe,
     ordinal: usize,
@@ -272,38 +373,54 @@ fn scan(
     budget: &EvalBudget,
     best: &mut BTreeMap<String, Hit>,
 ) -> Result<(usize, bool), ScanStop> {
-    let limit = i64::try_from(scan_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
+    let page = i64::try_from(scan_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
     let mut statement = conn.prepare_cached(PROBE_SQL)?;
-    let mut rows = statement.query(rusqlite::params![probe, limit])?;
     let mut seen = 0;
-    while let Some(row) = rows.next()? {
-        budget.check().map_err(|_| ScanStop::Budget)?;
-        if seen == scan_rows.get() {
-            return Ok((seen, true));
+    let mut offset: i64 = 0;
+    loop {
+        let mut rows = statement.query(rusqlite::params![probe, page, offset])?;
+        let mut fetched: i64 = 0;
+        while let Some(row) = rows.next()? {
+            budget.check().map_err(|_| ScanStop::Budget)?;
+            fetched += 1;
+            if !row.get::<_, bool>(6)? {
+                continue;
+            }
+            if seen == scan_rows.get() {
+                return Ok((seen, true));
+            }
+            seen += 1;
+            let (occurrence_id, hit) = hit(row, ordinal)?;
+            if best
+                .get(&occurrence_id)
+                .is_none_or(|incumbent| better(&hit, incumbent))
+            {
+                best.insert(occurrence_id, hit);
+            }
         }
-        seen += 1;
-        let occurrence_id: String = row.get(0)?;
-        let class = OccurrenceClass::from_code(&row.get::<_, String>(2)?)
-            .ok_or(ProjectionError::CorruptRow)?;
-        let hit = Hit {
-            candidate: OccurrenceCandidate::new(
-                occurrence_id.clone(),
-                class,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-            ),
-            rank: row.get(1)?,
-            ordinal,
-        };
-        if best
-            .get(&occurrence_id)
-            .is_none_or(|incumbent| better(&hit, incumbent))
-        {
-            best.insert(occurrence_id, hit);
+        if fetched < page {
+            return Ok((seen, false));
         }
+        offset = offset.saturating_add(page);
     }
-    Ok((seen, false))
+}
+
+fn hit(row: &rusqlite::Row<'_>, ordinal: usize) -> Result<(String, Hit), ScanStop> {
+    let occurrence_id: String = row.get(0)?;
+    let class =
+        OccurrenceClass::from_code(&row.get::<_, String>(2)?).ok_or(ProjectionError::CorruptRow)?;
+    let hit = Hit {
+        candidate: OccurrenceCandidate::new(
+            occurrence_id.clone(),
+            class,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        ),
+        rank: row.get(1)?,
+        ordinal,
+    };
+    Ok((occurrence_id, hit))
 }
 
 /// Returns `SnapshotChanged` or `KernelIncarnationChanged` if kernel state differs from the first batch,
@@ -343,7 +460,7 @@ fn judge_batch(
 
 /// Judges candidates in comparator order, `batch_rows` at a time, and accepts eligible ones until `max_accepted` fills.
 /// An ineligible leader consumes judgment work and no accepted slot, so eligible tails behind it are still reached.
-fn admit(
+fn admit_batches(
     kernel: &KernelStore,
     authority: Authority<'_>,
     bounds: RetrievalBounds,
@@ -426,6 +543,7 @@ fn revalidate(
                 class: hit.candidate.class,
                 rank: hit.rank,
                 ordinal: hit.ordinal,
+                candidate: hit.candidate.candidate,
             }),
             Disposition::PolicyExcluded(verdict) => retrieval.consumed.exclude(verdict),
         }
