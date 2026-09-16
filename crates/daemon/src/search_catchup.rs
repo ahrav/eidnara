@@ -954,6 +954,8 @@ pub(crate) fn classify(error: &ProjectionError) -> Refusal {
         | ProjectionError::Lexical(_)
         | ProjectionError::LexicalRowidCollision { .. }
         | ProjectionError::CorruptRow => Refusal::Integrity,
-        ProjectionError::Unsupported { .. } | ProjectionError::Sqlite(_) => Refusal::Storage,
+        ProjectionError::Unsupported { .. }
+        | ProjectionError::Interrupted
+        | ProjectionError::Sqlite(_) => Refusal::Storage,
     }
 }

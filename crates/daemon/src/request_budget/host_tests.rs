@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use host_runtime::{
-    BindOutcome, Client, ClientRoute, HealthReport, HostConfig, HostError, HostHandler, HostInit,
-    InitError, ManifestSnapshot, RequestCtx, RequestOptions, RequestOutcome, ResourceDeclaration,
-    RouteHandle, RouteIdentity, RouteTarget, TargetKind,
+    BindOutcome, CancelSignal, Client, ClientRoute, HealthReport, HostConfig, HostError,
+    HostHandler, HostInit, InitError, ManifestSnapshot, RequestCtx, RequestOptions, RequestOutcome,
+    ResourceDeclaration, RouteHandle, RouteIdentity, RouteTarget, TargetKind,
 };
 use storage::{GuardedConn, StoreError};
 use tokio::sync::oneshot;
@@ -15,6 +15,8 @@ use crate::request_budget::{BlockingFailure, Exhaustion, RequestBudget};
 use crate::search_projection::{SearchProjection, SearchProjectionError};
 
 const HELD_BODY: &[u8] = b"budget-held-read";
+/// The budget derives from a token the test never cancels, so only the guard's drop can raise the interrupt.
+const DROP_ONLY_BODY: &[u8] = b"budget-drop-only";
 const PANIC_BODY: &[u8] = b"budget-panic";
 const LONG_SCAN: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 200000000) SELECT count(*) FROM c";
 const CEILING: Duration = Duration::from_secs(30);
@@ -75,12 +77,13 @@ impl HostHandler for BudgetHandler {
             let _ = self.failure.lock().unwrap().take().unwrap().send(failure);
             return RequestOutcome::error("internal_error", "blocking work failed");
         }
-        if ctx.body.as_slice() != HELD_BODY {
-            return self.handler.handle(ctx).await;
-        }
-        let budget =
-            RequestBudget::derive(ctx.cancel_signal(), Some(60_000), Some(CEILING)).unwrap();
-        let shared = budget.share();
+        let cancel = match ctx.body.as_slice() {
+            HELD_BODY => ctx.cancel_signal(),
+            DROP_ONLY_BODY => CancelSignal::observing(CancellationToken::new()),
+            _ => return self.handler.handle(ctx).await,
+        };
+        let budget = RequestBudget::derive(cancel, Some(60_000), Some(CEILING)).unwrap();
+        let shared = budget.shared().clone();
         let projection = Arc::clone(&self.projection);
         let report = self.report.lock().unwrap().take().unwrap();
         let entered = self.entered.lock().unwrap().take().unwrap();
@@ -98,7 +101,7 @@ impl HostHandler for BudgetHandler {
                 exhaustion: shared.exhaustion(),
             });
         });
-        // No `select!` arm here: cancellation reaches the read only through the guard's drop when the host aborts this future.
+        // No `select!` arm here; the host aborts this future on cancel and the guard drops with it.
         match read.await {
             Ok(()) => RequestOutcome::error("unexpected", "the held read completed"),
             Err(_) => RequestOutcome::error("internal_error", "blocking work failed"),
@@ -229,6 +232,15 @@ impl BudgetHost {
         )
     }
 
+    async fn wait_until_held(&self, held: bool) {
+        watchdog(async {
+            while self.connection_is_held() != held {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+    }
+
     async fn stop(self) {
         watchdog(self.client.close()).await.unwrap();
         drop(self.stop_on_drop);
@@ -245,22 +257,17 @@ async fn watchdog<T>(future: impl std::future::Future<Output = T>) -> T {
         .expect("test operation must finish before the watchdog")
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling() {
+async fn cancel_held_read(body: &[u8]) {
     let mut host = BudgetHost::start().await;
     let mut response = watchdog(host.client.request_stream(
         host.route,
-        HELD_BODY.to_vec(),
+        body.to_vec(),
         RequestOptions::default(),
     ))
     .await
     .unwrap();
     watchdog(&mut host.entered).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert!(
-        host.connection_is_held(),
-        "the read must hold the projection connection while it runs"
-    );
+    host.wait_until_held(true).await;
     assert!(host.report.try_recv().is_err());
 
     let cancelled_at = Instant::now();
@@ -278,16 +285,26 @@ async fn cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_be
         report.finished - cancelled_at < Duration::from_secs(5),
         "the interrupt lands at a polled step, not at the deadline"
     );
-    assert!(!host.connection_is_held());
+    host.wait_until_held(false).await;
     assert_eq!(
         host.projection
-            .read_within(Instant::now() + Duration::from_secs(1), |conn| Ok(
+            .read_within(Instant::now() + Duration::from_secs(5), |conn| Ok(
                 conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?
             ))
             .unwrap(),
         1
     );
     host.stop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling() {
+    cancel_held_read(HELD_BODY).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_guard_drop_alone_interrupts_the_held_read_when_the_host_aborts_the_handler() {
+    cancel_held_read(DROP_ONLY_BODY).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

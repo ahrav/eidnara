@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use host_runtime::{BlockingWorkFailed, CancelSignal};
@@ -42,12 +44,14 @@ pub enum Exhaustion {
     Deadline,
 }
 
-/// The clone a request-scoped callee or blocking closure carries; every clone shares one flag and one deadline.
+/// The clone a request-scoped callee or blocking closure carries; every clone shares one flag, one deadline, and one record of why the flag was raised.
 #[derive(Debug, Clone)]
 pub struct SharedBudget {
     budget: EvalBudget,
     deadline: Instant,
     cancel: CancelSignal,
+    /// Set when the guard is dropped, so a drop-cancel is classified as cancellation rather than as a deadline the clock never reached.
+    guard_dropped: Arc<AtomicBool>,
 }
 
 impl SharedBudget {
@@ -59,21 +63,22 @@ impl SharedBudget {
         self.deadline
     }
 
-    /// The host's cancellation is folded into the budget here, so a cooperative check sees it even before the guard drops.
-    pub fn is_exhausted(&self) -> bool {
-        if self.cancel.is_cancelled() {
-            self.budget.cancel();
-        }
-        self.budget.is_exhausted()
+    fn cancelled(&self) -> bool {
+        self.guard_dropped.load(Ordering::SeqCst) || self.cancel.is_cancelled()
     }
 
     /// Cancellation wins over the deadline when both hold, because a cancelled caller is not waiting for a deadline verdict.
+    /// The host's cancellation is folded into the flag here, so callees polling only the `EvalBudget` stop as well.
     pub fn exhaustion(&self) -> Option<Exhaustion> {
-        if self.cancel.is_cancelled() {
+        if self.cancelled() {
+            self.budget.cancel();
             return Some(Exhaustion::Cancelled);
         }
-        (self.budget.is_exhausted() || Instant::now() >= self.deadline)
-            .then_some(Exhaustion::Deadline)
+        self.budget.is_exhausted().then_some(Exhaustion::Deadline)
+    }
+
+    pub fn is_exhausted(&self) -> bool {
+        self.exhaustion().is_some()
     }
 
     /// Returns `true` once cancellation or the request deadline should stop SQLite work or an acquisition wait.
@@ -111,26 +116,34 @@ impl RequestBudget {
                 budget: EvalBudget::new(Some(deadline), Default::default()),
                 deadline,
                 cancel,
+                guard_dropped: Default::default(),
             },
         })
     }
 
-    /// Only request-scoped callees may hold the clone; longer-lived structures must not retain it.
-    pub fn share(&self) -> SharedBudget {
-        self.shared.clone()
-    }
-}
-
-impl std::ops::Deref for RequestBudget {
-    type Target = SharedBudget;
-
-    fn deref(&self) -> &SharedBudget {
+    /// Only request-scoped callees and the request's own blocking closures may hold a clone; longer-lived structures must not retain one.
+    pub fn shared(&self) -> &SharedBudget {
         &self.shared
+    }
+
+    pub fn deadline(&self) -> Instant {
+        self.shared.deadline
+    }
+
+    pub fn exhaustion(&self) -> Option<Exhaustion> {
+        self.shared.exhaustion()
+    }
+
+    pub fn is_exhausted(&self) -> bool {
+        self.shared.is_exhausted()
     }
 }
 
 impl Drop for RequestBudget {
     fn drop(&mut self) {
+        // The reason is published before the interrupt, and the fence keeps the two stores in that order, so a reader that sees the interrupt also sees the reason.
+        self.shared.guard_dropped.store(true, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
         self.shared.budget.cancel();
     }
 }
@@ -154,7 +167,7 @@ mod tests {
         let after = Instant::now();
         assert!(budget.deadline() <= after + Duration::from_secs(5));
         assert!(budget.deadline() >= before + Duration::from_secs(5));
-        assert_eq!(budget.eval().deadline(), Some(budget.deadline()));
+        assert_eq!(budget.shared().eval().deadline(), Some(budget.deadline()));
         assert_eq!(budget.exhaustion(), None);
         assert!(!budget.is_exhausted());
     }
@@ -187,8 +200,8 @@ mod tests {
         let (_, cancel) = signal();
         let budget =
             RequestBudget::derive(cancel, Some(60_000), Some(Duration::from_secs(60))).unwrap();
-        let clone = budget.share();
-        let mut stop = budget.stop_predicate();
+        let clone = budget.shared().clone();
+        let mut stop = budget.shared().stop_predicate();
         assert_eq!(clone.deadline(), budget.deadline());
         assert_eq!(clone.eval().deadline(), Some(budget.deadline()));
         assert!(!clone.is_exhausted());
@@ -196,6 +209,7 @@ mod tests {
         drop(budget);
         assert!(clone.is_exhausted());
         assert!(stop());
+        assert_eq!(clone.exhaustion(), Some(Exhaustion::Cancelled));
     }
 
     #[test]
@@ -203,8 +217,8 @@ mod tests {
         let (token, cancel) = signal();
         let budget =
             RequestBudget::derive(cancel, Some(60_000), Some(Duration::from_secs(60))).unwrap();
-        let clone = budget.share();
-        let mut stop = budget.stop_predicate();
+        let clone = budget.shared().clone();
+        let mut stop = budget.shared().stop_predicate();
         token.cancel();
         assert!(stop());
         assert!(clone.is_exhausted());

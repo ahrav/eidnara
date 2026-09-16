@@ -14,10 +14,12 @@ request on the shared connection.
   and the transaction finishes; `Drop` clears it on unwind with
   `progress_handler(0, None)`. `is_interrupted` documents the scope as the only
   source of `SQLITE_INTERRUPT` on a store connection.
-- `crates/daemon/src/search_projection.rs` `read_under` passes a fresh stop
-  predicate per request and maps an engine error under an exhausted budget to
-  the store's deadline error, so an interrupted statement is reported as
-  exhaustion.
+- `crates/retrieval/src/lib.rs` maps a `SQLITE_INTERRUPT` failure to
+  `ProjectionError::Interrupted` through `storage::is_interrupted`, so the
+  interrupt survives the callback's error type; `read_under` in
+  `crates/daemon/src/search_projection.rs` passes a fresh stop predicate per
+  request and maps that one variant to the store's deadline error while every
+  other engine error keeps its own class.
 - `crates/daemon/tests/request_budget_reads.rs` cancels one request's read
   and then runs a fresh request's read and a plain bounded read on the same
   connection.
@@ -47,14 +49,15 @@ handler installed.
 
 ## Investigation log
 
-### Q: How is an interrupt distinguished from an engine failure once the callback has mapped it to a string?
+### Q: How is an interrupt distinguished from an engine failure once the callback has mapped it to `ProjectionError`?
 
-- Sources examined: `ProjectionError::Sqlite(String)`; `store_error` mapping
-  in storage; `read_under`.
-- Findings: the callback's error type loses the rusqlite kind. The progress
-  handler fires only when the stop predicate holds, so an engine error under
-  an exhausted budget is the interrupt or a read whose result is no longer
-  authoritative.
+- Sources examined: `ProjectionError::Sqlite(String)`; `storage::is_interrupted`;
+  `retrieval::scan::ScanStop`, which already classifies interrupts before
+  converting; `search_catchup::classify`, which quarantines integrity errors.
+- Findings: a string-typed error would force a text match or a budget-state
+  guess, and a guess would relabel a real corruption or I/O failure racing the
+  deadline as a retryable deadline.
 - Missing evidence: none.
-- Conclusion: resolved with answer - report exhaustion for any engine error
-  once the budget is exhausted.
+- Conclusion: resolved with answer - `From<rusqlite::Error>` yields a
+  dedicated `Interrupted` variant, and only that variant becomes the deadline
+  error.

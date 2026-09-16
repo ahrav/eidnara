@@ -306,6 +306,9 @@ pub enum ProjectionError {
     },
     #[error("the linked engine is unsupported: {reason}")]
     Unsupported { reason: &'static str },
+    /// The connection's progress handler stopped the statement, so the caller's budget ended the read rather than the engine failing.
+    #[error("sqlite: the statement was interrupted")]
+    Interrupted,
     #[error("sqlite: {0}")]
     Sqlite(String),
 }
@@ -318,7 +321,11 @@ impl From<lexical::LexicalRefusal> for ProjectionError {
 
 impl From<rusqlite::Error> for ProjectionError {
     fn from(error: rusqlite::Error) -> Self {
-        Self::Sqlite(error.to_string())
+        if storage::is_interrupted(&error) {
+            Self::Interrupted
+        } else {
+            Self::Sqlite(error.to_string())
+        }
     }
 }
 

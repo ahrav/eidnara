@@ -30,14 +30,17 @@ would take the runtime down instead of settling one request.
 
 ## Timing windows and dependencies
 
-The host's abort of the handler future while the blocking read runs; the
+The host's abort of the handler future while the blocking read runs. With the
+request's own token the stop predicate also sees the cancellation directly;
+the drop-only variant derives the budget from a token nobody cancels, so the
 guard's drop is the only path that raises the interrupt in that window.
 
 ## What a test must construct
 
 - A held read on the blocking pool, observable by a second reader failing to
   acquire the connection within a short bound.
-- A client cancel frame while the handler is suspended at the await.
+- A client cancel frame while the handler is suspended at the await, once
+  with the request's token and once with a token the test never cancels.
 - Read-return time compared with error-publication time.
 - A panicking closure and the client's single terminal error.
 - After U3b and U3c: the route's permits and dense pins in the same census.

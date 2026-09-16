@@ -395,9 +395,6 @@ impl SearchProjection {
         budget: &SharedBudget,
         f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
     ) -> Result<T, SearchProjectionError> {
-        if budget.is_exhausted() {
-            return Err(StoreError::Deadline.into());
-        }
         let outcome = self.run(
             f,
             Access::ReadUnder {
@@ -405,11 +402,9 @@ impl SearchProjection {
                 stop: Box::new(budget.stop_predicate()),
             },
         );
-        // An interrupted statement reaches `f` as an engine error; once the budget is exhausted no read result is authoritative, so exhaustion is reported rather than the engine's text.
+        // The progress handler fires only once `stop` holds, so an interrupted statement is the budget's own verdict, not an engine failure.
         match outcome {
-            Err(SearchProjectionError::Projection(ProjectionError::Sqlite(_)))
-                if budget.is_exhausted() =>
-            {
+            Err(SearchProjectionError::Projection(ProjectionError::Interrupted)) => {
                 Err(StoreError::Deadline.into())
             }
             other => other,
@@ -426,6 +421,7 @@ impl SearchProjection {
     ) -> Result<T, SearchProjectionError> {
         let mut outcome: Option<Result<T, ProjectionError>> = None;
         let mut quarantine = None;
+        // Read before the match below moves `access`, whose `ReadUnder` arm owns a boxed predicate.
         let is_read = access.is_read();
         let inner = |conn: &GuardedConn<'_>| -> rusqlite::Result<()> {
             if !is_read && let Some(found) = self.quarantine() {

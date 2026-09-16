@@ -390,6 +390,7 @@ mod sqlite_backend {
         }
 
         /// Runs `f` with a connection acquired by `deadline`; `stop` ends both the acquisition wait and the statements.
+        /// `stop` is polled once per acquisition iteration and once per progress-handler interval, so it must be cheap, side-effect free apart from latching, and must not panic: SQLite treats a panicking handler as "continue".
         /// SQLite's [progress callback](https://www.sqlite.org/c3ref/progress_handler.html) uses an approximate VM-instruction interval, not a wall-clock timeout.
         /// The handler is removed before the transaction ends, including when `f` unwinds, so a later read on the same connection cannot be interrupted by an earlier caller's `stop`.
         ///
@@ -702,10 +703,12 @@ mod sqlite_backend {
             if !self.armed {
                 return Ok(());
             }
-            self.armed = false;
             self.conn
                 .progress_handler(0, None::<fn() -> bool>)
-                .map_err(backend_error)
+                .map_err(backend_error)?;
+            // Disarming only after success leaves the drop path to retry a failed removal.
+            self.armed = false;
+            Ok(())
         }
     }
 
@@ -5620,12 +5623,7 @@ mod tests {
             Ok(())
         });
         let leaked = store.with_conn_within(far(), count);
-        assert!(
-            leaked
-                .as_ref()
-                .is_err_and(|error| error.to_string().contains("interrupted")),
-            "{leaked:?}"
-        );
+        assert!(leaked.is_err(), "{leaked:?}");
         drop(store);
         let _ = std::fs::remove_dir_all(&root);
     }

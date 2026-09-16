@@ -103,9 +103,11 @@ later request on the shared connection, and an interrupted read reports budget
 exhaustion rather than corruption.
 Check: `always` - after a cancelled read on the projection connection, a fresh
 request's interruptible read and a plain bounded read both complete; the
-cancelled read returns the store's deadline error and the budget classifies
-it as cancellation; the negative control shows that a handler left installed
-does interrupt the next read, so the oracle detects a leak. `always` because
+cancelled read returns the store's deadline error because the engine reported
+`ProjectionError::Interrupted`, a variant only the progress handler produces,
+and the budget classifies it as cancellation; the negative control shows that
+a handler left installed does interrupt the next read, so the oracle detects a
+leak. `always` because
 every read on the connection must be free of the previous request's hook.
 Fault/timing angle: Cancellation raised while a statement runs; cancellation
 raised after the read returned but before the next request acquires the
@@ -131,7 +133,8 @@ Reachability: test-only
 Status: active
 Exercised: partial - the bridge clauses are covered by
 `crates/daemon/src/request_budget/host_tests.rs`
-`cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling`
+`cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling`,
+`the_guard_drop_alone_interrupts_the_held_read_when_the_host_aborts_the_handler`,
 and `a_panic_in_tracked_blocking_work_is_typed_and_still_settles`; the permit
 and pin clauses wait for the route (U3b) and the dense lane (U3c) that hold
 them.
@@ -142,11 +145,14 @@ surfaces as its typed failure and still settles.
 Check: `always` - a real client cancels a request whose handler is suspended
 at `run_blocking` with no `select!` arm; the read reports exhaustion at a time
 no later than the host's error publication for that channel; the projection
-connection is held before cancellation and free after settlement; a panicking
-closure yields `BlockingFailure::Panicked` and the client sees one terminal
-error. `always` because every cancelled request must drain its blocking work.
+connection is held before cancellation and free after settlement; with the
+budget derived from a token the test never cancels, the guard's drop alone
+stops the read and classifies it as cancellation; a panicking closure yields
+`BlockingFailure::Panicked` and the client sees one terminal error. `always`
+because every cancelled request must drain its blocking work.
 Fault/timing angle: The host aborts the handler future while the blocking
-read runs; the guard's drop is the only path raising the interrupt.
+read runs; in the drop-only variant the guard's drop is the only path raising
+the interrupt.
 Required faults and enabling state: A real host and client; a held
 search-projection read on the blocking pool; a request cancel frame; a panic
 inside tracked work.

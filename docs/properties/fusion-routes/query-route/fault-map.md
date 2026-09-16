@@ -10,7 +10,7 @@ branch head on `main` at `8e0491225a7292ef077c675d44b94f94a24041d3`.
 | Cancel while waiting for a held connection | A reader holding the connection on another thread. | route-budget-is-derived-once-before-queue-wait |
 | Late cancel before the next request | A second `RequestBudget` on the same projection after the first is cancelled. | route-sql-cancellation-is-request-local |
 | Leaked progress handler | `GuardedConn::leak_progress_handler_for_test` in the storage test module. | route-sql-cancellation-is-request-local |
-| Handler aborted while suspended at `run_blocking` | A real host and client; `ResponseStream::cancel`. | route-permits-and-pins-outlive-client-cancellation |
+| Handler aborted while suspended at `run_blocking` | A real host and client; `ResponseStream::cancel`; a drop-only variant whose budget observes a never-cancelled token. | route-permits-and-pins-outlive-client-cancellation |
 | Panic inside tracked blocking work | A closure that panics under `run_blocking`. | route-permits-and-pins-outlive-client-cancellation |
 
 Real durations are used because `EvalBudget` reads `std::time::Instant`, which
