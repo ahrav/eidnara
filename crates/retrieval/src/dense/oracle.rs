@@ -532,7 +532,15 @@ fn score_page(
             return Ok(None);
         }
         ranking.coverage.required += 1;
-        match source.vector(&row, &request.layout)? {
+        let vector = match source.vector(&row, &request.layout) {
+            Ok(vector) => vector,
+            Err(error) => {
+                // The buffered rows were visited before this one, so a rejection among them refuses the request instead of this error.
+                block.flush(request, ranking, top, &mut selected)?;
+                return Err(error);
+            }
+        };
+        match vector {
             Some(vector) => {
                 block.push(row.candidate, vector);
                 if block.is_full() {
