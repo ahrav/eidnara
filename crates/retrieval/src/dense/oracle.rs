@@ -1,5 +1,5 @@
 //! Walks every live occurrence whose class requires a vector in occurrence identifier order through bounded keyset pages, inside the caller's read transaction.
-//! Each page is decoded, validated, and scored; only the rows that would enter the current top-K are judged for canonical eligibility, in one kernel batch per page, and the eligible ones are offered; the top-K is re-judged once before return.
+//! Each page is decoded, validated, and scored in blocks of eight rows; only the rows that would enter the current top-K are judged for canonical eligibility, in one kernel batch per page, and the eligible ones are offered; the top-K is re-judged once before return.
 //! Judging only rows that can enter the set returns the same rows as judging every row: a member of the final top-K outranks the worst held member at every earlier point of the walk, so it is never skipped.
 //! A live required row without a vector is a coverage shortfall, so the result is incomplete even when every scored row was eligible; a kernel snapshot or incarnation that moves between batches ends the walk the same way.
 //! The walk itself is shared: a `RowSource` supplies the page query and the vector of each visited row, so the oracle reads `occurrence_vectors` and the layered ranking reads resolved layer rows through one judgment, admission, and revalidation path.
@@ -18,7 +18,7 @@ use rusqlite::params;
 use storage::GuardedConn;
 
 use super::codec::{self, Metric, RowLayout, RowRejection};
-use super::score::{Ranked, TopK, score};
+use super::score::{BLOCK_ROWS, Ranked, TopK, score_block};
 use crate::ProjectionError;
 use crate::batch::{VectorGeneration, dense_eligible};
 use crate::coverage::CURRENT_PENDING;
@@ -79,7 +79,7 @@ pub(super) trait RowSource {
     /// The page query, in the shape [`read_page`] documents.
     fn page_sql(&self) -> &str;
 
-    /// The validated vector of a visited row, or `None` when the source holds none for it.
+    /// Returns a vector of the layout's length, or `None` when the source holds none for the row. Block scoring validates finiteness and norm.
     fn vector(
         &mut self,
         row: &PageRow,
@@ -106,9 +106,11 @@ impl RowSource for StoredVectors {
         row.stored
             .as_deref()
             .map(|bytes| {
-                codec::decode(bytes, layout).map_err(|rejection| OracleRefusal::StoredRow {
-                    occurrence_id: row.candidate.occurrence_id.clone(),
-                    rejection,
+                codec::decode_length(bytes, layout.dimension).map_err(|rejection| {
+                    OracleRefusal::StoredRow {
+                        occurrence_id: row.candidate.occurrence_id.clone(),
+                        rejection,
+                    }
                 })
             })
             .transpose()
@@ -209,7 +211,7 @@ pub enum OracleRefusal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Window<'a> {
-    /// A live required row is about to be decoded.
+    /// A live required row is about to be read; its block is validated and scored after the visits of its rows.
     Visited(&'a str),
     AfterJudgment,
     AfterPage(usize),
@@ -451,7 +453,63 @@ struct Selected {
     scores: Vec<f64>,
 }
 
-/// Every present vector of the page is obtained, validated, and scored; a missing vector is counted and its row is neither judged nor scored.
+struct Block {
+    rows: Vec<(OccurrenceCandidate, Vec<f32>)>,
+}
+
+impl Block {
+    fn new() -> Self {
+        Self {
+            rows: Vec::with_capacity(BLOCK_ROWS),
+        }
+    }
+
+    fn push(&mut self, candidate: OccurrenceCandidate, vector: Vec<f32>) {
+        self.rows.push((candidate, vector));
+    }
+
+    fn is_full(&self) -> bool {
+        self.rows.len() == BLOCK_ROWS
+    }
+
+    /// Validates and scores the buffered rows in visit order, exactly as scoring each row alone would: the first row that fails the layout refuses, every validated row counts toward coverage, and only then is its identity validated and its score offered to `top`.
+    /// A block short of `BLOCK_ROWS` repeats its first row in the spare lanes; their results are discarded.
+    fn flush(
+        &mut self,
+        request: &Walk<'_>,
+        ranking: &mut ExhaustiveRanking,
+        top: &TopK<OccurrenceCandidate>,
+        selected: &mut Selected,
+    ) -> Result<(), OracleRefusal> {
+        let Some((_, first)) = self.rows.first() else {
+            return Ok(());
+        };
+        let lanes: [&[f32]; BLOCK_ROWS] =
+            std::array::from_fn(|lane| self.rows.get(lane).map_or(&first[..], |(_, row)| row));
+        let sums = score_block(request.layout.metric, request.query, &lanes);
+        for ((candidate, vector), (sum_of_squares, score)) in self
+            .rows
+            .drain(..)
+            .zip(sums.sums_of_squares.into_iter().zip(sums.scores))
+        {
+            codec::validate_from_sum(&vector, &request.layout, sum_of_squares).map_err(
+                |rejection| OracleRefusal::StoredRow {
+                    occurrence_id: candidate.occurrence_id.clone(),
+                    rejection,
+                },
+            )?;
+            ranking.coverage.with_vector += 1;
+            candidate.candidate.validate()?;
+            if top.admits(score, &candidate.occurrence_id) {
+                selected.candidates.push(candidate);
+                selected.scores.push(score);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Every present vector of the page is obtained and, in blocks of up to [`BLOCK_ROWS`], validated and scored; a missing vector is counted and its row is neither judged nor scored.
 /// A row with a vector has its identity fields validated before `top.admits` is consulted, so a corrupt row is refused even when it could not enter the top-K.
 /// Returns the rows that would enter the top-K as it stood before the page, with their scores; only they are judged.
 fn score_page(
@@ -465,26 +523,35 @@ fn score_page(
 ) -> Result<Option<Selected>, OracleRefusal> {
     ranking.consumed.pages += 1;
     let mut selected = Selected::default();
+    let mut block = Block::new();
     for row in page {
         hook(Window::Visited(&row.candidate.occurrence_id));
         if budget.is_exhausted() {
+            // Rows visited before the budget ended are judged for the layout before the end is acted on, so a corrupt row among them still refuses.
+            block.flush(request, ranking, top, &mut selected)?;
             return Ok(None);
         }
         ranking.coverage.required += 1;
-        match source.vector(&row, &request.layout)? {
+        let vector = match source.vector(&row, &request.layout) {
+            Ok(vector) => vector,
+            Err(error) => {
+                // The buffered rows were visited before this one, so a rejection among them refuses the request instead of this error.
+                block.flush(request, ranking, top, &mut selected)?;
+                return Err(error);
+            }
+        };
+        match vector {
             Some(vector) => {
-                ranking.coverage.with_vector += 1;
-                row.candidate.candidate.validate()?;
-                let score = score(request.layout.metric, request.query, &vector);
-                if top.admits(score, &row.candidate.occurrence_id) {
-                    selected.candidates.push(row.candidate);
-                    selected.scores.push(score);
+                block.push(row.candidate, vector);
+                if block.is_full() {
+                    block.flush(request, ranking, top, &mut selected)?;
                 }
             }
             None if row.pending => ranking.coverage.missing_pending += 1,
             None => ranking.coverage.missing_without_pending += 1,
         }
     }
+    block.flush(request, ranking, top, &mut selected)?;
     Ok(Some(selected))
 }
 
