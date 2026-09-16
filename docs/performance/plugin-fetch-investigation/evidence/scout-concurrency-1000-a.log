@@ -1,7 +1,0 @@
-ROUTE bytes=640178 rows=1001 fixture_rows=1000 scopes=1
-TIME concurrency/route/1x10 min_ms=205.9642 median_ms=214.3737 max_ms=216.4827 reps=5 first_ms=216.7134
-TIME concurrency/pushdown/1x10 min_ms=12.6314 median_ms=12.9353 max_ms=13.4657 reps=5 first_ms=19.2356
-TIME concurrency/route/4x10 min_ms=395.2355 median_ms=405.6499 max_ms=415.1140 reps=5 first_ms=408.9717
-TIME concurrency/pushdown/4x10 min_ms=29.2569 median_ms=37.4440 max_ms=40.1101 reps=5 first_ms=46.0049
-TIME concurrency/route/8x10 min_ms=689.0789 median_ms=713.2699 max_ms=717.5870 reps=5 first_ms=701.8258
-TIME concurrency/pushdown/8x10 min_ms=57.5791 median_ms=58.8340 max_ms=84.4264 reps=5 first_ms=77.4745

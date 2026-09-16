@@ -1,4 +1,0 @@
-Gnuplot not found, using plotters backend
-profiled read/1000-rows/narrow-scope: 495 iterations
-[ perf record: Woken up 43 times to write data ]
-[ perf record: Captured and wrote 10.926 MB /tmp/pfi/perf-read-baseline.data (1343 samples) ]

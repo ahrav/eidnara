@@ -19,6 +19,12 @@ enum PreparedSource {
     Json(Arc<Value>),
     Exact(Arc<Vec<u8>>),
     Transform(Arc<TransformSegments>),
+    Emit(Arc<dyn Emit>),
+}
+
+/// A typed body serialized on demand: once into a counter for measurement, once into the reserved destination.
+pub trait Emit: Send + Sync {
+    fn emit(&self, destination: &mut dyn Write) -> Result<(), PreparedOutputError>;
 }
 
 struct TransformSegments {
@@ -177,6 +183,15 @@ impl PreparedOutput {
         }
     }
 
+    /// A typed body that serializes directly, with no intermediate `Value` tree.
+    pub fn emit(body: Arc<dyn Emit>) -> Self {
+        Self {
+            source: PreparedSource::Emit(body),
+            #[cfg(test)]
+            encoded_for_test: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
     /// Retains existing encoded bytes without copying them into an output body.
     pub fn cached_bytes(bytes: Vec<u8>) -> Self {
         Self {
@@ -220,7 +235,9 @@ impl PreparedOutput {
     pub fn json_for_test(&self) -> Option<&Value> {
         match &self.source {
             PreparedSource::Json(value) => Some(value),
-            PreparedSource::Exact(_) | PreparedSource::Transform(_) => None,
+            PreparedSource::Exact(_) | PreparedSource::Transform(_) | PreparedSource::Emit(_) => {
+                None
+            }
         }
     }
 
@@ -240,6 +257,12 @@ impl PreparedOutput {
             PreparedSource::Transform(segments) => {
                 let len = measure_transform(segments)?;
                 (MeasuredSource::Transform(segments), len)
+            }
+            PreparedSource::Emit(body) => {
+                let mut counter = CountingWriter::default();
+                let result = body.emit(&mut counter);
+                let counter = finish_count(counter, result)?;
+                (MeasuredSource::Emit(body.as_ref()), counter.len)
             }
         };
         Ok(MeasuredOutput { source, len })
@@ -284,6 +307,7 @@ impl fmt::Debug for PreparedOutput {
             PreparedSource::Json(_) => "json",
             PreparedSource::Exact(_) => "exact",
             PreparedSource::Transform(_) => "transform",
+            PreparedSource::Emit(_) => "emit",
         };
         f.debug_struct("PreparedOutput")
             .field("kind", &kind)
@@ -320,6 +344,7 @@ enum MeasuredSource<'a> {
     Json(&'a Value),
     Exact(&'a [u8]),
     Transform(&'a TransformSegments),
+    Emit(&'a dyn Emit),
 }
 
 impl MeasuredOutput<'_> {
@@ -347,6 +372,7 @@ impl MeasuredOutput<'_> {
             }
             MeasuredSource::Exact(bytes) => destination.write_all(bytes)?,
             MeasuredSource::Transform(segments) => write_transform(segments, &mut destination)?,
+            MeasuredSource::Emit(body) => body.emit(&mut destination)?,
         }
         let written = destination.written();
         if written != self.len {
@@ -393,6 +419,16 @@ fn checked_body_len(
         });
     }
     Ok(total)
+}
+
+/// Measures a typed value's exact encoded length without retaining the bytes.
+pub(crate) fn measure_serialize<T: serde::Serialize + ?Sized>(
+    value: &T,
+) -> Result<usize, PreparedOutputError> {
+    let mut writer = CountingWriter::default();
+    let result = serde_json::to_writer(&mut writer, value).map_err(PreparedOutputError::Serialize);
+    let writer = finish_count(writer, result)?;
+    Ok(writer.len)
 }
 
 /// Measures a JSON value's exact encoded length without retaining the bytes.
