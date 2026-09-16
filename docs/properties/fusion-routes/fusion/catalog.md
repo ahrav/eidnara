@@ -173,15 +173,23 @@ Open questions:
 Grouped by shared mechanism, with suspected dominance noted where one property
 holding would make another likely to hold. Dominance is a hypothesis, not proof.
 
-- **One identifier behind every derivation.**
-  `fusion-occurrence-identity-never-collapses-payload` is upstream of the other
-  two records: `SelectionDigest::derive` hashes `OccurrenceId::as_bytes`
-  (`crates/retrieval/src/fusion/identity.rs:266-273`) and
-  `ParentGroupKey::derive` reads the same kernel tuple
-  (`identity.rs:176-190`). An identifier that collapsed two occurrences would
-  give the digest and the parent key one input where the records expect two,
-  so both downstream checks would pass on a merged identity. Neither downstream
-  record detects that fault; only the first does.
+- **One identifier behind the selection digest.**
+  `fusion-occurrence-identity-never-collapses-payload` is upstream of
+  `fusion-selection-digest-tracks-identity-tuple`: `SelectionDigest::derive`
+  hashes `OccurrenceId::as_bytes` (`crates/retrieval/src/fusion/identity.rs:266-273`)
+  and the digest tests build their selections from distinct synthetic
+  identifiers, so an encoder that collapsed two occurrences would hand the
+  digest one input where the record expects two and the digest checks would
+  pass. Only the first record detects that fault on the selection path.
+- **One tuple encoding behind the parent key, with overlapping detection.**
+  `ParentGroupKey::derive` consumes the raw kernel tuple and an explicit
+  revision, not the occurrence identifier (`identity.rs:176-190`), so
+  `fusion-parent-groups-are-not-voters` shares the encoding with the first
+  record rather than depending on its digest. Its test also asserts five
+  distinct occurrence identifiers and a five-entry lane ranking over the same
+  sources (`crates/retrieval/tests/identity.rs:472`, `:478`), so an identifier
+  collapse across span, revision, or representation is caught by both records.
+  Neither dominates the other.
 - **Selection inside preparation.**
   `PreparationDigest::derive` hashes the selection digest as its last component
   (`identity.rs:277-299`), so `fusion-selection-digest-tracks-identity-tuple`

@@ -41,8 +41,10 @@ a wildcard pass that questioned the framing itself.
    foreign-lane and non-finite score refusals; the test is now listed and the
    Check names all three refusals.
 4. **The catalog ended without a relationship map.** One is added: the
-   occurrence identifier is upstream of both digests and the parent key
-   (`crates/retrieval/src/fusion/identity.rs:266-273`, `:176-190`), the
+   occurrence identifier is upstream of the selection digest
+   (`crates/retrieval/src/fusion/identity.rs:266-273`), the parent key shares
+   the tuple encoding and its test detects an identifier collapse itself
+   (`:176-190`, `crates/retrieval/tests/identity.rs:472`, `:478`), the
    preparation digest hashes the selection digest (`:277-299`), and the
    arithmetic records will sit downstream of the first record.
 
@@ -74,7 +76,9 @@ a wildcard pass that questioned the framing itself.
    specification does not name.
 3. **One seeded generator behind the property tests.** `runner()`
    (`crates/retrieval/tests/identity.rs:23-31`) fixes a ChaCha seed and 512
-   cases, so the permutation, duplication, and component-split checks are
-   deterministic and reproducible but never explore beyond one fixed sample per
-   revision of the test. Raising the case count or adding an unseeded run in a
-   separate job is a cost decision.
+   cases; its two callers are the permutation-and-duplication check (`:233`)
+   and the route-binding check (`:528`), so those are deterministic and
+   reproducible but never explore beyond one fixed sample per revision of the
+   test. The component-split check compares the literal pairs `("ab", "c")`
+   and `("a", "bc")` (`:419-440`) and is not generated. Raising the case
+   count or adding an unseeded run in a separate job is a cost decision.
