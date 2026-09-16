@@ -5,7 +5,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use daemon::context_capabilities::{CapabilitySource, LatchedCapabilities, StaticDeclarations};
+use daemon::context_capabilities::{
+    BackendDeclarations, CapabilitySource, LatchedCapabilities, StaticDeclarations,
+};
 use daemon::dispatch::PreparedOutcome;
 use daemon::edit_receipts::ReceiptLimits;
 use host_runtime::model_execution::backend::{
@@ -118,6 +120,61 @@ fn an_unavailable_backend_is_an_unreadable_declaration_not_a_closed_one() {
             "{harness}"
         );
     }
+}
+
+/// Counts availability reads, which in production revalidate the installed harness closure.
+struct Counting {
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl LlmExecutionBackend for Counting {
+    fn execute(
+        &self,
+        _request: host_runtime::model_execution::backend::BackendRequest,
+        _events: host_runtime::model_execution::backend::EventSink,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> host_runtime::model_execution::backend::BackendFuture {
+        Box::pin(async { unreachable!("the capability test never runs a model") })
+    }
+
+    fn unavailable_reason(&self, harness: Harness) -> Option<&'static str> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (harness == Harness::Pi).then_some("descriptor_absent")
+    }
+
+    fn context_capabilities(&self, harness: Harness) -> ContextCapabilities {
+        match harness {
+            Harness::OpenCode => OPENCODE_CONTEXT_CAPABILITIES,
+            Harness::Pi => ContextCapabilities::NONE,
+        }
+    }
+}
+
+#[test]
+fn the_production_source_reads_each_harness_once_and_every_bind_is_a_lookup() {
+    let backend = Arc::new(Counting {
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let erased: Arc<dyn LlmExecutionBackend> = backend.clone();
+    let source = BackendDeclarations::new(&erased);
+    let after_construction = backend.reads.load(std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..3 {
+        assert_eq!(
+            source.declare("opencode"),
+            Ok(OPENCODE_CONTEXT_CAPABILITIES)
+        );
+        assert_eq!(source.declare("pi"), Err("descriptor_absent"));
+        assert_eq!(source.declare("other"), Err("unknown_harness"));
+    }
+    assert_eq!(
+        backend.reads.load(std::sync::atomic::Ordering::SeqCst),
+        after_construction,
+        "a bind never reads the backend"
+    );
+    assert!(
+        after_construction <= 2,
+        "construction reads each harness at most once, read {after_construction} times"
+    );
 }
 
 /// A source whose answer a test can change after a route has bound.

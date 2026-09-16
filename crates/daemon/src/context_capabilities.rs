@@ -61,12 +61,28 @@ pub enum CapabilityDenial {
     },
 }
 
-/// The production source: the host's harness backend read through the trait default-closed method.
-pub struct BackendDeclarations(pub Arc<dyn LlmExecutionBackend>);
+/// The production source: each harness's availability and declaration, read from the host's backend once at construction. The backend's availability read revalidates the installed closure, so a bind is a table lookup.
+pub struct BackendDeclarations {
+    entries: [(Harness, Result<ContextCapabilities, &'static str>); 2],
+}
+
+impl BackendDeclarations {
+    pub fn new(backend: &Arc<dyn LlmExecutionBackend>) -> Self {
+        let read = |harness: Harness| (harness, backend.declare(harness.as_str()));
+        Self {
+            entries: [read(Harness::OpenCode), read(Harness::Pi)],
+        }
+    }
+}
 
 impl CapabilitySource for BackendDeclarations {
     fn declare(&self, harness: &str) -> Result<ContextCapabilities, &'static str> {
-        self.0.declare(harness)
+        let harness = Harness::parse(harness).ok_or("unknown_harness")?;
+        self.entries
+            .iter()
+            .find(|(known, _)| *known == harness)
+            .map(|(_, declared)| *declared)
+            .unwrap_or(Err("unknown_harness"))
     }
 }
 

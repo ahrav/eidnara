@@ -1101,8 +1101,8 @@ pub fn run() -> Result<(), &'static str> {
         StateRoot::resolve(Some(&root)).map_err(|_| "model_execution state root is unavailable")?;
     let backend: Arc<dyn LlmExecutionBackend> =
         Arc::new(harness_backend(&envelope, &env, &model_execution_state)?);
-    let capability_source = Arc::new(daemon::context_capabilities::BackendDeclarations(
-        Arc::clone(&backend),
+    let capability_source = Arc::new(daemon::context_capabilities::BackendDeclarations::new(
+        &backend,
     ));
     let model_execution = if envelope.credentials.is_empty() {
         ModelExecutionComponent::new(backend, model_execution_state)

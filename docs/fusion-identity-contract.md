@@ -161,8 +161,9 @@ an evicted key or a key of another project is refused rather than replayed.
 
 Suppression, replacement, and cross-step reuse are offered only when the host
 backend's `context_capabilities` declaration for the route's harness allows
-the class. The declaration is host-authored static data, read once when the
-route binds and constant for the route epoch; a backend that overrides
+the class. The declaration is host-authored static data, read from the
+backend once at startup, latched when the route binds, and constant for the
+route epoch; a backend that overrides
 nothing declares no class, OpenCode declares whole-message suppression and
 replacement, and Pi declares nothing. Consumer capability strings are never
 read for this decision. A class the declaration does not allow answers

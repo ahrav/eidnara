@@ -266,12 +266,15 @@ Exercised: yes - `crates/daemon/tests/context_capabilities.rs`
 `a_backend_that_overrides_nothing_declares_no_class_and_the_harness_tables_are_recorded`,
 `without_a_declaration_every_gated_class_is_denied_as_unreadable_and_append_still_works`,
 `an_unavailable_backend_is_an_unreadable_declaration_not_a_closed_one`,
+`the_production_source_reads_each_harness_once_and_every_bind_is_a_lookup`,
 `the_real_harness_tables_allow_exactly_the_recorded_classes`, and
 `the_declaration_is_latched_at_bind_and_reread_by_a_new_bind`.
 Guarantee: `LlmExecutionBackend::context_capabilities` defaults to the empty
 set; the OpenCode declaration allows exactly suppression and replacement and
-the Pi declaration is empty; the declaration is read once at route bind,
-held for the route epoch, and re-read by a new bind; a class the latched
+the Pi declaration is empty; the production source reads each harness's
+availability and declaration from the backend once at startup and a bind is
+a lookup; the declaration is latched once at route bind,
+held for the route epoch, and re-read from the source by a new bind; a class the latched
 declaration does not allow is `capability_unsupported`, a declaration that
 could not be read is `capability_undeclared` with its reason, and a backend
 whose `unavailable_reason` for the harness is set is unreadable with that
@@ -281,7 +284,9 @@ again on apply and confirm so a route whose declaration is closed cannot drive
 a receipt another route prepared; append is never gated.
 Check: `always` - a backend that overrides nothing denies every class for
 both harnesses; a backend whose `unavailable_reason` is `descriptor_absent`
-latches `Unreadable("descriptor_absent")` for both harnesses; a daemon
+latches `Unreadable("descriptor_absent")` for both harnesses; the production
+source over a counting backend answers three rounds of binds without a
+further backend read; a daemon
 without a source denies every class as
 `no_declaration` and still prepares an append; under the recorded tables an
 `opencode` route prepares `replace` and `suppress` and is denied `reuse`

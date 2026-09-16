@@ -14,7 +14,7 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u4-context-edits` at
 - `crates/host-runtime/src/model_execution/backend.rs`: `context_capabilities` defaults to `ContextCapabilities::NONE`; `OPENCODE_CONTEXT_CAPABILITIES` and `PI_CONTEXT_CAPABILITIES`; `HarnessDispatchBackend` forwards per harness; `opencode.rs` and `pi.rs` answer their own harness.
 - `crates/daemon/src/context_capabilities.rs`: `CapabilitySource`, `LatchedCapabilities::read` and `gate`, `CapabilityDenial`.
 - `crates/daemon/src/lib.rs`: `bind` latches into `SessionBinding::context_capabilities`; `RouteScope` carries it; `edit_receipts.rs` gates `retrieval.prepare`.
-- `crates/daemon/src/bin/eidnara_host/serve.rs` installs `BackendDeclarations` over the production backend.
+- `crates/daemon/src/bin/eidnara_host/serve.rs` installs `BackendDeclarations` over the production backend; it reads each harness's `unavailable_reason` and `context_capabilities` once at construction, because the backends' availability read revalidates the installed closure.
 
 ## Failure scenario
 
