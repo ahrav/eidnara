@@ -9,7 +9,9 @@ use kernel::source_identity::{Occurrence, OccurrenceClass, Span, encode, payload
 use kernel::{ArtifactDestination, KernelStore, ProjectScope, Sensitivity};
 use retrieval::eligibility::judge_occurrences;
 use retrieval::fusion::{IdentityRefusal, OccurrenceId};
-use retrieval::packing::{Grouping, PayloadRef, Provenance, SelectedOccurrence, read_selected};
+use retrieval::packing::{
+    Grouping, PayloadRef, Provenance, SelectedOccurrence, fetch_payload, read_selected,
+};
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, ProjectionError, persist_occurrences};
 use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite,
@@ -348,6 +350,82 @@ fn reads_refuse_unknown_identities_oversized_selections_and_disagreeing_columns(
             )
             .unwrap();
     }
+}
+
+#[test]
+fn payload_fetch_is_length_guarded_in_sql_and_verified_by_digest_afterwards() {
+    let span = tool_span(
+        "call-1",
+        "1",
+        "tool_output",
+        None,
+        Sensitivity::Normal,
+        "src-1",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    let reference = store
+        .with_conn_fenced(|conn| {
+            persist(conn, std::slice::from_ref(&span));
+            Ok(read_selected(conn, &[span.id()], MAX).unwrap()[0]
+                .payload
+                .clone())
+        })
+        .unwrap();
+    assert_eq!(reference.byte_length, BUFFER.len() as u64);
+
+    let fetched = store
+        .with_conn(|conn| Ok(fetch_payload(conn, &reference)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched, BUFFER.as_bytes());
+    assert_eq!(reference.verify(&fetched), Ok(()));
+
+    let shorter = PayloadRef {
+        byte_length: reference.byte_length - 1,
+        ..reference.clone()
+    };
+    let beyond_kernel = PayloadRef {
+        byte_length: kernel::MAX_PAYLOAD_BYTES as u64 + 1,
+        ..reference.clone()
+    };
+    let unknown = PayloadRef {
+        payload_id: "f".repeat(64),
+        ..reference.clone()
+    };
+    for (name, wrong) in [
+        ("shorter", &shorter),
+        ("beyond the kernel bound", &beyond_kernel),
+        ("unknown", &unknown),
+    ] {
+        let fetched = store
+            .with_conn(|conn| Ok(fetch_payload(conn, wrong)))
+            .unwrap();
+        assert_eq!(fetched, Err(ProjectionError::CorruptRow), "{name}");
+    }
+
+    let mut altered = BUFFER.as_bytes().to_vec();
+    altered[0] ^= 1;
+    assert_eq!(reference.verify(&altered), Err(ProjectionError::CorruptRow));
+    assert_eq!(
+        reference.verify(&BUFFER.as_bytes()[..BUFFER.len() - 1]),
+        Err(ProjectionError::CorruptRow)
+    );
+    drop(store);
+    rusqlite::Connection::open(dir.path().join("search.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE payloads SET bytes=?1 WHERE payload_id=?2",
+            rusqlite::params![altered, reference.payload_id],
+        )
+        .unwrap();
+    let store = open(dir.path());
+    let fetched = store
+        .with_conn(|conn| Ok(fetch_payload(conn, &reference)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched, altered, "the fetch alone does not hash");
+    assert_eq!(reference.verify(&fetched), Err(ProjectionError::CorruptRow));
 }
 
 #[test]

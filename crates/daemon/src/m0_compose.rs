@@ -107,7 +107,12 @@ pub(crate) fn trim_memories_to_budget(
             }
             cost as u64
         },
-        |open_categories, index| open_categories.push(positive[index].category.as_str()),
+        |open_categories, index| {
+            let category = positive[index].category.as_str();
+            if !open_categories.contains(&category) {
+                open_categories.push(category);
+            }
+        },
     );
     scan.admitted
         .iter()

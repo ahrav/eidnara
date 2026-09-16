@@ -2,20 +2,33 @@
 //! selected spans never enter a group.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use kernel::source_identity::Span;
 
 use super::{Grouping, GroupingKey, SelectedOccurrence};
 use crate::fusion::OccurrenceId;
 
-#[derive(Debug, Clone, Copy)]
+/// `Debug` reports the byte length, never the selected content.
+#[derive(Clone, Copy)]
 pub struct Selected<'a> {
     pub row: &'a SelectedOccurrence,
     pub bytes: &'a [u8],
 }
 
+impl fmt::Debug for Selected<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Selected")
+            .field("row", &self.row)
+            .field("byte_length", &self.bytes.len())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ungrouped {
+    /// Only an explicit span can be empty; an empty whole-object row is its
+    /// own group.
     EmptySpan,
     SpanOverflow,
     /// Every span of the disagreeing run is refused.
@@ -39,12 +52,23 @@ impl GroupIdentity {
 }
 
 /// One maximal run of overlapping or adjacent spans, in canonical offset
-/// order within its group.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// order within its group. `Debug` reports the byte length, never the
+/// selected content.
+#[derive(Clone, PartialEq, Eq)]
 pub struct MergedRange {
     pub span: Span,
     pub bytes: Vec<u8>,
     pub members: Vec<OccurrenceId>,
+}
+
+impl fmt::Debug for MergedRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MergedRange")
+            .field("span", &self.span)
+            .field("byte_length", &self.bytes.len())
+            .field("members", &self.members)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,13 +85,6 @@ impl Group {
         self.ranges
             .iter()
             .flat_map(|range| range.members.iter().copied())
-    }
-
-    pub fn byte_length(&self) -> u64 {
-        self.ranges
-            .iter()
-            .map(|range| range.bytes.len() as u64)
-            .sum()
     }
 }
 
@@ -143,7 +160,9 @@ fn merge(
     refused: &mut Vec<(OccurrenceId, Ungrouped)>,
 ) -> Vec<MergedRange> {
     members.retain(|member| {
-        let reason = if member.end <= member.start {
+        let reason = if member.end < member.start {
+            Some(Ungrouped::SpanOverflow)
+        } else if member.end == member.start && !member.whole_buffer {
             Some(Ungrouped::EmptySpan)
         } else if member.end - member.start != member.bytes.len() as u64 {
             Some(Ungrouped::SpanOverflow)

@@ -12,9 +12,9 @@ representation with a typed result for classes that do not group.
 - `crates/retrieval/src/fusion/identity.rs` `ParentGroupKey::derive` reads the
   parent from the tuple through `kernel::source_identity::whole_buffer_lineage_digest`
   and refuses a revision, representation, or span that disagrees with the tuple.
-- `crates/retrieval/src/packing.rs` `Grouping::applies_to` encodes the Q1
+- `crates/retrieval/src/packing/mod.rs` `Grouping::applies_to` encodes the Q1
   ruling: only `raw_tool_spans` groups.
-- `crates/retrieval/src/packing.rs` `Grouping::derive` returns
+- `crates/retrieval/src/packing/mod.rs` `Grouping::derive` returns
   `NonGrouping(class)` for every other class and otherwise wraps the parent key
   with the class and representation as explicit components.
 - `crates/retrieval/tests/packing_identity.rs`

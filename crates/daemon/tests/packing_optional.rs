@@ -4,6 +4,9 @@
 mod support;
 
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
 
 use daemon::packing::{
     AccountingProfile, Charged, ClaudeTokens, OptionalAdmission, OptionalExclusion,
@@ -12,10 +15,12 @@ use daemon::packing::{
 };
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
+use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{OptionalBound, OptionalBounds};
+use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
 use support::packing::{
     Fixture, ToolSpan, accounting_bounds, bounds, byte_profile, required_render_total, tool_range,
-    tool_span,
+    tool_span, while_connection_is_held,
 };
 
 const REQUIRED: ToolSpan = tool_span("req", "1", "required bytes\n");
@@ -291,16 +296,68 @@ fn a_groups_priced_cost_equals_its_charged_entries_and_the_budget_covers_the_clo
     }
 }
 
+/// A heuristic whose count is not monotonic in the render: an odd number of
+/// rendered spans counts as more than half the `u64` range, an even number as
+/// nothing. The required render has no span and costs nothing; a group of
+/// three ranges is priced at two deltas above half the range, whose sum is
+/// unrepresentable.
+fn half_plus_one_on_odd_spans() -> AccountingProfile {
+    AccountingProfile::heuristic("half-plus-one", "odd spans", 0, |text| {
+        if text.matches("<span").count() % 2 == 1 {
+            (u64::MAX / 2 + 1) as usize
+        } else {
+            0
+        }
+    })
+}
+
+#[test]
+fn a_group_whose_cost_overflows_is_refused_not_admitted_at_a_saturated_cost() {
+    let a = tool_range("tool", PARENT, 0, 6);
+    let b = tool_range("tool", PARENT, 8, 12);
+    let c = tool_range("tool", PARENT, 15, 20);
+    let fixture = Fixture::new(&[REQUIRED, a, b, c]);
+    let requests = [optional(&a), optional(&b), optional(&c)];
+    let (result, _) = run_with_profile(
+        &fixture,
+        &requests,
+        &wide(),
+        u64::MAX,
+        &half_plus_one_on_odd_spans(),
+    );
+    match result {
+        Err(PreparationRefusal::OptionalCostOverflow { at }) => assert_eq!(at, 0),
+        other => panic!("an unrepresentable cost must not be admitted: {other:?}"),
+    }
+}
+
 #[test]
 fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation() {
     let live = tool_span("opt-live", "1", "live");
     let unknown = tool_span("opt-unknown", "1", "never");
     let excluded = tool_span("opt-excluded", "1", "excluded");
     let moved = tool_span("opt-moved", "1", "moved on");
+    let tombstoned = tool_span("opt-tombstoned", "1", "retired");
     let fixture = Fixture::with_admitted(
-        &[REQUIRED, live, excluded, moved],
-        &["req", "opt-live", "opt-moved"],
+        &[REQUIRED, live, excluded, moved, tombstoned],
+        &["req", "opt-live", "opt-moved", "opt-tombstoned"],
     );
+    fixture
+        .store
+        .with_conn_fenced(|conn| {
+            tombstone_occurrence(
+                conn,
+                &tombstoned.id().to_string(),
+                Tombstone {
+                    invalidated_commit_seq: 9,
+                    reason: TombstoneReason::Retired,
+                },
+                2,
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
     let stale = OptionalRequest {
         occurrence: moved.id(),
         revision: 2,
@@ -310,21 +367,27 @@ fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation()
         optional(&unknown),
         optional(&excluded),
         stale,
+        optional(&tombstoned),
         optional(&live),
+        optional(&unknown),
     ];
     let (result, trace) = run(&fixture, &requests, &wide(), 1 << 20);
     let admission = result.unwrap();
     assert_eq!(admission.admitted.len(), 1);
+    // `Duplicate` names the later request; the identity's first request still
+    // carries its own reason, so a repeated missing identity reports both.
     assert_eq!(
         admission.excluded,
         vec![
             (live.id(), OptionalExclusion::Duplicate),
+            (unknown.id(), OptionalExclusion::Duplicate),
             (unknown.id(), OptionalExclusion::Missing),
             (
                 excluded.id(),
                 OptionalExclusion::Excluded(EligibilityVerdict::Retracted)
             ),
             (moved.id(), OptionalExclusion::Stale),
+            (tombstoned.id(), OptionalExclusion::Stale),
         ]
     );
     assert_eq!(
@@ -362,5 +425,126 @@ fn an_optional_bound_at_limit_plus_one_refuses_with_the_bound_before_any_load() 
         trace.payload_loads(),
         1,
         "only the required payload was loaded"
+    );
+}
+
+/// The kernel judges at most `MAX_ELIGIBILITY_CANDIDATES` per batch, so a
+/// caller bound above it cannot be honored; the set is refused as a bound
+/// violation before any row is read rather than read whole and refused by
+/// the kernel.
+#[test]
+fn a_fused_set_beyond_the_kernel_batch_cap_is_refused_before_any_read() {
+    let fixture = Fixture::new(&[REQUIRED]);
+    let requests: Vec<OptionalRequest> = (0..=kernel::MAX_ELIGIBILITY_CANDIDATES)
+        .map(|index| OptionalRequest {
+            occurrence: OccurrenceId::parse(&format!("{index:064x}")).unwrap(),
+            revision: 1,
+        })
+        .collect();
+    let generous = OptionalBounds {
+        max_fused_candidates: NonZeroUsize::new(2 * kernel::MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        ..wide()
+    };
+    let (result, trace) = run(&fixture, &requests, &generous, 1 << 20);
+    match result.unwrap_err() {
+        PreparationRefusal::OptionalBound(exceeded) => {
+            assert_eq!(exceeded.bound, OptionalBound::FusedCandidates);
+            assert_eq!(exceeded.at, kernel::MAX_ELIGIBILITY_CANDIDATES);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        !trace
+            .events()
+            .iter()
+            .any(|event| matches!(event, StageEvent::Optional(..))),
+        "no optional row is read before the cap refuses the set: {:?}",
+        trace.events()
+    );
+}
+
+/// A corrupt optional payload is excluded with its reason after the load; the
+/// scan continues and the preparation is not refused.
+#[test]
+fn a_corrupt_optional_payload_is_excluded_and_the_scan_continues() {
+    let damaged = tool_span("opt-a", "1", "damaged");
+    let sound = tool_span("opt-b", "1", "sound");
+    let fixture = Fixture::new(&[REQUIRED, damaged, sound]);
+    let payload_id = kernel::source_identity::payload_id(damaged.payload.as_bytes());
+    let mut altered = damaged.payload.as_bytes().to_vec();
+    altered[0] ^= 1;
+    rusqlite::Connection::open(fixture.sqlite_path())
+        .unwrap()
+        .execute(
+            "UPDATE payloads SET bytes=?2 WHERE payload_id=?1",
+            rusqlite::params![payload_id, altered],
+        )
+        .unwrap();
+    let (result, trace) = run(
+        &fixture,
+        &[optional(&damaged), optional(&sound)],
+        &wide(),
+        1 << 20,
+    );
+    let admission = result.unwrap();
+    assert_eq!(
+        admission.excluded,
+        vec![(damaged.id(), OptionalExclusion::Corrupt)]
+    );
+    assert_eq!(admission.admitted.len(), 1);
+    assert_eq!(
+        admission.admitted[0].group.members().collect::<Vec<_>>(),
+        vec![sound.id()]
+    );
+    assert_eq!(
+        trace.payload_loads(),
+        2,
+        "the required payload and the sound optional payload; the corrupt load is not charged"
+    );
+}
+
+#[test]
+fn a_deadline_that_passes_while_the_connection_is_held_refuses_the_optional_phase_without_reading()
+{
+    let a = tool_span("opt-a", "1", "aaaa");
+    let fixture = Fixture::new(&[REQUIRED, a]);
+    let (required, _) = fixture.prepare(
+        &[REQUIRED.request()],
+        &bounds(1 << 20),
+        &EvalBudget::unbounded(),
+    );
+    let required = required.unwrap();
+    let short = EvalBudget::new(
+        Some(Instant::now() + Duration::from_millis(200)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let mut trace = PackingTrace::default();
+    let profile = byte_profile();
+    let (waited, result) = while_connection_is_held(&fixture, || {
+        prepare_optional(
+            &fixture.store,
+            RequiredInputs {
+                kernel: &fixture.kernel,
+                project: &fixture.project,
+                destination: kernel::ArtifactDestination::Local,
+                budget: &short,
+                profile: &profile,
+            },
+            &required,
+            &[optional(&a)],
+            &wide(),
+            &accounting_bounds(),
+            &mut trace,
+        )
+    });
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+    assert!(
+        waited < Duration::from_secs(2),
+        "the hold must end at the deadline, not when the holder releases: {waited:?}"
+    );
+    assert!(
+        trace.events().is_empty(),
+        "no optional row is read after the deadline: {:?}",
+        trace.events()
     );
 }

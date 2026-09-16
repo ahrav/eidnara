@@ -22,7 +22,7 @@ grouping of spans into groups, accounting, and application are separate parts.
 
 ## Observation contract
 
-The observation point is the public API of `crates/retrieval/src/packing.rs`,
+The observation point is the public API of `crates/retrieval/src/packing/mod.rs`,
 exported at `crates/retrieval/src/lib.rs:27` and exercised by
 `crates/retrieval/tests/packing_identity.rs`. Persistence and collision refusal
 are the existing `crates/retrieval/src/lib.rs` `persist_occurrences` path.
@@ -35,7 +35,7 @@ Only `raw_tool_spans` groups. Its occurrences are the one class cut into
 ranges of a parent buffer. `messages`, `canonical_claims`, `promoted_memory`,
 and `git_commits` persist whole objects and derive the typed non-grouping
 result. Recorded by the RP2.8 owner at the U1 change;
-`crates/retrieval/src/packing.rs` `Grouping::applies_to` encodes it.
+`crates/retrieval/src/packing/mod.rs` `Grouping::applies_to` encodes it.
 
 ## Index
 
@@ -50,9 +50,11 @@ result. Recorded by the RP2.8 owner at the U1 change;
 
 Type: safety
 Reachability: test-only - `read_selected` and `SelectedOccurrence` are called
-from `crates/retrieval/tests/packing_identity.rs` only; `grep -rn 'packing::'
-crates --include=*.rs` outside `crates/retrieval/src/packing.rs` finds that
-test file alone, so no packer reads a selection at this base.
+from `crates/retrieval/tests/packing_identity.rs` and, since RP2.8 U2, from
+`crates/daemon/src/packing/mod.rs` `prepare_required`, which itself has only a test
+caller; `grep -rn 'packing::' crates --include=*.rs` outside
+`crates/retrieval/src/packing/mod.rs` finds those files alone, so no route
+reads a selection at this base.
 Status: active
 Exercised: yes - `crates/retrieval/tests/packing_identity.rs`
 `byte_twins_share_one_payload_row_and_keep_their_own_attribution` and
@@ -95,9 +97,9 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `Grouping::derive` is called from
-`crates/retrieval/src/packing.rs` `into_selected` and from
+`crates/retrieval/src/packing/mod.rs` `decode` and from
 `crates/retrieval/tests/packing_identity.rs`; the read itself has no
-production caller at this base (same grep as the first record).
+route caller at this base (same grep as the first record).
 Status: active
 Exercised: yes - `crates/retrieval/tests/packing_identity.rs`
 `grouping_keys_need_parent_revision_and_representation_together`,

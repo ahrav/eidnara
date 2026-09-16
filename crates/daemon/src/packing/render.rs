@@ -1,3 +1,5 @@
+use std::fmt;
+
 use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{Group, MergedRange, TokenCount};
 
@@ -38,12 +40,13 @@ pub struct LedgerEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Staged {
     entries: Vec<(LedgerEntry, String)>,
-    cost: ClaudeTokens,
+    cost: Option<ClaudeTokens>,
     tail_tokens: ClaudeTokens,
 }
 
 impl Staged {
-    pub fn cost(&self) -> ClaudeTokens {
+    /// `None` when the sum is not representable; nothing is saturated.
+    pub fn cost(&self) -> Option<ClaudeTokens> {
         self.cost
     }
 
@@ -53,7 +56,7 @@ impl Staged {
 }
 
 /// Each rendered byte is attributable to exactly one charged fragment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Ledger {
     profile: AccountingProfile,
     text: String,
@@ -65,6 +68,20 @@ pub struct Ledger {
     anchor: usize,
     /// The profile's count of `text[anchor..]`.
     tail_tokens: ClaudeTokens,
+}
+
+/// Payloads are never logged; the rendered byte length stands in for the
+/// text.
+impl fmt::Debug for Ledger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ledger")
+            .field("profile", &self.profile)
+            .field("rendered_bytes", &self.text.len())
+            .field("entries", &self.entries)
+            .field("total", &self.total)
+            .field("total_with_headroom", &self.total_with_headroom)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Ledger {
@@ -137,14 +154,12 @@ impl Ledger {
     pub fn stage(&self, fragments: impl IntoIterator<Item = (Charged, String)>) -> Staged {
         let mut scratch = self.text[self.anchor..].to_owned();
         let mut before = self.tail_tokens;
-        let mut cost = ClaudeTokens::ZERO;
+        let mut cost = Some(ClaudeTokens::ZERO);
         let entries = fragments
             .into_iter()
             .map(|(item, fragment)| {
                 let charge = self.price(&mut scratch, &mut before, &fragment);
-                cost = cost
-                    .checked_add(charge.with_headroom())
-                    .unwrap_or(ClaudeTokens::MAX);
+                cost = cost.and_then(|sum| sum.checked_add(charge.with_headroom()));
                 let entry = LedgerEntry {
                     item,
                     bytes: fragment.len(),
