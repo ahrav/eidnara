@@ -723,28 +723,12 @@ pub fn stage(
     }
     drop(file);
     let manifest = seed.verification.stage_manifest();
-    let sources: Vec<_> = manifest
-        .files
-        .iter()
-        .map(|file| {
-            let source = match file.path.as_str() {
-                SEED_FILE => seed.path.clone(),
-                SEED_REPORT_FILE => report_path.clone(),
-                _ => {
-                    return Err(SeedRefusal::Staging(
-                        "unexpected seed manifest path".to_owned(),
-                    ));
-                }
-            };
-            Ok(SourceSpec {
-                rel_path: file.path.clone(),
-                source,
-                executable: false,
-                expected_size: Some(file.size),
-                expected_sha256: Some(file.sha256.clone()),
-            })
-        })
-        .collect::<Result<_, _>>()?;
+    let sources = manifest_sources(&manifest, |path| match path {
+        SEED_FILE => Some(seed.path.clone()),
+        SEED_REPORT_FILE => Some(report_path.clone()),
+        _ => None,
+    })
+    .ok_or_else(|| SeedRefusal::Staging("unexpected seed manifest path".to_owned()))?;
     let staged = store.stage(&sources, &seed_stage_meta(&seed.verification), protected);
     let _ = fs::remove_file(&report_path);
     let digest = staged.map_err(|error| match error {
@@ -758,6 +742,26 @@ pub fn stage(
         digest,
         verification: seed.verification.clone(),
     })
+}
+
+/// One [`SourceSpec`] per manifest file, each carrying the manifest's size and hash so the store refuses a source that changed after the manifest was computed; `None` when `resolve` does not know a path.
+pub(crate) fn manifest_sources(
+    manifest: &GenerationManifest,
+    resolve: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<Vec<SourceSpec>> {
+    manifest
+        .files
+        .iter()
+        .map(|file| {
+            Some(SourceSpec {
+                rel_path: file.path.clone(),
+                source: resolve(&file.path)?,
+                executable: false,
+                expected_size: Some(file.size),
+                expected_sha256: Some(file.sha256.clone()),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn verify_certificate(seed: &ClosedSeed) -> Result<(), SeedRefusal> {

@@ -1,8 +1,39 @@
 //! Little-endian f32 decoding preserves every bit, including signed zero.
+//! The original-row artifact is one fixed header followed by the rows in writer order; identical rows under an identical layout encode to identical bytes.
+
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Metric {
     InnerProduct,
+}
+
+impl Metric {
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::InnerProduct => 1,
+        }
+    }
+
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::InnerProduct),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::InnerProduct => "inner_product",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "inner_product" => Some(Self::InnerProduct),
+            _ => None,
+        }
+    }
 }
 
 /// The shape and normalization predicate every row of one generation satisfies.
@@ -131,4 +162,135 @@ fn check_norm(row: &[f32], tolerance: f64) -> Result<(), RowRejection> {
         return Err(RowRejection::Normalization { norm });
     }
     Ok(())
+}
+
+pub const ARTIFACT_MAGIC: [u8; 8] = *b"EIDF32R\0";
+pub const ARTIFACT_VERSION: u16 = 1;
+/// Magic, version, metric code, one reserved zero byte, dimension, and row count.
+pub const ARTIFACT_HEADER_BYTES: usize = 8 + 2 + 1 + 1 + 4 + 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum ArtifactRejection {
+    #[error("the artifact is {bytes} bytes, shorter than its {ARTIFACT_HEADER_BYTES}-byte header")]
+    ShortHeader { bytes: usize },
+    #[error("the artifact magic is not the original-row magic")]
+    Magic,
+    #[error("artifact version {version} is not {ARTIFACT_VERSION}")]
+    Version { version: u16 },
+    #[error("the reserved header byte is {reserved}, not zero")]
+    Reserved { reserved: u8 },
+    #[error("metric code {code} is not the layout's {expected:?}")]
+    Metric { code: u8, expected: Metric },
+    #[error("a layout with dimension zero has no rows")]
+    ZeroDimension,
+    #[error("the layout admits no generation: {0}")]
+    Layout(RowRejection),
+    #[error("the artifact declares dimension {declared}, not the layout's {expected}")]
+    Dimension { declared: u32, expected: u32 },
+    #[error("the artifact declares {declared} rows but carries {bytes} row bytes")]
+    RowBytes { declared: u64, bytes: usize },
+    #[error("row {index}: {rejection}")]
+    Row {
+        index: usize,
+        rejection: RowRejection,
+    },
+}
+
+#[derive(Clone, PartialEq)]
+pub struct OriginalRows {
+    pub layout: RowLayout,
+    pub rows: Vec<Vec<f32>>,
+}
+
+impl fmt::Debug for OriginalRows {
+    /// Rows are embedding content and stay out of diagnostics.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OriginalRows")
+            .field("layout", &self.layout)
+            .field("rows", &self.rows.len())
+            .finish()
+    }
+}
+
+/// Every row is validated before encoding, so no artifact carries a row the decoder would refuse.
+pub fn encode_rows<'a>(
+    layout: &RowLayout,
+    rows: impl IntoIterator<Item = &'a [f32]>,
+) -> Result<Vec<u8>, ArtifactRejection> {
+    if layout.dimension == 0 {
+        return Err(ArtifactRejection::ZeroDimension);
+    }
+    layout.check().map_err(ArtifactRejection::Layout)?;
+    let mut bytes = Vec::with_capacity(ARTIFACT_HEADER_BYTES);
+    bytes.extend_from_slice(&ARTIFACT_MAGIC);
+    bytes.extend_from_slice(&ARTIFACT_VERSION.to_le_bytes());
+    bytes.push(layout.metric.code());
+    bytes.push(0);
+    bytes.extend_from_slice(&layout.dimension.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    let mut count = 0u64;
+    for (index, row) in rows.into_iter().enumerate() {
+        validate(row, layout).map_err(|rejection| ArtifactRejection::Row { index, rejection })?;
+        bytes.extend(row.iter().flat_map(|value| value.to_le_bytes()));
+        count += 1;
+    }
+    bytes[16..ARTIFACT_HEADER_BYTES].copy_from_slice(&count.to_le_bytes());
+    Ok(bytes)
+}
+
+/// The header, metric, dimension, and byte count are checked before any row is read.
+pub fn decode_rows(bytes: &[u8], layout: &RowLayout) -> Result<OriginalRows, ArtifactRejection> {
+    if layout.dimension == 0 {
+        return Err(ArtifactRejection::ZeroDimension);
+    }
+    layout.check().map_err(ArtifactRejection::Layout)?;
+    if bytes.len() < ARTIFACT_HEADER_BYTES {
+        return Err(ArtifactRejection::ShortHeader { bytes: bytes.len() });
+    }
+    let (header, body) = bytes.split_at(ARTIFACT_HEADER_BYTES);
+    if header[..8] != ARTIFACT_MAGIC {
+        return Err(ArtifactRejection::Magic);
+    }
+    let version = u16::from_le_bytes([header[8], header[9]]);
+    if version != ARTIFACT_VERSION {
+        return Err(ArtifactRejection::Version { version });
+    }
+    if Metric::from_code(header[10]) != Some(layout.metric) {
+        return Err(ArtifactRejection::Metric {
+            code: header[10],
+            expected: layout.metric,
+        });
+    }
+    if header[11] != 0 {
+        return Err(ArtifactRejection::Reserved {
+            reserved: header[11],
+        });
+    }
+    let declared = u32::from_le_bytes([header[12], header[13], header[14], header[15]]);
+    if declared != layout.dimension {
+        return Err(ArtifactRejection::Dimension {
+            declared,
+            expected: layout.dimension,
+        });
+    }
+    let row_count = u64::from_le_bytes(header[16..24].try_into().expect("eight header bytes"));
+    let row_bytes = u64::from(layout.dimension) * 4;
+    let mismatch = ArtifactRejection::RowBytes {
+        declared: row_count,
+        bytes: body.len(),
+    };
+    if row_count.checked_mul(row_bytes) != u64::try_from(body.len()).ok() {
+        return Err(mismatch);
+    }
+    let rows = body
+        .chunks_exact(usize::try_from(row_bytes).map_err(|_| mismatch)?)
+        .enumerate()
+        .map(|(index, chunk)| {
+            decode(chunk, layout).map_err(|rejection| ArtifactRejection::Row { index, rejection })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(OriginalRows {
+        layout: *layout,
+        rows,
+    })
 }

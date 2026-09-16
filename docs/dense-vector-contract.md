@@ -235,3 +235,90 @@ here.
 
 Pinned bytes for a fixed corpus live in `tests/dense_scalar.rs`. A change to
 them is a change to the recipe.
+
+## The immutable vector generation
+
+`daemon::vector_generation` builds one generation from a
+`retrieval::dense::export::live_rows` export: every live dense-required
+occurrence with a vector of the generation, validated against the layout, in
+occurrence identifier order, together with the generation and kernel
+incarnation the export checked against the projection and the projection
+checkpoint the same read transaction observed. The export walks the
+generation's `(generation_id, occurrence_id)` index in order and never sorts.
+`build` refuses an export whose generation or kernel incarnation is not the
+caller's expectation and stamps the sidecar's generation identifier, epoch,
+model, tokenizer fingerprint, and kernel incarnation from the export, so the
+provenance the sidecar records is the state the rows came from. The
+generation is five files staged through the shared `GenerationStore` under
+target `vector-generation`:
+
+| File | Bytes |
+| --- | --- |
+| `rows.f32` | The original-row artifact: header (`EIDF32R\0`, version `1`, metric code, reserved zero byte, dimension, row count), then the rows in identifier order. |
+| `codes.int8` | One two's-complement byte per coordinate per row, in the same row order, encoded under the generation's scales. |
+| `scales.f32` | The calibration scales, four little-endian bytes each. |
+| `row-ids.json` | A JSON array of the occurrence identifiers, in row order. |
+| `vector-sidecar.json` | The sidecar, in its canonical byte form. |
+
+The sidecar names every other file by size and SHA-256 and binds the model,
+tokenizer fingerprint, dimension, metric, unit-norm tolerance, quantizer
+recipe, calibrated row count and scales digest, generation identifier and
+epoch, kernel incarnation, and the projection checkpoint the rows were taken
+at. Its hash fills the manifest's inputs slot, the compatibility identity's
+digest fills the contract slot, and the row artifact's hash fills the payload
+slot, so the generation digest is a function of every declared input and two
+builds over byte-identical inputs yield the same directory name, the same
+bytes, and the same digest. The `GenerationManifest` schema is unchanged.
+
+Verification (`vector_generation::verify`) does not trust the manifest to
+describe itself. The store checks inventory, sizes, modes, and hashes; the
+verifier then checks that the manifest is a vector manifest, that the sidecar
+bytes are canonical, inventory exactly the four payload files, and hash into
+the manifest, that the sidecar's checkpoint is one the projection schema
+could hold (a non-negative snapshot, a checkpoint at or after it, and a hold),
+that every identity field of the sidecar equals the caller's
+expectation (model, tokenizer fingerprint, dimension, metric, tolerance,
+recipe, generation identifier and epoch, kernel incarnation, and the
+checkpoint when the caller names one), and that the payload agrees with
+itself under the recipe: the row artifact holds the declared number of rows,
+recalibrating those rows reproduces the scale bytes and the calibrated row
+count and the scales hash the sidecar records, the identifiers number the
+rows in strictly increasing order, and the codes are exactly the rows encoded
+under the scales. A generation whose hashes were rewritten to match changed
+bytes is refused when the payload itself can reveal the change. The
+identifier list is the one payload no other file derives: a rewrite that
+keeps it the same length and strictly increasing is indistinguishable from
+the original here, so which occurrence each row names is bound by the export
+at the recorded checkpoint, not by verification; the store's owner-only modes
+exclude other users, a same-user writer is trusted, and a caller that needs
+more compares the identifiers with `live_rows` under the sidecar's checkpoint. A
+different model space is refused at an equal dimension.
+
+The vector selector is `vector-profile.json`, beside the host and search
+selectors. `select_vector` refuses a generation whose manifest target is not
+`vector-generation`; the search selector keeps its existing behavior and
+checks no target. Pruning retains every owner-selected generation, discard
+refuses one, and exchange repair refuses to replace one. An owner selector of
+unknown schema is quarantined: it may name any digest, so `prune` removes only
+temps and counts each such selector, `discard_unselected` and exchange repair
+refuse, and selection through that selector refuses, as the search selector
+already did. A corrupt owner selector (malformed bytes, a noncanonical digest,
+or failed security checks) is an error from every path that reads it: `prune`,
+`discard_unselected`, and exchange repair fail before removing anything, and
+selection through it fails. Neither stops staging new bytes or selecting
+through the other selectors: those touch nothing the uncertain selector could
+name, and a host or daemon rolled back to a build that predates the selector's
+schema must still be able to launch and publish. Verification holds a
+generation's payload in memory and takes a caller byte bound; a manifest whose
+files total more than it is refused before any payload is held. The store's
+validation has already streamed each file through a fixed buffer to check its
+hash, so the bound limits memory, not I/O. The store's selection primitive checks
+inventory, sizes, modes, and hashes only; the daemon's semantic verification
+of a generation precedes selection, and selecting or recovering a complete
+composition is a separate contract.
+
+Staging charges the whole payload inventory against the admission manifest's
+`capture_disk_bytes` limit under the caller's admission; a denial stages
+nothing. The build's work directory is scratch: files are created exclusively
+and not synced there, because the store copies and syncs them when it stages,
+and a retry uses a fresh directory.
