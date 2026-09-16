@@ -985,12 +985,77 @@ fn cancellation_after_a_page_is_judged_keeps_every_exclusion_of_that_page() {
         Completion::Incomplete(IncompleteReason::BudgetExhausted)
     );
     assert!(ranking.ranked.is_empty());
-    assert_eq!(ranking.consumed.judged, 8);
+    assert_eq!(
+        ranking.consumed.judged, 3,
+        "the first batch of a page wider than k holds its k best rows, alpha among them"
+    );
     assert_eq!(
         ranking.consumed.excluded,
         vec![(EligibilityVerdict::Hidden, 1)],
         "a judged exclusion counts whether or not its page was scored"
     );
+}
+
+#[test]
+fn a_page_wider_than_k_judges_its_k_best_rows_and_nothing_more_when_they_are_all_eligible() {
+    let fixture = Fixture::all_admitted();
+    let query = axis(0);
+    let reference = fixture.reference(&query, &OBJECTS);
+    let ranking = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(8).unwrap(),
+                ..bounds(3)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(ranking.completion, Completion::Complete);
+    assert_eq!(keyed(&ranking), reference[..3]);
+    assert_eq!(ranking.consumed.pages, 1);
+    assert_eq!(
+        ranking.consumed.batches, 2,
+        "one batch of the k best rows, then the re-judgment"
+    );
+    assert_eq!(ranking.consumed.judged, 3 + 3);
+    assert!(ranking.consumed.excluded.is_empty());
+}
+
+#[test]
+fn ineligible_rows_among_the_k_best_widen_the_judged_set_until_the_page_cannot_place_another_row() {
+    // `alpha` and `beta` outscore every other row against the axis; the kernel hides both.
+    let admitted: Vec<&str> = OBJECTS
+        .iter()
+        .copied()
+        .filter(|object| *object != "alpha" && *object != "beta")
+        .collect();
+    let fixture = Fixture::new(&admitted, corpus());
+    let query = axis(0);
+    let reference = fixture.reference(&query, &admitted);
+    let ranking = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(8).unwrap(),
+                ..bounds(3)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(ranking.completion, Completion::Complete);
+    assert_eq!(keyed(&ranking), reference[..3]);
+    assert!(!ids_of(&ranking).contains(&fixture.id("alpha")));
+    assert!(!ids_of(&ranking).contains(&fixture.id("beta")));
+    assert_eq!(
+        ranking.consumed.excluded,
+        vec![(EligibilityVerdict::Hidden, 2)]
+    );
+    assert_eq!(
+        ranking.consumed.batches, 3,
+        "the k best rows, then the rest of the page, then the re-judgment"
+    );
+    assert_eq!(ranking.consumed.judged, 8 + 3);
 }
 
 #[test]

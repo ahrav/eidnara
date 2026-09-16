@@ -21,8 +21,9 @@ value.
   survives a round trip, including the sign of zero. Nothing canonicalizes
   `-0.0` to `0.0`.
 - `occurrence_vectors.vector` in `search.sqlite` holds exactly these bytes.
-  `dense::codec::encode` produces them and `dense::codec::decode_shape`
-  reads them; there is no second decoder.
+  `dense::codec::encode` produces them; `dense::codec::decode_shape` and
+  `dense::score::score_encoded` read them through one word decoder; there is
+  no second decoder.
 - A byte string whose length is not a multiple of four is a truncated word
   and is refused before any coordinate is read.
 
@@ -75,7 +76,9 @@ one; no row of the refusing page is judged or returned.
 - No reassociation, pairwise summation, or SIMD reduction.
 
 Every dense scoring path uses this function or reproduces it exactly, so the
-same query and row yield the same f64 everywhere.
+same query and row yield the same f64 everywhere. `dense::score::score_encoded`
+reproduces it over the encoded row, checking `N_gen` in the same pass over the
+coordinates, and the oracle scores stored rows through it.
 
 ## Ordering
 
@@ -93,12 +96,17 @@ generation inside the caller's read transaction:
   (`batch::dense_eligible`), visited in occurrence identifier byte order
   regardless of class, through bounded keyset pages of `page_rows` rows over
   the `occurrences` primary key. Visit order therefore equals tie order.
-- Each page is decoded, validated, and scored. Every row with a vector has
+- Each page is validated and scored as it is read. Every row with a vector has
   its identity fields validated as a kernel candidate before its score is
   consulted, so a corrupt row is refused (`Kernel`) whatever `page_rows` is.
   Only the rows that would enter the top-`k` set as it stood before the page
-  are judged for canonical eligibility, in one kernel batch; the eligible
-  ones are then offered to the set. A page with no such row runs no batch.
+  are judged for canonical eligibility; the eligible ones are offered to the
+  set after each batch. A page whose selected rows fit one batch is judged in
+  one. A wider page is judged in rank order: the first batch holds its `k`
+  best rows, later batches are sized to the eligible rows still wanted at the
+  admission rate the walk has observed so far, and the page stops once the set
+  no longer admits its best unjudged row, so a page whose `k` best rows are all
+  eligible judges only those `k`. A page with no such row runs no batch.
   Eligibility precedes admission;
   enumeration order and score never decide eligibility, only whether a row is
   judged at all. The returned set equals the one a walk judging every row

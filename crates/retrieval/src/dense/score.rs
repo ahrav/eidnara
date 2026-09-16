@@ -27,6 +27,41 @@ pub fn score(metric: Metric, query: &[f32], row: &[f32]) -> f64 {
     }
 }
 
+/// The dot product accumulates in coordinate order to match decoding the row before calling [`score`] bit for bit.
+pub fn score_encoded(layout: &RowLayout, query: &[f32], bytes: &[u8]) -> Result<f64, RowRejection> {
+    layout.check()?;
+    let words = codec::decode_words(bytes)?;
+    if words.len() != layout.dimension as usize {
+        return Err(RowRejection::Dimension {
+            expected: layout.dimension,
+            actual: words.len(),
+        });
+    }
+    assert_eq!(
+        query.len(),
+        words.len(),
+        "the query was validated against the same layout as the row"
+    );
+    match layout.metric {
+        Metric::InnerProduct => {
+            let mut sum_of_squares = 0.0f64;
+            let mut sum = 0.0f64;
+            for (coordinate, (q, r)) in query.iter().zip(words).enumerate() {
+                if !r.is_finite() {
+                    return Err(RowRejection::NonFinite { coordinate });
+                }
+                let widened = f64::from(r);
+                let square = widened * widened;
+                sum_of_squares += square;
+                let product = f64::from(*q) * widened;
+                sum += product;
+            }
+            codec::check_sum_of_squares(sum_of_squares, layout.unit_norm_tolerance)?;
+            Ok(sum)
+        }
+    }
+}
+
 /// `total_cmp` orders finite scores; no NaN reaches it because rows are validated finite.
 pub fn rank_order(left: (f64, &str), right: (f64, &str)) -> Ordering {
     right
@@ -89,6 +124,10 @@ impl<T> TopK<T> {
             || self.heap.peek().is_some_and(|worst| {
                 rank_order((score, occurrence_id), worst.0.key()) == Ordering::Less
             })
+    }
+
+    pub fn k(&self) -> usize {
+        self.k.get()
     }
 
     /// A row that ranks at or below the current worst member when the set is full is dropped.

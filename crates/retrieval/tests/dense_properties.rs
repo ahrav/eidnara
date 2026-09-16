@@ -151,6 +151,78 @@ fn the_first_non_finite_coordinate_is_the_one_named() {
         .unwrap();
 }
 
+/// Rows drawn from raw bits so non-finite words, zero rows, and rows far from unit norm all occur, plus truncated and mis-sized byte strings.
+fn encoded_rows() -> impl Strategy<Value = (Vec<u8>, Vec<f32>, u32, f64)> {
+    (
+        prop::collection::vec(any::<u32>(), 0..12),
+        prop::collection::vec(-1.0f32..1.0, 1..12),
+        0usize..3,
+        prop::sample::select(vec![0.0f64, 1e-3, 0.5, 2.0]),
+    )
+        .prop_map(|(bits, query, extra_bytes, tolerance)| {
+            let row: Vec<f32> = bits.into_iter().map(f32::from_bits).collect();
+            let mut bytes = codec::encode(&row);
+            bytes.extend(std::iter::repeat_n(0u8, extra_bytes));
+            let dimension = query.len() as u32;
+            (bytes, query, dimension, tolerance)
+        })
+}
+
+#[test]
+fn scoring_an_encoded_row_matches_decoding_then_scoring_in_every_outcome() {
+    runner()
+        .run(&encoded_rows(), |(bytes, query, dimension, tolerance)| {
+            let layout = RowLayout {
+                dimension,
+                metric: Metric::InnerProduct,
+                unit_norm_tolerance: tolerance,
+            };
+            let decoded = codec::decode(&bytes, &layout)
+                .map(|row| retrieval::dense::score(Metric::InnerProduct, &query, &row).to_bits());
+            let fused =
+                retrieval::dense::score::score_encoded(&layout, &query, &bytes).map(f64::to_bits);
+            prop_assert_eq!(fused, decoded);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn scoring_a_unit_row_from_bytes_matches_the_in_order_model() {
+    runner()
+        .run(
+            &(
+                prop::collection::vec(-1.0f32..1.0, 1..24),
+                prop::collection::vec(-1.0f32..1.0, 1..24),
+            ),
+            |(raw, query)| {
+                let norm = raw
+                    .iter()
+                    .map(|v| f64::from(*v) * f64::from(*v))
+                    .sum::<f64>()
+                    .sqrt();
+                prop_assume!(norm > 0.0);
+                let row: Vec<f32> = raw.iter().map(|v| (f64::from(*v) / norm) as f32).collect();
+                let query: Vec<f32> = query.iter().cycle().take(row.len()).copied().collect();
+                let layout = RowLayout {
+                    dimension: row.len() as u32,
+                    metric: Metric::InnerProduct,
+                    unit_norm_tolerance: 1e-3,
+                };
+                let mut model = 0.0f64;
+                for (q, r) in query.iter().zip(&row) {
+                    model += f64::from(*q) * f64::from(*r);
+                }
+                let fused =
+                    retrieval::dense::score::score_encoded(&layout, &query, &codec::encode(&row))
+                        .unwrap();
+                prop_assert_eq!(fused.to_bits(), model.to_bits());
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
 fn positive_scales() -> impl Strategy<Value = Vec<f32>> {
     prop::collection::vec(
         prop::sample::select(vec![1.0f32, 0.5, 0.25, 1.0 / 127.0, 3.0e-3, 2.0, 1.0e-6]),

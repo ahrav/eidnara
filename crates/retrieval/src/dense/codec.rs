@@ -154,6 +154,14 @@ fn check_norm(row: &[f32], tolerance: f64) -> Result<(), RowRejection> {
         let widened = f64::from(*value);
         sum_of_squares += widened * widened;
     }
+    check_sum_of_squares(sum_of_squares, tolerance)
+}
+
+/// Checks a precomputed sum of squares, preserving caller-controlled accumulation order.
+pub(super) fn check_sum_of_squares(
+    sum_of_squares: f64,
+    tolerance: f64,
+) -> Result<(), RowRejection> {
     if sum_of_squares == 0.0 {
         return Err(RowRejection::ZeroNorm);
     }
