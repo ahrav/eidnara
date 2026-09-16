@@ -12,8 +12,9 @@ proposed.
 | Part | Owns | Landed by |
 | --- | --- | --- |
 | `identity/` | Per-occurrence attribution on shared payloads, the grouping key, and the non-grouping classes. | RP2.8 U1 ([#631](https://github.com/ahrav/eidnara/issues/631)). |
+| `required/` | The required phase: failure classes, the integer budget, and the trace that witnesses no optional event or retrieval call precedes completion. | RP2.8 U2 ([#632](https://github.com/ahrav/eidnara/issues/632)). |
 
-The budget, grouping, accounting, and application parts enter this directory
+The grouping, accounting, and application parts enter this directory
 with the tickets that land their checks. Each part follows `../METHOD.md`.
 
 ## Precondition-marker ledger
@@ -23,5 +24,5 @@ which record each marker serves, and whether a check has fired it. A ticket
 that adds a marker adds a row; a ticket that fires one records the check that
 fired it. RP2.8 U5 closes the ledger per harness. The RP2.8 Q8 owner freezes
 each per-harness marker set before the harness tickets implement against it;
-until then the harness column reads `retrieval` for markers observed at the
-retrieval boundary.
+until then the harness column reads `retrieval` or `daemon` for markers
+observed at those crate boundaries.

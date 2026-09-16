@@ -39,6 +39,7 @@ pub(crate) mod memory_render;
 pub mod memory_tool;
 pub mod message_cleanup;
 pub mod metered_decode;
+pub mod packing;
 pub(crate) mod project_docs;
 pub(crate) mod prompt_surface;
 mod retained_size;

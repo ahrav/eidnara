@@ -41,3 +41,12 @@ derives `Grouping::NonGrouping`, and `GroupingKey` is derive-only. The crate hol
 to `eligibility::judge_occurrences` and the report stays with the caller.
 Changing the grouping class set or the key's components requires the matching
 edit in `docs/properties/selection-packing/identity/catalog.md`.
+
+`src/packing/required.rs` holds the pure required-phase decisions:
+`admit_required` classifies rows and kernel dispositions into
+`RequiredContextFailure` in request order before any byte is loaded, and
+`reserve_required` charges loaded bytes through a caller-supplied cost function
+against an integer `TokenCount`. Neither reads a store, a clock, or a default
+bound; the daemon's `packing` module owns fact gathering, `ClaudeTokens`, and
+the trace. Changing a failure class or the stage order requires the matching
+edit in `docs/properties/selection-packing/required/catalog.md`.

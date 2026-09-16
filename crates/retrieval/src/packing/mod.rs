@@ -1,10 +1,12 @@
 //! Selected occurrences are read by occurrence identity from their own rows.
 //! Byte-identical payloads remain distinct occurrences.
 
+mod required;
+
 use std::num::NonZeroUsize;
 
 use kernel::Sensitivity;
-use kernel::source_identity::{OccurrenceClass, Span};
+use kernel::source_identity::{OccurrenceClass, Span, payload_id};
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 use storage::GuardedConn;
@@ -12,6 +14,11 @@ use storage::GuardedConn;
 use crate::eligibility::OccurrenceCandidate;
 use crate::fusion::{IdentityRefusal, OccurrenceId, ParentGroupKey};
 use crate::{ProjectionError, Tombstone, decode_span, decode_tombstone, parse_sensitivity};
+
+pub use required::{
+    AdmittedRequired, RequiredBound, RequiredBounds, RequiredContextFailure, RequiredFact,
+    RequiredRequest, RequiredReservation, TokenCount, admit_required, reserve_required,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GroupingKey {
@@ -206,4 +213,24 @@ fn decode(
         tombstone,
         grouping,
     })
+}
+
+/// Loads the bytes a payload reference names and refuses bytes whose digest or
+/// length disagree with it as `CorruptRow`, so a caller never charges or
+/// renders bytes the reference did not name.
+pub fn load_payload(
+    conn: &GuardedConn<'_>,
+    payload: &PayloadRef,
+) -> Result<Vec<u8>, ProjectionError> {
+    let bytes: Vec<u8> = conn
+        .prepare_cached("SELECT bytes FROM payloads WHERE payload_id=?1")?
+        .query_row(params![payload.payload_id], |row| row.get(0))
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => ProjectionError::CorruptRow,
+            other => other.into(),
+        })?;
+    if bytes.len() as u64 != payload.byte_length || payload_id(&bytes) != payload.payload_id {
+        return Err(ProjectionError::CorruptRow);
+    }
+    Ok(bytes)
 }
