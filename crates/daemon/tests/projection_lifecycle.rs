@@ -793,6 +793,30 @@ fn replays_reconcile_to_one_intent_and_conflicts_change_nothing() {
         ),
         Err(IntentRefusal::InvalidConsumer)
     );
+    // The same identity-value rule `retrieval::fusion::GenerationId` applies, so every
+    // generation this daemon registers has a `GenerationId` spelling.
+    for generation_id in [
+        String::new(),
+        "gen\u{0}2".to_owned(),
+        "g".repeat(kernel::source_identity::MAX_IDENTITY_VALUE_BYTES + 1),
+    ] {
+        assert_eq!(
+            lifecycle.record(
+                &gate,
+                &LifecycleRequest {
+                    consumer: ConsumerBinding {
+                        consumer_id: "consumer-a".to_owned(),
+                        generation_id: generation_id.clone(),
+                    },
+                    ..rebuild_request()
+                },
+                NOW
+            ),
+            Err(IntentRefusal::InvalidGeneration),
+            "{generation_id:?}"
+        );
+        assert!(!record_path(fresh.path()).exists());
+    }
     assert_eq!(
         lifecycle.record(
             &gate,
