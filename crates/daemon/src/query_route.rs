@@ -1,6 +1,6 @@
 //! Payload bytes are never read here; packing consumes the ranking and materializes payloads under its own bounds.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
 use kernel::{ArtifactDestination, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES};
 use retrieval::ProjectionError;
 use retrieval::eligibility::{
-    Authority, Disposition, judge_occurrences_within_budget, live_candidates_by_id,
+    Authority, AuthorityMoved, Disposition, OccurrenceCandidate, judge_tracked,
 };
 use retrieval::exact::{
     ExactQuery, Family, Intent, LookupContext, LookupRefusal, Selector, SelectorBounds,
@@ -23,7 +23,7 @@ use retrieval::fusion::{
 };
 use retrieval::lexical::{
     Completion, IncompleteReason, LexicalBounds, LexicalRefusal, RetrievalBounds, RetrievalRefusal,
-    analyze_segments, compile, retrieve,
+    Scan, admit, analyze_segments, compile, scan,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -50,6 +50,8 @@ pub enum LimitsRefusal {
         "lexical_accepted {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
     )]
     LexicalAccepted { value: usize },
+    #[error("response_bytes {value} cannot hold the {floor}-byte empty fused envelope")]
+    ResponseBytes { value: usize, floor: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +71,15 @@ pub struct QueryRouteLimits {
 }
 
 impl QueryRouteLimits {
-    /// Refuses a limit the kernel's eligibility batch could never serve, so the refusal lands at installation instead of on every request.
+    /// Bytes of a fused answer with no entries and every lane undeclared; no `response_bytes` below it can hold any answer.
+    pub fn response_floor() -> NonZeroUsize {
+        let statuses = [const { LaneStatus::Undeclared }; Lane::ORDER.len()];
+        let bytes = measure_json(&fused_envelope(&statuses, false, Vec::new(), false))
+            .expect("the empty fused envelope measures");
+        NonZeroUsize::new(bytes).expect("the empty fused envelope is not empty")
+    }
+
+    /// Refuses a limit the kernel's eligibility batch could never serve or a response bound no answer fits, so the refusal lands at installation instead of on every request.
     pub fn validate(&self) -> Result<(), LimitsRefusal> {
         if self.validation_batch.get() > MAX_ELIGIBILITY_CANDIDATES {
             return Err(LimitsRefusal::ValidationBatch {
@@ -79,6 +89,13 @@ impl QueryRouteLimits {
         if self.lexical_accepted.get() > MAX_ELIGIBILITY_CANDIDATES {
             return Err(LimitsRefusal::LexicalAccepted {
                 value: self.lexical_accepted.get(),
+            });
+        }
+        let floor = Self::response_floor();
+        if self.response_bytes < floor {
+            return Err(LimitsRefusal::ResponseBytes {
+                value: self.response_bytes.get(),
+                floor: floor.get(),
             });
         }
         Ok(())
@@ -175,6 +192,8 @@ pub enum Phase {
     Probes,
     Exact,
     Lexical,
+    /// Both lanes' hits are judged by the kernel, after the projection connection is released.
+    Admission,
     Fusion,
     Revalidation,
     Materialization,
@@ -201,13 +220,6 @@ impl LaneOutput {
         }
     }
 
-    fn undeclared() -> Self {
-        Self {
-            ranking: None,
-            status: LaneStatus::Undeclared,
-        }
-    }
-
     fn ranked(lane: Lane, hits: Vec<LaneHit>, status: LaneStatus) -> Self {
         match LaneRanking::consolidate(lane, OCCURRENCE_ENCODING_VERSION, hits) {
             Ok(ranking) => Self {
@@ -222,7 +234,6 @@ impl LaneOutput {
 /// Engine text never reaches the wire; each refusal maps to one code.
 fn projection_reason(error: &ProjectionError) -> &'static str {
     match error {
-        ProjectionError::Interrupted => "interrupted",
         ProjectionError::Sqlite(_) => "engine",
         _ => "projection",
     }
@@ -286,23 +297,37 @@ fn check(budget: &SharedBudget) -> Result<(), Terminal> {
     }
     Ok(())
 }
-
-fn hit(occurrence_id: &str, raw_score: RawScore) -> Option<LaneHit> {
-    OccurrenceId::parse(occurrence_id)
-        .ok()
-        .map(|occurrence| LaneHit {
-            occurrence,
-            raw_score,
-        })
+/// A stored identifier outside the contract spelling is a corrupt row, not a smaller result set.
+fn hit(occurrence_id: &str, raw_score: RawScore) -> Result<LaneHit, IdentityRefusal> {
+    OccurrenceId::parse(occurrence_id).map(|occurrence| LaneHit {
+        occurrence,
+        raw_score,
+    })
 }
 
-fn exact_lane(
+struct ScopedHit {
+    hit: LaneHit,
+    candidate: OccurrenceCandidate,
+}
+
+/// A lane's projection read: work the kernel still judges, or the status that ended the lane.
+enum LaneRead<T> {
+    Pending(T),
+    Ended(LaneStatus),
+}
+
+struct ExactHits {
+    hits: Vec<ScopedHit>,
+    status: LaneStatus,
+}
+
+fn exact_read(
     conn: &GuardedConn<'_>,
     kernel_incarnation_id: &str,
     intent: &Intent,
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
-) -> Result<LaneOutput, QueryFailure> {
+) -> Result<LaneRead<ExactHits>, QueryFailure> {
     let selectors: Vec<&Selector> = match intent {
         Intent::Direct(selector) => vec![selector],
         Intent::Hybrid(mentions) => mentions.iter().map(|mention| &mention.selector).collect(),
@@ -316,7 +341,7 @@ fn exact_lane(
         })
         .collect();
     if object_ids.is_empty() {
-        return Ok(LaneOutput::undeclared());
+        return Ok(LaneRead::Ended(LaneStatus::Undeclared));
     }
     if object_ids.len() > limits.probes.get() {
         return Err(QueryFailure::InvalidQuery(format!(
@@ -341,16 +366,27 @@ fn exact_lane(
                 Err(refusal) => {
                     return match lookup_refusal(&refusal) {
                         LaneRefusal::Budget => Err(exhaustion(budget).into()),
-                        LaneRefusal::Reason(reason) => Ok(LaneOutput::unavailable(reason)),
+                        LaneRefusal::Reason(reason) => {
+                            Ok(LaneRead::Ended(LaneStatus::Unavailable(reason)))
+                        }
                     };
                 }
             };
-            hits.extend(
-                page.rows
-                    .iter()
-                    .filter(|row| row.tombstone.is_none())
-                    .filter_map(|row| hit(&row.occurrence_id, RawScore::Exact)),
-            );
+            for row in page.rows.iter().filter(|row| row.tombstone.is_none()) {
+                let Ok(hit) = hit(&row.occurrence_id, RawScore::Exact) else {
+                    return Ok(LaneRead::Ended(LaneStatus::Unavailable("identity")));
+                };
+                hits.push(ScopedHit {
+                    hit,
+                    candidate: OccurrenceCandidate::new(
+                        row.occurrence_id.clone(),
+                        row.class,
+                        row.source_object_id.clone(),
+                        row.revision,
+                        row.source_artifact_digest.clone(),
+                    ),
+                });
+            }
             cursor = page.next;
             if cursor.is_none() {
                 break;
@@ -360,18 +396,16 @@ fn exact_lane(
             status = LaneStatus::Incomplete("page_bound");
         }
     }
-    Ok(LaneOutput::ranked(Lane::Exact, hits, status))
+    Ok(LaneRead::Pending(ExactHits { hits, status }))
 }
 
-fn lexical_lane(
+fn lexical_read(
     conn: &GuardedConn<'_>,
-    kernel: &KernelStore,
-    authority: Authority<'_>,
     intent: &Intent,
     query: &str,
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
-) -> Result<LaneOutput, QueryFailure> {
+) -> Result<LaneRead<Scan>, QueryFailure> {
     let segments = match intent {
         Intent::Direct(_) => Vec::new(),
         Intent::Hybrid(_) => intent.lexical_segments(query),
@@ -382,10 +416,14 @@ fn lexical_lane(
     };
     let analysis = match analyze_segments(&segments, bounds) {
         Ok(analysis) => analysis,
-        Err(refusal) => return Ok(LaneOutput::unavailable(lexical_refusal(&refusal))),
+        Err(refusal) => {
+            return Ok(LaneRead::Ended(LaneStatus::Unavailable(lexical_refusal(
+                &refusal,
+            ))));
+        }
     };
     if analysis.is_empty() {
-        return Ok(LaneOutput::undeclared());
+        return Ok(LaneRead::Ended(LaneStatus::Undeclared));
     }
     let probes = compile(&analysis);
     let bounds = RetrievalBounds {
@@ -394,7 +432,127 @@ fn lexical_lane(
         max_accepted: limits.lexical_accepted,
         batch_rows: limits.validation_batch,
     };
-    let retrieval = match retrieve(conn, kernel, &probes, authority, bounds, budget.eval()) {
+    match scan(conn, &probes, bounds, budget.eval()) {
+        Ok(scanned) => Ok(LaneRead::Pending(scanned)),
+        Err(refusal) => match retrieval_refusal(&refusal) {
+            LaneRefusal::Budget => Err(exhaustion(budget).into()),
+            LaneRefusal::Reason(reason) => Ok(LaneRead::Ended(LaneStatus::Unavailable(reason))),
+        },
+    }
+}
+
+enum Judged {
+    Eligible(BTreeSet<OccurrenceId>),
+    Moved(&'static str),
+    Kernel,
+}
+
+/// Judges `candidates` in `validation_batch` slices, refusing to join verdicts from different kernel snapshots or incarnations.
+///
+/// `between_batches` runs before every slice after the first; the caller gates the first slice itself.
+fn judge_eligible(
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    limits: &QueryRouteLimits,
+    budget: &SharedBudget,
+    candidates: &[(OccurrenceId, &OccurrenceCandidate)],
+    mut between_batches: impl FnMut() -> Result<(), QueryFailure>,
+) -> Result<Judged, QueryFailure> {
+    let mut snapshot = None;
+    let mut incarnation = None;
+    let mut eligible = BTreeSet::new();
+    for (index, batch) in candidates.chunks(limits.validation_batch.get()).enumerate() {
+        if index > 0 {
+            between_batches()?;
+        }
+        let terms: Vec<OccurrenceCandidate> =
+            batch.iter().map(|(_, terms)| (*terms).clone()).collect();
+        let (report, moved) = match judge_tracked(
+            kernel,
+            authority,
+            &terms,
+            budget.eval(),
+            &mut snapshot,
+            &mut incarnation,
+        ) {
+            Ok(judged) => judged,
+            Err(KernelError::Deadline) => return Err(exhaustion(budget).into()),
+            Err(_) => return Ok(Judged::Kernel),
+        };
+        match moved {
+            Some(AuthorityMoved::Incarnation) => {
+                return Ok(Judged::Moved("kernel_incarnation_changed"));
+            }
+            Some(AuthorityMoved::Snapshot) => return Ok(Judged::Moved("snapshot_changed")),
+            None => {}
+        }
+        eligible.extend(
+            batch
+                .iter()
+                .zip(report.occurrences)
+                .filter(|(_, judged)| judged.disposition == Disposition::Eligible)
+                .map(|((occurrence, _), _)| *occurrence),
+        );
+    }
+    Ok(Judged::Eligible(eligible))
+}
+
+/// Judges the exact lane's rows under the request's authority before any position is assigned, so a row the caller may not see earns no position and consumes no union slot.
+fn admit_exact(
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    limits: &QueryRouteLimits,
+    budget: &SharedBudget,
+    read: LaneRead<ExactHits>,
+    terms: &mut BTreeMap<OccurrenceId, OccurrenceCandidate>,
+) -> Result<LaneOutput, QueryFailure> {
+    let ExactHits { hits, status } = match read {
+        LaneRead::Pending(hits) => hits,
+        LaneRead::Ended(status) => {
+            return Ok(LaneOutput {
+                ranking: None,
+                status,
+            });
+        }
+    };
+    let candidates: Vec<(OccurrenceId, &OccurrenceCandidate)> = hits
+        .iter()
+        .map(|scoped| (scoped.hit.occurrence, &scoped.candidate))
+        .collect();
+    let eligible = match judge_eligible(kernel, authority, limits, budget, &candidates, || {
+        check(budget).map_err(Into::into)
+    })? {
+        Judged::Eligible(eligible) => eligible,
+        Judged::Moved(reason) => return Ok(LaneOutput::unavailable(reason)),
+        Judged::Kernel => return Ok(LaneOutput::unavailable("kernel")),
+    };
+    let mut ranked = Vec::new();
+    for scoped in hits {
+        if eligible.contains(&scoped.hit.occurrence) {
+            terms.insert(scoped.hit.occurrence, scoped.candidate);
+            ranked.push(scoped.hit);
+        }
+    }
+    Ok(LaneOutput::ranked(Lane::Exact, ranked, status))
+}
+
+fn admit_lexical(
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    budget: &SharedBudget,
+    read: LaneRead<Scan>,
+    terms: &mut BTreeMap<OccurrenceId, OccurrenceCandidate>,
+) -> Result<LaneOutput, QueryFailure> {
+    let scanned = match read {
+        LaneRead::Pending(scanned) => scanned,
+        LaneRead::Ended(status) => {
+            return Ok(LaneOutput {
+                ranking: None,
+                status,
+            });
+        }
+    };
+    let retrieval = match admit(kernel, authority, scanned, budget.eval()) {
         Ok(retrieval) => retrieval,
         Err(refusal) => {
             return match retrieval_refusal(&refusal) {
@@ -419,18 +577,23 @@ fn lexical_lane(
             return Ok(LaneOutput::unavailable("snapshot_changed"));
         }
     };
-    let hits = retrieval
-        .contributions
-        .iter()
-        .filter_map(|c| hit(&c.occurrence_id, RawScore::Lexical(c.rank)))
-        .collect();
-    Ok(LaneOutput::ranked(Lane::Lexical, hits, status))
+    let mut ranked = Vec::with_capacity(retrieval.contributions.len());
+    for contribution in &retrieval.contributions {
+        let Ok(hit) = hit(
+            &contribution.occurrence_id,
+            RawScore::Lexical(contribution.rank),
+        ) else {
+            return Ok(LaneOutput::unavailable("identity"));
+        };
+        terms.insert(hit.occurrence, contribution.occurrence_candidate());
+        ranked.push(hit);
+    }
+    Ok(LaneOutput::ranked(Lane::Lexical, ranked, status))
 }
 
 struct Scanned {
-    statuses: [LaneStatus; Lane::ORDER.len()],
-    fused: Fused,
-    candidates: Vec<retrieval::eligibility::OccurrenceCandidate>,
+    exact: LaneRead<ExactHits>,
+    lexical: LaneRead<Scan>,
 }
 
 pub fn execute(
@@ -451,6 +614,7 @@ pub fn execute(
     let intent = classify(query, bounds)
         .map_err(|refusal| QueryFailure::InvalidQuery(refusal.to_string()))?;
 
+    // Only projection statements run while the connection is held; every kernel reader is taken after it is released.
     let read = projection.read_under(budget, |conn| {
         let Some(identity) = retrieval::read_identity(conn)? else {
             return Ok(Err(QueryFailure::Unavailable("no_identity")));
@@ -458,7 +622,7 @@ pub fn execute(
         let mut phases = || -> Result<Scanned, QueryFailure> {
             before_phase(Phase::Exact);
             check(budget)?;
-            let exact = exact_lane(
+            let exact = exact_read(
                 conn,
                 &identity.kernel_incarnation_id,
                 &intent,
@@ -467,45 +631,8 @@ pub fn execute(
             )?;
             before_phase(Phase::Lexical);
             check(budget)?;
-            let lexical = lexical_lane(conn, kernel, authority, &intent, query, limits, budget)?;
-            if exact.ranking.is_none() && lexical.ranking.is_none() {
-                let both_undeclared = exact.status == LaneStatus::Undeclared
-                    && lexical.status == LaneStatus::Undeclared;
-                return Err(if both_undeclared {
-                    QueryFailure::InvalidQuery("the query yields no probe".to_string())
-                } else {
-                    QueryFailure::Unavailable("no_lane")
-                });
-            }
-            before_phase(Phase::Fusion);
-            check(budget)?;
-            let rankings = [exact.ranking, lexical.ranking].into_iter().flatten();
-            let lanes = DeclaredLanes::admit(rankings)
-                .map_err(|_| QueryFailure::Unavailable("duplicate_lane"))?;
-            let fused = fuse(lanes, &limits.fusion, limits.fused_union)
-                .map_err(|_| QueryFailure::Unavailable("fused_union"))?;
-            let ids: Vec<String> = fused
-                .entries()
-                .iter()
-                .map(|entry| entry.occurrence().to_string())
-                .collect();
-            let candidates =
-                live_candidates_by_id(conn, ids.iter().map(String::as_str)).map_err(|error| {
-                    match error {
-                        ProjectionError::Interrupted => QueryFailure::Terminal(exhaustion(budget)),
-                        _ => QueryFailure::Unavailable("candidate_read"),
-                    }
-                })?;
-            check(budget)?;
-            let mut statuses = [const { LaneStatus::Undeclared }; Lane::ORDER.len()];
-            for (lane, status) in [(Lane::Exact, exact.status), (Lane::Lexical, lexical.status)] {
-                statuses[lane_slot(lane)] = status;
-            }
-            Ok(Scanned {
-                statuses,
-                fused,
-                candidates,
-            })
+            let lexical = lexical_read(conn, &intent, query, limits, budget)?;
+            Ok(Scanned { exact, lexical })
         };
         Ok(phases())
     });
@@ -516,50 +643,74 @@ pub fn execute(
         }
         Err(_) => return Err(QueryFailure::Unavailable("projection_read")),
     };
+    if matches!(
+        (&scanned.exact, &scanned.lexical),
+        (
+            LaneRead::Ended(LaneStatus::Undeclared),
+            LaneRead::Ended(LaneStatus::Undeclared)
+        )
+    ) {
+        return Err(QueryFailure::InvalidQuery(
+            "the query yields no probe".to_string(),
+        ));
+    }
+
+    before_phase(Phase::Admission);
+    check(budget)?;
+    let mut terms: BTreeMap<OccurrenceId, OccurrenceCandidate> = BTreeMap::new();
+    let exact = admit_exact(kernel, authority, limits, budget, scanned.exact, &mut terms)?;
+    let lexical = admit_lexical(kernel, authority, budget, scanned.lexical, &mut terms)?;
+    if exact.ranking.is_none() && lexical.ranking.is_none() {
+        return Err(QueryFailure::Unavailable("no_lane"));
+    }
+    let mut statuses = [const { LaneStatus::Undeclared }; Lane::ORDER.len()];
+    for (lane, status) in [(Lane::Exact, exact.status), (Lane::Lexical, lexical.status)] {
+        statuses[lane_slot(lane)] = status;
+    }
+
+    before_phase(Phase::Fusion);
+    check(budget)?;
+    let rankings = [exact.ranking, lexical.ranking].into_iter().flatten();
+    let lanes =
+        DeclaredLanes::admit(rankings).map_err(|_| QueryFailure::Unavailable("duplicate_lane"))?;
+    let fused = fuse(lanes, &limits.fusion, limits.fused_union)
+        .map_err(|_| QueryFailure::Unavailable("fused_union"))?;
 
     before_phase(Phase::Revalidation);
     check(budget)?;
-    let mut eligible: BTreeSet<OccurrenceId> = BTreeSet::new();
-    for batch in scanned.candidates.chunks(limits.validation_batch.get()) {
-        check(budget)?;
-        let report = judge_occurrences_within_budget(
-            kernel,
-            authority.project,
-            authority.destination,
-            batch,
-            budget.eval(),
-        )
-        .map_err(|error| match error {
-            KernelError::Deadline => QueryFailure::Terminal(exhaustion(budget)),
-            _ => QueryFailure::Unavailable("eligibility"),
-        })?;
-        eligible.extend(
-            report
-                .occurrences
-                .into_iter()
-                .filter(|judged| judged.disposition == Disposition::Eligible)
-                .filter_map(|judged| OccurrenceId::parse(&judged.occurrence_id).ok()),
-        );
-    }
-    let fused = scanned
-        .fused
-        .filter(|entry| eligible.contains(entry.occurrence()));
+    let candidates: Vec<(OccurrenceId, &OccurrenceCandidate)> = fused
+        .entries()
+        .iter()
+        .map(|entry| {
+            let occurrence = *entry.occurrence();
+            let terms = terms
+                .get(&occurrence)
+                .expect("every fused entry came from an admitted lane hit");
+            (occurrence, terms)
+        })
+        .collect();
+    let eligible = match judge_eligible(kernel, authority, limits, budget, &candidates, || {
+        before_phase(Phase::Revalidation);
+        check(budget).map_err(Into::into)
+    })? {
+        Judged::Eligible(eligible) => eligible,
+        Judged::Moved(reason) => return Err(QueryFailure::Unavailable(reason)),
+        Judged::Kernel => return Err(QueryFailure::Unavailable("eligibility")),
+    };
+    let fused = fused.filter(|entry| eligible.contains(entry.occurrence()));
 
     before_phase(Phase::Materialization);
     check(budget)?;
-    let statuses = scanned.statuses;
     let degraded = statuses.iter().any(LaneStatus::degrades);
     let envelope = |entries: Vec<Value>, truncated: bool| {
-        json!({
-            "kind": "fused",
-            "degraded": degraded,
-            "lanes": lanes_json(&statuses),
-            "truncated": truncated,
-            "entries": entries,
-        })
+        fused_envelope(&statuses, degraded, entries, truncated)
     };
-    let mut used = measure_json(&envelope(Vec::new(), true))
+    // `false` is the longer spelling, so the baseline over-counts a truncated body by one byte and never under-counts.
+    let mut used = measure_json(&envelope(Vec::new(), false))
         .map_err(|_| QueryFailure::Unavailable("response_measure"))?;
+    if used > limits.response_bytes.get() {
+        return Err(QueryFailure::Unavailable("response_bytes"));
+    }
     let mut entries = Vec::new();
     let mut truncated = false;
     for entry in fused.entries() {
@@ -602,6 +753,21 @@ fn lanes_json(statuses: &[LaneStatus; Lane::ORDER.len()]) -> Value {
         lanes.insert(lane.code().to_string(), status.json());
     }
     Value::Object(lanes)
+}
+
+fn fused_envelope(
+    statuses: &[LaneStatus; Lane::ORDER.len()],
+    degraded: bool,
+    entries: Vec<Value>,
+    truncated: bool,
+) -> Value {
+    json!({
+        "kind": "fused",
+        "degraded": degraded,
+        "lanes": lanes_json(statuses),
+        "truncated": truncated,
+        "entries": entries,
+    })
 }
 
 fn entry_json(entry: &FusedEntry) -> Value {
@@ -806,5 +972,49 @@ mod tests {
         assert!(!LaneStatus::Undeclared.degrades());
         assert!(LaneStatus::Incomplete("page_bound").degrades());
         assert!(LaneStatus::Unavailable("engine").degrades());
+    }
+
+    #[test]
+    fn a_response_bound_below_the_empty_envelope_is_refused_at_installation() {
+        let floor = QueryRouteLimits::response_floor();
+        let envelope = json!({
+            "kind": "fused",
+            "degraded": false,
+            "lanes": lanes_json(&[const { LaneStatus::Undeclared }; Lane::ORDER.len()]),
+            "truncated": false,
+            "entries": [],
+        });
+        assert_eq!(floor.get(), measure_json(&envelope).unwrap());
+        let limits = |response_bytes: NonZeroUsize| QueryRouteLimits {
+            query_bytes: NonZeroUsize::new(64).unwrap(),
+            probes: NonZeroUsize::new(4).unwrap(),
+            lexical_scan_rows: NonZeroUsize::new(16).unwrap(),
+            lexical_accepted: NonZeroUsize::new(8).unwrap(),
+            validation_batch: NonZeroUsize::new(8).unwrap(),
+            exact_page_rows: NonZeroUsize::new(4).unwrap(),
+            exact_pages: NonZeroUsize::new(2).unwrap(),
+            fused_union: NonZeroUsize::new(16).unwrap(),
+            result_rows: NonZeroUsize::new(8).unwrap(),
+            response_bytes,
+            deadline_ceiling: Duration::from_secs(1),
+            fusion: FusionParameters::new(
+                retrieval::fusion::LaneWeights {
+                    exact: 1.0,
+                    lexical: 1.0,
+                    dense: 1.0,
+                },
+                60.0,
+            )
+            .unwrap(),
+        };
+        assert_eq!(limits(floor).validate(), Ok(()));
+        let below = NonZeroUsize::new(floor.get() - 1).unwrap();
+        assert_eq!(
+            limits(below).validate(),
+            Err(LimitsRefusal::ResponseBytes {
+                value: below.get(),
+                floor: floor.get(),
+            })
+        );
     }
 }

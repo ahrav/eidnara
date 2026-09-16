@@ -13,13 +13,12 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
 
 - `crates/daemon/src/kernel_routes/mod.rs` `kernel_request` runs
   `kernel_route_scope` (session binding, `project_root`,
-  `ProjectBinding::accepts`) before `parse_request_body`.
+  `ProjectBinding::accepts`) before `parse_request_body`, and carries the
+  bound `SessionBinding::harness` into `RouteScope::harness`.
 - `crates/daemon/src/query_route.rs` `handle_retrieval_query` calls
-  `kernel_request::<QueryRequest>`, then `harness_for_route`, then compares
-  the optional `harness` claim, then reads the limit set; the budget, the
+  `kernel_request::<QueryRequest>`, then compares the optional `harness` claim
+  with `RouteScope::harness`, then reads the limit set; the budget, the
   lifecycle pin, and every projection read come after.
-- `crates/daemon/src/lib.rs` `harness_for_route` reads the bound
-  `SessionBinding::harness`.
 - `crates/daemon/tests/query_route_handler.rs`
   `scope_harness_and_disable_are_decided_before_any_candidate_read`.
 

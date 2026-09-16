@@ -15,7 +15,7 @@ use kernel::{
 use retrieval::batch::{BatchBounds, MutationIdentity, ProjectionBatch, apply_batch};
 use retrieval::lexical::{
     Authority, Completion, IncompleteReason, LexicalBounds, Probe, Retrieval, RetrievalBounds,
-    RetrievalRefusal, Window, analyze, compile, retrieve, retrieve_with_hook_for_test,
+    RetrievalRefusal, Window, admit, analyze, compile, retrieve, retrieve_with_hook_for_test, scan,
 };
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::Connection;
@@ -529,6 +529,40 @@ fn zero_probes_run_no_match_while_a_control_probe_contributes() {
     assert_eq!(control.consumed.scanned_rows, 1);
     assert_eq!(control.consumed.batches, 2);
     assert!(control.snapshot.is_some());
+}
+
+#[test]
+fn admitting_a_released_scan_equals_retrieve_and_carries_the_judged_candidate() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse fetch io");
+    let reference = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    let scanned = fixture
+        .store
+        .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+        .unwrap()
+        .unwrap();
+    assert_eq!(scanned.hits(), 6);
+    // The projection connection is released here; admission needs only the kernel.
+    let admitted = admit(
+        &fixture.kernel,
+        fixture.authority(),
+        scanned,
+        &EvalBudget::unbounded(),
+    )
+    .unwrap();
+    assert_eq!(admitted, reference);
+    for contribution in &admitted.contributions {
+        let candidate = contribution.occurrence_candidate();
+        assert_eq!(candidate.occurrence_id, contribution.occurrence_id);
+        assert_eq!(candidate.class, contribution.class);
+        assert_eq!(
+            candidate.candidate.artifact_digest.as_deref(),
+            Some(DIGEST),
+            "the contribution carries the terms the kernel judged"
+        );
+    }
 }
 
 #[test]

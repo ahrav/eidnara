@@ -51,10 +51,11 @@ const WEIGHTS: LaneWeights = LaneWeights {
     dense: 1.0,
 };
 const K: f64 = 7.0;
-const ALL_PHASES: [Phase; 7] = [
+const ALL_PHASES: [Phase; 8] = [
     Phase::Probes,
     Phase::Exact,
     Phase::Lexical,
+    Phase::Admission,
     Phase::Fusion,
     Phase::Revalidation,
     Phase::Materialization,
@@ -326,6 +327,57 @@ impl Fixture {
         )
     }
 
+    /// Retires `object` in the kernel and materializes the retirement into the source descriptors the eligibility adapter judges, leaving the projection's rows in place.
+    async fn retire(&self, object: &str) {
+        let retired = self
+            .daemon
+            .commit(
+                &format!("retire-{object}"),
+                vec![json!({"op": "retire_decision", "object_id": object})],
+            )
+            .await;
+        assert_eq!(retired["state"]["kind"], "available", "{retired}");
+        let report = ClaimMaterializer::new(&self.store, ProviderEgress::LocalOnly)
+            .run_episode(commit_bounds(), NOW)
+            .unwrap();
+        assert!(report.retired > 0, "{report:?}");
+    }
+
+    /// Advances the kernel tip without touching any decision the fixture queries.
+    fn move_kernel_snapshot(&self) {
+        self.store
+            .commit(intent("move-snapshot"), |envelope| {
+                envelope.retire_decision("third")?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    /// Copies the occurrence behind `occurrence_id` under an identifier outside the contract spelling, with a lexical row so the lexical lane hits it.
+    fn corrupt_lexical_copy(&self, occurrence_id: &str) {
+        self.projection
+            .write(|conn| {
+                conn.execute(
+                    "INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
+                         span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                         source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at)
+                     SELECT 'not-an-occurrence-identifier',tuple,lineage_id,class,revision,representation,
+                         span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                         source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at
+                     FROM occurrences WHERE occurrence_id=?1",
+                    [occurrence_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO lexical(rowid,original,parts,occurrence_id)
+                     SELECT 1<<40,original,parts,'not-an-occurrence-identifier'
+                     FROM lexical WHERE occurrence_id=?1",
+                    [occurrence_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
     fn oracle(&self, shared: &SharedBudget) -> Vec<String> {
         let limits = limits();
         let intent = classify(
@@ -530,18 +582,7 @@ async fn revalidation_excludes_retired_and_foreign_occurrences() {
         .run(&limits(), budget.shared(), QUERY, |_| {})
         .unwrap();
     let before_ids = entry_ids(&before.body);
-    let retired = fixture
-        .daemon
-        .commit(
-            "retire",
-            vec![json!({"op": "retire_decision", "object_id": "other"})],
-        )
-        .await;
-    assert_eq!(retired["state"]["kind"], "available", "{retired}");
-    let report = ClaimMaterializer::new(&fixture.store, ProviderEgress::LocalOnly)
-        .run_episode(commit_bounds(), NOW)
-        .unwrap();
-    assert!(report.retired > 0, "{report:?}");
+    fixture.retire("other").await;
     let after = fixture
         .run(&limits(), budget.shared(), QUERY, |_| {})
         .unwrap();
@@ -557,6 +598,139 @@ async fn revalidation_excludes_retired_and_foreign_occurrences() {
     let outcome = fixture.run_with_scope(&foreign, budget.shared()).unwrap();
     assert_eq!(outcome.body["kind"], "fused");
     assert!(entry_ids(&outcome.body).is_empty(), "{}", outcome.body);
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revalidation_refuses_verdicts_joined_across_a_moved_kernel_snapshot() {
+    let fixture = Fixture::build().await;
+    let mut one_per_batch = limits();
+    one_per_batch.validation_batch = NonZeroUsize::new(1).unwrap();
+    let (_token, budget) = budget(10_000);
+    let mut revalidation_checks = 0;
+    let outcome = fixture.run(&one_per_batch, budget.shared(), QUERY, |phase| {
+        if phase == Phase::Revalidation {
+            revalidation_checks += 1;
+            if revalidation_checks == 2 {
+                fixture.move_kernel_snapshot();
+            }
+        }
+    });
+    assert_eq!(
+        outcome.err(),
+        Some(QueryFailure::Unavailable("snapshot_changed")),
+        "verdicts from two kernel snapshots are never joined into one answer"
+    );
+    assert!(revalidation_checks >= 2, "{revalidation_checks}");
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_lane_positions_and_bounds_count_only_eligible_rows() {
+    let fixture = Fixture::build().await;
+    let (_token, budget) = budget(10_000);
+    let both = fixture
+        .run(&limits(), budget.shared(), "id:rule id:other", |_| {})
+        .unwrap();
+    let rule_only = fixture
+        .run(&limits(), budget.shared(), "id:rule", |_| {})
+        .unwrap();
+    let both_rows = entry_ids(&both.body).len();
+    let rule_rows = entry_ids(&rule_only.body).len();
+    assert!(rule_rows > 0 && rule_rows < both_rows, "{}", both.body);
+    fixture.retire("other").await;
+
+    let outcome = fixture
+        .run(&limits(), budget.shared(), "id:rule id:other", |_| {})
+        .unwrap();
+    assert_eq!(entry_ids(&outcome.body), entry_ids(&rule_only.body));
+    assert_eq!(outcome.fused.entries().len(), rule_rows);
+    for (index, entry) in outcome.body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let position = index + 1;
+        assert_eq!(entry["position"], position, "{}", outcome.body);
+        assert_eq!(
+            entry["lanes"]["exact"]["position"], position,
+            "a retired row earns no lane position: {}",
+            outcome.body
+        );
+    }
+    assert_eq!(outcome.body["degraded"], false);
+
+    let mut union = limits();
+    union.fused_union = NonZeroUsize::new(rule_rows).unwrap();
+    let outcome = fixture
+        .run(&union, budget.shared(), "id:rule id:other", |_| {})
+        .unwrap();
+    assert_eq!(
+        entry_ids(&outcome.body).len(),
+        rule_rows,
+        "a retired row consumes no union slot: {}",
+        outcome.body
+    );
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_projection_connection_is_free_while_the_lanes_are_admitted() {
+    let fixture = Fixture::build().await;
+    let (_token, budget) = budget(10_000);
+    let mut probed = Vec::new();
+    let outcome = fixture.run(&limits(), budget.shared(), QUERY, |phase| {
+        if matches!(
+            phase,
+            Phase::Admission | Phase::Fusion | Phase::Revalidation
+        ) {
+            let (_token, other) = self::budget(500);
+            let read = fixture
+                .projection
+                .read_under(other.shared(), |conn| retrieval::read_identity(conn));
+            probed.push((phase, read.is_ok()));
+        }
+    });
+    outcome.unwrap();
+    assert_eq!(
+        probed,
+        vec![
+            (Phase::Admission, true),
+            (Phase::Fusion, true),
+            (Phase::Revalidation, true)
+        ]
+    );
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_identifier_outside_the_contract_makes_the_lane_unavailable() {
+    let fixture = Fixture::build().await;
+    let (_token, budget) = budget(10_000);
+    let healthy = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    let lexical_id = healthy
+        .fused
+        .entries()
+        .iter()
+        .find(|entry| entry.lane(Lane::Lexical).is_some())
+        .map(|entry| entry.occurrence().to_string())
+        .unwrap();
+    fixture.corrupt_lexical_copy(&lexical_id);
+
+    let outcome = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    assert_eq!(
+        outcome.statuses[1],
+        LaneStatus::Unavailable("identity"),
+        "{}",
+        outcome.body
+    );
+    assert_eq!(outcome.statuses[0], LaneStatus::Complete);
+    assert_eq!(outcome.body["degraded"], true);
     fixture.daemon.shutdown().await;
 }
 
@@ -707,6 +881,27 @@ async fn a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves() {
     assert_eq!(outcome.body["degraded"], true);
     assert_eq!(outcome.body["lanes"]["exact"]["status"], "unavailable");
     assert_eq!(outcome.body["lanes"]["exact"]["reason"], "no_checkpoint");
+
+    let mut floor = limits();
+    floor.response_bytes = QueryRouteLimits::response_floor();
+    floor.validate().unwrap();
+    let outcome = execute(
+        &projection,
+        &fixture.store,
+        Authority {
+            project: &fixture.project,
+            destination: ArtifactDestination::Local,
+        },
+        &floor,
+        budget.shared(),
+        QUERY,
+        |_| {},
+    );
+    assert_eq!(
+        outcome.err(),
+        Some(QueryFailure::Unavailable("response_bytes")),
+        "a degraded envelope over the bound is refused, never shipped over it"
+    );
     fixture.daemon.shutdown().await;
 }
 
