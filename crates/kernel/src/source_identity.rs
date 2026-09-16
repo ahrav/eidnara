@@ -288,16 +288,13 @@ pub fn encode(
     Ok(encoded)
 }
 
-/// Returns the lineage identifier implied by `tuple`, or `None` when the
-/// supplied derived fields disagree with the tuple bytes. Readers use this to
-/// detect a stored tuple-derived column altered independently of the tuple.
-pub fn derived_lineage_id(
-    tuple: &[u8],
+fn identity_prefix<'t>(
+    tuple: &'t [u8],
     class_code: &str,
     revision: i64,
     representation: &str,
     span: Option<Span>,
-) -> Option<String> {
+) -> Option<&'t [u8]> {
     let mut head = vec![OCCURRENCE_ENCODING_VERSION, ROLE_OCCURRENCE];
     push_str(&mut head, class_code);
     // `finish` with an empty prefix yields version + role + tail + span;
@@ -313,8 +310,45 @@ pub fn derived_lineage_id(
     if prefix_end < head.len() || !tuple.starts_with(&head) || &tuple[prefix_end..] != tail {
         return None;
     }
-    let lineage = finish(&tuple[2..prefix_end], ROLE_LINEAGE, &[representation], span);
-    Some(identity_digest(&lineage))
+    Some(&tuple[2..prefix_end])
+}
+
+/// Returns the lineage identifier implied by `tuple`, or `None` when the
+/// supplied derived fields disagree with the tuple bytes. Readers use this to
+/// detect a stored tuple-derived column altered independently of the tuple.
+pub fn derived_lineage_id(
+    tuple: &[u8],
+    class_code: &str,
+    revision: i64,
+    representation: &str,
+    span: Option<Span>,
+) -> Option<String> {
+    let prefix = identity_prefix(tuple, class_code, revision, representation, span)?;
+    Some(identity_digest(&finish(
+        prefix,
+        ROLE_LINEAGE,
+        &[representation],
+        span,
+    )))
+}
+
+/// Returns the whole-buffer lineage digest of `tuple`'s source and representation, or `None` when derived fields do not match `tuple`.
+/// Every span occurrence of one source at one representation shares this value, which lets a consumer group spans under their parent without a parent column.
+/// A lineage-role digest never equals an occurrence identifier.
+pub fn derived_parent_id(
+    tuple: &[u8],
+    class_code: &str,
+    revision: i64,
+    representation: &str,
+    span: Option<Span>,
+) -> Option<String> {
+    let prefix = identity_prefix(tuple, class_code, revision, representation, span)?;
+    Some(identity_digest(&finish(
+        prefix,
+        ROLE_LINEAGE,
+        &[representation],
+        None,
+    )))
 }
 
 /// Checks only the identity prefix.
@@ -463,6 +497,53 @@ pub fn encode_preserving_span(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_parent_is_the_whole_buffer_lineage_shared_by_every_span_of_one_source() {
+        let occurrence = |span| Occurrence {
+            class: OccurrenceClass::CanonicalClaims.code(),
+            identity: &[("object_id", "obj:a")],
+            revision: "3",
+            representation: "decision_summary",
+            span,
+        };
+        let whole = encode_preserving_span(&occurrence(None)).unwrap();
+        let head = encode_preserving_span(&occurrence(Some(Span { start: 0, end: 4 }))).unwrap();
+        let tail = encode_preserving_span(&occurrence(Some(Span { start: 5, end: 9 }))).unwrap();
+        let parent = |encoded: &EncodedOccurrence| {
+            derived_parent_id(
+                &encoded.tuple,
+                "canonical_claims",
+                encoded.revision,
+                "decision_summary",
+                encoded.span,
+            )
+        };
+        assert_eq!(parent(&whole).as_deref(), Some(whole.lineage_id.as_str()));
+        assert_eq!(parent(&head), parent(&whole));
+        assert_eq!(parent(&tail), parent(&whole));
+        assert_ne!(head.lineage_id, whole.lineage_id);
+        for encoded in [&whole, &head, &tail] {
+            assert_ne!(
+                parent(encoded).as_deref(),
+                Some(encoded.occurrence_id.as_str())
+            );
+        }
+        assert_eq!(
+            derived_parent_id(
+                &head.tuple,
+                "canonical_claims",
+                4,
+                "decision_summary",
+                head.span
+            ),
+            None
+        );
+        assert_eq!(
+            derived_parent_id(&head.tuple, "canonical_claims", 3, "decision_summary", None),
+            None
+        );
+    }
 
     #[test]
     fn identity_matching_requires_the_complete_exact_prefix() {
