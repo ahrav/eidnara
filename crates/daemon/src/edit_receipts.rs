@@ -372,14 +372,22 @@ pub enum PrepareOutcome {
 
 /// Suppression requires each selected occurrence to have a survivor covering its entire
 /// buffer: the survivor's `buffer_len` must equal the context's span for that occurrence,
-/// and the survivor's span must be null or `[0, buffer_len]`. A selected occurrence absent
+/// and the survivor's span must be null or `[0, buffer_len]`. A context naming one occurrence
+/// with two buffer lengths confirms no survivor for it, whatever the order. A selected occurrence absent
 /// from `context.spans` returns `selection_not_in_spans` before the proof is read, so the
 /// context's defect is named whether or not a proof was sent; duplicate survivor occurrence
 /// IDs return `malformed_survivor`. Every list is indexed once.
 fn unconfirmed_survivor(context: &Context, survivors: &[WireSpan]) -> Option<&'static str> {
-    let mut declared: HashMap<&str, &WireSpan> = HashMap::with_capacity(context.spans.len());
+    let mut declared: HashMap<&str, Option<u64>> = HashMap::with_capacity(context.spans.len());
     for span in &context.spans {
-        declared.entry(span.occurrence_id.as_str()).or_insert(span);
+        declared
+            .entry(span.occurrence_id.as_str())
+            .and_modify(|len| {
+                if *len != Some(span.buffer_len) {
+                    *len = None;
+                }
+            })
+            .or_insert(Some(span.buffer_len));
     }
     if context
         .selection
@@ -409,7 +417,7 @@ fn unconfirmed_survivor(context: &Context, survivors: &[WireSpan]) -> Option<&'s
         };
         match confirmed.get(occurrence_id.as_str()) {
             None => return Some("unconfirmed_survivor"),
-            Some(survivor) if survivor.buffer_len != declared.buffer_len => {
+            Some(survivor) if Some(survivor.buffer_len) != *declared => {
                 return Some("unconfirmed_survivor");
             }
             Some(survivor)

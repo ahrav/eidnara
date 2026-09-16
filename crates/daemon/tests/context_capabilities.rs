@@ -453,6 +453,18 @@ async fn suppression_needs_whole_message_survivor_proof_for_every_selected_occur
         unknown_selection["reason"], "selection_not_in_spans",
         "a selected occurrence absent from the context's spans is the context's defect, not the survivor proof's: {unknown_selection}"
     );
+    for spans in [
+        json!([whole(OCC_A), {"occurrence_id": OCC_A, "buffer_len": 40, "span": null}, whole(OCC_B)]),
+        json!([{"occurrence_id": OCC_A, "buffer_len": 40, "span": null}, whole(OCC_A), whole(OCC_B)]),
+    ] {
+        let mut conflicting = prepare(&project, "suppress", json!([whole(OCC_A), whole(OCC_B)]));
+        conflicting["spans"] = spans;
+        let conflicting = call(&daemon, conflicting).await;
+        assert_eq!(
+            conflicting["reason"], "unconfirmed_survivor",
+            "a context naming one occurrence with two lengths confirms no survivor for it, in either order: {conflicting}"
+        );
+    }
     let mut unknown_selection_no_proof = prepare(&project, "suppress", json!([]));
     unknown_selection_no_proof["spans"] = json!([whole(OCC_A)]);
     let unknown_selection_no_proof = call(&daemon, unknown_selection_no_proof).await;
