@@ -599,8 +599,11 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_dense.rs`
-`an_unavailable_embedding_lane_degrades_to_a_nonempty_exact_and_lexical_answer`
-and `producer_corruption_and_a_foreign_query_shape_are_typed_not_degraded_success`;
+`an_unavailable_embedding_lane_degrades_to_a_nonempty_exact_and_lexical_answer`,
+`producer_corruption_is_typed_while_a_foreign_query_shape_degrades_the_lane`,
+and `a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete`;
+`crates/daemon/src/query_route.rs`
+`a_lane_that_is_not_ready_is_an_unavailability_never_a_fault`;
 `crates/daemon/tests/query_route_handler.rs`
 `the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`.
 Guarantee: An embedding lane that is busy, starting, disabled, or failing, or
@@ -616,7 +619,11 @@ exhausted; a wrong-shaped query vector degrades the lane as `query_shape` while
 the other lanes serve; a zero-norm stored vector ends the request as
 `lane_unavailable`/`dense_corruption`; a faulted embedder ends it as
 `lane_unavailable`/`embedding_failed`; no producer runs when the lane is
-unavailable. `always` because every dense request classifies its lane.
+unavailable; a live row without a vector leaves the lane `incomplete` with
+reason `coverage_shortfall` and a `max_rows` of one leaves it `row_bound`, both
+degraded; a NaN tolerance is refused at installation; a budget that lapses
+during the embedding step is `deadline` even when the embedder also faulted.
+`always` because every dense request classifies its lane.
 Fault/timing angle: None; the lane states are driven directly.
 Required faults and enabling state: A populated projection with vectors; the
 `DenseLane::Unavailable` input; a scripted embedder for the handler path; a

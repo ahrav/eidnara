@@ -21,7 +21,8 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u3b-query-route` at
   budget's verdict.
 - `crates/daemon/tests/query_route_dense.rs`
   `an_unavailable_embedding_lane_degrades_to_a_nonempty_exact_and_lexical_answer`
-  and `producer_corruption_and_a_foreign_query_shape_are_typed_not_degraded_success`.
+  `producer_corruption_is_typed_while_a_foreign_query_shape_degrades_the_lane`,
+  and `a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete`.
 
 ## Failure scenario
 

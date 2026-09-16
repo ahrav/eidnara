@@ -63,6 +63,8 @@ pub enum LimitsRefusal {
         "dense {bound} {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
     )]
     Dense { bound: &'static str, value: usize },
+    #[error("dense unit_norm_tolerance must be finite and not negative")]
+    DenseTolerance,
 }
 
 /// An absent dense limit set leaves the dense lane undeclared; RP2.9 approves the values before it is declared.
@@ -109,6 +111,9 @@ impl QueryRouteLimits {
                 if value > MAX_ELIGIBILITY_CANDIDATES {
                     return Err(LimitsRefusal::Dense { bound, value });
                 }
+            }
+            if !dense.unit_norm_tolerance.is_finite() || dense.unit_norm_tolerance < 0.0 {
+                return Err(LimitsRefusal::DenseTolerance);
             }
         }
         Ok(())
@@ -962,6 +967,11 @@ impl HandlerCore {
                 drop(budget);
                 return blocking_failure(failed);
             }
+            if shared.is_exhausted() {
+                let terminal = exhaustion(&shared);
+                drop(budget);
+                return terminal_response(terminal);
+            }
             let result = slot
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1106,6 +1116,20 @@ mod tests {
             assert_eq!(body["kind"], "terminal");
             assert_eq!(body["terminal"], terminal.code());
         }
+    }
+
+    #[test]
+    fn a_lane_that_is_not_ready_is_an_unavailability_never_a_fault() {
+        let unsupported = LocalEmbeddingsComponent::unsupported("no lane");
+        assert_eq!(
+            unsupported.embed("query"),
+            Err(EmbedFailure::Unavailable("disabled"))
+        );
+        let starting = LocalEmbeddingsComponent::new(None);
+        assert!(matches!(
+            starting.embed("query"),
+            Err(EmbedFailure::Unavailable("starting" | "disabled"))
+        ));
     }
 
     #[test]

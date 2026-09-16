@@ -302,7 +302,7 @@ impl DenseProducer for Counting {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn producer_corruption_and_a_foreign_query_shape_are_typed_not_degraded_success() {
+async fn producer_corruption_is_typed_while_a_foreign_query_shape_degrades_the_lane() {
     let fixture = Fixture::build().await;
     let rows = fixture.store_vectors(vector_for);
     let producer = ExhaustiveProducer {
@@ -377,5 +377,85 @@ async fn producer_corruption_and_a_foreign_query_shape_are_typed_not_degraded_su
             value: MAX_ELIGIBILITY_CANDIDATES + 1
         })
     );
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete() {
+    let fixture = Fixture::build().await;
+    let candidates = fixture.live_candidates();
+    let withheld = candidates[0].occurrence_id.clone();
+    let rows = fixture.store_vectors(vector_for);
+    fixture
+        .projection
+        .write(|conn| {
+            conn.execute(
+                "DELETE FROM occurrence_vectors WHERE occurrence_id=?1",
+                [withheld.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let producer = ExhaustiveProducer {
+        limits: dense_limits(),
+    };
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(
+        &fixture,
+        &with_dense(),
+        &query_vector(),
+        &producer,
+        budget.shared(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.statuses[2],
+        LaneStatus::Incomplete("coverage_shortfall"),
+        "{}",
+        outcome.body
+    );
+    assert_eq!(outcome.body["degraded"], true);
+    assert!(
+        outcome
+            .fused
+            .entries()
+            .iter()
+            .filter(|entry| entry.lane(Lane::Dense).is_some())
+            .count()
+            < rows.len()
+    );
+
+    fixture.store_vectors(vector_for);
+    let mut bounded = with_dense();
+    let narrow = DenseLimits {
+        max_rows: NonZeroUsize::new(1).unwrap(),
+        ..dense_limits()
+    };
+    bounded.dense = Some(narrow);
+    let producer = ExhaustiveProducer { limits: narrow };
+    let outcome = run(
+        &fixture,
+        &bounded,
+        &query_vector(),
+        &producer,
+        budget.shared(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.statuses[2],
+        LaneStatus::Incomplete("row_bound"),
+        "{}",
+        outcome.body
+    );
+    assert_eq!(outcome.body["degraded"], true);
+
+    let mut bad = with_dense();
+    bad.dense = Some(DenseLimits {
+        unit_norm_tolerance: f64::NAN,
+        ..dense_limits()
+    });
+    assert_eq!(bad.validate(), Err(LimitsRefusal::DenseTolerance));
     fixture.daemon.shutdown().await;
 }
