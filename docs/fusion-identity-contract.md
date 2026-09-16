@@ -156,6 +156,19 @@ key from another daemon incarnation or a lost acknowledgment is `unknown` and
 stays so until such a confirm. Receipts are in memory, bounded by count and
 retention, and an evicted key is refused rather than replayed.
 
+## Capability gate
+
+Suppression, replacement, and cross-step reuse are offered only when the host
+backend's `context_capabilities` declaration for the route's harness allows
+the class. The declaration is host-authored static data, read once when the
+route binds and constant for the route epoch; a backend that overrides
+nothing declares no class, OpenCode declares whole-message suppression and
+replacement, and Pi declares nothing. Consumer capability strings are never
+read for this decision. A denied or unreadable class answers
+`capability_unsupported` before any identity is minted. Append is not a
+class. Suppression additionally requires the adapter's surviving set to
+confirm every selected occurrence whole.
+
 ## Probe and generation identities
 
 `ProbeOrdinal(u32)` is one compiled query atom's zero-based position in its

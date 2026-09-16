@@ -950,6 +950,7 @@ impl HandlerCore {
             store,
             project,
             harness: _,
+            context_capabilities: _,
         } = scope;
         let query = parsed.query;
         let embedded = if limits.dense.is_some() {

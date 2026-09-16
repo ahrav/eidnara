@@ -11,6 +11,7 @@ pub mod codec;
 mod commit_stream;
 pub(crate) mod conditional_note_evaluation;
 pub(crate) mod config;
+pub mod context_capabilities;
 pub mod coverage;
 pub mod decay_render;
 pub mod dispatch;
@@ -273,6 +274,8 @@ pub struct SessionBinding {
     /// The binding does not use a newer harness-resolved value because config can change while the route remains open.
     pub history_budget_tokens: f64,
     pub credential_fingerprints: std::collections::BTreeMap<String, String>,
+    /// Read from the host backend once at bind and constant for the route epoch; consumer capability strings never change it.
+    pub context_capabilities: context_capabilities::LatchedCapabilities,
 }
 
 #[derive(Default)]
@@ -3001,6 +3004,7 @@ pub struct HandlerCore {
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
     edit_receipts: Mutex<Option<edit_receipts::ReceiptStore>>,
+    capability_source: Mutex<Option<Arc<dyn context_capabilities::CapabilitySource>>>,
     /// Parent Q8: the incarnation signal every preparation identity carries; a fresh value per `HandlerCore` makes a key from a restarted daemon classify as `Unknown`.
     edit_incarnation: String,
     #[cfg(any(test, feature = "test-support"))]
@@ -3817,6 +3821,18 @@ impl Handler {
         self
     }
 
+    /// Without a source every route binding latches an unreadable declaration and every gated edit class is denied.
+    pub fn with_capability_source(
+        self,
+        source: Arc<dyn context_capabilities::CapabilitySource>,
+    ) -> Self {
+        *self
+            .capability_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
+        self
+    }
+
     /// Attaches the lane whose model and tokenizer name the search projection's identity and run its embedding work. Without one the daemon owns no projection.
     pub fn with_local_embeddings(
         self,
@@ -3875,6 +3891,7 @@ impl Handler {
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
             edit_receipts: Mutex::new(None),
+            capability_source: Mutex::new(None),
             edit_incarnation: edit_receipts::fresh_incarnation(),
             #[cfg(any(test, feature = "test-support"))]
             query_embedder_override: Mutex::new(None),
@@ -4221,6 +4238,15 @@ impl HandlerCore {
         Some(owner)
     }
 
+    fn latch_capabilities(&self, harness: &str) -> context_capabilities::LatchedCapabilities {
+        let source = self
+            .capability_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        context_capabilities::LatchedCapabilities::read(source.as_ref(), harness)
+    }
+
     fn lifecycle_owner(&self) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
         self.search_lifecycle
             .lock()
@@ -4308,6 +4334,7 @@ impl Handler {
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
             edit_receipts: Mutex::new(None),
+            capability_source: Mutex::new(None),
             edit_incarnation: edit_receipts::fresh_incarnation(),
             #[cfg(any(test, feature = "test-support"))]
             query_embedder_override: Mutex::new(None),
@@ -12521,6 +12548,7 @@ impl CompositeComponent for Handler {
 
     async fn bind(&self, route: RouteHandle, identity: RouteIdentity) -> BindOutcome {
         let config = self.effective_config(&identity.project_root);
+        let context_capabilities = self.latch_capabilities(&identity.harness);
         self.bind_route(
             route,
             SessionBinding {
@@ -12532,6 +12560,7 @@ impl CompositeComponent for Handler {
                 config,
                 history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
                 credential_fingerprints: identity.credential_fingerprints,
+                context_capabilities,
             },
         );
         BindOutcome::Accept
@@ -19494,6 +19523,9 @@ mod tests {
             config: default_test_config(),
             history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
             credential_fingerprints: std::collections::BTreeMap::new(),
+            context_capabilities: context_capabilities::LatchedCapabilities::Unreadable(
+                "no_declaration",
+            ),
         }
     }
 

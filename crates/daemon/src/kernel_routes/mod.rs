@@ -400,6 +400,7 @@ pub(crate) struct RouteScope {
     pub(crate) store: Arc<KernelStore>,
     pub(crate) project: ProjectBinding,
     pub(crate) harness: String,
+    pub(crate) context_capabilities: crate::context_capabilities::LatchedCapabilities,
 }
 
 impl HandlerCore {
@@ -426,6 +427,7 @@ impl HandlerCore {
             store,
             project,
             harness: binding.harness,
+            context_capabilities: binding.context_capabilities,
         })
     }
 

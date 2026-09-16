@@ -1101,6 +1101,9 @@ pub fn run() -> Result<(), &'static str> {
         StateRoot::resolve(Some(&root)).map_err(|_| "model_execution state root is unavailable")?;
     let backend: Arc<dyn LlmExecutionBackend> =
         Arc::new(harness_backend(&envelope, &env, &model_execution_state)?);
+    let capability_source = Arc::new(daemon::context_capabilities::BackendDeclarations(
+        Arc::clone(&backend),
+    ));
     let model_execution = if envelope.credentials.is_empty() {
         ModelExecutionComponent::new(backend, model_execution_state)
     } else {
@@ -1124,6 +1127,7 @@ pub fn run() -> Result<(), &'static str> {
     let composite = StaticComposite::new(
         daemon::Handler::new_with_connection_file(Some(publication))
             .with_connection_key_hook(commit_selection)
+            .with_capability_source(capability_source)
             .with_local_embeddings(local_embeddings.clone()),
         local_embeddings,
         model_execution,

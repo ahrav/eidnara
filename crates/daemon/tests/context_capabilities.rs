@@ -1,0 +1,326 @@
+mod support;
+
+use std::num::NonZeroUsize;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use daemon::context_capabilities::{CapabilitySource, LatchedCapabilities, StaticDeclarations};
+use daemon::dispatch::PreparedOutcome;
+use daemon::edit_receipts::ReceiptLimits;
+use host_runtime::model_execution::backend::{
+    ContextCapabilities, EditClass, Harness, LlmExecutionBackend, OPENCODE_CONTEXT_CAPABILITIES,
+    PI_CONTEXT_CAPABILITIES,
+};
+use serde_json::{Value, json};
+use support::kernel_daemon::{KernelDaemon, SESSION, StartOptions};
+
+const OCC_A: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const OCC_B: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+fn limits() -> ReceiptLimits {
+    ReceiptLimits {
+        max_keys: NonZeroUsize::new(16).unwrap(),
+        retention: Duration::from_secs(120),
+        append_allowance_bytes: 4096,
+        replacement_capacity_bytes: 2048,
+    }
+}
+
+fn whole(occurrence_id: &str) -> Value {
+    json!({"occurrence_id": occurrence_id, "buffer_len": 100, "span": null})
+}
+
+fn prepare(project: &Path, action: &str, survivors: Value) -> Value {
+    json!({
+        "method": "retrieval.prepare",
+        "v": 1,
+        "session_id": SESSION,
+        "project_root": project.to_str().unwrap(),
+        "context_revision": "rev-1",
+        "representation": "repr-1",
+        "spans": [whole(OCC_A), whole(OCC_B)],
+        "selection": [OCC_A, OCC_B],
+        "action": action,
+        "accounting_profile": "profile-a",
+        "edit_bytes": 4,
+        "survivors": survivors,
+    })
+}
+
+async fn call(daemon: &KernelDaemon, request: Value) -> Value {
+    match daemon.outcome(request).await {
+        PreparedOutcome::Response(output) => output.json_for_test().unwrap().clone(),
+        PreparedOutcome::Error { code, message } => json!({"error": code, "message": message}),
+        PreparedOutcome::Streamed => panic!("streamed"),
+    }
+}
+
+fn denied(value: &Value, class: &str, reason: &str) {
+    assert_eq!(value["kind"], "terminal", "{value}");
+    assert_eq!(value["terminal"], "capability_unsupported", "{value}");
+    assert_eq!(value["class"], class, "{value}");
+    assert_eq!(value["reason"], reason, "{value}");
+}
+
+struct Nothing;
+
+impl LlmExecutionBackend for Nothing {
+    fn execute(
+        &self,
+        _request: host_runtime::model_execution::backend::BackendRequest,
+        _events: host_runtime::model_execution::backend::EventSink,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> host_runtime::model_execution::backend::BackendFuture {
+        Box::pin(async { unreachable!("the capability test never runs a model") })
+    }
+}
+
+/// A source whose answer a test can change after a route has bound.
+struct Mutable {
+    answer: Mutex<ContextCapabilities>,
+}
+
+impl CapabilitySource for Mutable {
+    fn declare(&self, _harness: &str) -> Result<ContextCapabilities, &'static str> {
+        Ok(*self.answer.lock().unwrap())
+    }
+}
+
+#[test]
+fn a_backend_that_overrides_nothing_declares_no_class_and_the_harness_tables_are_recorded() {
+    for harness in [Harness::OpenCode, Harness::Pi] {
+        assert_eq!(
+            Nothing.context_capabilities(harness),
+            ContextCapabilities::NONE
+        );
+    }
+    assert_eq!(
+        OPENCODE_CONTEXT_CAPABILITIES,
+        ContextCapabilities {
+            suppression: true,
+            replacement: true,
+            cross_step_reuse: false,
+        }
+    );
+    assert_eq!(PI_CONTEXT_CAPABILITIES, ContextCapabilities::NONE);
+    let latched = LatchedCapabilities::read(
+        Some(&(Arc::new(Nothing) as Arc<dyn CapabilitySource>)),
+        "opencode",
+    );
+    for class in [
+        EditClass::Suppression,
+        EditClass::Replacement,
+        EditClass::CrossStepReuse,
+    ] {
+        assert!(latched.gate(class).is_err());
+    }
+    assert_eq!(
+        LatchedCapabilities::read(
+            Some(&(Arc::new(Nothing) as Arc<dyn CapabilitySource>)),
+            "other"
+        ),
+        LatchedCapabilities::Unreadable("unknown_harness")
+    );
+    assert_eq!(
+        LatchedCapabilities::read(None, "opencode"),
+        LatchedCapabilities::Unreadable("no_declaration")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_declaration_every_gated_class_is_denied_as_unreadable_and_append_still_works() {
+    let daemon = KernelDaemon::start().await;
+    daemon
+        .handler()
+        .set_edit_receipt_limits(Some(limits()))
+        .unwrap();
+    let project = daemon.project().to_owned();
+    for (action, class) in [
+        ("replace", "replacement"),
+        ("suppress", "suppression"),
+        ("reuse", "cross_step_reuse"),
+    ] {
+        denied(
+            &call(&daemon, prepare(&project, action, json!([]))).await,
+            class,
+            "no_declaration",
+        );
+    }
+    let appended = call(&daemon, prepare(&project, "append", json!([]))).await;
+    assert_eq!(appended["kind"], "prepared", "{appended}");
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_real_harness_tables_allow_exactly_the_recorded_classes() {
+    let source: Arc<dyn CapabilitySource> = Arc::new(StaticDeclarations::new(vec![
+        ("opencode".to_owned(), OPENCODE_CONTEXT_CAPABILITIES),
+        ("pi".to_owned(), PI_CONTEXT_CAPABILITIES),
+    ]));
+    for (harness, allowed) in [
+        (
+            "opencode",
+            [("replace", true), ("suppress", true), ("reuse", false)],
+        ),
+        (
+            "pi",
+            [("replace", false), ("suppress", false), ("reuse", false)],
+        ),
+    ] {
+        let daemon = KernelDaemon::start_with(StartOptions {
+            harness: harness.to_owned(),
+            consumer_capabilities: vec!["replacement".to_owned(), "suppression".to_owned()],
+            capability_source: Some(Arc::clone(&source)),
+            ..StartOptions::default()
+        })
+        .await;
+        daemon
+            .handler()
+            .set_edit_receipt_limits(Some(limits()))
+            .unwrap();
+        let project = daemon.project().to_owned();
+        for (action, allowed) in allowed {
+            let survivors = json!([whole(OCC_A), whole(OCC_B)]);
+            let answer = call(&daemon, prepare(&project, action, survivors)).await;
+            if allowed {
+                assert_eq!(answer["kind"], "prepared", "{harness} {action}: {answer}");
+            } else {
+                let class = match action {
+                    "replace" => "replacement",
+                    "suppress" => "suppression",
+                    _ => "cross_step_reuse",
+                };
+                denied(&answer, class, "unsupported");
+            }
+        }
+        let appended = call(&daemon, prepare(&project, "append", json!([]))).await;
+        assert_eq!(
+            appended["kind"], "prepared",
+            "{harness}: pure packing still works"
+        );
+        daemon.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_declaration_is_latched_at_bind_and_reread_by_a_new_bind() {
+    let source = Arc::new(Mutable {
+        answer: Mutex::new(ContextCapabilities::NONE),
+    });
+    let daemon = KernelDaemon::start_with(StartOptions {
+        capability_source: Some(Arc::clone(&source) as Arc<dyn CapabilitySource>),
+        ..StartOptions::default()
+    })
+    .await;
+    daemon
+        .handler()
+        .set_edit_receipt_limits(Some(limits()))
+        .unwrap();
+    let project = daemon.project().to_owned();
+    denied(
+        &call(&daemon, prepare(&project, "replace", json!([]))).await,
+        "replacement",
+        "unsupported",
+    );
+    *source.answer.lock().unwrap() = ContextCapabilities {
+        replacement: true,
+        ..ContextCapabilities::NONE
+    };
+    denied(
+        &call(&daemon, prepare(&project, "replace", json!([]))).await,
+        "replacement",
+        "unsupported",
+    );
+    daemon.shutdown().await;
+
+    let rebound = KernelDaemon::start_with(StartOptions {
+        capability_source: Some(Arc::clone(&source) as Arc<dyn CapabilitySource>),
+        ..StartOptions::default()
+    })
+    .await;
+    rebound
+        .handler()
+        .set_edit_receipt_limits(Some(limits()))
+        .unwrap();
+    let project = rebound.project().to_owned();
+    assert_eq!(
+        call(&rebound, prepare(&project, "replace", json!([]))).await["kind"],
+        "prepared"
+    );
+    denied(
+        &call(&rebound, prepare(&project, "suppress", json!([]))).await,
+        "suppression",
+        "unsupported",
+    );
+    rebound.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn suppression_needs_whole_message_survivor_proof_for_every_selected_occurrence() {
+    let daemon = KernelDaemon::start_with(StartOptions {
+        capability_source: Some(Arc::new(StaticDeclarations::new(vec![(
+            "test".to_owned(),
+            ContextCapabilities {
+                suppression: true,
+                ..ContextCapabilities::NONE
+            },
+        )]))),
+        ..StartOptions::default()
+    })
+    .await;
+    daemon
+        .handler()
+        .set_edit_receipt_limits(Some(limits()))
+        .unwrap();
+    let project = daemon.project().to_owned();
+
+    let none = call(&daemon, prepare(&project, "suppress", json!([]))).await;
+    assert_eq!(none["outcome"], "preparation_failure", "{none}");
+    assert_eq!(none["reason"], "no_survivor_proof");
+
+    let partial = call(
+        &daemon,
+        prepare(&project, "suppress", json!([whole(OCC_A)])),
+    )
+    .await;
+    assert_eq!(partial["outcome"], "preparation_failure", "{partial}");
+    assert_eq!(partial["reason"], "unconfirmed_survivor");
+
+    let span_only = call(
+        &daemon,
+        prepare(
+            &project,
+            "suppress",
+            json!([
+                whole(OCC_A),
+                {"occurrence_id": OCC_B, "buffer_len": 100, "span": [0, 40]}
+            ]),
+        ),
+    )
+    .await;
+    assert_eq!(span_only["outcome"], "preparation_failure", "{span_only}");
+    assert_eq!(span_only["reason"], "span_granularity");
+
+    let confirmed = call(
+        &daemon,
+        prepare(&project, "suppress", json!([whole(OCC_A), whole(OCC_B)])),
+    )
+    .await;
+    assert_eq!(confirmed["kind"], "prepared", "{confirmed}");
+
+    let explicit_whole = call(
+        &daemon,
+        prepare(
+            &project,
+            "suppress",
+            json!([
+                whole(OCC_A),
+                {"occurrence_id": OCC_B, "buffer_len": 100, "span": [0, 100]}
+            ]),
+        ),
+    )
+    .await;
+    assert_eq!(explicit_whole["kind"], "prepared", "{explicit_whole}");
+    daemon.shutdown().await;
+}

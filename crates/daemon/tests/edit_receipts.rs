@@ -5,12 +5,32 @@ use std::path::Path;
 use std::time::Duration;
 
 use daemon::dispatch::PreparedOutcome;
+use std::sync::Arc;
+
+use daemon::context_capabilities::StaticDeclarations;
 use daemon::edit_receipts::{RETENTION_FLOOR, ReceiptLimits, ReceiptLimitsRefusal};
+use host_runtime::model_execution::backend::ContextCapabilities;
 use serde_json::{Value, json};
-use support::kernel_daemon::{KernelDaemon, SESSION};
+use support::kernel_daemon::{KernelDaemon, SESSION, StartOptions};
 
 const OCC_A: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const OCC_B: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+/// A daemon whose harness declares every gated class, so the receipt lifecycle can be exercised for each action.
+async fn permissive_daemon() -> KernelDaemon {
+    KernelDaemon::start_with(StartOptions {
+        capability_source: Some(Arc::new(StaticDeclarations::new(vec![(
+            "test".to_owned(),
+            ContextCapabilities {
+                suppression: true,
+                replacement: true,
+                cross_step_reuse: true,
+            },
+        )]))),
+        ..StartOptions::default()
+    })
+    .await
+}
 
 fn limits() -> ReceiptLimits {
     ReceiptLimits {
@@ -154,7 +174,7 @@ fn terminal(value: &Value) -> &str {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_route_is_disabled_until_an_approved_limit_set_is_installed() {
-    let daemon = KernelDaemon::start().await;
+    let daemon = permissive_daemon().await;
     let consumer = Consumer::new(&daemon);
     let ctx = context("rev-1", "repr-1", 10);
     assert_eq!(
@@ -196,7 +216,7 @@ async fn the_route_is_disabled_until_an_approved_limit_set_is_installed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn same_key_and_digest_replays_the_known_outcome_with_one_effect() {
-    let daemon = KernelDaemon::start().await;
+    let daemon = permissive_daemon().await;
     daemon
         .handler()
         .set_edit_receipt_limits(Some(limits()))
@@ -262,7 +282,7 @@ async fn same_key_and_digest_replays_the_known_outcome_with_one_effect() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_changed_context_between_prepare_and_apply_is_stale_and_forwards_nothing() {
-    let daemon = KernelDaemon::start().await;
+    let daemon = permissive_daemon().await;
     daemon
         .handler()
         .set_edit_receipt_limits(Some(limits()))
@@ -298,7 +318,7 @@ async fn a_changed_context_between_prepare_and_apply_is_stale_and_forwards_nothi
 async fn a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back() {
     let ctx = context("rev-1", "repr-1", 10);
     let (forwarded_key, forwarded_effect, prepared_key) = {
-        let daemon = KernelDaemon::start().await;
+        let daemon = permissive_daemon().await;
         daemon
             .handler()
             .set_edit_receipt_limits(Some(limits()))
@@ -316,7 +336,7 @@ async fn a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back
         (forwarded_key, effect, prepared_key)
     };
 
-    let restarted = KernelDaemon::start().await;
+    let restarted = permissive_daemon().await;
     restarted
         .handler()
         .set_edit_receipt_limits(Some(limits()))
@@ -375,7 +395,7 @@ async fn a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict() {
-    let daemon = KernelDaemon::start().await;
+    let daemon = permissive_daemon().await;
     daemon
         .handler()
         .set_edit_receipt_limits(Some(limits()))
@@ -434,7 +454,7 @@ async fn a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_confl
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_count_bound_evicts_the_oldest_settled_key_and_never_an_in_flight_one() {
-    let daemon = KernelDaemon::start().await;
+    let daemon = permissive_daemon().await;
     let mut narrow = limits();
     narrow.max_keys = NonZeroUsize::new(2).unwrap();
     daemon
@@ -489,7 +509,7 @@ async fn the_count_bound_evicts_the_oldest_settled_key_and_never_an_in_flight_on
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outcomes_are_distinct_and_capacity_is_bound_before_preparation() {
-    let daemon = KernelDaemon::start().await;
+    let daemon = permissive_daemon().await;
     daemon
         .handler()
         .set_edit_receipt_limits(Some(limits()))

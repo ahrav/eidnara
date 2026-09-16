@@ -19,3 +19,7 @@ System: `/local/home/ahrav/scratch/eidnara`. Base: `rp27/u3c-dense-lane` at
 
 The store takes `now: Instant` on every operation, so the module tests drive
 the time bound with synthetic instants and no sleep.
+| Backend answer changes after bind | A `CapabilitySource` behind a `Mutex` the test rewrites. | apply-context-capabilities-default-closed-per-harness |
+| No declaration | A `KernelDaemon` started without a capability source. | apply-context-capabilities-default-closed-per-harness |
+| Advertising consumer strings | `StartOptions::consumer_capabilities` on a `pi` route. | apply-consumer-capability-strings-never-authorize-edits |
+| Partial or span-level survivors | `survivors` sets on `retrieval.prepare` with action `suppress`. | apply-suppression-requires-confirmed-surviving-span |

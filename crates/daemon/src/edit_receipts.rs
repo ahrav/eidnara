@@ -14,7 +14,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use host_runtime::model_execution::backend::EditClass;
+
+use crate::context_capabilities::CapabilityDenial;
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
+use crate::kernel_routes::RouteScope;
 use crate::{HandlerCore, invalid_params_error};
 
 pub(crate) const PREPARE: &str = "retrieval.prepare";
@@ -56,6 +60,8 @@ impl ReceiptLimits {
 pub enum Action {
     Append,
     Replace,
+    Suppress,
+    Reuse,
 }
 
 impl Action {
@@ -63,6 +69,18 @@ impl Action {
         match self {
             Self::Append => "append",
             Self::Replace => "replace",
+            Self::Suppress => "suppress",
+            Self::Reuse => "reuse",
+        }
+    }
+
+    /// Append is not gated: every harness accepts an appended block.
+    fn gated_class(self) -> Option<EditClass> {
+        match self {
+            Self::Append => None,
+            Self::Replace => Some(EditClass::Replacement),
+            Self::Suppress => Some(EditClass::Suppression),
+            Self::Reuse => Some(EditClass::CrossStepReuse),
         }
     }
 }
@@ -91,6 +109,8 @@ impl Outcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     Disabled,
+    /// The route binding's latched declaration does not allow the edit class, or could not be read.
+    CapabilityUnsupported(CapabilityDenial),
     /// The key names this incarnation but the store holds nothing for it: expired, evicted, or never prepared; it never authorizes a replay.
     ReceiptUnavailable,
     StalePreparation,
@@ -102,6 +122,7 @@ impl Refusal {
     pub fn code(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
+            Self::CapabilityUnsupported(_) => "capability_unsupported",
             Self::ReceiptUnavailable => "receipt_unavailable",
             Self::StalePreparation => "stale_preparation",
             Self::Conflict => "conflict",
@@ -264,6 +285,9 @@ struct PrepareRequest {
     action: Action,
     accounting_profile: String,
     edit_bytes: u64,
+    /// Adapter-supplied proof of the spans that survive in the current context; suppression is prepared only for selected occurrences this set confirms whole.
+    #[serde(default)]
+    survivors: Vec<WireSpan>,
 }
 
 #[derive(Deserialize)]
@@ -291,8 +315,32 @@ pub struct Prepared {
 
 pub enum PrepareOutcome {
     Prepared(Prepared),
-    /// Over the append allowance or the replacement capacity, decided before any identity is minted.
+    /// Over the append allowance or the replacement capacity, or a suppression without confirmed survivors, decided before any identity is minted.
     Failure(&'static str),
+}
+
+/// Parent Q10: suppression is whole-message; a survivor confirmed only for a span, or a selected occurrence absent from the survivors, is not a confirmed survivor.
+fn unconfirmed_survivor(selection: &[String], survivors: &[WireSpan]) -> Option<&'static str> {
+    if survivors.is_empty() {
+        return Some("no_survivor_proof");
+    }
+    for occurrence_id in selection {
+        match survivors
+            .iter()
+            .find(|survivor| survivor.occurrence_id == *occurrence_id)
+        {
+            None => return Some("unconfirmed_survivor"),
+            Some(survivor)
+                if survivor
+                    .span
+                    .is_some_and(|(start, end)| start != 0 || end != survivor.buffer_len) =>
+            {
+                return Some("span_granularity");
+            }
+            Some(_) => {}
+        }
+    }
+    None
 }
 
 pub enum ApplyOutcome {
@@ -346,16 +394,25 @@ impl ReceiptStore {
         action: Action,
         accounting_profile: &str,
         edit_bytes: u64,
+        survivors: &[WireSpan],
     ) -> Result<PrepareOutcome, IdentityRefusal> {
         let capacity = match action {
-            Action::Append => (self.limits.append_allowance_bytes, "append_allowance"),
-            Action::Replace => (
+            Action::Append => Some((self.limits.append_allowance_bytes, "append_allowance")),
+            Action::Replace | Action::Reuse => Some((
                 self.limits.replacement_capacity_bytes,
                 "replacement_capacity",
-            ),
+            )),
+            Action::Suppress => None,
         };
-        if edit_bytes > capacity.0 {
-            return Ok(PrepareOutcome::Failure(capacity.1));
+        if let Some((bound, reason)) = capacity
+            && edit_bytes > bound
+        {
+            return Ok(PrepareOutcome::Failure(reason));
+        }
+        if action == Action::Suppress
+            && let Some(reason) = unconfirmed_survivor(&context.selection, survivors)
+        {
+            return Ok(PrepareOutcome::Failure(reason));
         }
         let digest = context.digest()?;
         let selection = context.selection_digest()?;
@@ -574,7 +631,15 @@ fn response(body: Value) -> PreparedOutcome {
 }
 
 fn refusal(refusal: Refusal) -> PreparedOutcome {
-    response(json!({ "kind": "terminal", "terminal": refusal.code() }))
+    match refusal {
+        Refusal::CapabilityUnsupported(denial) => response(json!({
+            "kind": "terminal",
+            "terminal": refusal.code(),
+            "class": denial.class().code(),
+            "reason": denial.reason(),
+        })),
+        _ => response(json!({ "kind": "terminal", "terminal": refusal.code() })),
+    }
 }
 
 fn identity_refusal(operation: &str, refusal: IdentityRefusal) -> PreparedOutcome {
@@ -609,12 +674,12 @@ impl HandlerCore {
         channel: RouteHandle,
         request: Value,
         operation: &str,
-        f: impl FnOnce(&mut ReceiptStore, T) -> PreparedOutcome,
+        f: impl FnOnce(&mut ReceiptStore, RouteScope, T) -> PreparedOutcome,
     ) -> PreparedOutcome
     where
         T: serde::de::DeserializeOwned,
     {
-        let (_scope, parsed) = match self.kernel_request::<T>(channel, request, operation) {
+        let (scope, parsed) = match self.kernel_request::<T>(channel, request, operation) {
             Ok(bound) => bound,
             Err(outcome) => return outcome,
         };
@@ -625,7 +690,7 @@ impl HandlerCore {
         let Some(store) = slot.as_mut() else {
             return refusal(Refusal::Disabled);
         };
-        f(store, parsed)
+        f(store, scope, parsed)
     }
 
     pub(crate) fn handle_retrieval_prepare(
@@ -637,25 +702,33 @@ impl HandlerCore {
             channel,
             request,
             PREPARE,
-            |store, parsed: PrepareRequest| match store.prepare(
-                Instant::now(),
-                &parsed.context,
-                parsed.action,
-                &parsed.accounting_profile,
-                parsed.edit_bytes,
-            ) {
-                Ok(PrepareOutcome::Prepared(prepared)) => response(json!({
-                    "kind": "prepared",
-                    "preparation_id": prepared.preparation_id,
-                    "preparation_digest": prepared.preparation_digest,
-                    "fingerprint": prepared.fingerprint,
-                })),
-                Ok(PrepareOutcome::Failure(reason)) => response(json!({
-                    "kind": "outcome",
-                    "outcome": Outcome::PreparationFailure.code(),
-                    "reason": reason,
-                })),
-                Err(identity) => identity_refusal(PREPARE, identity),
+            |store, scope, parsed: PrepareRequest| {
+                if let Some(class) = parsed.action.gated_class()
+                    && let Err(denial) = scope.context_capabilities.gate(class)
+                {
+                    return refusal(Refusal::CapabilityUnsupported(denial));
+                }
+                match store.prepare(
+                    Instant::now(),
+                    &parsed.context,
+                    parsed.action,
+                    &parsed.accounting_profile,
+                    parsed.edit_bytes,
+                    &parsed.survivors,
+                ) {
+                    Ok(PrepareOutcome::Prepared(prepared)) => response(json!({
+                        "kind": "prepared",
+                        "preparation_id": prepared.preparation_id,
+                        "preparation_digest": prepared.preparation_digest,
+                        "fingerprint": prepared.fingerprint,
+                    })),
+                    Ok(PrepareOutcome::Failure(reason)) => response(json!({
+                        "kind": "outcome",
+                        "outcome": Outcome::PreparationFailure.code(),
+                        "reason": reason,
+                    })),
+                    Err(identity) => identity_refusal(PREPARE, identity),
+                }
             },
         )
     }
@@ -669,7 +742,7 @@ impl HandlerCore {
             channel,
             request,
             APPLY,
-            |store, parsed: ApplyRequest| match store.apply(
+            |store, _scope, parsed: ApplyRequest| match store.apply(
                 Instant::now(),
                 &parsed.preparation_id,
                 &parsed.context,
@@ -713,7 +786,7 @@ impl HandlerCore {
             channel,
             request,
             CONFIRM,
-            |store, parsed: ConfirmRequest| match store.confirm(
+            |store, _scope, parsed: ConfirmRequest| match store.confirm(
                 Instant::now(),
                 &parsed.preparation_id,
                 &parsed.forwarded_identity,
@@ -758,7 +831,7 @@ mod tests {
 
     fn prepared(store: &mut ReceiptStore, now: Instant) -> String {
         match store
-            .prepare(now, &context("rev"), Action::Append, "profile", 1)
+            .prepare(now, &context("rev"), Action::Append, "profile", 1, &[])
             .unwrap()
         {
             PrepareOutcome::Prepared(prepared) => prepared.preparation_id,
@@ -835,7 +908,7 @@ mod tests {
             Ok(ApplyOutcome::Forwarded { .. })
         ));
         assert!(matches!(
-            store.prepare(now, &context("rev"), Action::Append, "profile", 1),
+            store.prepare(now, &context("rev"), Action::Append, "profile", 1, &[]),
             Ok(PrepareOutcome::Failure("receipt_capacity"))
         ));
         assert!(store.holds(&key));

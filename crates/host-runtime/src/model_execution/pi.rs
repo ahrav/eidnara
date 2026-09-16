@@ -13,8 +13,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::backend::{
-    self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
-    EventSink, FinishReason, Harness, LlmExecutionBackend,
+    self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal,
+    ContextCapabilities, ErrorClass, EventSink, FinishReason, Harness, LlmExecutionBackend,
+    PI_CONTEXT_CAPABILITIES,
 };
 use super::config::MAX_PI_PROVIDER_EXTENSIONS;
 use super::subprocess::group_registry::StateRoot;
@@ -129,6 +130,13 @@ impl LlmExecutionBackend for PiBackend {
     }
 
     /// Resolving every node `run_pi` needs re-proves the same closure invariants, so a rejected send and a failed run report the same subreason.
+    fn context_capabilities(&self, harness: Harness) -> ContextCapabilities {
+        match harness {
+            Harness::Pi => PI_CONTEXT_CAPABILITIES,
+            Harness::OpenCode => ContextCapabilities::NONE,
+        }
+    }
+
     fn unavailable_reason(&self, harness: Harness) -> Option<&'static str> {
         if harness != Harness::Pi {
             return None;

@@ -12,8 +12,9 @@ Source: the RP2.7 specification
 bundle, whose application catalog proposed these slugs as unexercised
 `test-only` obligations. The RP2.7.U4 ticket
 ([#643](https://github.com/ahrav/eidnara/issues/643)) lands the preparation
-and receipt lifecycle records. The capability-gate records enter with
-RP2.7.U5.
+and receipt lifecycle records; the RP2.7.U5 ticket
+([#644](https://github.com/ahrav/eidnara/issues/644)) lands the capability
+gate records.
 
 This part owns `crates/daemon/src/edit_receipts.rs`: the bounded in-memory
 receipt store behind `retrieval.prepare`, `retrieval.apply`, and
@@ -41,6 +42,21 @@ refuses the new preparation with `preparation_failure`/`receipt_capacity`, so
 a read never evicts and an edit that may already be applied is never dropped.
 A limits change keeps the receipts.
 
+Parent decisions for the gate recorded here. RP2.8 Q7: the capability answer
+is not wire-visible except as the `capability_unsupported` terminal on a
+gated `retrieval.prepare`; Append is not a gated class. Q10: suppression is
+whole-message, so a survivor confirmed only for a span is not a confirmed
+survivor and the recipe carrier for empty replacement is unchanged
+(`replace` with `edit_bytes` zero); cross-step reuse is a declared class
+(`reuse`) with the replacement capacity bound and no harness declares it; an
+accounting profile is part of the preparation fingerprint, so a changed
+profile is a new intent rather than a mutation of an existing one. Q11: the Pi
+set is empty until Pi registers a context hook and a revision token; a
+suppression decided before the plugin's response is not accepted, because the
+adapter must supply the surviving set on the prepare itself; chained-extension
+visibility belongs to the harness adapter that assembles the invocation
+(RP2.8.U5).
+
 ## Reachability and observation contract
 
 Every record here is `test-only`: the routes answer `disabled` until
@@ -64,6 +80,11 @@ witnesses drive a `KernelDaemon` through `dispatch_value_for_test` in
 | [apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement](#apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement) | safety | test-only | always | active | high |
 | [apply-append-allowance-and-replacement-capacity-are-bound-before-preparation](#apply-append-allowance-and-replacement-capacity-are-bound-before-preparation) | safety | test-only | always | active | high |
 | [apply-healthy-prepared-application-terminates-with-known-outcome](#apply-healthy-prepared-application-terminates-with-known-outcome) | liveness | test-only | always | active | high |
+| [apply-context-capabilities-default-closed-per-harness](#apply-context-capabilities-default-closed-per-harness) | safety | test-only | always | active | high |
+| [apply-consumer-capability-strings-never-authorize-edits](#apply-consumer-capability-strings-never-authorize-edits) | safety | test-only | always | active | high |
+| [apply-suppression-requires-confirmed-surviving-span](#apply-suppression-requires-confirmed-surviving-span) | safety | test-only | always | active | high |
+| [apply-adapter-validates-entire-assembled-invocation](#apply-adapter-validates-entire-assembled-invocation) | safety | test-only | always | active | low |
+| [apply-enabled-outcomes-are-proven-on-real-harness-paths](#apply-enabled-outcomes-are-proven-on-real-harness-paths) | safety | test-only | always | active | low |
 
 ## Records
 
@@ -210,3 +231,148 @@ An always-refusing store would pass every safety record and fail this one.
 Existing check: `crates/daemon/tests/kernel_routes.rs` idempotent `kernel.commit` replay tests, status unaudited.
 Impact: A route that never completes would leave every edit `in_flight`.
 Open questions: None.
+
+### apply-context-capabilities-default-closed-per-harness
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/context_capabilities.rs`
+`a_backend_that_overrides_nothing_declares_no_class_and_the_harness_tables_are_recorded`,
+`without_a_declaration_every_gated_class_is_denied_as_unreadable_and_append_still_works`,
+`the_real_harness_tables_allow_exactly_the_recorded_classes`, and
+`the_declaration_is_latched_at_bind_and_reread_by_a_new_bind`.
+Guarantee: `LlmExecutionBackend::context_capabilities` defaults to the empty
+set; the OpenCode declaration allows exactly suppression and replacement and
+the Pi declaration is empty; the declaration is read once at route bind,
+held for the route epoch, and re-read by a new bind; a class the latched
+declaration does not allow is `capability_unsupported` with reason
+`unsupported`, a declaration that could not be read is `capability_unsupported`
+with its own reason, and both fail closed before any capacity check or minted
+identity; append is never gated.
+Check: `always` - a backend that overrides nothing denies every class for
+both harnesses; a daemon without a source denies every class as
+`no_declaration` and still prepares an append; under the recorded tables an
+`opencode` route prepares `replace` and `suppress` and is denied `reuse`
+while a `pi` route is denied all three and still prepares an append; a source
+whose answer changes after bind leaves the bound route denied and a new bind
+reads the new answer. `always` because every gated prepare reads the latched
+declaration.
+Fault/timing angle: The backend answer changes during a route epoch.
+Required faults and enabling state: A mutable capability source; the recorded
+harness tables; a daemon with no source.
+Confidence: high - [evidence](evidence/apply-context-capabilities-default-closed-per-harness.md).
+The trait's other defaulted method, `unavailable_reason`, defaults open; the
+new method's documentation says why this one defaults closed.
+Existing check: `crates/host-runtime/tests/model_execution_protocol.rs`
+`unavailable_reason` override tests, status unaudited.
+Impact: A harness adapter that cannot construct or account for an edit could
+be offered one.
+Open questions: None.
+
+### apply-consumer-capability-strings-never-authorize-edits
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/context_capabilities.rs`
+`the_real_harness_tables_allow_exactly_the_recorded_classes`.
+Guarantee: The consumer capability strings a route carries at bind are not
+read by any authorization path; a consumer advertising `replacement` and
+`suppression` is denied when the host declaration disallows the class, and no
+probe, response field, or third channel exposes or widens the declaration.
+Check: `always` - a `pi` route bound with consumer strings advertising
+`replacement` and `suppression` is denied both; `git grep
+consumer_capabilities crates/daemon/src` finds only the bind identity's field,
+never a read. `always` because the gate reads the latched declaration alone.
+Fault/timing angle: None.
+Required faults and enabling state: A route bound with advertising consumer
+strings under a closed declaration.
+Confidence: high - [evidence](evidence/apply-consumer-capability-strings-never-authorize-edits.md).
+Existing check: `crates/host-runtime/src/handler.rs` documents the identity
+fields as unverified claims, status unaudited.
+Impact: A plugin could claim a class and receive an edit the host cannot
+account for.
+Open questions: None.
+
+### apply-suppression-requires-confirmed-surviving-span
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/context_capabilities.rs`
+`suppression_needs_whole_message_survivor_proof_for_every_selected_occurrence`.
+Guarantee: A suppression is prepared only when the adapter supplies a
+surviving set that confirms every selected occurrence whole; an empty set,
+a selected occurrence absent from it, or a survivor confirmed only for a
+span each fail as `preparation_failure` with a distinct reason and mint
+nothing.
+Check: `always` - no survivors is `no_survivor_proof`; one of two selected
+occurrences confirmed is `unconfirmed_survivor`; a survivor with a partial
+span is `span_granularity`; both confirmed whole, with a null span or a span
+covering the buffer, prepares. `always` because the check runs on every
+suppression.
+Fault/timing angle: Partial visibility or a replaced slot between the plugin's
+observation and the prepare.
+Required faults and enabling state: A harness declaring suppression; survivor
+sets of each shape.
+Confidence: high - [evidence](evidence/apply-suppression-requires-confirmed-surviving-span.md).
+Parent Q10 is recorded as whole-message granularity; the span-level case is
+refused rather than admitted.
+Existing check: None found.
+Impact: A span the harness no longer shows could be suppressed as though it
+were visible.
+Open questions: None.
+
+### apply-adapter-validates-entire-assembled-invocation
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - the daemon's boundary is the capacity check in
+`crates/daemon/tests/edit_receipts.rs`
+`outcomes_are_distinct_and_capacity_is_bound_before_preparation`; the
+whole-invocation validation with accounting headroom is RP2.8.U5's adapter
+and has no witness here.
+Guarantee: The daemon binds append allowance and replacement capacity before
+preparation and the harness adapter validates the entire assembled invocation
+with accounting headroom before it applies; a payload that fits alone but not
+in the invocation is refused by the adapter, never applied.
+Check: `always` - the daemon half is the capacity witness; the adapter half is
+unimplemented. `always` because every application crosses both.
+Fault/timing angle: None.
+Required faults and enabling state: The RP2.8.U5 adapter.
+Confidence: low - [evidence](evidence/apply-adapter-validates-entire-assembled-invocation.md).
+Existing check: None found.
+Impact: An edit that fits its own bound could overflow the invocation.
+Open questions:
+
+- The adapter-side validation lands with RP2.8.U5. (needs human input)
+
+### apply-enabled-outcomes-are-proven-on-real-harness-paths
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: partial - `crates/daemon/tests/context_capabilities.rs`
+`the_real_harness_tables_allow_exactly_the_recorded_classes` drives the
+recorded OpenCode and Pi declarations through bound routes; the enabled
+outcomes with plugin-supplied applied identity on a running harness wait for
+RP2.8.U5.
+Guarantee: On the OpenCode path each enabled class has a witnessed outcome
+carrying plugin-supplied applied identity; on the Pi path every gated class is
+denied and pure packing still works; a plugin build without the transform
+hook never produces an applied outcome.
+Check: `always` - the Pi denials and the pure-packing append are witnessed
+through a bound `pi` route; the OpenCode allowed set is witnessed at the gate;
+the applied-identity witnesses are not yet possible without the harness-side
+apply. `always` because every enablement claim needs its witness.
+Fault/timing angle: None.
+Required faults and enabling state: A running harness with the RP2.8.U5 apply.
+Confidence: low - [evidence](evidence/apply-enabled-outcomes-are-proven-on-real-harness-paths.md).
+Existing check: `crates/daemon/tests/model_execution_roundtrip.rs` real harness
+subprocess runs, status unaudited.
+Impact: A class could be declared enabled without a harness ever proving it.
+Open questions:
+
+- The applied-identity witnesses land with RP2.8.U5. (needs human input)
