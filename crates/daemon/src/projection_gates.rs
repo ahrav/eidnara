@@ -950,7 +950,7 @@ impl HookGate {
         renewal
     }
 
-    /// [`Self::renew`] for tests of the refresh path, which keeps grants whose verdicts did not change and withdraws the rest.
+    /// `renew` for tests of the refresh path, which keeps grants whose verdicts did not change and withdraws the rest.
     #[cfg(feature = "test-support")]
     pub fn renew_for_test(&self, evaluator: EvidenceEvaluator) -> Renewal {
         self.renew(evaluator)
