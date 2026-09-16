@@ -125,7 +125,7 @@ impl RowSource for ResolvedRows<'_> {
                             });
                         }
                     };
-                    codec::validate(&vector, layout).map_err(|rejection| {
+                    codec::validate_length(&vector, layout.dimension).map_err(|rejection| {
                         OracleRefusal::StoredRow {
                             occurrence_id: occurrence_id.to_owned(),
                             rejection,
