@@ -9,7 +9,7 @@ use daemon::projection_gates::Denial;
 use daemon::vector_admission::{
     Census, DELTA_LIMIT, DISK_LIMIT, RESIDENT_LIMIT, Refusal, ResourceClass,
 };
-use daemon::vector_compaction::{Compacted, CompactionRefusal, Cut, compact, due, publish};
+use daemon::vector_compaction::{Compacted, CompactionRefusal, Cut, compact, publish};
 use daemon::vector_composition::{
     CompositionRefusal, Progress, Reconciled, SelectorState, reconcile, recover,
 };
@@ -17,6 +17,7 @@ use daemon::vector_generation::ExpectedVectors;
 use host_runtime::generation::{GenerationError, ProfileEvent};
 use retrieval::dense::{Completion, RowAccess};
 use support::dense_projection::{occurrence_id, reference};
+use support::flock::try_exclusive;
 use support::vector_reads::*;
 use support::vector_store::{Fixture, unit};
 
@@ -35,9 +36,7 @@ fn compact_view(
     compact(
         view,
         &fixture.expected(),
-        &fixture.ledger,
-        &fixture.admission,
-        &fixture.store,
+        &fixture.staging(),
         max_entries(),
         &fixture.work_dir(),
     )
@@ -83,7 +82,9 @@ fn compaction_keeps_every_effective_row_applies_every_tombstone_and_ranks_to_the
     let admitted: Vec<&str> = OBJECTS.iter().copied().filter(|o| *o != "gamma").collect();
     let projection = projection(&fixture, &admitted);
     let corpus = corpus();
-    let low = unit([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+    // A negative zero survives only a bit-preserving copy.
+    let mut low = unit([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+    low[0] = -0.0;
     let restored = unit([0.6, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0]);
     let newer_gamma = unit([0.95, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
     let first: &[(&str, Vec<f32>)] = &[("alpha", low.clone())];
@@ -115,7 +116,7 @@ fn compaction_keeps_every_effective_row_applies_every_tombstone_and_ranks_to_the
     assert_eq!(published.tail, Vec::<String>::new());
     assert_eq!(published.sequence, 2);
     let view_census = fixture.ledger.census();
-    drop(compacted);
+    compacted.discard().unwrap();
     assert_eq!(
         fixture.ledger.census(),
         Census {
@@ -149,10 +150,19 @@ fn compaction_keeps_every_effective_row_applies_every_tombstone_and_ranks_to_the
         "a base carries no tombstones; every prefix tombstone is applied by absence"
     );
     for (index, (_, vector)) in expected.iter().enumerate() {
+        let bits: Vec<u32> = compacted_base
+            .row(index)
+            .unwrap()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
         assert_eq!(
-            &compacted_base.row(index).unwrap(),
-            vector,
-            "row bytes are the winners' exactly"
+            bits,
+            vector
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "row bits are the winners' exactly"
         );
     }
     assert_eq!(
@@ -165,22 +175,13 @@ fn compaction_keeps_every_effective_row_applies_every_tombstone_and_ranks_to_the
     let mut live = expected.clone();
     live.retain(|(id, _)| *id != occurrence_id("gamma"));
     assert_eq!(keyed(&after), reference(&query, &live));
-    // The kernel hides `gamma`; its newer row is the one compaction kept, and no older row of it is revived.
-    assert!(
-        !compacted_base
-            .occurrence_ids()
-            .contains(&occurrence_id("gamma"))
-            || compacted_base
-                .row(
-                    compacted_base
-                        .occurrence_ids()
-                        .iter()
-                        .position(|id| *id == occurrence_id("gamma"))
-                        .unwrap()
-                )
-                .unwrap()
-                == newer_gamma
-    );
+    // The kernel hides `gamma`; the row compaction kept for it is the newer one, and no older row of it is revived anywhere.
+    let gamma_row = compacted_base
+        .occurrence_ids()
+        .iter()
+        .position(|id| *id == occurrence_id("gamma"))
+        .unwrap();
+    assert_eq!(compacted_base.row(gamma_row).unwrap(), newer_gamma);
     assert_eq!(
         after.ranking.consumed.excluded,
         before.ranking.consumed.excluded
@@ -251,7 +252,28 @@ fn a_tail_published_after_the_cut_is_carried_once_with_its_precedence_and_a_stal
     let expected = expected_rows(&[(&corpus, &[]), (first, &[]), (tail_rows, &["beta"])]);
     assert_eq!(keyed(&full), reference(&query, &expected));
 
-    let published = publish_compacted(&fixture, &compacted).unwrap();
+    // While the compactor reads back and renames, a competing mutator cannot take the transaction lock.
+    let lock = transaction_lock(&fixture);
+    let mut renames = 0;
+    let published = publish(
+        &compacted,
+        &fixture.staging(),
+        &fixture.expected(),
+        max_deltas(),
+        &fixture.work_dir(),
+        &mut |event| {
+            if event == ProfileEvent::BeforeRename {
+                renames += 1;
+                assert!(
+                    !try_exclusive(&lock),
+                    "the exclusive lock is held through the rename"
+                );
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(renames, 1);
     assert_eq!(
         published.tail,
         vec![with_tail.deltas[1].clone()],
@@ -279,18 +301,25 @@ fn a_tail_published_after_the_cut_is_carried_once_with_its_precedence_and_a_stal
         "`epsilon` and `alpha` are superseded once each"
     );
 
-    // A compaction of the cut that already moved refuses: the selection no longer stands on that base.
-    let stale = compact_view(&fixture, &cut_view).unwrap();
+    // A compaction of a cut whose base already moved refuses before staging: the full view's prefix compacts to a base nobody has staged, and none reaches the store.
+    let stale = compact_view(&fixture, &full_view).unwrap();
+    let generations = fixture.generations();
+    assert!(!generations.contains(&stale.built.digest()));
     assert_eq!(
         publish_compacted(&fixture, &stale).unwrap_err(),
         CompactionRefusal::PrefixMoved
     );
     assert_eq!(
+        fixture.generations(),
+        generations,
+        "a refused prefix stages nothing"
+    );
+    assert_eq!(
         fixture.store.read_vector_current().unwrap(),
         host_runtime::generation::CurrentProfile::Current(published.digest.clone())
     );
-    drop((compacted, stale));
-    assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
+    compacted.discard().unwrap();
+    stale.discard().unwrap();
     assert_eq!(held(&fixture.ledger, ResourceClass::CompactionScratch), 0);
 }
 
@@ -348,10 +377,57 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
         publish_compacted(&fixture, &retry).unwrap_err(),
         CompactionRefusal::PrefixMoved
     );
+    compacted.discard().unwrap();
+    retry.discard().unwrap();
+
+    // A rename that never happened leaves the old selection; reconciliation says so, and the retry from the same cut publishes once, with the base staged a second time charged nothing.
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let old = fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &view).unwrap();
+    let outcome = publish(
+        &compacted,
+        &fixture.staging(),
+        &fixture.expected(),
+        max_deltas(),
+        &fixture.work_dir(),
+        &mut |event| {
+            if event == ProfileEvent::BeforeRename {
+                Err(GenerationError::NativePayloadInvalid { detail: "cut" })
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(
+        matches!(outcome, Err(CompactionRefusal::Composition(_))),
+        "a failure before the rename is a known refusal, not an unknown outcome: {outcome:?}"
+    );
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(old.clone())
+    );
+    let generations = fixture.generations();
+    let published = publish_compacted(&fixture, &compacted).unwrap();
+    assert_eq!(published.sequence, 2);
+    assert_eq!(
+        fixture.generations(),
+        generations,
+        "the base and the record were staged by the first attempt; the retry adds nothing"
+    );
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        host_runtime::generation::CurrentProfile::Current(published.digest)
+    );
+    compacted.discard().unwrap();
 }
 
 #[test]
-fn reservations_precede_any_read_and_a_short_limit_refuses_with_nothing_written() {
+fn reservations_are_taken_before_any_read_released_with_the_output_and_a_short_limit_writes_nothing()
+ {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
     fixture
@@ -362,35 +438,48 @@ fn reservations_precede_any_read_and_a_short_limit_refuses_with_nothing_written(
 
     let compacted = compact_view(&fixture, &view).unwrap();
     let census = fixture.ledger.census();
-    assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 5 * 8 * 4);
-    assert_eq!(census.resident, resident_before + 5 * 8 * 4);
+    assert_eq!(
+        held(&fixture.ledger, ResourceClass::RowBuffers),
+        0,
+        "the rows are on disk once the build returns"
+    );
+    assert_eq!(census.resident, resident_before);
+    let written: u64 = compacted
+        .built
+        .sidecar
+        .files
+        .iter()
+        .map(|file| file.size)
+        .sum();
     assert!(
-        census.disk > 0,
-        "the compacted files are scratch until staged"
+        held(&fixture.ledger, ResourceClass::CompactionScratch) >= written,
+        "the scratch reservation covers what the build wrote"
     );
     let work_dir = compacted.built.dir.clone();
-    drop(compacted);
-    assert_eq!(fixture.ledger.census().resident, resident_before);
+    assert!(std::fs::read_dir(&work_dir).unwrap().next().is_some());
+    compacted.discard().unwrap();
+    assert!(!work_dir.exists(), "discarding removes the files");
     assert_eq!(fixture.ledger.census().disk, 0);
 
-    fixture.set_limit(RESIDENT_LIMIT, resident_before + 5 * 8 * 4 - 1);
+    // The resident reservation is the build's peak: decoded rows, the row artifact, and the codes. One byte short refuses before any row is read.
+    let peak = 5 * 8 * 4 * 2 + 5 * 8;
+    fixture.set_limit(RESIDENT_LIMIT, resident_before + peak - 1);
     let dir = fixture.work_dir();
     let refusal = compact(
         &view,
         &fixture.expected(),
-        &fixture.ledger,
-        &fixture.admission,
-        &fixture.store,
+        &fixture.staging(),
         max_entries(),
         &dir,
     )
     .unwrap_err();
-    assert!(
-        matches!(
-            refusal,
-            CompactionRefusal::Reservation(Refusal::Denied(Denial::LimitExceeded { .. }))
-        ),
-        "{refusal:?}"
+    assert_eq!(
+        refusal,
+        CompactionRefusal::Reservation(Refusal::Denied(Denial::LimitExceeded {
+            limit: RESIDENT_LIMIT.to_owned(),
+            observed: resident_before + peak,
+            max: resident_before + peak - 1
+        }))
     );
     assert!(
         std::fs::read_dir(&dir).unwrap().next().is_none(),
@@ -402,9 +491,7 @@ fn reservations_precede_any_read_and_a_short_limit_refuses_with_nothing_written(
     let refusal = compact(
         &view,
         &fixture.expected(),
-        &fixture.ledger,
-        &fixture.admission,
-        &fixture.store,
+        &fixture.staging(),
         max_entries(),
         &dir,
     )
@@ -419,11 +506,10 @@ fn reservations_precede_any_read_and_a_short_limit_refuses_with_nothing_written(
         resident_before,
         "a refused disk reservation releases the row reservation taken before it"
     );
-    let _ = work_dir;
 }
 
 #[test]
-fn at_the_delta_cap_further_deltas_are_refused_and_compaction_is_due_and_clears_the_cap() {
+fn at_the_delta_cap_further_deltas_are_refused_and_compaction_clears_the_cap() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
     let d1 = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
@@ -431,7 +517,6 @@ fn at_the_delta_cap_further_deltas_are_refused_and_compaction_is_due_and_clears_
     fixture.set_limit(DELTA_LIMIT, 1);
     let one = fixture.compose(1, &base, &[d1]).unwrap();
     fixture.publish(&one).unwrap();
-    assert!(due(one.deltas.len(), 1));
     let d1_again =
         daemon::vector_generation::verify(&fixture.store, &one.deltas[0], &fixture.expected())
             .unwrap();
@@ -448,8 +533,7 @@ fn at_the_delta_cap_further_deltas_are_refused_and_compaction_is_due_and_clears_
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let compacted = compact_view(&fixture, &view).unwrap();
     let published = publish_compacted(&fixture, &compacted).unwrap();
-    assert_eq!(published.tail.len(), 0);
-    assert!(!due(published.tail.len(), 1), "the cap is clear again");
+    assert_eq!(published.tail.len(), 0, "the cap is clear again");
     let compacted_base =
         daemon::vector_generation::verify(&fixture.store, &published.base, &fixture.expected())
             .unwrap();
@@ -482,47 +566,27 @@ fn a_fully_masked_base_compacts_to_the_deltas_rows_alone_and_a_foreign_expectati
         (1, 5),
         "every base row is masked; the delta's own row is the whole base"
     );
-    drop(compacted);
+    compacted.discard().unwrap();
 
+    // A view of another model space refuses before anything is reserved, read, or written; no mislabelled base can reach the store.
     let mut other = fixture.generation.clone();
     other.embedding_model = "another-model".to_owned();
     let foreign = ExpectedVectors {
         generation: &other,
         ..fixture.expected()
     };
-    let mut fixture2 = Fixture::new();
-    let base2 = fixture2.layer_from(&export(&corpus(), &[], 10));
-    fixture2
-        .publish(&fixture2.compose(1, &base2, &[]).unwrap())
-        .unwrap();
-    let view2 = acquire_view(&mut fixture2, &mut |_| {}).unwrap();
-    let compacted = compact(
-        &view2,
-        &foreign,
-        &fixture2.ledger,
-        &fixture2.admission,
-        &fixture2.store,
-        max_entries(),
-        &fixture2.work_dir(),
-    )
-    .unwrap();
-    let refusal = publish(
-        &compacted,
-        &fixture2.staging(),
-        &foreign,
-        max_deltas(),
-        &fixture2.work_dir(),
-        &mut |_| Ok(()),
-    )
-    .unwrap_err();
-    // The selected composition is read back under the expectation and does not carry it, so no base is composed at all.
+    let before = fixture.generations();
+    let dir = fixture.work_dir();
+    let refusal = compact(&view, &foreign, &fixture.staging(), max_entries(), &dir).unwrap_err();
     assert_eq!(
         refusal,
-        CompactionRefusal::Composition(CompositionRefusal::NotComposition("identity"))
+        CompactionRefusal::Identity {
+            digest: view.members()[0].clone(),
+            field: "embedding_model"
+        }
     );
-    assert_eq!(
-        fixture2.store.read_vector_current().unwrap(),
-        host_runtime::generation::CurrentProfile::Current(view2.digest.clone()),
-        "no fabricated composition is selected"
-    );
+    assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
+    assert_eq!(fixture.generations(), before);
+    assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
+    assert_eq!(held(&fixture.ledger, ResourceClass::CompactionScratch), 0);
 }

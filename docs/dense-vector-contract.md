@@ -354,43 +354,51 @@ folding a frozen prefix into one new base and republishing it under whatever
 deltas followed. The prefix is a view a reader pinned (`vector_reader::acquire`):
 its base and deltas are read only through the pinned files, so what
 compaction consumed is exactly what it read, and `Cut` names the record, the
-base, and the deltas it stood on. `compact` resolves the view's layers with
-the resolver, reserves the winners' f32 rows in the ledger's resident pool
-and the files it is about to write in the disk pool before reading any row,
-reads each winner's row by offset, and builds one base of exactly those rows
-in identifier order at the checkpoint of the prefix's last layer. Every
-superseded row and every masked row of the prefix is absent from the new
-base, and every tombstone of the prefix is applied by that absence, so the
-new base carries no tombstones; the tail keeps its own tombstones and its own
-order above the new base. The same prefix compacts to the same base bytes and
-the same digest. The compacted output holds its reservations until it is
-dropped, never released by cancellation alone, and a refused reservation
-writes nothing.
+base, and the deltas it stood on. Both steps take the shared `Staging` handle,
+which carries the lifecycle's exclusive transaction lock, the gate, the grant,
+and the ledger.
 
-`publish` stages the compacted base through the shared staging path, reads
-the selected composition back under the caller's exclusive transaction lock,
-and refuses as `PrefixMoved` unless the selection still stands on the cut's
-base with the cut's deltas as a prefix. Whatever deltas follow them are the
-tail: published independently of the compactor, they are carried over
-unchanged and in order, so a later insert, update, or delete keeps its
-precedence and is represented exactly once. The new composition takes the
-selection's sequence plus one and goes through `vector_composition::publish`,
-so the delta count is admitted and the selector moves in one rename as for
-any publication. A failure at or after the selector rename is an unknown
-outcome the caller settles with `vector_composition::reconcile` before any
-retry; a retry from the same cut finds the selection standing on the
-compacted base and refuses, so no second history is published, and staging
-the same base again is charged nothing. A cut whose base has already moved
-was compacted or replaced by someone else and refuses the same way.
+`compact` first checks every layer's sidecar against the caller's expectation
+with the identity check verification uses, so a view of another model space
+refuses before anything is reserved, read, or written. It then resolves the
+view's layers with the resolver, reserves the build's peak resident bytes
+(the decoded rows, the row artifact, and the codes) and the files it is about
+to write in the ledger before reading any row, reads each winner's row by
+offset, and builds one base of exactly those rows in identifier order at the
+checkpoint of the prefix's last layer. Every superseded row and every masked
+row of the prefix is absent from the new base, and every tombstone of the
+prefix is applied by that absence, so the new base carries no tombstones; the
+tail keeps its own tombstones and its own order above the new base. Rows are
+copied bit for bit through the original-row codec, so the same prefix
+compacts to the same bytes and the same digest. The resident reservation ends
+with the build, since the rows are then on disk; the files stay reserved as
+disk scratch until the caller discards the compacted output, which removes
+the work directory. A refused reservation writes nothing.
 
-`due(deltas, cap)` says whether a composition stands at the delta cap. The
-ledger refuses the next delta at `cap + 1` through `vector_delta_count`, and
-compaction is due at `cap`; a maintenance owner that schedules it is not part
-of this module. Compaction never reinterprets bytes: rows are decoded through
-the original-row codec and re-encoded under a fresh calibration of the
-winners, so the new base's scales are its own, and a tail delta's codes keep
-scoring with that delta's scales. A selected composition that does not carry
-the caller's expectation refuses before any base is composed.
+`publish` reads the selected composition back under the exclusive lock and
+refuses as `PrefixMoved` unless the selection still stands on the cut's base
+with the cut's deltas as a prefix, before staging anything. Whatever deltas
+follow them are the tail: published independently of the compactor, they are
+carried over unchanged and in order, so a later insert, update, or delete
+keeps its precedence and is represented exactly once. Only then is the new
+base staged and the new composition, at the selection's sequence plus one,
+sent through `vector_composition::publish`, so the delta count is admitted and
+the selector moves in one rename as for any publication. A failure before the
+rename is a known refusal and a retry from the same cut publishes once, with
+the base and the record staged again for nothing. A failure at or after the
+rename is an unknown outcome the caller settles with
+`vector_composition::reconcile` before any retry; a retry then finds the
+selection standing on the compacted base and refuses, so no second history is
+published. A cut whose base has already moved was compacted or replaced by
+someone else and refuses the same way.
+
+The ledger refuses the next delta past `vector_delta_count`, and a namespace
+at the cap admits no delta until a compaction clears it; a prefix that
+resolves to no live row cannot compact, and such a namespace waits for a full
+base to be published afresh. Compaction re-encodes the winners under a fresh
+calibration, so the new base's scales are its own and a tail delta's codes
+keep scoring with that delta's scales. Scheduling compaction when the cap is
+reached belongs to the maintenance owner and is not part of this module.
 
 ## The pinned reader
 
