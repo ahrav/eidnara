@@ -157,7 +157,7 @@ pub struct ExpectedVectors<'a> {
     pub metric: Metric,
     pub unit_norm_tolerance: f64,
     pub recipe: ScalarRecipe,
-    /// The checkpoint the rows were read at; `None` accepts any checkpoint and reads it from the sidecar.
+    /// The checkpoint the rows were read at; `None` accepts any checkpoint the projection schema could hold and reads it from the sidecar.
     pub checkpoint: Option<&'a ProjectionCheckpoint>,
 }
 
@@ -415,6 +415,13 @@ pub fn verify(
     }
     if sidecar.stage_manifest() != *manifest {
         return Err(VectorRefusal::NotVectors("manifest binding"));
+    }
+    // The projection schema holds no checkpoint without these, so a sidecar naming one came from no export.
+    if sidecar.snapshot_commit_seq < 0
+        || sidecar.checkpoint_commit_seq < sidecar.snapshot_commit_seq
+        || sidecar.hold_id.is_empty()
+    {
+        return Err(VectorRefusal::NotVectors("checkpoint"));
     }
     check_identity(&sidecar, expected)?;
     let layout = RowLayout {

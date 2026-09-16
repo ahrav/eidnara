@@ -715,6 +715,35 @@ fn verification_refuses_rehashed_state_whose_meaning_changed() {
         }
     );
 
+    // A checkpoint the projection schema could not hold is refused even when no checkpoint is expected.
+    for (name, tamper) in [
+        (
+            "negative snapshot",
+            Box::new(|s: &mut VectorSidecar| s.snapshot_commit_seq = -1)
+                as Box<dyn Fn(&mut VectorSidecar)>,
+        ),
+        (
+            "checkpoint before snapshot",
+            Box::new(|s: &mut VectorSidecar| s.checkpoint_commit_seq = s.snapshot_commit_seq - 1),
+        ),
+        (
+            "empty hold",
+            Box::new(|s: &mut VectorSidecar| s.hold_id.clear()),
+        ),
+    ] {
+        let impossible = fixture.restaged(&digest, |dir| {
+            let mut sidecar = read_sidecar(dir);
+            tamper(&mut sidecar);
+            write_bound(dir, &sidecar);
+        });
+        assert!(fixture.store.validate(&impossible).is_ok(), "{name}");
+        assert_eq!(
+            fixture.verify(&impossible).unwrap_err(),
+            VectorRefusal::NotVectors("checkpoint"),
+            "{name}"
+        );
+    }
+
     // An extra file inventoried by the sidecar and hashed by the manifest is still not a vector generation.
     let extra = fixture.restaged(&digest, |dir| {
         fs::write(dir.join("extra.bin"), b"x").unwrap();

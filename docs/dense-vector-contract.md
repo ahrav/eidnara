@@ -260,7 +260,9 @@ Verification (`vector_generation::verify`) does not trust the manifest to
 describe itself. The store checks inventory, sizes, modes, and hashes; the
 verifier then checks that the manifest is a vector manifest, that the sidecar
 bytes are canonical, inventory exactly the four payload files, and hash into
-the manifest, that every identity field of the sidecar equals the caller's
+the manifest, that the sidecar's checkpoint is one the projection schema
+could hold (a non-negative snapshot, a checkpoint at or after it, and a hold),
+that every identity field of the sidecar equals the caller's
 expectation (model, tokenizer fingerprint, dimension, metric, tolerance,
 recipe, generation identifier and epoch, kernel incarnation, and the
 checkpoint when the caller names one), and that the payload agrees with
@@ -269,8 +271,14 @@ recalibrating those rows reproduces the scale bytes and the calibrated row
 count and the scales hash the sidecar records, the identifiers number the
 rows in strictly increasing order, and the codes are exactly the rows encoded
 under the scales. A generation whose hashes were rewritten to match changed
-bytes is refused when its meaning changed. A different model space is refused
-at an equal dimension.
+bytes is refused when the payload itself can reveal the change. The
+identifier list is the one payload no other file derives: a rewrite that
+keeps it the same length and strictly increasing is indistinguishable from
+the original here, so which occurrence each row names is bound by the export
+at the recorded checkpoint, not by verification; the store's owner-only modes
+are the boundary against a same-user rewrite, and a caller that needs more
+compares the identifiers with `live_rows` under the sidecar's checkpoint. A
+different model space is refused at an equal dimension.
 
 The vector selector is `vector-profile.json`, beside the host and search
 selectors. `select_vector` refuses a generation whose manifest target is not
