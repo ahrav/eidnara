@@ -179,7 +179,7 @@ impl Fixture {
     }
 
     fn verify(&self, digest: &str) -> Result<VectorSidecar, VectorRefusal> {
-        verify(&self.store, digest, &self.expected()).map(|verified| verified.sidecar)
+        verify(&self.store, digest, &self.expected(), u64::MAX).map(|verified| verified.sidecar)
     }
 
     fn lifecycle_dir(&self) -> PathBuf {
@@ -370,14 +370,31 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
         "staging selects nothing"
     );
 
-    let verified = verify(&fixture.store, &digest, &fixture.expected()).unwrap();
+    let verified = verify(&fixture.store, &digest, &fixture.expected(), u64::MAX).unwrap();
     assert_eq!(verified.sidecar, first.sidecar);
     verified.generation.pin().unwrap();
     let with_checkpoint = ExpectedVectors {
         checkpoint: Some(&export().checkpoint),
         ..fixture.expected()
     };
-    assert!(verify(&fixture.store, &digest, &with_checkpoint).is_ok());
+    assert!(verify(&fixture.store, &digest, &with_checkpoint, u64::MAX).is_ok());
+
+    // The bound is the manifest's payload total, including the sidecar; one byte under it refuses before any payload is read.
+    let total: u64 = first
+        .sidecar
+        .stage_manifest()
+        .files
+        .iter()
+        .map(|file| file.size)
+        .sum();
+    assert!(verify(&fixture.store, &digest, &fixture.expected(), total).is_ok());
+    assert_eq!(
+        verify(&fixture.store, &digest, &fixture.expected(), total - 1).map(|v| v.digest),
+        Err(VectorRefusal::OverBound {
+            bytes: total,
+            max: total - 1
+        })
+    );
 }
 
 #[test]
@@ -470,6 +487,96 @@ fn build_refuses_an_export_whose_generation_or_kernel_is_not_the_expected_one() 
         "a refused build writes nothing"
     );
     assert!(build(&fixture.expected(), &export(), &dir).is_ok());
+}
+
+#[test]
+fn build_refuses_an_export_whose_checkpoint_is_not_the_one_the_caller_named() {
+    let fixture = Fixture::new();
+    let dir = fixture.work_dir();
+    let mut pinned = export().checkpoint;
+    pinned.hold_id = "hold-8".to_owned();
+    let expected = ExpectedVectors {
+        checkpoint: Some(&pinned),
+        ..fixture.expected()
+    };
+    assert_eq!(
+        build(&expected, &export(), &dir),
+        Err(VectorRefusal::Export {
+            field: "checkpoint"
+        }),
+        "rows read at another checkpoint do not become the pinned generation"
+    );
+    assert!(
+        fs::read_dir(&dir).unwrap().next().is_none(),
+        "a refused build writes nothing"
+    );
+    let expected = ExpectedVectors {
+        checkpoint: Some(&export().checkpoint),
+        ..fixture.expected()
+    };
+    assert!(build(&expected, &export(), &dir).is_ok());
+}
+
+#[test]
+fn staging_refuses_a_build_whose_provenance_is_not_the_admitted_identity() {
+    let fixture = Fixture::new();
+    let built = fixture.build();
+    for (field, mutate) in [
+        (
+            "embedding_model",
+            Box::new(|i: &mut ProjectionIdentity| i.embedding_model = "another-model".to_owned())
+                as Box<dyn Fn(&mut ProjectionIdentity)>,
+        ),
+        (
+            "tokenizer_fingerprint",
+            Box::new(|i: &mut ProjectionIdentity| i.tokenizer_fingerprint = "f".repeat(64)),
+        ),
+        (
+            "vector_dimension",
+            Box::new(|i: &mut ProjectionIdentity| i.vector_dimension = 4),
+        ),
+        (
+            "generation_epoch",
+            Box::new(|i: &mut ProjectionIdentity| i.generation_epoch = 2),
+        ),
+        (
+            "kernel_incarnation_id",
+            Box::new(|i: &mut ProjectionIdentity| {
+                i.kernel_incarnation_id = "other-kernel".to_owned()
+            }),
+        ),
+    ] {
+        // The gate holds evidence for identity B and admits under it; the build carries identity A.
+        let mut other = fixture.identity.clone();
+        mutate(&mut other);
+        let gate = Arc::new(HookGate::closed());
+        gate.install(passing_evaluator(&other, 0, &ProjectionHook::ALL));
+        let admission = gate
+            .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
+            .unwrap();
+        let ledger = Ledger::new(Arc::clone(&gate), InvalidationIdentity::from(&other));
+        assert_eq!(
+            stage(
+                &built,
+                &Staging {
+                    store: &fixture.store,
+                    transaction: &fixture.tx,
+                    gate: &gate,
+                    admission: &admission,
+                    identity: &other,
+                    ledger: &ledger,
+                    protected: &BTreeSet::new(),
+                },
+            ),
+            Err(VectorRefusal::Identity { field }),
+            "a build for one {field} is not staged under another's evidence"
+        );
+        assert!(
+            fixture.generations().is_empty(),
+            "{field}: a refused staging creates no generation"
+        );
+    }
+    assert!(fixture.stage(&built).is_ok());
 }
 
 #[test]
@@ -686,6 +793,35 @@ fn verification_refuses_rehashed_state_whose_meaning_changed() {
         }
     );
 
+    // A checkpoint the projection schema could not hold is refused even when no checkpoint is expected.
+    for (name, tamper) in [
+        (
+            "negative snapshot",
+            Box::new(|s: &mut VectorSidecar| s.snapshot_commit_seq = -1)
+                as Box<dyn Fn(&mut VectorSidecar)>,
+        ),
+        (
+            "checkpoint before snapshot",
+            Box::new(|s: &mut VectorSidecar| s.checkpoint_commit_seq = s.snapshot_commit_seq - 1),
+        ),
+        (
+            "empty hold",
+            Box::new(|s: &mut VectorSidecar| s.hold_id.clear()),
+        ),
+    ] {
+        let impossible = fixture.restaged(&digest, |dir| {
+            let mut sidecar = read_sidecar(dir);
+            tamper(&mut sidecar);
+            write_bound(dir, &sidecar);
+        });
+        assert!(fixture.store.validate(&impossible).is_ok(), "{name}");
+        assert_eq!(
+            fixture.verify(&impossible).unwrap_err(),
+            VectorRefusal::NotVectors("checkpoint"),
+            "{name}"
+        );
+    }
+
     // An extra file inventoried by the sidecar and hashed by the manifest is still not a vector generation.
     let extra = fixture.restaged(&digest, |dir| {
         fs::write(dir.join("extra.bin"), b"x").unwrap();
@@ -826,7 +962,7 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             ..fixture.expected()
         };
         assert_eq!(
-            verify(&fixture.store, &digest, &expected).unwrap_err(),
+            verify(&fixture.store, &digest, &expected, u64::MAX).unwrap_err(),
             VectorRefusal::Identity { field },
             "a different {field} is refused"
         );
@@ -838,7 +974,8 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             &ExpectedVectors {
                 unit_norm_tolerance: 2e-3,
                 ..fixture.expected()
-            }
+            },
+            u64::MAX,
         )
         .unwrap_err(),
         VectorRefusal::Identity {
@@ -852,7 +989,8 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             &ExpectedVectors {
                 kernel_incarnation_id: "other",
                 ..fixture.expected()
-            }
+            },
+            u64::MAX,
         )
         .unwrap_err(),
         VectorRefusal::Identity {
@@ -880,7 +1018,8 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
                 &ExpectedVectors {
                     checkpoint: Some(&other_checkpoint),
                     ..fixture.expected()
-                }
+                },
+                u64::MAX,
             )
             .unwrap_err(),
             VectorRefusal::Identity {
@@ -899,7 +1038,8 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
                 generation: &other_generation,
                 kernel_incarnation_id: "another-kernel",
                 ..fixture.expected()
-            }
+            },
+            u64::MAX,
         )
         .unwrap_err(),
         VectorRefusal::Identity {
@@ -918,7 +1058,8 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             &ExpectedVectors {
                 unit_norm_tolerance: -0.0,
                 ..fixture.expected()
-            }
+            },
+            u64::MAX,
         )
         .unwrap_err(),
         VectorRefusal::Identity {

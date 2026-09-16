@@ -44,6 +44,7 @@ pub(crate) mod prompt_surface;
 mod retained_size;
 pub mod scheduler;
 pub mod search_catchup;
+pub mod search_lifecycle_owner;
 pub mod search_projection;
 pub mod search_replacement;
 pub mod search_seed;
@@ -310,6 +311,17 @@ impl RouteBindings {
             .filter(|(_, binding)| binding.project_root == route_root)
             .map(|(seq, binding)| (*seq, binding))
             .max_by_key(|(seq, _)| *seq)
+    }
+
+    /// The project of every bound root, keyed by its scope identifier; roots sharing a project collapse to one entry.
+    fn bound_projects(&self) -> Vec<(String, kernel::ProjectScope)> {
+        let mut projects: BTreeMap<String, kernel::ProjectScope> = BTreeMap::new();
+        for (_, binding) in self.latest_per_root().into_values() {
+            projects
+                .entry(binding.kernel_project.scope_id())
+                .or_insert_with(|| binding.kernel_project.scope().clone());
+        }
+        projects.into_iter().collect()
     }
 
     /// The returned sequence orders bindings by insertion time.
@@ -2290,6 +2302,9 @@ const _: () = assert!(
 /// call sites against this constant.
 pub const STORAGE_CONNECTIONS: u64 = 2;
 
+/// Search projection connections open at once at the peak: the selected family's while a rebuild's staged replacement is built and verified beside it (`crates/daemon/src/search_lifecycle_owner.rs`). Each retains its own page cache and schema snapshot, so the declaration counts both.
+pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
+
 /// The component declares every resident byte it retains through [`ResourceDeclaration::retained_resident_bytes`].
 ///
 /// `max_resident_bytes` bounds process retention only when `retained_resident_bytes` is truthful.
@@ -2297,9 +2312,9 @@ pub const STORAGE_CONNECTIONS: u64 = 2;
 ///
 /// The declaration lists each retention class separately so a budget change cannot omit a cache from accounting.
 /// The seed and page coordinators hold request bytes across requests, after each ingress reservation has ended, so their staging caps count here.
-/// Each storage-backed connection retains one schema snapshot within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the daemon opens [`STORAGE_CONNECTIONS`] of them.
+/// Each storage-backed connection retains one schema snapshot within `storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND`; the daemon opens [`STORAGE_CONNECTIONS`] kinds of them, and holds [`PEAK_SEARCH_CONNECTIONS`] search connections at the peak of a rebuild, so that many snapshots and search page caches are declared.
 /// The memory store's connection holds `memory_store::PAGE_CACHE_BUDGET_BYTES` of page cache and maps up to `memory_store::MMAP_BUDGET_BYTES` of its file; mapped pages are file-backed and reclaimable, and are counted so the ceiling stays conservative.
-/// The search projection's connection holds `search_projection::CACHE_KIB` of page cache.
+/// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
@@ -2313,10 +2328,11 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + ACTIVE_PROJECTION_LEASE_BUDGET_BYTES as u64
     + token_cache::RETAINED_BYTES_BOUND as u64
     + transform::TAG_CACHE_COMBINED_BUDGET_BYTES as u64
-    + storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND as u64 * STORAGE_CONNECTIONS
+    + storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND as u64
+        * (STORAGE_CONNECTIONS - 1 + PEAK_SEARCH_CONNECTIONS)
     + memory_store::PAGE_CACHE_BUDGET_BYTES as u64
     + memory_store::MMAP_BUDGET_BYTES as u64
-    + search_projection::CACHE_KIB as u64 * 1024
+    + search_projection::CACHE_KIB as u64 * 1024 * PEAK_SEARCH_CONNECTIONS
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
@@ -3007,8 +3023,10 @@ pub struct HandlerCore {
     publication_fence_write_hook: ConnectFailureCommitHook,
     /// A full route handle maps to its session binding and route root; epoch-scoped lookups and removals prevent channel reuse from accessing another incarnation's state.
     bindings: Arc<Mutex<RouteBindings>>,
-    /// Set once the SQLite store's data home is known; a deployment without a SQLite store has no projection to admit.
-    projection_admission: Arc<OnceLock<projection_admission::ProjectionAdmission>>,
+    /// The lifecycle owner exists only when the SQLite store has a data home, the kernel is available, and local embeddings are attached. Cleared after a successful shutdown joins the owner's supervisor.
+    search_lifecycle: Arc<Mutex<Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>>>>,
+    /// The lane the projection's identity and embedding work come from; attached by the daemon binary before activation.
+    local_embeddings: Mutex<Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
     /// Evaluator registrations exist only in memory and are keyed by notes-authority project.
@@ -3789,6 +3807,18 @@ impl Handler {
         self
     }
 
+    /// Attaches the lane whose model and tokenizer name the search projection's identity and run its embedding work. Without one the daemon owns no projection.
+    pub fn with_local_embeddings(
+        self,
+        local_embeddings: host_runtime::local_embeddings::LocalEmbeddingsComponent,
+    ) -> Self {
+        *self
+            .local_embeddings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(local_embeddings);
+        self
+    }
+
     pub fn new_with_connection_file(connection_file: Option<PathBuf>) -> Self {
         let cancel = CancellationToken::new();
         let producer_factory: Arc<dyn HistorySummarizerProducerFactory> = match connection_file {
@@ -3857,7 +3887,8 @@ impl Handler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
-            projection_admission: Arc::new(OnceLock::new()),
+            search_lifecycle: Arc::new(Mutex::new(None)),
+            local_embeddings: Mutex::new(None),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -3941,7 +3972,12 @@ impl HandlerCore {
         let store_slot = Arc::clone(&self.store);
         let bindings = Arc::clone(&self.bindings);
         let memory_classifier = Arc::clone(&self.memory_classifier);
-        let projection_admission = Arc::clone(&self.projection_admission);
+        let search_lifecycle = Arc::clone(&self.search_lifecycle);
+        let local_embeddings = self
+            .local_embeddings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         if admission
             .spawn(async move {
                 let _guard = StoreOpenWaiterGuard {
@@ -3966,7 +4002,7 @@ impl HandlerCore {
                     let host: Arc<dyn memory_classifier_scheduler::SchedulerHost> =
                         Arc::new(SchedulerBridge {
                             store,
-                            bindings,
+                            bindings: Arc::clone(&bindings),
                             memory_classifier,
                         });
                     let scheduler = memory_classifier_scheduler::MemoryClassifierScheduler::new(
@@ -3980,14 +4016,23 @@ impl HandlerCore {
                         kernel
                             .open(kernel_routes::kernel_root_for(path), policy, cancel.clone())
                             .await;
+                        // `kernel.open` returns on cancellation too; an owner bound then would read records during shutdown for a gate nothing can consult.
+                        if !cancel.is_cancelled()
+                            && let Some(owner) = Self::open_search_lifecycle(
+                                &search_lifecycle,
+                                &kernel,
+                                local_embeddings,
+                                &bindings,
+                                path,
+                            )
+                        {
+                            task_admission
+                                .spawn(search_lifecycle_owner::run_slices(owner, cancel.clone()));
+                        }
                         if kernel.state() == kernel_routes::KernelState::Ready
                             && kernel.background_sampler_enabled()
                         {
-                            task_admission.spawn(kernel.run_sampler(cancel.clone()));
-                        }
-                        // `kernel.open` returns on cancellation too; an owner bound then would read records during shutdown for a gate nothing can consult.
-                        if !cancel.is_cancelled() {
-                            Self::open_projection_admission(&projection_admission, path);
+                            task_admission.spawn(kernel.run_sampler(cancel));
                         }
                     }
                     (true, StorageBackend::Postgres { .. }) => {
@@ -4120,30 +4165,58 @@ impl HandlerCore {
         }
     }
 
-    /// Binds the admission owner to the store's data home. Nothing is selected at startup, so the gate stays closed; a refused record is reported now rather than at the first hook, while an absent one is the ordinary state of a host without approvals.
-    fn open_projection_admission(
-        slot: &OnceLock<projection_admission::ProjectionAdmission>,
+    /// Binds the lifecycle owner to the store's data home once the kernel is ready and a lane is attached, and returns it only on the first binding so exactly one slice loop runs. Nothing is selected at startup, so admission stays closed until the first slice; a refused admission record is reported now rather than at that slice, while an absent one is the ordinary state of a host without approvals.
+    fn open_search_lifecycle(
+        slot: &Mutex<Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>>>,
+        kernel: &kernel_routes::KernelOpenCoordinator,
+        local_embeddings: Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>,
+        bindings: &Arc<Mutex<RouteBindings>>,
         sqlite_path: &str,
-    ) {
+    ) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
         let Some(home) = sqlite_store_data_home(sqlite_path) else {
-            eprintln!(
-                "daemon: search admission stays closed: the store path is not under a data home"
-            );
-            return;
+            eprintln!("daemon: search stays unavailable: the store path is not under a data home");
+            return None;
         };
+        let (Ok(kernel), Some(local_embeddings)) = (kernel.kernel_store(), local_embeddings) else {
+            return None;
+        };
+        let mut slot = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
+            return None;
+        }
         let home = Path::new(home);
-        slot.get_or_init(|| projection_admission::ProjectionAdmission::for_home(home));
         if let Err(refusal) = projection_admission::AdmissionInputs::read(home)
             && !matches!(refusal, projection_admission::InputRefusal::Missing(_))
         {
             eprintln!("daemon: search admission record refused: {refusal}");
         }
+        let roster = Arc::clone(bindings);
+        let owner = Arc::new(
+            search_lifecycle_owner::SearchLifecycleOwner::for_home(home, kernel, local_embeddings)
+                .with_roster(Arc::new(move || {
+                    roster
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .bound_projects()
+                })),
+        );
+        *slot = Some(Arc::clone(&owner));
+        Some(owner)
     }
 
-    /// The admission owner, once the SQLite store's data home is known.
+    fn lifecycle_owner(&self) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
+        self.search_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The lifecycle owner, once the kernel is ready under a SQLite store with a lane attached.
     #[cfg(feature = "test-support")]
-    pub fn projection_admission(&self) -> Option<&projection_admission::ProjectionAdmission> {
-        self.projection_admission.get()
+    pub fn search_lifecycle(&self) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
+        self.lifecycle_owner()
     }
 
     async fn open_store_once(
@@ -4232,7 +4305,8 @@ impl Handler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
-            projection_admission: Arc::new(OnceLock::new()),
+            search_lifecycle: Arc::new(Mutex::new(None)),
+            local_embeddings: Mutex::new(None),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
             note_evaluator_registration_seq: AtomicU64::new(0),
@@ -12553,13 +12627,28 @@ impl CompositeComponent for Handler {
             self.cancel.cancel();
             self.tasks.close();
         }
-        // Closing before the join cancels every grant so a slice holding one can exit; closing again after it catches an owner the store-open task bound while the join was in progress, which the first pass could not see.
-        if let Some(admission) = self.projection_admission.get() {
-            admission.close();
+        // Closing admission before the join cancels every grant so a slice holding one can exit; the owner itself is released after the join, when no slice can run and an owner bound during the join is visible too.
+        let owner = self.lifecycle_owner();
+        if let Some(owner) = &owner {
+            owner.admission().close();
         }
         self.tasks.wait().await;
-        if let Some(admission) = self.projection_admission.get() {
-            admission.close();
+        // An owner that did not drain stays bound, with its selection, projection connection, and kernel lease live; the rest of the component is still released, and the outcome is reported so the composite does not take the primary as cleanly shut down.
+        let mut unresolved = None;
+        let owner = self.lifecycle_owner().or(owner);
+        if let Some(owner) = owner {
+            match owner.shutdown().await {
+                Ok(()) => {
+                    *self
+                        .search_lifecycle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                }
+                Err(error) => {
+                    eprintln!("daemon: search maintenance did not drain at shutdown: {error}");
+                    unresolved = Some(error);
+                }
+            }
         }
 
         self.bindings.lock().expect("bindings mutex").clear();
@@ -12618,7 +12707,12 @@ impl CompositeComponent for Handler {
         *self.store.lock().expect("store slot mutex") = None;
         self.kernel
             .mark_unavailable(kernel_routes::UnavailableKind::Store);
-        Ok(())
+        match unresolved {
+            None => Ok(()),
+            Some(unresolved) => Err(ShutdownError(format!(
+                "search maintenance did not drain at shutdown: {unresolved}"
+            ))),
+        }
     }
 }
 
@@ -13400,7 +13494,7 @@ fn json_type_name(value: &Value) -> &'static str {
 /// Use the wall clock only to set the expiry cutoff during the first HARD materialization.
 /// Storing the first HARD cutoff keeps later materializations byte-stable.
 /// Later passes use the stored cutoff so expiry cannot change rendered bytes between passes.
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -19152,20 +19246,28 @@ mod tests {
         assert!(handler.tasks.is_empty());
     }
 
-    /// The tracked task binds `projection_admission` after cancellation, so the owner exists only once shutdown is already joining its tasks.
+    /// The tracked task binds the lifecycle owner after cancellation, so the owner exists only once shutdown is already joining its tasks.
     #[tokio::test]
-    async fn shutdown_closes_an_admission_owner_bound_during_the_join() {
-        use projection_admission::{Closed, ProjectionAdmission, Refresh};
+    async fn shutdown_closes_a_lifecycle_owner_bound_during_the_join() {
+        use projection_admission::{Closed, Refresh};
+        use search_lifecycle_owner::{SearchLifecycleOwner, SliceOutcome};
 
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().to_owned();
+        let kernel = Arc::new(kernel::KernelStore::open(home.join("kernel")).unwrap());
         let handler = Handler::new();
-        let slot = Arc::clone(&handler.projection_admission);
+        let slot = Arc::clone(&handler.search_lifecycle);
         let cancel = handler.cancel.clone();
+        let owner = Arc::new(SearchLifecycleOwner::for_home(
+            &home,
+            kernel,
+            host_runtime::local_embeddings::LocalEmbeddingsComponent::unsupported("no lane"),
+        ));
+        let bound = Arc::clone(&owner);
         handler
             .spawn_tracked_task(async move {
                 cancel.cancelled().await;
-                slot.get_or_init(|| ProjectionAdmission::for_home(&home));
+                *slot.lock().unwrap() = Some(bound);
             })
             .expect("late binder admitted");
 
@@ -19173,15 +19275,20 @@ mod tests {
             .await
             .unwrap();
 
-        let admission = handler
-            .projection_admission
-            .get()
-            .expect("the owner was bound during the join");
+        assert!(
+            handler.search_lifecycle().is_none(),
+            "a joined owner is released with the store"
+        );
         assert_eq!(
-            admission.refresh(None),
+            owner.admission().refresh(None),
             Refresh::Closed(Closed::ShutDown),
             "no refresh reopens a gate after shutdown"
         );
+        assert!(matches!(
+            owner.run_slice(&kernel::applicability::EvalBudget::unbounded()),
+            SliceOutcome::Disabled
+        ));
+        assert!(owner.maintenance().is_none());
     }
 
     fn handler_with_blocking_lifecycle(

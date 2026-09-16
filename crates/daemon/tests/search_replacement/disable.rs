@@ -238,6 +238,7 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
                 },
                 Arc::new(|| fixtures::NOW),
                 events,
+                &budget(Duration::from_secs(10)),
             )
             .unwrap();
         drop(reader);
@@ -321,8 +322,9 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
         }
         let before = selection.begin_disable(&gate, &mut |_| {}).unwrap();
         let mut entered_drain = false;
+        // Both waits only need to outlast the filesystem reads before the drain; the held native permit keeps the drain itself from resolving.
         let cancelled = tokio::time::timeout(
-            Duration::from_millis(20),
+            Duration::from_secs(1),
             selection.reconcile_disabled(
                 &corpus.kernel,
                 &gate,
@@ -343,7 +345,7 @@ async fn cancelled_shutdown_and_owner_drop_retain_native_permits_and_pins_until_
                 &corpus.kernel,
                 &gate,
                 &spec(root.path()),
-                &budget(Duration::from_millis(20)),
+                &budget(Duration::from_secs(1)),
                 &mut |_| {},
             )
             .await;
@@ -1164,6 +1166,7 @@ async fn a_supervisor_stopped_before_disable_still_reconciles() {
             },
             Arc::new(|| fixtures::NOW),
             events,
+            &budget(Duration::from_secs(10)),
         )
         .unwrap();
     drop(reader);
@@ -1433,6 +1436,7 @@ async fn selecting_a_replacement_is_refused_while_maintenance_is_bound() {
             },
             Arc::new(|| fixtures::NOW),
             events,
+            &budget(Duration::from_secs(10)),
         )
         .unwrap();
     let selected = reader.digest().to_owned();
@@ -1620,7 +1624,13 @@ async fn a_finished_maintenance_owner_releases_selection_and_restart() {
     };
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     selection
-        .start_maintenance(maintained(), bounds(), Arc::new(|| fixtures::NOW), events)
+        .start_maintenance(
+            maintained(),
+            bounds(),
+            Arc::new(|| fixtures::NOW),
+            events,
+            &budget(Duration::from_secs(10)),
+        )
         .unwrap();
     drop(reader);
     selection
@@ -1643,6 +1653,7 @@ async fn a_finished_maintenance_owner_releases_selection_and_restart() {
                 bounds(),
                 Arc::new(|| fixtures::NOW),
                 events.clone(),
+                &budget(Duration::from_secs(10)),
             ) {
                 Ok(()) => break,
                 Err(BuildError::Invalid("maintenance already owned")) => {
@@ -1660,6 +1671,63 @@ async fn a_finished_maintenance_owner_releases_selection_and_restart() {
         .shutdown(Duration::from_secs(10))
         .await
         .unwrap();
+}
+
+/// Starting maintenance while every kernel reader is held ends within the caller's budget instead of a fresh slice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maintenance_startup_waits_for_a_kernel_reader_only_within_the_callers_budget() {
+    use daemon::embedding_supervisor::{Maintained, SliceBounds};
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    let gate = gate_for(root.path());
+    let mut selection = build_selected(root.path(), &corpus, &gate);
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let engine = fixtures::TestEngine::new();
+    let local_embeddings = Arc::new(fixtures::component(
+        &engine,
+        host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
+    ));
+    let bounds = SliceBounds {
+        dispatch: fixtures::bounds(),
+        sweep_candidates: NonZeroUsize::new(16).unwrap(),
+        slice: Duration::from_secs(4),
+        idle: Duration::from_millis(20),
+    };
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    let held = std::sync::Barrier::new(2);
+    let (waited, started) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            corpus
+                .kernel
+                .hold_readers_for_test(&held, Duration::from_secs(4))
+        });
+        held.wait();
+        let clock = std::time::Instant::now();
+        let started = selection.start_maintenance(
+            Maintained {
+                gate: Arc::clone(&gate),
+                kernel: Arc::clone(&corpus.kernel),
+                projection: Arc::clone(reader.projection()),
+                local_embeddings,
+                project: kernel::ProjectScope::new(fixtures::PROJECT).unwrap(),
+                destination: kernel::ArtifactDestination::Remote,
+            },
+            bounds,
+            Arc::new(|| fixtures::NOW),
+            events,
+            &budget(Duration::from_millis(300)),
+        );
+        (clock.elapsed(), started)
+    });
+    assert!(
+        waited < Duration::from_secs(2),
+        "startup waited {waited:?} for a kernel reader: {started:?}"
+    );
+    assert!(started.is_err(), "{started:?}");
+    assert!(selection.maintenance_supervisor_for_test().is_none());
 }
 
 /// Selection and maintenance refuse gates or kernels bound to another data home.
@@ -1714,6 +1782,7 @@ async fn selection_and_maintenance_refuse_foreign_bindings() {
         bounds(),
         Arc::new(|| fixtures::NOW),
         events,
+        &budget(Duration::from_secs(10)),
     );
     assert!(
         matches!(
@@ -1742,6 +1811,7 @@ async fn selection_and_maintenance_refuse_foreign_bindings() {
         bounds(),
         Arc::new(|| fixtures::NOW),
         events,
+        &budget(Duration::from_secs(10)),
     );
     assert!(
         matches!(
@@ -1834,6 +1904,7 @@ async fn maintenance_refuses_bounds_larger_than_the_manifest_limits() {
             bounds(),
             Arc::new(|| fixtures::NOW),
             events,
+            &budget(Duration::from_secs(10)),
         );
         assert!(
             matches!(
@@ -1893,6 +1964,7 @@ async fn grace_expiry_counts_only_the_held_slice_for_pinned_maintenance() {
             },
             Arc::new(|| fixtures::NOW),
             events,
+            &budget(Duration::from_secs(10)),
         )
         .unwrap();
     drop(reader);

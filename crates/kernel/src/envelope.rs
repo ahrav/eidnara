@@ -266,7 +266,40 @@ pub struct Envelope<'tx> {
     pub(super) admission_ordinal: usize,
     pub(super) admission_latest: HashMap<AdmissionKey, StoredAdmission>,
     pub(super) descriptor_objects: HashMap<String, String>,
+    /// Causality subject to the `claimcauseobj:` row this envelope wrote for it.
+    pub(super) causality_objects: HashMap<String, String>,
     poisoned: Option<KernelError>,
+}
+
+impl Envelope<'_> {
+    /// Every registry row this commit created under `prefix` must be the one
+    /// `owned` records for its `source_id`; any other writer squatting on the
+    /// namespace fails the commit.
+    pub(super) fn check_reserved_ownership(
+        &self,
+        prefix: &str,
+        owned: &HashMap<String, String>,
+    ) -> Result<(), KernelError> {
+        let mut statement = self
+            .tx
+            .prepare_cached(
+                "SELECT object_id,source_id FROM object_registry
+                 WHERE created_commit_seq=?1 AND object_id GLOB ?2",
+            )
+            .map_err(map_sqlite)?;
+        let rows = statement
+            .query_map(params![self.commit_seq, format!("{prefix}*")], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(map_sqlite)?;
+        for row in rows {
+            let (object_id, owner_id) = row.map_err(map_sqlite)?;
+            if owned.get(&owner_id) != Some(&object_id) {
+                return Err(KernelError::InvalidInput);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// No `&mut Envelope` is reachable, so nothing lands in the log. The one mutation, [`Preview::preview_admission`], seeds the same-transaction prior cache the way `record_admission` does inside a commit, so a later operation in the same preview is judged against an earlier one's decision as the commit judges it. The authority cascade over a decision's dependents is not simulated; an operation whose authority chain an earlier operation in the preview touched is refused with [`KernelError::PreviewAuthorityChanged`] instead of being judged against stale authority.
@@ -716,6 +749,7 @@ impl KernelStore {
                     admission_ordinal: 0,
                     admission_latest: HashMap::new(),
                     descriptor_objects: HashMap::new(),
+                    causality_objects: HashMap::new(),
                     poisoned: None,
                 },
             })
@@ -1165,6 +1199,7 @@ fn commit_prepared_with_writer(
         admission_ordinal: 0,
         admission_latest: HashMap::new(),
         descriptor_objects: HashMap::new(),
+        causality_objects: HashMap::new(),
         poisoned: None,
     };
     let result = operation(&mut envelope)?;
@@ -1172,6 +1207,7 @@ fn commit_prepared_with_writer(
         return Err(error);
     }
     envelope.check_descriptor_ownership()?;
+    envelope.check_causality_ownership()?;
     let unconditional_changes = envelope
         .changes
         .iter()

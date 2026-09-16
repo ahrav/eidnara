@@ -453,6 +453,7 @@ impl std::fmt::Debug for VerifiedComposition {
 }
 
 /// Verifies one composition generation and every member under `expected`, and re-checks the topology under `max_deltas` so a composition current admission would refuse does not verify.
+/// Each member is verified under `max_member_bytes`, the byte bound [`verify`] takes; every member's payload is held at once, so the caller's memory bound is `max_member_bytes` times one more than `max_deltas`.
 ///
 /// # Errors
 ///
@@ -462,6 +463,7 @@ pub fn verify_composition(
     digest: &str,
     expected: &ExpectedVectors<'_>,
     max_deltas: NonZeroUsize,
+    max_member_bytes: u64,
 ) -> Result<VerifiedComposition, CompositionRefusal> {
     // The manifest is read before any listed file is hashed or held in memory.
     let manifest = store.manifest(digest)?;
@@ -473,7 +475,7 @@ pub fn verify_composition(
         return Err(CompositionRefusal::NotComposition("record size"));
     }
     let generation = store.validate(digest)?;
-    verify_validated(store, generation, expected, max_deltas)
+    verify_validated(store, generation, expected, max_deltas, max_member_bytes)
 }
 
 fn verify_validated(
@@ -481,6 +483,7 @@ fn verify_validated(
     generation: ValidatedGeneration,
     expected: &ExpectedVectors<'_>,
     max_deltas: NonZeroUsize,
+    max_member_bytes: u64,
 ) -> Result<VerifiedComposition, CompositionRefusal> {
     if generation.manifest.target != VECTOR_SELECTION_TARGET {
         return Err(CompositionRefusal::NotComposition("manifest target"));
@@ -505,9 +508,11 @@ fn verify_validated(
         return Err(CompositionRefusal::NotComposition("identity"));
     }
     let member = |digest: &str| {
-        verify(store, digest, expected).map_err(|refusal| CompositionRefusal::Member {
-            digest: digest.to_owned(),
-            refusal,
+        verify(store, digest, expected, max_member_bytes).map_err(|refusal| {
+            CompositionRefusal::Member {
+                digest: digest.to_owned(),
+                refusal,
+            }
         })
     };
     let base = member(&composition.base)?;
@@ -611,6 +616,7 @@ pub fn candidates(
 }
 
 /// Fully verifies the [`candidates`] in order and takes the first that passes. `_transaction` keeps a concurrent mutator from reclaiming what recovery is examining.
+/// `max_deltas` and `max_member_bytes` bound each verification as [`verify_composition`] does.
 ///
 /// # Errors
 ///
@@ -620,6 +626,7 @@ pub fn recover(
     _transaction: &LifecycleTransactionLock,
     expected: &ExpectedVectors<'_>,
     max_deltas: NonZeroUsize,
+    max_member_bytes: u64,
     bound: NonZeroUsize,
 ) -> Result<Recovered, Unavailable> {
     let current = store
@@ -628,8 +635,13 @@ pub fn recover(
     let candidates = candidates(store, &current, bound)?;
     let examined = candidates.len();
     for candidate in candidates {
-        if let Ok(composition) = verify_composition(store, &candidate.digest, expected, max_deltas)
-        {
+        if let Ok(composition) = verify_composition(
+            store,
+            &candidate.digest,
+            expected,
+            max_deltas,
+            max_member_bytes,
+        ) {
             return Ok(Recovered {
                 composition,
                 selector: candidate.selector,

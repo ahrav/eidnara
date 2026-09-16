@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod batch;
+pub mod claims;
 pub mod coverage;
 pub mod dense;
 pub mod dispatch;

@@ -570,6 +570,51 @@ fn a_masked_row_with_open_work_is_a_pending_shortfall() {
 }
 
 #[test]
+fn a_budget_that_ends_inside_the_last_page_leaves_its_unvisited_rows_unvisited() {
+    let fixture = Fixture::all_admitted();
+    let query = axis(0);
+    let base = full_base(&fixture);
+    let budget = EvalBudget::unbounded();
+    let mut visited = 0;
+    let ranking = rank(
+        &fixture,
+        &[base.layer()],
+        &query,
+        OracleBounds {
+            page_rows: NonZeroUsize::new(8).unwrap(),
+            ..bounds(8)
+        },
+        &budget,
+        |window| {
+            if let Window::Visited(_) = window {
+                visited += 1;
+                if visited == 5 {
+                    budget.cancel();
+                }
+            }
+        },
+    )
+    .unwrap();
+    assert_accounted(&ranking);
+    assert_eq!(
+        ranking.ranking.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert_eq!(ranking.ranking.coverage.required, 4);
+    // The page had no rows after it, but four of its rows were never reached; nothing is known about their winners.
+    assert_eq!(
+        ranking.layers,
+        LayerAccount {
+            winners: 8,
+            superseded: 0,
+            masked: 0,
+            revoked: 0,
+            unvisited: 4
+        }
+    );
+}
+
+#[test]
 fn a_stop_between_pages_leaves_the_tail_unvisited_while_a_stop_after_the_last_page_knows_it_is_revoked()
  {
     let fixture = Fixture::all_admitted();

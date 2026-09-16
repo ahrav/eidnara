@@ -261,6 +261,109 @@ async fn ended(events: &mut UnboundedReceiver<SupervisorEvent>, kind: SliceKind)
     .await
 }
 
+/// Once the episode grant's deadline has passed, no sweep runs under it: only backfill passes continue, and those stop expired rows rather than admit work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn no_sweep_runs_after_the_grant_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    // The supervisor's clock already stands past the grant's deadline.
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
+        SliceBounds {
+            dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
+                grant: grant(3, NOW + DAY_MS),
+                ..bounds()
+            },
+            ..slice_bounds(Duration::from_secs(2))
+        },
+        Arc::new(|| NOW + DAY_MS + 1),
+        sender,
+    );
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    let mut backfills = 0;
+    while backfills < 3 {
+        match next_event(&mut events).await {
+            SupervisorEvent::SliceStarted {
+                kind: SliceKind::Sweep,
+                ..
+            } => panic!("a sweep started under an expired grant"),
+            SupervisorEvent::SliceEnded {
+                kind: SliceKind::Backfill,
+                ..
+            } => backfills += 1,
+            _ => {}
+        }
+    }
+    supervisor.shutdown(Duration::from_secs(5)).await.unwrap();
+    running.await.unwrap();
+}
+
+/// A slice's budget ends at the episode grant's deadline when that comes before the slice bound, so a result that lands after the deadline is not awaited under a slice that would still publish it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_slice_ends_at_the_grant_deadline_when_it_is_nearer_than_the_slice_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    corpus.publish("held", "held text");
+    let (projection, _rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let gate = engine.block_calls();
+    let _release = GateGuard(Arc::clone(&gate));
+    let local_embeddings = Arc::new(component(&engine, LocalEmbeddingsLimits::default()));
+    let (sender, mut events) = unbounded_channel();
+    // The grant ends 300 ms of the supervisor's clock after now; the slice bound is far longer.
+    let supervisor = EmbeddingSupervisor::new(
+        maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
+        SliceBounds {
+            dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
+                grant: grant(3, NOW + 300),
+                ..bounds()
+            },
+            ..slice_bounds(Duration::from_secs(5))
+        },
+        Arc::new(|| NOW),
+        sender,
+    );
+    let started = Instant::now();
+    let running = tokio::spawn(Arc::clone(&supervisor).run());
+    let SupervisorEvent::SliceStarted {
+        kind: SliceKind::Backfill,
+        deadline,
+    } = next_event(&mut events).await
+    else {
+        panic!()
+    };
+    // The slice started no later than this receive, so its deadline is at most the grant's remainder from now.
+    assert!(
+        deadline.saturating_duration_since(Instant::now()) <= Duration::from_millis(300),
+        "the slice deadline is the grant's, not the slice bound's: {:?} ahead",
+        deadline.saturating_duration_since(Instant::now())
+    );
+    // The held call keeps the backfill waiting, so the slice ends when its budget does.
+    assert!(matches!(
+        ended(&mut events, SliceKind::Backfill).await,
+        SliceOutcome::Backfill {
+            end: Some(Blocked::BudgetExhausted),
+            ..
+        }
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    TestEngine::release(&gate);
+    let _ = supervisor.shutdown(Duration::from_secs(5)).await;
+    running.await.unwrap();
+}
+
 /// AC2, AC3, AC4: slices alternate under their own budgets while native work is held; shutdown joins its slices but stays unresolved while the host still runs an admitted call, repeated requests neither duplicate work nor release anything, and once the call exits shutdown resolves with the row still admitted for the next incarnation, which finishes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn shutdown_joins_slices_and_stays_unresolved_while_native_work_is_held() {
@@ -446,6 +549,7 @@ async fn a_stopped_row_keeps_its_running_native_call_in_the_census() {
         maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 grant: grant(1, NOW + DAY_MS),
                 ..bounds()
             },
@@ -609,6 +713,7 @@ async fn a_backfill_of_dispositions_alone_does_not_idle() {
         maintained(&corpus, Arc::new(projection), local_embeddings),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 max_jobs: NonZeroUsize::new(1).unwrap(),
                 grant: grant(3, NOW - 1),
                 ..bounds()
@@ -630,11 +735,12 @@ async fn a_backfill_of_dispositions_alone_does_not_idle() {
             dispositions: 1,
         }
     );
+    // Under the expired grant no sweep runs, so the next slice is the next backfill; what matters is that it starts at once.
     let progressed_at = Instant::now();
     assert!(matches!(
         next_event(&mut events).await,
         SupervisorEvent::SliceStarted {
-            kind: SliceKind::Sweep,
+            kind: SliceKind::Backfill,
             ..
         }
     ));
@@ -976,6 +1082,7 @@ async fn a_reauthorized_row_keeps_its_earlier_native_call_in_the_census() {
         ),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 grant: grant(1, NOW + DAY_MS),
                 ..bounds()
             },
@@ -1142,6 +1249,7 @@ async fn a_held_head_of_the_sweep_order_does_not_starve_identities_behind_it() {
         maintained(&corpus, Arc::clone(&projection), local_embeddings),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 result_wait: Duration::from_millis(50),
                 ..bounds()
             },
@@ -1228,6 +1336,7 @@ async fn a_settled_call_no_row_expects_leaves_the_census_during_maintenance() {
         maintained(&corpus, Arc::new(projection), Arc::clone(&local_embeddings)),
         SliceBounds {
             dispatch: DispatchBounds {
+                input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
                 grant: grant(1, NOW + DAY_MS),
                 ..bounds()
             },

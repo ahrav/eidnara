@@ -255,7 +255,7 @@ pub struct ExpectedVectors<'a> {
     pub metric: Metric,
     pub unit_norm_tolerance: f64,
     pub recipe: ScalarRecipe,
-    /// The checkpoint the rows were read at; `None` accepts any checkpoint and reads it from the sidecar.
+    /// The checkpoint the rows were read at; `None` accepts any checkpoint the projection schema could hold and reads it from the sidecar.
     pub checkpoint: Option<&'a ProjectionCheckpoint>,
 }
 
@@ -300,6 +300,8 @@ pub enum VectorRefusal {
     Store(String),
     #[error("the generation carries a state schema this build does not know")]
     Quarantined,
+    #[error("the generation's {bytes} payload bytes exceed the verification bound of {max}")]
+    OverBound { bytes: u64, max: u64 },
     #[error("insufficient storage for the generation")]
     InsufficientStorage,
     #[error("the generation is not a vector generation: {0}")]
@@ -337,13 +339,13 @@ impl BuiltVectors {
 }
 
 /// Writes rows, codes, scales, identifiers, and tombstones under `work_dir` and describes them in a sidecar bound to `expected` and the export's generation, kernel incarnation, and checkpoint.
-/// The export names the generation and kernel it read the rows under; a disagreement with `expected` is refused rather than stamped, so the sidecar's provenance is the rows' provenance.
+/// The export names the generation, kernel, and checkpoint it read the rows under; a disagreement with `expected` is refused rather than stamped, so the sidecar's provenance is the rows' provenance.
 /// Rows and tombstones must arrive in strictly increasing identifier order, and no occurrence may be both, so the artifact, the codes, the identifier list, and the resolver agree on what the layer says across builds.
 /// Files are created exclusively and never synced: the store copies and syncs them when it stages, so the work directory is scratch, and a retry needs a fresh one.
 ///
 /// # Errors
 ///
-/// An export of another generation or kernel, no rows, rows or tombstones out of order, an occurrence both listed and tombstoned, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
+/// An export of another generation, kernel, or named checkpoint, no rows, rows or tombstones out of order, an occurrence both listed and tombstoned, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
 pub fn build(
     expected: &ExpectedVectors<'_>,
     export: &LiveRows,
@@ -485,16 +487,33 @@ impl Staging<'_> {
 }
 
 /// Stages a build through `staging`.
+/// The build's provenance must be the identity the admission is bound to: a sidecar for another model, tokenizer, dimension, epoch, or kernel incarnation is refused before the gate is consulted, so no generation is published under another identity's evidence and none is published that `verify` under this identity would refuse.
 ///
 /// # Errors
 ///
-/// An admission denial or the store's refusal.
+/// A build of another identity, an admission denial, or the store's refusal.
 pub fn stage(built: &BuiltVectors, staging: &Staging<'_>) -> Result<String, VectorRefusal> {
-    staging.stage_manifest(
-        &built.sidecar.stage_manifest(),
-        &built.sidecar.stage_meta(),
-        |path| built.dir.join(path),
-    )
+    let sidecar = &built.sidecar;
+    let identity = staging.identity;
+    let field = |field| VectorRefusal::Identity { field };
+    if sidecar.embedding_model != identity.embedding_model {
+        return Err(field("embedding_model"));
+    }
+    if sidecar.tokenizer_fingerprint != identity.tokenizer_fingerprint {
+        return Err(field("tokenizer_fingerprint"));
+    }
+    if sidecar.vector_dimension != identity.vector_dimension {
+        return Err(field("vector_dimension"));
+    }
+    if sidecar.generation_epoch != identity.generation_epoch {
+        return Err(field("generation_epoch"));
+    }
+    if sidecar.kernel_incarnation_id != identity.kernel_incarnation_id {
+        return Err(field("kernel_incarnation_id"));
+    }
+    staging.stage_manifest(&sidecar.stage_manifest(), &sidecar.stage_meta(), |path| {
+        built.dir.join(path)
+    })
 }
 
 /// A generation whose files, sidecar, and meaning were all checked. The row and code artifacts stay open on the descriptors verification read them through, and the tables it decoded stay with it, so a reader takes the files as verified without opening or hashing them again.
@@ -532,6 +551,7 @@ pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
+/// Verification holds every payload in memory, so a manifest whose files total more than `max_bytes` is refused before any payload is held; the store's validation has already streamed each file through a fixed buffer to check its hash, so the bound limits memory, not I/O. The caller bounds its own memory as `live_rows` bounds the export.
 ///
 /// # Errors
 ///
@@ -540,11 +560,23 @@ pub fn verify(
     store: &GenerationStore,
     digest: &str,
     expected: &ExpectedVectors<'_>,
+    max_bytes: u64,
 ) -> Result<VerifiedVectors, VectorRefusal> {
     let generation = store.validate(digest)?;
     let manifest = &generation.manifest;
     if manifest.target != VECTOR_TARGET {
         return Err(VectorRefusal::NotVectors("manifest target"));
+    }
+    let bytes = manifest
+        .files
+        .iter()
+        .try_fold(0u64, |sum, file| sum.checked_add(file.size))
+        .unwrap_or(u64::MAX);
+    if bytes > max_bytes {
+        return Err(VectorRefusal::OverBound {
+            bytes,
+            max: max_bytes,
+        });
     }
     let sidecar_bytes = generation.read_verified_file(SIDECAR_FILE)?;
     let sidecar: VectorSidecar =
@@ -560,6 +592,13 @@ pub fn verify(
     }
     if sidecar.stage_manifest() != *manifest {
         return Err(VectorRefusal::NotVectors("manifest binding"));
+    }
+    // The projection schema holds no checkpoint without these, so a sidecar naming one came from no export.
+    if sidecar.snapshot_commit_seq < 0
+        || sidecar.checkpoint_commit_seq < sidecar.snapshot_commit_seq
+        || sidecar.hold_id.is_empty()
+    {
+        return Err(VectorRefusal::NotVectors("checkpoint"));
     }
     check_identity(&sidecar, expected)?;
     let layout = RowLayout {
@@ -675,6 +714,12 @@ fn check_export(export: &LiveRows, expected: &ExpectedVectors<'_>) -> Result<(),
     }
     if export.kernel_incarnation_id != expected.kernel_incarnation_id {
         return Err(field("kernel_incarnation_id"));
+    }
+    if expected
+        .checkpoint
+        .is_some_and(|checkpoint| export.checkpoint != *checkpoint)
+    {
+        return Err(field("checkpoint"));
     }
     Ok(())
 }

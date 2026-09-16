@@ -75,6 +75,18 @@ pub struct AdmissionInputs {
 }
 
 impl AdmissionInputs {
+    pub fn manifest(&self) -> &RuntimeManifest {
+        &self.manifest
+    }
+
+    /// Whether both records name `identity`, the same check the gate makes before it applies them: the manifest's and the campaign's invalidation identities and the manifest's protocol version all agree with it.
+    pub fn applies_to(&self, identity: &ProjectionIdentity) -> bool {
+        let expected = InvalidationIdentity::from(identity);
+        self.manifest.identity == expected
+            && self.campaign.invalidation_identity == expected
+            && self.manifest.protocol_version == expected.limit_manifest_protocol_version
+    }
+
     /// Reads both records under `<home>/search-admission/`.
     ///
     /// # Errors
@@ -265,6 +277,22 @@ impl ProjectionAdmission {
                 Refresh::Closed(Closed::Inputs(refusal))
             }
         }
+    }
+
+    /// [`Self::refresh`] from records already read, so the evidence installed and the bounds derived from `inputs` come from one read.
+    pub fn refresh_with(
+        &self,
+        inputs: AdmissionInputs,
+        selected: SelectedProjection<'_>,
+    ) -> Refresh {
+        let closed = self.closed.lock().unwrap_or_else(|p| p.into_inner());
+        if *closed {
+            return Refresh::Closed(Closed::ShutDown);
+        }
+        Refresh::Installed(
+            self.gate
+                .renew(inputs.evaluator(selected.identity, selected.coverage.cloned())),
+        )
     }
 
     /// Closes the gate for good: every grant is cancelled and no refresh reopens it.

@@ -28,11 +28,17 @@ value.
 
 ## Metric
 
-The metric is the inner product (`Metric::InnerProduct`). Rows are
-unit-normalized, so the inner product equals the cosine. No other metric is
-defined; `dense::score::score` matches the metric exhaustively, so a new
-variant cannot fall through to the wrong arithmetic. The persisted encoding of
-the metric belongs to the artifact contract, not to this document.
+The metric is the inner product (`Metric::InnerProduct`) of the stored f32
+coordinates. The generation predicate permits norms within a caller-supplied
+tolerance of one; scoring does not divide by those norms. Inner product and
+cosine agree mathematically when both norms are exactly one, but accepted
+norm differences can change scores and near-tie ordering. The oracle's target
+is stored-value inner product, not exact cosine.
+
+No other metric is defined; `dense::score::score` matches the metric
+exhaustively, so a new variant cannot fall through to the wrong arithmetic.
+The persisted encoding of the metric belongs to the artifact contract, not
+to this document.
 
 ## The generation predicate `N_gen`
 
@@ -101,7 +107,7 @@ generation inside the caller's read transaction:
   shortfall. It is counted as `missing_pending` when durable work for it is
   still open and `missing_without_pending` otherwise. It is never a policy
   exclusion and it never makes the result complete.
-- Lexical presence, dense coverage, pending work, and policy exclusions are
+- Dense coverage, pending work, and policy exclusions are
   reported in separate fields and never merged.
 - `max_rows` bounds the visit; reaching it with rows remaining yields
   `Incomplete(RowBound)`.
@@ -190,7 +196,10 @@ refuses a wrong dimension and the reserved byte `0x80`.
 sum_j (s_j * s_j) * (i32(c_query_j) * i32(c_doc_j))
 ```
 
-- The integer product is formed in i32 and lies in `[-16129, 16129]`.
+- The integer product is formed in i32 and lies in `[-16129, 16129]`. That
+  range holds because scoring accepts only codes in `[-127, 127]`: the
+  reserved code `-128` widens to a product outside it, so `weighted_dot`
+  rejects `-128` with a debug assertion instead of scoring it.
 - The weight `s_j * s_j` is formed in f64 from the f32 scale.
 - Each term is `weight * f64(product)`.
 - Terms are summed into one f64 accumulator in increasing coordinate order,
@@ -211,8 +220,13 @@ For a query `q` and a document `d` whose codes were not clipped,
 |Σ q_j d_j − Σ s_j² c_q,j c_d,j| ≤ Σ_j |q_j| · |d_j − s_j c_d,j| + |s_j c_d,j| · |q_j − s_j c_q,j|
 ```
 
-and each unclipped reconstruction error `|x − s c|` is at most `s / 2`. The
-fixtures assert this bound with the document residual taken as `s_j / 2` and
+in real arithmetic, and each unclipped reconstruction error `|x − s c|` is at
+most `s / 2`. The two f64 scorers each round their terms and partial sums, so
+the difference between the returned scores can exceed this bound by their
+accumulation roundoff, at most about `n · 2⁻⁵³ · Σ|term|` per side for `n`
+coordinates; a two-coordinate fixture in `tests/dense_scalar.rs` meets the
+real bound with equality and lands one ulp past it. The fixtures assert the
+bound plus that allowance with the document residual taken as `s_j / 2` and
 the query residual taken exactly, so a clipped query is covered too, and they
 check that pairs whose exact scores differ by more than both bounds keep
 their order under the int8 score. Pairs closer than the bound may reorder;
@@ -495,7 +509,9 @@ Verification (`vector_generation::verify`) does not trust the manifest to
 describe itself. The store checks inventory, sizes, modes, and hashes; the
 verifier then checks that the manifest is a vector manifest, that the sidecar
 bytes are canonical, inventory exactly the five payload files, and hash into
-the manifest, that every identity field of the sidecar equals the caller's
+the manifest, that the sidecar's checkpoint is one the projection schema
+could hold (a non-negative snapshot, a checkpoint at or after it, and a hold),
+that every identity field of the sidecar equals the caller's
 expectation (model, tokenizer fingerprint, dimension, metric, tolerance,
 recipe, generation identifier and epoch, kernel incarnation, and the
 checkpoint when the caller names one), and that the payload agrees with
@@ -504,14 +520,25 @@ recalibrating those rows reproduces the scale bytes and the calibrated row
 count and the scales hash the sidecar records, the identifiers number the
 rows in strictly increasing order, the tombstones are as many as the sidecar
 says, strictly increasing, and disjoint from the identifiers, and the codes
-are exactly the rows encoded under the scales. A generation whose hashes were rewritten to match changed
-bytes is refused when its meaning changed. A different model space is refused
-at an equal dimension.
+are exactly the rows encoded under the scales. A generation whose hashes were
+rewritten to match changed bytes is refused when the payload itself can reveal
+the change. The identifier list is the one payload no other file derives: a
+rewrite that keeps it the same length and strictly increasing is
+indistinguishable from the original here, so which occurrence each row names
+is bound by the export at the recorded checkpoint, not by verification; the
+store's owner-only modes exclude other users, a same-user writer is trusted,
+and a caller that needs more compares the identifiers with `live_rows` under
+the sidecar's checkpoint. A different model space is refused at an equal
+dimension. Verification holds a generation's payload in memory and takes a
+caller byte bound; a manifest whose files total more than it is refused before
+any payload is held. The store's validation has already streamed each file
+through a fixed buffer to check its hash, so the bound limits memory, not I/O.
 
 The vector selector is `vector-profile.json`, beside the host and search
 selectors. It names a composition, never a layer. A layer's manifest target
 is `vector-generation`; a composition's is `vector-composition`, and
-`select_vector` refuses any other. Any generation may list `members.json`, digests the store must retain with
+`select_vector` refuses any other; the search selector keeps its existing
+behavior and checks no target. Any generation may list `members.json`, digests the store must retain with
 it: pruning retains every member named by any complete generation in the
 store, so a member outlives every record that names it by one prune pass;
 discard and exchange repair refuse a member of any record; exchange repair
@@ -521,11 +548,22 @@ corrupt payload of a selected generation does not stop pruning; a selected or
 pinned generation whose manifest or members file cannot be read, or any
 generation of unknown schema, including one behind a directory mode this
 build rejects, makes the members unknown, and the store then behaves as with
-a quarantined selector: temps only are reclaimed and discard refuses. The members rule is owner
-agnostic: a search seed that lists members retains them the same way, though
-no search seed does. The store's selection primitive checks inventory, sizes, modes,
-hashes, the target, and that every listed member validates; the daemon's
-semantic verification of the composition and its members precedes selection.
+a quarantined selector: temps only are reclaimed and discard refuses. An owner
+selector of unknown schema is quarantined: it may name any digest, so `prune`
+removes only temps and counts each such selector, `discard_unselected` and
+exchange repair refuse, and selection through that selector refuses, as the
+search selector already did. A corrupt owner selector (malformed bytes, a
+noncanonical digest, or failed security checks) is an error from every path
+that reads it: `prune`, `discard_unselected`, and exchange repair fail before
+removing anything, and selection through it fails. Neither stops staging new
+bytes or selecting through the other selectors: those touch nothing the
+uncertain selector could name, and a host or daemon rolled back to a build
+that predates the selector's schema must still be able to launch and publish.
+The members rule is owner agnostic: a search seed that lists members retains
+them the same way, though no search seed does. The store's selection primitive
+checks inventory, sizes, modes, hashes, the target, and that every listed
+member validates; the daemon's semantic verification of the composition and
+its members precedes selection.
 
 Staging charges the whole payload inventory against the admission manifest's
 `capture_disk_bytes` limit under the caller's admission; a denial stages
@@ -578,7 +616,11 @@ manifest binding, agreement with `members.json`, and identity, verifies every
 member with `vector_generation::verify`, and re-checks the topology. A record
 of unknown schema is refused as `Quarantined`, not as a malformed record. It refuses
 an excessive delta count before opening any member, so the caller's delta bound
-limits member-verification work as well as the accepted topology.
+limits member-verification work as well as the accepted topology. Each member
+is verified under the caller's per-member byte bound, the one
+`vector_generation::verify` takes; every member's payload is held at once, so
+the memory a verification may hold is that bound times one more than the delta
+bound. `recover` takes the same two bounds.
 `recover` takes the selected composition when it verifies; otherwise it reads
 the manifests of the other generations and, for composition targets, only the
 manifest-listed `composition.json` (hash-checked and capped at 1 MiB). Discovery

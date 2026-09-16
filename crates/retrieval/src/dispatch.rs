@@ -188,8 +188,12 @@ impl DispatchJob {
 
     /// An admitted row's charged attempt expires only at its deadline; exhaustion refuses new attempts, not this one.
     pub fn completion_refusal(&self, grant: EpisodeGrant, now: i64) -> Option<&'static str> {
-        let (_, deadline) = bounds(self.episode.as_ref(), grant);
-        (now > deadline).then_some(DEADLINE_EXPIRED)
+        (now > self.episode_deadline(grant)).then_some(DEADLINE_EXPIRED)
+    }
+
+    /// The deadline this row's attempt runs under: its persisted episode's, or the grant's for a row admission would open an episode for.
+    pub fn episode_deadline(&self, grant: EpisodeGrant) -> i64 {
+        bounds(self.episode.as_ref(), grant).1
     }
 }
 

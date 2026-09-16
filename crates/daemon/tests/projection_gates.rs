@@ -927,6 +927,7 @@ async fn revocation_between_jobs_is_seen_on_the_slice_thread() {
     let (sender, mut events) = unbounded_channel();
     let mut bounds = slice_bounds(Duration::from_secs(30));
     bounds.dispatch = daemon::embedding_dispatch::DispatchBounds {
+        input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
         result_wait: Duration::from_millis(50),
         ..dispatch_bounds()
     };

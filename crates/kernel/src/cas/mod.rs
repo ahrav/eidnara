@@ -599,6 +599,52 @@ pub(super) fn read_capped(source: impl std::io::Read) -> std::io::Result<Option<
     Ok(Some(bytes))
 }
 
+/// How `evidence_id` stands against a producer's claim that it is the
+/// exact-retained artifact `artifact_digest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExactEvidence {
+    Missing,
+    DigestMismatch,
+    NotExact,
+    Bound,
+}
+
+/// Judges `evidence_id` against `artifact_digest` from the live row
+/// (`as_of: None`) or the row as it stood at a snapshot. Descriptors and
+/// causality records share this rule so the two cannot drift.
+pub(crate) fn exact_evidence(
+    tx: &rusqlite::Transaction<'_>,
+    evidence_id: &str,
+    artifact_digest: &str,
+    as_of: Option<i64>,
+) -> Result<ExactEvidence, KernelError> {
+    use crate::CachedSql;
+    use rusqlite::OptionalExtension;
+    let stored: Option<(String, Vec<u8>)> = match as_of {
+        None => tx.query_row_cached(
+            "SELECT artifact_digest,redaction_metadata FROM evidence_meta
+             WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL",
+            [evidence_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ),
+        Some(requested) => tx.query_row_cached(
+            "SELECT artifact_digest,redaction_metadata FROM evidence_meta
+             WHERE evidence_id=?1 AND created_commit_seq<=?2
+               AND (invalidated_commit_seq IS NULL OR ?2<invalidated_commit_seq)",
+            rusqlite::params![evidence_id, requested],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ),
+    }
+    .optional()
+    .map_err(crate::map_sqlite)?;
+    Ok(match stored {
+        None => ExactEvidence::Missing,
+        Some((digest, _)) if digest != artifact_digest => ExactEvidence::DigestMismatch,
+        Some((_, redactions)) if !is_exact_retention(&redactions) => ExactEvidence::NotExact,
+        Some(_) => ExactEvidence::Bound,
+    })
+}
+
 pub(crate) fn is_artifact_digest(value: &str) -> bool {
     value.len() == 64
         && value

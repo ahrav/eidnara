@@ -1327,6 +1327,9 @@ fn completeness_walk_requires_every_page_before_certifying_exact_target() {
     let mut config = spec(root.path());
     config.episode.commits.max_commits = NonZeroUsize::MIN;
     config.episode.max_source_pages = NonZeroUsize::MIN;
+    // A commit that does not fit one page on its own ends the walk before anything is certified.
+    let max_rows = config.episode.commits.max_rows;
+    config.episode.commits.max_rows = NonZeroUsize::MIN;
     let error = case
         .selection
         .retire(
@@ -1347,7 +1350,7 @@ fn completeness_walk_requires_every_page_before_certifying_exact_target() {
             .unwrap(),
         Some(case.old_checkpoint)
     );
-    config.episode.max_source_pages = NonZeroUsize::new(commits as usize).unwrap();
+    config.episode.commits.max_rows = max_rows;
     let materialized = case.corpus.kernel.materialized_outbox_rows_for_test();
     case.selection
         .retire(
