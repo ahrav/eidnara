@@ -8,10 +8,10 @@ parent identity plus canonical representation revision, never parent alone.
 
 ## Evidence trail
 
-- `crates/kernel/src/source_identity.rs` `derived_parent_id` re-derives the
+- `crates/kernel/src/source_identity.rs` `whole_buffer_lineage_digest` re-derives the
   lineage digest of the tuple's source and representation with no span. A
   lineage-role digest never equals an occurrence-role digest.
-- `crates/retrieval/src/identity.rs` `ParentGroupKey::derive` pairs that
+- `crates/retrieval/src/fusion/` `ParentGroupKey::derive` pairs that
   parent with the occurrence's own revision and refuses a tuple whose derived
   columns disagree with its bytes.
 - `crates/retrieval/tests/identity.rs` shows spans of one source sharing a

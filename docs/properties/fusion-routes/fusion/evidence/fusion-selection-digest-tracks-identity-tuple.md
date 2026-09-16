@@ -12,7 +12,7 @@ digest is the fused-order witness that both bind.
 - `crates/kernel/src/envelope.rs` `operation_identity` hashes a domain tag,
   then each component's length before its bytes, and documents why: without a
   length prefix two field splits share one preimage.
-- `crates/retrieval/src/identity.rs` `Derivation` writes a domain tag, a
+- `crates/retrieval/src/fusion/` `Derivation` writes a domain tag, a
   count before each sequence, and a length before each component.
   `SelectionDigest::derive` hashes the ordered occurrence identifiers;
   `PreparationDigest::derive` hashes the context revision, representation,

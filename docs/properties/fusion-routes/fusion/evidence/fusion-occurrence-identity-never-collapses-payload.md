@@ -13,11 +13,12 @@ present one occurrence as two ranking units without touching payload bytes.
 - `crates/kernel/src/source_identity.rs` encodes the occurrence tuple with
   length-delimited fields and mints the identifier as lowercase SHA-256 hex.
   `payload_id` is the digest of exact bytes only.
-- `crates/retrieval/src/identity.rs` `OccurrenceId::parse` admits exactly the
+- `crates/retrieval/src/fusion/` `OccurrenceId::parse` admits exactly the
   64-character lowercase hex spelling; `LaneRanking::consolidate` keys hits by
   `OccurrenceId`, keeps the lane's own best score per occurrence, orders by
   score then identifier bytes, and assigns positions once;
-  `DeclaredLanes::admit` refuses a duplicate lane and mixed encoding versions.
+  a stamp other than the kernel encoding version is refused, which also refuses
+  mixed versions across lanes; `DeclaredLanes::admit` refuses a duplicate lane.
 - `crates/retrieval/tests/identity.rs` constructs both halves against the real
   kernel encoder.
 
@@ -37,7 +38,7 @@ None. Consolidation and admission are pure functions over values.
 - Occurrences sharing `BUFFER` that differ in one tuple component each, with
   the payload digest held equal.
 - Hits for one occurrence from several probe ordinals and several generations
-  with differing raw scores, asserting the retained score and origin.
+  with differing raw scores, asserting the retained score.
 - A fixed-seed random hit list, shuffled and partly duplicated, compared
   bit-for-bit with the unshuffled ranking.
 - Uppercase, prefixed, truncated, extended, and non-hex spellings.

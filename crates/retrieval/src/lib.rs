@@ -20,7 +20,7 @@ pub mod dense;
 pub mod dispatch;
 pub mod eligibility;
 pub mod exact;
-pub mod identity;
+pub mod fusion;
 pub mod identity_sweep;
 pub mod lexical;
 pub mod message_cleanup;

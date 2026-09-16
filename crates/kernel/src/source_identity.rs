@@ -241,11 +241,11 @@ pub fn normalize_span(span: Option<Span>, buffer: &str) -> Option<Span> {
     normalize_span_for_length(span, buffer.len() as u64)
 }
 
-pub(crate) fn normalize_span_for_length(span: Option<Span>, byte_length: u64) -> Option<Span> {
+pub fn normalize_span_for_length(span: Option<Span>, byte_length: u64) -> Option<Span> {
     span.filter(|span| !(span.start == 0 && span.end == byte_length))
 }
 
-pub(crate) fn well_formed_value(value: &str) -> bool {
+pub fn well_formed_value(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_IDENTITY_VALUE_BYTES
         && !value.chars().any(char::is_control)
@@ -332,23 +332,19 @@ pub fn derived_lineage_id(
     )))
 }
 
-/// Returns the whole-buffer lineage digest of `tuple`'s source and representation, or `None` when derived fields do not match `tuple`.
+/// Returns the SHA-256 of the lineage encoding for `tuple`'s source and representation with no span, or `None` when derived fields do not match `tuple`.
+/// `revision` and `span` only witness the tuple; neither enters the digest.
 /// Every span occurrence of one source at one representation shares this value, which lets a consumer group spans under their parent without a parent column.
 /// A lineage-role digest never equals an occurrence identifier.
-pub fn derived_parent_id(
+pub fn whole_buffer_lineage_digest(
     tuple: &[u8],
     class_code: &str,
     revision: i64,
     representation: &str,
     span: Option<Span>,
-) -> Option<String> {
+) -> Option<[u8; 32]> {
     let prefix = identity_prefix(tuple, class_code, revision, representation, span)?;
-    Some(identity_digest(&finish(
-        prefix,
-        ROLE_LINEAGE,
-        &[representation],
-        None,
-    )))
+    Some(Sha256::digest(finish(prefix, ROLE_LINEAGE, &[representation], None)).into())
 }
 
 /// Checks only the identity prefix.
@@ -511,13 +507,14 @@ mod tests {
         let head = encode_preserving_span(&occurrence(Some(Span { start: 0, end: 4 }))).unwrap();
         let tail = encode_preserving_span(&occurrence(Some(Span { start: 5, end: 9 }))).unwrap();
         let parent = |encoded: &EncodedOccurrence| {
-            derived_parent_id(
+            whole_buffer_lineage_digest(
                 &encoded.tuple,
                 "canonical_claims",
                 encoded.revision,
                 "decision_summary",
                 encoded.span,
             )
+            .map(|digest| identity_digest_hex(&digest))
         };
         assert_eq!(parent(&whole).as_deref(), Some(whole.lineage_id.as_str()));
         assert_eq!(parent(&head), parent(&whole));
@@ -529,20 +526,22 @@ mod tests {
                 Some(encoded.occurrence_id.as_str())
             );
         }
-        assert_eq!(
-            derived_parent_id(
-                &head.tuple,
-                "canonical_claims",
-                4,
-                "decision_summary",
-                head.span
-            ),
-            None
-        );
-        assert_eq!(
-            derived_parent_id(&head.tuple, "canonical_claims", 3, "decision_summary", None),
-            None
-        );
+        for (revision, span) in [(4, head.span), (3, None)] {
+            assert_eq!(
+                whole_buffer_lineage_digest(
+                    &head.tuple,
+                    "canonical_claims",
+                    revision,
+                    "decision_summary",
+                    span
+                ),
+                None
+            );
+        }
+    }
+
+    fn identity_digest_hex(digest: &[u8; 32]) -> String {
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     #[test]

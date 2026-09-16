@@ -25,7 +25,7 @@ authorization, and application lifecycle are separate parts.
 
 Every record here is `test-only`: the types under test are pure retrieval-crate
 values with no daemon route feeding them at this base. The observation point
-is the public API of `crates/retrieval/src/identity.rs`, exercised by
+is the public API of `crates/retrieval/src/fusion/`, exercised by
 `crates/retrieval/tests/identity.rs`. Kernel occurrence encoding is reused
 through `kernel::source_identity`, never restated.
 
@@ -49,7 +49,7 @@ Exercised: yes - `crates/retrieval/tests/identity.rs`
 `a_lane_admits_one_entry_per_occurrence_with_the_lane_own_best_score`,
 `consolidation_ignores_probe_order_and_duplication`,
 `only_the_lowercase_hex_spelling_of_an_identifier_is_admitted`, and
-`declared_lanes_hold_one_ranking_per_lane_in_fixed_order_under_one_encoding_version`.
+`declared_lanes_hold_one_ranking_per_lane_in_fixed_order`.
 Guarantee: The fusion ranking unit is the kernel occurrence identifier; equal
 payload bytes at different source, revision, representation, or span identities
 stay distinct ranking units, and a lane holds exactly one entry per occurrence
@@ -59,8 +59,8 @@ tuples, the occurrence identifiers differ and a lane ranking built from both
 holds two entries; a ranking built from any multiset of hits holds one entry
 per distinct occurrence with the lane's own best raw score, and permuting or
 duplicating the hits yields a bit-identical ranking; a non-canonical identifier
-spelling, a second ranking for one lane, or a lane stamped with another
-encoding version is refused before any ranking is admitted. `always` because
+spelling, a second ranking for one lane, or a lane stamped with an encoding
+version other than the kernel's is refused before any ranking is admitted. `always` because
 the property must hold on every construction, not only at a rare state.
 Fault/timing angle: none; the types are pure values.
 Required faults and enabling state: Two occurrences sharing `BUFFER` with one
@@ -84,7 +84,8 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: yes - `crates/retrieval/tests/identity.rs`
-`selection_digest_tracks_order_and_membership` and
+`selection_digest_tracks_order_and_membership`,
+`selected_spans_normalize_the_whole_buffer_and_refuse_malformed_ranges`, and
 `preparation_digest_tracks_every_component_and_never_merges_component_splits`.
 Guarantee: The selection digest changes whenever fused order or membership
 changes, the preparation digest changes whenever the context revision,
@@ -93,7 +94,9 @@ tuples with different component splits derive one digest.
 Check: `always` - the digest of a selection equals itself and differs from the
 digest of any reordering, extension, or truncation; the preparation digest
 differs for each single-component change including a span bound, a
-whole-buffer versus range spelling, span order, span count, and selection; the
+whole-buffer versus range selection, span order, span count, and selection; a
+whole-buffer range normalizes to the one whole-buffer spelling and a reversed
+or out-of-range span is refused; the
 pair `("ab", "c")` and `("a", "bc")` derive different digests. `always`
 because every derivation must be sensitive to every component.
 Fault/timing angle: none; derivation is a pure function.
@@ -133,7 +136,8 @@ and representation derive one group key; a revision, representation, or
 object change derives another; the parent identifier equals the whole-buffer
 lineage identifier and is absent from the occurrence identifier set; a lane
 ranking over the spans holds one entry per span; a derived column that
-disagrees with the tuple bytes is refused. `always` because the key must be a
+disagrees with the tuple bytes is refused, and no single flipped tuple bit
+derives the same key. `always` because the key must be a
 pure function of the tuple on every derivation.
 Fault/timing angle: none for the identity clauses.
 Required faults and enabling state: Occurrences of one canonical claim at a
