@@ -165,7 +165,7 @@ impl Fixture {
     }
 
     fn verify(&self, digest: &str) -> Result<VectorSidecar, VectorRefusal> {
-        verify(&self.store, digest, &self.expected()).map(|verified| verified.sidecar)
+        verify(&self.store, digest, &self.expected(), u64::MAX).map(|verified| verified.sidecar)
     }
 
     fn lifecycle_dir(&self) -> PathBuf {
@@ -365,14 +365,31 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
         "staging selects nothing"
     );
 
-    let verified = verify(&fixture.store, &digest, &fixture.expected()).unwrap();
+    let verified = verify(&fixture.store, &digest, &fixture.expected(), u64::MAX).unwrap();
     assert_eq!(verified.sidecar, first.sidecar);
     verified.generation.pin().unwrap();
     let with_checkpoint = ExpectedVectors {
         checkpoint: Some(&export().checkpoint),
         ..fixture.expected()
     };
-    assert!(verify(&fixture.store, &digest, &with_checkpoint).is_ok());
+    assert!(verify(&fixture.store, &digest, &with_checkpoint, u64::MAX).is_ok());
+
+    // The bound is the manifest's payload total, including the sidecar; one byte under it refuses before any payload is read.
+    let total: u64 = first
+        .sidecar
+        .stage_manifest()
+        .files
+        .iter()
+        .map(|file| file.size)
+        .sum();
+    assert!(verify(&fixture.store, &digest, &fixture.expected(), total).is_ok());
+    assert_eq!(
+        verify(&fixture.store, &digest, &fixture.expected(), total - 1).map(|v| v.digest),
+        Err(VectorRefusal::OverBound {
+            bytes: total,
+            max: total - 1
+        })
+    );
 }
 
 #[test]
@@ -453,6 +470,86 @@ fn build_refuses_an_export_whose_generation_or_kernel_is_not_the_expected_one() 
         "a refused build writes nothing"
     );
     assert!(build(&fixture.expected(), &export(), &dir).is_ok());
+}
+
+#[test]
+fn build_refuses_an_export_whose_checkpoint_is_not_the_one_the_caller_named() {
+    let fixture = Fixture::new();
+    let dir = fixture.work_dir();
+    let mut pinned = export().checkpoint;
+    pinned.hold_id = "hold-8".to_owned();
+    let expected = ExpectedVectors {
+        checkpoint: Some(&pinned),
+        ..fixture.expected()
+    };
+    assert_eq!(
+        build(&expected, &export(), &dir),
+        Err(VectorRefusal::Export {
+            field: "checkpoint"
+        }),
+        "rows read at another checkpoint do not become the pinned generation"
+    );
+    assert!(
+        fs::read_dir(&dir).unwrap().next().is_none(),
+        "a refused build writes nothing"
+    );
+    let expected = ExpectedVectors {
+        checkpoint: Some(&export().checkpoint),
+        ..fixture.expected()
+    };
+    assert!(build(&expected, &export(), &dir).is_ok());
+}
+
+#[test]
+fn staging_refuses_a_build_whose_provenance_is_not_the_admitted_identity() {
+    let fixture = Fixture::new();
+    let built = fixture.build();
+    for (field, mutate) in [
+        (
+            "embedding_model",
+            Box::new(|i: &mut ProjectionIdentity| i.embedding_model = "another-model".to_owned())
+                as Box<dyn Fn(&mut ProjectionIdentity)>,
+        ),
+        (
+            "tokenizer_fingerprint",
+            Box::new(|i: &mut ProjectionIdentity| i.tokenizer_fingerprint = "f".repeat(64)),
+        ),
+        (
+            "vector_dimension",
+            Box::new(|i: &mut ProjectionIdentity| i.vector_dimension = 4),
+        ),
+        (
+            "generation_epoch",
+            Box::new(|i: &mut ProjectionIdentity| i.generation_epoch = 2),
+        ),
+    ] {
+        // The gate holds evidence for identity B and admits under it; the build carries identity A.
+        let mut other = fixture.identity.clone();
+        mutate(&mut other);
+        let gate = HookGate::closed();
+        gate.install(passing_evaluator(&other, 0, &ProjectionHook::ALL));
+        let admission = gate
+            .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
+            .unwrap();
+        assert_eq!(
+            stage(
+                &built,
+                &fixture.store,
+                &fixture.tx,
+                &gate,
+                &admission,
+                &other,
+                &BTreeSet::new(),
+            ),
+            Err(VectorRefusal::Identity { field }),
+            "a build for one {field} is not staged under another's evidence"
+        );
+        assert!(
+            fixture.generations().is_empty(),
+            "{field}: a refused staging creates no generation"
+        );
+    }
+    assert!(fixture.stage(&built).is_ok());
 }
 
 #[test]
@@ -754,7 +851,7 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             ..fixture.expected()
         };
         assert_eq!(
-            verify(&fixture.store, &digest, &expected).unwrap_err(),
+            verify(&fixture.store, &digest, &expected, u64::MAX).unwrap_err(),
             VectorRefusal::Identity { field },
             "a different {field} is refused at an equal dimension"
         );
@@ -766,7 +863,8 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             &ExpectedVectors {
                 unit_norm_tolerance: 2e-3,
                 ..fixture.expected()
-            }
+            },
+            u64::MAX,
         )
         .unwrap_err(),
         VectorRefusal::Identity {
@@ -780,7 +878,8 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             &ExpectedVectors {
                 kernel_incarnation_id: "other",
                 ..fixture.expected()
-            }
+            },
+            u64::MAX,
         )
         .unwrap_err(),
         VectorRefusal::Identity {
@@ -798,7 +897,8 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             &ExpectedVectors {
                 checkpoint: Some(&other_checkpoint),
                 ..fixture.expected()
-            }
+            },
+            u64::MAX,
         )
         .unwrap_err(),
         VectorRefusal::Identity {
@@ -876,6 +976,13 @@ fn a_selector_cut_before_the_rename_leaves_no_selection_and_one_after_it_is_reco
     ] {
         let fixture = Fixture::new();
         let digest = fixture.stage(&fixture.build()).unwrap();
+        let entries = || -> BTreeSet<String> {
+            fs::read_dir(fixture.lifecycle_dir())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        };
+        let before = entries();
         let mut seen = Vec::new();
         let outcome = fixture
             .store
@@ -908,15 +1015,12 @@ fn a_selector_cut_before_the_rename_leaves_no_selection_and_one_after_it_is_reco
             expected,
             "{cut:?}"
         );
-        let temps: Vec<String> = fs::read_dir(fixture.lifecycle_dir())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(&format!(".{VECTOR_PROFILE_NAME}")))
-            .collect();
-        assert!(
-            temps.is_empty() || cut != ProfileEvent::BeforeRename,
-            "{cut:?}: {temps:?}"
-        );
+        // A cut leaves the selector or nothing, never a temp, whatever the store names its temps.
+        let mut after = before.clone();
+        if cut != ProfileEvent::BeforeRename {
+            after.insert(VECTOR_PROFILE_NAME.to_owned());
+        }
+        assert_eq!(entries(), after, "{cut:?}");
     }
     let _ = digest;
 }

@@ -194,6 +194,8 @@ pub enum VectorRefusal {
     Store(String),
     #[error("the generation carries a state schema this build does not know")]
     Quarantined,
+    #[error("the generation's {bytes} payload bytes exceed the verification bound of {max}")]
+    OverBound { bytes: u64, max: u64 },
     #[error("insufficient storage for the generation")]
     InsufficientStorage,
     #[error("the generation is not a vector generation: {0}")]
@@ -231,13 +233,13 @@ impl BuiltVectors {
 }
 
 /// Writes rows, codes, scales, and identifiers under `work_dir` and describes them in a sidecar bound to `expected` and the export's generation, kernel incarnation, and checkpoint.
-/// The export names the generation and kernel it read the rows under; a disagreement with `expected` is refused rather than stamped, so the sidecar's provenance is the rows' provenance.
+/// The export names the generation, kernel, and checkpoint it read the rows under; a disagreement with `expected` is refused rather than stamped, so the sidecar's provenance is the rows' provenance.
 /// Rows must arrive in strictly increasing identifier order so the artifact, the codes, and the identifier list agree on row numbering across builds.
 /// Files are created exclusively and never synced: the store copies and syncs them when it stages, so the work directory is scratch, and a retry needs a fresh one.
 ///
 /// # Errors
 ///
-/// An export of another generation or kernel, no rows, rows out of order, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
+/// An export of another generation, kernel, or named checkpoint, no rows, rows out of order, a row outside the layout, a calibration refusal, or an I/O failure; nothing is staged.
 pub fn build(
     expected: &ExpectedVectors<'_>,
     export: &LiveRows,
@@ -309,11 +311,12 @@ pub fn build(
 }
 
 /// Stages a build into `store` after the admission gate accepts its whole inventory against the staged-bytes limit; a refused admission stages nothing.
+/// The build's provenance must be the identity the admission is bound to: a sidecar for another model, tokenizer, dimension, or epoch is refused before the gate is consulted, so no generation is published under another identity's evidence.
 /// `_transaction` is the caller's exclusive hold on the store's transaction lock; hold it until the digest is pinned or protected.
 ///
 /// # Errors
 ///
-/// An admission denial or the store's refusal.
+/// A build of another identity, an admission denial, or the store's refusal.
 pub fn stage(
     built: &BuiltVectors,
     store: &GenerationStore,
@@ -323,7 +326,21 @@ pub fn stage(
     identity: &ProjectionIdentity,
     protected: &BTreeSet<String>,
 ) -> Result<String, VectorRefusal> {
-    let manifest = built.sidecar.stage_manifest();
+    let sidecar = &built.sidecar;
+    let field = |field| VectorRefusal::Identity { field };
+    if sidecar.embedding_model != identity.embedding_model {
+        return Err(field("embedding_model"));
+    }
+    if sidecar.tokenizer_fingerprint != identity.tokenizer_fingerprint {
+        return Err(field("tokenizer_fingerprint"));
+    }
+    if sidecar.vector_dimension != identity.vector_dimension {
+        return Err(field("vector_dimension"));
+    }
+    if sidecar.generation_epoch != identity.generation_epoch {
+        return Err(field("generation_epoch"));
+    }
+    let manifest = sidecar.stage_manifest();
     let bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
     gate.check_limits(
         admission,
@@ -357,6 +374,7 @@ impl std::fmt::Debug for VerifiedVectors {
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
+/// Verification holds every payload in memory, so a manifest whose files total more than `max_bytes` is refused before any payload is read; the caller bounds its own memory as `live_rows` bounds the export.
 ///
 /// # Errors
 ///
@@ -365,11 +383,23 @@ pub fn verify(
     store: &GenerationStore,
     digest: &str,
     expected: &ExpectedVectors<'_>,
+    max_bytes: u64,
 ) -> Result<VerifiedVectors, VectorRefusal> {
     let generation = store.validate(digest)?;
     let manifest = &generation.manifest;
     if manifest.target != VECTOR_TARGET {
         return Err(VectorRefusal::NotVectors("manifest target"));
+    }
+    let bytes = manifest
+        .files
+        .iter()
+        .try_fold(0u64, |sum, file| sum.checked_add(file.size))
+        .unwrap_or(u64::MAX);
+    if bytes > max_bytes {
+        return Err(VectorRefusal::OverBound {
+            bytes,
+            max: max_bytes,
+        });
     }
     let sidecar_bytes = read_verified(&generation, SIDECAR_FILE)?;
     let sidecar: VectorSidecar =
@@ -445,6 +475,12 @@ fn check_export(export: &LiveRows, expected: &ExpectedVectors<'_>) -> Result<(),
     }
     if export.kernel_incarnation_id != expected.kernel_incarnation_id {
         return Err(field("kernel_incarnation_id"));
+    }
+    if expected
+        .checkpoint
+        .is_some_and(|checkpoint| export.checkpoint != *checkpoint)
+    {
+        return Err(field("checkpoint"));
     }
     Ok(())
 }

@@ -479,16 +479,16 @@ impl GenerationStore {
         self.read_profile(VECTOR_PROFILE_NAME)
     }
 
-    /// The digest every owner selector names, plus whether any owner selector is quarantined.
-    fn owner_selections(&self) -> Result<(BTreeSet<String>, bool), GenerationError> {
+    /// The digest every owner selector names, plus how many owner selectors are quarantined.
+    fn owner_selections(&self) -> Result<(BTreeSet<String>, usize), GenerationError> {
         let mut selected = BTreeSet::new();
-        let mut quarantined = false;
+        let mut quarantined = 0;
         for name in OWNER_PROFILE_NAMES {
             match self.read_profile(name)? {
                 CurrentProfile::Current(digest) => {
                     selected.insert(digest);
                 }
-                CurrentProfile::Quarantined => quarantined = true,
+                CurrentProfile::Quarantined => quarantined += 1,
                 CurrentProfile::Absent => {}
             }
         }
@@ -820,7 +820,7 @@ impl GenerationStore {
             return Err(invalid("corrupt digest target is protected"));
         }
         let (selected, quarantined) = self.owner_selections()?;
-        if quarantined {
+        if quarantined > 0 {
             return Err(GenerationError::UnsupportedStateSchema);
         }
         if selected.contains(digest) {
@@ -1013,7 +1013,7 @@ impl GenerationStore {
             _ => {}
         }
         let (selected, quarantined) = self.owner_selections()?;
-        if quarantined {
+        if quarantined > 0 {
             return Err(GenerationError::UnsupportedStateSchema);
         }
         if selected.contains(&digest) {
@@ -1058,11 +1058,10 @@ impl GenerationStore {
     pub fn prune(&self, protected: &BTreeSet<String>) -> Result<PruneReport, GenerationError> {
         let mut protected = protected.clone();
         let mut report = PruneReport::default();
-        let (selected, owner_quarantined) = self.owner_selections()?;
+        let (selected, quarantined_owners) = self.owner_selections()?;
         protected.extend(selected);
-        if owner_quarantined {
-            report.quarantined += 1;
-        }
+        report.quarantined += quarantined_owners;
+        let owner_quarantined = quarantined_owners > 0;
         match self.read_current()? {
             CurrentProfile::Absent => {}
             CurrentProfile::Current(digest) => {
@@ -2834,6 +2833,25 @@ mod tests {
         assert_eq!(
             std::fs::read(store.root().join(CURRENT_PROFILE_NAME)).unwrap(),
             profile
+        );
+        store.validate(&other).unwrap();
+        store.validate(&digest).unwrap();
+        // Each quarantined owner selector is one entry needing intervention, so two count as two.
+        write_new_file(
+            &store.root_fd,
+            VECTOR_PROFILE_NAME,
+            br#"{"schema":999,"current":"unknown"}"#,
+            0o600,
+        )
+        .unwrap();
+        assert_eq!(
+            store.prune(&BTreeSet::new()).unwrap(),
+            PruneReport {
+                quarantined: 2,
+                removed_temps: 0,
+                removed_profile_temps: 0,
+                removed_generations: 0,
+            }
         );
         store.validate(&other).unwrap();
         store.validate(&digest).unwrap();

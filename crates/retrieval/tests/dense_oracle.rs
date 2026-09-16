@@ -2010,6 +2010,15 @@ fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_boun
         other_kernel,
         Err(ExportRefusal::Projection(ProjectionError::IdentityMismatch))
     ));
+    // The schema admits a NULL hold, read back as empty; no batch could have committed it, so it is no provenance.
+    fixture
+        .raw()
+        .execute("UPDATE projection_checkpoint SET hold_id=NULL", [])
+        .unwrap();
+    assert!(matches!(
+        export(&fixture, 64, layout()),
+        Err(ExportRefusal::NoCheckpoint { .. })
+    ));
     fixture
         .raw()
         .execute("DELETE FROM projection_checkpoint", [])
