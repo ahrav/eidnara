@@ -4,8 +4,8 @@ mod support;
 
 use daemon::projection_gates::{
     COMPRESSED_ACTIVATION_ID, COMPRESSION_CRITERIA, CompressionRecord, Denial, EvidenceEvaluator,
-    Gate, HookGate, Outcome, ProjectionHook, Renewal, RuntimeManifest, TRACE_STAGES, TraceKind,
-    VECTOR_LIMITS,
+    Gate, HARNESSES, HookGate, Outcome, ProjectionHook, Renewal, RuntimeManifest, TRACE_STAGES,
+    TraceKind, VECTOR_LIMITS,
 };
 use serde_json::json;
 use support::projection_gate::{identity, passing_evaluator};
@@ -74,6 +74,19 @@ fn a_correctly_bound_campaign_admits_and_every_broken_dimension_denies_on_its_ow
         Err(Denial::EvidenceIdentity),
         "a harness version the daemon does not run under is a mismatch"
     );
+    for harness in HARNESSES {
+        assert_eq!(
+            judge(|e| {
+                e.binding.as_mut().unwrap().harnesses.remove(harness);
+                compression(e).binding.harnesses.remove(harness);
+            }),
+            Err(Denial::Failed(
+                Gate::Compression,
+                "the binding does not name exactly one version per harness".to_owned()
+            )),
+            "a harness version both sides omit is unbound, not matching"
+        );
+    }
     assert_eq!(
         judge(|e| compression(e).revoked = true),
         Err(Denial::Revoked)

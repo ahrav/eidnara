@@ -341,7 +341,9 @@ under it and the frozen hook map is unchanged. Enabled, the evaluator applies
 every gate a dense hook passes and then the compression campaign in the
 evidence record: it must be gathered under the current projection identity
 and under the binding the daemon itself runs with (build, corpus digest,
-quantizer recipe, hardware, and the version of each harness), not be revoked,
+quantizer recipe, hardware, and the version of each harness; a binding that
+names a version for anything but exactly the known harnesses refuses), not be
+revoked,
 record the same vector limits the manifest carries (a changed cap
 invalidates it), pass every criterion (fidelity, request latency, startup and
 cold cache, concurrency, freshness, disk, compaction, cancellation, task

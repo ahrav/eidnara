@@ -673,6 +673,17 @@ impl EvidenceEvaluator {
         if evidence.identity != self.current || evidence.binding != *binding {
             return Err(Denial::EvidenceIdentity);
         }
+        // Two bindings that both omit a harness compare equal without binding its version; the harness set is fixed, so the map is judged against it.
+        if binding.harnesses.len() != HARNESSES.len()
+            || HARNESSES
+                .iter()
+                .any(|harness| !binding.harnesses.contains_key(*harness))
+        {
+            return Err(Denial::Failed(
+                Gate::Compression,
+                "the binding does not name exactly one version per harness".to_owned(),
+            ));
+        }
         if evidence.revoked {
             return Err(Denial::Revoked);
         }
