@@ -15,12 +15,13 @@ read-back and the collision refusal.
   payload reference, sensitivity, and source columns per occurrence.
 - `crates/retrieval/src/lib.rs` `persist_with_digests` refuses
   `PayloadCollision` and `OccurrenceCollision` before the first insert.
-- `crates/retrieval/src/packing.rs` `read_selected` queries by occurrence
+- `crates/retrieval/src/packing/mod.rs` `read_selected` queries by occurrence
   identifier, refuses a row whose tuple does not digest to that identifier,
   and returns `SelectedOccurrence` values whose `payload` is a `PayloadRef`
-  exposing identifier and byte length only; no function in the module takes a
-  `PayloadRef` as an input.
-- `crates/retrieval/src/packing.rs` `SelectedOccurrence::eligibility_candidate`
+  exposing identifier and byte length only; no selection read takes a
+  `PayloadRef` as an input. `fetch_payload` is the one `PayloadRef`-keyed read
+  and returns bytes only; attribution is never resolved through it.
+- `crates/retrieval/src/packing/mod.rs` `SelectedOccurrence::eligibility_candidate`
   builds the kernel candidate from the row's own source columns; the verdict
   is returned by `crates/retrieval/src/eligibility.rs` `judge_occurrences` and
   stored nowhere in the crate.

@@ -11,8 +11,12 @@ the 64 KiB per-line cut on the packing path.
 - `crates/retrieval/src/packing/required.rs` `reserve_required` charges every
   admitted item through the injected cost function and refuses a sum above the
   limit; it never slices bytes.
-- `crates/retrieval/src/packing/mod.rs` `load_payload` returns the whole
-  payload row and refuses a digest or length mismatch.
+- `crates/retrieval/src/packing/mod.rs` `fetch_payload` returns the whole
+  payload row, refusing in SQL a row whose length disagrees with the reference
+  or exceeds the kernel payload bound; `PayloadRef::verify` refuses a digest or
+  length mismatch afterwards. `crates/retrieval/tests/packing_identity.rs`
+  `payload_fetch_is_length_guarded_in_sql_and_verified_by_digest_afterwards`
+  exercises both.
 - `crates/daemon/tests/packing_required.rs` uses a one-token-per-byte
   estimator so the limit sits on a byte boundary, then compares materialized
   bytes to the persisted payload and item costs to `charged`.

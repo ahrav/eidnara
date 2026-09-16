@@ -5,8 +5,8 @@ mod required;
 
 use std::num::NonZeroUsize;
 
-use kernel::Sensitivity;
 use kernel::source_identity::{OccurrenceClass, Span, payload_id};
+use kernel::{MAX_PAYLOAD_BYTES, Sensitivity};
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 use storage::GuardedConn;
@@ -81,6 +81,19 @@ impl Grouping {
 pub struct PayloadRef {
     pub payload_id: String,
     pub byte_length: u64,
+}
+
+impl PayloadRef {
+    /// # Errors
+    ///
+    /// [`ProjectionError::CorruptRow`] when the length or the digest of `bytes`
+    /// disagrees with this reference.
+    pub fn verify(&self, bytes: &[u8]) -> Result<(), ProjectionError> {
+        if bytes.len() as u64 != self.byte_length || payload_id(bytes) != self.payload_id {
+            return Err(ProjectionError::CorruptRow);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,22 +228,36 @@ fn decode(
     })
 }
 
-/// Loads the bytes a payload reference names and refuses bytes whose digest or
-/// length disagree with it as `CorruptRow`, so a caller never charges or
-/// renders bytes the reference did not name.
-pub fn load_payload(
+/// Returns bytes for `payload` without verifying its digest.
+/// The caller must call [`PayloadRef::verify`] after releasing `conn` to avoid
+/// hashing while the connection is held.
+/// Rows with a mismatched byte length yield NULL, so SQLite does not
+/// materialize their blobs.
+///
+/// # Errors
+///
+/// [`ProjectionError::CorruptRow`] when no row carries the identifier, the
+/// reference exceeds [`MAX_PAYLOAD_BYTES`], or the row fails the length
+/// predicate; the SQLite error otherwise.
+pub fn fetch_payload(
     conn: &GuardedConn<'_>,
     payload: &PayloadRef,
 ) -> Result<Vec<u8>, ProjectionError> {
-    let bytes: Vec<u8> = conn
-        .prepare_cached("SELECT bytes FROM payloads WHERE payload_id=?1")?
-        .query_row(params![payload.payload_id], |row| row.get(0))
+    let Ok(byte_length) = i64::try_from(payload.byte_length) else {
+        return Err(ProjectionError::CorruptRow);
+    };
+    if payload.byte_length > MAX_PAYLOAD_BYTES as u64 {
+        return Err(ProjectionError::CorruptRow);
+    }
+    let bytes: Option<Vec<u8>> = conn
+        .prepare_cached(
+            "SELECT CASE WHEN byte_length=length(bytes) AND byte_length=?2 THEN bytes END
+             FROM payloads WHERE payload_id=?1",
+        )?
+        .query_row(params![payload.payload_id, byte_length], |row| row.get(0))
         .map_err(|error| match error {
             rusqlite::Error::QueryReturnedNoRows => ProjectionError::CorruptRow,
             other => other.into(),
         })?;
-    if bytes.len() as u64 != payload.byte_length || payload_id(&bytes) != payload.payload_id {
-        return Err(ProjectionError::CorruptRow);
-    }
-    Ok(bytes)
+    bytes.ok_or(ProjectionError::CorruptRow)
 }
