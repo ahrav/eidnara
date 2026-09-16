@@ -2,7 +2,10 @@
 
 System: `/local/home/ahrav/scratch/eidnara`. Base: `89c5589e`. Every check
 below is `unaudited`: source inspection establishes its presence and
-assertions, not adequacy.
+assertions, not adequacy. This table inventories checks that predate the part
+and checks that carry a claim without a record; the checks that exercise a
+record are linked from that record's `Exercised` line in `catalog.md`, as in
+the `identity/`, `required/`, and `fusion-routes` parts.
 
 | Location and check | Asserted behavior | Status | Limitation for this part |
 | --- | --- | --- | --- |

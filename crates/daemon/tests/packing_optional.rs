@@ -241,14 +241,18 @@ fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation()
         stale,
         optional(&tombstoned),
         optional(&live),
+        optional(&unknown),
     ];
     let (result, trace) = run(&fixture, &requests, &wide(), 1 << 20);
     let admission = result.unwrap();
     assert_eq!(admission.admitted.len(), 1);
+    // `Duplicate` names the later request; the identity's first request still
+    // carries its own reason, so a repeated missing identity reports both.
     assert_eq!(
         admission.excluded,
         vec![
             (live.id(), OptionalExclusion::Duplicate),
+            (unknown.id(), OptionalExclusion::Duplicate),
             (unknown.id(), OptionalExclusion::Missing),
             (
                 excluded.id(),

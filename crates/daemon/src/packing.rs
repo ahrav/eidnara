@@ -453,7 +453,9 @@ pub struct OptionalAdmission {
     /// Groups visited and skipped, in fused order.
     pub skipped: Vec<CostedGroup>,
     /// In the order the exclusions were found: duplicates, then reads, then
-    /// judgments, then loads.
+    /// judgments, then loads. `Duplicate` names a later request, so an
+    /// identity requested twice can appear here as `Duplicate` and again
+    /// with the reason its first request earned, or be admitted.
     pub excluded: Vec<(OccurrenceId, OptionalExclusion)>,
     pub ungrouped: Vec<(OccurrenceId, Ungrouped)>,
     pub remaining: ClaudeTokens,

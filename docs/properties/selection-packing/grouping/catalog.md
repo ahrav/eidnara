@@ -143,9 +143,10 @@ duplicated, missing, kernel-excluded, revision-moved, tombstoned, and corrupt
 optional rows.
 Guarantee: Every selected identity appears exactly once: as a member of one
 group or in the refused set with an `Ungrouped` reason; no identity is dropped
-without a reason and none is counted twice; an optional identity that never
-reaches grouping is excluded once with an `OptionalExclusion` reason and the
-preparation continues.
+without a reason and none is counted twice; a repeated optional request is
+excluded as `Duplicate` while the identity's first request proceeds, and an
+identity that never reaches grouping carries exactly one identity-scoped
+`OptionalExclusion` reason; the preparation continues.
 Check: `always` - the set of identities across groups and refusals equals the
 selected set with no duplicate; the reversed, empty, overflowing,
 past-whole-buffer-sibling, disagreeing, and UTF-8-splitting spans each carry
@@ -153,8 +154,10 @@ their named reason while a split pair that rejoins validly forms a group;
 through the daemon entry a repeated, unpersisted, retracted, revision-moved,
 tombstoned, or corrupt-payload optional row is excluded as `Duplicate`,
 `Missing`, `Excluded(Retracted)`, `Stale`, `Stale`, or `Corrupt` in the order
-found, the duplicate is read and loaded once, the corrupt load is not charged,
-and the surviving rows are admitted. `always` because
+found, a repeated request for a missing identity yields `Duplicate` for the
+later request and `Missing` for the first, the duplicate of a live row is read
+and loaded once, the corrupt load is not charged, and the surviving rows are
+admitted. `always` because
 coverage is asserted per identity, not by aggregate count.
 Fault/timing angle: none.
 Required faults and enabling state: A stored span that is reversed, empty,
@@ -262,5 +265,6 @@ Open questions:
   (every grouped identity is a partition member), the bounds record gates
   which rows reach grouping, and the scan record consumes the groups' costs.
 - `OptionalCostOverflow` is exercised by `crates/daemon/tests/packing_optional.rs`
-  but carries no record here, and no daemon optional test runs under a
-  deadline; both are queued in `portfolio-evaluation.md`.
+  but carries no record here; the optional phase's acquisition deadline is
+  exercised there too, its mid-statement interruption is not. Both are in
+  `portfolio-evaluation.md`.

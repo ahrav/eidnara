@@ -74,14 +74,20 @@ a wildcard pass that questioned the framing.
    asserts it, but no record or Q2 ruling names it. Queued for the accounting
    part (RP2.8 U5a), which owns cost composition; until then the relationship
    map points here.
-3. **No optional-phase deadline check.** Every daemon optional test uses
-   `EvalBudget::unbounded()`, so `hold` takes the uninterruptible branch and
-   the three polls in `prepare_optional` never fire. The "interrupted statement
-   ends the statements at once" rule is observed only by
+3. **No optional-phase deadline check at evaluation time.** Every daemon
+   optional test then used `EvalBudget::unbounded()`, so `hold` took the
+   uninterruptible branch. Partly closed at this change:
+   `a_deadline_that_passes_while_the_connection_is_held_refuses_the_optional_phase_without_reading`
+   moves the required part's `while_connection_is_held` helper into the shared
+   support and asserts `prepare_optional` refuses with `Deadline` inside the
+   budget with no optional event, covering the acquisition deadline and the
+   pre-read poll. Still open: a deadline or cancellation that lands while an
+   optional statement is running. The "interrupted statement ends the
+   statements at once" rule is observed only by
    `optional_statements_stop_at_the_first_non_excludable_fault`, a combinator
-   unit test that never calls `prepare_optional`. Queued for RP2.8 U4, which
-   lands the production caller and its request budget; the required part's
-   `while_connection_is_held` helper is the seam to reuse.
+   unit test that never calls `prepare_optional`, because no test seam raises
+   the budget's interrupt mid-batch. Queued for RP2.8 U4, which lands the
+   production caller and its request budget.
 4. **Two checks appeared in no artifact.** The combinator unit test above and
    `selected_bytes_are_never_printed_by_grouping_types` are now rows in
    `existing-checks.md`, status `unaudited`.
