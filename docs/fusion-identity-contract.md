@@ -121,12 +121,28 @@ can produce an answer the route cannot bound or the host cannot send.
 
 The exact lane reads the query's `id:` mentions and the lexical lane scans the
 prose outside selector mentions inside one interruptible projection read under
-the request budget; the projection connection is released before any kernel
-reader is taken. The handler awaits the blocking work through
+the request budget; for those two lanes the projection connection is released
+before any kernel reader is taken. The handler awaits the blocking work through
 `SharedBudget::bridge`, which raises the shared `EvalBudget` flag the moment
 the host cancels, so a kernel or retrieval stage holding only that budget
 stops on a host cancel instead of running to the deadline; the work is still
-joined before the request settles. Both lanes are then admitted by the kernel's eligibility
+joined before the request settles. When a dense limit set is installed and the
+query carries prose outside its selector mentions, the query is first embedded
+in process by the daemon's embedding lane as one tracked blocking step awaited
+in the handler; the dense lane then runs inside the same read through
+`DenseProducer`, whose first implementation is the exhaustive f32 oracle. The
+oracle judges each page it scores and re-judges its top-K before returning, so
+it is the one lane that holds a kernel reader under the projection connection;
+it hands the terms it judged each row under to revalidation. A selector-only
+query is never embedded and leaves the dense lane `undeclared`, as it does the
+lexical lane. An embedding lane that is busy, starting, disabled, failing, or
+that refuses the input or now serves another identity, leaves the dense lane
+`unavailable` and the answer `degraded`; the lane's own typed refusal decides
+the reason, so a lane that changes state during the call reports that state.
+Inference that runs and fails, including an artifact the backend declares
+unusable, or a stored vector outside the generation's layout ends the request
+as `lane_unavailable` with reason `embedding_failed` or `dense_corruption`.
+The exact and lexical lanes are then admitted by the kernel's eligibility
 adapter under the bound scope: the lexical lane through
 `retrieval::lexical::admit`, the exact lane by judging its rows in
 `validation_batch` slices before any position is assigned, so a row the caller

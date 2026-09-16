@@ -2999,6 +2999,8 @@ pub struct HandlerCore {
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    query_embedder_override: Mutex<Option<Arc<dyn query_route::QueryEmbedder>>>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
     /// Test-side mirror of a client: full input arrays and applied outputs per session, so wire
@@ -3717,9 +3719,34 @@ impl Handler {
         route: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
+        self.dispatch_value_on(route, request, transform_unit::DetachedRunner::default())
+            .await
+    }
+
+    /// Counts `run_unit` submissions; `cancel_before_step` cancels the request at its first `run_step` submission.
+    pub async fn dispatch_value_for_test_observed(
+        &self,
+        route: RouteHandle,
+        request: Value,
+        cancel_before_step: bool,
+    ) -> (PreparedOutcome, usize) {
+        let runner = transform_unit::DetachedRunner {
+            cancel_before_step,
+            ..Default::default()
+        };
+        let units = Arc::clone(&runner.units);
+        let outcome = self.dispatch_value_on(route, request, runner).await;
+        (outcome, units.load(Ordering::SeqCst))
+    }
+
+    async fn dispatch_value_on(
+        &self,
+        route: RouteHandle,
+        request: Value,
+        runner: transform_unit::DetachedRunner,
+    ) -> PreparedOutcome {
         let reserve = metered_decode::unbounded_reserve();
         let meter = ResidentMeter::new(&reserve);
-        let runner = transform_unit::DetachedRunner::default();
         let entry = PassEntry {
             core: &self.core,
             route,
@@ -3868,6 +3895,8 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            query_embedder_override: Mutex::new(None),
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
             #[cfg(test)]
@@ -4297,6 +4326,8 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            query_embedder_override: Mutex::new(None),
             guidance_now_ms: Mutex::new(None),
             test_client: Mutex::new(HashMap::new()),
             reduction_injection: Mutex::new(HashMap::new()),

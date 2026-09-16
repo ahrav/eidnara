@@ -4,6 +4,8 @@ mod support;
 
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use daemon::dispatch::PreparedOutcome;
@@ -11,7 +13,10 @@ use daemon::projection_gates::ProjectionHook;
 use daemon::projection_lifecycle::{
     Cause, ConsumerBinding, ControlState, LifecycleRequest, ProjectionLifecycle, Transition,
 };
-use daemon::query_route::{LimitsRefusal, QueryRouteLimits};
+use daemon::query_route::{
+    DenseLimits, EmbedFailure, EmbedResult, LimitsRefusal, QueryEmbedder, QueryRouteLimits,
+};
+use host_runtime::local_embeddings::inference::InferenceError;
 use kernel::{KernelStore, MAX_ELIGIBILITY_CANDIDATES};
 use retrieval::fusion::{FusionParameters, LaneWeights};
 use serde_json::{Value, json};
@@ -41,6 +46,7 @@ fn limits() -> QueryRouteLimits {
             60.0,
         )
         .unwrap(),
+        dense: None,
     }
 }
 
@@ -173,8 +179,8 @@ fn now() -> i64 {
         .as_millis() as i64
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn the_running_daemon_serves_the_route_from_its_converged_family() {
+/// A daemon whose scheduled slices converged a family over an empty kernel, with the route enabled.
+async fn converged_daemon() -> KernelDaemon {
     let data = tempfile::tempdir().unwrap();
     let home = data.path().to_owned();
     let kernel_root = home.join("eidnara").join("context");
@@ -210,7 +216,6 @@ async fn the_running_daemon_serves_the_route_from_its_converged_family() {
         .unwrap();
 
     let daemon = KernelDaemon::start_in(data, None).await;
-    let project = daemon.project().to_owned();
     daemon
         .handler()
         .set_query_route_limits(Some(limits()))
@@ -229,6 +234,13 @@ async fn the_running_daemon_serves_the_route_from_its_converged_family() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    daemon
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_running_daemon_serves_the_route_from_its_converged_family() {
+    let daemon = converged_daemon().await;
+    let project = daemon.project().to_owned();
     let fused = body(
         daemon
             .outcome(request(&project, "id:rule explicit contract"))
@@ -273,5 +285,252 @@ async fn the_running_daemon_serves_the_route_from_its_converged_family() {
     let mut lapsed = request(&project, "id:rule explicit contract");
     lapsed["remaining_ms"] = json!(0);
     assert_eq!(error_code(daemon.outcome(lapsed).await), "invalid_params");
+    daemon.shutdown().await;
+}
+
+struct ScriptedEmbedder {
+    outcome: EmbedResult,
+    calls: AtomicUsize,
+    delay: Duration,
+}
+
+impl QueryEmbedder for ScriptedEmbedder {
+    fn embed(&self, _text: &str) -> EmbedResult {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        self.outcome.clone()
+    }
+}
+
+fn dense_limits() -> QueryRouteLimits {
+    let mut limits = limits();
+    limits.dense = Some(DenseLimits {
+        k: NonZeroUsize::new(8).unwrap(),
+        page_rows: NonZeroUsize::new(4).unwrap(),
+        max_rows: NonZeroUsize::new(64).unwrap(),
+        unit_norm_tolerance: 1e-3,
+    });
+    limits
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed() {
+    let daemon = converged_daemon().await;
+    let project = daemon.project().to_owned();
+    daemon
+        .handler()
+        .set_query_route_limits(Some(dense_limits()))
+        .unwrap();
+
+    let answer = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(answer["kind"], "fused", "{answer}");
+    assert_eq!(answer["degraded"], false);
+    assert_eq!(answer["lanes"]["dense"]["status"], "complete");
+
+    for reason in ["busy", "starting", "disabled"] {
+        let embedder = Arc::new(ScriptedEmbedder {
+            outcome: Err(EmbedFailure::Unavailable(reason)),
+            calls: AtomicUsize::new(0),
+            delay: Duration::ZERO,
+        });
+        daemon
+            .handler()
+            .set_query_embedder_for_test(Some(Arc::clone(&embedder) as Arc<dyn QueryEmbedder>));
+        let started = Instant::now();
+        let answer = body(
+            daemon
+                .outcome(request(&project, "id:rule explicit contract"))
+                .await,
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(answer["kind"], "fused", "{answer}");
+        assert_eq!(answer["degraded"], true);
+        assert_eq!(answer["lanes"]["dense"]["status"], "unavailable");
+        assert_eq!(answer["lanes"]["dense"]["reason"], reason);
+        assert_eq!(answer["lanes"]["exact"]["status"], "complete");
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
+    }
+
+    let faulted = Arc::new(ScriptedEmbedder {
+        outcome: Err(EmbedFailure::Faulted),
+        calls: AtomicUsize::new(0),
+        delay: Duration::ZERO,
+    });
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::clone(&faulted) as Arc<dyn QueryEmbedder>));
+    let answer = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(terminal(&answer), "lane_unavailable");
+    assert_eq!(answer["reason"], "embedding_failed");
+
+    let slow = Arc::new(ScriptedEmbedder {
+        outcome: Ok(vec![1.0; 8]),
+        calls: AtomicUsize::new(0),
+        delay: Duration::from_millis(400),
+    });
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::clone(&slow) as Arc<dyn QueryEmbedder>));
+    let mut lapsing = request(&project, "id:rule explicit contract");
+    lapsing["remaining_ms"] = json!(200);
+    let (outcome, units) = daemon.outcome_observed(lapsing, false).await;
+    let answer = body(outcome);
+    assert_eq!(
+        terminal(&answer),
+        "deadline",
+        "a deadline that lapses during the embedding await ends the request before any scan"
+    );
+    assert_eq!(slow.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        units, 0,
+        "no scan unit is submitted after the deadline lapsed"
+    );
+
+    let queued = Arc::new(ScriptedEmbedder {
+        outcome: Ok(vec![1.0; 8]),
+        calls: AtomicUsize::new(0),
+        delay: Duration::ZERO,
+    });
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::clone(&queued) as Arc<dyn QueryEmbedder>));
+    let (outcome, units) = daemon
+        .outcome_observed(request(&project, "id:rule explicit contract"), true)
+        .await;
+    let answer = body(outcome);
+    assert_eq!(terminal(&answer), "cancelled");
+    assert_eq!(
+        queued.calls.load(Ordering::SeqCst),
+        0,
+        "a request cancelled before its embedding step starts is not embedded"
+    );
+    assert_eq!(units, 0, "no scan unit is submitted after cancellation");
+
+    daemon.handler().set_query_embedder_for_test(None);
+    let answer = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(answer["lanes"]["dense"]["status"], "complete");
+    daemon.shutdown().await;
+}
+
+/// A request that is one selector has no prose to embed; the handler skips the embedding step and the dense lane stays undeclared while the exact lane serves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_selector_only_request_is_never_embedded_and_leaves_the_dense_lane_undeclared() {
+    let daemon = converged_daemon().await;
+    let project = daemon.project().to_owned();
+    daemon
+        .handler()
+        .set_query_route_limits(Some(dense_limits()))
+        .unwrap();
+    let embedder = Arc::new(ScriptedEmbedder {
+        outcome: Ok(vec![1.0 / 8f32.sqrt(); 8]),
+        calls: AtomicUsize::new(0),
+        delay: Duration::ZERO,
+    });
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::clone(&embedder) as Arc<dyn QueryEmbedder>));
+
+    let answer = body(daemon.outcome(request(&project, "id:rule")).await);
+    assert_eq!(answer["kind"], "fused", "{answer}");
+    assert_eq!(answer["degraded"], false);
+    assert_eq!(answer["lanes"]["exact"]["status"], "complete");
+    assert_eq!(answer["lanes"]["lexical"]["status"], "undeclared");
+    assert_eq!(answer["lanes"]["dense"]["status"], "undeclared");
+    assert_eq!(
+        embedder.calls.load(Ordering::SeqCst),
+        0,
+        "a selector-only request is not embedded"
+    );
+
+    let refused = daemon.outcome(request(&project, "   ")).await;
+    assert_eq!(error_code(refused), "invalid_params");
+    assert_eq!(
+        embedder.calls.load(Ordering::SeqCst),
+        0,
+        "a request the selector classifier refuses is not embedded"
+    );
+
+    let mut over_bound: Vec<String> = (0..=limits().probes.get())
+        .map(|i| format!("id:rule{i}"))
+        .collect();
+    over_bound.push("explicit contract".to_string());
+    let refused = daemon
+        .outcome(request(&project, &over_bound.join(" ")))
+        .await;
+    assert_eq!(error_code(refused), "invalid_params");
+    assert_eq!(
+        embedder.calls.load(Ordering::SeqCst),
+        0,
+        "a request over the probe bound is refused before it is embedded"
+    );
+
+    let refused = daemon.outcome(request(&project, "!!!")).await;
+    assert_eq!(error_code(refused), "invalid_params");
+    let answer = body(daemon.outcome(request(&project, "id:rule,id:other")).await);
+    assert_eq!(answer["lanes"]["dense"]["status"], "undeclared", "{answer}");
+    assert_eq!(
+        embedder.calls.load(Ordering::SeqCst),
+        0,
+        "punctuation outside selector mentions is not prose and is not embedded"
+    );
+
+    let answer = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(answer["lanes"]["dense"]["status"], "complete");
+    assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
+    daemon.shutdown().await;
+}
+
+/// Inference that runs and declares its artifact unusable is a fault, not a busy lane: the request ends `embedding_failed`, and the lane it disabled reports `disabled` to the next request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_artifact_fault_during_inference_is_embedding_failed_and_the_lane_is_disabled_after() {
+    let daemon = converged_daemon().await;
+    let project = daemon.project().to_owned();
+    daemon
+        .handler()
+        .set_query_route_limits(Some(dense_limits()))
+        .unwrap();
+    let answer = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(answer["lanes"]["dense"]["status"], "complete", "{answer}");
+
+    daemon
+        .engine()
+        .fail_next(InferenceError::Artifact("artifact unusable".to_owned()));
+    let answer = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(terminal(&answer), "lane_unavailable");
+    assert_eq!(answer["reason"], "embedding_failed");
+
+    let answer = body(
+        daemon
+            .outcome(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(answer["kind"], "fused", "{answer}");
+    assert_eq!(answer["degraded"], true);
+    assert_eq!(answer["lanes"]["dense"]["status"], "unavailable");
+    assert_eq!(answer["lanes"]["dense"]["reason"], "disabled");
     daemon.shutdown().await;
 }

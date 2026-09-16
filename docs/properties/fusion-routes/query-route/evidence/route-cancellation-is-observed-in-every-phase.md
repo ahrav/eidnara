@@ -11,7 +11,7 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
 
 ## Evidence trail
 
-- `crates/daemon/src/query_route.rs`: `Phase` enumerates the eight phases;
+- `crates/daemon/src/query_route.rs`: `Phase` enumerates the nine phases;
   `execute` calls `before_phase` then `check(budget)` at each, and
   `judge_eligible` repeats the revalidation gate before every validation slice
   after the first; `check` reads `SharedBudget::is_exhausted` and `exhaustion`

@@ -16,7 +16,9 @@ cancellation bridge records. The RP2.7.U3b ticket
 ([#641](https://github.com/ahrav/eidnara/issues/641)) lands the route records:
 authorization, bounds, cancellation in every phase, scope, revalidation,
 healthy completion, the closed terminal set, and disable as rollback. The
-dense-lane records enter with RP2.7.U3c.
+RP2.7.U3c ticket ([#642](https://github.com/ahrav/eidnara/issues/642)) lands
+the dense-lane records: embedding before the blocking scan and typed
+degradation of an unavailable embedding lane.
 
 This part owns the request budget (one absolute `EvalBudget` derived at
 handler entry, tracked blocking work, and the interruptible search-projection
@@ -37,6 +39,23 @@ failure during revalidation is `lane_unavailable` with a `reason` code naming
 the witness; an interrupted statement inside a lane is the budget's own
 verdict, `cancelled` or `deadline`; a panic in tracked work is the transport's
 `internal_error`; a stopped runtime or closing route is `cancelled`.
+
+Parent Q5 and Q6 decisions for the dense lane recorded here: the query is
+embedded in process by the daemon's `LocalEmbeddingsComponent`, the lane the
+family was built under, so nothing is routed and no remaining duration crosses
+a process; only a query with prose outside its selector mentions is embedded,
+and a selector-only query leaves the dense lane `undeclared` without an
+inference call; a busy, starting, disabled, or failing lane, one that refuses
+the input, or one whose identity changed (`lane_changed`), degrades at once
+with no retry inside the deadline, and the answer is `fused` with the dense
+lane `unavailable` and `degraded` true, the reason taken from the lane's typed
+refusal; inference that runs and fails, including an artifact the backend
+declares unusable, or a stored vector that fails the generation's layout, ends
+the request as `lane_unavailable` with reason `embedding_failed` or
+`dense_corruption` and is never a degraded success; a query vector outside the
+generation's shape degrades the lane as `query_shape`. The exhaustive f32
+oracle is the first producer behind `DenseProducer`; the dense limits are
+absent until RP2.9 approves them, which leaves the lane undeclared.
 
 Parent Q4 decisions recorded here: the remaining-duration request field is
 `remaining_ms`, a positive integer of milliseconds, clamped to a route-supplied
@@ -83,6 +102,8 @@ judge is refused before any request instead of on every request.
 | [route-healthy-authorized-query-completes-fused](#route-healthy-authorized-query-completes-fused) | liveness | test-only | always | active | medium |
 | [route-required-context-failure-is-typed-and-terminal](#route-required-context-failure-is-typed-and-terminal) | safety | test-only | always | active | medium |
 | [route-rollback-disables-without-mutating-canonical-truth](#route-rollback-disables-without-mutating-canonical-truth) | safety | test-only | always | active | high |
+| [route-query-embedding-completes-before-blocking-scan](#route-query-embedding-completes-before-blocking-scan) | safety | test-only | always | active | medium |
+| [route-dense-unavailable-degrades-typed-within-deadline](#route-dense-unavailable-degrades-typed-within-deadline) | safety | test-only | always | active | high |
 
 ## Records
 
@@ -352,21 +373,27 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route.rs`
 `cancellation_and_deadline_are_observed_in_every_phase` and
-`a_healthy_query_completes_fused_in_the_oracles_order`.
-Guarantee: The request budget is checked at the start of probe compilation,
-the exact scan, the lexical scan, lane admission, fusion, revalidation,
-materialization, and response construction; a cancellation or a lapsed
-deadline observed at any of them ends the request with `cancelled` or
-`deadline` and no ranking.
-Check: `always` - for each of the eight phases, a hook that cancels the
-budget's token when that phase begins yields `Terminal::Cancelled`, and a hook
-that sleeps past a 600 ms remaining duration yields `Terminal::Deadline`; in
-both halves the hook records the phases reached and the target is the last
-one, so the terminal is attributed to that phase; a healthy run visits the
-eight phases once each in order. The revalidation check guards the kernel
-judging, and the hook fires again before every later validation slice so a
-test can act between slices. `always` because every phase transition performs
-the check.
+`a_healthy_query_completes_fused_in_the_oracles_order`;
+`crates/daemon/tests/query_route_dense.rs`
+`cancellation_and_deadline_during_the_dense_scan_end_typed_without_a_ranking`;
+`crates/daemon/tests/query_route_handler.rs`
+`the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`.
+Guarantee: The request budget is checked after the embedding await and at the
+start of probe compilation, the exact scan, the lexical scan, the dense scan,
+lane admission, fusion, revalidation, materialization, and response
+construction; a cancellation or a lapsed deadline observed at any of them ends
+the request with `cancelled` or `deadline` and no ranking.
+Check: `always` - for each of the nine phases (the dense scan included), a
+hook that cancels the budget's token when that phase begins yields
+`Terminal::Cancelled`, and a hook that sleeps past a 600 ms remaining duration
+yields `Terminal::Deadline`; in both halves the hook records the phases
+reached and the target is the last one, so the terminal is attributed to that
+phase; a healthy run visits the nine phases once each in order; a
+cancellation raised inside the dense producer is the budget's verdict, and a
+deadline that lapses during the embedding await ends the request before the
+scan is submitted. The revalidation check guards the kernel judging, and the
+hook fires again before every later validation slice so a test can act between
+slices. `always` because every phase transition performs the check.
 Fault/timing angle: Cancellation between phases; the projection read's own
 progress handler covers cancellation inside a statement, see
 `route-sql-cancellation-is-request-local`.
@@ -396,14 +423,17 @@ its lanes finishes, the lifecycle pin and the projection connection it holds
 are released, and the request settles within an approved fault-free envelope;
 a permanently blocked read stays visible as unresolved work rather than being
 settled early. The projection connection is held only while the lanes read
-the projection; every kernel reader the request takes is acquired after it is
-released, so a request never waits for a kernel reader while other projection
-readers and writers wait for it.
+the projection; every kernel reader the exact and lexical lanes take is
+acquired after it is released, so those lanes never wait for a kernel reader
+while other projection readers and writers wait for it. The dense oracle
+judges each page it scores under the connection, so a dense request holds the
+connection across its eligibility batches.
 Check: `always` - the handler awaits `run_unit` with the budget guard alive
 and drops the guard only after the join; the closure owns the pin for its
 whole run; a second budgeted projection read placed by the `before_phase` hook
 at the admission, fusion, and revalidation phases succeeds, so the connection
-is free during every kernel judgment. The envelope bound and a holder census
+is free during every exact and lexical judgment; the dense lane is undeclared
+in that witness. The envelope bound and a holder census
 over the pin and the guard are not yet asserted. `always` because every
 cancelled request must drain.
 Fault/timing angle: Cancellation while the lanes hold the projection
@@ -421,6 +451,10 @@ Open questions:
 
 - The drain envelope is an RP2.9 number; until it is approved the record has
   no bound to assert. (needs human input)
+- The dense oracle judges pages under the projection connection because its
+  bounded top-K admits a row before the next page is read; releasing the
+  connection would mean scanning up to `max_rows` vectors first and judging
+  after, a change to `retrieval::dense::exhaustive`. (needs human input)
 
 ### route-candidate-ids-never-widen-scope
 
@@ -576,7 +610,7 @@ terminal carries a `reason` code; the failure of a non-dense lane for a
 non-budget reason, including a stored occurrence identifier that is not the
 contract spelling, is reported per lane as `unavailable` with a closed reason
 code and the answer `degraded` while the other lane's ranking is served, and
-both lanes failing is `lane_unavailable`.
+every declared lane failing is `lane_unavailable`.
 `always` because the set is the wire contract.
 Fault/timing angle: None.
 Required faults and enabling state: A packing stage that misses required
@@ -622,6 +656,116 @@ disable tests, status unaudited.
 Impact: A rollback that mutated canonical rows to match a projection would be
 irreversible.
 Open questions: None.
+
+### route-query-embedding-completes-before-blocking-scan
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/query_route_handler.rs`
+`the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`
+and `crates/daemon/tests/query_route_dense.rs`
+`dense_positions_follow_the_producer_and_the_fused_order_follows_the_oracle`.
+Guarantee: When the dense lane is declared, the query text is embedded by the
+daemon's own embedding lane as one tracked blocking step awaited in the
+handler, the budget is checked once it returns, and only then is the scan unit
+that runs the lanes submitted; the scan closure receives a finished vector or
+a typed unavailability and never embeds; dense positions in the fused answer
+equal the exhaustive producer's ranking and the fused order equals the U2
+oracle.
+Check: `always` - through the handler over a converged family and the test
+engine, a query answers `fused` with the dense lane `complete`; an embedder
+that sleeps past the remaining duration yields the `deadline` terminal after
+exactly one embedding call and zero `run_unit` submissions, counted by the
+test runner; a request cancelled as its embedding step is submitted yields
+`cancelled` with zero embedding calls and zero submissions; at the `execute`
+level, over stored
+unit vectors, every dense contribution's position and raw score equal the
+inner-product reference truncated to `k`. `always` because every dense request
+crosses the same await.
+Fault/timing angle: The deadline lapses while the embedding step runs; the
+scan unit must not be submitted afterwards.
+Required faults and enabling state: A converged family; a scripted embedder
+installed through `set_query_embedder_for_test`; stored vectors under the
+fixture generation.
+Confidence: medium - [evidence](evidence/route-query-embedding-completes-before-blocking-scan.md).
+The ordering is enforced by control flow in `handle_retrieval_query`; the
+witness counts scan submissions on the test runner and observes the
+embedder's call count, not the thread the embedding ran on.
+Existing check: `crates/retrieval/tests/dense_oracle.rs` reference-prefix
+tests, status unaudited.
+Impact: Embedding inside the scan closure would hold the projection
+connection through a native call and hide the embedding's share of the budget
+from the phase checks.
+Open questions: None.
+
+### route-dense-unavailable-degrades-typed-within-deadline
+
+Type: safety
+Reachability: test-only
+Status: active
+Exercised: yes - `crates/daemon/tests/query_route_dense.rs`
+`an_unavailable_embedding_lane_degrades_to_a_nonempty_exact_and_lexical_answer`,
+`producer_corruption_is_typed_while_a_foreign_query_shape_degrades_the_lane`,
+`a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_no_producer`,
+`a_ready_dense_lane_serves_alone_when_the_lexical_lane_refuses_the_prose`,
+and `a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete`;
+`crates/daemon/src/query_route.rs`
+`a_lane_that_is_not_ready_is_an_unavailability_never_a_fault`;
+`crates/daemon/tests/query_route_handler.rs`
+`the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`,
+`a_selector_only_request_is_never_embedded_and_leaves_the_dense_lane_undeclared`,
+and
+`an_artifact_fault_during_inference_is_embedding_failed_and_the_lane_is_disabled_after`.
+Guarantee: An embedding lane that is busy, starting, disabled, or failing, or
+that refuses the input, degrades the request to the exact and lexical fusion
+with the dense lane reported `unavailable` and a closed reason taken from the
+lane's typed refusal, within the original deadline and never as `deadline` or
+as dense completion; a request without prose outside its selector mentions is
+never embedded and leaves a ready dense lane `undeclared`; inference that
+fails, including an artifact the backend declares unusable, a stored vector
+that fails the layout, and a lane-level cancellation end the request as their
+own typed outcomes, never as a degraded success.
+Check: `always` - for each unavailability reason the answer is `fused`,
+`degraded`, nonempty, carries no dense contribution, and the budget is not
+exhausted; a wrong-shaped query vector degrades the lane as `query_shape` while
+the other lanes serve; a zero-norm stored vector ends the request as
+`lane_unavailable`/`dense_corruption`; a faulted embedder ends it as
+`lane_unavailable`/`embedding_failed`; an engine that answers one inference
+with an artifact fault ends that request as `embedding_failed` and the next
+request reports the lane `disabled`; a selector-only request, at the `execute`
+level with a ready lane and through the handler with a counting embedder,
+reports the dense lane `undeclared`, carries no dense contribution, and makes
+no embedding or producer call; punctuation alone outside the mentions is not
+prose (`!!!` is refused as no probe, `id:rule,id:other` serves with the dense
+lane `undeclared`); a request over the probe bound and one
+cancelled before its embedding step starts make no embedding call; no producer
+runs when the lane is unavailable; a prose query the lexical lane refuses is
+served by a ready dense lane alone, `degraded`, and is `no_lane` only when
+every declared lane fails; a live row without a vector leaves the lane
+`incomplete` with reason
+`coverage_shortfall` and a `max_rows` of one leaves it `row_bound`, both
+degraded; a NaN tolerance is refused at installation; a budget that lapses
+during the embedding step is `deadline` even when the embedder also faulted.
+`always` because every dense request classifies its lane.
+Fault/timing angle: None; the lane states are driven directly.
+Required faults and enabling state: A populated projection with vectors; the
+`DenseLane::Unavailable` input; a scripted embedder for the handler path; an
+engine scripted to fail one inference; a corrupt stored vector.
+Confidence: high - [evidence](evidence/route-dense-unavailable-degrades-typed-within-deadline.md).
+Existing check: `crates/host-runtime` local-embeddings busy and disabled
+tests, status unaudited.
+Impact: A busy lane reported as `deadline` would blame the caller's budget; an
+artifact fault reported as `busy` would count a disabled lane as saturation in
+the RP2.9 retry calibration; a selector-only lookup embedded and scanned would
+fuse a ranking over selector syntax into a direct answer and spend the lane's
+inference permit on it; a corrupt vector served as a degraded success would
+rank rows over bytes the generation does not own.
+Open questions:
+
+- Whether a bounded retry inside the deadline should replace at-once
+  degradation for `busy` is an RP2.9 calibration item; the route implements
+  at-once. (needs human input)
 
 ## Relationship map
 

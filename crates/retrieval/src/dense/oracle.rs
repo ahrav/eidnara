@@ -168,6 +168,8 @@ pub struct Consumed {
 pub struct ExhaustiveRanking {
     /// Re-judged rows, best first, at most `k`.
     pub ranked: Vec<Ranked>,
+    /// The terms each `ranked` row was judged under, in `ranked` order, so a later revalidation judges the same facts without another projection read.
+    pub candidates: Vec<OccurrenceCandidate>,
     pub completion: Completion,
     pub coverage: DenseCoverage,
     /// The snapshot every ranked row was judged under; `None` if no batch ran.
@@ -310,6 +312,7 @@ pub(super) fn walk(
 
     let mut ranking = ExhaustiveRanking {
         ranked: Vec::new(),
+        candidates: Vec::new(),
         completion: Completion::Complete,
         coverage: DenseCoverage::default(),
         snapshot: None,
@@ -393,6 +396,7 @@ fn exhausted(mut ranking: ExhaustiveRanking) -> Result<ExhaustiveRanking, Oracle
         return Err(OracleRefusal::BudgetExhausted);
     }
     ranking.ranked.clear();
+    ranking.candidates.clear();
     incomplete(&mut ranking, IncompleteReason::BudgetExhausted);
     Ok(ranking)
 }
@@ -588,9 +592,12 @@ fn revalidate(
     }
     ranking.snapshot = Some(report.snapshot);
     ranking.incarnation = Some(report.incarnation);
-    for (row, judged) in ranked.into_iter().zip(report.occurrences) {
+    for ((row, candidate), judged) in ranked.into_iter().zip(candidates).zip(report.occurrences) {
         match judged.disposition {
-            Disposition::Eligible => ranking.ranked.push(row),
+            Disposition::Eligible => {
+                ranking.ranked.push(row);
+                ranking.candidates.push(candidate);
+            }
             Disposition::PolicyExcluded(verdict) => {
                 tally_exclusion(&mut ranking.consumed.excluded, verdict);
             }
@@ -601,8 +608,43 @@ fn revalidate(
 
 #[cfg(test)]
 mod tests {
-    use super::PAGE_SQL;
+    use super::*;
     use rusqlite::Connection;
+
+    /// A ranking discarded for an ended budget keeps `candidates` in step with the emptied `ranked`.
+    #[test]
+    fn an_exhausted_ranking_drops_its_candidates_with_its_rows() {
+        let candidate = OccurrenceCandidate::new(
+            "occ".to_string(),
+            OccurrenceClass::Messages,
+            "object".to_string(),
+            1,
+            "digest".to_string(),
+        );
+        let ranking = ExhaustiveRanking {
+            ranked: vec![Ranked {
+                occurrence_id: "occ".to_string(),
+                class: OccurrenceClass::Messages,
+                score: 1.0,
+            }],
+            candidates: vec![candidate],
+            completion: Completion::Complete,
+            coverage: DenseCoverage::default(),
+            snapshot: None,
+            incarnation: None,
+            consumed: Consumed {
+                pages: 1,
+                ..Consumed::default()
+            },
+        };
+        let ranking = exhausted(ranking).unwrap();
+        assert!(ranking.ranked.is_empty());
+        assert!(ranking.candidates.is_empty());
+        assert_eq!(
+            ranking.completion,
+            Completion::Incomplete(IncompleteReason::BudgetExhausted)
+        );
+    }
 
     /// The walk must step the primary-key index in identifier order; a class-index search would sort the whole class on every page.
     #[test]
