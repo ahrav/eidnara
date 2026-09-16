@@ -13,7 +13,7 @@ Acceptance row AC3 names the six fault classes.
   the classes; `admit_required` maps rows and dispositions to them in request
   order before any byte is loaded; `reserve_required` adds `Corrupt` for a
   length mismatch and `OverBudget` for the limit.
-- `crates/daemon/src/packing.rs` `prepare_required` refuses a request set beyond the load
+- `crates/daemon/src/packing/mod.rs` `prepare_required` refuses a request set beyond the load
   bound before any read, reads each row under one connection hold, judges
   eligibility in one kernel batch, admits, loads through `load_payload` under
   a second hold, and reserves outside both, polling `EvalBudget::is_exhausted`

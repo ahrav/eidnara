@@ -9,7 +9,7 @@ render precedents.
 
 ## Evidence trail
 
-- `crates/daemon/src/packing.rs` `ClaudeTokens(u64)` with two `compile_fail`
+- `crates/daemon/src/packing/mod.rs` `ClaudeTokens(u64)` with two `compile_fail`
   doctests; `from_budget` refuses each malformed shape with a `BudgetRefusal`
   variant.
 - `crates/daemon/src/m0_compose.rs` `trim_user_profile_to_budget` clamps

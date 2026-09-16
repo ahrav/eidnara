@@ -170,11 +170,50 @@ fn a_heuristic_count_carries_its_authority_and_headroom_and_never_the_exact_labe
         exact.charge("twelve bytes").with_headroom(),
         exact.charge("twelve bytes").tokens()
     );
-    assert!(exact.revision().as_str().starts_with("10:claude-bpe;64:"));
+    let identity = exact.identity();
+    assert!(
+        exact
+            .revision()
+            .as_str()
+            .starts_with(&format!("5:exact;{}:{identity};64:", identity.len())),
+        "the exact revision names its own identity: {}",
+        exact.revision().as_str()
+    );
     assert_ne!(exact.revision(), heuristic.revision());
     let other_degradation =
         AccountingProfile::heuristic("bytes-over-four", "bytes/3", 250, |text| text.len() / 3);
     assert_ne!(heuristic.revision(), other_degradation.revision());
+    for profile in profiles() {
+        assert_eq!(
+            profile.declared_uncharged(),
+            daemon::packing::DECLARED_UNCHARGED,
+            "{}: the declared exclusions do not vary by profile",
+            profile.identity()
+        );
+    }
+    assert_eq!(
+        daemon::packing::DECLARED_UNCHARGED,
+        &["separator-before-memory-block"]
+    );
+}
+
+#[test]
+fn a_heuristic_impersonating_the_exact_revision_shares_neither_revision_nor_cache_entry() {
+    use sha2::Digest;
+    let exact = AccountingProfile::exact_tokenizer();
+    let digest: &'static str =
+        Box::leak(format!("{:x}", sha2::Sha256::digest(tokenizer::vocab_blob())).into_boxed_str());
+    let impostor = AccountingProfile::heuristic(exact.identity(), digest, 0, |_| 1);
+    assert_ne!(impostor.revision(), exact.revision());
+
+    let content = "content long enough to enter the shared cache under either revision ".repeat(2);
+    let expected = tokenizer::estimate_tokens(&content) as u64;
+    assert_ne!(expected, 1, "the fixture must discriminate the two counts");
+    assert_eq!(impostor.charge(&content).tokens(), ClaudeTokens::new(1));
+    let charge = exact.charge(&content);
+    assert_eq!(charge.tokens(), ClaudeTokens::new(expected));
+    assert_eq!(charge.authority(), Authority::Exact);
+    assert_eq!(impostor.charge(&content).tokens(), ClaudeTokens::new(1));
 }
 
 #[test]

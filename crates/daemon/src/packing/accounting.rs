@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::token_cache::{AccountingRevision, cached_count_under};
+use crate::token_cache::{AccountingRevision, EXACT_TOKENIZER_IDENTITY, cached_count_under};
 
 use super::ClaudeTokens;
 use retrieval::packing::TokenCount;
@@ -49,7 +49,7 @@ impl Eq for AccountingProfile {}
 impl AccountingProfile {
     pub fn exact_tokenizer() -> Self {
         Self {
-            identity: "claude-bpe",
+            identity: EXACT_TOKENIZER_IDENTITY,
             revision: AccountingRevision::exact_tokenizer().clone(),
             authority: Authority::Exact,
             count: Arc::new(tokenizer::estimate_tokens),
@@ -66,7 +66,7 @@ impl AccountingProfile {
     ) -> Self {
         Self {
             identity,
-            revision: AccountingRevision::from_components(&[identity, degradation]),
+            revision: AccountingRevision::heuristic(identity, degradation),
             authority: Authority::Heuristic {
                 degradation,
                 headroom_permille,
@@ -87,8 +87,22 @@ impl AccountingProfile {
         self.authority
     }
 
+    pub fn declared_uncharged(&self) -> &'static [&'static str] {
+        DECLARED_UNCHARGED
+    }
+
     pub fn charge(&self, text: &str) -> Charge {
         let count = cached_count_under(&self.revision, text, |text| (self.count)(text));
+        self.charge_of(count)
+    }
+
+    /// Counts without the shared cache; the cache only pays off for text that
+    /// recurs.
+    pub fn charge_uncached(&self, text: &str) -> Charge {
+        self.charge_of((self.count)(text))
+    }
+
+    fn charge_of(&self, count: usize) -> Charge {
         Charge {
             tokens: ClaudeTokens::new(count as u64),
             authority: self.authority,

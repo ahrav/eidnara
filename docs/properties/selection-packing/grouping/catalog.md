@@ -24,7 +24,7 @@ The pure functions are `crates/retrieval/src/packing/grouping.rs` `group` and
 `admit_optional_set`, exercised by `crates/retrieval/tests/packing_grouping.rs`
 against the oracle parent in `crates/retrieval/tests/fixtures/packing/groups.json`
 and the frozen reference in `crates/retrieval/tests/support/frozen_packer.rs`
-(`packing-reference-v1`). The daemon entry is `crates/daemon/src/packing.rs`
+(`packing-reference-v1`). The daemon entry is `crates/daemon/src/packing/mod.rs`
 `prepare_optional`, exercised by `crates/daemon/tests/packing_optional.rs`;
 `PackingTrace` is the observation point for stage order and payload loads.
 The production packer receives selected bytes only; the parent buffer exists
@@ -72,7 +72,7 @@ grouper and the frozen reference:
 Type: safety
 Reachability: test-only - `group` is called from `prepare_optional` and the
 tests; `prepare_optional` has no production caller at this base (`grep -rn
-'prepare_optional' crates --include=*.rs` finds `crates/daemon/src/packing.rs`
+'prepare_optional' crates --include=*.rs` finds `crates/daemon/src/packing/mod.rs`
 and `crates/daemon/tests/packing_optional.rs`).
 Status: active
 Exercised: yes - `crates/retrieval/tests/packing_grouping.rs`
@@ -151,7 +151,8 @@ marginal cost exceeds the remaining budget is skipped and the scan continues;
 unused budget is success; the production scan never diverges from the frozen
 reference; the prefix packer is not the baseline.
 Check: `always` - budget 10 against costs 11, 4, 6 admits positions 1 and 2 in
-order with remaining 0; the visit counter equals the item count; a budget
+order with remaining 0, and the daemon entry admits the small and medium groups
+behind a big one over a budget of their rendered costs; the visit counter equals the item count; a budget
 larger than the sum reports the unused remainder; the prefix packer admits
 nothing on the same input and differs; the frozen reference agrees on every
 generated cost list and budget; the memory trim that delegates to the same
@@ -159,7 +160,8 @@ rule matches its replaced loop on boundary budgets and generated rows.
 `always` because the rule is the baseline policy on every request.
 Fault/timing angle: none.
 Required faults and enabling state: Costs 11, 4, 6 with remaining budget 10;
-generated cost lists and budgets.
+rendered costs big, small, medium against small plus medium through the daemon
+entry; generated cost lists and budgets.
 Confidence: high - [evidence](evidence/packing-optional-scan-skips-and-continues.md).
 Existing check: `crates/daemon/src/m0_compose.rs` `trim_memories_to_budget`
 implemented the rule for memories before this change and now delegates to

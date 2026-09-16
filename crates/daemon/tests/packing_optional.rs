@@ -6,8 +6,9 @@ mod support;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use daemon::packing::{
-    Charged, ClaudeTokens, OptionalAdmission, OptionalExclusion, OptionalRequest, PackingTrace,
-    PreparationRefusal, RequiredInputs, StageEvent, prepare_optional, prepare_required, render,
+    AccountingProfile, Charged, ClaudeTokens, OptionalAdmission, OptionalExclusion,
+    OptionalRequest, PackingTrace, PreparationRefusal, RequiredInputs, StageEvent,
+    prepare_optional, prepare_required, render,
 };
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
@@ -44,16 +45,31 @@ fn run(
     optional_bounds: &OptionalBounds,
     budget: u64,
 ) -> (Result<OptionalAdmission, PreparationRefusal>, PackingTrace) {
+    run_with_profile(
+        fixture,
+        optional_requests,
+        optional_bounds,
+        budget,
+        &byte_profile(),
+    )
+}
+
+fn run_with_profile(
+    fixture: &Fixture,
+    optional_requests: &[OptionalRequest],
+    optional_bounds: &OptionalBounds,
+    budget: u64,
+    profile: &AccountingProfile,
+) -> (Result<OptionalAdmission, PreparationRefusal>, PackingTrace) {
     let mut trace = PackingTrace::default();
     trace.note_retrieval_call();
     let eval = EvalBudget::unbounded();
-    let profile = byte_profile();
     let inputs = RequiredInputs {
         kernel: &fixture.kernel,
         project: &fixture.project,
         destination: kernel::ArtifactDestination::Local,
         budget: &eval,
-        profile: &profile,
+        profile,
     };
     let required = prepare_required(
         &fixture.store,
@@ -136,7 +152,14 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
 
     let remaining = small + medium;
     assert!(big > remaining, "the first group alone must not fit");
-    let (result, trace) = run(&fixture, &requests, &wide(), required_charge + remaining);
+    // The budget covers the closed render, so the block close is part of it.
+    let close = render::BLOCK_CLOSE_FRAGMENT.len() as u64;
+    let (result, trace) = run(
+        &fixture,
+        &requests,
+        &wide(),
+        required_charge + remaining + close,
+    );
     let admission = result.unwrap();
     let admitted: Vec<_> = admission
         .admitted
@@ -165,7 +188,7 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
         &fixture,
         &requests[1..],
         &wide(),
-        required_charge + remaining + 3,
+        required_charge + remaining + close + 3,
     );
     assert_eq!(
         spare.unwrap().remaining,
@@ -213,6 +236,59 @@ fn same_parent_spans_group_and_are_charged_as_one_merged_range() {
         .filter(|entry| matches!(entry.item, Charged::Range(1, _)))
         .count();
     assert_eq!(range_entries, 2);
+}
+
+/// The scan deducts each group's priced cost from the budget; the ledger
+/// charges the group's entries. The two must agree under a profile whose
+/// headroom rounds per charge, and the budget must cover the closed render.
+#[test]
+fn a_groups_priced_cost_equals_its_charged_entries_and_the_budget_covers_the_closed_render() {
+    let a = tool_range("tool", PARENT, 0, 6);
+    let b = tool_range("tool", PARENT, 4, 10);
+    let c = tool_range("tool", PARENT, 15, 20);
+    let other = tool_span("other", "1", "zz");
+    let fixture = Fixture::new(&[REQUIRED, a, b, c, other]);
+    let requests = [optional(&other), optional(&a), optional(&b), optional(&c)];
+    let headroom = AccountingProfile::heuristic("bytes-over-four", "bytes/4", 250, |text| {
+        text.len().div_ceil(4)
+    });
+    for profile in [
+        byte_profile(),
+        headroom,
+        AccountingProfile::exact_tokenizer(),
+    ] {
+        let limit = 1 << 20;
+        let (result, _) = run_with_profile(&fixture, &requests, &wide(), limit, &profile);
+        let admission = result.unwrap();
+        assert_eq!(admission.admitted.len(), 2, "{}", profile.identity());
+        for (index, group) in admission.admitted.iter().enumerate() {
+            let charged = admission
+                .ledger
+                .entries()
+                .iter()
+                .filter(|entry| match entry.item {
+                    Charged::GroupOpen(i) | Charged::Range(i, _) | Charged::GroupClose(i) => {
+                        i == index
+                    }
+                    _ => false,
+                })
+                .map(|entry| entry.charge.with_headroom().get())
+                .sum::<u64>();
+            assert_eq!(
+                group.cost.get(),
+                charged,
+                "{}: group {index} priced {} but charged {charged}",
+                profile.identity(),
+                group.cost.get()
+            );
+        }
+        assert_eq!(
+            limit - admission.remaining.get(),
+            admission.ledger.total_with_headroom().get(),
+            "{}: the budget consumed equals the closed ledger's total",
+            profile.identity()
+        );
+    }
 }
 
 #[test]

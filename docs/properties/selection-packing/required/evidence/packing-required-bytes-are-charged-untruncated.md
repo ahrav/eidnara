@@ -16,7 +16,7 @@ the 64 KiB per-line cut on the packing path.
 - `crates/daemon/tests/packing_required.rs` uses a one-token-per-byte
   estimator so the limit sits on a byte boundary, then compares materialized
   bytes to the persisted payload and item costs to `charged`.
-- `crates/daemon/src/packing.rs` test shows the legacy memory line rendering a
+- `crates/daemon/src/packing/mod.rs` test shows the legacy memory line rendering a
   64 KiB + 7 payload shorter than its content while the estimator charges the
   tail.
 

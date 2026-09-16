@@ -439,22 +439,6 @@ pub struct OptionalAdmission {
     pub remaining: ClaudeTokens,
 }
 
-/// The wrapper is charged once, at the group's first admitted member, as its
-/// own entry so an adjustment that empties the group can reclaim it.
-fn render_group(ledger: &mut Ledger, index: usize, group: &Group) {
-    ledger.append(
-        Charged::GroupOpen(index),
-        &render::group_open_fragment(group),
-    );
-    for (position, range) in group.ranges.iter().enumerate() {
-        ledger.append(
-            Charged::Range(index, position),
-            &render::range_fragment(range),
-        );
-    }
-    ledger.append(Charged::GroupClose(index), render::GROUP_CLOSE_FRAGMENT);
-}
-
 /// Runs after [`prepare_required`] over the budget it left; a required
 /// materialization is the witness that the required phase completed.
 pub fn prepare_optional(
@@ -553,27 +537,48 @@ pub fn prepare_optional(
     let partition = group(&selected);
     trace.optional(OptionalEvent::Grouped, None);
 
-    let mut ledger = required.ledger.clone();
+    let ledger = required.ledger.clone();
+    // The close is part of the render the budget must cover, so its charge is
+    // held back from the scan and settled once the closing charge is known.
+    let close_reserve = ledger.delta(BLOCK_CLOSE_FRAGMENT).with_headroom();
+    let scan_budget = required
+        .remaining
+        .checked_sub(close_reserve)
+        .unwrap_or(ClaudeTokens::ZERO);
     let mut costs: Vec<ClaudeTokens> = Vec::with_capacity(partition.groups.len());
+    // Each group is priced once as the entries it would be charged as; the
+    // admit callback commits that same pricing, so the deducted cost and the
+    // ledger's charges cannot diverge.
+    let mut state: (Ledger, Option<render::Staged>) = (ledger, None);
     let scan = skip_and_continue(
-        required.remaining,
+        scan_budget,
         partition.groups.len(),
-        &mut ledger,
-        |ledger, index| {
+        &mut state,
+        |(ledger, staged), index| {
             if inputs.budget.is_exhausted() {
                 costs.push(ClaudeTokens::MAX);
                 return ClaudeTokens::MAX;
             }
-            let cost = ledger
-                .delta(&render::group_fragment(&partition.groups[index]))
-                .with_headroom();
+            let priced = ledger.stage(render::group_fragments(index, &partition.groups[index]));
+            let cost = priced.cost();
             costs.push(cost);
+            *staged = Some(priced);
             cost
         },
-        |ledger, index| render_group(ledger, index, &partition.groups[index]),
+        |(ledger, staged), _| {
+            if let Some(priced) = staged.take() {
+                ledger.commit(priced);
+            }
+        },
     );
+    let (mut ledger, _) = state;
     deadline(&inputs)?;
-    ledger.close();
+    let close = ledger.close().with_headroom();
+    let remaining = scan
+        .remaining
+        .checked_add(close_reserve)
+        .and_then(|budget| budget.checked_sub(close))
+        .unwrap_or(ClaudeTokens::ZERO);
     trace.optional(OptionalEvent::Scanned, None);
     admit_render(&ledger, accounting).map_err(PreparationRefusal::Accounting)?;
     let (admitted, skipped): (Vec<_>, Vec<_>) = partition
@@ -589,7 +594,7 @@ pub fn prepare_optional(
         skipped: skipped.into_iter().map(|(_, group)| group).collect(),
         excluded,
         ungrouped: partition.refused,
-        remaining: scan.remaining,
+        remaining,
     })
 }
 

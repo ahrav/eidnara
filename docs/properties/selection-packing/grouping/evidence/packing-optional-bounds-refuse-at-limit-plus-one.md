@@ -12,7 +12,7 @@ per-item-maximum bounds to the optional phase.
 - `crates/retrieval/src/packing/scan.rs` `admit_optional_set` checks every
   bound in row order before any byte is loaded and returns `BoundExceeded`
   with the bound and the crossing position.
-- `crates/daemon/src/packing.rs` `prepare_optional` calls it after eligibility
+- `crates/daemon/src/packing/mod.rs` `prepare_optional` calls it after eligibility
   and before the load hold, mapping the refusal to
   `PreparationRefusal::OptionalBound`.
 - `crates/retrieval/tests/packing_grouping.rs` admits a four-span set at the
