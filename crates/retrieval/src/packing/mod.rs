@@ -156,9 +156,10 @@ const SELECTED_SQL: &str =
 /// [`ProjectionError::TooManyRecords`] when more than `max` identities are
 /// given, [`ProjectionError::UnknownOccurrence`] for an identity with no row,
 /// [`ProjectionError::CorruptRow`] for a row outside the schema's shape, whose
-/// tuple digest does not match its identifier, or whose class, revision,
-/// representation, or span column disagrees with its tuple, and the SQLite
-/// error otherwise.
+/// tuple digest does not match its identifier, whose class, revision,
+/// representation, or span column disagrees with its tuple, or whose
+/// eligibility metadata the kernel would refuse, and the SQLite error
+/// otherwise.
 pub fn read_selected(
     conn: &GuardedConn<'_>,
     selected: &[OccurrenceId],
@@ -211,7 +212,7 @@ fn decode(
     }
     let grouping =
         Grouping::derive(tuple, class, revision, &representation, span).map_err(|_| corrupt())?;
-    Ok(SelectedOccurrence {
+    let selected = SelectedOccurrence {
         occurrence,
         class,
         revision,
@@ -231,7 +232,15 @@ fn decode(
         },
         tombstone,
         grouping,
-    })
+    };
+    // Metadata the kernel would refuse is this row's fault, not an untyped
+    // `InvalidInput` over the whole batch it is judged in.
+    selected
+        .eligibility_candidate()
+        .candidate
+        .validate()
+        .map_err(|_| corrupt())?;
+    Ok(selected)
 }
 
 /// Returns bytes for `payload` without verifying its digest.

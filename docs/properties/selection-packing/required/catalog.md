@@ -14,7 +14,7 @@ that lands their executable checks.
 
 This part owns the required phase: what refuses a required occurrence, the
 integer budget it is charged against, and the trace that witnesses that no
-optional event and no retrieval call precede its completion. Optional
+optional event and no retrieval call happen inside it. Optional
 grouping and admission are the U3 part.
 
 ## Observation contract
@@ -70,7 +70,8 @@ Exercised: yes - `crates/daemon/tests/packing_required.rs`
 `a_deadline_that_passes_while_the_connection_is_held_refuses_without_reading`,
 `a_cancellation_while_the_connection_is_held_refuses_without_reading`,
 `more_requests_than_the_load_bound_are_refused_before_any_read`,
-`a_set_beyond_the_kernel_batch_cap_is_refused_before_any_read`, and
+`a_set_beyond_the_kernel_batch_cap_is_refused_before_any_read`,
+`a_budget_that_ends_during_reservation_refuses_the_materialization`, and
 `every_failure_class_has_a_distinct_literal`; the hidden verdict and the
 stale and superseded verdicts are exercised at the pure layer by
 `crates/retrieval/tests/packing_required.rs`
@@ -80,7 +81,8 @@ precedence by
 Guarantee: A required occurrence that is missing, stale, hidden, corrupt,
 ineligible, or oversized, or a required set whose cost exceeds the token
 limit, yields exactly one `RequiredContextFailure` class, and the trace shows
-zero optional events and zero retrieval calls; an exhausted `EvalBudget`
+zero optional events and no retrieval call added by the phase; an exhausted
+`EvalBudget`
 yields the deadline refusal with the same trace. A set beyond the load-count
 bound, or beyond the kernel's `MAX_ELIGIBILITY_CANDIDATES` batch cap, is
 refused as oversized before any request is examined; every other fault is the
@@ -89,13 +91,16 @@ Check: `always` - for each fault class one required occurrence exhibiting it
 returns that class and no other; `class()` literals are pairwise distinct;
 `PackingTrace::optional_events()` is zero and `retrieval_calls()` equals the
 seeded lane count after every refusal and every success; admission-stage
-refusals record no `Loaded` event and `payload_loads()` stays zero; the
+refusals record no `Loaded` event and `payload_loads()` stays zero, while a
+row whose bytes came back counts as loaded before its digest is checked; the
 deadline refusal and the load-bound refusal record no event; a deadline that
 passes, or a cancellation that lands, while another thread holds the
-projection connection refuses within the budget with no event. `always`
+projection connection refuses within the budget with no event; a budget that
+ends inside the estimator refuses rather than materializing. `always`
 because the phase must hold it on every request, not only on a reachable
 subset.
-Fault/timing angle: The `EvalBudget` is polled between stages, and each
+Fault/timing angle: The `EvalBudget` is polled between stages and on both
+sides of reservation, and each
 projection hold acquires and reads through `with_conn_interruptible` under the
 budget's deadline and cancellation when the budget has a deadline, so a budget
 that ends mid-phase refuses at the next poll or at the next SQLite step. A
@@ -106,10 +111,12 @@ Required faults and enabling state: An unpersisted identifier; a request
 revision other than the row's; a tombstoned row; a kernel with no object for
 the row's source; a payload row rewritten to other bytes; a payload row
 rewritten to another length; an occurrence row whose tuple is another
-occurrence's; per-item, load-count, and byte-total bounds below the fixture; a
+occurrence's; an occurrence row whose eligibility digest the kernel refuses;
+per-item, load-count, and byte-total bounds below the fixture; a
 request set beyond the kernel batch cap; a token limit one below the required
 cost; an expired and a cancelled budget; a deadline and a cancellation that
-land while another thread holds the projection connection.
+land while another thread holds the projection connection; a cancellation
+raised by the estimator.
 Confidence: high - [evidence](evidence/packing-required-phase-precedes-optional-work.md).
 Every clause is asserted at this base; the hidden verdict is asserted only
 at the pure layer because the kernel fixture has no hidden surface.
@@ -131,7 +138,9 @@ Exercised: yes - `crates/daemon/src/packing.rs` tests
 `compile_fail` doctests on `ClaudeTokens`.
 Guarantee: The packer's budget and cost unit is the integer `ClaudeTokens`;
 a NaN, negative, non-integer, infinite, over-range, or absent budget is
-refused with a typed `BudgetRefusal`, never rounded, saturated, or clamped; `EmbedTokens` and
+refused with a typed `BudgetRefusal`, never rounded, saturated, or clamped;
+over-range begins above 2^53, the last `f64` below which every integer
+arrives exact; `EmbedTokens` and
 `ClaudeTokens` do not substitute for each other at compile time.
 Check: `always` - each malformed value maps to its refusal variant; the
 legacy profile trim answers a NaN or negative budget as if it were one token
@@ -140,7 +149,7 @@ fail to compile. `always` because a single clamped budget is an over-budget
 edit.
 Fault/timing angle: none.
 Required faults and enabling state: NaN, negative zero, negative, fractional,
-infinite, 2^64, and absent budget values.
+infinite, 2^53 + 2, 2^64, and absent budget values.
 Confidence: high - [evidence](evidence/packing-budget-is-an-integer-never-clamped.md).
 The negative control runs the retained legacy clamp and shows it answering.
 Existing check: `crates/daemon/src/m0_compose.rs`

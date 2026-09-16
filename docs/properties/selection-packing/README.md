@@ -12,7 +12,7 @@ proposed.
 | Part | Owns | Landed by |
 | --- | --- | --- |
 | `identity/` | Per-occurrence attribution on shared payloads, the grouping key, and the non-grouping classes. | RP2.8 U1 ([#631](https://github.com/ahrav/eidnara/issues/631)). |
-| `required/` | The required phase: failure classes, the integer budget, and the trace that witnesses no optional event or retrieval call precedes completion. | RP2.8 U2 ([#632](https://github.com/ahrav/eidnara/issues/632)). |
+| `required/` | The required phase: failure classes, the integer budget, and the trace that witnesses no optional event or retrieval call happens inside it. | RP2.8 U2 ([#632](https://github.com/ahrav/eidnara/issues/632)). |
 
 The grouping, accounting, and application parts enter this directory
 with the tickets that land their checks. Each part follows `../METHOD.md`.

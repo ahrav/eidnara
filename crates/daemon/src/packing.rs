@@ -47,9 +47,10 @@ impl ClaudeTokens {
 
     /// A fractional, negative, non-finite, over-range, or absent budget is
     /// refused, never rounded, saturated, or clamped. Negative zero is
-    /// refused as negative.
+    /// refused as negative. Values above 2^53 are over-range: an integer
+    /// there may already have rounded on its way into the `f64`.
     pub fn from_budget(value: Option<f64>) -> Result<Self, BudgetRefusal> {
-        const TWO_TO_THE_64: f64 = 18_446_744_073_709_551_616.0;
+        const MAX_EXACT: f64 = 9_007_199_254_740_992.0;
         let value = value.ok_or(BudgetRefusal::Absent)?;
         if value.is_nan() {
             return Err(BudgetRefusal::NotANumber);
@@ -57,7 +58,7 @@ impl ClaudeTokens {
         if value.is_sign_negative() {
             return Err(BudgetRefusal::Negative);
         }
-        if !value.is_finite() || value >= TWO_TO_THE_64 {
+        if value > MAX_EXACT {
             return Err(BudgetRefusal::TooLarge);
         }
         if value.fract() != 0.0 {
@@ -343,12 +344,12 @@ pub fn prepare_required(
     // request order.
     for (item, payload) in admitted.iter().zip(&bytes) {
         let occurrence = item.row().occurrence;
+        trace.payload_loads += 1;
+        trace.required(RequiredEvent::Loaded, Some(occurrence));
         item.row()
             .payload
             .verify(payload)
             .map_err(|_| RequiredContextFailure::Corrupt(occurrence))?;
-        trace.payload_loads += 1;
-        trace.required(RequiredEvent::Loaded, Some(occurrence));
     }
     if let Some((occurrence, error)) = fault {
         return Err(match error {
@@ -357,9 +358,11 @@ pub fn prepare_required(
         });
     }
     let borrowed: Vec<&[u8]> = bytes.iter().map(Vec::as_slice).collect();
+    deadline()?;
     let reservation = reserve_required(&admitted, &borrowed, bounds.token_limit, |bytes| {
         inputs.estimator.cost(bytes)
     })?;
+    deadline()?;
     trace.required(RequiredEvent::Reserved, None);
 
     let items = admitted
@@ -416,8 +419,8 @@ mod tests {
         assert_eq!(ClaudeTokens::from_budget(Some(0.0)), Ok(ClaudeTokens(0)));
         assert_eq!(ClaudeTokens::from_budget(Some(10.0)), Ok(ClaudeTokens(10)));
         assert_eq!(
-            ClaudeTokens::from_budget(Some(18_446_744_073_709_549_568.0)),
-            Ok(ClaudeTokens(18_446_744_073_709_549_568))
+            ClaudeTokens::from_budget(Some(9_007_199_254_740_992.0)),
+            Ok(ClaudeTokens(1 << 53))
         );
         assert_eq!(ClaudeTokens::from_budget(None), Err(BudgetRefusal::Absent));
         assert_eq!(
@@ -441,9 +444,13 @@ mod tests {
             Err(BudgetRefusal::TooLarge)
         );
         assert_eq!(
-            ClaudeTokens::from_budget(Some(18_446_744_073_709_551_616.0)),
+            ClaudeTokens::from_budget(Some(9_007_199_254_740_994.0)),
             Err(BudgetRefusal::TooLarge),
-            "2^64 would saturate `as u64` to u64::MAX"
+            "above 2^53 an integer may already have rounded before it arrived"
+        );
+        assert_eq!(
+            ClaudeTokens::from_budget(Some(18_446_744_073_709_551_616.0)),
+            Err(BudgetRefusal::TooLarge)
         );
         assert_eq!(ClaudeTokens(u64::MAX).checked_add(ClaudeTokens(1)), None);
     }

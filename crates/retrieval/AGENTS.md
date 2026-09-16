@@ -35,7 +35,8 @@ bytes change. Identity types carry no project, session, or harness.
 
 `src/packing/mod.rs` reads selected occurrences by occurrence identity and
 derives the grouping key. Attribution (sensitivity, provenance, eligibility
-candidate) comes from the occurrence's own row; `PayloadRef` is never an input
+candidate) comes from the occurrence's own row, and a row whose candidate the
+kernel would refuse is `CorruptRow` at the read; `PayloadRef` is never an input
 to a selection read. `fetch_payload` is the one read keyed by a `PayloadRef`:
 it returns bytes only, length-guarded in SQL, and the caller verifies the
 digest through `PayloadRef::verify` after releasing the connection. Only
