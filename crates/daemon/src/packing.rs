@@ -254,6 +254,10 @@ pub struct RequiredMaterialization {
     pub remaining: ClaudeTokens,
 }
 
+/// The kernel judges at most `MAX_ELIGIBILITY_CANDIDATES` per batch, so a
+/// caller bound above it cannot be honored.
+const KERNEL_BATCH_CAP: NonZeroUsize = NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap();
+
 fn deadline(inputs: &RequiredInputs<'_>) -> Result<(), PreparationRefusal> {
     if inputs.budget.is_exhausted() {
         Err(PreparationRefusal::Deadline)
@@ -292,6 +296,20 @@ fn until_first_fault<T, E>(results: impl Iterator<Item = Result<T, E>>) -> (Vec<
     (values, None)
 }
 
+/// An optional row that is missing or corrupt is excluded and the scan
+/// continues; any other fault, including an interrupted statement, ends the
+/// statements at once as in the required phase.
+fn excludable<T>(
+    result: Result<T, ProjectionError>,
+) -> Result<Result<T, OptionalExclusion>, ProjectionError> {
+    match result {
+        Ok(value) => Ok(Ok(value)),
+        Err(ProjectionError::UnknownOccurrence { .. }) => Ok(Err(OptionalExclusion::Missing)),
+        Err(ProjectionError::CorruptRow) => Ok(Err(OptionalExclusion::Corrupt)),
+        Err(fault) => Err(fault),
+    }
+}
+
 pub fn prepare_required(
     store: &SqliteStore,
     inputs: RequiredInputs<'_>,
@@ -300,9 +318,6 @@ pub fn prepare_required(
     trace: &mut PackingTrace,
 ) -> Result<RequiredMaterialization, PreparationRefusal> {
     deadline(&inputs)?;
-    // The kernel judges at most `MAX_ELIGIBILITY_CANDIDATES` per batch, so a
-    // caller bound above it cannot be honored.
-    const KERNEL_BATCH_CAP: NonZeroUsize = NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap();
     let load_cap = bounds.max_payload_loads.min(KERNEL_BATCH_CAP);
     let bounds = &RequiredBounds {
         max_payload_loads: load_cap,
@@ -455,6 +470,10 @@ pub fn prepare_optional(
     trace: &mut PackingTrace,
 ) -> Result<OptionalAdmission, PreparationRefusal> {
     deadline(&inputs)?;
+    let bounds = &OptionalBounds {
+        max_fused_candidates: bounds.max_fused_candidates.min(KERNEL_BATCH_CAP),
+        ..*bounds
+    };
     admit_fused_candidates(requests.len(), bounds).map_err(PreparationRefusal::OptionalBound)?;
     let mut excluded = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -469,29 +488,24 @@ pub fn prepare_optional(
         })
         .copied()
         .collect();
-    let reads: Vec<Result<SelectedOccurrence, ProjectionError>> =
-        hold(store, inputs.budget, |conn| {
-            Ok(requests
-                .iter()
-                .map(|request| {
-                    read_selected(conn, &[request.occurrence], NonZeroUsize::MIN)
-                        .map(|mut rows| rows.swap_remove(0))
-                })
-                .collect())
-        })?;
+    let (reads, fault) = hold(store, inputs.budget, |conn| {
+        Ok(until_first_fault(requests.iter().map(|request| {
+            excludable(
+                read_selected(conn, &[request.occurrence], NonZeroUsize::MIN)
+                    .map(|mut rows| rows.swap_remove(0)),
+            )
+        })))
+    })?;
     let mut live: Vec<(OptionalRequest, SelectedOccurrence)> = Vec::new();
     for (request, read) in requests.iter().zip(reads) {
         match read {
             Ok(row) => live.push((*request, row)),
-            Err(ProjectionError::UnknownOccurrence { .. }) => {
-                excluded.push((request.occurrence, OptionalExclusion::Missing));
-            }
-            Err(ProjectionError::CorruptRow) => {
-                excluded.push((request.occurrence, OptionalExclusion::Corrupt));
-            }
-            Err(other) => return Err(other.into()),
+            Err(exclusion) => excluded.push((request.occurrence, exclusion)),
         }
         trace.optional(OptionalEvent::Read, Some(request.occurrence));
+    }
+    if let Some(fault) = fault {
+        return Err(fault.into());
     }
 
     deadline(&inputs)?;
@@ -526,25 +540,32 @@ pub fn prepare_optional(
     trace.optional(OptionalEvent::Bounded, None);
 
     deadline(&inputs)?;
-    let loaded: Vec<Result<Vec<u8>, ProjectionError>> = hold(store, inputs.budget, |conn| {
-        Ok(rows
-            .iter()
-            .map(|row| fetch_payload(conn, &row.payload))
-            .collect())
+    let (loaded, fault) = hold(store, inputs.budget, |conn| {
+        Ok(until_first_fault(
+            rows.iter()
+                .map(|row| excludable(fetch_payload(conn, &row.payload))),
+        ))
     })?;
     // Payload verification runs after `hold` releases the connection.
     let mut selected: Vec<(&SelectedOccurrence, Vec<u8>)> = Vec::with_capacity(rows.len());
     for (row, load) in rows.iter().zip(loaded) {
-        match load.and_then(|payload| row.payload.verify(&payload).map(|()| payload)) {
+        match load.and_then(|payload| {
+            row.payload
+                .verify(&payload)
+                .map(|()| payload)
+                .map_err(|_| OptionalExclusion::Corrupt)
+        }) {
             Ok(payload) => selected.push((row, payload)),
-            Err(ProjectionError::CorruptRow) => {
-                excluded.push((row.occurrence, OptionalExclusion::Corrupt));
+            Err(exclusion) => {
+                excluded.push((row.occurrence, exclusion));
                 continue;
             }
-            Err(other) => return Err(other.into()),
         }
         trace.payload_loads += 1;
         trace.optional(OptionalEvent::Loaded, Some(row.occurrence));
+    }
+    if let Some(fault) = fault {
+        return Err(fault.into());
     }
     let selected: Vec<Selected<'_>> = selected
         .iter()
@@ -618,6 +639,36 @@ mod tests {
             assert!(rendered.contains(&secret.len().to_string()), "{rendered}");
             assert!(rendered.contains("abab"), "{rendered}");
         }
+    }
+
+    /// A missing or corrupt row is excluded and the next statement runs; an
+    /// interrupted statement is the fault and no later statement runs.
+    #[test]
+    fn optional_statements_stop_at_the_first_non_excludable_fault() {
+        let outcomes = [
+            Ok(1),
+            Err(ProjectionError::UnknownOccurrence {
+                occurrence_id: String::new(),
+            }),
+            Err(ProjectionError::CorruptRow),
+            Err(ProjectionError::Interrupted),
+            Ok(2),
+        ];
+        let mut ran = 0;
+        let (results, fault) = until_first_fault(outcomes.into_iter().map(|outcome| {
+            ran += 1;
+            excludable(outcome)
+        }));
+        assert_eq!(fault, Some(ProjectionError::Interrupted));
+        assert_eq!(
+            results,
+            [
+                Ok(1),
+                Err(OptionalExclusion::Missing),
+                Err(OptionalExclusion::Corrupt)
+            ]
+        );
+        assert_eq!(ran, 4, "the statement after the interruption never ran");
     }
 
     #[test]

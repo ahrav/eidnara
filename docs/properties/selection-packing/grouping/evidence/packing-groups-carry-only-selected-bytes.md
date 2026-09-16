@@ -41,3 +41,44 @@ None.
   representations.
 - The frozen reference and a seeded generator over spans at character
   boundaries.
+
+## Investigation log
+
+### Q: Can the production grouper reach a parent buffer?
+
+- Sources examined: `crates/retrieval/src/packing/grouping.rs` `Selected` and
+  `group`; `crates/daemon/src/packing.rs` `prepare_optional`, which builds
+  each `Selected` from the row and the bytes `fetch_payload` returned for that
+  row alone; `grep -rn groups.json crates --include=*.rs`.
+- Findings: `group` takes `&[Selected<'_>]` and nothing else; the only reader
+  of the oracle parent is `crates/retrieval/tests/packing_grouping.rs`.
+- Missing evidence: none.
+- Conclusion: resolved with answer - the parent exists in the test alone, so
+  a gap can only be filled by bytes the selection carried.
+
+### Q: Is adjacency declared by the data or inferred by the grouper?
+
+- Sources examined: the Q2 rulings in `catalog.md`; `grouping.rs` `merge`,
+  whose run condition is `member.start <= current.span.end` after sorting by
+  `(start, end, occurrence)`.
+- Findings: adjacency is the offset relation "first ends where second starts";
+  no tuple, schema, or export field declares it, and the frozen reference
+  applies the same relation from the rule text.
+- Missing evidence: none.
+- Conclusion: resolved with answer - inferred from offsets under the recorded
+  ruling; a change to the relation is a protocol change to both implementations.
+
+### Q: Does the frozen reference share code or assumptions with production?
+
+- Sources examined: `crates/retrieval/tests/support/frozen_packer.rs` imports
+  (`std::collections::BTreeMap` only) and its coverage-map algorithm; the
+  differential proptest's seeded generator and damage cases.
+- Findings: the reference imports nothing from `retrieval::packing`; it marks
+  each selected byte in a coverage map and reads runs off the map, while
+  production merges sorted members. Both are written from the same rule text,
+  so a misreading of the text would be shared.
+- Missing evidence: an oracle independent of the rule text beyond the fixture
+  tables in `groups.json`.
+- Conclusion: resolved with answer - no code in common; the shared-text risk is
+  bounded by the hand-written fixture tables, which the first test checks
+  against the parent slice directly.

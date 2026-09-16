@@ -663,3 +663,27 @@ fn whole_objects_of_one_class_are_their_own_group_in_both_implementations() {
     assert_eq!(empty.ranges[0].members, vec![rows[3].0.occurrence]);
     grouping_agrees_with_reference(&rows).unwrap();
 }
+
+/// The crate promises that payloads are never logged; a group carries the
+/// selected bytes, so its `Debug` names their length, not their content.
+#[test]
+fn selected_bytes_are_never_printed_by_grouping_types() {
+    let secret = "the selected payload content";
+    let rows = [tool_span("call-a", "1", "tool_output", secret, None)];
+    let items = selected(&rows);
+    let partition = group(&items);
+    assert_eq!(partition.groups.len(), 1, "{partition:?}");
+    let range = &partition.groups[0].ranges[0];
+    for rendered in [
+        format!("{:?}", items[0]),
+        format!("{range:?}"),
+        format!("{:?}", partition.groups[0]),
+        format!("{partition:?}"),
+    ] {
+        assert!(
+            !rendered.contains("payload content") && !rendered.contains("116, 104, 101"),
+            "{rendered}"
+        );
+        assert!(rendered.contains(&secret.len().to_string()), "{rendered}");
+    }
+}

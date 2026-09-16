@@ -12,6 +12,7 @@ use daemon::packing::{
 };
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
+use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{OptionalBound, OptionalBounds};
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
 use support::packing::{ByteEstimator, Fixture, ToolSpan, bounds, tool_range, tool_span};
@@ -287,5 +288,80 @@ fn an_optional_bound_at_limit_plus_one_refuses_with_the_bound_before_any_load() 
         trace.payload_loads(),
         1,
         "only the required payload was loaded"
+    );
+}
+
+/// The kernel judges at most `MAX_ELIGIBILITY_CANDIDATES` per batch, so a
+/// caller bound above it cannot be honored; the set is refused as a bound
+/// violation before any row is read rather than read whole and refused by
+/// the kernel.
+#[test]
+fn a_fused_set_beyond_the_kernel_batch_cap_is_refused_before_any_read() {
+    let fixture = Fixture::new(&[REQUIRED]);
+    let requests: Vec<OptionalRequest> = (0..=kernel::MAX_ELIGIBILITY_CANDIDATES)
+        .map(|index| OptionalRequest {
+            occurrence: OccurrenceId::parse(&format!("{index:064x}")).unwrap(),
+            revision: 1,
+        })
+        .collect();
+    let generous = OptionalBounds {
+        max_fused_candidates: NonZeroUsize::new(2 * kernel::MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        ..wide()
+    };
+    let (result, trace) = run(&fixture, &requests, &generous, 1 << 20);
+    match result.unwrap_err() {
+        PreparationRefusal::OptionalBound(exceeded) => {
+            assert_eq!(exceeded.bound, OptionalBound::FusedCandidates);
+            assert_eq!(exceeded.at, kernel::MAX_ELIGIBILITY_CANDIDATES);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        !trace
+            .events()
+            .iter()
+            .any(|event| matches!(event, StageEvent::Optional(..))),
+        "no optional row is read before the cap refuses the set: {:?}",
+        trace.events()
+    );
+}
+
+/// A corrupt optional payload is excluded with its reason after the load; the
+/// scan continues and the preparation is not refused.
+#[test]
+fn a_corrupt_optional_payload_is_excluded_and_the_scan_continues() {
+    let damaged = tool_span("opt-a", "1", "damaged");
+    let sound = tool_span("opt-b", "1", "sound");
+    let fixture = Fixture::new(&[REQUIRED, damaged, sound]);
+    let payload_id = kernel::source_identity::payload_id(damaged.payload.as_bytes());
+    let mut altered = damaged.payload.as_bytes().to_vec();
+    altered[0] ^= 1;
+    rusqlite::Connection::open(fixture.sqlite_path())
+        .unwrap()
+        .execute(
+            "UPDATE payloads SET bytes=?2 WHERE payload_id=?1",
+            rusqlite::params![payload_id, altered],
+        )
+        .unwrap();
+    let (result, trace) = run(
+        &fixture,
+        &[optional(&damaged), optional(&sound)],
+        &wide(),
+        1 << 20,
+    );
+    let admission = result.unwrap();
+    assert_eq!(
+        admission.excluded,
+        vec![(damaged.id(), OptionalExclusion::Corrupt)]
+    );
+    assert_eq!(admission.admitted.len(), 1);
+    assert_eq!(
+        admission.admitted[0].group.members().collect::<Vec<_>>(),
+        vec![sound.id()]
+    );
+    assert_eq!(
+        trace.payload_loads(),
+        2,
+        "the required payload and the sound optional payload; the corrupt load is not charged"
     );
 }
