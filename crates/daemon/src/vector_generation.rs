@@ -438,7 +438,7 @@ pub struct Staging<'a> {
 }
 
 impl Staging<'_> {
-    /// Charges the manifest's whole inventory against the staged-bytes limit, reserves it in the ledger's disk pool on top of what the store already holds, then stages the files `resolve` names for each manifest path; a refused admission or reservation stages nothing. The reservation ends with the copy: the bytes then belong to the store, which the next disk reservation counts. A manifest the store already holds is reserved the same way, because the store copies the inventory into a staging temp before it finds the occupant and publishes nothing twice.
+    /// Charges the manifest's whole inventory against the staged-bytes limit, reserves it plus the `manifest.json` the store writes beside it in the ledger's disk pool on top of what the store already holds, then stages the files `resolve` names for each manifest path; a refused admission or reservation stages nothing. The reservation ends with the copy: the bytes then belong to the store, which the next disk reservation counts. A manifest the store already holds is reserved the same way, because the store copies the inventory into a staging temp before it finds the occupant and publishes nothing twice.
     ///
     /// # Errors
     ///
@@ -457,9 +457,17 @@ impl Staging<'_> {
                 &[(STAGE_DISK_LIMIT, bytes)],
             )
             .map_err(VectorRefusal::Admission)?;
+        // The store's walk counts `manifest.json`, so the reservation covers it or an exact-bound staging would leave the store over the limit.
+        let on_disk = bytes
+            .checked_add(manifest.canonical_bytes().len() as u64)
+            .ok_or(VectorRefusal::Reservation(
+                crate::vector_admission::Refusal::Overflow {
+                    pool: crate::vector_admission::Pool::Disk,
+                },
+            ))?;
         let _staging = self
             .ledger
-            .reserve_disk(self.admission, ResourceClass::Staging, bytes, self.store)
+            .reserve_disk(self.admission, ResourceClass::Staging, on_disk, self.store)
             .map_err(VectorRefusal::Reservation)?;
         let sources = manifest_sources(manifest, |path| Some(resolve(path)))
             .expect("every manifest path resolves under the work directory");

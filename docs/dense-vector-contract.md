@@ -308,9 +308,10 @@ it and nothing else does: cancelling the work that holds one releases nothing
 until that work lets go, and output that keeps its view keeps its
 reservations.
 
-Staging reserves the payload inventory in the disk pool before it copies
-anything and releases the reservation when the copy is done, since the bytes
-are then the store's, measured by the next disk reservation. A manifest the
+Staging reserves the payload inventory plus the `manifest.json` the store
+writes beside it in the disk pool before it copies anything and releases the
+reservation when the copy is done, since the bytes are then the store's,
+measured by the next disk reservation. A manifest the
 store already holds is reserved the same way: the store copies the inventory
 into a staging temp before it finds the occupant and publishes nothing twice,
 so a retry after an unknown outcome needs room for the copy and leaves the

@@ -205,13 +205,10 @@ fn the_disk_pool_counts_the_store_and_staging_is_refused_before_it_would_exceed_
     let store_bytes = Ledger::store_bytes(&fixture.store).unwrap();
     assert!(store_bytes > 0);
     let built = build(&fixture.expected(), &export(2, 12), &fixture.work_dir()).unwrap();
-    let staged_bytes: u64 = built
-        .sidecar
-        .stage_manifest()
-        .files
-        .iter()
-        .map(|f| f.size)
-        .sum();
+    // The payload inventory plus the `manifest.json` the store writes beside it: every byte the staging leaves in the store.
+    let manifest = built.sidecar.stage_manifest();
+    let staged_bytes: u64 = manifest.files.iter().map(|f| f.size).sum::<u64>()
+        + manifest.canonical_bytes().len() as u64;
 
     fixture.set_limit(DISK_LIMIT, store_bytes + staged_bytes - 1);
     let refusal = stage(&built, &fixture.staging()).unwrap_err();
@@ -242,9 +239,10 @@ fn the_disk_pool_counts_the_store_and_staging_is_refused_before_it_would_exceed_
         0,
         "the staging reservation ends with the copy; the bytes are the store's"
     );
-    assert!(
-        Ledger::store_bytes(&fixture.store).unwrap() >= store_bytes + staged_bytes,
-        "the store's own total grew by at least the staged files"
+    assert_eq!(
+        Ledger::store_bytes(&fixture.store).unwrap(),
+        store_bytes + staged_bytes,
+        "the store grew by exactly the reserved bytes, so it stays within the bound it was admitted under"
     );
     // A compactor's scratch reservation is judged against the same pool and the same store total; a resident reservation meanwhile leaves the disk pool alone.
     let _resident = fixture
