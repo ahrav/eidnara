@@ -1,0 +1,254 @@
+{
+  "manifest": {
+    "base": "8e0491225a7292ef077c675d44b94f94a24041d3",
+    "probe_sha256": "67ac0be9f66cbec65f4319ef1e0451bacaa0d2f7763009421870a9a0f859781c",
+    "candidates_sha256": "1bd352c656696ba62063072ff0b55cc104bfb0c5edc8940b6bd2cf693e9acdf4",
+    "guards_sha256": "ac42f7b59112aac188797a6a155826c492268857d4a32a2fa918bea6a7abe9ad",
+    "file_layer_sha256": "824f471dc6738c52a8fdf4cc9b29aa773e5e93ef5f729815a4eb23d065977a4c",
+    "binary_sha256": "4d62763801692f990846ea26a517038aa98142fe8808ae7326f0b03b9d22bbb4",
+    "command": [
+      "taskset",
+      "-c",
+      "16",
+      "/tmp/opencode/dense-retrieval-lab/target/release/deps/dense_performance_probe-252a8083ba00156f",
+      "--ignored",
+      "--exact",
+      "guards::dense_candidate_guards",
+      "--nocapture"
+    ],
+    "build_command": [
+      "cargo",
+      "+1.98",
+      "test",
+      "--locked",
+      "-p",
+      "retrieval",
+      "--release",
+      "--test",
+      "dense_performance_probe",
+      "--no-run",
+      "--message-format=json"
+    ],
+    "uname": {
+      "system": "Linux",
+      "node": "redacted; shared development host",
+      "release": "6.12.103-127.188.amzn2023.x86_64",
+      "version": "#1 SMP PREEMPT_DYNAMIC Tue Aug 25 15:42:53 UTC 2026",
+      "machine": "x86_64"
+    },
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+    "cc": "cc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)\nCopyright (C) 2021 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+    "cpu": {
+      "lscpu": [
+        {
+          "field": "Architecture:",
+          "data": "x86_64"
+        },
+        {
+          "field": "CPU op-mode(s):",
+          "data": "32-bit, 64-bit"
+        },
+        {
+          "field": "Address sizes:",
+          "data": "48 bits physical, 48 bits virtual"
+        },
+        {
+          "field": "Byte Order:",
+          "data": "Little Endian"
+        },
+        {
+          "field": "CPU(s):",
+          "data": "128"
+        },
+        {
+          "field": "On-line CPU(s) list:",
+          "data": "0-127"
+        },
+        {
+          "field": "Vendor ID:",
+          "data": "AuthenticAMD"
+        },
+        {
+          "field": "Model name:",
+          "data": "AMD EPYC 9R14"
+        },
+        {
+          "field": "CPU family:",
+          "data": "25"
+        },
+        {
+          "field": "Model:",
+          "data": "17"
+        },
+        {
+          "field": "Thread(s) per core:",
+          "data": "1"
+        },
+        {
+          "field": "Core(s) per socket:",
+          "data": "64"
+        },
+        {
+          "field": "Socket(s):",
+          "data": "2"
+        },
+        {
+          "field": "Stepping:",
+          "data": "1"
+        },
+        {
+          "field": "BogoMIPS:",
+          "data": "5200.00"
+        },
+        {
+          "field": "Flags:",
+          "data": "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq monitor ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy cr8_legacy abm sse4a misalignsse 3dnowprefetch topoext perfctr_core ssbd perfmon_v2 ibrs ibpb stibp ibrs_enhanced vmmcall fsgsbase bmi1 avx2 smep bmi2 invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx512_bf16 clzero xsaveerptr rdpru wbnoinvd arat avx512vbmi pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid flush_l1d"
+        },
+        {
+          "field": "Hypervisor vendor:",
+          "data": "KVM"
+        },
+        {
+          "field": "Virtualization type:",
+          "data": "full"
+        },
+        {
+          "field": "L1d cache:",
+          "data": "4 MiB (128 instances)"
+        },
+        {
+          "field": "L1i cache:",
+          "data": "4 MiB (128 instances)"
+        },
+        {
+          "field": "L2 cache:",
+          "data": "128 MiB (128 instances)"
+        },
+        {
+          "field": "L3 cache:",
+          "data": "512 MiB (16 instances)"
+        },
+        {
+          "field": "NUMA node(s):",
+          "data": "2"
+        },
+        {
+          "field": "NUMA node0 CPU(s):",
+          "data": "0-63"
+        },
+        {
+          "field": "NUMA node1 CPU(s):",
+          "data": "64-127"
+        },
+        {
+          "field": "Vulnerability Gather data sampling:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability Indirect target selection:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability Itlb multihit:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability L1tf:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability Mds:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability Meltdown:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability Mmio stale data:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability Reg file data sampling:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability Retbleed:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability Spec rstack overflow:",
+          "data": "Mitigation; Safe RET"
+        },
+        {
+          "field": "Vulnerability Spec store bypass:",
+          "data": "Mitigation; Speculative Store Bypass disabled via prctl"
+        },
+        {
+          "field": "Vulnerability Spectre v1:",
+          "data": "Mitigation; usercopy/swapgs barriers and __user pointer sanitization"
+        },
+        {
+          "field": "Vulnerability Spectre v2:",
+          "data": "Mitigation; Enhanced / Automatic IBRS; IBPB conditional; STIBP disabled; PBRSB-eIBRS Not affected; BHI Not affected"
+        },
+        {
+          "field": "Vulnerability Srbds:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability Tsa:",
+          "data": "Mitigation; Clear CPU buffers"
+        },
+        {
+          "field": "Vulnerability Tsx async abort:",
+          "data": "Not affected"
+        },
+        {
+          "field": "Vulnerability Vmscape:",
+          "data": "Not affected"
+        }
+      ]
+    },
+    "load_before": "13.57 8.73 8.78 2/6557 2633194\n",
+    "clock_ticks_per_second": 100,
+    "config": {
+      "worktree": "/tmp/opencode/dense-retrieval-lab",
+      "output": "/tmp/opencode/dense-final-guards",
+      "n": 20000,
+      "dim": 384,
+      "reps": 5,
+      "k": 20,
+      "page": 1024,
+      "selectivity": 100,
+      "query": 1,
+      "cpu": "16",
+      "candidates": false,
+      "guards": true,
+      "kernel_cache_pages": 0,
+      "projection_cache_kib": 8192,
+      "file_layer": false,
+      "concurrent": false
+    },
+    "env": {
+      "DENSE_N": "20000",
+      "DENSE_DIM": "384",
+      "DENSE_REPS": "5",
+      "DENSE_K": "20",
+      "DENSE_PAGE": "1024",
+      "DENSE_SELECTIVITY": "100",
+      "DENSE_QUERY": "1",
+      "DENSE_CANDIDATES": "0",
+      "DENSE_KERNEL_CACHE_PAGES": "0",
+      "DENSE_PROJECTION_CACHE_KIB": "8192",
+      "DENSE_FILE_LAYER": "0",
+      "DENSE_CONCURRENT": "0"
+    },
+    "exit_code": 0,
+    "load_after": "13.57 8.73 8.78 7/6557 2633203\n"
+  },
+  "metadata": {},
+  "observations": [
+    {"cases":[{"case":"excluded_prefix_and_boundary_tie","eligible":16,"k":20,"outcome":"exact_ids_and_score_bits","page_heap_underfilled_throughout":true,"paths":[{"judged":168,"passes":1,"path":"page_score_first","scanned":152},{"judged":168,"passes":3,"path":"shortlist_sql","scanned":456},{"judged":168,"passes":3,"path":"resident_shortlist","scanned":456}],"population":152,"tie_boundary":{"first_64_all_excluded":true,"rank_64_excluded_id":"00dcacb0cf41c15c71146e5daa887ef229c210720734053d0691a77b8b0c88a0","rank_65_eligible_id":"7ca046ac25b188c032579b19cb27f9fe57f9b7dd3721784d3944ff19d4d77275","score_bits":4603579539312869376},"work_limit":"bounded shortlist memory does not bound repeated scan work"},{"case":"zero_eligible","eligible":0,"k":20,"outcome":"exact_ids_and_score_bits","page_heap_underfilled_throughout":true,"paths":[{"judged":95,"passes":1,"path":"page_score_first","scanned":95},{"judged":95,"passes":2,"path":"shortlist_sql","scanned":190},{"judged":95,"passes":2,"path":"resident_shortlist","scanned":190}],"population":95,"tie_boundary":null,"work_limit":"bounded shortlist memory does not bound repeated scan work"},{"case":"missing_vector","losing_id":"adf70e5cd7ea2b40fbf42abe8e3d38df32effa29af4fa844b382169d036891c2","losing_rank":95,"outcome":"all_candidates_refuse","stock":"DenseCoverageShortfall"},{"case":"nonfinite_vector","losing_id":"adf70e5cd7ea2b40fbf42abe8e3d38df32effa29af4fa844b382169d036891c2","losing_rank":95,"outcome":"all_candidates_refuse","stock":"StoredRow::NonFinite"},{"case":"malformed_digest","full_semantic_equivalence":false,"limit":"resident is not rebuilt over malformed metadata; page strategy is not asserted","losing_id":"adf70e5cd7ea2b40fbf42abe8e3d38df32effa29af4fa844b382169d036891c2","losing_rank":95,"outcome":"semantic_gap_demonstrated","resident":"existing_owner_refuses_external_projection_change","shortlist_sql":"succeeded_with_exact_ranked_results","stock":"Kernel::InvalidInput"},{"case":"kernel_retirement","mutation":"legitimate_retirement_after_resident_build","outcome":"resident_refuses_stale_kernel","scope":"sequential fixture mutation, not a concurrent snapshot proof"}],"expected_fixture_panics":8,"kind":"guard","panic_output":"expected refusal hooks may print to stderr; success requires every assertion","refusals":[{"case":"missing_vector/page_score_first","message_checked":"missing vector","outcome":"expected_fixture_panic"},{"case":"missing_vector/shortlist_sql","message_checked":"missing vector","outcome":"expected_fixture_panic"},{"case":"missing_vector/resident_shortlist","message_checked":"resident projection is stale","outcome":"expected_fixture_panic"},{"case":"nonfinite_vector/page_score_first","message_checked":"corrupt stored vector","outcome":"expected_fixture_panic"},{"case":"nonfinite_vector/shortlist_sql","message_checked":"corrupt stored vector","outcome":"expected_fixture_panic"},{"case":"nonfinite_vector/resident_shortlist","message_checked":"resident projection is stale","outcome":"expected_fixture_panic"},{"case":"malformed_digest/resident_shortlist","message_checked":"resident projection is stale","outcome":"expected_fixture_panic"},{"case":"kernel_retirement/resident_shortlist","message_checked":"projection is not caught up","outcome":"expected_fixture_panic"}],"scope":"small fixture correctness only; no benchmark or universal snapshot guarantee","success":true,"test":"dense_candidate_guards"}
+  ]
+}
