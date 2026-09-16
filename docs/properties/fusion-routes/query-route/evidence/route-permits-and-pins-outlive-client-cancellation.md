@@ -15,6 +15,10 @@ falsely complete ranking.
   `RuntimeStopped`, or `RouteClosing`.
 - `crates/host-runtime/src/dispatch.rs` aborts the handler future on cancel,
   waits for the request ledger, and only then settles the request.
+- `crates/storage/src/lib.rs` `read_on` takes the `ConnGuard` by value and
+  drops it when the read returns, before the blocking closure returns to
+  `run_blocking`; the connection is therefore free before the join, and only
+  the ledger charge lasts through it.
 - `crates/daemon/src/request_budget/host_tests.rs` runs a real host and
   client: the handler derives a `RequestBudget`, runs a held projection read
   through `run_blocking`, and awaits it with no `select!` arm. The blocking

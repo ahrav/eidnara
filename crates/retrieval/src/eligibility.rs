@@ -8,7 +8,7 @@ use kernel::{
     ArtifactDestination, CommitReadIncarnation, EgressSnapshot, EligibilityBatch,
     EligibilityCandidate, EligibilityVerdict, KernelError, KernelStore, ProjectScope,
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use storage::GuardedConn;
 
 use crate::ProjectionError;
@@ -106,34 +106,6 @@ fn candidate(
         revision,
         digest,
     ))
-}
-
-const LIVE_CANDIDATE_BY_ID_SQL: &str =
-    "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest
-     FROM occurrences o
-     LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
-     WHERE t.occurrence_id IS NULL AND o.occurrence_id=?1";
-
-/// Returns live candidates for `occurrence_ids` in input order; tombstoned and unknown identifiers are omitted, so revalidation excludes them instead of judging a missing row.
-///
-/// # Errors
-///
-/// Returns [`ProjectionError::CorruptRow`] for a stored class outside the contract, and the SQLite error otherwise.
-pub fn live_candidates_by_id<'a>(
-    conn: &GuardedConn<'_>,
-    occurrence_ids: impl IntoIterator<Item = &'a str>,
-) -> Result<Vec<OccurrenceCandidate>, ProjectionError> {
-    let mut statement = conn.prepare_cached(LIVE_CANDIDATE_BY_ID_SQL)?;
-    let mut candidates = Vec::new();
-    for occurrence_id in occurrence_ids {
-        let row: Option<LiveRow> = statement
-            .query_row(params![occurrence_id], live_row)
-            .optional()?;
-        if let Some(row) = row {
-            candidates.push(candidate(row)?);
-        }
-    }
-    Ok(candidates)
 }
 
 /// `PolicyExcluded` carries the kernel's verdict itself, never a paraphrase.

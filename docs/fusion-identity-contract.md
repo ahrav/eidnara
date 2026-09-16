@@ -108,23 +108,59 @@ the project root and session are compared before the body is parsed, and a
 `harness` claim that disagrees with the bound harness is refused. The route is
 enabled by installing a `QueryRouteLimits` set through
 `Handler::set_query_route_limits`; with none installed every authorized request
-receives the `disabled` terminal and no state is read, so rollback is disable,
-not mutation.
+whose kernel store is ready receives the `disabled` terminal and no canonical,
+projection, or lifecycle state is read, so rollback is disable, not mutation. A
+request that arrives while the store is still starting or unavailable receives
+the kernel routes' `state` answer for that condition, as every `kernel.*` route
+does, because the binding is decided before the limit set is consulted.
+`QueryRouteLimits::validate` refuses a `validation_batch` or `lexical_accepted`
+over the kernel's candidate batch, a `response_bytes` below the smallest
+empty fused envelope (one lane complete, the others undeclared, no entries),
+and a `response_bytes` above the host wire body maximum, so no installed set
+can produce an answer the route cannot bound or the host cannot send.
 
-The exact lane runs over the query's `id:` mentions, the lexical lane over the
-prose outside selector mentions, and both run inside one interruptible
-projection read under the request budget. When a dense limit set is installed
-the query is first embedded in process by the daemon's embedding lane as one
-tracked blocking step awaited in the handler; the dense lane then runs inside
-the same read through `DenseProducer`, whose first implementation is the
-exhaustive f32 oracle. An embedding lane that is busy, starting, disabled,
-failing, or refuses the input leaves the dense lane `unavailable` and the
-answer `degraded`; inference that fails or a stored vector outside the
-generation's layout ends the request as `lane_unavailable` with reason
-`embedding_failed` or `dense_corruption`. Fusion runs once, the fused set is
-revalidated by the kernel's eligibility adapter under the bound scope, and only
-survivors are materialized within `result_rows` and `response_bytes`. No
-payload byte is read by the route.
+The exact lane reads the query's `id:` mentions and the lexical lane scans the
+prose outside selector mentions inside one interruptible projection read under
+the request budget; for those two lanes the projection connection is released
+before any kernel reader is taken. The handler awaits the blocking work through
+`SharedBudget::bridge`, which raises the shared `EvalBudget` flag the moment
+the host cancels, so a kernel or retrieval stage holding only that budget
+stops on a host cancel instead of running to the deadline; the work is still
+joined before the request settles. When a dense limit set is installed and the
+query carries prose outside its selector mentions, the query is first embedded
+in process by the daemon's embedding lane as one tracked blocking step awaited
+in the handler; the dense lane then runs inside the same read through
+`DenseProducer`, whose first implementation is the exhaustive f32 oracle. The
+oracle judges each page it scores and re-judges its top-K before returning, so
+it is the one lane that holds a kernel reader under the projection connection;
+it hands the terms it judged each row under to revalidation. A selector-only
+query is never embedded and leaves the dense lane `undeclared`, as it does the
+lexical lane. An embedding lane that is busy, starting, disabled, failing, or
+that refuses the input or now serves another identity, leaves the dense lane
+`unavailable` and the answer `degraded`; the lane's own typed refusal decides
+the reason, so a lane that changes state during the call reports that state.
+Inference that runs and fails, including an artifact the backend declares
+unusable, or a stored vector outside the generation's layout ends the request
+as `lane_unavailable` with reason `embedding_failed` or `dense_corruption`.
+The exact and lexical lanes are then admitted by the kernel's eligibility
+adapter under the bound scope: the lexical lane through
+`retrieval::lexical::admit`, the exact lane by judging its rows in
+`validation_batch` slices before any position is assigned, so a row the caller
+may not see earns no lane position and consumes no union slot. The exact
+lane's page bound counts every row `exact::page` reads, tombstoned or
+ineligible rows included, because the kernel judges only after the projection
+connection is released; `page_bound` names a read bound, not a visible-row
+count. Fusion
+runs once, the fused set is revalidated by the same adapter in
+`validation_batch` slices, and only survivors are materialized within
+`result_rows` and `response_bytes`. Every judgment refuses to join verdicts
+from two kernel snapshots or incarnations: a lane whose kernel moved between
+its slices is `unavailable` with reason `snapshot_changed` or
+`kernel_incarnation_changed`, and a revalidation whose kernel moved is the
+`lane_unavailable` terminal with the same reason. A stored occurrence
+identifier outside the contract spelling makes its lane `unavailable` with
+reason `identity` rather than shrinking the result. No payload byte is read by
+the route.
 
 A fused answer is
 `{"kind":"fused","degraded":bool,"lanes":{...},"truncated":bool,"entries":[...]}`.
@@ -133,7 +169,12 @@ reason, or `undeclared`; reasons are closed codes chosen by the route, never
 engine text; `degraded` is true when a lane is incomplete or unavailable. Each
 entry carries `occurrence_id`, fused `position`, fused `score`, and per-lane
 `position` and `raw` score; positions are the fused positions, so an entry
-revalidation withheld leaves a gap. A terminal answer is
+revalidation withheld leaves a gap. Because both lanes are admitted before
+fusion, such a gap can arise only from a canonical change between admission
+and revalidation within one request, never from rows the caller was never
+allowed to see. The envelope is measured before any entry is added; an
+envelope alone over `response_bytes` is the `lane_unavailable` terminal with
+reason `response_bytes`, never a body over the bound. A terminal answer is
 `{"kind":"terminal","terminal":<code>}` with `code` one of `unauthorized`,
 `deadline`, `cancelled`, `lane_unavailable`, `required_context_failure`, or
 `disabled`; a `lane_unavailable` terminal adds a `reason` code naming the
@@ -177,9 +218,13 @@ adapter's surviving set to confirm every selected occurrence whole.
 `ProbeOrdinal(u32)` is one compiled query atom's zero-based position in its
 request. `GenerationId` is one immutable vector generation spelled as its
 registered `generation_id`, constructed through `GenerationId::parse` or
-`TryFrom<&VectorGeneration>`. Both are provenance. Neither is a ranking unit
-and neither enters a lane ranking entry, so a probe or generation cannot vote
-more than once.
+`TryFrom<&VectorGeneration>`. Both apply the kernel identity-value rule
+(nonempty, at most `MAX_IDENTITY_VALUE_BYTES`, no control characters). The
+daemon applies the same rule to a consumer binding's `generation_id` before it
+records a lifecycle intent, so every generation this daemon registers has a
+`GenerationId` spelling and `TryFrom` cannot refuse a live generation. Both are
+provenance. Neither is a ranking unit and neither enters a lane ranking entry,
+so a probe or generation cannot vote more than once.
 
 ## Parent groups
 
@@ -197,6 +242,11 @@ column that disagrees with the tuple bytes is refused. Spans of one source at
 different revisions form different groups. This is RP2.8's Q1 decision:
 grouping never mixes bytes from two revisions, and a parent key never stands
 in for an occurrence.
+
+Which classes group is an RP2.8 decision: only `raw_tool_spans` derives a
+grouping key, and `retrieval::packing::Grouping` returns the typed
+non-grouping result for every other class. The RP2.8 key adds class and
+representation as explicit components over `ParentGroupKey`.
 
 ## Selection digest
 

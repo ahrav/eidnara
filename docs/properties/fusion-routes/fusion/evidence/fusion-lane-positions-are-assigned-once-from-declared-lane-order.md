@@ -14,8 +14,12 @@ positions.
 
 ## Failure scenario
 
-A filter that renumbered survivors would make the selection digest depend on
-which entries eligibility removed.
+A filter that renumbered survivors would discard the rank positions fusion
+assigned them, so a consumer could no longer tell a first-ranked survivor from
+one promoted by an eligibility removal. The selection digest does not detect
+this: `SelectionDigest::derive` hashes only the ordered occurrence
+identifiers and their count, so renumbering `[1, 3, 4]` to `[1, 2, 3]` over
+the same survivors leaves it unchanged.
 
 ## Timing windows and dependencies
 

@@ -11,10 +11,11 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
 
 ## Evidence trail
 
-- `crates/daemon/src/query_route.rs`: `Phase` enumerates the seven phases;
-  `execute` calls `before_phase` then `check(budget)` at each; `check` reads
-  `SharedBudget::is_exhausted` and `exhaustion` to pick `Cancelled` or
-  `Deadline`.
+- `crates/daemon/src/query_route.rs`: `Phase` enumerates the nine phases;
+  `execute` calls `before_phase` then `check(budget)` at each, and
+  `judge_eligible` repeats the revalidation gate before every validation slice
+  after the first; `check` reads `SharedBudget::is_exhausted` and `exhaustion`
+  to pick `Cancelled` or `Deadline`.
 - `crates/daemon/tests/query_route.rs`
   `cancellation_and_deadline_are_observed_in_every_phase` and the phase-order
   assertion in `a_healthy_query_completes_fused_in_the_oracles_order`.

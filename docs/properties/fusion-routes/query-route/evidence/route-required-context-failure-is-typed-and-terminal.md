@@ -20,7 +20,10 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
   `identity_reason`; engine text is never serialized. `degrades` marks the
   answer. `crates/daemon/tests/query_route.rs`
   `a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves` drives
-  the exact lane's `no_checkpoint` through the route.
+  the exact lane's `no_checkpoint` through the route, and
+  `a_stored_identifier_outside_the_contract_makes_the_lane_unavailable` drives
+  a copied occurrence row whose identifier is not the contract spelling through
+  the lexical lane, which answers `identity` instead of dropping the row.
 - No stage constructs `Terminal::RequiredContextFailure` yet.
 
 ## Failure scenario

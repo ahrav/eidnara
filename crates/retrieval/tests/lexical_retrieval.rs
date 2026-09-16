@@ -15,7 +15,7 @@ use kernel::{
 use retrieval::batch::{BatchBounds, MutationIdentity, ProjectionBatch, apply_batch};
 use retrieval::lexical::{
     Authority, Completion, IncompleteReason, LexicalBounds, Probe, Retrieval, RetrievalBounds,
-    RetrievalRefusal, Window, analyze, compile, retrieve, retrieve_with_hook_for_test,
+    RetrievalRefusal, Window, admit, analyze, compile, retrieve, retrieve_with_hook_for_test, scan,
 };
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::Connection;
@@ -532,6 +532,40 @@ fn zero_probes_run_no_match_while_a_control_probe_contributes() {
 }
 
 #[test]
+fn admitting_a_released_scan_equals_retrieve_and_carries_the_judged_candidate() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse fetch io");
+    let reference = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    let scanned = fixture
+        .store
+        .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+        .unwrap()
+        .unwrap();
+    assert_eq!(scanned.hits(), 6);
+    // The projection connection is released here; admission needs only the kernel.
+    let admitted = admit(
+        &fixture.kernel,
+        fixture.authority(),
+        scanned,
+        &EvalBudget::unbounded(),
+    )
+    .unwrap();
+    assert_eq!(admitted, reference);
+    for contribution in &admitted.contributions {
+        let candidate = contribution.occurrence_candidate();
+        assert_eq!(candidate.occurrence_id, contribution.occurrence_id);
+        assert_eq!(candidate.class, contribution.class);
+        assert_eq!(
+            candidate.candidate.artifact_digest.as_deref(),
+            Some(DIGEST),
+            "the contribution carries the terms the kernel judged"
+        );
+    }
+}
+
+#[test]
 fn contributions_follow_the_reference_order_and_survive_probe_duplication_and_permutation() {
     let fixture = Fixture::all_admitted();
 
@@ -772,13 +806,80 @@ fn a_tombstoned_row_is_excluded_at_the_engine() {
         )
         .unwrap();
 
+    assert_stale_row_excluded_at_every_scan_bound(&fixture, &request, &before, "gamma");
+}
+
+#[test]
+fn an_orphaned_lexical_row_is_excluded_at_the_engine() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse");
+    let before = fixture.reference(&request);
+    assert!(before.contains(&fixture.id("gamma")));
+
+    // Removing the occurrence while its lexical row stays orphans the match.
+    let raw = fixture.raw();
+    raw.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    raw.execute(
+        "DELETE FROM occurrences WHERE occurrence_id=?1",
+        [fixture.id("gamma")],
+    )
+    .unwrap();
+    let orphaned: i64 = raw
+        .query_row(
+            "SELECT count(*) FROM lexical WHERE occurrence_id=?1",
+            [fixture.id("gamma")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(orphaned > 0);
+
+    assert_stale_row_excluded_at_every_scan_bound(&fixture, &request, &before, "gamma");
+}
+
+/// `before` is the reference order with `stale` still live. For every `scan_rows` from 1 through
+/// `before.len()`, retrieval must return the live prefix of that order and report truncation only
+/// while live rows remain past the bound, wherever `stale` sat in the shortlist.
+fn assert_stale_row_excluded_at_every_scan_bound(
+    fixture: &Fixture,
+    request: &[Probe],
+    before: &[String],
+    stale: &str,
+) {
+    let stale_id = fixture.id(stale);
     let retrieval = fixture
-        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .retrieve(request, bounds(), &EvalBudget::unbounded())
         .unwrap();
     assert_eq!(retrieval.completion, Completion::Complete);
     assert_eq!(retrieval.consumed.scanned_rows, before.len() - 1);
-    assert!(!ids_of(&retrieval).contains(&fixture.id("gamma")));
+    assert!(!ids_of(&retrieval).contains(&stale_id));
     assert_eq!(retrieval.contributions.len(), before.len() - 1);
+
+    let expected: Vec<String> = before
+        .iter()
+        .filter(|id| **id != stale_id)
+        .cloned()
+        .collect();
+    let stale_at = before.iter().position(|id| *id == stale_id).unwrap();
+    for scan_rows in 1..=before.len() {
+        let tight = RetrievalBounds {
+            scan_rows: NonZeroUsize::new(scan_rows).unwrap(),
+            ..bounds()
+        };
+        let retrieval = fixture
+            .retrieve(request, tight, &EvalBudget::unbounded())
+            .unwrap();
+        let want = &expected[..scan_rows.min(expected.len())];
+        assert_eq!(ids_of(&retrieval), want, "scan_rows={scan_rows}");
+        assert_eq!(
+            retrieval.completion,
+            if scan_rows < expected.len() {
+                Completion::Incomplete(IncompleteReason::ScanBound)
+            } else {
+                Completion::Complete
+            },
+            "scan_rows={scan_rows} stale_at={stale_at}"
+        );
+    }
 }
 
 #[test]

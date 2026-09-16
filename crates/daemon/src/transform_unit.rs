@@ -67,6 +67,8 @@ impl UnitRunner for RequestCtx {
 #[derive(Default)]
 pub(crate) struct DetachedRunner {
     pub(crate) cancel: CancellationToken,
+    pub(crate) cancel_before_step: bool,
+    pub(crate) units: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -76,6 +78,7 @@ impl UnitRunner for DetachedRunner {
         work: Box<dyn FnOnce() -> UnitOutcome + Send>,
     ) -> Pin<Box<dyn Future<Output = Result<UnitOutcome, BlockingWorkFailed>> + Send + 'static>>
     {
+        self.units.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let joined = tokio::task::spawn_blocking(work);
         Box::pin(async move {
             match joined.await {
@@ -90,6 +93,9 @@ impl UnitRunner for DetachedRunner {
         &self,
         work: Box<dyn FnOnce() + Send>,
     ) -> Pin<Box<dyn Future<Output = Result<(), BlockingWorkFailed>> + Send + 'static>> {
+        if self.cancel_before_step {
+            self.cancel.cancel();
+        }
         let joined = tokio::task::spawn_blocking(work);
         Box::pin(async move {
             match joined.await {

@@ -41,6 +41,8 @@ impl Default for StartOptions {
 
 pub struct KernelDaemon {
     handler: Handler,
+    /// The engine behind the handler's embedding lane, so a test can script one inference outcome.
+    engine: Arc<super::embedding_fixtures::TestEngine>,
     route: RouteHandle,
     project: PathBuf,
     // Fields drop in declaration order; the directory must outlive the handler
@@ -73,9 +75,10 @@ impl KernelDaemon {
         let data = options.data.unwrap_or_else(|| tempfile::tempdir().unwrap());
         let project_config = options.project_config;
         let descriptor: StorageDescriptor = dev_descriptor_at(data.path().to_str().unwrap());
+        let engine = super::embedding_fixtures::TestEngine::new();
         let mut handler =
             Handler::new().with_local_embeddings(super::embedding_fixtures::component(
-                &super::embedding_fixtures::TestEngine::new(),
+                &engine,
                 host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
             ));
         if let Some(source) = options.capability_source {
@@ -134,10 +137,15 @@ impl KernelDaemon {
         ));
         Self {
             handler,
+            engine,
             route,
             project,
             _data: data,
         }
+    }
+
+    pub fn engine(&self) -> &super::embedding_fixtures::TestEngine {
+        &self.engine
     }
 
     pub async fn outcome(&self, request: Value) -> PreparedOutcome {
@@ -166,6 +174,16 @@ impl KernelDaemon {
             BindOutcome::Accept
         ));
         route
+    }
+
+    pub async fn outcome_observed(
+        &self,
+        request: Value,
+        cancel_before_step: bool,
+    ) -> (PreparedOutcome, usize) {
+        self.handler
+            .dispatch_value_for_test_observed(self.route, request, cancel_before_step)
+            .await
     }
 
     pub async fn call(&self, request: Value) -> Value {

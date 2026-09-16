@@ -13,12 +13,16 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u3b-query-route` at
 ## Evidence trail
 
 - `crates/daemon/src/query_route.rs` `handle_retrieval_query`: when
-  `limits.dense` is set, the embedder runs through `UnitRunner::run_step`, the
-  handler awaits it, checks `SharedBudget::is_exhausted`, and only then calls
-  `run_unit` for the scan; the scan closure receives `Embedded`.
-- `QueryEmbedder for LocalEmbeddingsComponent` embeds in process with
-  `embed_blocking`; `HandlerCore::query_embedder` returns the lifecycle
-  owner's lane, or a test override.
+  `limits.dense` is set and the query carries prose outside its selector
+  mentions, the embedder runs through `UnitRunner::run_step`, the handler
+  awaits it, checks `SharedBudget::is_exhausted`, and only then calls
+  `run_unit` for the scan; the scan closure receives `Embedded`. A request
+  without prose skips the step and the scan runs with the dense lane
+  undeclared.
+- `QueryEmbedder for LocalEmbeddingsComponent` embeds in process through
+  `preflight_embedding_for_lane` and `embed_admitted`, both synchronous under
+  the lane's single inference permit; `HandlerCore::query_embedder` returns the
+  lifecycle owner's lane, or a test override.
 - `crates/daemon/tests/query_route_handler.rs`
   `the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`;
   `crates/daemon/tests/query_route_dense.rs`
@@ -37,6 +41,14 @@ The deadline lapses during the embedding step.
 
 - A converged family so the handler reaches the embedding step.
 - A scripted embedder that sleeps past the remaining duration.
+- A test runner that counts `run_unit` submissions
+  (`Handler::dispatch_value_for_test_observed`), so "no scan" is an observed
+  zero rather than inferred from the `deadline` terminal, which `lifecycle.pin`
+  would also produce inside a wrongly submitted scan; the same runner cancels
+  the request as its embedding step is submitted, and the head-of-step budget
+  check leaves the embedder uncalled. Removing the handler's post-embedding
+  exhaustion checks made the count read one while the terminal still read
+  `deadline`.
 - Stored unit vectors under the fixture generation for the position oracle.
 
 ## Investigation log
