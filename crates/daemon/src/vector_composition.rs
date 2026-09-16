@@ -292,7 +292,8 @@ pub fn publish(
         .ledger
         .admit_deltas(staging.admission, composition.deltas.len())
         .map_err(|denial| fail(progress, CompositionRefusal::Deltas(denial)))?;
-    write_new(
+    // Members were verified before composing; the store re-validates each on selection, so a member reclaimed meanwhile refuses the selection rather than exposing a partial set.
+    let staged = write_new(
         &work_dir.join(COMPOSITION_FILE),
         &composition.canonical_bytes(),
     )
@@ -302,15 +303,18 @@ pub fn publish(
             &composition.members_bytes(),
         )
     })
-    .map_err(|refusal| fail(progress, CompositionRefusal::Stage(refusal)))?;
-    // Members were verified before composing; the store re-validates each on selection, so a member reclaimed meanwhile refuses the selection rather than exposing a partial set.
-    let digest = staging
-        .stage_manifest(
+    .and_then(|()| {
+        staging.stage_manifest(
             &composition.stage_manifest(),
             &composition.stage_meta(),
             |path| work_dir.join(path),
         )
-        .map_err(|refusal| fail(progress, CompositionRefusal::Stage(refusal)))?;
+    });
+    // The store holds its own copies once staged, and a retry through the same `work_dir` creates these names again.
+    for name in [COMPOSITION_FILE, MEMBERS_FILE_NAME] {
+        let _ = std::fs::remove_file(work_dir.join(name));
+    }
+    let digest = staged.map_err(|refusal| fail(progress, CompositionRefusal::Stage(refusal)))?;
     progress = Progress::Staged;
     let selected = staging
         .store
@@ -465,17 +469,58 @@ pub fn verify_composition(
     max_deltas: NonZeroUsize,
     max_member_bytes: u64,
 ) -> Result<VerifiedComposition, CompositionRefusal> {
-    // The manifest is read before any listed file is hashed or held in memory.
-    let manifest = store.manifest(digest)?;
-    if manifest
+    check_record_size(store, digest)?;
+    let generation = store.validate(digest)?;
+    verify_validated(store, generation, expected, max_deltas, max_member_bytes)
+}
+
+/// Reads the manifest before any listed file is hashed or held in memory, so an oversized record is refused by its declared size.
+fn check_record_size(store: &GenerationStore, digest: &str) -> Result<(), CompositionRefusal> {
+    if store
+        .manifest(digest)?
         .files
         .iter()
         .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
     {
         return Err(CompositionRefusal::NotComposition("record size"));
     }
-    let generation = store.validate(digest)?;
-    verify_validated(store, generation, expected, max_deltas, max_member_bytes)
+    Ok(())
+}
+
+/// Verifies the composition generation `digest` and its record without opening a member: the record is a canonical composition bound to its manifest and carrying `expected`.
+///
+/// # Errors
+///
+/// A generation of another owner or schema, or a record that is not canonical, does not agree with its members file, or carries another identity.
+pub fn verify_record(
+    store: &GenerationStore,
+    digest: &str,
+    expected: &ExpectedVectors<'_>,
+) -> Result<Composition, CompositionRefusal> {
+    check_record_size(store, digest)?;
+    verify_record_of(&store.validate(digest)?, expected)
+}
+
+fn verify_record_of(
+    generation: &ValidatedGeneration,
+    expected: &ExpectedVectors<'_>,
+) -> Result<Composition, CompositionRefusal> {
+    if generation.manifest.target != VECTOR_SELECTION_TARGET {
+        return Err(CompositionRefusal::NotComposition("manifest target"));
+    }
+    if let Ok(members) = generation.read_verified_file(MEMBERS_FILE_NAME) {
+        check_members_schema(&members)?;
+    }
+    let bytes = generation.read_verified_file(COMPOSITION_FILE)?;
+    let composition = decode_record(&generation.manifest, &bytes)?;
+    if composition
+        .identity()
+        .first_mismatch(&VectorIdentity::from_expected(expected))
+        .is_some()
+    {
+        return Err(CompositionRefusal::NotComposition("identity"));
+    }
+    Ok(composition)
 }
 
 fn verify_validated(
@@ -485,14 +530,7 @@ fn verify_validated(
     max_deltas: NonZeroUsize,
     max_member_bytes: u64,
 ) -> Result<VerifiedComposition, CompositionRefusal> {
-    if generation.manifest.target != VECTOR_SELECTION_TARGET {
-        return Err(CompositionRefusal::NotComposition("manifest target"));
-    }
-    if let Ok(members) = generation.read_verified_file(MEMBERS_FILE_NAME) {
-        check_members_schema(&members)?;
-    }
-    let bytes = generation.read_verified_file(COMPOSITION_FILE)?;
-    let composition = decode_record(&generation.manifest, &bytes)?;
+    let composition = verify_record_of(&generation, expected)?;
     // Refuse before opening members: the bound limits verification work, not just the returned topology.
     if composition.deltas.len() > max_deltas.get() {
         return Err(CompositionRefusal::DeltasOverBound {
@@ -500,26 +538,11 @@ fn verify_validated(
             max: max_deltas.get(),
         });
     }
-    if composition
-        .identity()
-        .first_mismatch(&VectorIdentity::from_expected(expected))
-        .is_some()
-    {
-        return Err(CompositionRefusal::NotComposition("identity"));
-    }
-    let member = |digest: &str| {
-        verify(store, digest, expected, max_member_bytes).map_err(|refusal| {
-            CompositionRefusal::Member {
-                digest: digest.to_owned(),
-                refusal,
-            }
-        })
-    };
-    let base = member(&composition.base)?;
+    let base = verify_member(store, &composition.base, expected, max_member_bytes)?;
     let deltas = composition
         .deltas
         .iter()
-        .map(|digest| member(digest))
+        .map(|digest| verify_member(store, digest, expected, max_member_bytes))
         .collect::<Result<Vec<_>, _>>()?;
     check_topology(expected, &base, &deltas, max_deltas)?;
     Ok(VerifiedComposition {
@@ -528,6 +551,23 @@ fn verify_validated(
         record: generation,
         base,
         deltas,
+    })
+}
+
+/// # Errors
+///
+/// Returns the failing member's `digest` in [`CompositionRefusal::Member`].
+pub fn verify_member(
+    store: &GenerationStore,
+    digest: &str,
+    expected: &ExpectedVectors<'_>,
+    max_member_bytes: u64,
+) -> Result<VerifiedVectors, CompositionRefusal> {
+    verify(store, digest, expected, max_member_bytes).map_err(|refusal| {
+        CompositionRefusal::Member {
+            digest: digest.to_owned(),
+            refusal,
+        }
     })
 }
 

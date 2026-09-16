@@ -135,6 +135,10 @@ impl PinnedLayer {
         &self.occurrence_ids
     }
 
+    pub fn tombstones(&self) -> &[String] {
+        &self.tombstones
+    }
+
     fn dimension(&self) -> usize {
         self.sidecar.vector_dimension as usize
     }
@@ -234,7 +238,8 @@ impl PinnedVectors {
             .collect()
     }
 
-    fn resolver_layers(&self) -> Vec<Layer<'_>> {
+    /// The layers in the resolver's shape, the base as ordinal zero and each delta by its position.
+    pub fn resolver_layers(&self) -> Vec<Layer<'_>> {
         self.layers
             .iter()
             .map(|layer| Layer {

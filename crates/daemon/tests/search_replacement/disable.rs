@@ -93,7 +93,13 @@ pub(super) fn apply_prefix(reader: &SearchReader, through: i64, invalidations: V
 fn production_gate_construction_requires_a_home_and_external_stops_cancel_existing_grants() {
     use daemon::projection_gates::Denial;
     let source = include_str!("../../src/projection_gates.rs");
-    let constructors: Vec<_> = source
+    // Only the gate's own impl block: other types in the file construct themselves freely.
+    let gate_impl = source
+        .split("\nimpl HookGate {\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("projection_gates.rs has one `impl HookGate` block");
+    let constructors: Vec<_> = gate_impl
         .lines()
         .map(str::trim)
         .filter(|line| line.starts_with("pub fn ") && line.ends_with("-> Self {"))

@@ -349,8 +349,9 @@ bytes beside the ledger's pinned bytes, and a readback above them means
 readers pin what the ledger was never told about. Ranking reserves one page
 of row scratch for the walk's duration in the ledger that holds the view's
 tables, taken from the view rather than named by the caller, so the two are
-judged against one resident total. The compactor's entry point reserves its
-working files in the disk pool the same way.
+judged against one resident total. Compaction reserves its build's footprint,
+the peak resident bytes in the resident pool and every file it writes in the
+disk pool, the same way.
 
 Compressed activation, production use or full-corpus publication of
 compressed vector layers, is judged by the same gate through
@@ -394,6 +395,89 @@ before the records gain these keys, and a rollback to an older build must
 also revert `runtime-manifest.json` and `campaign-evidence.json`. In the
 other direction nothing changes: this build reads records without the keys
 as before and refuses only the vector work that needs them.
+
+## Compaction
+
+`daemon::vector_compaction` keeps a composition's delta count bounded by
+folding a frozen prefix into one new base and republishing it under whatever
+deltas followed. The prefix is a view a reader pinned (`vector_reader::acquire`):
+its base and deltas are read only through the pinned files, so what
+compaction consumed is exactly what it read, and `Cut` names the record, the
+base, and the deltas it stood on. Both steps take the shared `Staging` handle,
+which carries the lifecycle's exclusive transaction lock, the gate, the grant,
+and the ledger.
+
+`compact` first checks every layer's sidecar against the caller's expectation
+with the identity check verification uses, so a view of another model space
+refuses before anything is reserved, read, or written. A view holding only
+its base refuses as `BaseOnly` next: it would compact to itself, and
+publishing that would only bump the sequence, once per replay. It then
+resolves the view's layers with the resolver and sizes the build with
+`vector_generation::footprint`, which lives beside `build` and derives every
+file size from the layout `build` writes: the identifier list is serialized
+the way the build serializes it and the sidecar is measured from the same
+fields with fixed-width hash placeholders, so the disk figure is the inventory
+the build will write, sidecar included, whatever the identifiers' lengths or
+the identity strings' sizes. The resident figure is the build's peak: the
+decoded rows, the row artifact, the codes, the calibration tables, and the
+serialized payloads; compaction adds its own per-row state on top. Both are
+reserved in the ledger before any row is read. Compaction then reads each
+winner's row by offset and builds one base of exactly those rows in
+identifier order at the checkpoint of the prefix's last layer. Every
+superseded row and every masked row of the prefix is absent from the new
+base, and every tombstone of the prefix is applied by that absence, so the new
+base carries no tombstones; the tail keeps its own tombstones and its own
+order above the new base. Rows are copied bit for bit through the original-row
+codec, so the same prefix compacts to the same bytes and the same digest. The
+resident reservation ends with the build, since the rows are then on disk; the
+files stay reserved as disk scratch until the compacted output is discarded or
+dropped, either of which unlinks the build's own files and removes the work
+directory. Discard removes only the build's own file names, whoever wrote
+them, so a retry succeeds over a crashed attempt's leftovers; a directory
+holding other names is left standing and reported. A refused reservation
+writes nothing, and a build that fails after writing some of its files, or
+whose inventory exceeds its footprint, removes them before returning, so no
+refusal leaves an uncounted file behind. A dedicated, empty work directory per
+compaction is the caller's contract.
+
+`publish` reads the selected composition's record back under the exclusive lock
+and refuses as `PrefixMoved` unless the selection still stands on the cut's
+base with the cut's deltas as a prefix, before staging anything. The cut's own
+members are not opened again: the view verified and pinned them at acquisition,
+and none of them belongs to the new composition. Whatever deltas follow them
+are the tail, and their count is the new composition's delta count: it is
+checked against the reader bound and admitted through the ledger before a
+member is opened or the base is staged. Published independently of the
+compactor, each tail delta is verified as a
+member and carried over unchanged and in order, so a later insert, update, or
+delete keeps its precedence and is represented exactly once. Only then is the
+new base staged and the new composition, at the selection's sequence plus one,
+sent through `vector_composition::publish`, so the delta count is admitted and
+the selector moves in one rename as for any publication. The record files are
+removed from the publication's work directory once the store has copied them,
+so one directory serves every attempt. A failure before the rename is a known
+refusal and a retry from the same cut publishes once, with the base and the
+record staged again for nothing. A failure at or after the rename is an
+unknown outcome the caller settles with `vector_composition::reconcile` before
+any retry; a retry then finds the selection standing on the compacted base and
+refuses, so no second history is published. A cut whose base has already moved
+was compacted or replaced by someone else and refuses the same way.
+
+The ledger refuses the next delta past `vector_delta_count`, and a namespace
+at the cap admits no delta until a compaction clears it. Every layer a view
+pins holds at least one row, and the newest layer's rows are never hidden, so
+every acquirable prefix resolves to at least one live row. Compaction
+re-encodes the winners under a fresh calibration, so the new base's scales
+are its own and a tail delta's codes keep scoring with that delta's scales.
+That calibration is the recipe's, and the winners can fail it where each
+layer alone did not: a coordinate whose nonzero largest winner magnitude
+divided by 127 rounds to zero in f32 has no int8 scale, and the build refuses as
+`Build(Calibration(ScaleUnderflow))` before writing a file, its reservations
+ending with the refusal. Such a live set cannot be published as one layer by
+any path, so the refusal is a property of the rows, not of the compactor;
+retrying does not clear it, and neither would a fresh base. Scheduling
+compaction when the cap is reached belongs to the maintenance owner and is
+not part of this module.
 
 ## The pinned reader
 

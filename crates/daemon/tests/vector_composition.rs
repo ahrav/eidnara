@@ -945,6 +945,20 @@ fn verification_refuses_an_oversized_record_before_opening_the_generation() {
 }
 
 #[test]
+fn record_verification_refuses_an_oversized_record_before_opening_the_generation() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let template = fixture.compose(1, &base, &[]).unwrap();
+    let digest = fixture.stage_record(&vec![b'x'; 1024 * 1024 + 1], &template);
+    fixture.corrupt(&digest, COMPOSITION_FILE);
+    assert_eq!(
+        daemon::vector_composition::verify_record(&fixture.store, &digest, &fixture.expected())
+            .unwrap_err(),
+        CompositionRefusal::NotComposition("record size")
+    );
+}
+
+#[test]
 fn verification_refuses_excess_deltas_before_opening_any_member() {
     let fixture = Fixture::new();
     let base = fixture.layer(1, 10);

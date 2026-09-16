@@ -32,7 +32,12 @@ pub const TOLERANCE: f64 = 1e-3;
 pub const KERNEL: &str = "test-incarnation";
 
 pub fn generation() -> VectorGeneration {
-    let identity = identity(KERNEL, DIMENSION);
+    generation_of(DIMENSION)
+}
+
+/// The fixture's generation at `dimension`, so a wide fixture's exports name the generation they were read under.
+pub fn generation_of(dimension: u32) -> VectorGeneration {
+    let identity = identity(KERNEL, dimension);
     VectorGeneration {
         generation_id: "gen-vectors-1".to_owned(),
         embedding_model: identity.embedding_model,
@@ -101,17 +106,34 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new() -> Self {
+        Self::with_dimension(DIMENSION)
+    }
+
+    pub fn with_dimension(dimension: u32) -> Self {
+        Self::build(dimension, None)
+    }
+
+    /// A fixture whose identity, gate, ledger, and generation all name `model`, so a long name reaches every path that carries it.
+    pub fn with_embedding_model(model: &str) -> Self {
+        Self::build(DIMENSION, Some(model))
+    }
+
+    fn build(dimension: u32, model: Option<&str>) -> Self {
         let root = tempfile::tempdir().unwrap();
         let store = GenerationStore::open(Some(root.path())).unwrap();
         let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
-        let identity = identity(KERNEL, DIMENSION);
+        let mut identity = identity(KERNEL, dimension);
+        if let Some(model) = model {
+            identity.embedding_model = model.to_owned();
+        }
         let gate = Arc::new(HookGate::closed());
         gate.install(passing_evaluator(&identity, 0, &ProjectionHook::ALL));
         let admission = gate
             .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
             .unwrap();
         let ledger = Ledger::new(Arc::clone(&gate), InvalidationIdentity::from(&identity));
-        let generation = generation();
+        let mut generation = generation_of(dimension);
+        generation.embedding_model = identity.embedding_model.clone();
         Self {
             root,
             store,
