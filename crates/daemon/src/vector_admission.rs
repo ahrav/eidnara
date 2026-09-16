@@ -149,6 +149,7 @@ impl std::fmt::Debug for Ledger {
 }
 
 impl Ledger {
+    /// One ledger per daemon: the tally is this value's alone, so two ledgers over one gate each judge their own total against the whole limit and together exceed it. The component that wires vector work into the daemon constructs the one ledger and hands the same `Arc` to every charger.
     pub fn new(gate: Arc<HookGate>, identity: InvalidationIdentity) -> Arc<Self> {
         Arc::new(Self {
             gate,
