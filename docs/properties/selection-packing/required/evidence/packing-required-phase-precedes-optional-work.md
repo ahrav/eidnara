@@ -64,3 +64,35 @@ deadline is bounded only by the polls between stages.
   tombstone.
 - An expired and a cancelled `EvalBudget`.
 - A `PackingTrace` inspected after every outcome.
+
+## Investigation log
+
+### Q: Is a payload whose digest fails a load or a refusal?
+
+- Sources examined: the Q3 ruling in `../catalog.md`; `prepare_required`'s
+  verification loop; review threads
+  [#668 r4030909349](https://github.com/ahrav/eidnara/pull/668#discussion_r4030909349)
+  and
+  [#668 r4031290395](https://github.com/ahrav/eidnara/pull/668#discussion_r4031290395).
+- Findings: the ruling names the projection read as the load. The first cut
+  counted only verified payloads, so a corrupt row that returned bytes left
+  `payload_loads()` at zero.
+- Missing evidence: none.
+- Conclusion: resolved with answer - the count and the `Loaded` event are
+  recorded when the bytes come back, before the digest check.
+
+### Q: Can a budget without a deadline stop a projection hold?
+
+- Sources examined: `crates/daemon/src/packing.rs` `hold`;
+  `crates/storage/src/lib.rs` `with_conn_interruptible`, which takes an
+  `Instant`; `crates/daemon/src/request_budget.rs` `SharedBudget::deadline`,
+  which returns an `Instant`; review thread
+  [#668 r4030909327](https://github.com/ahrav/eidnara/pull/668#discussion_r4030909327).
+- Findings: storage has no deadline-free interruptible mode, and no production
+  budget reaches the phase without a deadline; `EvalBudget::unbounded()` is
+  test-only. The polls between stages and around reservation are the only
+  bound for such a budget.
+- Missing evidence: a production caller with a deadline-free budget, which
+  does not exist at this base.
+- Conclusion: resolved with answer - documented ceiling, no storage change
+  until a caller needs it.

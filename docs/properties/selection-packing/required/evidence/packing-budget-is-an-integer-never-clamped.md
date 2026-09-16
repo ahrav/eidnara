@@ -32,3 +32,17 @@ None.
 - Each malformed budget value.
 - The legacy clamp as a negative control that must answer, not refuse.
 - The two cross-substitution doctests under the all-features doctest job.
+
+## Investigation log
+
+### Q: Where does over-range begin for a budget that arrives as an `f64`?
+
+- Sources examined: `crates/daemon/src/packing.rs` `from_budget`; the
+  `budgets_are_integers_and_never_clamped` test; review thread
+  [#668 r4030901776](https://github.com/ahrav/eidnara/pull/668#discussion_r4030901776).
+- Findings: every integer up to 2^53 is exact in an `f64`; above it an odd
+  integer has already rounded before `from_budget` sees it, and `fract()`
+  cannot tell. The first cut at 2^64 accepted such values.
+- Missing evidence: none; the wire route that produces the `f64` lands with
+  U5a, and whether it decodes an integer directly is that route's question.
+- Conclusion: resolved with answer - values above 2^53 are `TooLarge`.

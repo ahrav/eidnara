@@ -62,7 +62,7 @@ Reachability: test-only - `prepare_required` is called from
 crates --include=*.rs` outside `crates/daemon/src/packing.rs` finds that test
 file alone, so no route packs a selection at this base.
 Status: active
-Exercised: yes - `crates/daemon/tests/packing_required.rs`
+Exercised: partial - `crates/daemon/tests/packing_required.rs`
 `each_required_fault_yields_exactly_one_class_with_zero_optional_events`,
 `a_required_occurrence_the_kernel_excludes_is_ineligible_not_missing`,
 `corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt`,
@@ -86,11 +86,17 @@ zero optional events and no retrieval call added by the phase; an exhausted
 yields the deadline refusal with the same trace. A set beyond the load-count
 bound, or beyond the kernel's `MAX_ELIGIBILITY_CANDIDATES` batch cap, is
 refused as oversized before any request is examined; every other fault is the
-first in request order, at both the pure and the daemon layer.
+first in request order within its stage. The pure layer is one stage and so
+strictly request-ordered; the daemon reads every row, then judges and admits,
+then loads and verifies, then reserves, so a read-stage fault on a later
+request precedes an admission-stage fault on an earlier one.
 Check: `always` - for each fault class one required occurrence exhibiting it
 returns that class and no other; `class()` literals are pairwise distinct;
 `PackingTrace::optional_events()` is zero and `retrieval_calls()` equals the
-seeded lane count after every refusal and every success; admission-stage
+seeded lane count after every refusal and every success, an oracle for a
+packer that reports through the trace, while the rule that the packing module
+holds no lane call (`crates/retrieval/AGENTS.md`) is the guard against one
+that does not; admission-stage
 refusals record no `Loaded` event and `payload_loads()` stays zero, while a
 row whose bytes came back counts as loaded before its digest is checked; the
 deadline refusal and the load-bound refusal record no event; a deadline that
@@ -110,7 +116,11 @@ faulting statement.
 Required faults and enabling state: An unpersisted identifier; a request
 revision other than the row's; a tombstoned row; a kernel with no object for
 the row's source; a payload row rewritten to other bytes; a payload row
-rewritten to another length; an occurrence row whose tuple is another
+rewritten to other bytes of another length, refused by the digest because the
+row's `byte_length` follows the rewrite (the SQL length predicate has its own
+check in `crates/retrieval/tests/packing_identity.rs`
+`payload_fetch_is_length_guarded_in_sql_and_verified_by_digest_afterwards`);
+an occurrence row whose tuple is another
 occurrence's; an occurrence row whose eligibility digest the kernel refuses;
 per-item, load-count, and byte-total bounds below the fixture; a
 request set beyond the kernel batch cap; a token limit one below the required
@@ -118,8 +128,12 @@ cost; an expired and a cancelled budget; a deadline and a cancellation that
 land while another thread holds the projection connection; a cancellation
 raised by the estimator.
 Confidence: high - [evidence](evidence/packing-required-phase-precedes-optional-work.md).
-Every clause is asserted at this base; the hidden verdict is asserted only
-at the pure layer because the kernel fixture has no hidden surface.
+Every clause is asserted at this base except the optional-event clause,
+which is structural until U3 lands a pusher for `StageEvent::Optional`
+(`PackingTrace` has none, so `optional_events()` cannot be non-zero); the
+hidden verdict is asserted only at the pure layer because the kernel fixture
+has no hidden surface. No daemon test crosses stages with faults on two
+requests.
 Existing check: none before this change.
 Impact: An optional event before the required phase completes would let
 optional context consume budget the required set needed, and a retrieval call
@@ -191,3 +205,40 @@ cuts at 64 KiB; it is the precedent, not a check.
 Impact: An uncharged byte overruns the provider budget; a cut byte changes
 the meaning of required context without a signal.
 Open questions: None.
+
+## Relationship map
+
+Grouped by shared mechanism, with suspected dominance noted where one property
+holding would make another likely to hold. Dominance is a hypothesis, not proof.
+
+- **One integer unit behind every charge.**
+  `packing-budget-is-an-integer-never-clamped` is upstream of
+  `packing-required-bytes-are-charged-untruncated`: `reserve_required` sums
+  through `TokenCount::checked_add` and compares against `token_limit`, both
+  in `ClaudeTokens`, so a budget that had been rounded or clamped on entry
+  would make the exact-limit check pass or fail at the wrong byte while the
+  accounting record's own tests, which construct `ClaudeTokens` directly,
+  still pass. Only the first record detects that fault; the second assumes it.
+- **Reservation is the last required stage.**
+  `packing-required-bytes-are-charged-untruncated` sits inside
+  `packing-required-phase-precedes-optional-work`: the `OverBudget` refusal
+  the first record asserts is one of the seven classes the second enumerates,
+  and both are observed through the same `PackingTrace` after the same
+  `Reserved` stage. The stage-order record says nothing about the amount
+  charged, and the accounting record says nothing about what precedes the
+  charge; neither dominates the other.
+- **Bounds before bytes, bytes before tokens.** The load-count and byte
+  bounds in `admit_required` refuse before any payload is read, the token
+  limit in `reserve_required` refuses after every admitted payload is read and
+  verified. `packing-required-phase-precedes-optional-work` owns the order and
+  the `Loaded` count; `packing-required-bytes-are-charged-untruncated` owns
+  the amount. A test that charged an unloaded item, or loaded an item the
+  bounds refused, would contradict both.
+- **Downstream parts.** The identity part's
+  `packing-attribution-follows-the-occurrence-row` is upstream of every record
+  here: `read_selected` supplies the rows the required phase judges, admits,
+  and loads, and a row attributed through a payload identifier rather than its
+  own occurrence would be judged under another occurrence's source before any
+  record in this part could observe it. The optional phase (U3) will sit
+  downstream of `packing-required-phase-precedes-optional-work`, which is the
+  record that forbids it from starting early.
