@@ -163,10 +163,9 @@ The identity clauses are exercised; the fusion clause is not yet executable.
 Existing check: none before this change.
 Impact: A parent key used as a voter would let one source outvote another by
 span count, and a group spanning revisions would mix bytes from two versions.
-Open questions:
-
-- RP2.8 decides whether non-span classes group at all; this record only fixes
-  the key. (needs human input)
+Open questions: None. RP2.8 U1 ruled that only `raw_tool_spans` groups;
+`docs/properties/selection-packing/identity/catalog.md` records the ruling
+and the class-and-representation key built over this one.
 
 ## Relationship map
 

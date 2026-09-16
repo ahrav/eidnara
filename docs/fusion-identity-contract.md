@@ -95,6 +95,11 @@ different revisions form different groups. This is RP2.8's Q1 decision:
 grouping never mixes bytes from two revisions, and a parent key never stands
 in for an occurrence.
 
+Which classes group is an RP2.8 decision: only `raw_tool_spans` derives a
+grouping key, and `retrieval::packing::Grouping` returns the typed
+non-grouping result for every other class. The RP2.8 key adds class and
+representation as explicit components over `ParentGroupKey`.
+
 ## Selection digest
 
 `SelectionDigest::derive(selection)` is SHA-256 over:
