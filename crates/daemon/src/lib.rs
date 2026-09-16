@@ -826,7 +826,9 @@ const HISTORY_SUMMARIZER_SIDE_CHANNEL_DRAIN_PER_KIND: usize = 32;
 ///
 /// Serde reads `null` into a plain `Option<Option<T>>` as the outer `None`, which would make a
 /// clear indistinguishable from omission.
-fn deserialize_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn deserialize_nullable<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,

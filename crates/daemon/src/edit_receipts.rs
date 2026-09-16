@@ -354,7 +354,9 @@ struct ApplyRequest {
 struct ConfirmRequest {
     preparation_id: String,
     forwarded_identity: String,
-    applied_identity: Option<String>,
+    /// Required on the wire: `null` is a lost acknowledgment, an omitted field is `invalid_params`.
+    #[serde(deserialize_with = "crate::deserialize_nullable")]
+    applied_identity: Option<Option<String>>,
     outcome: Outcome,
 }
 
@@ -979,7 +981,7 @@ impl HandlerCore {
                     project,
                     &parsed.preparation_id,
                     &parsed.forwarded_identity,
-                    parsed.applied_identity.as_deref(),
+                    parsed.applied_identity.flatten().as_deref(),
                     parsed.outcome,
                 ) {
                     Ok(ConfirmOutcome::Complete { outcome }) => response(json!({
