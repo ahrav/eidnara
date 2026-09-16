@@ -184,7 +184,7 @@ impl Fixture {
     pub fn layer_from(&self, export: &LiveRows) -> VerifiedVectors {
         let built = build(&self.expected(), export, &self.work_dir()).unwrap();
         let digest = stage(&built, &self.staging()).unwrap();
-        verify(&self.store, &digest, &self.expected()).unwrap()
+        verify(&self.store, &digest, &self.expected(), u64::MAX).unwrap()
     }
 
     pub fn compose(
@@ -216,6 +216,7 @@ impl Fixture {
             digest,
             &self.expected(),
             NonZeroUsize::new(4).unwrap(),
+            u64::MAX,
         )
         .map(|verified| verified.composition.members())
     }
@@ -284,6 +285,7 @@ impl Fixture {
             self.transaction(),
             &self.expected(),
             NonZeroUsize::new(4).unwrap(),
+            u64::MAX,
             NonZeroUsize::new(8).unwrap(),
         )
         .map(|recovered| (recovered.composition.digest, recovered.selector))

@@ -1,6 +1,6 @@
 //! Runs embedding maintenance as bounded slices under the daemon's shutdown token: a backfill pass over durable pending work, then an identity sweep, then a yield, so one maintenance kind never starves the other and no slice outlives its budget. The loop waits `idle` only when both kinds last found nothing to do, so a blocked lane cannot spin it and a dry sweep cannot throttle a backfill with a backlog.
 //!
-//! Every slice gets one `EvalBudget`: an absolute deadline derived once when the slice starts, and a sticky cancellation that shutdown raises. The dispatcher and the sweeper thread that same budget through admission, the result poll, the guard, and the reclamation write, so no stage renews it. A projection transaction's wait for the file is the store's own busy timeout, not the budget's, so a slice bound is the deadline plus that timeout. A slice runs on a tracked blocking thread; shutdown stops new slices, cancels the running one, and joins every tracked task. A native call that has not returned keeps its permit, its charges, and its result lease, and the join stays unresolved until it exits: grace expiry reports that state, it does not end it. A slice that panics is reported, not swallowed, and stops the supervisor. Quarantine from either maintenance kind stops the supervisor and retains every obligation for an operator. A read that fails before anything is decided is not terminal: the slice reports it and the loop runs the same kind again after the idle wait.
+//! Every slice gets one `EvalBudget`: an absolute deadline derived once when the slice starts, the nearer of the slice bound and a still-ahead episode grant deadline, and a sticky cancellation that shutdown raises. The dispatcher and the sweeper thread that same budget through admission, the result poll, the guard, and the reclamation write, so no stage renews it. A projection transaction's wait for the file is the store's own busy timeout, not the budget's, so a slice bound is the deadline plus that timeout. A slice runs on a tracked blocking thread; shutdown stops new slices, cancels the running one, and joins every tracked task. A native call that has not returned keeps its permit, its charges, and its result lease, and the join stays unresolved until it exits: grace expiry reports that state, it does not end it. A slice that panics is reported, not swallowed, and stops the supervisor. Quarantine from either maintenance kind stops the supervisor and retains every obligation for an operator. A read that fails before anything is decided is not terminal: the slice reports it and the loop runs the same kind again after the idle wait.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -17,6 +17,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::embedding_dispatch::{
     Blocked, DispatchBounds, DispatchError, DispatchEvent, DispatchFault, EmbeddingDispatcher,
+    ScanPosition,
 };
 use crate::identity_sweep::{IdentitySweeper, SweepError, SweepReport};
 use crate::projection_gates::{Denial, EntryPoint, HookGate, ProjectionHook};
@@ -35,7 +36,7 @@ pub struct Maintained {
 }
 
 /// Finite bounds every slice runs under. `slice` is the absolute budget of one slice; `idle` is the wait once both a backfill and a sweep have found nothing to do.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SliceBounds {
     pub dispatch: DispatchBounds,
     pub sweep_candidates: NonZeroUsize,
@@ -153,6 +154,8 @@ pub struct EmbeddingSupervisor {
     admitted: Mutex<BTreeMap<String, HostJob>>,
     /// Where the next identity sweep resumes its selection; `None` starts a pass over the table.
     sweep_cursor: Mutex<Option<String>>,
+    /// Where the next backfill pass resumes its eligibility scan.
+    scan_position: Mutex<Option<ScanPosition>>,
     panic_next_slice: AtomicBool,
     dispatch_faults: Mutex<Vec<DispatchFault>>,
     #[cfg(feature = "test-support")]
@@ -184,6 +187,7 @@ impl EmbeddingSupervisor {
             stop: Mutex::new(None),
             admitted: Mutex::new(BTreeMap::new()),
             sweep_cursor: Mutex::new(None),
+            scan_position: Mutex::new(None),
             panic_next_slice: AtomicBool::new(false),
             dispatch_faults: Mutex::new(Vec::new()),
             #[cfg(feature = "test-support")]
@@ -235,8 +239,25 @@ impl EmbeddingSupervisor {
                 self.stop_with(Stop::Shutdown);
                 return;
             }
+            // A slice that would straddle the episode grant's deadline ends there instead, so no pass awaits and publishes a result past the episode; a backfill slice begun after the deadline keeps the slice bound, since its passes only refuse and stop expired rows, and no sweep runs then; one begun at the deadline gets no time, since a row is still completable then and no result may be awaited past it.
+            let until_grant = self
+                .bounds
+                .dispatch
+                .grant
+                .deadline
+                .saturating_sub((self.now)());
+            let slice = match u64::try_from(until_grant) {
+                Ok(remaining) => self.bounds.slice.min(Duration::from_millis(remaining)),
+                Err(_) => self.bounds.slice,
+            };
+            // Past the grant's deadline nothing is reclaimed under it: sweeps wait for the owner's next grant, while backfill passes still run and only stop expired rows.
+            if until_grant < 0 && kind == SliceKind::Sweep {
+                idle.record(kind, true);
+                kind = kind.other();
+                continue;
+            }
             let budget = EvalBudget::new(
-                Some(Instant::now() + self.bounds.slice),
+                Some(Instant::now() + slice),
                 Arc::new(AtomicBool::new(false)),
             );
             let _ = self.events.send(SupervisorEvent::SliceStarted {
@@ -340,7 +361,8 @@ impl EmbeddingSupervisor {
         match kind {
             SliceKind::Backfill => {
                 let mut dispatcher =
-                    EmbeddingDispatcher::new(&m.kernel, &m.projection, &m.local_embeddings);
+                    EmbeddingDispatcher::new(&m.kernel, &m.projection, &m.local_embeddings)
+                        .resuming(self.lock_scan_position().take());
                 for fault in std::mem::take(
                     &mut *self
                         .dispatch_faults
@@ -443,6 +465,7 @@ impl EmbeddingSupervisor {
                         }
                     },
                 );
+                *self.lock_scan_position() = dispatcher.scan_position();
                 // Host jobs the host has settled and no row expects leave the census here, so it holds only live obligations rather than every job ever submitted.
                 self.native_census();
                 match end {
@@ -472,7 +495,9 @@ impl EmbeddingSupervisor {
                 *self.lock_sweep_cursor() = sweeper.cursor().map(str::to_owned);
                 match swept {
                     Ok(report) => Ok(SliceOutcome::Sweep(report)),
-                    Err(SweepError::Read(error)) => Ok(SliceOutcome::ReadFailed(error.to_string())),
+                    Err(error @ (SweepError::Read(_) | SweepError::Unbounded)) => {
+                        Ok(SliceOutcome::ReadFailed(error.to_string()))
+                    }
                     Err(SweepError::Quarantined(quarantine)) => Err(Stop::Quarantined(quarantine)),
                 }
             }
@@ -612,6 +637,12 @@ impl EmbeddingSupervisor {
 
     fn lock_sweep_cursor(&self) -> std::sync::MutexGuard<'_, Option<String>> {
         self.sweep_cursor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_scan_position(&self) -> std::sync::MutexGuard<'_, Option<ScanPosition>> {
+        self.scan_position
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }

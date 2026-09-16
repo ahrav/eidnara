@@ -34,6 +34,8 @@ use crate::vector_generation::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReaderBounds {
     pub max_deltas: NonZeroUsize,
+    /// Bytes one member's payload may total; verification holds every member's payload at once.
+    pub max_member_bytes: u64,
     /// Compositions recovery may fully verify when the selected one does not.
     pub recovery_bound: NonZeroUsize,
 }
@@ -351,6 +353,7 @@ pub fn acquire(
             &candidate.digest,
             expected,
             bounds.max_deltas,
+            bounds.max_member_bytes,
         ) else {
             continue;
         };

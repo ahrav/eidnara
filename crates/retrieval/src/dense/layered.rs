@@ -81,7 +81,7 @@ struct ResolvedRows<'a> {
     winners: Vec<Winner<'a>>,
     next: usize,
     revoked: usize,
-    /// The last page read had no rows after it, so every winner still ahead of the cursor is past the live population.
+    /// The last page read was visited in full and had no rows after it, so every winner still ahead of the cursor is past the live population.
     exhausted: bool,
 }
 

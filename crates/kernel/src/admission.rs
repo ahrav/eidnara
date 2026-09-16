@@ -2629,6 +2629,24 @@ fn approval_chain_valid_at_snapshot_sql(approval_column: &str) -> String {
 }
 // policy-digest:chain-end
 
+/// The snapshot-bound authority check as SQL for readers outside this module.
+/// Binds `:governing_as_of`; the policy digest covers the definition it wraps.
+pub(crate) fn supporting_approval_valid_sql(approval_column: &str) -> String {
+    approval_chain_valid_at_snapshot_sql(approval_column)
+}
+
+/// The serving view's own-row selection at `:governing_as_of`, for readers
+/// outside this module. The enclosing query must bind `o` to `object_registry`.
+pub(crate) fn served_own_decision_sql(alias: &str) -> String {
+    latest_own_decision_sql(alias, &format!("AND {alias}.commit_seq<=:governing_as_of"))
+}
+
+/// The serving view's lineage-row selection at `:governing_as_of`, for readers
+/// outside this module. The enclosing query must bind `o` to `object_registry`.
+pub(crate) fn served_lineage_decision_sql(alias: &str) -> String {
+    latest_lineage_decision_sql(alias, &format!("AND {alias}.commit_seq<=:governing_as_of"))
+}
+
 /// A validated trigger reports the sensitivity it carries, which composes into the
 /// admission so an observation cannot admit content less classified than itself.
 ///
@@ -2987,20 +3005,23 @@ pub(crate) fn egress_candidates_tx(
 ) -> Result<Vec<EgressCandidate>, KernelError> {
     let ids: Vec<&str> = candidates.iter().map(|(id, _)| *id).collect();
     let ids = serde_json::to_string(&ids).map_err(|_| KernelError::InvalidInput)?;
-    // Hidden at `ExplicitSearch`, the widest surface, means hidden everywhere.
-    let served: HashMap<String, ServedClass> =
-        served_rows(tx, Surface::ExplicitSearch, tip, Some(&ids), None)?
-            .into_iter()
-            .map(|(object, visibility, _)| {
-                (
-                    object.object_id,
-                    ServedClass {
-                        sensitivity: object.sensitivity,
-                        visibility,
-                    },
-                )
-            })
-            .collect();
+    // Hidden at `ExplicitSearch`, the widest surface, means hidden everywhere;
+    // the narrower surfaces ride along from the same row so a per-surface
+    // judgement needs no second serving read.
+    let served: HashMap<String, ServedClass> = served_classes(tx, tip, Some(&ids), None)?
+        .into_iter()
+        .map(|row| {
+            (
+                row.object.object_id.clone(),
+                ServedClass {
+                    sensitivity: row.object.sensitivity,
+                    visibility: row.visibility(Surface::ExplicitSearch),
+                    auto_inject: row.visibility(Surface::AutoInject),
+                    auto_search: row.visibility(Surface::AutoSearch),
+                },
+            )
+        })
+        .collect();
     // One registry read for the batch, and one egress-facts read per
     // distinct digest, instead of one of each per candidate.
     let states = load_object_states(tx, &ids)?;
@@ -3073,6 +3094,18 @@ pub struct ServedClass {
     /// `Hidden` when no surface serves the object: admission rejected,
     /// contradicted, or quarantined it, or its class bars every surface.
     pub visibility: SurfaceVisibility,
+    pub auto_inject: SurfaceVisibility,
+    pub auto_search: SurfaceVisibility,
+}
+
+impl ServedClass {
+    pub fn visibility_on(&self, surface: Surface) -> SurfaceVisibility {
+        match surface {
+            Surface::AutoInject => self.auto_inject,
+            Surface::AutoSearch => self.auto_search,
+            Surface::ExplicitSearch => self.visibility,
+        }
+    }
 }
 
 /// `ServedRow` keeps own and lineage rows separate so callers can evaluate a hypothetical own row.
@@ -3250,7 +3283,7 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
 // policy-digest:serving-end
 
 /// Returns served rows before a surface is applied.
-fn served_classes(
+pub(crate) fn served_classes(
     tx: &Transaction<'_>,
     requested: i64,
     ids: Option<&str>,

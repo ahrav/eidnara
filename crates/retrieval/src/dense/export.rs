@@ -44,7 +44,7 @@ pub enum ExportRefusal {
     LayoutMismatch { layout: u32, generation: u32 },
     #[error("the layout admits no generation: {0}")]
     Layout(RowRejection),
-    #[error("no batch has committed under kernel {kernel_incarnation_id}")]
+    #[error("no batch has committed a checkpoint with a hold under kernel {kernel_incarnation_id}")]
     NoCheckpoint { kernel_incarnation_id: String },
     #[error("more than {max} live rows carry a vector of the generation")]
     OverBound { max: usize },
@@ -96,11 +96,12 @@ pub fn live_rows(
     }
     layout.check().map_err(ExportRefusal::Layout)?;
     crate::vectors::check_generation(conn, generation)?;
-    let checkpoint = read_checkpoint(conn, kernel_incarnation_id)?.ok_or_else(|| {
-        ExportRefusal::NoCheckpoint {
+    // The schema admits a NULL hold, read back as empty; `apply_batch` refuses an empty hold, so no batch committed that checkpoint and it is no provenance.
+    let checkpoint = read_checkpoint(conn, kernel_incarnation_id)?
+        .filter(|checkpoint| !checkpoint.hold_id.is_empty())
+        .ok_or_else(|| ExportRefusal::NoCheckpoint {
             kernel_incarnation_id: kernel_incarnation_id.to_owned(),
-        }
-    })?;
+        })?;
     let limit = i64::try_from(max_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
     let mut statement = conn
         .prepare(&LIVE_ROWS_SQL)

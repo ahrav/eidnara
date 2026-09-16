@@ -153,7 +153,7 @@ fn positive_scales() -> impl Strategy<Value = Vec<f32>> {
     )
 }
 
-/// `weighted_dot` equals the coordinate-order f64 sum of `s²·(cq·cd)` written independently, and every integer product stays in `[-16129, 16129]`.
+/// The independently written in-order model must match bit for bit over the full code range `[-127, 127]`, so any reassociation, fusion, or order change in `weighted_dot` fails here.
 #[test]
 fn weighted_dot_matches_the_in_order_model_over_the_full_code_range() {
     runner()
@@ -173,7 +173,6 @@ fn weighted_dot_matches_the_in_order_model_over_the_full_code_range() {
                 for j in 0..query.len() {
                     let s = f64::from(scales.as_slice()[j]);
                     let product = i32::from(query[j]) * i32::from(doc[j]);
-                    prop_assert!((-16129..=16129).contains(&product));
                     model += (s * s) * f64::from(product);
                 }
                 prop_assert_eq!(

@@ -671,6 +671,22 @@ fn authority_moved_reports_an_incarnation_change_before_a_snapshot_change() {
         None
     );
 
+    // An unknown classification generation is a moved snapshot even against nothing or against itself.
+    let mut unknown = first.clone();
+    unknown.snapshot.classification_generation = None;
+    assert_eq!(
+        authority_moved(None, None, &unknown),
+        Some(AuthorityMoved::Snapshot)
+    );
+    assert_eq!(
+        authority_moved(
+            Some(&unknown.snapshot),
+            Some(&unknown.incarnation),
+            &unknown
+        ),
+        Some(AuthorityMoved::Snapshot)
+    );
+
     fixture.retire("theta");
     let after_commit = judge(&fixture.kernel);
     assert_ne!(after_commit.snapshot, first.snapshot);
@@ -792,6 +808,115 @@ fn a_budget_that_ends_before_the_first_page_refuses_and_one_that_ends_later_is_i
     );
     assert!(before_revalidation.ranked.is_empty());
     assert_eq!(before_revalidation.coverage.required, 8);
+}
+
+#[test]
+fn cancellation_stops_decoding_at_each_row_in_a_page() {
+    let fixture = Fixture::all_admitted();
+    for stop_at in 1..=8 {
+        let budget = EvalBudget::unbounded();
+        let mut visited = 0;
+        let ranking = fixture
+            .rank_with_hook(
+                &axis(0),
+                OracleBounds {
+                    page_rows: NonZeroUsize::new(8).unwrap(),
+                    ..bounds(3)
+                },
+                &budget,
+                |window| {
+                    if let Window::Visited(_) = window {
+                        visited += 1;
+                        if visited == stop_at {
+                            budget.cancel();
+                        }
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            ranking.completion,
+            Completion::Incomplete(IncompleteReason::BudgetExhausted)
+        );
+        assert!(ranking.ranked.is_empty());
+        assert_eq!(visited, stop_at);
+        assert_eq!(ranking.coverage.required, stop_at - 1);
+        assert_eq!(ranking.coverage.with_vector, stop_at - 1);
+        assert_eq!(ranking.consumed.pages, 1);
+        assert_eq!(ranking.consumed.batches, 0);
+    }
+}
+
+#[test]
+fn cancellation_after_a_page_is_judged_keeps_every_exclusion_of_that_page() {
+    let admitted: Vec<&str> = OBJECTS
+        .iter()
+        .copied()
+        .filter(|object| *object != "alpha")
+        .collect();
+    let fixture = Fixture::new(&admitted, corpus());
+    let budget = EvalBudget::unbounded();
+    let ranking = fixture
+        .rank_with_hook(
+            &axis(0),
+            OracleBounds {
+                page_rows: NonZeroUsize::new(8).unwrap(),
+                ..bounds(3)
+            },
+            &budget,
+            |window| {
+                if window == Window::AfterJudgment {
+                    budget.cancel();
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        ranking.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(ranking.ranked.is_empty());
+    assert_eq!(ranking.consumed.judged, 8);
+    assert_eq!(
+        ranking.consumed.excluded,
+        vec![(EligibilityVerdict::Hidden, 1)],
+        "a judged exclusion counts whether or not its page was scored"
+    );
+}
+
+#[test]
+fn cancellation_does_not_decode_a_corrupt_tail_after_the_budget_ends() {
+    let fixture = Fixture::all_admitted();
+    let last = fixture.dense_ids().into_iter().next_back().unwrap();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2 WHERE occurrence_id=?1",
+            rusqlite::params![last, codec::encode(&[f32::NAN; 8])],
+        )
+        .unwrap();
+    let budget = EvalBudget::unbounded();
+    let ranking = fixture
+        .rank_with_hook(
+            &axis(0),
+            OracleBounds {
+                page_rows: NonZeroUsize::new(8).unwrap(),
+                ..bounds(3)
+            },
+            &budget,
+            |window| {
+                if let Window::Visited(_) = window {
+                    budget.cancel();
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        ranking.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(ranking.ranked.is_empty());
+    assert_eq!(ranking.coverage.required, 0);
 }
 
 #[test]
@@ -1040,6 +1165,50 @@ fn rows_round_trip_every_bit_including_signed_zero() {
         unit_row.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
     );
     assert!(decoded[0].is_sign_negative());
+}
+
+#[test]
+fn codec_entry_points_refuse_invalid_tolerances_before_reading_rows() {
+    for tolerance in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5] {
+        let layout = RowLayout {
+            unit_norm_tolerance: tolerance,
+            ..layout()
+        };
+        for row in [axis(0), vec![2.0; 8], Vec::new()] {
+            let bytes = codec::encode(&row);
+            for result in [
+                codec::validate(&row, &layout),
+                codec::decode(&bytes, &layout).map(|_| ()),
+                codec::decode(&[0], &layout).map(|_| ()),
+            ] {
+                assert!(
+                    matches!(result, Err(RowRejection::Tolerance { tolerance: seen })
+                        if seen.to_bits() == tolerance.to_bits()),
+                    "{tolerance}: {result:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn tolerated_norm_error_does_not_turn_inner_product_into_cosine() {
+    let query = axis(0);
+    let mut longer = query.clone();
+    longer[0] = 1.0005;
+    let ranked = rescore(
+        &layout(),
+        &query,
+        [
+            ("a", OccurrenceClass::CanonicalClaims, query.as_slice()),
+            ("b", OccurrenceClass::CanonicalClaims, longer.as_slice()),
+        ],
+    )
+    .unwrap();
+    // Both rows have cosine 1; stored-value inner product ranks the longer row first.
+    assert_eq!(ranked[0].occurrence_id, "b");
+    assert_eq!(ranked[0].score, f64::from(longer[0]));
+    assert_eq!(ranked[1].score, 1.0);
 }
 
 #[test]
@@ -1425,6 +1594,15 @@ fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_boun
     assert!(matches!(
         other_kernel,
         Err(ExportRefusal::Projection(ProjectionError::IdentityMismatch))
+    ));
+    // The schema admits a NULL hold, read back as empty; no batch could have committed it, so it is no provenance.
+    fixture
+        .raw()
+        .execute("UPDATE projection_checkpoint SET hold_id=NULL", [])
+        .unwrap();
+    assert!(matches!(
+        export(&fixture, 64, layout()),
+        Err(ExportRefusal::NoCheckpoint { .. })
     ));
     fixture
         .raw()

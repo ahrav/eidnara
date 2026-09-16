@@ -50,5 +50,6 @@ evidence.
 | `search-projection` | the RP2.1 specification ([#347](https://github.com/ahrav/eidnara/issues/347)) and its companion catalogs for embedding, export and recovery, and projection coverage, authored against Eidnara `913234433` | RP2.1 P1 |
 | `hot-path-optimization` | the hot-path latency specification ([#350](https://github.com/ahrav/eidnara/issues/350)), whose parent supplement was published under the superseded [#351](https://github.com/ahrav/eidnara/issues/351); the parent supplement and its `latency-audit/` area are authored against Eidnara `913234433` | HP1 M0 |
 | `opencode-plugin/transform-edit-responses` | the Transform Edit Responses specification ([#525](https://github.com/ahrav/eidnara/issues/525)); the client execution records TE17 to TE24, TE26, TE27, and TE30 are authored against the #533 change, with `baseline.md` holding the pre-533 benchmark baseline | TE U3 |
+| `canonical-positive-claim-projection` | the RP2.4 specification ([#408](https://github.com/ahrav/eidnara/issues/408)) and the slugs its implementation tickets assign; the specification's catalog bundle is unavailable, so records are reconstructed from the specification and verified against the kernel code that implements them | RP2.4 |
 
 Part directories do not exist before their assigned waves.

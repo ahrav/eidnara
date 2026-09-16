@@ -59,7 +59,7 @@ fn a_base_publishes_as_one_complete_selection_whose_members_stay_protected_witho
     assert_eq!(report.removed_generations, 0);
     assert!(fixture.generations().contains(&base_digest));
     assert!(fixture.generations().contains(&composition.digest()));
-    let base_manifest = verify(&fixture.store, &base_digest, &fixture.expected())
+    let base_manifest = verify(&fixture.store, &base_digest, &fixture.expected(), u64::MAX)
         .unwrap()
         .sidecar
         .stage_manifest();
@@ -144,7 +144,7 @@ fn topology_and_identity_checks_refuse_a_composition_before_anything_is_staged()
         fixture.compose(1, &base, &[earlier]).unwrap_err(),
         CompositionRefusal::CheckpointOrder { index: 0 }
     );
-    let duplicate = verify(&fixture.store, &delta.digest, &fixture.expected()).unwrap();
+    let duplicate = verify(&fixture.store, &delta.digest, &fixture.expected(), u64::MAX).unwrap();
     assert_eq!(
         fixture.compose(1, &base, &[delta, duplicate]).unwrap_err(),
         CompositionRefusal::DuplicateMember { index: 1 }
@@ -415,6 +415,7 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
             fixture.transaction(),
             &foreign,
             NonZeroUsize::new(4).unwrap(),
+            u64::MAX,
             NonZeroUsize::new(8).unwrap()
         )
         .unwrap_err(),
@@ -427,6 +428,7 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
             fixture.transaction(),
             &fixture.expected(),
             NonZeroUsize::new(4).unwrap(),
+            u64::MAX,
             NonZeroUsize::new(1).unwrap()
         )
         .is_ok()
@@ -438,6 +440,7 @@ fn recovery_takes_the_newest_verified_composition_and_reports_a_stale_or_absent_
             fixture.transaction(),
             &fixture.expected(),
             NonZeroUsize::new(1).unwrap(),
+            u64::MAX,
             NonZeroUsize::new(8).unwrap()
         )
         .map(|r| r.composition.digest),
@@ -467,6 +470,7 @@ fn recovery_counts_full_validation_failures_against_its_candidate_bound() {
             fixture.transaction(),
             &fixture.expected(),
             NonZeroUsize::new(4).unwrap(),
+            u64::MAX,
             NonZeroUsize::new(1).unwrap(),
         )
         .unwrap_err(),
@@ -523,6 +527,7 @@ fn recovery_does_not_retain_discovery_descriptors() {
         fixture.transaction(),
         &fixture.expected(),
         NonZeroUsize::new(4).unwrap(),
+        u64::MAX,
         NonZeroUsize::new(1).unwrap(),
     )
     .unwrap();
@@ -810,6 +815,7 @@ fn a_rename_lost_before_its_sync_is_read_back_as_the_old_selection_and_the_retry
         fixture.transaction(),
         &fixture.expected(),
         NonZeroUsize::new(4).unwrap(),
+        u64::MAX,
         NonZeroUsize::new(8).unwrap(),
     )
     .unwrap();
@@ -888,10 +894,15 @@ fn equal_sequences_without_a_selector_recover_deterministically_and_a_selector_n
     // A composition whose member was removed from the store cannot be selected, whatever its record says.
     let orphaned = fixture.compose(3, &fixture.layer(7, 20), &[]).unwrap();
     let orphaned_base = orphaned.base.clone();
-    let orphaned_manifest = verify(&fixture.store, &orphaned_base, &fixture.expected())
-        .unwrap()
-        .sidecar
-        .stage_manifest();
+    let orphaned_manifest = verify(
+        &fixture.store,
+        &orphaned_base,
+        &fixture.expected(),
+        u64::MAX,
+    )
+    .unwrap()
+    .sidecar
+    .stage_manifest();
     fixture
         .store
         .discard_unselected(&orphaned_manifest, fixture.transaction(), &BTreeSet::new())
@@ -949,6 +960,7 @@ fn verification_refuses_excess_deltas_before_opening_any_member() {
             &composition.digest(),
             &fixture.expected(),
             NonZeroUsize::new(1).unwrap(),
+            u64::MAX,
         )
         .unwrap_err(),
         CompositionRefusal::DeltasOverBound { count: 2, max: 1 },
@@ -1206,7 +1218,7 @@ fn a_forged_record_with_a_repeated_delta_fails_topology_at_verification() {
     };
     let built = build(&fixture.expected(), &earlier_snapshot, &fixture.work_dir()).unwrap();
     let staged = stage(&built, &fixture.staging()).unwrap();
-    let layer = verify(&fixture.store, &staged, &fixture.expected()).unwrap();
+    let layer = verify(&fixture.store, &staged, &fixture.expected(), u64::MAX).unwrap();
     assert_eq!(
         fixture.compose(4, &base, &[layer]).unwrap_err(),
         CompositionRefusal::CheckpointOrder { index: 0 }
@@ -1267,7 +1279,7 @@ fn a_quarantined_vector_selector_stops_staging_and_pruning_and_an_unselected_cor
     assert!(fixture.store.validate(&stray.digest).is_err());
     let rebuilt = build(&fixture.expected(), &export(9, 30), &fixture.work_dir()).unwrap();
     assert_eq!(stage(&rebuilt, &fixture.staging()).unwrap(), stray.digest);
-    assert!(verify(&fixture.store, &stray.digest, &fixture.expected()).is_ok());
+    assert!(verify(&fixture.store, &stray.digest, &fixture.expected(), u64::MAX).is_ok());
 }
 
 #[test]
