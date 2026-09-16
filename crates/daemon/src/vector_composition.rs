@@ -236,7 +236,7 @@ fn check_topology(
 /// How far one publication attempt is known to have gone; each rung is recorded when its step returns, so a lost reply leaves the attempt on the last rung that returned without implying the next did not happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Progress {
-    /// Nothing reached the store.
+    /// Staging did not return a digest; the selector is unchanged.
     NotStaged,
     /// The composition generation is in the store; the selector is unchanged.
     Staged,
@@ -333,13 +333,17 @@ fn selected_sequence(store: &GenerationStore) -> Result<Option<u64>, Composition
 ///
 /// # Errors
 ///
-/// Returns `Quarantined` when the record has an unknown schema.
+/// Returns `Quarantined` when the generation manifest or the record has an unknown schema.
 fn record(
     store: &GenerationStore,
     digest: &str,
 ) -> Result<Option<Composition>, CompositionRefusal> {
-    let Ok(manifest) = store.manifest(digest) else {
-        return Ok(None);
+    let manifest = match store.manifest(digest) {
+        Ok(manifest) => manifest,
+        Err(GenerationError::UnsupportedStateSchema) => {
+            return Err(CompositionRefusal::Quarantined);
+        }
+        Err(_) => return Ok(None),
     };
     if manifest.target != VECTOR_SELECTION_TARGET {
         return Ok(None);

@@ -1201,7 +1201,27 @@ fn a_selection_the_verifier_rejects_gates_publication_the_same_way_recovery_trea
     // Recovery still serves what this build can verify without repointing the selector.
     assert_eq!(
         fixture.recover().unwrap(),
-        (repair.digest(), SelectorState::Stale(selected))
+        (repair.digest(), SelectorState::Stale(selected.clone()))
+    );
+
+    // An unknown generation-manifest schema on the selected generation also refuses publication without moving the selector.
+    let manifest_path = fixture.generation_dir(&selected).join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["schema"] = 7.into();
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let failure = publish(
+        &fixture.compose(9, &base, &[]).unwrap(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(failure.progress, Progress::NotStaged);
+    assert_eq!(failure.refusal, CompositionRefusal::Quarantined);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(selected)
     );
 }
 

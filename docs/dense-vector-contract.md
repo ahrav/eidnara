@@ -319,7 +319,7 @@ validation is not a composition this build accepts, so it sets no sequence
 floor and a repair publication proceeds. A selected record of a schema this
 build does not know refuses publication as `Quarantined`, because it may be a
 later build's selection. It reports how far the attempt got, recorded when each step returns:
-`NotStaged`, `Staged` when the store holds the record, `Acknowledged` when
+`NotStaged`, `Staged` when staging returned the record's digest, `Acknowledged` when
 the selector rename returned, `Durable` when the containing-directory sync
 returned. A failure carries the last stage reached; a failure at or after
 `Acknowledged` is an unknown outcome, and `reconcile` settles it by reading
