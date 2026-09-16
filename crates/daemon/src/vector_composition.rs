@@ -467,17 +467,22 @@ pub fn verify_composition(
     expected: &ExpectedVectors<'_>,
     max_deltas: NonZeroUsize,
 ) -> Result<VerifiedComposition, CompositionRefusal> {
-    // The manifest is read before any listed file is hashed or held in memory.
-    let manifest = store.manifest(digest)?;
-    if manifest
+    check_record_size(store, digest)?;
+    let generation = store.validate(digest)?;
+    verify_validated(store, generation, expected, max_deltas)
+}
+
+/// Reads the manifest before any listed file is hashed or held in memory, so an oversized record is refused by its declared size.
+fn check_record_size(store: &GenerationStore, digest: &str) -> Result<(), CompositionRefusal> {
+    if store
+        .manifest(digest)?
         .files
         .iter()
         .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
     {
         return Err(CompositionRefusal::NotComposition("record size"));
     }
-    let generation = store.validate(digest)?;
-    verify_validated(store, generation, expected, max_deltas)
+    Ok(())
 }
 
 /// Verifies the composition generation `digest` and its record without opening a member: the record is a canonical composition bound to its manifest and carrying `expected`.
@@ -490,6 +495,7 @@ pub fn verify_record(
     digest: &str,
     expected: &ExpectedVectors<'_>,
 ) -> Result<Composition, CompositionRefusal> {
+    check_record_size(store, digest)?;
     verify_record_of(&store.validate(digest)?, expected)
 }
 

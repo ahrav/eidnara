@@ -670,6 +670,41 @@ fn a_prefix_whose_winners_cannot_be_calibrated_refuses_with_the_calibration_reje
 }
 
 #[test]
+fn a_tail_the_delta_limit_no_longer_admits_refuses_publication_before_staging_the_base() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let d1 = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
+    fixture
+        .publish(&fixture.compose(1, &base, &[d1]).unwrap())
+        .unwrap();
+    let cut_view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &cut_view).unwrap();
+    let d1_verified = daemon::vector_generation::verify(
+        &fixture.store,
+        &cut_view.members()[1],
+        &fixture.expected(),
+    )
+    .unwrap();
+    let d2 = fixture.layer_from(&export(&[("beta", axis(6))], &[], 14));
+    fixture
+        .publish(&fixture.compose(2, &base, &[d1_verified, d2]).unwrap())
+        .unwrap();
+    // The limit drops to zero after the tail was published: the compacted composition would carry one delta.
+    fixture.set_limit(DELTA_LIMIT, 0);
+    let before = fixture.generations();
+    assert_eq!(
+        publish_compacted(&fixture, &compacted).unwrap_err(),
+        CompactionRefusal::Composition(CompositionRefusal::Deltas(Denial::LimitExceeded {
+            limit: DELTA_LIMIT.to_owned(),
+            observed: 1,
+            max: 0
+        }))
+    );
+    assert_eq!(fixture.generations(), before, "the base was not staged");
+    compacted.discard().unwrap();
+}
+
+#[test]
 fn a_selection_at_the_last_sequence_refuses_publication_before_staging_anything() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));

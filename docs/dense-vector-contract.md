@@ -428,7 +428,10 @@ and refuses as `PrefixMoved` unless the selection still stands on the cut's
 base with the cut's deltas as a prefix, before staging anything. The cut's own
 members are not opened again: the view verified and pinned them at acquisition,
 and none of them belongs to the new composition. Whatever deltas follow them
-are the tail: published independently of the compactor, each is verified as a
+are the tail, and their count is the new composition's delta count: it is
+checked against the reader bound and admitted through the ledger before a
+member is opened or the base is staged. Published independently of the
+compactor, each tail delta is verified as a
 member and carried over unchanged and in order, so a later insert, update, or
 delete keeps its precedence and is represented exactly once. Only then is the
 new base staged and the new composition, at the selection's sequence plus one,

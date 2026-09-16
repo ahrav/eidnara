@@ -319,6 +319,18 @@ pub fn publish(
             selected: current.sequence,
         })?;
     let tail = current.deltas[prefix..].to_vec();
+    // The tail is the new composition's delta count; a bound or limit it fails refuses before a member is opened or the base is staged.
+    if tail.len() > max_deltas.get() {
+        return Err(CompositionRefusal::DeltasOverBound {
+            count: tail.len(),
+            max: max_deltas.get(),
+        }
+        .into());
+    }
+    staging
+        .ledger
+        .admit_deltas(staging.admission, tail.len())
+        .map_err(CompositionRefusal::Deltas)?;
     let carried = tail
         .iter()
         .map(|delta| vector_composition::verify_member(staging.store, delta, expected))
