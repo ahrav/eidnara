@@ -41,6 +41,14 @@ The deadline lapses during the embedding step.
 
 - A converged family so the handler reaches the embedding step.
 - A scripted embedder that sleeps past the remaining duration.
+- A test runner that counts `run_unit` submissions
+  (`Handler::dispatch_value_for_test_observed`), so "no scan" is an observed
+  zero rather than inferred from the `deadline` terminal, which `lifecycle.pin`
+  would also produce inside a wrongly submitted scan; the same runner cancels
+  the request as its embedding step is submitted, and the head-of-step budget
+  check leaves the embedder uncalled. Removing the handler's post-embedding
+  exhaustion checks made the count read one while the terminal still read
+  `deadline`.
 - Stored unit vectors under the fixture generation for the position oracle.
 
 ## Investigation log

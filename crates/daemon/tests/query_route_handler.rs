@@ -381,13 +381,18 @@ async fn the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades
         .set_query_embedder_for_test(Some(Arc::clone(&slow) as Arc<dyn QueryEmbedder>));
     let mut lapsing = request(&project, "id:rule explicit contract");
     lapsing["remaining_ms"] = json!(200);
-    let answer = body(daemon.outcome(lapsing).await);
+    let (outcome, units) = daemon.outcome_observed(lapsing, false).await;
+    let answer = body(outcome);
     assert_eq!(
         terminal(&answer),
         "deadline",
         "a deadline that lapses during the embedding await ends the request before any scan"
     );
     assert_eq!(slow.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        units, 0,
+        "no scan unit is submitted after the deadline lapsed"
+    );
 
     let queued = Arc::new(ScriptedEmbedder {
         outcome: Ok(vec![1.0; 8]),
@@ -397,17 +402,17 @@ async fn the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades
     daemon
         .handler()
         .set_query_embedder_for_test(Some(Arc::clone(&queued) as Arc<dyn QueryEmbedder>));
-    let answer = body(
-        daemon
-            .outcome_cancelling_before_steps(request(&project, "id:rule explicit contract"))
-            .await,
-    );
+    let (outcome, units) = daemon
+        .outcome_observed(request(&project, "id:rule explicit contract"), true)
+        .await;
+    let answer = body(outcome);
     assert_eq!(terminal(&answer), "cancelled");
     assert_eq!(
         queued.calls.load(Ordering::SeqCst),
         0,
         "a request cancelled before its embedding step starts is not embedded"
     );
+    assert_eq!(units, 0, "no scan unit is submitted after cancellation");
 
     daemon.handler().set_query_embedder_for_test(None);
     let answer = body(

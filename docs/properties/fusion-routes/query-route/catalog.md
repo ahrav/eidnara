@@ -577,7 +577,10 @@ oracle.
 Check: `always` - through the handler over a converged family and the test
 engine, a query answers `fused` with the dense lane `complete`; an embedder
 that sleeps past the remaining duration yields the `deadline` terminal after
-exactly one embedding call and no scan; at the `execute` level, over stored
+exactly one embedding call and zero `run_unit` submissions, counted by the
+test runner; a request cancelled as its embedding step is submitted yields
+`cancelled` with zero embedding calls and zero submissions; at the `execute`
+level, over stored
 unit vectors, every dense contribution's position and raw score equal the
 inner-product reference truncated to `k`. `always` because every dense request
 crosses the same await.
@@ -588,8 +591,8 @@ installed through `set_query_embedder_for_test`; stored vectors under the
 fixture generation.
 Confidence: medium - [evidence](evidence/route-query-embedding-completes-before-blocking-scan.md).
 The ordering is enforced by control flow in `handle_retrieval_query`; the
-witness observes its consequence (a lapsed deadline yields no scan), not the
-thread the embedding ran on.
+witness counts scan submissions on the test runner and observes the
+embedder's call count, not the thread the embedding ran on.
 Existing check: `crates/retrieval/tests/dense_oracle.rs` reference-prefix
 tests, status unaudited.
 Impact: Embedding inside the scan closure would hold the projection

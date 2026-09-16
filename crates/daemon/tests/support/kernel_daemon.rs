@@ -118,9 +118,13 @@ impl KernelDaemon {
             .await
     }
 
-    pub async fn outcome_cancelling_before_steps(&self, request: Value) -> PreparedOutcome {
+    pub async fn outcome_observed(
+        &self,
+        request: Value,
+        cancel_before_step: bool,
+    ) -> (PreparedOutcome, usize) {
         self.handler
-            .dispatch_value_for_test_cancelling_before_steps(self.route, request)
+            .dispatch_value_for_test_observed(self.route, request, cancel_before_step)
             .await
     }
 

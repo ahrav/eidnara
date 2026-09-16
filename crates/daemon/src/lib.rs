@@ -3723,17 +3723,20 @@ impl Handler {
             .await
     }
 
-    /// Cancels the request when its first blocking step is submitted.
-    pub async fn dispatch_value_for_test_cancelling_before_steps(
+    /// Counts `run_unit` submissions; `cancel_before_step` cancels the request at its first `run_step` submission.
+    pub async fn dispatch_value_for_test_observed(
         &self,
         route: RouteHandle,
         request: Value,
-    ) -> PreparedOutcome {
+        cancel_before_step: bool,
+    ) -> (PreparedOutcome, usize) {
         let runner = transform_unit::DetachedRunner {
-            cancel_before_step: true,
+            cancel_before_step,
             ..Default::default()
         };
-        self.dispatch_value_on(route, request, runner).await
+        let units = Arc::clone(&runner.units);
+        let outcome = self.dispatch_value_on(route, request, runner).await;
+        (outcome, units.load(Ordering::SeqCst))
     }
 
     async fn dispatch_value_on(
