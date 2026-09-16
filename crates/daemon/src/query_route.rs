@@ -1226,6 +1226,7 @@ impl HandlerCore {
             store,
             project,
             harness: _,
+            context_capabilities: _,
         } = scope;
         let query = parsed.query;
         // Requests without prose or with more than `limits.probes` ID selectors skip dense inference.

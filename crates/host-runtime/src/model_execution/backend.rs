@@ -198,7 +198,66 @@ pub trait LlmExecutionBackend: Send + Sync + 'static {
     fn unavailable_reason(&self, _harness: Harness) -> Option<&'static str> {
         None
     }
+
+    /// The edit classes this host build can construct and account for on `harness`; the only authorization truth for suppression, replacement, and cross-step reuse.
+    ///
+    /// The default is closed. `unavailable_reason` defaults the other way, because `None` there means "available"; a backend that overrides nothing here offers no edit class, and consumer capability strings never widen this answer.
+    fn context_capabilities(&self, _harness: Harness) -> ContextCapabilities {
+        ContextCapabilities::NONE
+    }
 }
+
+/// The gated edit classes. Append is not a class: every harness accepts an appended block, so it is never gated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditClass {
+    Suppression,
+    Replacement,
+    CrossStepReuse,
+}
+
+impl EditClass {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Suppression => "suppression",
+            Self::Replacement => "replacement",
+            Self::CrossStepReuse => "cross_step_reuse",
+        }
+    }
+}
+
+/// Host-authored static data: which edit classes a harness adapter can construct and account for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContextCapabilities {
+    pub suppression: bool,
+    pub replacement: bool,
+    pub cross_step_reuse: bool,
+}
+
+impl ContextCapabilities {
+    pub const NONE: Self = Self {
+        suppression: false,
+        replacement: false,
+        cross_step_reuse: false,
+    };
+
+    pub fn allows(self, class: EditClass) -> bool {
+        match class {
+            EditClass::Suppression => self.suppression,
+            EditClass::Replacement => self.replacement,
+            EditClass::CrossStepReuse => self.cross_step_reuse,
+        }
+    }
+}
+
+/// OpenCode: whole-message suppression and replacement are the classes the recipe can construct and the accounting can bound; cross-step reuse has no defined semantics and stays off.
+pub const OPENCODE_CONTEXT_CAPABILITIES: ContextCapabilities = ContextCapabilities {
+    suppression: true,
+    replacement: true,
+    cross_step_reuse: false,
+};
+
+/// Pi registers no context hook and no revision token, so no class can be proven and the set stays empty.
+pub const PI_CONTEXT_CAPABILITIES: ContextCapabilities = ContextCapabilities::NONE;
 
 /// Routes each request to the backend for its harness. Holding one backend per harness
 /// keeps the OpenCode and Pi adapters independently replaceable.
@@ -231,6 +290,13 @@ impl LlmExecutionBackend for HarnessDispatchBackend {
         match harness {
             Harness::OpenCode => self.opencode.unavailable_reason(harness),
             Harness::Pi => self.pi.unavailable_reason(harness),
+        }
+    }
+
+    fn context_capabilities(&self, harness: Harness) -> ContextCapabilities {
+        match harness {
+            Harness::OpenCode => self.opencode.context_capabilities(harness),
+            Harness::Pi => self.pi.context_capabilities(harness),
         }
     }
 }

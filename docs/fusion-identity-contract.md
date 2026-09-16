@@ -184,7 +184,7 @@ witness. A malformed request is the transport's `invalid_params` error.
 
 `retrieval.prepare`, `retrieval.apply`, and `retrieval.confirm` in
 `crates/daemon/src/edit_receipts.rs` carry a selection from ranking to a
-confirmed edit; their literals are context-application protocol 1 in
+confirmed edit; their literals are context-application protocol 2 in
 `docs/host-wire-protocol.md` Section 7.8. A preparation binds the RP2.7.U1
 preparation digest over the caller's context and mints a per-preparation
 identity whose fingerprint covers daemon incarnation, context revision,
@@ -197,6 +197,21 @@ key from another daemon incarnation or a lost acknowledgment is `unknown` and
 stays so until such a confirm. Receipts are in memory, keyed by the route's
 bound project, bounded per project by count and store-wide by retention, and
 an evicted key or a key of another project is refused rather than replayed.
+
+## Capability gate
+
+Suppression, replacement, and cross-step reuse are offered only when the host
+backend's `context_capabilities` declaration for the route's harness allows
+the class. The declaration is host-authored static data, read from the
+backend once at startup, latched when the route binds, and constant for the
+route epoch; a backend that overrides
+nothing declares no class, OpenCode declares whole-message suppression and
+replacement, and Pi declares nothing. Consumer capability strings are never
+read for this decision. A class the declaration does not allow answers
+`capability_unsupported`; a declaration that could not be read answers
+`capability_undeclared` with its reason. Both refuse before any identity is
+minted. Append is not a class. Suppression additionally requires the
+adapter's surviving set to confirm every selected occurrence whole.
 
 ## Probe and generation identities
 

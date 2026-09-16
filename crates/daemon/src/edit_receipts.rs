@@ -1,6 +1,6 @@
 //! Selection is not permission and preparation is not application: a receipt records what the daemon forwarded, and only an acknowledgment carrying the applied identity completes it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use host_runtime::model_execution::backend::EditClass;
+
+use crate::context_capabilities::CapabilityDenial;
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
+use crate::kernel_routes::RouteScope;
 use crate::{HandlerCore, invalid_params_error};
 
 pub(crate) const PREPARE: &str = "retrieval.prepare";
@@ -66,6 +70,8 @@ impl ReceiptLimits {
 pub enum Action {
     Append,
     Replace,
+    Suppress,
+    Reuse,
 }
 
 impl Action {
@@ -73,6 +79,18 @@ impl Action {
         match self {
             Self::Append => "append",
             Self::Replace => "replace",
+            Self::Suppress => "suppress",
+            Self::Reuse => "reuse",
+        }
+    }
+
+    /// Append is not gated: every harness accepts an appended block.
+    fn gated_class(self) -> Option<EditClass> {
+        match self {
+            Self::Append => None,
+            Self::Replace => Some(EditClass::Replacement),
+            Self::Suppress => Some(EditClass::Suppression),
+            Self::Reuse => Some(EditClass::CrossStepReuse),
         }
     }
 }
@@ -101,6 +119,10 @@ impl Outcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     Disabled,
+    /// The route binding's latched declaration does not allow the edit class.
+    CapabilityUnsupported(EditClass),
+    /// The route binding's declaration could not be read; distinct from a closed class so an operator repairs the source instead of enabling a class.
+    CapabilityUndeclared(EditClass, &'static str),
     /// The key names this incarnation but the store holds nothing for it: expired, evicted, or never prepared; it never authorizes a replay.
     ReceiptUnavailable,
     StalePreparation,
@@ -112,6 +134,8 @@ impl Refusal {
     pub fn code(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
+            Self::CapabilityUnsupported(_) => "capability_unsupported",
+            Self::CapabilityUndeclared(..) => "capability_undeclared",
             Self::ReceiptUnavailable => "receipt_unavailable",
             Self::StalePreparation => "stale_preparation",
             Self::Conflict => "conflict",
@@ -313,6 +337,9 @@ struct PrepareRequest {
     action: Action,
     accounting_profile: String,
     edit_bytes: u64,
+    /// Adapter-supplied proof of the spans that survive in the current context; suppression is prepared only for selected occurrences this set confirms whole.
+    #[serde(default)]
+    survivors: Vec<WireSpan>,
 }
 
 #[derive(Deserialize)]
@@ -342,8 +369,72 @@ pub struct Prepared {
 
 pub enum PrepareOutcome {
     Prepared(Prepared),
-    /// Over the append allowance or the replacement capacity, decided before any identity is minted.
+    /// Over the append allowance or the replacement capacity, or a suppression without confirmed survivors, decided before any identity is minted.
     Failure(&'static str),
+}
+
+/// Suppression requires each selected occurrence to have a survivor covering its entire
+/// buffer: the survivor's `buffer_len` must equal the context's span for that occurrence,
+/// and the survivor's span must be null or `[0, buffer_len]`. A context naming one occurrence
+/// with two buffer lengths confirms no survivor for it, whatever the order. A selected occurrence absent
+/// from `context.spans` returns `selection_not_in_spans` before the proof is read, so the
+/// context's defect is named whether or not a proof was sent; duplicate survivor occurrence
+/// IDs return `malformed_survivor`. Every list is indexed once.
+fn unconfirmed_survivor(context: &Context, survivors: &[WireSpan]) -> Option<&'static str> {
+    let mut declared: HashMap<&str, Option<u64>> = HashMap::with_capacity(context.spans.len());
+    for span in &context.spans {
+        declared
+            .entry(span.occurrence_id.as_str())
+            .and_modify(|len| {
+                if *len != Some(span.buffer_len) {
+                    *len = None;
+                }
+            })
+            .or_insert(Some(span.buffer_len));
+    }
+    if context
+        .selection
+        .iter()
+        .any(|occurrence_id| !declared.contains_key(occurrence_id.as_str()))
+    {
+        return Some("selection_not_in_spans");
+    }
+    if survivors.is_empty() {
+        return Some("no_survivor_proof");
+    }
+    let mut confirmed: HashMap<&str, &WireSpan> = HashMap::with_capacity(survivors.len());
+    for survivor in survivors {
+        if OccurrenceId::parse(&survivor.occurrence_id).is_err() {
+            return Some("malformed_survivor");
+        }
+        if confirmed
+            .insert(survivor.occurrence_id.as_str(), survivor)
+            .is_some()
+        {
+            return Some("malformed_survivor");
+        }
+    }
+    for occurrence_id in &context.selection {
+        let Some(declared) = declared.get(occurrence_id.as_str()) else {
+            return Some("selection_not_in_spans");
+        };
+        match confirmed.get(occurrence_id.as_str()) {
+            None => return Some("unconfirmed_survivor"),
+            Some(survivor) if Some(survivor.buffer_len) != *declared => {
+                return Some("unconfirmed_survivor");
+            }
+            Some(survivor)
+                if survivor
+                    .span
+                    .flatten()
+                    .is_some_and(|(start, end)| start != 0 || end != survivor.buffer_len) =>
+            {
+                return Some("span_granularity");
+            }
+            Some(_) => {}
+        }
+    }
+    None
 }
 
 pub enum ApplyOutcome {
@@ -410,6 +501,7 @@ fn well_formed_preparation_id(preparation_id: &str) -> bool {
 
 impl ReceiptStore {
     /// Parent Q7: a second application of one selection is a legal intent, so the tuple is a fingerprint and the identity minted here is the key.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
         now: Instant,
@@ -418,20 +510,31 @@ impl ReceiptStore {
         action: Action,
         accounting_profile: &str,
         edit_bytes: u64,
+        survivors: &[WireSpan],
     ) -> Result<PrepareOutcome, IdentityRefusal> {
         self.expire(now);
-        let capacity = match action {
-            Action::Append => (self.limits.append_allowance_bytes, "append_allowance"),
-            Action::Replace => (
-                self.limits.replacement_capacity_bytes,
-                "replacement_capacity",
-            ),
-        };
-        if edit_bytes > capacity.0 {
-            return Ok(PrepareOutcome::Failure(capacity.1));
-        }
+        // A malformed context is `invalid_params` for every action; the capacity and survivor answers below are outcomes for a well-formed request.
         let digest = context.digest()?;
         let selection = context.selection_digest()?;
+        let capacity = match action {
+            Action::Append => Some((self.limits.append_allowance_bytes, "append_allowance")),
+            Action::Replace | Action::Reuse => Some((
+                self.limits.replacement_capacity_bytes,
+                "replacement_capacity",
+            )),
+            Action::Suppress => None,
+        };
+        if let Some((bound, reason)) = capacity
+            && edit_bytes > bound
+        {
+            return Ok(PrepareOutcome::Failure(reason));
+        }
+        if action == Action::Suppress
+            && let Some(reason) = unconfirmed_survivor(context, survivors)
+        {
+            return Ok(PrepareOutcome::Failure(reason));
+        }
+
         let max_keys = self.limits.max_keys;
         if !self.project(project).make_room(max_keys) {
             return Ok(PrepareOutcome::Failure("receipt_capacity"));
@@ -666,6 +769,13 @@ impl ReceiptStore {
         self.receipts(project)
             .is_some_and(|receipts| receipts.contains_key(preparation_id))
     }
+
+    pub fn action(&mut self, now: Instant, project: &str, preparation_id: &str) -> Option<Action> {
+        self.expire(now);
+        self.receipts(project)
+            .and_then(|receipts| receipts.get(preparation_id))
+            .map(|receipt| receipt.action)
+    }
 }
 
 fn fresh_incarnation() -> String {
@@ -679,7 +789,36 @@ fn response(body: Value) -> PreparedOutcome {
 }
 
 fn refusal(refusal: Refusal) -> PreparedOutcome {
-    response(json!({ "kind": "terminal", "terminal": refusal.code() }))
+    match refusal {
+        Refusal::CapabilityUnsupported(class) => response(json!({
+            "kind": "terminal",
+            "terminal": refusal.code(),
+            "class": class.code(),
+        })),
+        Refusal::CapabilityUndeclared(class, reason) => response(json!({
+            "kind": "terminal",
+            "terminal": refusal.code(),
+            "class": class.code(),
+            "reason": reason,
+        })),
+        _ => response(json!({ "kind": "terminal", "terminal": refusal.code() })),
+    }
+}
+
+/// The route's latched declaration is read on prepare and again on apply and confirm, so a receipt cannot be driven from a route whose declaration does not allow its class.
+fn gate(scope: &RouteScope, action: Action) -> Result<(), Refusal> {
+    let Some(class) = action.gated_class() else {
+        return Ok(());
+    };
+    scope
+        .context_capabilities
+        .gate(class)
+        .map_err(|denial| match denial {
+            CapabilityDenial::Unsupported { class } => Refusal::CapabilityUnsupported(class),
+            CapabilityDenial::Unreadable { class, reason } => {
+                Refusal::CapabilityUndeclared(class, reason)
+            }
+        })
 }
 
 fn identity_refusal(operation: &str, refusal: IdentityRefusal) -> PreparedOutcome {
@@ -716,7 +855,7 @@ impl HandlerCore {
         channel: RouteHandle,
         request: Value,
         operation: &str,
-        f: impl FnOnce(&mut ReceiptStore, &str, T) -> PreparedOutcome,
+        f: impl FnOnce(&mut ReceiptStore, &RouteScope, &str, T) -> PreparedOutcome,
     ) -> PreparedOutcome
     where
         T: serde::de::DeserializeOwned,
@@ -733,7 +872,7 @@ impl HandlerCore {
         let Some(store) = slot.as_mut() else {
             return refusal(Refusal::Disabled);
         };
-        f(store, &project, parsed)
+        f(store, &scope, &project, parsed)
     }
 
     pub(crate) fn handle_retrieval_prepare(
@@ -745,26 +884,32 @@ impl HandlerCore {
             channel,
             request,
             PREPARE,
-            |store, project, parsed: PrepareRequest| match store.prepare(
-                Instant::now(),
-                project,
-                &parsed.context,
-                parsed.action,
-                &parsed.accounting_profile,
-                parsed.edit_bytes,
-            ) {
-                Ok(PrepareOutcome::Prepared(prepared)) => response(json!({
-                    "kind": "prepared",
-                    "preparation_id": prepared.preparation_id,
-                    "preparation_digest": prepared.preparation_digest,
-                    "fingerprint": prepared.fingerprint,
-                })),
-                Ok(PrepareOutcome::Failure(reason)) => response(json!({
-                    "kind": "outcome",
-                    "outcome": Outcome::PreparationFailure.code(),
-                    "reason": reason,
-                })),
-                Err(identity) => identity_refusal(PREPARE, identity),
+            |store, scope, project, parsed: PrepareRequest| {
+                if let Err(denied) = gate(scope, parsed.action) {
+                    return refusal(denied);
+                }
+                match store.prepare(
+                    Instant::now(),
+                    project,
+                    &parsed.context,
+                    parsed.action,
+                    &parsed.accounting_profile,
+                    parsed.edit_bytes,
+                    &parsed.survivors,
+                ) {
+                    Ok(PrepareOutcome::Prepared(prepared)) => response(json!({
+                        "kind": "prepared",
+                        "preparation_id": prepared.preparation_id,
+                        "preparation_digest": prepared.preparation_digest,
+                        "fingerprint": prepared.fingerprint,
+                    })),
+                    Ok(PrepareOutcome::Failure(reason)) => response(json!({
+                        "kind": "outcome",
+                        "outcome": Outcome::PreparationFailure.code(),
+                        "reason": reason,
+                    })),
+                    Err(identity) => identity_refusal(PREPARE, identity),
+                }
             },
         )
     }
@@ -778,38 +923,41 @@ impl HandlerCore {
             channel,
             request,
             APPLY,
-            |store, project, parsed: ApplyRequest| match store.apply(
-                Instant::now(),
-                project,
-                &parsed.preparation_id,
-                &parsed.context,
-            ) {
-                Ok(ApplyOutcome::Forwarded {
-                    forwarded_identity,
-                    action,
-                    edit_bytes,
-                }) => response(json!({
-                    "kind": "forwarded",
-                    "preparation_id": parsed.preparation_id,
-                    "forwarded_identity": forwarded_identity,
-                    "action": action.code(),
-                    "edit_bytes": edit_bytes,
-                })),
-                Ok(ApplyOutcome::InFlight { forwarded_identity }) => response(json!({
-                    "kind": "receipt",
-                    "state": "in_flight",
-                    "forwarded_identity": forwarded_identity,
-                })),
-                Ok(ApplyOutcome::Complete { outcome }) => response(json!({
-                    "kind": "receipt",
-                    "state": "complete",
-                    "outcome": outcome.code(),
-                })),
-                Ok(ApplyOutcome::Unknown) => {
-                    response(json!({ "kind": "receipt", "state": "unknown" }))
+            |store, scope, project, parsed: ApplyRequest| {
+                let now = Instant::now();
+                if let Some(action) = store.action(now, project, &parsed.preparation_id)
+                    && let Err(denied) = gate(scope, action)
+                {
+                    return refusal(denied);
                 }
-                Err(ApplyRefusal::Refused(refused)) => refusal(refused),
-                Err(ApplyRefusal::Invalid(identity)) => identity_refusal(APPLY, identity),
+                match store.apply(now, project, &parsed.preparation_id, &parsed.context) {
+                    Ok(ApplyOutcome::Forwarded {
+                        forwarded_identity,
+                        action,
+                        edit_bytes,
+                    }) => response(json!({
+                        "kind": "forwarded",
+                        "preparation_id": parsed.preparation_id,
+                        "forwarded_identity": forwarded_identity,
+                        "action": action.code(),
+                        "edit_bytes": edit_bytes,
+                    })),
+                    Ok(ApplyOutcome::InFlight { forwarded_identity }) => response(json!({
+                        "kind": "receipt",
+                        "state": "in_flight",
+                        "forwarded_identity": forwarded_identity,
+                    })),
+                    Ok(ApplyOutcome::Complete { outcome }) => response(json!({
+                        "kind": "receipt",
+                        "state": "complete",
+                        "outcome": outcome.code(),
+                    })),
+                    Ok(ApplyOutcome::Unknown) => {
+                        response(json!({ "kind": "receipt", "state": "unknown" }))
+                    }
+                    Err(ApplyRefusal::Refused(refused)) => refusal(refused),
+                    Err(ApplyRefusal::Invalid(identity)) => identity_refusal(APPLY, identity),
+                }
             },
         )
     }
@@ -823,23 +971,31 @@ impl HandlerCore {
             channel,
             request,
             CONFIRM,
-            |store, project, parsed: ConfirmRequest| match store.confirm(
-                Instant::now(),
-                project,
-                &parsed.preparation_id,
-                &parsed.forwarded_identity,
-                parsed.applied_identity.flatten().as_deref(),
-                parsed.outcome,
-            ) {
-                Ok(ConfirmOutcome::Complete { outcome }) => response(json!({
-                    "kind": "receipt",
-                    "state": "complete",
-                    "outcome": outcome.code(),
-                })),
-                Ok(ConfirmOutcome::Unknown) => {
-                    response(json!({ "kind": "receipt", "state": "unknown" }))
+            |store, scope, project, parsed: ConfirmRequest| {
+                let now = Instant::now();
+                if let Some(action) = store.action(now, project, &parsed.preparation_id)
+                    && let Err(denied) = gate(scope, action)
+                {
+                    return refusal(denied);
                 }
-                Err(refused) => refusal(refused),
+                match store.confirm(
+                    now,
+                    project,
+                    &parsed.preparation_id,
+                    &parsed.forwarded_identity,
+                    parsed.applied_identity.flatten().as_deref(),
+                    parsed.outcome,
+                ) {
+                    Ok(ConfirmOutcome::Complete { outcome }) => response(json!({
+                        "kind": "receipt",
+                        "state": "complete",
+                        "outcome": outcome.code(),
+                    })),
+                    Ok(ConfirmOutcome::Unknown) => {
+                        response(json!({ "kind": "receipt", "state": "unknown" }))
+                    }
+                    Err(refused) => refusal(refused),
+                }
             },
         )
     }
@@ -871,7 +1027,15 @@ mod tests {
 
     fn prepared(store: &mut ReceiptStore, now: Instant) -> String {
         match store
-            .prepare(now, PROJECT, &context("rev"), Action::Append, "profile", 1)
+            .prepare(
+                now,
+                PROJECT,
+                &context("rev"),
+                Action::Append,
+                "profile",
+                1,
+                &[],
+            )
             .unwrap()
         {
             PrepareOutcome::Prepared(prepared) => prepared.preparation_id,
@@ -906,6 +1070,56 @@ mod tests {
     /// A key another daemon incarnation minted: sixteen hex characters, a dash, sixty-four hex characters.
     fn foreign_key(seed: &str) -> String {
         format!("{}-{}", seed.repeat(8), seed.repeat(32))
+    }
+
+    #[test]
+    fn a_malformed_context_is_invalid_before_capacity_or_survivor_proof_is_judged() {
+        let now = Instant::now();
+        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        let mut malformed = context("rev");
+        malformed.selection = vec!["zz".to_string()];
+        assert!(
+            store
+                .prepare(
+                    now,
+                    PROJECT,
+                    &malformed,
+                    Action::Suppress,
+                    "profile",
+                    0,
+                    &[]
+                )
+                .is_err(),
+            "a suppression without survivors is still a malformed context first"
+        );
+        assert!(
+            store
+                .prepare(
+                    now,
+                    PROJECT,
+                    &malformed,
+                    Action::Append,
+                    "profile",
+                    1000,
+                    &[]
+                )
+                .is_err(),
+            "an append over the allowance is still a malformed context first"
+        );
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn an_expired_key_is_invisible_to_the_gate_lookup_and_answers_receipt_unavailable() {
+        let start = Instant::now();
+        let mut store = ReceiptStore::new(limits(8, Duration::from_secs(10)), "inc".to_string());
+        let key = prepared(&mut store, start);
+        let later = start + Duration::from_secs(10);
+        assert_eq!(store.action(later, PROJECT, &key), None);
+        assert!(matches!(
+            store.apply(later, PROJECT, &key, &context("rev")),
+            Err(ApplyRefusal::Refused(Refusal::ReceiptUnavailable))
+        ));
     }
 
     #[test]
@@ -1009,7 +1223,15 @@ mod tests {
             Ok(ApplyOutcome::Forwarded { .. })
         ));
         assert!(matches!(
-            store.prepare(now, PROJECT, &context("rev"), Action::Append, "profile", 1),
+            store.prepare(
+                now,
+                PROJECT,
+                &context("rev"),
+                Action::Append,
+                "profile",
+                1,
+                &[]
+            ),
             Ok(PrepareOutcome::Failure("receipt_capacity"))
         ));
         assert!(store.holds(PROJECT, &key));
@@ -1031,7 +1253,15 @@ mod tests {
             Ok(ConfirmOutcome::Unknown)
         ));
         assert!(matches!(
-            store.prepare(now, PROJECT, &context("rev"), Action::Append, "profile", 1),
+            store.prepare(
+                now,
+                PROJECT,
+                &context("rev"),
+                Action::Append,
+                "profile",
+                1,
+                &[]
+            ),
             Ok(PrepareOutcome::Failure("receipt_capacity"))
         ));
         assert!(store.holds(PROJECT, &key));
@@ -1063,7 +1293,8 @@ mod tests {
                 &context("rev"),
                 Action::Append,
                 "profile",
-                101
+                101,
+                &[]
             ),
             Ok(PrepareOutcome::Failure("append_allowance"))
         ));

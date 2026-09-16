@@ -7,8 +7,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::backend::{
-    self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
-    EventSink, FinishReason, Harness, LlmExecutionBackend,
+    self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal,
+    ContextCapabilities, ErrorClass, EventSink, FinishReason, Harness, LlmExecutionBackend,
+    OPENCODE_CONTEXT_CAPABILITIES,
 };
 use super::config::MAX_OPENCODE_CONFIG_BYTES;
 use super::subprocess::group_registry::StateRoot;
@@ -83,6 +84,13 @@ impl LlmExecutionBackend for OpenCodeBackend {
         Box::pin(run_opencode(
             runtime, limits, env, state_root, request, events, cancel,
         ))
+    }
+
+    fn context_capabilities(&self, harness: Harness) -> ContextCapabilities {
+        match harness {
+            Harness::OpenCode => OPENCODE_CONTEXT_CAPABILITIES,
+            Harness::Pi => ContextCapabilities::NONE,
+        }
     }
 
     /// The probe re-verifies the whole closure and resolves the executable exactly as `run_opencode` does before launch, so a rejected send and a failed run report the same subreason.
