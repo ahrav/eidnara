@@ -278,7 +278,7 @@ struct Secured {
     pinned: Pinned,
 }
 
-/// Pins `candidate` and its members under `protection`, then reserves the members' resident bytes and records the pinned bytes. `None` when the record or a member cannot be pinned, does not name its members, or names more members than `max_deltas` admits: the candidate would not verify either, and the next one is tried without pinning what it lists.
+/// Pins `candidate` and its members under `protection`, reserves the members' resident bytes, and records the pinned bytes before the protection goes. `None` when the record or a member cannot be pinned, does not name its members, or names more members than `max_deltas` admits: the candidate would not verify either, and the next one is tried without pinning what it lists.
 ///
 /// # Errors
 ///
@@ -311,14 +311,15 @@ fn secure(
         resident = resident.saturating_add(vector_generation::resident_bytes(&pin.manifest));
         pins.push(pin);
     }
-    drop(protection);
     let pinned = pins
         .iter()
         .flat_map(|pin| pin.manifest.files.iter())
         .map(|file| file.size)
         .fold(0u64, u64::saturating_add);
     let resident = ledger.reserve(grant, ResourceClass::LayerTables, resident)?;
+    // Recorded before the protection goes, so a prune that takes the exclusive lock next reads back no pin the ledger has not been told about.
     let pinned = ledger.pin(pinned);
+    drop(protection);
     Ok(Some(Secured {
         pins,
         resident,
