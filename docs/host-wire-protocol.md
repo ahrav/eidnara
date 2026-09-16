@@ -4,6 +4,7 @@ Status: normative direct-linked static three-target profile
 Wire version: 3
 Connection-file schema: 2
 Lifecycle-record schema: 1
+Context-application protocol: 1
 
 ## 1. Conformance and authority
 
@@ -683,6 +684,32 @@ Producers publish before signaling readiness. Consumers arm by generation, reche
 
 `transport.negotiate`, `transport.activate`, and `transport.commit` are not operations of this protocol. A host advertises exactly four channel-0 operations in `host_ops`: `route.open`, `catalog.list`, `host.shutdown`, and `host.status`. Any other operation receives terminal `unsupported_operation` while the host stays connected if framing remains valid.
 
+### 7.8 Context application protocol
+
+Version 1 of the context application protocol rides on the daemon's routed request envelope (`method`, `v: 1`, `session_id`, `project_root`) and adds three method literals and one closed outcome vocabulary. RP2.8 (#629) Q7 assigns these literals to RP2.7; the harness-side application of an edit is RP2.8.U5 and is outside this section. The literals below MUST NOT be renamed or extended without a new protocol version on this line.
+
+Methods: `retrieval.prepare`, `retrieval.apply`, `retrieval.confirm`. Every body is parsed strictly; an unknown field is an `invalid_params` transport error. The route binding decides scope: a `project_root` the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state before the body is read. Until the daemon installs an approved receipt limit set, every method answers `{"kind":"terminal","terminal":"disabled"}`.
+
+A **context** is `{"context_revision": string, "representation": string, "spans": [{"occurrence_id": hex64, "buffer_len": u64, "span": [start, end] | null}], "selection": [hex64]}`. Its preparation digest is the RP2.7.U1 derivation over revision, representation, normalized spans, and the selection digest.
+
+`retrieval.prepare` adds `action` (`append` | `replace`), `accounting_profile` (string), and `edit_bytes` (u64). An `edit_bytes` over the append allowance or the replacement capacity answers `{"kind":"outcome","outcome":"preparation_failure","reason":"append_allowance"|"replacement_capacity"}` and mints nothing. Otherwise the daemon answers `{"kind":"prepared","preparation_id","preparation_digest","fingerprint"}`. The fingerprint is a length-delimited derivation over daemon incarnation, context revision, action, selection digest, and accounting profile; the preparation identity is minted per preparation, so two intents over one fingerprint are two keys. A preparation identity begins with the incarnation that minted it.
+
+`retrieval.apply` carries `preparation_id` and the caller's current context. Answers:
+
+| Answer | Meaning |
+| --- | --- |
+| `{"kind":"forwarded","preparation_id","forwarded_identity","action","edit_bytes"}` | The receipt moved from prepared to in flight and recorded `forwarded_identity` before answering; the caller applies the edit and confirms. |
+| `{"kind":"receipt","state":"in_flight","forwarded_identity"}` | A duplicate while an apply is in flight; nothing is forwarded again. |
+| `{"kind":"receipt","state":"complete","outcome"}` | The known outcome of an earlier acknowledgment. |
+| `{"kind":"receipt","state":"unknown"}` | The key names another daemon incarnation or its acknowledgment was lost; nothing is forwarded and the state stays `unknown` until a confirm with an applied identity reclassifies it. |
+| `{"kind":"terminal","terminal":"stale_preparation"}` | The current context's digest differs from the prepared one before any forward. |
+| `{"kind":"terminal","terminal":"conflict"}` | Same key, different digest, after a forward. |
+| `{"kind":"terminal","terminal":"receipt_unavailable"}` | The key names this incarnation but the receipt was never made, expired, or was evicted; it never authorizes a replay. |
+
+`retrieval.confirm` carries `preparation_id`, `forwarded_identity`, `applied_identity` (string or null), and `outcome`. `outcome` is exactly one of `keep`, `append`, `applied_replacement`, `preparation_failure`; `unknown` is a receipt state and is never accepted as an outcome. A confirm whose `applied_identity` equals the recorded forwarded identity completes the receipt; a confirm without an applied identity leaves it `unknown`; a `forwarded_identity` other than the recorded one, a confirm of a preparation that was never forwarded, or a second acknowledgment with another outcome is `conflict`. An empty replacement is `applied_replacement`. A daemon receipt alone never yields a complete state: only a confirm carrying the applied identity does.
+
+Receipt state is in memory, bounded by a key count and a retention duration that MUST be at least the longest supported retry path, and cleared by a daemon restart.
+
 ## 8. Host and handler lifecycle
 
 ### 8.1 Startup and readiness
@@ -1038,7 +1065,7 @@ This direct boundary owns secure connection-file primitives, version-3 wire and 
 
 The product daemon crate owns the production host executable and launcher, production connection-file orchestration during startup and teardown, user-facing configuration and doctor behavior, packaging, and distribution. This contract does not claim those lifecycle flows are delivered here.
 
-The ModelExecution application protocol remains normative in its owning revision. Flow credit, dynamic module supervision, remote transport, new plugin/tool APIs, storage semantics, and handler business semantics remain outside this wire contract.
+The ModelExecution application protocol remains normative in its owning revision. The context application protocol's literals and outcome vocabulary are normative in Section 7.8; the daemon's ranking route (`retrieval.query`) is handler business semantics. Flow credit, dynamic module supervision, remote transport, new plugin/tool APIs, storage semantics, and other handler business semantics remain outside this wire contract.
 
 ## 18. Provenance ledger
 

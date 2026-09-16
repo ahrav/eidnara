@@ -15,6 +15,7 @@ pub mod coverage;
 pub mod decay_render;
 pub mod dispatch;
 pub(crate) mod divergence;
+pub mod edit_receipts;
 pub mod edit_recipe;
 pub mod embedding_dispatch;
 pub mod embedding_publication;
@@ -2999,6 +3000,9 @@ pub struct HandlerCore {
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
+    edit_receipts: Mutex<Option<Arc<Mutex<edit_receipts::ReceiptStore>>>>,
+    /// Parent Q8: the incarnation signal every preparation identity carries; a fresh value per `HandlerCore` makes a key from a restarted daemon classify as `Unknown`.
+    edit_incarnation: String,
     #[cfg(any(test, feature = "test-support"))]
     query_embedder_override: Mutex<Option<Arc<dyn query_route::QueryEmbedder>>>,
     #[cfg(test)]
@@ -3870,6 +3874,8 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            edit_receipts: Mutex::new(None),
+            edit_incarnation: edit_receipts::fresh_incarnation(),
             #[cfg(any(test, feature = "test-support"))]
             query_embedder_override: Mutex::new(None),
             #[cfg(test)]
@@ -4301,6 +4307,8 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            edit_receipts: Mutex::new(None),
+            edit_incarnation: edit_receipts::fresh_incarnation(),
             #[cfg(any(test, feature = "test-support"))]
             query_embedder_override: Mutex::new(None),
             guidance_now_ms: Mutex::new(None),
@@ -13436,6 +13444,9 @@ impl HandlerCore {
                     self.handle_retrieval_query(channel, request, entry.runner)
                         .await
                 }
+                edit_receipts::PREPARE => self.handle_retrieval_prepare(channel, request),
+                edit_receipts::APPLY => self.handle_retrieval_apply(channel, request),
+                edit_receipts::CONFIRM => self.handle_retrieval_confirm(channel, request),
                 // The handler echoes only explicit wire-debugging requests.
                 // Unknown request bodies must fail so misrouted callers cannot mistake an echo for success.
                 // An unconditional echo lets a misrouted caller mistake an echo for success.
