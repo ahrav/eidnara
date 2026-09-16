@@ -914,7 +914,7 @@ impl HandlerCore {
                 }
             })
         }));
-        let outcome = work.await;
+        let outcome = budget.shared().bridge(work).await;
         drop(budget);
         match outcome {
             Ok(UnitOutcome::Terminal(outcome)) => outcome,

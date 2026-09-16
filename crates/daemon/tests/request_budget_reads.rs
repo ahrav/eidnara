@@ -14,6 +14,8 @@ use tokio_util::sync::CancellationToken;
 /// The 200-million-step recursive query keeps the read active for interruption tests; the progress handler polls every 1,000 VM steps.
 const LONG_SCAN: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 200000000) SELECT count(*) FROM c";
 const SHORT_SCAN: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 1000) SELECT count(*) FROM c";
+/// `MEDIUM_SCAN` gives a leaked progress handler multiple polling opportunities.
+const MEDIUM_SCAN: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 200000) SELECT count(*) FROM c";
 const CEILING: Duration = Duration::from_secs(30);
 
 fn scan(sql: &str) -> impl FnOnce(&GuardedConn<'_>) -> Result<i64, ProjectionError> + '_ {
@@ -35,17 +37,25 @@ fn is_deadline(error: &SearchProjectionError) -> bool {
     matches!(error, SearchProjectionError::Store(StoreError::Deadline))
 }
 
+/// The first receiver fires from inside the read callback, after acquisition and interrupt-scope
+/// installation, so a cancellation raised after it is observed by the running statement.
+type ScanOutcome = (Instant, Result<i64, SearchProjectionError>);
+
 fn held_scan(
     projection: &Arc<SearchProjection>,
     shared: SharedBudget,
-) -> mpsc::Receiver<(Instant, Result<i64, SearchProjectionError>)> {
+) -> (mpsc::Receiver<()>, mpsc::Receiver<ScanOutcome>) {
+    let (ready_tx, ready) = mpsc::channel();
     let (tx, rx) = mpsc::channel();
     let projection = Arc::clone(projection);
     thread::spawn(move || {
-        let result = projection.read_under(&shared, scan(LONG_SCAN));
+        let result = projection.read_under(&shared, |conn| {
+            ready_tx.send(()).unwrap();
+            scan(LONG_SCAN)(conn)
+        });
         let _ = tx.send((Instant::now(), result));
     });
-    rx
+    (ready, rx)
 }
 
 fn open() -> (tempfile::TempDir, Arc<SearchProjection>) {
@@ -59,8 +69,8 @@ fn cancelling_the_request_interrupts_a_held_read_and_reports_exhaustion() {
     let (_dir, projection) = open();
     let (token, budget) = derive(CEILING.as_millis() as u64);
     let started = Instant::now();
-    let rx = held_scan(&projection, budget.shared().clone());
-    thread::sleep(Duration::from_millis(150));
+    let (ready, rx) = held_scan(&projection, budget.shared().clone());
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(
         rx.try_recv().is_err(),
         "the scan must still be running when cancellation arrives"
@@ -80,7 +90,7 @@ fn an_elapsed_remaining_duration_interrupts_a_held_read_the_same_way() {
     let (_dir, projection) = open();
     let (_token, budget) = derive(200);
     let started = Instant::now();
-    let rx = held_scan(&projection, budget.shared().clone());
+    let (_ready, rx) = held_scan(&projection, budget.shared().clone());
     let (finished, result) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(is_deadline(&result.unwrap_err()));
     assert!(finished >= budget.deadline());
@@ -112,8 +122,8 @@ fn an_exhausted_budget_is_refused() {
 fn a_later_request_on_the_same_connection_is_not_interrupted_by_a_prior_cancellation() {
     let (_dir, projection) = open();
     let (token, prior) = derive(CEILING.as_millis() as u64);
-    let rx = held_scan(&projection, prior.shared().clone());
-    thread::sleep(Duration::from_millis(100));
+    let (ready, rx) = held_scan(&projection, prior.shared().clone());
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
     token.cancel();
     assert!(is_deadline(
         &rx.recv_timeout(Duration::from_secs(5))
@@ -135,6 +145,53 @@ fn a_later_request_on_the_same_connection_is_not_interrupted_by_a_prior_cancella
             .unwrap(),
         1000
     );
+}
+
+/// The plain read runs before any fresh `read_under`: a replacement handler would mask the
+/// handler left behind by a successful `read_under`.
+#[test]
+fn a_cancellation_after_a_successful_read_does_not_interrupt_a_later_plain_read() {
+    let (_dir, projection) = open();
+    let (token, prior) = derive(CEILING.as_millis() as u64);
+    assert_eq!(
+        projection
+            .read_under(prior.shared(), scan(SHORT_SCAN))
+            .unwrap(),
+        1000
+    );
+    token.cancel();
+    assert!(prior.is_exhausted());
+    assert_eq!(
+        projection
+            .read_within(Instant::now() + Duration::from_secs(10), scan(MEDIUM_SCAN))
+            .unwrap(),
+        200_000
+    );
+}
+
+/// An engine interrupt is the budget's verdict on every access mode, so no consumer classifying a
+/// `ProjectionError` refusal ever sees `Interrupted` and quarantines the projection for a cancellation.
+#[test]
+fn an_interrupted_statement_is_the_deadline_error_on_every_access_mode() {
+    let (_dir, projection) = open();
+    let (_token, budget) = derive(CEILING.as_millis() as u64);
+    let far = || Instant::now() + Duration::from_secs(5);
+    let interrupted =
+        |_: &GuardedConn<'_>| -> Result<(), ProjectionError> { Err(ProjectionError::Interrupted) };
+    let outcomes = [
+        ("read", projection.read(interrupted)),
+        ("read_within", projection.read_within(far(), interrupted)),
+        (
+            "read_under",
+            projection.read_under(budget.shared(), interrupted),
+        ),
+        ("write", projection.write(interrupted)),
+        ("write_within", projection.write_within(far(), interrupted)),
+    ];
+    for (mode, outcome) in outcomes {
+        let error = outcome.unwrap_err();
+        assert!(is_deadline(&error), "{mode}: {error:?}");
+    }
 }
 
 #[test]

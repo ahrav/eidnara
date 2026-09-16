@@ -1,6 +1,6 @@
 //! The seed is fixed so a failing case reproduces.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
@@ -463,13 +463,28 @@ fn lane_order_probe_duplication_and_entry_order_change_nothing() {
             ),
             |((exact_hits, lexical_hits, dense_hits, weights, k), ex2, lx2, dn2, lane_order)| {
                 let parameters = FusionParameters::new(weights_of(weights), k).unwrap();
+                prop_assert_eq!(parameters.k().to_bits(), k.to_bits());
+                for (l, weight) in Lane::ORDER.into_iter().zip(weights) {
+                    prop_assert_eq!(parameters.weight(l).to_bits(), weight.to_bits());
+                }
+                let declared = [
+                    lane(Lane::Exact, exact_hits.clone()),
+                    lane(Lane::Lexical, lexical_hits.clone()),
+                    lane(Lane::Dense, dense_hits.clone()),
+                ];
+                let mut expected_contributions: BTreeMap<
+                    OccurrenceId,
+                    [Option<(NonZeroUsize, RawScore)>; 3],
+                > = BTreeMap::new();
+                for (slot, ranking) in (0..).zip(&declared) {
+                    for entry in ranking.entries() {
+                        expected_contributions
+                            .entry(*entry.occurrence())
+                            .or_default()[slot] = Some((entry.position(), entry.raw_score()));
+                    }
+                }
                 let reference = fuse(
-                    DeclaredLanes::admit([
-                        lane(Lane::Exact, exact_hits.clone()),
-                        lane(Lane::Lexical, lexical_hits.clone()),
-                        lane(Lane::Dense, dense_hits.clone()),
-                    ])
-                    .unwrap(),
+                    DeclaredLanes::admit(declared).unwrap(),
                     &parameters,
                     UNBOUNDED,
                 )
@@ -497,7 +512,12 @@ fn lane_order_probe_duplication_and_entry_order_change_nothing() {
                 let mut previous: Option<(f64, OccurrenceId)> = None;
                 for (entry, expected) in reference.entries().iter().zip(1usize..) {
                     prop_assert_eq!(entry.position().get(), expected);
-                    let positions = Lane::ORDER.map(|l| entry.lane(l).map(|c| c.position().get()));
+                    let contributions = expected_contributions[entry.occurrence()];
+                    prop_assert_eq!(
+                        Lane::ORDER.map(|l| entry.lane(l).map(|c| (c.position(), c.raw_score()))),
+                        contributions
+                    );
+                    let positions = contributions.map(|c| c.map(|(p, _)| p.get()));
                     prop_assert_eq!(
                         entry.score().to_bits(),
                         oracle_score(&parameters, positions).to_bits()
@@ -595,7 +615,7 @@ fn raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring
         UNBOUNDED,
     )
     .unwrap();
-    let before = snapshot(&fused);
+    let before = fused.entries().to_vec();
     assert_eq!(
         fused.entries()[0].lane(Lane::Lexical).unwrap().raw_score(),
         RawScore::Lexical(-5.5)
@@ -606,11 +626,18 @@ fn raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring
     );
     let absent_before: Vec<Lane> = fused.undeclared_lanes().collect();
     let filtered = fused.filter(|entry| *entry.occurrence() != c);
-    let after = snapshot(&filtered);
-    let expected: Vec<_> = before.iter().copied().filter(|(o, _, _)| *o != c).collect();
-    assert_eq!(after, expected);
+    let expected: Vec<_> = before
+        .iter()
+        .copied()
+        .filter(|e| *e.occurrence() != c)
+        .collect();
+    assert_eq!(filtered.entries(), expected.as_slice());
     assert_eq!(
-        after.iter().map(|(_, p, _)| *p).collect::<Vec<_>>(),
+        filtered
+            .entries()
+            .iter()
+            .map(|e| e.position().get())
+            .collect::<Vec<_>>(),
         vec![1, 3, 4]
     );
     assert_eq!(

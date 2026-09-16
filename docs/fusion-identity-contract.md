@@ -122,7 +122,11 @@ can produce an answer the route cannot bound or the host cannot send.
 The exact lane reads the query's `id:` mentions and the lexical lane scans the
 prose outside selector mentions inside one interruptible projection read under
 the request budget; the projection connection is released before any kernel
-reader is taken. Both lanes are then admitted by the kernel's eligibility
+reader is taken. The handler awaits the blocking work through
+`SharedBudget::bridge`, which raises the shared `EvalBudget` flag the moment
+the host cancels, so a kernel or retrieval stage holding only that budget
+stops on a host cancel instead of running to the deadline; the work is still
+joined before the request settles. Both lanes are then admitted by the kernel's eligibility
 adapter under the bound scope: the lexical lane through
 `retrieval::lexical::admit`, the exact lane by judging its rows in
 `validation_batch` slices before any position is assigned, so a row the caller
@@ -165,9 +169,13 @@ witness. A malformed request is the transport's `invalid_params` error.
 `ProbeOrdinal(u32)` is one compiled query atom's zero-based position in its
 request. `GenerationId` is one immutable vector generation spelled as its
 registered `generation_id`, constructed through `GenerationId::parse` or
-`TryFrom<&VectorGeneration>`. Both are provenance. Neither is a ranking unit
-and neither enters a lane ranking entry, so a probe or generation cannot vote
-more than once.
+`TryFrom<&VectorGeneration>`. Both apply the kernel identity-value rule
+(nonempty, at most `MAX_IDENTITY_VALUE_BYTES`, no control characters). The
+daemon applies the same rule to a consumer binding's `generation_id` before it
+records a lifecycle intent, so every generation this daemon registers has a
+`GenerationId` spelling and `TryFrom` cannot refuse a live generation. Both are
+provenance. Neither is a ranking unit and neither enters a lane ranking entry,
+so a probe or generation cannot vote more than once.
 
 ## Parent groups
 
@@ -185,6 +193,11 @@ column that disagrees with the tuple bytes is refused. Spans of one source at
 different revisions form different groups. This is RP2.8's Q1 decision:
 grouping never mixes bytes from two revisions, and a parent key never stands
 in for an occurrence.
+
+Which classes group is an RP2.8 decision: only `raw_tool_spans` derives a
+grouping key, and `retrieval::packing::Grouping` returns the typed
+non-grouping result for every other class. The RP2.8 key adds class and
+representation as explicit components over `ParentGroupKey`.
 
 ## Selection digest
 
