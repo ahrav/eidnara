@@ -6,16 +6,19 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
+use std::io::Write;
+use std::sync::Arc;
+
 use host_runtime::RouteHandle;
-use kernel::{DecisionRow, KernelError, KernelStore, Surface, VisibleRow};
-use serde::Deserialize;
-use serde_json::{Value, json};
+use kernel::{DecisionRow, KernelError, KernelStore, Sensitivity, Surface, VisibleRow};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::project::{ProjectBinding, ScopeFilter, stored_terms};
 use super::serving;
-use super::{InvalidReason, KernelOutcome, blocking, kernel_response, state_only};
+use super::{InvalidReason, KernelOutcome, blocking, state_only};
 use crate::HandlerCore;
-use crate::dispatch::PreparedOutcome;
+use crate::dispatch::{Emit, PreparedOutcome, PreparedOutput, PreparedOutputError};
 
 const OPERATION: &str = "kernel.read";
 
@@ -247,18 +250,140 @@ pub(crate) fn read_visible(
     })
 }
 
-fn row_json(row: &VisibleRow, decision: Option<&DecisionRow>, known_as_of: i64) -> Value {
-    json!({
-        "object": row.object,
-        "visibility": row.visibility.as_str(),
-        "labeled": row.labeled,
-        "scope_id": row.scope_id,
-        "token": {"object_id": row.object.object_id, "known_as_of": known_as_of},
-        "decision": decision.map(|decision| json!({
-            "decision_kind": decision.decision_kind,
-            "payload": decision.payload,
-        })),
-    })
+/// Wire shape of one row. Fields are declared in the sorted key order a `serde_json::Map` emits, so the encoding is byte-identical to the `json!` tree it replaces.
+#[derive(Serialize)]
+struct RowOut<'a> {
+    decision: Option<DecisionOut<'a>>,
+    labeled: bool,
+    object: ObjectOut<'a>,
+    scope_id: Option<&'a str>,
+    token: TokenOut<'a>,
+    visibility: &'static str,
+}
+
+#[derive(Serialize)]
+struct ObjectOut<'a> {
+    created_commit_seq: i64,
+    domain_id: &'a str,
+    invalidated_commit_seq: Option<i64>,
+    object_id: &'a str,
+    object_kind: &'a str,
+    sensitivity: Sensitivity,
+    source_id: &'a str,
+    source_kind: &'a str,
+    source_revision: i64,
+    superseded_by: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct PayloadOut<'a> {
+    rationale: &'a str,
+    summary: &'a str,
+}
+
+#[derive(Serialize)]
+struct DecisionOut<'a> {
+    decision_kind: &'a str,
+    payload: PayloadOut<'a>,
+}
+
+#[derive(Serialize)]
+struct TokenOut<'a> {
+    known_as_of: i64,
+    object_id: &'a str,
+}
+
+fn row_out<'a>(
+    row: &'a VisibleRow,
+    decision: Option<&'a DecisionRow>,
+    known_as_of: i64,
+) -> RowOut<'a> {
+    let object = &row.object;
+    RowOut {
+        decision: decision.map(|decision| DecisionOut {
+            decision_kind: &decision.decision_kind,
+            payload: PayloadOut {
+                rationale: &decision.payload.rationale,
+                summary: &decision.payload.summary,
+            },
+        }),
+        labeled: row.labeled,
+        object: ObjectOut {
+            created_commit_seq: object.created_commit_seq,
+            domain_id: &object.domain_id,
+            invalidated_commit_seq: object.invalidated_commit_seq,
+            object_id: &object.object_id,
+            object_kind: &object.object_kind,
+            sensitivity: object.sensitivity,
+            source_id: &object.source_id,
+            source_kind: &object.source_kind,
+            source_revision: object.source_revision,
+            superseded_by: object.superseded_by.as_deref(),
+        },
+        scope_id: row.scope_id.as_deref(),
+        token: TokenOut {
+            known_as_of,
+            object_id: &object.object_id,
+        },
+        visibility: row.visibility.as_str(),
+    }
+}
+
+/// The read's serialized body: rows are encoded straight from the store rows each time the body is emitted, so no `Value` tree exists between measurement and the reserved write.
+struct ReadBody {
+    response: ReadResponse,
+    gated: bool,
+    truncated: bool,
+    /// Rows past this index exceeded the byte budget.
+    served: usize,
+}
+
+#[derive(Serialize)]
+struct ReadBodyOut<'a> {
+    gated: bool,
+    known_as_of: i64,
+    rows: RowsOut<'a>,
+    state: &'a KernelOutcome,
+    tip: i64,
+    truncated: bool,
+}
+
+struct RowsOut<'a>(&'a ReadBody);
+
+impl Serialize for RowsOut<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let body = self.0;
+        let mut seq = serializer.serialize_seq(Some(body.served))?;
+        for row in &body.response.rows[..body.served] {
+            seq.serialize_element(&row_out(
+                row,
+                body.response.decisions.get(&row.object.object_id),
+                body.response.known_as_of,
+            ))?;
+        }
+        seq.end()
+    }
+}
+
+impl Emit for ReadBody {
+    fn emit(&self, destination: &mut dyn Write) -> Result<(), PreparedOutputError> {
+        let out = ReadBodyOut {
+            gated: self.gated,
+            known_as_of: self.response.known_as_of,
+            rows: RowsOut(self),
+            state: &KernelOutcome::Available,
+            tip: self.response.tip,
+            truncated: self.truncated,
+        };
+        serde_json::to_writer(destination, &out).map_err(|error| {
+            if error.is_io() {
+                PreparedOutputError::Write(error.into())
+            } else {
+                PreparedOutputError::Serialize(error)
+            }
+        })
+    }
 }
 
 impl HandlerCore {
@@ -322,22 +447,22 @@ impl HandlerCore {
         };
         // Rows are newest first, so the budget retains a contiguous prefix of the most recent rows. A failed measurement stops collection and sets `truncated`.
         let mut truncated = response.truncated;
-        let mut rows: Vec<Value> = Vec::with_capacity(response.rows.len());
+        let mut served = 0usize;
         let mut row_bytes = 0usize;
         for row in &response.rows {
-            let value = row_json(
+            let out = row_out(
                 row,
                 response.decisions.get(&row.object.object_id),
                 response.known_as_of,
             );
             // The `+ 1` charges each row's array separator or bracket byte against the budget.
-            let cost = crate::dispatch::measure_json(&value)
+            let cost = crate::dispatch::measure_serialize(&out)
                 .ok()
                 .and_then(|len| len.checked_add(1));
             match cost {
                 Some(cost) if row_bytes + cost <= MAX_READ_ROW_BYTES => {
                     row_bytes += cost;
-                    rows.push(value);
+                    served += 1;
                 }
                 _ => {
                     truncated = true;
@@ -345,22 +470,19 @@ impl HandlerCore {
                 }
             }
         }
-        kernel_response(
-            &KernelOutcome::Available,
-            json!({
-                "known_as_of": response.known_as_of,
-                "tip": response.tip,
-                "gated": parsed.gated,
-                "truncated": truncated,
-                "rows": rows,
-            }),
-        )
+        PreparedOutcome::Response(PreparedOutput::emit(Arc::new(ReadBody {
+            response,
+            gated: parsed.gated,
+            truncated,
+            served,
+        })))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use kernel::{ObjectRow, Sensitivity, SurfaceVisibility};
+    use kernel::{DecisionPayload, ObjectRow, Sensitivity, SurfaceVisibility};
+    use serde_json::json;
 
     use super::*;
 
@@ -382,6 +504,129 @@ mod tests {
             labeled: false,
             scope_id: None,
         }
+    }
+
+    fn populated_row() -> VisibleRow {
+        let mut row = row("decision", "memory");
+        row.object.invalidated_commit_seq = Some(9);
+        row.object.superseded_by = Some("memory-decision-2".to_string());
+        row.object.sensitivity = Sensitivity::Sensitive;
+        row.object.source_id = "line \"quoted\" \\ tab\t ünïcödé".to_string();
+        row.visibility = SurfaceVisibility::Hidden;
+        row.labeled = true;
+        row.scope_id = Some("scope-1".to_string());
+        row
+    }
+
+    fn decision(object_id: &str) -> DecisionRow {
+        DecisionRow {
+            decision_id: format!("{object_id}-decision"),
+            object_id: object_id.to_string(),
+            proposition_id: None,
+            scope_id: Some("scope-1".to_string()),
+            anchor_id: None,
+            evidence_id: None,
+            decision_kind: "fact".to_string(),
+            payload: DecisionPayload {
+                summary: "summary with \"quotes\"".to_string(),
+                rationale: "rationale\nwith newline".to_string(),
+            },
+            created_commit_seq: 3,
+            sensitivity: Sensitivity::Normal,
+        }
+    }
+
+    /// `to_value` of a struct emits its keys in sorted order, so this tree fixes field order too.
+    fn row_value(row: &VisibleRow, decision: Option<&DecisionRow>, known_as_of: i64) -> Value {
+        json!({
+            "object": row.object,
+            "visibility": row.visibility.as_str(),
+            "labeled": row.labeled,
+            "scope_id": row.scope_id,
+            "token": {"object_id": row.object.object_id, "known_as_of": known_as_of},
+            "decision": decision.map(|decision| json!({
+                "decision_kind": decision.decision_kind,
+                "payload": decision.payload,
+            })),
+        })
+    }
+
+    /// A column added to `ObjectRow` or `DecisionPayload` fails here instead of silently leaving the wire.
+    #[test]
+    fn object_and_payload_mirrors_match_the_kernel_structs() {
+        let row = populated_row();
+        let decision = decision(&row.object.object_id);
+        let out = row_out(&row, Some(&decision), 7);
+
+        let object_via_row = serde_json::to_value(&row.object).unwrap();
+        assert_eq!(serde_json::to_value(&out.object).unwrap(), object_via_row);
+        assert_eq!(
+            serde_json::to_string(&out.object).unwrap(),
+            serde_json::to_string(&object_via_row).unwrap(),
+            "ObjectOut must declare its fields in the sorted order a Value map emits"
+        );
+
+        let payload = &out.decision.as_ref().unwrap().payload;
+        let payload_via_row = serde_json::to_value(&decision.payload).unwrap();
+        assert_eq!(serde_json::to_value(payload).unwrap(), payload_via_row);
+        assert_eq!(
+            serde_json::to_string(payload).unwrap(),
+            serde_json::to_string(&payload_via_row).unwrap(),
+            "PayloadOut must declare its fields in the sorted order a Value map emits"
+        );
+    }
+
+    #[test]
+    fn read_body_bytes_match_the_value_tree_encoding() {
+        let populated = populated_row();
+        let bare = row("observation", "notes");
+        let unserved = row("decision", "other");
+        let decision = decision(&populated.object.object_id);
+        let mut decisions = HashMap::new();
+        decisions.insert(populated.object.object_id.clone(), decision);
+        let response = ReadResponse {
+            known_as_of: 41,
+            tip: 42,
+            rows: vec![populated, bare, unserved],
+            truncated: false,
+            decisions,
+        };
+        let expected_rows: Vec<Value> = response.rows[..2]
+            .iter()
+            .map(|row| {
+                row_value(
+                    row,
+                    response.decisions.get(&row.object.object_id),
+                    response.known_as_of,
+                )
+            })
+            .collect();
+        let expected = json!({
+            "known_as_of": response.known_as_of,
+            "tip": response.tip,
+            "gated": true,
+            "truncated": true,
+            "rows": expected_rows,
+            "state": {"kind": "available"},
+        });
+        let expected = serde_json::to_vec(&expected).unwrap();
+
+        let body = Arc::new(ReadBody {
+            response,
+            gated: true,
+            truncated: true,
+            served: 2,
+        });
+        let mut emitted = Vec::new();
+        body.emit(&mut emitted).unwrap();
+        assert_eq!(
+            String::from_utf8(emitted.clone()).unwrap(),
+            String::from_utf8(expected).unwrap()
+        );
+
+        let output = PreparedOutput::emit(body);
+        let measured = output.measure().unwrap();
+        assert_eq!(measured.len(), emitted.len());
     }
 
     #[test]
