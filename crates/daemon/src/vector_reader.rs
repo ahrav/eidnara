@@ -191,7 +191,7 @@ pub struct PinnedVectors {
     /// The base first, then the deltas in application order.
     layers: Vec<PinnedLayer>,
     _record: ValidatedGeneration,
-    _resident: Reservation,
+    resident: Reservation,
     _pinned: Pinned,
 }
 
@@ -341,7 +341,7 @@ pub fn acquire(
         },
         layers,
         _record: record,
-        _resident: resident,
+        resident,
         _pinned: pinned,
     }))
 }
@@ -370,7 +370,7 @@ pub enum RankRefusal {
     Layered(#[from] LayeredRefusal),
 }
 
-/// Ranks `request` over the view's layers inside the caller's read transaction. Every layer's sidecar is checked against the request's expectation first, and one page of row scratch is reserved for the walk's duration.
+/// Ranks `request` over the view's layers inside the caller's read transaction. Every layer's sidecar is checked against the request's expectation first, and one page of row scratch is reserved for the walk's duration in the ledger that holds the view's tables, so the two are judged against one resident total.
 /// Run it through the request's blocking seam with the `Arc<PinnedVectors>` moved into the work, so the view outlives a caller that drops its future, cancels, or times out.
 ///
 /// # Errors
@@ -382,7 +382,6 @@ pub fn rank(
     kernel: &KernelStore,
     request: &RankRequest<'_>,
     budget: &EvalBudget,
-    ledger: &Arc<Ledger>,
     grant: &Admission,
 ) -> Result<LayeredRanking, RankRefusal> {
     let expected = request.expected;
@@ -408,7 +407,9 @@ pub fn rank(
                 pool: vector_admission::Pool::Resident,
             },
         })?;
-    let _scratch = ledger
+    let _scratch = view
+        .resident
+        .ledger()
         .reserve(grant, ResourceClass::Scratch, bytes)
         .map_err(|refusal| RankRefusal::Scratch { bytes, refusal })?;
     let layers = view.resolver_layers();

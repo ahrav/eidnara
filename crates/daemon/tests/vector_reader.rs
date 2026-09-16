@@ -197,7 +197,6 @@ fn rank_expecting(
                 &projection.kernel,
                 &request,
                 &EvalBudget::unbounded(),
-                &fixture.ledger,
                 &fixture.admission,
             ))
         })
@@ -408,15 +407,7 @@ fn identity_handoff_allocation_contract() {
             .store
             .with_conn(|conn| {
                 Ok(alloc_recorder::record_window(|| {
-                    rank(
-                        &view,
-                        conn,
-                        &projection.kernel,
-                        &request,
-                        &budget,
-                        &fixture.ledger,
-                        &revoked,
-                    )
+                    rank(&view, conn, &projection.kernel, &request, &budget, &revoked)
                 }))
             })
             .unwrap();
@@ -722,7 +713,6 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
                     &projection.kernel,
                     &request,
                     &EvalBudget::unbounded(),
-                    &fixture.ledger,
                     &fixture.admission,
                 ))
             })
@@ -759,7 +749,7 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
     assert_eq!(ranking.ranking.coverage.with_vector, 5);
 }
 
-/// Everything a blocking worker owns for one ranking: the view, the projection, the kernel, the expectation's parts, the ledger, and its grant.
+/// Everything a blocking worker owns for one ranking: the view, the projection, the kernel, the expectation's parts, and its grant.
 struct Work {
     view: Arc<PinnedVectors>,
     projection_store: Arc<storage::SqliteStore>,
@@ -767,7 +757,6 @@ struct Work {
     generation: retrieval::batch::VectorGeneration,
     kernel_incarnation_id: String,
     project: kernel::ProjectScope,
-    ledger: Arc<Ledger>,
     grant: Admission,
 }
 
@@ -800,7 +789,6 @@ impl Work {
                     &self.kernel,
                     &request,
                     budget,
-                    &self.ledger,
                     &self.grant,
                 ))
             })
@@ -818,7 +806,6 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
     let digest = fixture.publish(&composition).unwrap();
     let generation = fixture.generation.clone();
     let kernel_incarnation_id = fixture.identity.kernel_incarnation_id.clone();
-    let ledger = Arc::clone(&fixture.ledger);
     let grant = fixture.admission.clone();
     let work = |view: Arc<PinnedVectors>| Work {
         view,
@@ -827,7 +814,6 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
         generation: generation.clone(),
         kernel_incarnation_id: kernel_incarnation_id.clone(),
         project: projection.project.clone(),
-        ledger: Arc::clone(&ledger),
         grant: grant.clone(),
     };
 

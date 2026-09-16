@@ -324,8 +324,10 @@ store's total already carries those bytes, and they are what a prune's
 readback is reconciled against. `Ledger::reconcile` sets the prune's retained
 bytes beside the ledger's pinned bytes, and a readback above them means
 readers pin what the ledger was never told about. Ranking reserves one page
-of row scratch for the walk's duration. The compactor's entry point reserves
-its working files in the disk pool the same way.
+of row scratch for the walk's duration in the ledger that holds the view's
+tables, taken from the view rather than named by the caller, so the two are
+judged against one resident total. The compactor's entry point reserves its
+working files in the disk pool the same way.
 
 Compressed activation, production use or full-corpus publication of
 compressed vector layers, is judged by the same gate through

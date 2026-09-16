@@ -318,6 +318,11 @@ pub struct Reservation {
 }
 
 impl Reservation {
+    /// The ledger this reservation is held in; work that extends what the reservation holds charges the same ledger.
+    pub fn ledger(&self) -> &Arc<Ledger> {
+        &self.ledger
+    }
+
     pub fn bytes(&self) -> u64 {
         self.bytes
     }
