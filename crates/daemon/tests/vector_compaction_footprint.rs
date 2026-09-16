@@ -29,19 +29,29 @@ fn axis(index: usize) -> Vec<f32> {
     raw
 }
 
-/// Publishes one base of `rows` under `hold_id`, then returns what compaction reserves for it and the heap it peaks at.
+/// Publishes one base of `rows` under `hold_id` with a delta that replaces the first row, then returns what compaction reserves for the pair and the heap it peaks at.
 fn reserved_and_peak(fixture: &mut Fixture, rows: Vec<ExportedRow>, hold_id: &str) -> (u64, u64) {
+    let checkpoint = |commit_seq: i64| ProjectionCheckpoint {
+        snapshot_commit_seq: commit_seq - 1,
+        checkpoint_commit_seq: commit_seq,
+        hold_id: hold_id.to_owned(),
+    };
+    let replaced = ExportedRow {
+        occurrence_id: rows[0].occurrence_id.clone(),
+        vector: rows[0].vector.iter().rev().copied().collect(),
+    };
     let base = fixture.layer_from(&LiveRows {
-        checkpoint: ProjectionCheckpoint {
-            snapshot_commit_seq: 9,
-            checkpoint_commit_seq: 10,
-            hold_id: hold_id.to_owned(),
-        },
+        checkpoint: checkpoint(10),
         rows,
         tombstones: Vec::new(),
     });
+    let delta = fixture.layer_from(&LiveRows {
+        checkpoint: checkpoint(12),
+        rows: vec![replaced],
+        tombstones: Vec::new(),
+    });
     fixture
-        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(fixture, &mut |_| {}).unwrap();
     let max_entries = NonZeroUsize::new(64).unwrap();

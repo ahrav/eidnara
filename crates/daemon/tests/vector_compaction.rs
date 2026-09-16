@@ -308,7 +308,7 @@ fn a_tail_published_after_the_cut_is_carried_once_with_its_precedence_and_a_stal
     // A compaction of a cut whose base already moved refuses before staging: the full view's prefix compacts to a base nobody has staged, and none reaches the store.
     let stale = compact_view(&fixture, &full_view).unwrap();
     let generations = fixture.generations();
-    assert!(!generations.contains(&stale.built.digest()));
+    assert!(!generations.contains(&stale.built().digest()));
     assert_eq!(
         publish_compacted(&fixture, &stale).unwrap_err(),
         CompactionRefusal::PrefixMoved
@@ -373,8 +373,8 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
     // A blind retry from the same cut finds the selection standing on the compacted base and refuses; the compacted base itself is staged idempotently.
     let retry = compact_view(&fixture, &view).unwrap();
     assert_eq!(
-        retry.built.digest(),
-        compacted.built.digest(),
+        retry.built().digest(),
+        compacted.built().digest(),
         "the same prefix compacts to the same base"
     );
     assert_eq!(
@@ -394,7 +394,7 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let compacted = compact_view(&fixture, &view).unwrap();
     let before_attempts = fixture.generations();
-    assert!(!before_attempts.contains(&compacted.built.digest()));
+    assert!(!before_attempts.contains(&compacted.built().digest()));
     let record_dir = fixture.work_dir();
     let outcome = publish(
         &compacted,
@@ -420,7 +420,7 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
     );
     let generations = fixture.generations();
     assert!(
-        generations.contains(&compacted.built.digest()),
+        generations.contains(&compacted.built().digest()),
         "the first attempt staged the new base before the rename failed"
     );
     assert_eq!(generations.len(), before_attempts.len() + 2);
@@ -456,8 +456,9 @@ fn reservations_are_taken_before_any_read_released_with_the_output_and_a_short_l
  {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
     fixture
-        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let resident_before = fixture.ledger.census().resident;
@@ -475,7 +476,7 @@ fn reservations_are_taken_before_any_read_released_with_the_output_and_a_short_l
         inventory_bytes(&compacted),
         "the scratch reservation is exactly what the build wrote"
     );
-    let work_dir = compacted.built.dir.clone();
+    let work_dir = compacted.built().dir.clone();
     assert!(std::fs::read_dir(&work_dir).unwrap().next().is_some());
     compacted.discard().unwrap();
     assert!(!work_dir.exists(), "discarding removes the files");
@@ -595,11 +596,37 @@ fn at_the_delta_cap_further_deltas_are_refused_and_compaction_clears_the_cap() {
 }
 
 #[test]
-fn a_selection_at_the_last_sequence_refuses_publication_before_staging_anything() {
+fn a_prefix_that_compacts_to_its_own_base_refuses_so_a_replay_publishes_nothing() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
     fixture
-        .publish(&fixture.compose(u64::MAX, &base, &[]).unwrap())
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let before = fixture.generations();
+    let census = fixture.ledger.census();
+    // Replaying a publication of this cut would bump the sequence with the same base every time; the compaction refuses instead.
+    assert_eq!(
+        compact_view(&fixture, &view).unwrap_err(),
+        CompactionRefusal::BaseOnly {
+            base: base.digest.clone()
+        }
+    );
+    assert_eq!(fixture.generations(), before, "nothing was staged");
+    assert_eq!(fixture.ledger.census(), census, "nothing was reserved");
+    assert!(
+        std::fs::read_dir(fixture.work_dir()).map_or(true, |mut d| d.next().is_none()),
+        "nothing was written"
+    );
+}
+
+#[test]
+fn a_selection_at_the_last_sequence_refuses_publication_before_staging_anything() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
+    fixture
+        .publish(&fixture.compose(u64::MAX, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let compacted = compact_view(&fixture, &view).unwrap();
@@ -659,7 +686,7 @@ fn a_fully_masked_base_compacts_to_the_deltas_rows_alone_and_a_foreign_expectati
 
 fn inventory_bytes(compacted: &Compacted) -> u64 {
     compacted
-        .built
+        .built()
         .sidecar
         .stage_manifest()
         .files
@@ -691,8 +718,20 @@ fn the_scratch_reservation_is_sized_from_the_winners_identifiers_and_the_sidecar
         tombstones: Vec::new(),
     };
     let base = fixture.layer_from(&long_export);
+    let delta = fixture.layer_from(&LiveRows {
+        checkpoint: ProjectionCheckpoint {
+            snapshot_commit_seq: 11,
+            checkpoint_commit_seq: 12,
+            hold_id: "hold-7".to_owned(),
+        },
+        rows: vec![ExportedRow {
+            occurrence_id: long_ids[0].0.clone(),
+            vector: axis(7),
+        }],
+        tombstones: Vec::new(),
+    });
     fixture
-        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let compacted = compact_view(&fixture, &view).unwrap();
@@ -707,12 +746,13 @@ fn the_scratch_reservation_is_sized_from_the_winners_identifiers_and_the_sidecar
     let mut fixture = Fixture::new();
     fixture.generation.embedding_model = "model-".repeat(1024);
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
     fixture
-        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let compacted = compact_view(&fixture, &view).unwrap();
-    assert!(compacted.built.sidecar.canonical_bytes().len() > 6000);
+    assert!(compacted.built().sidecar.canonical_bytes().len() > 6000);
     assert_eq!(
         held(&fixture.ledger, ResourceClass::CompactionScratch),
         inventory_bytes(&compacted),
@@ -725,8 +765,9 @@ fn the_scratch_reservation_is_sized_from_the_winners_identifiers_and_the_sidecar
 fn a_build_that_fails_after_writing_leaves_no_file_of_its_own_and_no_charge() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
     fixture
-        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     // A directory at `CODES_FILE` makes the codes write fail after the rows write succeeded.
@@ -760,14 +801,15 @@ fn a_build_that_fails_after_writing_leaves_no_file_of_its_own_and_no_charge() {
 fn discard_removes_only_the_builds_files_and_drop_removes_them_too() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
     fixture
-        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
 
     // Discard unlinks the build's own files, leaves a foreign file in place, and reports the directory it cannot remove.
     let compacted = compact_view(&fixture, &view).unwrap();
-    let dir = compacted.built.dir.clone();
+    let dir = compacted.built().dir.clone();
     let foreign = dir.join("keep.txt");
     std::fs::write(&foreign, b"not the build's").unwrap();
     assert!(matches!(
@@ -781,7 +823,7 @@ fn discard_removes_only_the_builds_files_and_drop_removes_them_too() {
 
     // Dropping `Compacted` removes the build's files and releases their charge.
     let compacted = compact_view(&fixture, &view).unwrap();
-    let dir = compacted.built.dir.clone();
+    let dir = compacted.built().dir.clone();
     assert!(dir.join(ROWS_FILE).exists());
     drop(compacted);
     assert!(!dir.exists(), "the work directory goes with the output");

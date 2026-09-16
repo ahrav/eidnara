@@ -386,8 +386,10 @@ and the ledger.
 
 `compact` first checks every layer's sidecar against the caller's expectation
 with the identity check verification uses, so a view of another model space
-refuses before anything is reserved, read, or written. It then resolves the
-view's layers with the resolver and sizes the build with
+refuses before anything is reserved, read, or written. A view holding only
+its base refuses as `BaseOnly` next: it would compact to itself, and
+publishing that would only bump the sequence, once per replay. It then
+resolves the view's layers with the resolver and sizes the build with
 `vector_generation::footprint`, which lives beside `build` and derives every
 file size from the layout `build` writes: the identifier list is serialized
 the way the build serializes it and the sidecar is measured from the same

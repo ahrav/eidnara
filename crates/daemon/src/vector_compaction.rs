@@ -57,6 +57,9 @@ pub enum CompactionRefusal {
     /// The build's inventory exceeded the footprint it was sized from; the files are removed with the reservation.
     #[error("the build wrote {written} bytes against a {reserved}-byte scratch reservation")]
     ScratchUnderestimated { reserved: u64, written: u64 },
+    /// The view holds only its base, which compacts to itself: publication would only bump the sequence, and a replay would bump it again since the selection still stands on that base.
+    #[error("the view holds only its base {base}; there is no prefix to fold")]
+    BaseOnly { base: String },
     #[error("building the compacted base: {0}")]
     Build(VectorRefusal),
     #[error("staging the compacted base: {0}")]
@@ -87,7 +90,7 @@ impl From<GenerationError> for CompactionRefusal {
 #[derive(Debug)]
 pub struct Compacted {
     cut: Cut,
-    pub built: BuiltVectors,
+    built: BuiltVectors,
     pub winners: usize,
     pub superseded: usize,
     pub masked: usize,
@@ -105,6 +108,19 @@ impl Compacted {
     /// ```
     pub fn cut(&self) -> &Cut {
         &self.cut
+    }
+
+    /// The base built from the cut's winners. It is fixed with the cut, so what `publish` stages is what `compact` built from the prefix it read.
+    ///
+    /// ```compile_fail,E0616
+    /// use daemon::vector_compaction::Compacted;
+    /// use daemon::vector_generation::BuiltVectors;
+    /// fn swap(compacted: &mut Compacted, built: BuiltVectors) {
+    ///     compacted.built = built;
+    /// }
+    /// ```
+    pub fn built(&self) -> &BuiltVectors {
+        &self.built
     }
 
     /// Unlinks the build's file names, removes the work directory, and releases the scratch reservation. Files under other names are left in place; the build's names are the module's own in its own work directory, whoever wrote them.
@@ -148,6 +164,10 @@ pub fn compact(
             }
         })?;
     }
+    let cut = Cut::of(view);
+    if cut.deltas.is_empty() {
+        return Err(CompactionRefusal::BaseOnly { base: cut.base });
+    }
     let layers = view.resolver_layers();
     let resolved = resolve(&layers, max_entries)?;
     let checkpoint = view
@@ -165,7 +185,7 @@ pub fn compact(
             .map(|winner| winner.occurrence_id.as_str()),
         std::iter::empty(),
     );
-    // Beyond the build's own peak, compaction holds each winner's identifier twice, in the resolution and in the export, the prefix's checkpoint it hands the build, and one row's bytes and decode in flight while the export fills.
+    // Beyond the build's own peak, compaction holds each winner's identifier twice, in the resolution and in the export, the cut's digests, the prefix's checkpoint it hands the build, and one row's bytes and decode in flight while the export fills.
     let identifier_bytes = resolved.winners.iter().fold(0u64, |total, winner| {
         total.saturating_add(winner.occurrence_id.len() as u64)
     });
@@ -175,6 +195,14 @@ pub fn compact(
         .saturating_mul(2)
         .saturating_add(
             rows.saturating_mul((size_of::<Winner>() + size_of::<ExportedRow>()) as u64),
+        )
+        .saturating_add(cut.digest.len() as u64)
+        .saturating_add(cut.base.len() as u64)
+        .saturating_add(
+            cut.deltas
+                .iter()
+                .map(|delta| (delta.len() + size_of::<String>()) as u64)
+                .sum::<u64>(),
         )
         .saturating_add(checkpoint.hold_id.len() as u64)
         .saturating_add(dimension.saturating_mul(8));
@@ -229,7 +257,7 @@ pub fn compact(
         .sum();
     drop(rows_held);
     let compacted = Compacted {
-        cut: Cut::of(view),
+        cut,
         built,
         winners: resolved.winners.len(),
         superseded: resolved.superseded,
