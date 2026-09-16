@@ -750,6 +750,10 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             Box::new(|g: &mut VectorGeneration| g.tokenizer_fingerprint = "f".repeat(64)),
         ),
         (
+            "vector_dimension",
+            Box::new(|g: &mut VectorGeneration| g.vector_dimension += 1),
+        ),
+        (
             "generation_id",
             Box::new(|g: &mut VectorGeneration| g.generation_id = "gen-vectors-2".to_owned()),
         ),
@@ -767,7 +771,7 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
         assert_eq!(
             verify(&fixture.store, &digest, &expected).unwrap_err(),
             VectorRefusal::Identity { field },
-            "a different {field} is refused at an equal dimension"
+            "a different {field} is refused"
         );
     }
     assert_eq!(
@@ -798,22 +802,70 @@ fn verification_refuses_another_owner_unknown_formats_and_a_foreign_model_space(
             field: "kernel_incarnation_id"
         }
     );
-    let other_checkpoint = ProjectionCheckpoint {
-        checkpoint_commit_seq: 10,
-        ..export().checkpoint
-    };
+    for other_checkpoint in [
+        ProjectionCheckpoint {
+            snapshot_commit_seq: 0,
+            ..export().checkpoint
+        },
+        ProjectionCheckpoint {
+            checkpoint_commit_seq: 10,
+            ..export().checkpoint
+        },
+        ProjectionCheckpoint {
+            hold_id: "another-hold".to_owned(),
+            ..export().checkpoint
+        },
+    ] {
+        assert_eq!(
+            verify(
+                &fixture.store,
+                &digest,
+                &ExpectedVectors {
+                    checkpoint: Some(&other_checkpoint),
+                    ..fixture.expected()
+                }
+            )
+            .unwrap_err(),
+            VectorRefusal::Identity {
+                field: "checkpoint"
+            }
+        );
+    }
+    let mut other_generation = fixture.generation.clone();
+    other_generation.embedding_model = "another-model".to_owned();
+    other_generation.generation_id = "another-generation".to_owned();
     assert_eq!(
         verify(
             &fixture.store,
             &digest,
             &ExpectedVectors {
-                checkpoint: Some(&other_checkpoint),
+                generation: &other_generation,
+                kernel_incarnation_id: "another-kernel",
                 ..fixture.expected()
             }
         )
         .unwrap_err(),
         VectorRefusal::Identity {
-            field: "checkpoint"
+            field: "embedding_model"
+        }
+    );
+    let zero_tolerance = fixture.restaged(&digest, |dir| {
+        let mut sidecar = read_sidecar(dir);
+        sidecar.unit_norm_tolerance = 0.0;
+        write_bound(dir, &sidecar);
+    });
+    assert_eq!(
+        verify(
+            &fixture.store,
+            &zero_tolerance,
+            &ExpectedVectors {
+                unit_norm_tolerance: -0.0,
+                ..fixture.expected()
+            }
+        )
+        .unwrap_err(),
+        VectorRefusal::Identity {
+            field: "unit_norm_tolerance"
         }
     );
 }

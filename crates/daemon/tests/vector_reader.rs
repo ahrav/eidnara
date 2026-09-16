@@ -2,6 +2,13 @@
 
 mod support;
 
+#[allow(dead_code)]
+#[path = "support/alloc_recorder.rs"]
+mod alloc_recorder;
+
+#[global_allocator]
+static GLOBAL: alloc_recorder::RecordingAlloc = alloc_recorder::RecordingAlloc;
+
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -245,7 +252,7 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
     let residency = ByteBudget::new(RESIDENCY as u64);
     let view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
 
-    assert_eq!(view.digest, digest);
+    assert_eq!(view.digest(), digest);
     assert_eq!(view.members(), composition.members());
     for member in view.members().iter().chain([&digest]) {
         assert!(
@@ -261,9 +268,9 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
     drop(complement);
 
     // Rows come back bit for bit from their offsets; codes are the rows under this layer's own scales.
-    let layout = view.layout;
+    let layout = view.layout();
     for (layer, expected) in view
-        .layers
+        .layers()
         .iter()
         .zip([&corpus[..], &[("alpha", low.clone())][..]])
     {
@@ -332,6 +339,70 @@ fn a_view_pins_the_record_and_every_member_reads_rows_and_codes_by_offset_and_ra
     );
     for member in composition.members().iter().chain([&digest]) {
         assert!(try_exclusive(&fixture.generation_dir(member)));
+    }
+}
+
+#[test]
+fn identity_handoff_allocation_contract() {
+    let (_, canary) = alloc_recorder::record_window(|| {
+        let bytes = std::hint::black_box(vec![0u8; 123]);
+        drop(std::hint::black_box(bytes));
+    });
+    assert!(!canary.overflow);
+    assert_eq!(canary.allocation_events, 1);
+    assert_eq!(canary.requested_bytes, 123);
+    assert_eq!(canary.live_bytes_at_close, 0);
+
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(
+        &mut fixture,
+        &ByteBudget::new(RESIDENCY as u64),
+        &mut |_| {},
+    )
+    .unwrap();
+    let checkpoint = base.sidecar.checkpoint();
+    let query = axis(0);
+    let budget = EvalBudget::unbounded();
+    let scratch = ByteBudget::new(0);
+    for checkpoint in [None, Some(&checkpoint)] {
+        let expected = ExpectedVectors {
+            checkpoint,
+            ..fixture.expected()
+        };
+        let request = RankRequest {
+            expected: &expected,
+            query: &query,
+            authority: projection.authority(),
+            bounds: oracle_bounds(8),
+            max_entries: NonZeroUsize::new(64).unwrap(),
+        };
+        let (result, ledger) = projection
+            .store
+            .with_conn(|conn| {
+                Ok(alloc_recorder::record_window(|| {
+                    rank(&view, conn, &projection.kernel, &request, &budget, &scratch)
+                }))
+            })
+            .unwrap();
+        assert_eq!(result.unwrap_err(), RankRefusal::Scratch { bytes: 96 });
+        assert!(!ledger.overflow);
+        assert_eq!(ledger.live_bytes_at_close, 0);
+        eprintln!(
+            "identity checkpoint={}: allocations={} requested={} peak={} live={}",
+            checkpoint.is_some(),
+            ledger.allocation_events,
+            ledger.requested_bytes,
+            ledger.peak_live_bytes,
+            ledger.live_bytes_at_close,
+        );
+        assert_eq!(ledger.allocation_events, 0);
+        assert_eq!(ledger.requested_bytes, 0);
+        assert_eq!(ledger.peak_live_bytes, 0);
     }
 }
 
@@ -446,7 +517,7 @@ fn no_composition_or_a_short_residency_budget_refuses_before_any_layer_and_a_tru
     let rows = fixture.generation_dir(&base.digest).join(ROWS_FILE);
     let bytes = std::fs::read(&rows).unwrap();
     std::fs::write(&rows, &bytes[..bytes.len() - 8]).unwrap();
-    let layer = &view.layers[0];
+    let layer = &view.layers()[0];
     assert!(layer.row(3).is_ok());
     assert!(matches!(layer.row(4), Err(RowFault::Unavailable(_))));
     let refusal = rank_view(
@@ -498,7 +569,7 @@ fn old_readers_keep_their_complete_set_while_a_new_composition_is_published_and_
     );
 
     let new_view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
-    assert_eq!(old_view.digest, old_digest);
+    assert_eq!(old_view.digest(), old_digest);
     assert_eq!(new_view.members(), vec![new_base.digest.clone()]);
     let query = axis(0);
     let scratch = ByteBudget::new(SCRATCH as u64);
@@ -578,6 +649,36 @@ fn handoff_rechecks_every_binding_and_a_hidden_or_retired_winner_never_falls_bac
             bytes: (2 + 1) * 8 * 4
         }
     );
+
+    for page_rows in [usize::MAX, usize::MAX / (8 * 4)] {
+        let expected = fixture.expected();
+        let request = RankRequest {
+            expected: &expected,
+            query: &query,
+            authority: projection.authority(),
+            bounds: OracleBounds {
+                page_rows: NonZeroUsize::new(page_rows).unwrap(),
+                ..oracle_bounds(8)
+            },
+            max_entries: NonZeroUsize::new(64).unwrap(),
+        };
+        let refusal = projection
+            .store
+            .with_conn(|conn| {
+                Ok(rank(
+                    &view,
+                    conn,
+                    &projection.kernel,
+                    &request,
+                    &EvalBudget::unbounded(),
+                    &scratch,
+                ))
+            })
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refusal, RankRefusal::Scratch { bytes: usize::MAX });
+        assert!(scratch.try_charge(SCRATCH).is_some());
+    }
 
     // `gamma` is hidden by the kernel, and `alpha` is retired after the view was taken: neither the delta's row nor the base's row for them is returned.
     projection.retire("alpha");
@@ -720,7 +821,7 @@ async fn a_worker_owns_the_view_and_its_charges_until_the_read_returns_whatever_
 
     // Completion with retained output: whoever keeps the ranking's view keeps its pins until that view is dropped.
     let view = acquire_view(&mut fixture, &residency, &mut |_| {}).unwrap();
-    let new_digest = view.digest.clone();
+    let new_digest = view.digest().to_owned();
     let owned = work(Arc::clone(&view));
     let ranked = tokio::task::spawn_blocking(move || owned.run(&EvalBudget::unbounded()))
         .await
