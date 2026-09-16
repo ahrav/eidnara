@@ -1249,7 +1249,7 @@ impl HandlerCore {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
             }));
-            if let Err(failed) = step.await {
+            if let Err(failed) = budget.shared().bridge(step).await {
                 drop(budget);
                 return blocking_failure(failed);
             }
@@ -1322,7 +1322,7 @@ impl HandlerCore {
                 }
             })
         }));
-        let outcome = work.await;
+        let outcome = budget.shared().bridge(work).await;
         drop(budget);
         match outcome {
             Ok(UnitOutcome::Terminal(outcome)) => outcome,

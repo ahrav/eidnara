@@ -18,7 +18,12 @@ cancelled at all.
 - `crates/daemon/src/request_budget.rs` `RequestBudget::derive` refuses a
   missing ceiling, a missing or zero `remaining_ms`, and an already-cancelled
   request, then mints the deadline once; `SharedBudget` clones and the stop
-  predicate carry that deadline; `Drop` cancels.
+  predicate carry that deadline; `Drop` cancels. The `EvalBudget` is private
+  to `SharedBudget`: host cancellation is folded into its flag only when
+  `exhaustion` or the stop predicate polls, so a callee holding the
+  `EvalBudget` alone would run to the deadline after a host cancel. Handing it
+  out waits for the route that owns the async side and can bridge the token's
+  edge into the flag once.
 - `crates/storage/src/lib.rs` `lock_conn_until` polls the same stop predicate
   during acquisition, so the wait ends on cancellation.
 

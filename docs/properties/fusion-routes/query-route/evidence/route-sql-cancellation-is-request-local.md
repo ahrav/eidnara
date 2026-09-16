@@ -16,13 +16,17 @@ request on the shared connection.
   source of `SQLITE_INTERRUPT` on a store connection.
 - `crates/retrieval/src/lib.rs` maps a `SQLITE_INTERRUPT` failure to
   `ProjectionError::Interrupted` through `storage::is_interrupted`, so the
-  interrupt survives the callback's error type; `read_under` in
-  `crates/daemon/src/search_projection.rs` passes a fresh stop predicate per
-  request and maps that one variant to the store's deadline error while every
-  other engine error keeps its own class.
+  interrupt survives the callback's error type; `SearchProjection::run` in
+  `crates/daemon/src/search_projection.rs` returns that one variant as the
+  store's deadline error on every access mode while every other engine error
+  keeps its own class, and `read_under` passes a fresh stop predicate per
+  request. `search_catchup::classify` and its quarantine-capable callers
+  therefore never receive the variant.
 - `crates/daemon/tests/request_budget_reads.rs` cancels one request's read
   and then runs a fresh request's read and a plain bounded read on the same
-  connection.
+  connection; a second case cancels a budget after its read succeeded and
+  runs a plain bounded read first, so a handler the success path left behind
+  is not masked by a replacement.
 - `crates/storage/src/lib.rs` test
   `a_leaked_progress_handler_interrupts_the_next_read_on_the_connection`
   installs a handler outside the scope and shows the next read is interrupted.
@@ -61,3 +65,18 @@ handler installed.
 - Conclusion: resolved with answer - `From<rusqlite::Error>` yields a
   dedicated `Interrupted` variant, and only that variant becomes the deadline
   error.
+
+### Q: Where is `Interrupted` turned into the deadline error?
+
+- Sources examined: `SearchProjection::read_under` and `SearchProjection::run`;
+  `search_catchup::classify`, whose `Refusal::Storage` arm the catch-up,
+  embedding-dispatch, and embedding-publication paths turn into a storage
+  quarantine.
+- Findings: a rewrite confined to `read_under` leaves `classify` as a second
+  encoding of the same event that quarantines the projection, so any later
+  interruptible access reaching a classifying consumer would quarantine on a
+  cancellation. `run` is the one exit every access mode shares.
+- Missing evidence: none.
+- Conclusion: resolved with answer - `run` performs the rewrite for every
+  access mode; `an_interrupted_statement_is_the_deadline_error_on_every_access_mode`
+  holds it.

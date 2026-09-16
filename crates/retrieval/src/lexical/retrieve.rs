@@ -155,12 +155,22 @@ fn comparator((left_id, left): &(String, Hit), (right_id, right): &(String, Hit)
         .then_with(|| left_id.cmp(right_id))
 }
 
-const PROBE_SQL: &str = "SELECT l.occurrence_id, l.rank, o.class, o.source_object_id, o.revision, o.source_artifact_digest
+/// Filters orphaned and tombstoned matches before `LIMIT`.
+const PROBE_SQL: &str = "SELECT l.occurrence_id, l.rank, o.class, o.source_object_id, o.revision, o.source_artifact_digest, 0
      FROM lexical l JOIN occurrences o ON o.occurrence_id=l.occurrence_id
      WHERE lexical MATCH ?1
        AND NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=o.occurrence_id)
      ORDER BY l.rank, l.occurrence_id
      LIMIT ?2";
+
+/// The last column marks a shortlisted row that is orphaned or tombstoned in the projection.
+/// Such a row holds a slot a live row would otherwise take, so the result is exact only when no row is marked.
+const LATE_JOIN_SQL: &str = "SELECT l.occurrence_id, l.rank, o.class, o.source_object_id, o.revision, o.source_artifact_digest,
+            o.occurrence_id IS NULL OR EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=l.occurrence_id)
+     FROM (SELECT occurrence_id, rank FROM lexical WHERE lexical MATCH ?1
+           ORDER BY rank, occurrence_id LIMIT ?2) l
+     LEFT JOIN occurrences o ON o.occurrence_id=l.occurrence_id
+     ORDER BY l.rank, l.occurrence_id";
 
 /// Probe hits read from the projection in comparator order, not yet judged by the kernel.
 ///
@@ -346,6 +356,9 @@ fn incomplete(retrieval: &mut Retrieval, reason: IncompleteReason) {
 }
 
 /// The probe query reads one row past `scan_rows` to report truncation without retaining the extra row.
+///
+/// A stale shortlisted row can underfill the result, so rerun `PROBE_SQL`.
+/// Live rows already recorded in `best` are a prefix of `PROBE_SQL`'s rows.
 fn scan_probe(
     conn: &GuardedConn<'_>,
     probe: &Probe,
@@ -354,14 +367,34 @@ fn scan_probe(
     budget: &EvalBudget,
     best: &mut BTreeMap<String, Hit>,
 ) -> Result<(usize, bool), ScanStop> {
+    if let Some(result) = scan_with(conn, LATE_JOIN_SQL, probe, ordinal, scan_rows, budget, best)? {
+        return Ok(result);
+    }
+    scan_with(conn, PROBE_SQL, probe, ordinal, scan_rows, budget, best)?
+        .ok_or(ScanStop::Projection(ProjectionError::CorruptRow))
+}
+
+/// `None` when a shortlisted row is stale and the result may be inexact.
+fn scan_with(
+    conn: &GuardedConn<'_>,
+    sql: &str,
+    probe: &Probe,
+    ordinal: usize,
+    scan_rows: NonZeroUsize,
+    budget: &EvalBudget,
+    best: &mut BTreeMap<String, Hit>,
+) -> Result<Option<(usize, bool)>, ScanStop> {
     let limit = i64::try_from(scan_rows.get().saturating_add(1)).unwrap_or(i64::MAX);
-    let mut statement = conn.prepare_cached(PROBE_SQL)?;
+    let mut statement = conn.prepare_cached(sql)?;
     let mut rows = statement.query(rusqlite::params![probe, limit])?;
     let mut seen = 0;
     while let Some(row) = rows.next()? {
         budget.check().map_err(|_| ScanStop::Budget)?;
+        if row.get::<_, bool>(6)? {
+            return Ok(None);
+        }
         if seen == scan_rows.get() {
-            return Ok((seen, true));
+            return Ok(Some((seen, true)));
         }
         seen += 1;
         let occurrence_id: String = row.get(0)?;
@@ -385,7 +418,7 @@ fn scan_probe(
             best.insert(occurrence_id, hit);
         }
     }
-    Ok((seen, false))
+    Ok(Some((seen, false)))
 }
 
 /// Returns `SnapshotChanged` or `KernelIncarnationChanged` if kernel state differs from the first batch,

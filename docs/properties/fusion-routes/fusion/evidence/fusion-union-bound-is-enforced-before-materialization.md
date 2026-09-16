@@ -31,6 +31,8 @@ None. Fusion is a pure function over values.
 ### Q: Does the check run before or after the allocation it protects?
 
 - Sources examined: `fuse`'s loop.
-- Findings: `contains_key` and `len` are read before `entry().or_default()`.
+- Findings: `union.len()` is read before `union.entry()`; the `Entry::Vacant`
+  arm guarded by `size >= bound.get()` returns `UnionExceeded` before
+  `vacant.insert` runs, so the refused occurrence is never stored.
 - Missing evidence: none.
 - Conclusion: resolved with answer - before.

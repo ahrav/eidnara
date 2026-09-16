@@ -33,14 +33,14 @@ state; an undeclared lane, including a dense lane reported unavailable,
 contributes zero and is listed by `Fused::undeclared_lanes` rather than treated
 as an error.
 
-## Reachability and observation contract
+## Observation contract
 
-Every record here is `test-only`: the types under test are pure retrieval-crate
-values with no daemon route feeding them at this base. The observation points
-are the public API of `crates/retrieval/src/fusion/`, exercised by
+The observation point is the public API of `crates/retrieval/src/fusion/`,
+exported at `crates/retrieval/src/lib.rs:23` and exercised by
 `crates/retrieval/tests/identity.rs` and `crates/retrieval/tests/fusion.rs`.
 Kernel occurrence encoding is reused through `kernel::source_identity`, never
-restated.
+restated. Each record carries its own reachability class and the evidence for
+it.
 
 ## Index
 
@@ -63,12 +63,20 @@ restated.
 ### fusion-occurrence-identity-never-collapses-payload
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `OccurrenceId::parse`, `LaneRanking::consolidate`,
+and `DeclaredLanes::admit` are called from `crates/retrieval/tests/identity.rs`
+only; `grep -rn 'fusion::' crates --include=*.rs` outside
+`crates/retrieval/src/fusion/` finds that test file,
+`crates/retrieval/tests/fusion.rs`, and two comments
+(`crates/daemon/src/projection_lifecycle.rs:227`,
+`crates/daemon/tests/projection_lifecycle.rs:796`), so no route builds a lane
+ranking at this base.
 Status: active
 Exercised: yes - `crates/retrieval/tests/identity.rs`
 `equal_payload_bytes_at_different_identities_stay_distinct_ranking_units`,
 `a_lane_admits_one_entry_per_occurrence_with_the_lane_own_best_score`,
 `consolidation_ignores_probe_order_and_duplication`,
+`a_lane_refuses_foreign_scores_non_finite_scores_and_other_encoding_versions`,
 `only_the_lowercase_hex_spelling_of_an_identifier_is_admitted`, and
 `declared_lanes_hold_one_ranking_per_lane_in_fixed_order`.
 Guarantee: The fusion ranking unit is the kernel occurrence identifier; equal
@@ -80,7 +88,8 @@ tuples, the occurrence identifiers differ and a lane ranking built from both
 holds two entries; a ranking built from any multiset of hits holds one entry
 per distinct occurrence with the lane's own best raw score, and permuting or
 duplicating the hits yields a bit-identical ranking; a non-canonical identifier
-spelling, a second ranking for one lane, or a lane stamped with an encoding
+spelling, a second ranking for one lane, a hit scored for another lane or with
+a non-finite score, or a lane stamped with an encoding
 version other than the kernel's is refused before any ranking is admitted. `always` because
 the property must hold on every construction, not only at a rare state.
 Fault/timing angle: none; the types are pure values.
@@ -102,7 +111,11 @@ Open questions: None.
 ### fusion-selection-digest-tracks-identity-tuple
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `SelectionDigest::derive`, `PreparationDigest::derive`,
+and `SelectedSpan::new` have no caller outside
+`crates/retrieval/tests/identity.rs` (same grep as the record above); the
+prepare route that would derive them is RP2.7.U4 work
+(`docs/fusion-identity-contract.md:6-7`).
 Status: active
 Exercised: yes - `crates/retrieval/tests/identity.rs`
 `selection_digest_tracks_order_and_membership`,
@@ -141,7 +154,10 @@ Open questions:
 ### fusion-parent-groups-are-not-voters
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `ParentGroupKey::derive` has no caller outside
+`crates/retrieval/tests/identity.rs` (same grep as the first record); `fuse`,
+the only scoring entry point, is called from `crates/retrieval/tests/fusion.rs`
+only.
 Status: active
 Exercised: yes - the identity clauses by `crates/retrieval/tests/identity.rs`
 `parent_groups_share_a_parent_across_spans_and_never_replace_occurrences`;
@@ -172,15 +188,15 @@ The identity clauses are exercised and the fusion input type admits no parent.
 Existing check: none before this change.
 Impact: A parent key used as a voter would let one source outvote another by
 span count, and a group spanning revisions would mix bytes from two versions.
-Open questions:
-
-- RP2.8 decides whether non-span classes group at all; this record only fixes
-  the key. (needs human input)
+Open questions: None. RP2.8 U1 ruled that only `raw_tool_spans` groups;
+`docs/properties/selection-packing/identity/catalog.md` records the ruling
+and the class-and-representation key built over this one.
 
 ### fusion-one-contribution-per-lane-per-occurrence
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `fuse` and `FusionParameters::new` have no caller
+outside `crates/retrieval/tests/fusion.rs` (same grep as the first record).
 Status: active
 Exercised: yes - `crates/retrieval/tests/fusion.rs`
 `lane_order_probe_duplication_and_entry_order_change_nothing` and
@@ -211,11 +227,14 @@ Open questions: None.
 ### fusion-lane-positions-are-assigned-once-from-declared-lane-order
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `fuse` and `FusionParameters::new` have no caller
+outside `crates/retrieval/tests/fusion.rs` (same grep as the first record).
 Status: active
 Exercised: yes - `crates/retrieval/tests/fusion.rs`
 `lane_order_probe_duplication_and_entry_order_change_nothing`,
-`empty_lanes_all_zero_weights_and_equal_scores_return_the_declared_result`.
+`empty_lanes_all_zero_weights_and_equal_scores_return_the_declared_result`,
+and, for the filter clause,
+`raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring`.
 Guarantee: Lane positions are assigned once by consolidation as `1..=n` in the
 lane's own order, fused positions are assigned once as `1..=n` in fused order,
 and neither is recomputed by a later filter.
@@ -235,7 +254,8 @@ Open questions: None.
 ### fusion-score-matches-weighted-rrf-reference
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `fuse` and `FusionParameters::new` have no caller
+outside `crates/retrieval/tests/fusion.rs` (same grep as the first record).
 Status: active
 Exercised: yes - `crates/retrieval/tests/fusion.rs`
 `a_hand_computed_two_lane_example_matches_term_for_term`,
@@ -266,11 +286,13 @@ Open questions: None.
 ### fusion-order-is-deterministic-and-permutation-invariant
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `fuse` and `FusionParameters::new` have no caller
+outside `crates/retrieval/tests/fusion.rs` (same grep as the first record).
 Status: active
 Exercised: yes - `crates/retrieval/tests/fusion.rs`
-`lane_order_probe_duplication_and_entry_order_change_nothing` and
-`empty_lanes_all_zero_weights_and_equal_scores_return_the_declared_result`.
+`lane_order_probe_duplication_and_entry_order_change_nothing`,
+`empty_lanes_all_zero_weights_and_equal_scores_return_the_declared_result`,
+and `ties_across_lanes_and_large_tied_sets_fall_to_identifier_order`.
 Guarantee: Fused order is descending score then ascending occurrence-identifier
 bytes, and it does not depend on lane completion order, hit order, or hit
 duplication; empty lanes, all-zero weights, and equal scores yield the
@@ -296,7 +318,8 @@ Open questions: None.
 ### fusion-parameters-are-validated-before-scoring
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `fuse` and `FusionParameters::new` have no caller
+outside `crates/retrieval/tests/fusion.rs` (same grep as the first record).
 Status: active
 Exercised: yes - `crates/retrieval/tests/fusion.rs`
 `invalid_parameters_are_refused_before_scoring`.
@@ -320,7 +343,8 @@ Open questions: None.
 ### fusion-raw-scores-are-retained-and-never-compared
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `fuse` and `FusionParameters::new` have no caller
+outside `crates/retrieval/tests/fusion.rs` (same grep as the first record).
 Status: active
 Exercised: yes - `crates/retrieval/tests/fusion.rs`
 `raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring`
@@ -342,7 +366,8 @@ Open questions: None.
 ### fusion-union-bound-is-enforced-before-materialization
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `fuse` and `FusionParameters::new` have no caller
+outside `crates/retrieval/tests/fusion.rs` (same grep as the first record).
 Status: active
 Exercised: yes - `crates/retrieval/tests/fusion.rs`
 `the_union_bound_refuses_before_materializing_the_excess`.
@@ -372,10 +397,14 @@ Open questions:
 ### fusion-fuses-once-before-revalidation
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `fuse` and `FusionParameters::new` have no caller
+outside `crates/retrieval/tests/fusion.rs` (same grep as the first record).
 Status: active
-Exercised: yes - `crates/retrieval/tests/fusion.rs`
-`raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring`.
+Exercised: partial - the filter clause by `crates/retrieval/tests/fusion.rs`
+`raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring`;
+the once-per-query clause is unexercised, since no test counts `fuse`
+invocations and a route that retains its lane results can call `fuse` again
+after revalidation without `Fused` observing it.
 Guarantee: Fusion runs one time per query; a later revalidation filter removes
 entries and leaves every survivor's position and score unchanged.
 Check: `always` - `Fused` exposes no path back to lane rankings, so no
@@ -390,3 +419,53 @@ Existing check: none before this change.
 Impact: Rescoring after revalidation would let eligibility filtering change
 relative order and make the selection digest depend on filter timing.
 Open questions: None.
+
+## Relationship map
+
+Grouped by shared mechanism, with suspected dominance noted where one property
+holding would make another likely to hold. Dominance is a hypothesis, not proof.
+
+- **One identifier behind the selection digest.**
+  `fusion-occurrence-identity-never-collapses-payload` is upstream of
+  `fusion-selection-digest-tracks-identity-tuple`: `SelectionDigest::derive`
+  hashes `OccurrenceId::as_bytes` (`crates/retrieval/src/fusion/identity.rs:266-273`)
+  and the digest tests build their selections from distinct synthetic
+  identifiers, so an encoder that collapsed two occurrences would hand the
+  digest one input where the record expects two and the digest checks would
+  pass. Only the first record detects that fault on the selection path.
+- **One tuple encoding behind the parent key, with overlapping detection.**
+  `ParentGroupKey::derive` consumes the raw kernel tuple and an explicit
+  revision, not the occurrence identifier (`identity.rs:176-190`), so
+  `fusion-parent-groups-are-not-voters` shares the encoding with the first
+  record rather than depending on its digest. Its test also asserts five
+  distinct occurrence identifiers and a five-entry lane ranking over the same
+  sources (`crates/retrieval/tests/identity.rs:472`, `:478`), so an identifier
+  collapse across span, revision, or representation is caught by both records.
+  Neither dominates the other.
+- **Selection inside preparation.**
+  `PreparationDigest::derive` hashes the selection digest as its last component
+  (`identity.rs:277-299`), so `fusion-selection-digest-tracks-identity-tuple`
+  covers both digests under one record: a selection reordering changes the
+  preparation digest through the selection digest, and a span change reaches
+  only the preparation digest. The two derivations use distinct domain strings
+  (`identity.rs:267`, `:278`), so a selection digest can never be presented as
+  a preparation digest. The record's open question on binding the accounting
+  profile is a preparation-only concern.
+- **Grouping beside, never inside, ranking.**
+  `fusion-parent-groups-are-not-voters` and
+  `fusion-occurrence-identity-never-collapses-payload` partition the tuple: the
+  ranking unit is the full occurrence identifier, the group key is the
+  whole-buffer lineage plus revision. The identity clauses are executable, and
+  the clause that a group key never enters a fused score holds by the type of
+  `fuse`, which accepts only `DeclaredLanes` of occurrence entries; the
+  arithmetic records sit downstream of both.
+- **Arithmetic downstream of identity.** The arithmetic records (one
+  contribution per lane, position assignment, RRF conformance, deterministic
+  order, parameter validation, raw-score retention, union bound, fuse-once)
+  consume `DeclaredLanes` and `LaneEntry::position`, so every one of them
+  depends on the first record here: an identifier collapse would reach `fuse`
+  as one occurrence and every arithmetic check would score the wrong unit
+  without noticing. Among themselves, position assignment is upstream of RRF
+  conformance and deterministic order, and parameter validation is upstream of
+  RRF conformance; the union bound, raw-score retention, and fuse-once records
+  share no mechanism with the others beyond `Fused`.

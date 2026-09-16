@@ -800,10 +800,26 @@ mod sqlite_backend {
 
     /// Bytes the SQLite library holds through its allocator, across every connection in
     /// the process, so an assertion on a delta must leave room for concurrent connections.
+    /// Zero unless [`enable_library_memory_statistics`] ran first in this process: the
+    /// workspace builds SQLite with `SQLITE_DEFAULT_MEMSTATUS=0`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn library_memory_used() -> i64 {
         // SAFETY: `sqlite3_memory_used` takes no pointers and reads no Rust-managed memory.
         unsafe { rusqlite::ffi::sqlite3_memory_used() }
+    }
+
+    /// Turns on SQLite's allocation statistics for this process. SQLite accepts the
+    /// setting only before its first initialization, so this must run before any
+    /// connection opens; the result is `false` once that window has closed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn enable_library_memory_statistics() -> bool {
+        // SAFETY: `sqlite3_config` with `SQLITE_CONFIG_MEMSTATUS` reads one integer
+        // argument and touches no Rust-managed memory; SQLite refuses the call with
+        // `SQLITE_MISUSE` rather than acting on it after initialization.
+        let rc = unsafe {
+            rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 1 as c_int)
+        };
+        rc == rusqlite::ffi::SQLITE_OK
     }
 
     /// Reaches pragmas and statement batches but not the authorizer, so a maintenance
@@ -3048,6 +3064,8 @@ mod sqlite_backend {
 
 #[cfg(all(feature = "sqlite", feature = "test-support"))]
 pub use sqlite_backend::after_commit_for_test;
+#[cfg(all(feature = "sqlite", any(test, feature = "test-support")))]
+pub use sqlite_backend::enable_library_memory_statistics;
 #[cfg(all(feature = "sqlite", any(test, feature = "test-support")))]
 pub use sqlite_backend::library_memory_used;
 #[cfg(feature = "sqlite")]
@@ -5651,15 +5669,29 @@ mod tests {
         held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&stop);
+        let polled = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&polled);
         let started = Instant::now();
         let waiter = thread::spawn(move || {
             store.with_conn_interruptible(
                 Instant::now() + Duration::from_secs(30),
-                move || observed.load(Ordering::SeqCst),
+                move || {
+                    if observed.load(Ordering::SeqCst) {
+                        return true;
+                    }
+                    seen.store(true, Ordering::SeqCst);
+                    false
+                },
                 |_| Ok(()),
             )
         });
-        thread::sleep(Duration::from_millis(50));
+        while !polled.load(Ordering::SeqCst) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the waiter never polled the stop predicate while the connection was held"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
         stop.store(true, Ordering::SeqCst);
         let result = waiter.join().unwrap();
         assert!(matches!(result, Err(StoreError::Deadline)), "{result:?}");

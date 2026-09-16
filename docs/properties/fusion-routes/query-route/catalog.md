@@ -65,20 +65,23 @@ the same stop predicate as SQLite statements, so the deadline-only acquisition
 gap is closed rather than documented; every blocking phase uses the host's
 tracked primitive.
 
-## Reachability and observation contract
+## Observation contract
 
-Every record here is `test-only`: the route is reachable through the
-handler's dispatch only after `Handler::set_query_route_limits` installs an
-approved limit set, and no production caller installs one yet. Observation
-points: `crates/daemon/src/request_budget.rs`, `SearchProjection::read_under`
-in `crates/daemon/src/search_projection.rs`, `SqliteStore::with_conn_interruptible`
-in `crates/storage/src/lib.rs`, the host's `RequestCtx::run_blocking`, and
-`execute` plus `HandlerCore::handle_retrieval_query` in
-`crates/daemon/src/query_route.rs`, whose `before_phase` hook exposes each
-budget check to a test. The host-level witnesses run a real host with a real
-client in `crates/daemon/src/request_budget/host_tests.rs`; the route
-witnesses run a `KernelDaemon` over a file-backed projection populated from
-its kernel in `crates/daemon/tests/query_route.rs` and drive the handler in
+Each record carries its own reachability label and the evidence for it; a
+later ticket that gives a record a production caller relabels that record
+alone. The route records are `test-only` because the route is reachable
+through the handler's dispatch only after `Handler::set_query_route_limits`
+installs an approved limit set, and no production caller installs one yet.
+Observation points: `crates/daemon/src/request_budget.rs`,
+`SearchProjection::read_under` in `crates/daemon/src/search_projection.rs`,
+`SqliteStore::with_conn_interruptible` in `crates/storage/src/lib.rs`, the
+host's `RequestCtx::run_blocking`, and `execute` plus
+`HandlerCore::handle_retrieval_query` in `crates/daemon/src/query_route.rs`,
+whose `before_phase` hook exposes each budget check to a test. The host-level
+witnesses run a real host with a real client in
+`crates/daemon/src/request_budget/host_tests.rs`; the route witnesses run a
+`KernelDaemon` over a file-backed projection populated from its kernel in
+`crates/daemon/tests/query_route.rs` and drive the handler in
 `crates/daemon/tests/query_route_handler.rs`. A limit set is validated at
 installation by `QueryRouteLimits::validate`, so a batch the kernel could never
 judge is refused before any request instead of on every request.
@@ -107,23 +110,30 @@ judge is refused before any request instead of on every request.
 ### route-budget-is-derived-once-before-queue-wait
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - the only production caller of
+`RequestBudget::derive` is `HandlerCore::handle_retrieval_query` in
+`crates/daemon/src/query_route.rs`, which derives a budget only after
+`Handler::set_query_route_limits` installs a limit set, and no production
+caller installs one at this head; the other callers are
+`crates/daemon/src/request_budget/host_tests.rs` and
+`crates/daemon/tests/request_budget_reads.rs`.
 Status: active
 Exercised: yes - `crates/daemon/src/request_budget.rs` unit tests
 `the_remaining_duration_is_clamped_to_the_approved_ceiling`,
 `a_request_without_an_approved_ceiling_or_a_remaining_duration_is_refused`,
 `dropping_the_guard_cancels_every_clone_and_the_stop_predicate`; and
 `crates/daemon/tests/request_budget_reads.rs`
-`the_deadline_is_identical_in_the_guard_every_clone_and_the_blocking_thread`,
 `an_elapsed_remaining_duration_interrupts_a_held_read_the_same_way`,
 `a_cancelled_budget_leaves_the_connection_wait_before_the_holder_releases`.
 Guarantee: One absolute budget is derived at handler entry from the request's
 cancellation and its clamped `remaining_ms`; every later stage, including the
 connection acquisition wait and SQLite VM steps, observes that same deadline
 and flag, and no stage re-derives a relative budget.
-Check: `always` - the guard, every `SharedBudget` clone, the `EvalBudget` a
-callee borrows, and the stop predicate a blocking thread carries report one
-identical deadline; a missing ceiling, a missing or zero `remaining_ms`, or an
+Check: `always` - the guard, every `SharedBudget` clone, the `EvalBudget`
+inside each clone, and the stop predicate a blocking thread carries report one
+identical deadline; the `EvalBudget` is never handed out alone, because host
+cancellation reaches its flag only through `SharedBudget::exhaustion` or the
+stop predicate; a missing ceiling, a missing or zero `remaining_ms`, or an
 already-cancelled request is refused before any work; an acquisition wait
 ends on cancellation before the holder releases and before the deadline.
 `always` because the property must hold on every derivation and every clone.
@@ -134,22 +144,40 @@ Required faults and enabling state: A held connection on another thread; a
 Confidence: high - [evidence](evidence/route-budget-is-derived-once-before-queue-wait.md).
 The deadline is one `Instant` copied into every clone; the stop predicate
 folds the host's cancellation into the same flag.
-Existing check: `crates/kernel/tests/kernel_source_budgets.rs` uses a
-test-local cancel-on-drop budget, status unaudited; `crates/retrieval/tests/lexical_retrieval.rs`
+Existing check: `crates/kernel/tests/kernel_source_budgets.rs`
+`bounded_capture_export_complete_commits_and_ack_preserve_fencing` cancels a
+budget on drop across the acknowledgement boundary, not across a running
+scan, status unaudited; `crates/retrieval/tests/lexical_retrieval.rs`
 `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion`
 drives the storage scope directly, status unaudited.
 Impact: A stage with its own fresh budget could outlive the caller's deadline,
 and a transport timeout could stand in for the caller's remaining duration.
-Open questions: None.
+Open questions:
+
+- A SQLite busy wait inside the read runs under the store's standing 5 s
+  `BUSY_TIMEOUT` (`crates/storage/src/lib.rs`), which neither the deadline
+  nor the stop predicate shortens; the progress handler polls only between VM
+  steps. In WAL mode a reader waits only during recovery or against an
+  exclusive-locking-mode connection, and an attempt to construct that wait
+  against a store that already holds the wal-index was refused with
+  `DatabaseBusy` on the blocker side. Unresolved, needs a reproducible busy
+  reader before the write path's `with_busy_timeout_until` is applied here.
 
 ### route-sql-cancellation-is-request-local
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `SearchProjection::read_under` is the only
+production caller of `with_conn_interruptible`, and its only production
+caller is `execute` in `crates/daemon/src/query_route.rs`, reachable only
+through the limit-gated route above; the other callers are
+`crates/daemon/tests/request_budget_reads.rs` and
+`crates/daemon/src/request_budget/host_tests.rs`.
 Status: active
 Exercised: yes - `crates/daemon/tests/request_budget_reads.rs`
 `a_later_request_on_the_same_connection_is_not_interrupted_by_a_prior_cancellation`,
-`cancelling_the_request_interrupts_a_held_read_and_reports_exhaustion`; and
+`a_cancellation_after_a_successful_read_does_not_interrupt_a_later_plain_read`,
+`cancelling_the_request_interrupts_a_held_read_and_reports_exhaustion`,
+`an_interrupted_statement_is_the_deadline_error_on_every_access_mode`; and
 `crates/storage/src/lib.rs`
 `an_interruptible_read_stops_a_running_statement_and_a_later_read_is_untouched`
 plus the negative control
@@ -163,7 +191,9 @@ Check: `always` - after a cancelled read on the projection connection, a fresh
 request's interruptible read and a plain bounded read both complete; the
 cancelled read returns the store's deadline error because the engine reported
 `ProjectionError::Interrupted`, a variant only the progress handler produces,
-and the budget classifies it as cancellation; the negative control shows that
+and `SearchProjection::run` returns it as the deadline error on every access
+mode, so no consumer classifying a projection refusal can quarantine the
+projection for a cancellation; the negative control shows that
 a handler left installed does interrupt the next read, so the oracle detects a
 leak. `always` because
 every read on the connection must be free of the previous request's hook.
@@ -177,7 +207,7 @@ The storage scope clears the handler before the transaction finishes and in
 `Drop`; the daemon read passes a fresh predicate per request.
 Existing check: `crates/storage/src/lib.rs`
 `an_interruptible_read_stops_a_running_statement_and_a_later_read_is_untouched`,
-status unaudited; `crates/kernel/tests/budget_tests.rs`
+status unaudited; `crates/kernel/src/budget_tests.rs`
 `commit_clears_interrupt_before_sql_and_rearms_it_for_connection_reuse` for the
 kernel store, status unaudited.
 Impact: A leaked hook would fail an unrelated request with a spurious deadline
@@ -187,30 +217,40 @@ Open questions: None.
 ### route-permits-and-pins-outlive-client-cancellation
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - the host witnesses in
+`crates/daemon/src/request_budget/host_tests.rs` register a test handler on
+a real host; the one production route that derives a budget and runs a
+projection read under it, `retrieval.query`, is disabled until a limit set is
+installed and no production caller installs one at this head.
 Status: active
 Exercised: partial - the bridge clauses are covered by
 `crates/daemon/src/request_budget/host_tests.rs`
 `cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling`,
 `the_guard_drop_alone_interrupts_the_held_read_when_the_host_aborts_the_handler`,
-and `a_panic_in_tracked_blocking_work_is_typed_and_still_settles`; the permit
+and `a_panic_in_tracked_blocking_work_is_typed_and_still_settles`, with the
+drop's classification under a concurrent poll covered by
+`crates/daemon/src/request_budget.rs`
+`a_poll_that_straddles_the_guard_drop_never_reports_a_deadline`; the permit
 and pin clauses wait for the route (U3b) and the dense lane (U3c) that hold
 them.
 Guarantee: After client cancellation the blocking worker is joined before the
-request settles; the connection it holds stays held until the read returns
-and is released only after the join; a panic inside the blocking closure
-surfaces as its typed failure and still settles.
+request settles; the connection it holds stays held until the interrupted
+read returns, then `read_on` releases it as the read completes, before the
+worker is joined, so connection ownership ends with the read while
+work-tracker ownership ends with the join; a panic inside the blocking
+closure surfaces as its typed failure and still settles.
 Check: `always` - a real client cancels a request whose handler is suspended
 at `run_blocking` with no `select!` arm; the read reports exhaustion at a time
 no later than the host's error publication for that channel; the projection
 connection is held before cancellation and free after settlement; with the
 budget derived from a token the test never cancels, the guard's drop alone
-stops the read and classifies it as cancellation; a panicking closure yields
+stops the read and classifies it as cancellation, including when a poll of
+`SharedBudget::exhaustion` straddles the drop; a panicking closure yields
 `BlockingFailure::Panicked` and the client sees one terminal error. `always`
 because every cancelled request must drain its blocking work.
 Fault/timing angle: The host aborts the handler future while the blocking
 read runs; in the drop-only variant the guard's drop is the only path raising
-the interrupt.
+the interrupt; a poll that reads the budget between the drop's two stores.
 Required faults and enabling state: A real host and client; a held
 search-projection read on the blocking pool; a request cancel frame; a panic
 inside tracked work.
@@ -726,3 +766,28 @@ Open questions:
 - Whether a bounded retry inside the deadline should replace at-once
   degradation for `busy` is an RP2.9 calibration item; the route implements
   at-once. (needs human input)
+
+## Relationship map
+
+The derivation record is the precondition for the other two: the deadline and
+flag it mints are what the progress handler and the acquisition poll observe,
+so a re-derived or transport-supplied budget would make the request-local and
+join-before-settle checks pass against the wrong deadline. The request-local
+record constrains the connection while a request owns it and after its read
+returns; the join record constrains the worker and the ledger charge after the
+host aborts the handler, and hands the connection back through the same
+`read_on` release the request-local record relies on. Neither later record
+proves the derivation is unique, and the derivation record says nothing about
+what a leaked handler or an early settlement would do; each guarantee needs
+its own check. The permit and pin clauses of the join record wait on state the
+route and dense lane add, and will not change the other two records.
+
+The route records sit on top of the three budget records rather than beside
+them. Authorization, bounds, and rollback are decided before any protected
+work, so they hold whether or not a budget is derived; the every-phase
+cancellation and drain records are the route-level reading of the
+request-local and join records, observed through `before_phase` instead of
+the connection; the candidate-scope and final-revalidation records are
+independent of the budget entirely and constrain what a completed request may
+return. A change to the budget records moves the route's cancellation and
+drain evidence and nothing else.
