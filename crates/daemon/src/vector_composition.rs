@@ -355,13 +355,12 @@ fn record(
     if manifest.target != VECTOR_SELECTION_TARGET {
         return Ok(None);
     }
-    let Ok(members) = store.read_manifest_file(digest, MEMBERS_FILE_NAME) else {
-        return Ok(None);
-    };
-    check_members_schema(&members)?;
     let Ok(bytes) = store.read_manifest_file(digest, COMPOSITION_FILE) else {
         return Ok(None);
     };
+    if let Ok(members) = store.read_manifest_file(digest, MEMBERS_FILE_NAME) {
+        check_members_schema(&members)?;
+    }
     match decode_record(&manifest, &bytes) {
         Ok(record) => Ok(Some(record)),
         Err(CompositionRefusal::Quarantined) => Err(CompositionRefusal::Quarantined),
@@ -369,7 +368,7 @@ fn record(
     }
 }
 
-/// A members file of a schema this build does not know is refused as `Quarantined` before the manifest binding reports it as a mismatch; any other shape is left to that binding check.
+/// A members file of a schema this build does not know is refused as `Quarantined` before the manifest binding reports it as a mismatch.
 fn check_members_schema(bytes: &[u8]) -> Result<(), CompositionRefusal> {
     let schema = serde_json::from_slice::<serde_json::Value>(bytes)
         .ok()
@@ -478,7 +477,9 @@ fn verify_validated(
     if generation.manifest.target != VECTOR_SELECTION_TARGET {
         return Err(CompositionRefusal::NotComposition("manifest target"));
     }
-    check_members_schema(&generation.read_verified_file(MEMBERS_FILE_NAME)?)?;
+    if let Ok(members) = generation.read_verified_file(MEMBERS_FILE_NAME) {
+        check_members_schema(&members)?;
+    }
     let bytes = generation.read_verified_file(COMPOSITION_FILE)?;
     let composition = decode_record(&generation.manifest, &bytes)?;
     // Refuse before opening members: the bound limits verification work, not just the returned topology.

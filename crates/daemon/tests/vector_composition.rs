@@ -1200,6 +1200,8 @@ fn verification_refuses_an_oversized_record_before_opening_the_generation() {
     let base = fixture.layer(1, 10);
     let template = fixture.compose(1, &base, &[]).unwrap();
     let digest = fixture.stage_record(&vec![b'x'; 1024 * 1024 + 1], &template);
+    // The record is corrupted in place so that validating or reading it before the cap reports something other than its size.
+    fixture.corrupt(&digest, COMPOSITION_FILE);
     assert_eq!(
         fixture.verify_composition(&digest).unwrap_err(),
         CompositionRefusal::NotComposition("record size")
@@ -1373,6 +1375,53 @@ fn an_unknown_members_schema_on_the_selected_composition_quarantines_publication
     assert_eq!(
         fixture.store.read_vector_current().unwrap(),
         CurrentProfile::Current(selected)
+    );
+}
+
+#[test]
+fn an_unknown_record_schema_without_a_members_file_still_quarantines_publication() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let mut future = fixture.compose(3, &base, &[]).unwrap();
+    future.schema = 2;
+    let dir = fixture.work_dir();
+    fs::write(dir.join(COMPOSITION_FILE), future.canonical_bytes()).unwrap();
+    let selected = fixture
+        .store
+        .stage(
+            &[SourceSpec {
+                rel_path: COMPOSITION_FILE.to_owned(),
+                source: dir.join(COMPOSITION_FILE),
+                executable: false,
+                expected_size: None,
+                expected_sha256: None,
+            }],
+            &future.stage_meta(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+    fixture
+        .store
+        .select_vector(&selected, &fixture.tx, &mut |_| Ok(()))
+        .unwrap();
+    let selector_bytes = fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap();
+
+    assert_eq!(
+        fixture.verify_composition(&selected).unwrap_err(),
+        CompositionRefusal::Quarantined
+    );
+    let failure = publish(
+        &fixture.compose(9, &base, &[]).unwrap(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(failure.progress, Progress::NotStaged);
+    assert_eq!(failure.refusal, CompositionRefusal::Quarantined);
+    assert_eq!(
+        fixture.selector_bytes(VECTOR_PROFILE_NAME).unwrap(),
+        selector_bytes
     );
 }
 
