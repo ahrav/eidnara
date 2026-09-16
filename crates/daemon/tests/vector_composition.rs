@@ -1316,6 +1316,67 @@ fn a_selection_the_verifier_rejects_gates_publication_the_same_way_recovery_trea
 }
 
 #[test]
+fn an_unknown_members_schema_on_the_selected_composition_quarantines_publication() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let future = fixture.compose(3, &base, &[]).unwrap();
+    let dir = fixture.work_dir();
+    fs::write(dir.join(COMPOSITION_FILE), future.canonical_bytes()).unwrap();
+    fs::write(
+        dir.join(MEMBERS_FILE_NAME),
+        serde_json::to_vec(&host_runtime::generation::WireMembers {
+            schema: 2,
+            members: future.members(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let sources: Vec<SourceSpec> = [COMPOSITION_FILE, MEMBERS_FILE_NAME]
+        .into_iter()
+        .map(|name| SourceSpec {
+            rel_path: name.to_owned(),
+            source: dir.join(name),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        })
+        .collect();
+    let selected = fixture
+        .store
+        .stage(&sources, &future.stage_meta(), &BTreeSet::new())
+        .unwrap();
+    // This build's store refuses to select it; a later build's selector may still name it.
+    assert!(
+        fixture
+            .store
+            .select_vector(&selected, &fixture.tx, &mut |_| Ok(()))
+            .is_err()
+    );
+    fixture.write_selector(
+        VECTOR_PROFILE_NAME,
+        format!(r#"{{"schema":1,"current":"{selected}"}}"#).as_bytes(),
+    );
+
+    assert_eq!(
+        fixture.verify_composition(&selected).unwrap_err(),
+        CompositionRefusal::Quarantined
+    );
+    let failure = publish(
+        &fixture.compose(9, &base, &[]).unwrap(),
+        &fixture.staging(),
+        &fixture.work_dir(),
+        &mut |_| Ok(()),
+    )
+    .unwrap_err();
+    assert_eq!(failure.progress, Progress::NotStaged);
+    assert_eq!(failure.refusal, CompositionRefusal::Quarantined);
+    assert_eq!(
+        fixture.store.read_vector_current().unwrap(),
+        CurrentProfile::Current(selected)
+    );
+}
+
+#[test]
 fn a_forged_record_with_a_repeated_delta_fails_topology_at_verification() {
     let fixture = Fixture::new();
     let base = fixture.layer(1, 10);
