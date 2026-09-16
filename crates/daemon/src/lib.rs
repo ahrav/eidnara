@@ -65,6 +65,7 @@ pub mod projection_gates;
 pub mod projection_lifecycle;
 pub mod release_contract;
 pub mod vector_admission;
+pub mod vector_compaction;
 pub mod vector_composition;
 pub mod vector_generation;
 pub mod vector_reader;
