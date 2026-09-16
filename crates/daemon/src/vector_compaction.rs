@@ -86,7 +86,7 @@ impl From<GenerationError> for CompactionRefusal {
 /// A compacted base built in a work directory. Its files are disk scratch reserved in the ledger until [`Self::discard`] removes them and releases the charge; dropping without discarding removes them too, so a caller that gives up on a compaction leaves nothing behind either way.
 #[derive(Debug)]
 pub struct Compacted {
-    pub cut: Cut,
+    cut: Cut,
     pub built: BuiltVectors,
     pub winners: usize,
     pub superseded: usize,
@@ -95,6 +95,18 @@ pub struct Compacted {
 }
 
 impl Compacted {
+    /// The prefix this output stands on. It is fixed at `compact`, so `publish` judges the selection against what was read.
+    ///
+    /// ```compile_fail,E0616
+    /// use daemon::vector_compaction::Compacted;
+    /// fn retarget(compacted: &mut Compacted, base: String) {
+    ///     compacted.cut.base = base;
+    /// }
+    /// ```
+    pub fn cut(&self) -> &Cut {
+        &self.cut
+    }
+
     /// Unlinks the build's files, removes the work directory, and releases the scratch reservation. Files the build did not write are left in place.
     ///
     /// # Errors
@@ -266,6 +278,14 @@ pub fn publish(
         .cut
         .prefix_len(&current)
         .ok_or(CompactionRefusal::PrefixMoved)?;
+    // No sequence follows the last one, so the refusal comes before anything is staged.
+    let sequence = current
+        .sequence
+        .checked_add(1)
+        .ok_or(CompositionRefusal::Sequence {
+            sequence: current.sequence,
+            selected: current.sequence,
+        })?;
     let tail = current.deltas[prefix..].to_vec();
     let carried = tail
         .iter()
@@ -278,7 +298,7 @@ pub fn publish(
         .map_err(CompactionRefusal::Stage)?;
     let composition = vector_composition::compose(&CompositionSpec {
         expected,
-        sequence: current.sequence + 1,
+        sequence,
         base: &base,
         deltas: &carried,
         max_deltas,

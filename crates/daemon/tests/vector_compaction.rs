@@ -109,7 +109,7 @@ fn compaction_keeps_every_effective_row_applies_every_tombstone_and_ranks_to_the
     // Two base rows superseded (`alpha`, `gamma`), one base row masked (`delta`); `beta`'s base row is superseded by the second delta's row over the first delta's tombstone.
     assert_eq!((compacted.superseded, compacted.masked), (3, 1));
     assert_eq!(
-        compacted.cut,
+        *compacted.cut(),
         Cut {
             digest: old_digest.clone(),
             base: base.digest.clone(),
@@ -592,6 +592,27 @@ fn at_the_delta_cap_further_deltas_are_refused_and_compaction_clears_the_cap() {
         fixture.publish(&next).is_ok(),
         "one delta over the compacted base admits"
     );
+}
+
+#[test]
+fn a_selection_at_the_last_sequence_refuses_publication_before_staging_anything() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(u64::MAX, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &view).unwrap();
+    let before = fixture.generations();
+    assert_eq!(
+        publish_compacted(&fixture, &compacted).unwrap_err(),
+        CompactionRefusal::Composition(CompositionRefusal::Sequence {
+            sequence: u64::MAX,
+            selected: u64::MAX
+        })
+    );
+    assert_eq!(fixture.generations(), before, "nothing was staged");
+    compacted.discard().unwrap();
 }
 
 #[test]
