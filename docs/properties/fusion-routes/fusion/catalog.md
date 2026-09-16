@@ -377,8 +377,11 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/retrieval/tests/fusion.rs`
-`raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring`.
+Exercised: partial - the filter clause by `crates/retrieval/tests/fusion.rs`
+`raw_scores_survive_and_filtering_keeps_positions_and_scores_without_rescoring`;
+the once-per-query clause is unexercised, since no test counts `fuse`
+invocations and a route that retains its lane results can call `fuse` again
+after revalidation without `Fused` observing it.
 Guarantee: Fusion runs one time per query; a later revalidation filter removes
 entries and leaves every survivor's position and score unchanged.
 Check: `always` - `Fused` exposes no path back to lane rankings, so no
