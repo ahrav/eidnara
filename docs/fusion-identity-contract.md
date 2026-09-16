@@ -65,6 +65,39 @@ ranking is the members in occurrence-identifier byte order with positions
 `DeclaredLanes::admit(rankings)` holds at most one ranking per lane in
 `Lane::ORDER`. A second ranking for one lane is refused.
 
+## Fusion arithmetic
+
+`FusionParameters::new(LaneWeights { exact, lexical, dense }, k)` refuses
+before any scoring when a weight is negative or not finite, when `k` is not
+positive and finite, or when the finite inputs would sum to infinity at rank
+one. A negative-zero weight is admitted as `+0.0`, so an
+all-zero parameter set has one spelling. `k = 60` and equal weights are
+calibration points for tests, not defaults; the caller supplies the
+parameters and the fused union bound with no defaults.
+
+`fuse(lanes, parameters, bound)` returns one `Fused` ranking:
+
+1. The union of occurrences across lanes is built one entry at a time and
+   refused with `UnionExceeded { bound }` before the first occurrence past
+   `bound` is materialized.
+2. `score(o) = sum_lane(weight_lane / (k + position_lane(o)))`, summed in
+   `f64` left to right in `Lane::ORDER`, one term per lane. A lane that did
+   not rank the occurrence, and a lane that was not declared, adds nothing.
+   The reference oracle sums terms; it never evaluates a closed fraction.
+3. Fused order is descending score, then ascending occurrence-identifier
+   bytes. Fused positions are `1..=n` in that order.
+4. Each entry keeps every lane's own position and raw score unchanged.
+
+An undeclared lane, including a dense lane reported unavailable, contributes
+zero and is listed by `Fused::undeclared_lanes`; why it was undeclared is the
+route's knowledge, and fusion never treats it as an error. An incomplete lane participates with the entries it reached; a
+`LaneRanking` carries no completion state, so the route reports each lane's
+completion beside the ranking.
+
+`Fused` exposes no path back to lane rankings and `Fused::filter` leaves every
+survivor's position and score unchanged, so a revalidation pass never rescores
+and fusion runs once per query.
+
 ## Probe and generation identities
 
 `ProbeOrdinal(u32)` is one compiled query atom's zero-based position in its
