@@ -32,15 +32,44 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
 | `claim-worker-result-cannot-outlive-identity` | Projection, progress and recovery | #460 | `crates/kernel/src/current_input.rs`, `crates/retrieval/src/vectors.rs` (shared) |
 | `eligible-positive-and-unknown-claims-remain-reachable` | Outcome; Useful-path coverage | #460, #466 | `crates/retrieval/src/claims.rs` |
 | `unknown-echo-state-is-policy-neutral` | Echo provenance and use authority; A2 | #460, #466 | `crates/retrieval/src/claims.rs` |
-| `bound-project-scope-cannot-be-widened-by-candidate` | Echo provenance and use authority | #466 | pending |
-| `candidate-validation-preserves-surface-policy` | U4 | #466 | pending |
-| `checkout-applicability-is-revalidated-without-relevance-refresh` | U4 | #466 | pending |
-| `eligibility-cache-cannot-change-canonical-verdict` | Echo provenance and use authority | #466 | pending |
-| `optional-edits-require-host-capability-and-survival-proof` | Bounds, capabilities and stop conditions | #466 | pending |
-| `stale-projection-cannot-authorize-current-use` | U4 | #466 | pending |
-| `u5-class-transition-situations-are-witnessed` | U5 | #466 | pending |
-| `u5-evaluation-keeps-provenance-and-judgment-separate` | U5 | #466 | pending |
-| `u5-rejection-and-unknown-accounting-is-lossless` | U5 | #466 | pending |
+| `bound-project-scope-cannot-be-widened-by-candidate` | Echo provenance and use authority | #466 | `crates/kernel/src/eligibility.rs`, `crates/retrieval/src/claims.rs` |
+| `candidate-validation-preserves-surface-policy` | U4 | #466 | `crates/kernel/src/eligibility.rs` (`judge_surface_eligibility`), `crates/retrieval/src/claims.rs` (`validate_for_surface`) |
+| `checkout-applicability-is-revalidated-without-relevance-refresh` | U4 | #466 | `crates/kernel/src/applicability/` (engine exists; no claim caller) |
+| `eligibility-cache-cannot-change-canonical-verdict` | Echo provenance and use authority | #466 | `crates/kernel/src/eligibility.rs`; `crates/daemon/src/kernel_routes/eligibility.rs` (unchanged) |
+| `optional-edits-require-host-capability-and-survival-proof` | Bounds, capabilities and stop conditions | #466 | no code; harness integration pending |
+| `stale-projection-cannot-authorize-current-use` | U4 | #466 | `crates/retrieval/src/claims.rs` (`validate_for_surface`) |
+| `u5-class-transition-situations-are-witnessed` | U5 | #466 | `crates/daemon/tests/claim_sources.rs` (witnesses); manifest pending |
+| `u5-evaluation-keeps-provenance-and-judgment-separate` | U5 | #466 | `crates/retrieval/src/claims.rs` |
+| `u5-rejection-and-unknown-accounting-is-lossless` | U5 | #466 | `crates/retrieval/src/claims.rs` (`UseAccounting`) |
+
+## Design decisions carried by the final-use gate
+
+- `judge_surface_eligibility` keeps the existing batch judgement and the
+  `kernel.eligibility.batch` wire contract unchanged; it pairs each batch
+  verdict with the serving view's visibility on the requested surface from the
+  one serving read the batch already makes, so the three surfaces cannot come
+  from different snapshots. A batch `Ok` therefore permits explicit search with its label
+  and grants nothing on `AutoInject` unless the serving view shows the object
+  there.
+- `validate_for_surface` judges the decision object each claim row names, not
+  the descriptor object, because admission-only dispositions are recorded on
+  the decision, and submits the row's artifact digest so the artifact egress
+  gate applies at the requested destination. Only `Current` candidates reach
+  the kernel; the others are denied by their state. The kernel read
+  (`judge_surface_eligibility_with_claims`) returns the canonical claim facts
+  of every named object from the same snapshot as the verdicts, and each
+  permitted row is reclassified against them, so a projection digest is never
+  the authority for which artifact is judged, a representation retired since
+  classification is denied at the fresh tip, and the lineage accounting is the
+  snapshot's. The batch carries the incarnation it was classified in, and the
+  read refuses a kernel of another incarnation under the reader guard, as
+  `claim_facts_at` does for the classification read. One `EvalBudget` bounds
+  the kernel read. The same call serves
+  preselection admission and the final revalidation of packed survivors; the
+  second call reads a newer snapshot and denies whatever was restricted since.
+- Not wired in this change: a daemon route or plugin path that calls the gate,
+  checkout applicability for claim candidates, and the six harness delivery
+  witnesses. Those remain open under the delivery ticket.
 
 ## Design decisions carried by the projection side
 
