@@ -10,21 +10,30 @@ Acceptance row AC3 names the six fault classes.
 ## Evidence trail
 
 - `crates/retrieval/src/packing/required.rs` `RequiredContextFailure` holds
-  the classes; `admit_required` maps rows and dispositions to them in request
-  order before any byte is loaded; `reserve_required` adds `Corrupt` for a
-  length mismatch and `OverBudget` for the limit.
-- `crates/daemon/src/packing.rs` `prepare_required` refuses a request set beyond the load
-  bound before any read, reads each row under one connection hold, judges
-  eligibility in one kernel batch, admits, loads through `load_payload` under
-  a second hold, and reserves outside both, polling `EvalBudget::is_exhausted`
-  between stages and recording only `StageEvent::Required` events. It never
-  calls a retrieval lane; the test seeds the trace with one lane call and
-  observes the count unchanged.
+  the classes; `admit_required` refuses a set beyond the load-count bound
+  before examining any request, then maps rows and dispositions to the classes
+  in request order before any byte is loaded; `reserve_required` adds `Corrupt`
+  for a length mismatch and `OverBudget` for the limit.
+- `crates/daemon/src/packing.rs` `prepare_required` tightens the load bound to
+  the kernel's `MAX_ELIGIBILITY_CANDIDATES`, refuses a request set beyond it
+  before any read, reads each row under one connection hold, judges
+  eligibility in one kernel batch, admits, fetches payloads through
+  `fetch_payload` under a second hold, verifies each digest through
+  `PayloadRef::verify` after that hold is released, and reserves outside both.
+  Each hold goes through `with_conn_interruptible` under the budget's deadline
+  and cancellation when the budget has a deadline, stops at the first faulting
+  statement, and maps `StoreError::Deadline` to the deadline refusal;
+  `EvalBudget::is_exhausted` is polled between stages and only
+  `StageEvent::Required` events are recorded. It never calls a retrieval lane;
+  the test seeds the trace with one lane call and observes the count
+  unchanged.
 - `crates/daemon/tests/packing_required.rs` constructs each fault and asserts
   the class, its literal, `optional_events() == 0`, and
-  `retrieval_calls() == 0`.
+  `retrieval_calls() == 0`; two tests hold the projection connection on
+  another thread and assert the phase refuses within the budget with no event.
 - `crates/retrieval/tests/packing_required.rs` covers the verdict mapping
-  the kernel fixture cannot produce (`Hidden`, `Stale`, `Superseded`).
+  the kernel fixture cannot produce (`Hidden`, `Stale`, `Superseded`) and the
+  load-bound precedence over a per-request fault.
 
 ## Failure scenario
 
@@ -37,7 +46,11 @@ rendered stale or corrupt.
 
 The `EvalBudget` deadline is polled before the read, before the kernel batch,
 and before the loads; the kernel batch itself runs within the budget through
-`judge_occurrences_within_budget`.
+`judge_occurrences_within_budget`. Each projection hold acquires the
+connection by polling until the budget's deadline and installs the budget as
+the SQLite progress stop, so a holder on another thread or a long statement
+cannot carry the phase past its deadline or its cancellation; a budget with no
+deadline is bounded only by the polls between stages.
 
 ## What a test must construct
 

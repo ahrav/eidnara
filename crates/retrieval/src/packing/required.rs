@@ -53,7 +53,8 @@ pub enum RequiredBound {
     ItemBytes,
 }
 
-/// The phase returns the first fault in request order.
+/// A set beyond the load-count bound fails before any request is examined;
+/// otherwise the phase returns the first fault in request order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequiredContextFailure<C> {
     Missing(OccurrenceId),
@@ -114,9 +115,15 @@ pub fn admit_required<'a, C>(
     facts: &[RequiredFact<'a>],
     bounds: &RequiredBounds<C>,
 ) -> Result<Vec<AdmittedRequired<'a>>, RequiredContextFailure<C>> {
+    if let Some(beyond) = facts.get(bounds.max_payload_loads.get()) {
+        return Err(RequiredContextFailure::Oversized {
+            occurrence: beyond.request.occurrence,
+            bound: RequiredBound::PayloadLoads,
+        });
+    }
     let mut admitted = Vec::with_capacity(facts.len());
     let mut total_bytes = 0u64;
-    for (index, fact) in facts.iter().enumerate() {
+    for fact in facts {
         let occurrence = fact.request.occurrence;
         let row = fact.row;
         if row.occurrence != occurrence {
@@ -141,12 +148,6 @@ pub fn admit_required<'a, C>(
                     verdict,
                 });
             }
-        }
-        if index >= bounds.max_payload_loads.get() {
-            return Err(RequiredContextFailure::Oversized {
-                occurrence,
-                bound: RequiredBound::PayloadLoads,
-            });
         }
         let bytes = row.payload.byte_length;
         if bytes > bounds.max_item_bytes.get() {

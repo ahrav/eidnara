@@ -219,6 +219,36 @@ fn stale_rows_and_bounds_are_checked_in_request_order() {
     );
 }
 
+/// The load-count bound is checked over the whole set before per-request faults.
+#[test]
+fn the_load_bound_is_checked_over_the_whole_set_before_any_request_fault() {
+    let mut retired = row(2, 1, 10);
+    retired.tombstone = Some(Tombstone {
+        invalidated_commit_seq: 5,
+        reason: TombstoneReason::Retired,
+    });
+    let live = row(3, 1, 10);
+    let one_load = RequiredBounds {
+        max_payload_loads: NonZeroUsize::MIN,
+        ..bounds(100)
+    };
+    let stale_then_live = [
+        fact(request(2, 1), &retired, Disposition::Eligible),
+        fact(request(3, 1), &live, Disposition::Eligible),
+    ];
+    assert_eq!(
+        admit_required(&stale_then_live, &one_load),
+        Err(RequiredContextFailure::Oversized {
+            occurrence: id(3),
+            bound: RequiredBound::PayloadLoads,
+        })
+    );
+    assert_eq!(
+        admit_required(&stale_then_live[..1], &one_load),
+        Err(RequiredContextFailure::Stale(id(2)))
+    );
+}
+
 #[test]
 fn reservation_charges_every_byte_and_stops_exactly_at_the_limit() {
     let rows = [row(1, 1, 4), row(2, 1, 6)];

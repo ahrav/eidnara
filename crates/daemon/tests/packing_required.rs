@@ -4,8 +4,8 @@
 mod support;
 
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use daemon::packing::{
@@ -15,6 +15,7 @@ use daemon::packing::{
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::encode;
+use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{RequiredBound, RequiredBounds, RequiredContextFailure, RequiredRequest};
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
 use support::packing::{Fixture, ToolSpan, bounds, tool_span};
@@ -251,7 +252,7 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
         &[&payload_id, &altered],
     );
     let (result, trace) = fixture.prepare(
-        &[FIRST.request()],
+        &[FIRST.request(), SECOND.request()],
         &bounds(1 << 20),
         &EvalBudget::unbounded(),
     );
@@ -264,6 +265,7 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
         required_events(&trace),
         [
             RequiredEvent::Read,
+            RequiredEvent::Read,
             RequiredEvent::Judged,
             RequiredEvent::Admitted
         ]
@@ -272,6 +274,37 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
     damage(
         "UPDATE payloads SET bytes=?2 WHERE payload_id=?1",
         &[&payload_id, &FIRST.payload.as_bytes()],
+    );
+
+    // The payload length must match its occurrence reference.
+    let second_payload_id = kernel::source_identity::payload_id(SECOND.payload.as_bytes());
+    let longer = [SECOND.payload.as_bytes(), b"!"].concat();
+    damage(
+        "UPDATE payloads SET bytes=?2, byte_length=?3 WHERE payload_id=?1",
+        &[&second_payload_id, &longer, &(longer.len() as i64)],
+    );
+    let (result, trace) = fixture.prepare(
+        &[FIRST.request(), SECOND.request()],
+        &bounds(1 << 20),
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        required_failure(&result),
+        &RequiredContextFailure::Corrupt(SECOND.id())
+    );
+    assert_eq!(
+        trace.payload_loads(),
+        1,
+        "the payload before the fault verified first"
+    );
+    assert_no_optional_work(&trace);
+    damage(
+        "UPDATE payloads SET bytes=?2, byte_length=?3 WHERE payload_id=?1",
+        &[
+            &second_payload_id,
+            &SECOND.payload.as_bytes(),
+            &(SECOND.payload.len() as i64),
+        ],
     );
 
     let identity = SECOND.identity();
@@ -312,6 +345,93 @@ fn an_expired_deadline_refuses_the_required_phase_before_any_optional_event() {
     assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
 }
 
+/// Holds the projection connection on another thread until `prepare` returns
+/// or `HOLD_CEILING` passes, then reports how long `prepare` took.
+fn while_connection_is_held(
+    fixture: &Fixture,
+    prepare: impl FnOnce() -> (
+        Result<daemon::packing::RequiredMaterialization, PreparationRefusal>,
+        PackingTrace,
+    ),
+) -> (
+    Duration,
+    Result<daemon::packing::RequiredMaterialization, PreparationRefusal>,
+    PackingTrace,
+) {
+    const HOLD_CEILING: Duration = Duration::from_secs(5);
+    let (holding_tx, holding) = mpsc::channel::<()>();
+    let (release_tx, release) = mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            fixture
+                .store
+                .with_conn(|_| {
+                    holding_tx.send(()).unwrap();
+                    let _ = release.recv_timeout(HOLD_CEILING);
+                    Ok(())
+                })
+                .unwrap();
+        });
+        holding.recv_timeout(HOLD_CEILING).unwrap();
+        let started = Instant::now();
+        let (result, trace) = prepare();
+        let waited = started.elapsed();
+        // The holder has already left once `HOLD_CEILING` passed; the elapsed
+        // assertion reports that, not this send.
+        let _ = release_tx.send(());
+        (waited, result, trace)
+    })
+}
+
+#[test]
+fn a_deadline_that_passes_while_the_connection_is_held_refuses_without_reading() {
+    let fixture = Fixture::new(&[FIRST]);
+    let short = EvalBudget::new(
+        Some(Instant::now() + Duration::from_millis(200)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (waited, result, trace) = while_connection_is_held(&fixture, || {
+        fixture.prepare(&[FIRST.request()], &bounds(1 << 20), &short)
+    });
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+    assert!(
+        waited < Duration::from_secs(2),
+        "the hold must end at the deadline, not when the holder releases: {waited:?}"
+    );
+    assert!(
+        trace.events().is_empty(),
+        "no row is read after the deadline: {:?}",
+        trace.events()
+    );
+    assert_no_optional_work(&trace);
+}
+
+#[test]
+fn a_cancellation_while_the_connection_is_held_refuses_without_reading() {
+    let fixture = Fixture::new(&[FIRST]);
+    let cancellable = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(30)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let canceller = cancellable.clone();
+    let (waited, result, trace) = while_connection_is_held(&fixture, || {
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                canceller.cancel();
+            });
+            fixture.prepare(&[FIRST.request()], &bounds(1 << 20), &cancellable)
+        })
+    });
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+    assert!(
+        waited < Duration::from_secs(2),
+        "the hold must end on cancellation, not at the deadline: {waited:?}"
+    );
+    assert!(trace.events().is_empty());
+    assert_no_optional_work(&trace);
+}
+
 #[test]
 fn a_required_payload_beyond_the_legacy_cut_is_materialized_and_charged_whole() {
     const LEN: usize = 64 * 1024 + 7;
@@ -346,6 +466,34 @@ fn more_requests_than_the_load_bound_are_refused_before_any_read() {
         required_failure(&result),
         &RequiredContextFailure::Oversized {
             occurrence: SECOND.id(),
+            bound: RequiredBound::PayloadLoads,
+        }
+    );
+    assert!(trace.events().is_empty());
+    assert_no_optional_work(&trace);
+}
+
+/// The kernel judges at most `MAX_ELIGIBILITY_CANDIDATES` per batch, so a
+/// caller bound above it cannot be honored; the set is refused as oversized
+/// before any row is read rather than read whole and refused by the kernel.
+#[test]
+fn a_set_beyond_the_kernel_batch_cap_is_refused_before_any_read() {
+    let fixture = Fixture::new(&[FIRST]);
+    let requests: Vec<RequiredRequest> = (0..=kernel::MAX_ELIGIBILITY_CANDIDATES)
+        .map(|index| RequiredRequest {
+            occurrence: OccurrenceId::parse(&format!("{index:064x}")).unwrap(),
+            revision: 1,
+        })
+        .collect();
+    let generous = RequiredBounds {
+        max_payload_loads: NonZeroUsize::new(2 * kernel::MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        ..bounds(1 << 20)
+    };
+    let (result, trace) = fixture.prepare(&requests, &generous, &EvalBudget::unbounded());
+    assert_eq!(
+        required_failure(&result),
+        &RequiredContextFailure::Oversized {
+            occurrence: requests[kernel::MAX_ELIGIBILITY_CANDIDATES].occurrence,
             bound: RequiredBound::PayloadLoads,
         }
     );

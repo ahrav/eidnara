@@ -37,9 +37,10 @@ Recorded by the repository owner at the U2 change:
 - Required overflow is its own variant, `OverBudget { limit, charged }`,
   distinct from the per-item and set-wide `Oversized` bounds.
 - Required bytes come from the projection payload row named by the
-  occurrence's own `PayloadRef`, verified by digest and length. That read is a
-  payload load, counted by the payload-loads bound and trace counter; it is
-  not a retrieval call, and no kernel canonical re-read exists.
+  occurrence's own `PayloadRef`, length-guarded in SQL by `fetch_payload` and
+  digest-verified by `PayloadRef::verify` after the connection is released.
+  That read is a payload load, counted by the payload-loads bound and trace
+  counter; it is not a retrieval call, and no kernel canonical re-read exists.
 - The packer judges eligibility itself at the start of the required phase in
   one kernel batch; a selection-time report is not accepted as input.
 
@@ -66,32 +67,49 @@ Exercised: yes - `crates/daemon/tests/packing_required.rs`
 `a_required_occurrence_the_kernel_excludes_is_ineligible_not_missing`,
 `corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt`,
 `an_expired_deadline_refuses_the_required_phase_before_any_optional_event`,
-`more_requests_than_the_load_bound_are_refused_before_any_read`, and
+`a_deadline_that_passes_while_the_connection_is_held_refuses_without_reading`,
+`a_cancellation_while_the_connection_is_held_refuses_without_reading`,
+`more_requests_than_the_load_bound_are_refused_before_any_read`,
+`a_set_beyond_the_kernel_batch_cap_is_refused_before_any_read`, and
 `every_failure_class_has_a_distinct_literal`; the hidden verdict and the
 stale and superseded verdicts are exercised at the pure layer by
 `crates/retrieval/tests/packing_required.rs`
-`every_verdict_maps_to_exactly_one_failure_class`.
+`every_verdict_maps_to_exactly_one_failure_class`, and the load-bound
+precedence by
+`the_load_bound_is_checked_over_the_whole_set_before_any_request_fault`.
 Guarantee: A required occurrence that is missing, stale, hidden, corrupt,
 ineligible, or oversized, or a required set whose cost exceeds the token
 limit, yields exactly one `RequiredContextFailure` class, and the trace shows
 zero optional events and zero retrieval calls; an exhausted `EvalBudget`
-yields the deadline refusal with the same trace.
+yields the deadline refusal with the same trace. A set beyond the load-count
+bound, or beyond the kernel's `MAX_ELIGIBILITY_CANDIDATES` batch cap, is
+refused as oversized before any request is examined; every other fault is the
+first in request order, at both the pure and the daemon layer.
 Check: `always` - for each fault class one required occurrence exhibiting it
 returns that class and no other; `class()` literals are pairwise distinct;
 `PackingTrace::optional_events()` is zero and `retrieval_calls()` equals the
 seeded lane count after every refusal and every success; admission-stage
 refusals record no `Loaded` event and `payload_loads()` stays zero; the
-deadline refusal and the load-bound refusal record no event. `always`
+deadline refusal and the load-bound refusal record no event; a deadline that
+passes, or a cancellation that lands, while another thread holds the
+projection connection refuses within the budget with no event. `always`
 because the phase must hold it on every request, not only on a reachable
 subset.
-Fault/timing angle: The `EvalBudget` deadline is polled between stages; a
-budget that expires mid-phase refuses at the next poll.
+Fault/timing angle: The `EvalBudget` is polled between stages, and each
+projection hold acquires and reads through `with_conn_interruptible` under the
+budget's deadline and cancellation when the budget has a deadline, so a budget
+that ends mid-phase refuses at the next poll or at the next SQLite step. A
+budget with no deadline is bounded only by the polls between stages. Digest
+verification runs after each hold is released, and a hold stops at the first
+faulting statement.
 Required faults and enabling state: An unpersisted identifier; a request
 revision other than the row's; a tombstoned row; a kernel with no object for
-the row's source; a payload row rewritten to other bytes; an occurrence row
-whose tuple is another occurrence's; per-item, load-count, and byte-total
-bounds below the fixture; a token limit one below the required cost; an
-expired and a cancelled budget.
+the row's source; a payload row rewritten to other bytes; a payload row
+rewritten to another length; an occurrence row whose tuple is another
+occurrence's; per-item, load-count, and byte-total bounds below the fixture; a
+request set beyond the kernel batch cap; a token limit one below the required
+cost; an expired and a cancelled budget; a deadline and a cancellation that
+land while another thread holds the projection connection.
 Confidence: high - [evidence](evidence/packing-required-phase-precedes-optional-work.md).
 Every clause is asserted at this base; the hidden verdict is asserted only
 at the pure layer because the kernel fixture has no hidden surface.
