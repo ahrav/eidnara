@@ -15,3 +15,21 @@ branch head on `main` at `8e0491225a7292ef077c675d44b94f94a24041d3`.
 
 Real durations are used because `EvalBudget` reads `std::time::Instant`, which
 virtual time cannot advance.
+
+## Coverage checks to add
+
+None. Every fault row above is constructed by a named test in the catalog's
+`Exercised:` field, and every record is `always`, so no `sometimes` or
+`reachable` marker is needed to prove a window was reached. The permit and pin
+census of `route-permits-and-pins-outlive-client-cancellation` needs new rows
+only once U3b and U3c add the state they count.
+
+## Leverage ranking
+
+1. The storage negative control (`a_leaked_progress_handler_interrupts_the_next_read_on_the_connection`)
+   is the cheapest oracle: it proves the untouched-later-read check can fail,
+   so the request-local record's passing test is evidence rather than silence.
+2. The file-backed `request_budget_reads.rs` tests cover three of the seven
+   fault rows with one fixture and no host.
+3. The host witnesses are the most expensive and the only ones that exercise
+   the abort-while-suspended window; run them last.

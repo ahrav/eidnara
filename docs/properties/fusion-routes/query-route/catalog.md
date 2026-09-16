@@ -27,10 +27,11 @@ the same stop predicate as SQLite statements, so the deadline-only acquisition
 gap is closed rather than documented; every blocking phase uses the host's
 tracked primitive.
 
-## Reachability and observation contract
+## Observation contract
 
-Every record here is `test-only` until a production route consumes the
-bridge. Observation points: `crates/daemon/src/request_budget.rs`,
+Each record carries its own reachability label and the evidence for it; a
+later ticket that gives a record a production caller relabels that record
+alone. Observation points: `crates/daemon/src/request_budget.rs`,
 `SearchProjection::read_under` in `crates/daemon/src/search_projection.rs`,
 `SqliteStore::with_conn_interruptible` in `crates/storage/src/lib.rs`, and the
 host's `RequestCtx::run_blocking`. The host-level witnesses run a real host
@@ -49,7 +50,10 @@ with a real client in `crates/daemon/src/request_budget/host_tests.rs`.
 ### route-budget-is-derived-once-before-queue-wait
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `RequestBudget::derive` has no caller outside
+`crates/daemon/src/request_budget.rs`, its `host_tests.rs`, and
+`crates/daemon/tests/request_budget_reads.rs`; no daemon handler derives a
+budget at this head.
 Status: active
 Exercised: yes - `crates/daemon/src/request_budget.rs` unit tests
 `the_remaining_duration_is_clamped_to_the_approved_ceiling`,
@@ -86,7 +90,10 @@ Open questions: None.
 ### route-sql-cancellation-is-request-local
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - `SearchProjection::read_under` is the only
+production caller of `with_conn_interruptible`, and `read_under` itself is
+called only from `crates/daemon/tests/request_budget_reads.rs` and
+`crates/daemon/src/request_budget/host_tests.rs`.
 Status: active
 Exercised: yes - `crates/daemon/tests/request_budget_reads.rs`
 `a_later_request_on_the_same_connection_is_not_interrupted_by_a_prior_cancellation`,
@@ -131,7 +138,10 @@ Open questions: None.
 ### route-permits-and-pins-outlive-client-cancellation
 
 Type: safety
-Reachability: test-only
+Reachability: test-only - the host witnesses in
+`crates/daemon/src/request_budget/host_tests.rs` register a test handler on
+a real host; no production route registers a handler that derives a budget
+and runs a projection read under it.
 Status: active
 Exercised: partial - the bridge clauses are covered by
 `crates/daemon/src/request_budget/host_tests.rs`
