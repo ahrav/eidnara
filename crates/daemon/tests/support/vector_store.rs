@@ -85,10 +85,14 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new() -> Self {
+        Self::with_dimension(DIMENSION)
+    }
+
+    pub fn with_dimension(dimension: u32) -> Self {
         let root = tempfile::tempdir().unwrap();
         let store = GenerationStore::open(Some(root.path())).unwrap();
         let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
-        let identity = identity("test-incarnation", DIMENSION);
+        let identity = identity("test-incarnation", dimension);
         let gate = Arc::new(HookGate::closed());
         gate.install(passing_evaluator(&identity, 0, &ProjectionHook::ALL));
         let admission = gate

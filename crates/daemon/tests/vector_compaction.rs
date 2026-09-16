@@ -13,8 +13,12 @@ use daemon::vector_compaction::{Compacted, CompactionRefusal, Cut, compact, publ
 use daemon::vector_composition::{
     CompositionRefusal, Progress, Reconciled, SelectorState, reconcile, recover,
 };
-use daemon::vector_generation::ExpectedVectors;
+use daemon::vector_generation::{
+    CODES_FILE, ExpectedVectors, ROWS_FILE, SIDECAR_FILE, VectorRefusal, footprint,
+};
 use host_runtime::generation::{GenerationError, ProfileEvent};
+use retrieval::batch::ProjectionCheckpoint;
+use retrieval::dense::export::{ExportedRow, LiveRows};
 use retrieval::dense::{Completion, RowAccess};
 use support::dense_projection::{occurrence_id, reference};
 use support::flock::try_exclusive;
@@ -380,20 +384,24 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
     compacted.discard().unwrap();
     retry.discard().unwrap();
 
-    // A rename that never happened leaves the old selection; reconciliation says so, and the retry from the same cut publishes once, with the base staged a second time charged nothing.
+    // A rename that never happened leaves the old selection; reconciliation says so, and the retry from the same cut, through the same record directory, publishes once, with the base staged a second time charged nothing.
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let d1 = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
     let old = fixture
-        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .publish(&fixture.compose(1, &base, &[d1]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     let compacted = compact_view(&fixture, &view).unwrap();
+    let before_attempts = fixture.generations();
+    assert!(!before_attempts.contains(&compacted.built.digest()));
+    let record_dir = fixture.work_dir();
     let outcome = publish(
         &compacted,
         &fixture.staging(),
         &fixture.expected(),
         max_deltas(),
-        &fixture.work_dir(),
+        &record_dir,
         &mut |event| {
             if event == ProfileEvent::BeforeRename {
                 Err(GenerationError::NativePayloadInvalid { detail: "cut" })
@@ -411,7 +419,24 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
         host_runtime::generation::CurrentProfile::Current(old.clone())
     );
     let generations = fixture.generations();
-    let published = publish_compacted(&fixture, &compacted).unwrap();
+    assert!(
+        generations.contains(&compacted.built.digest()),
+        "the first attempt staged the new base before the rename failed"
+    );
+    assert_eq!(generations.len(), before_attempts.len() + 2);
+    assert!(
+        std::fs::read_dir(&record_dir).unwrap().next().is_none(),
+        "the record files are removed once staged, so the directory serves the retry"
+    );
+    let published = publish(
+        &compacted,
+        &fixture.staging(),
+        &fixture.expected(),
+        max_deltas(),
+        &record_dir,
+        &mut |_| Ok(()),
+    )
+    .unwrap();
     assert_eq!(published.sequence, 2);
     assert_eq!(
         fixture.generations(),
@@ -422,6 +447,7 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
         fixture.store.read_vector_current().unwrap(),
         host_runtime::generation::CurrentProfile::Current(published.digest)
     );
+    assert!(std::fs::read_dir(&record_dir).unwrap().next().is_none());
     compacted.discard().unwrap();
 }
 
@@ -444,16 +470,10 @@ fn reservations_are_taken_before_any_read_released_with_the_output_and_a_short_l
         "the rows are on disk once the build returns"
     );
     assert_eq!(census.resident, resident_before);
-    let written: u64 = compacted
-        .built
-        .sidecar
-        .files
-        .iter()
-        .map(|file| file.size)
-        .sum();
-    assert!(
-        held(&fixture.ledger, ResourceClass::CompactionScratch) >= written,
-        "the scratch reservation covers what the build wrote"
+    assert_eq!(
+        held(&fixture.ledger, ResourceClass::CompactionScratch),
+        inventory_bytes(&compacted),
+        "the scratch reservation is exactly what the build wrote"
     );
     let work_dir = compacted.built.dir.clone();
     assert!(std::fs::read_dir(&work_dir).unwrap().next().is_some());
@@ -461,10 +481,35 @@ fn reservations_are_taken_before_any_read_released_with_the_output_and_a_short_l
     assert!(!work_dir.exists(), "discarding removes the files");
     assert_eq!(fixture.ledger.census().disk, 0);
 
-    // The resident reservation is the build's peak: decoded rows, the row artifact, and the codes. One byte short refuses before any row is read.
-    let peak = 5 * 8 * 4 * 2 + 5 * 8;
-    fixture.set_limit(RESIDENT_LIMIT, resident_before + peak - 1);
+    // One byte short of the reservation refuses before any row is read; the reservation is at least the build's own footprint.
+    fixture.set_limit(RESIDENT_LIMIT, resident_before);
     let dir = fixture.work_dir();
+    let refusal = compact(
+        &view,
+        &fixture.expected(),
+        &fixture.staging(),
+        max_entries(),
+        &dir,
+    )
+    .unwrap_err();
+    let CompactionRefusal::Reservation(Refusal::Denied(Denial::LimitExceeded {
+        limit,
+        observed,
+        max,
+    })) = refusal.clone()
+    else {
+        panic!("{refusal:?}");
+    };
+    assert_eq!((limit.as_str(), max), (RESIDENT_LIMIT, resident_before));
+    let build_footprint = footprint(
+        &fixture.expected(),
+        &view.layers[0].checkpoint,
+        view.layers[0].occurrence_ids().iter().map(String::as_str),
+        std::iter::empty(),
+    );
+    assert!(observed - resident_before >= build_footprint.resident);
+    assert!(observed - resident_before < 2 * build_footprint.resident);
+    fixture.set_limit(RESIDENT_LIMIT, observed - 1);
     let refusal = compact(
         &view,
         &fixture.expected(),
@@ -477,8 +522,8 @@ fn reservations_are_taken_before_any_read_released_with_the_output_and_a_short_l
         refusal,
         CompactionRefusal::Reservation(Refusal::Denied(Denial::LimitExceeded {
             limit: RESIDENT_LIMIT.to_owned(),
-            observed: resident_before + peak,
-            max: resident_before + peak - 1
+            observed,
+            max: observed - 1
         }))
     );
     assert!(
@@ -588,5 +633,136 @@ fn a_fully_masked_base_compacts_to_the_deltas_rows_alone_and_a_foreign_expectati
     assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
     assert_eq!(fixture.generations(), before);
     assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
+    assert_eq!(held(&fixture.ledger, ResourceClass::CompactionScratch), 0);
+}
+
+fn inventory_bytes(compacted: &Compacted) -> u64 {
+    compacted
+        .built
+        .sidecar
+        .stage_manifest()
+        .files
+        .iter()
+        .map(|file| file.size)
+        .sum()
+}
+
+#[test]
+fn the_scratch_reservation_is_sized_from_the_winners_identifiers_and_the_sidecar_it_writes() {
+    // Each identifier is 1000 bytes, so the reservation must include identifier lengths.
+    let mut fixture = Fixture::new();
+    let long_ids: Vec<(String, Vec<f32>)> = (0..5u32)
+        .map(|i| (format!("{i:02}").repeat(500), axis(i as usize)))
+        .collect();
+    let long_export = LiveRows {
+        checkpoint: ProjectionCheckpoint {
+            snapshot_commit_seq: 9,
+            checkpoint_commit_seq: 10,
+            hold_id: "hold-7".to_owned(),
+        },
+        rows: long_ids
+            .iter()
+            .map(|(occurrence_id, vector)| ExportedRow {
+                occurrence_id: occurrence_id.clone(),
+                vector: vector.clone(),
+            })
+            .collect(),
+        tombstones: Vec::new(),
+    };
+    let base = fixture.layer_from(&long_export);
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &view).unwrap();
+    assert_eq!(
+        held(&fixture.ledger, ResourceClass::CompactionScratch),
+        inventory_bytes(&compacted),
+        "the scratch reservation is exactly the files the build wrote"
+    );
+    compacted.discard().unwrap();
+
+    // The model name is 6 KiB, so the sidecar alone exceeds a 4 KiB fixed allowance.
+    let mut fixture = Fixture::new();
+    fixture.generation.embedding_model = "model-".repeat(1024);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let compacted = compact_view(&fixture, &view).unwrap();
+    assert!(compacted.built.sidecar.canonical_bytes().len() > 6000);
+    assert_eq!(
+        held(&fixture.ledger, ResourceClass::CompactionScratch),
+        inventory_bytes(&compacted),
+        "the sidecar's own bytes are part of the reservation"
+    );
+    compacted.discard().unwrap();
+}
+
+#[test]
+fn a_build_that_fails_after_writing_leaves_no_file_of_its_own_and_no_charge() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    // A directory at `CODES_FILE` makes the codes write fail after the rows write succeeded.
+    let dir = fixture.work_dir();
+    std::fs::create_dir(dir.join(CODES_FILE)).unwrap();
+    let refusal = compact(
+        &view,
+        &fixture.expected(),
+        &fixture.staging(),
+        max_entries(),
+        &dir,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(refusal, CompactionRefusal::Build(VectorRefusal::Io(_))),
+        "{refusal:?}"
+    );
+    assert!(
+        !dir.join(ROWS_FILE).exists(),
+        "the rows the build wrote before failing are removed"
+    );
+    assert!(
+        dir.join(CODES_FILE).is_dir(),
+        "what the build did not write is left alone"
+    );
+    assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
+    assert_eq!(held(&fixture.ledger, ResourceClass::CompactionScratch), 0);
+}
+
+#[test]
+fn discard_removes_only_the_builds_files_and_drop_removes_them_too() {
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+
+    // Discard unlinks the build's own files, leaves a foreign file in place, and reports the directory it cannot remove.
+    let compacted = compact_view(&fixture, &view).unwrap();
+    let dir = compacted.built.dir.clone();
+    let foreign = dir.join("keep.txt");
+    std::fs::write(&foreign, b"not the build's").unwrap();
+    assert!(matches!(
+        compacted.discard(),
+        Err(CompactionRefusal::Discard(_))
+    ));
+    assert!(foreign.exists(), "discard deletes nothing it did not write");
+    assert!(!dir.join(ROWS_FILE).exists());
+    assert!(!dir.join(SIDECAR_FILE).exists());
+    assert_eq!(held(&fixture.ledger, ResourceClass::CompactionScratch), 0);
+
+    // Dropping `Compacted` removes the build's files and releases their charge.
+    let compacted = compact_view(&fixture, &view).unwrap();
+    let dir = compacted.built.dir.clone();
+    assert!(dir.join(ROWS_FILE).exists());
+    drop(compacted);
+    assert!(!dir.exists(), "the work directory goes with the output");
     assert_eq!(held(&fixture.ledger, ResourceClass::CompactionScratch), 0);
 }

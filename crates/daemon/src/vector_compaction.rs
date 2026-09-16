@@ -2,13 +2,13 @@
 //! Publication reads the selected composition back first and refuses unless it still stands on the cut's base with the cut's deltas as a prefix; only then is the new base staged. Whatever follows the cut is the tail, recorded independently of the compactor and carried over exactly once. A cut whose base has moved was compacted by someone else and refuses rather than publishing a second history.
 //! Both steps run under the caller's exclusive transaction lock, carried by the staging handle, so the store cannot change under the walk or between the readback and the rename.
 
+use std::mem::size_of;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
 use host_runtime::generation::{CurrentProfile, GenerationError, ProfileEvent};
-use retrieval::dense::codec::ARTIFACT_HEADER_BYTES;
 use retrieval::dense::export::{ExportedRow, LiveRows};
-use retrieval::dense::{ResolveRefusal, RowAccess, RowFault, resolve};
+use retrieval::dense::{ResolveRefusal, RowAccess, RowFault, Winner, resolve};
 
 use crate::vector_admission::{self, Reservation, ResourceClass};
 use crate::vector_composition::{self, Composition, CompositionRefusal, CompositionSpec, Progress};
@@ -52,11 +52,11 @@ pub enum CompactionRefusal {
         row: usize,
         fault: RowFault,
     },
-    /// At the delta cap this leaves the namespace unable to admit a delta or compact, until a full base is published afresh.
-    #[error("the prefix resolves to no live row; a base needs at least one")]
-    Empty,
     #[error("the ledger refused the compaction's bytes: {0}")]
     Reservation(#[from] vector_admission::Refusal),
+    /// The build's inventory exceeded the footprint it was sized from; the files are removed with the reservation.
+    #[error("the build wrote {written} bytes against a {reserved}-byte scratch reservation")]
+    ScratchUnderestimated { reserved: u64, written: u64 },
     #[error("building the compacted base: {0}")]
     Build(VectorRefusal),
     #[error("staging the compacted base: {0}")]
@@ -83,7 +83,7 @@ impl From<GenerationError> for CompactionRefusal {
     }
 }
 
-/// A compacted base built in a work directory. The files it wrote are disk scratch reserved in the ledger until [`Self::discard`] removes them; dropping without discarding leaves the files on disk uncounted, so a caller that gives up on a compaction discards it.
+/// A compacted base built in a work directory. Its files are disk scratch reserved in the ledger until [`Self::discard`] removes them and releases the charge; dropping without discarding removes them too, so a caller that gives up on a compaction leaves nothing behind either way.
 #[derive(Debug)]
 pub struct Compacted {
     pub cut: Cut,
@@ -95,27 +95,29 @@ pub struct Compacted {
 }
 
 impl Compacted {
-    /// Removes the work directory and releases the scratch reservation with it.
+    /// Unlinks the build's files, removes the work directory, and releases the scratch reservation. Files the build did not write are left in place.
     ///
     /// # Errors
     ///
-    /// A directory that cannot be removed; the reservation is released either way, since the caller has given the files up.
+    /// A build file that cannot be unlinked or a directory that cannot be removed, because it holds something the build did not write; the reservation is released either way, since the caller has given the files up.
     pub fn discard(self) -> Result<(), CompactionRefusal> {
-        std::fs::remove_dir_all(&self.built.dir)
+        vector_generation::remove_build(&self.built.dir)
             .map_err(|error| CompactionRefusal::Discard(error.kind().to_string()))
     }
 }
 
-/// The bytes the sidecar and the row artifact header take beyond the rows; the identifier list is bounded per row.
-const FIXED_SCRATCH_BYTES: u64 = 4096 + ARTIFACT_HEADER_BYTES as u64;
-/// One quoted 64-hex identifier with its separator in `row-ids.json`.
-const IDENTIFIER_BYTES: u64 = 67;
+impl Drop for Compacted {
+    fn drop(&mut self) {
+        // A second removal after `discard` finds nothing to unlink; a failure here has no caller to report to.
+        let _ = vector_generation::remove_build(&self.built.dir);
+    }
+}
 
-/// Resolves the view's prefix and builds one base of exactly its winners, at the checkpoint of the prefix's last layer, so every tail delta still follows it. Every layer is checked against `expected` before anything is reserved or read, and the rows and the files are reserved before any row is read; the row reservation ends with the build, since the rows are then on disk.
+/// `compact` validates every prefix layer against `expected` before reserving memory or reading rows. It builds a base from the prefix winners at the last layer's checkpoint so each tail delta follows that base. It reserves `vector_generation::footprint` plus per-row compaction state before reading rows; the resident charge ends after the rows reach disk, while the disk charge remains with the output.
 ///
 /// # Errors
 ///
-/// A layer that does not carry the expectation, a prefix that does not resolve, a row that cannot be read, an empty result, a refused reservation, or a build refusal; nothing is staged, and a refusal before the build leaves the work directory empty.
+/// Returns an error without staging output if a prefix layer rejects `expected`, prefix resolution or a row read fails, a reservation or the build is refused, or the inventory exceeds `vector_generation::footprint`; no failed attempt leaves a build file in the work directory.
 pub fn compact(
     view: &PinnedVectors,
     expected: &ExpectedVectors<'_>,
@@ -136,29 +138,42 @@ pub fn compact(
     }
     let layers = view.resolver_layers();
     let resolved = resolve(&layers, max_entries)?;
-    if resolved.winners.is_empty() {
-        return Err(CompactionRefusal::Empty);
-    }
-    let dimension = u64::from(view.layout.dimension);
+    let checkpoint = view
+        .layers
+        .last()
+        .expect("a view has a base")
+        .checkpoint
+        .clone();
+    let footprint = vector_generation::footprint(
+        expected,
+        &checkpoint,
+        resolved
+            .winners
+            .iter()
+            .map(|winner| winner.occurrence_id.as_str()),
+        std::iter::empty(),
+    );
+    // Beyond the build's own peak, compaction holds each winner's identifier twice, in the resolution and in the export, and one row's bytes and decode in flight while the export fills.
+    let identifier_bytes = resolved.winners.iter().fold(0u64, |total, winner| {
+        total.saturating_add(winner.occurrence_id.len() as u64)
+    });
     let rows = resolved.winners.len() as u64;
-    let row_bytes = rows.saturating_mul(dimension).saturating_mul(4);
-    // The build holds the decoded rows, the encoded row artifact, and the codes at once.
-    let resident = row_bytes
+    let dimension = u64::from(view.layout.dimension);
+    let own = identifier_bytes
         .saturating_mul(2)
-        .saturating_add(rows.saturating_mul(dimension));
-    let scratch = row_bytes
-        .saturating_add(rows.saturating_mul(dimension))
-        .saturating_add(dimension.saturating_mul(4))
-        .saturating_add(rows.saturating_mul(IDENTIFIER_BYTES))
-        .saturating_add(FIXED_SCRATCH_BYTES);
-    let rows_held =
-        staging
-            .ledger
-            .reserve(staging.admission, ResourceClass::RowBuffers, resident)?;
+        .saturating_add(
+            rows.saturating_mul((size_of::<Winner>() + size_of::<ExportedRow>()) as u64),
+        )
+        .saturating_add(dimension.saturating_mul(8));
+    let rows_held = staging.ledger.reserve(
+        staging.admission,
+        ResourceClass::RowBuffers,
+        footprint.resident.saturating_add(own),
+    )?;
     let scratch = staging.ledger.reserve_disk(
         staging.admission,
         ResourceClass::CompactionScratch,
-        scratch,
+        footprint.disk,
         staging.store,
     )?;
     let mut exported = Vec::with_capacity(resolved.winners.len());
@@ -176,13 +191,7 @@ pub fn compact(
             vector,
         });
     }
-    let checkpoint = view
-        .layers
-        .last()
-        .expect("a view has a base")
-        .checkpoint
-        .clone();
-    let built = vector_generation::build(
+    let built = match vector_generation::build(
         expected,
         &LiveRows {
             checkpoint,
@@ -190,25 +199,39 @@ pub fn compact(
             tombstones: Vec::new(),
         },
         work_dir,
-    )
-    .map_err(CompactionRefusal::Build)?;
+    ) {
+        Ok(built) => built,
+        Err(refusal) => {
+            // The build may have written some of its files before refusing; none of them is charged once the reservation goes.
+            let _ = vector_generation::remove_build(work_dir);
+            return Err(CompactionRefusal::Build(refusal));
+        }
+    };
     drop(rows_held);
-    let written: u64 = built.sidecar.files.iter().map(|file| file.size).sum();
-    if written > scratch.bytes() {
-        return Err(CompactionRefusal::Reservation(
-            vector_admission::Refusal::Overflow {
-                pool: vector_admission::Pool::Disk,
-            },
-        ));
-    }
-    Ok(Compacted {
+    let compacted = Compacted {
         cut: Cut::of(view),
         built,
         winners: resolved.winners.len(),
         superseded: resolved.superseded,
         masked: resolved.masked,
         _scratch: scratch,
-    })
+    };
+    let written: u64 = compacted
+        .built
+        .sidecar
+        .stage_manifest()
+        .files
+        .iter()
+        .map(|file| file.size)
+        .sum();
+    if written > footprint.disk {
+        // Dropping `compacted` removes what the build wrote with the reservation.
+        return Err(CompactionRefusal::ScratchUnderestimated {
+            reserved: footprint.disk,
+            written,
+        });
+    }
+    Ok(compacted)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -398,31 +398,173 @@ pub fn build(
             sha256: sha256_hex(bytes),
         });
     }
-    let sidecar = VectorSidecar {
-        schema: SIDECAR_SCHEMA,
-        embedding_model: expected.generation.embedding_model.clone(),
-        tokenizer_fingerprint: expected.generation.tokenizer_fingerprint.clone(),
-        vector_dimension: layout.dimension,
-        metric: expected.metric.name().to_owned(),
-        unit_norm_tolerance: layout.unit_norm_tolerance,
-        quantizer_recipe: expected.recipe.id().to_owned(),
-        calibrated_rows: calibration.identity.calibrated_rows,
-        scales_sha256: sha256_hex(&calibration.scales.encode()),
-        generation_id: expected.generation.generation_id.clone(),
-        generation_epoch: expected.generation.generation_epoch,
-        kernel_incarnation_id: expected.kernel_incarnation_id.to_owned(),
-        snapshot_commit_seq: export.checkpoint.snapshot_commit_seq,
-        checkpoint_commit_seq: export.checkpoint.checkpoint_commit_seq,
-        hold_id: export.checkpoint.hold_id.clone(),
-        rows: rows.len() as u64,
-        tombstones: tombstones.len() as u64,
-        files: inventory,
-    };
+    let sidecar = sidecar(
+        expected,
+        &export.checkpoint,
+        SidecarCounts {
+            rows: rows.len() as u64,
+            tombstones: tombstones.len() as u64,
+            calibrated_rows: calibration.identity.calibrated_rows,
+        },
+        sha256_hex(&calibration.scales.encode()),
+        inventory,
+    );
     write_new(&work_dir.join(SIDECAR_FILE), &sidecar.canonical_bytes())?;
     Ok(BuiltVectors {
         sidecar,
         dir: work_dir.to_path_buf(),
     })
+}
+
+struct SidecarCounts {
+    rows: u64,
+    tombstones: u64,
+    calibrated_rows: u64,
+}
+
+fn sidecar(
+    expected: &ExpectedVectors<'_>,
+    checkpoint: &ProjectionCheckpoint,
+    counts: SidecarCounts,
+    scales_sha256: String,
+    files: Vec<SidecarFile>,
+) -> VectorSidecar {
+    VectorSidecar {
+        schema: SIDECAR_SCHEMA,
+        embedding_model: expected.generation.embedding_model.clone(),
+        tokenizer_fingerprint: expected.generation.tokenizer_fingerprint.clone(),
+        vector_dimension: expected.generation.vector_dimension,
+        metric: expected.metric.name().to_owned(),
+        unit_norm_tolerance: expected.unit_norm_tolerance,
+        quantizer_recipe: expected.recipe.id().to_owned(),
+        calibrated_rows: counts.calibrated_rows,
+        scales_sha256,
+        generation_id: expected.generation.generation_id.clone(),
+        generation_epoch: expected.generation.generation_epoch,
+        kernel_incarnation_id: expected.kernel_incarnation_id.to_owned(),
+        snapshot_commit_seq: checkpoint.snapshot_commit_seq,
+        checkpoint_commit_seq: checkpoint.checkpoint_commit_seq,
+        hold_id: checkpoint.hold_id.clone(),
+        rows: counts.rows,
+        tombstones: counts.tombstones,
+        files,
+    }
+}
+
+/// `resident` is a build's peak heap use; `disk` is the total bytes it writes, including the sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildFootprint {
+    pub resident: u64,
+    pub disk: u64,
+}
+
+/// Estimates resources before any row is decoded. `disk` matches the emitted files: identifiers are serialized and the sidecar is sized with 64-byte hash placeholders. `resident` includes the decoded rows and every artifact the build retains at once.
+pub fn footprint<'a>(
+    expected: &ExpectedVectors<'_>,
+    checkpoint: &ProjectionCheckpoint,
+    ids: impl IntoIterator<Item = &'a str>,
+    tombstones: impl IntoIterator<Item = &'a str>,
+) -> BuildFootprint {
+    let dimension = u64::from(expected.generation.vector_dimension);
+    let (rows, ids_file) = json_list_bytes(ids);
+    let (tombstone_count, tombstones_file) = json_list_bytes(tombstones);
+    let row_bytes = rows.saturating_mul(dimension).saturating_mul(4);
+    let rows_file = row_bytes.saturating_add(codec::ARTIFACT_HEADER_BYTES as u64);
+    let codes_file = rows.saturating_mul(dimension);
+    let scales_file = dimension.saturating_mul(4);
+    let placeholder = || "0".repeat(64);
+    let files = PAYLOAD_FILES
+        .iter()
+        .zip([
+            rows_file,
+            codes_file,
+            scales_file,
+            ids_file,
+            tombstones_file,
+        ])
+        .map(|(path, size)| SidecarFile {
+            path: (*path).to_owned(),
+            size,
+            sha256: placeholder(),
+        })
+        .collect();
+    let sidecar_file = sidecar(
+        expected,
+        checkpoint,
+        SidecarCounts {
+            rows,
+            tombstones: tombstone_count,
+            calibrated_rows: rows,
+        },
+        placeholder(),
+        files,
+    )
+    .canonical_bytes()
+    .len() as u64;
+    let payloads = [
+        rows_file,
+        codes_file,
+        scales_file,
+        ids_file,
+        tombstones_file,
+    ]
+    .into_iter()
+    .fold(0u64, u64::saturating_add);
+    // Peak resident memory also holds the calibration's running maxima, the calibration's scales, and one borrowed identifier reference per serialized identifier.
+    let resident = row_bytes
+        .saturating_add(payloads)
+        .saturating_add(scales_file.saturating_mul(2))
+        .saturating_add(sidecar_file)
+        .saturating_add(rows.saturating_mul(std::mem::size_of::<&str>() as u64));
+    BuildFootprint {
+        resident,
+        disk: payloads.saturating_add(sidecar_file),
+    }
+}
+
+fn json_list_bytes<'a>(items: impl IntoIterator<Item = &'a str>) -> (u64, u64) {
+    struct Counting(u64);
+    impl Write for Counting {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len() as u64);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = 0u64;
+    let mut bytes = Counting(1);
+    for item in items {
+        if count > 0 {
+            bytes.0 = bytes.0.saturating_add(1);
+        }
+        serde_json::to_writer(&mut bytes, item).expect("identifier serialization cannot fail");
+        count += 1;
+    }
+    (count, bytes.0.saturating_add(1))
+}
+
+/// Build cleanup unlinks the build's files under `dir` and removes `dir`; it leaves `dir` standing when other entries remain.
+///
+/// # Errors
+///
+/// Cleanup cannot unlink a file the build wrote or cannot remove the directory.
+pub(crate) fn remove_build(dir: &Path) -> io::Result<()> {
+    let mut first = None;
+    for name in PAYLOAD_FILES.iter().chain(std::iter::once(&SIDECAR_FILE)) {
+        if let Err(error) = fs::remove_file(dir.join(name))
+            && error.kind() != io::ErrorKind::NotFound
+            && first.is_none()
+        {
+            first = Some(error);
+        }
+    }
+    match first {
+        Some(error) => Err(error),
+        None => fs::remove_dir(dir),
+    }
 }
 
 /// Everything a stager needs from the lifecycle, the admission gate, and the ledger. `transaction` is the caller's exclusive hold on the store's transaction lock; hold it until the digest is pinned or protected.

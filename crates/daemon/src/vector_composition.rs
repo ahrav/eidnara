@@ -294,7 +294,8 @@ pub fn publish(
         .ledger
         .admit_deltas(staging.admission, composition.deltas.len())
         .map_err(|denial| fail(progress, CompositionRefusal::Deltas(denial)))?;
-    write_new(
+    // Members were verified before composing; the store re-validates each on selection, so a member reclaimed meanwhile refuses the selection rather than exposing a partial set.
+    let staged = write_new(
         &work_dir.join(COMPOSITION_FILE),
         &composition.canonical_bytes(),
     )
@@ -304,15 +305,18 @@ pub fn publish(
             &composition.members_bytes(),
         )
     })
-    .map_err(|refusal| fail(progress, CompositionRefusal::Stage(refusal)))?;
-    // Members were verified before composing; the store re-validates each on selection, so a member reclaimed meanwhile refuses the selection rather than exposing a partial set.
-    let digest = staging
-        .stage_manifest(
+    .and_then(|()| {
+        staging.stage_manifest(
             &composition.stage_manifest(),
             &composition.stage_meta(),
             |path| work_dir.join(path),
         )
-        .map_err(|refusal| fail(progress, CompositionRefusal::Stage(refusal)))?;
+    });
+    // The store holds its own copies once staged, and a retry through the same `work_dir` creates these names again.
+    for name in [COMPOSITION_FILE, MEMBERS_FILE_NAME] {
+        let _ = std::fs::remove_file(work_dir.join(name));
+    }
+    let digest = staged.map_err(|refusal| fail(progress, CompositionRefusal::Stage(refusal)))?;
     progress = Progress::Staged;
     let selected = staging
         .store
