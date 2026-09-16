@@ -392,6 +392,7 @@ fn exhausted(mut ranking: ExhaustiveRanking) -> Result<ExhaustiveRanking, Oracle
         return Err(OracleRefusal::BudgetExhausted);
     }
     ranking.ranked.clear();
+    ranking.candidates.clear();
     incomplete(&mut ranking, IncompleteReason::BudgetExhausted);
     Ok(ranking)
 }
@@ -595,8 +596,43 @@ fn revalidate(
 
 #[cfg(test)]
 mod tests {
-    use super::PAGE_SQL;
+    use super::*;
     use rusqlite::Connection;
+
+    /// A ranking discarded for an ended budget keeps `candidates` in step with the emptied `ranked`.
+    #[test]
+    fn an_exhausted_ranking_drops_its_candidates_with_its_rows() {
+        let candidate = OccurrenceCandidate::new(
+            "occ".to_string(),
+            OccurrenceClass::Messages,
+            "object".to_string(),
+            1,
+            "digest".to_string(),
+        );
+        let ranking = ExhaustiveRanking {
+            ranked: vec![Ranked {
+                occurrence_id: "occ".to_string(),
+                class: OccurrenceClass::Messages,
+                score: 1.0,
+            }],
+            candidates: vec![candidate],
+            completion: Completion::Complete,
+            coverage: DenseCoverage::default(),
+            snapshot: None,
+            incarnation: None,
+            consumed: Consumed {
+                pages: 1,
+                ..Consumed::default()
+            },
+        };
+        let ranking = exhausted(ranking).unwrap();
+        assert!(ranking.ranked.is_empty());
+        assert!(ranking.candidates.is_empty());
+        assert_eq!(
+            ranking.completion,
+            Completion::Incomplete(IncompleteReason::BudgetExhausted)
+        );
+    }
 
     /// The walk must step the primary-key index in identifier order; a class-index search would sort the whole class on every page.
     #[test]
