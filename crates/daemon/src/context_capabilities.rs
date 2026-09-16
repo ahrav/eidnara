@@ -58,21 +58,6 @@ pub enum CapabilityDenial {
     },
 }
 
-impl CapabilityDenial {
-    pub fn class(self) -> EditClass {
-        match self {
-            Self::Unsupported { class } | Self::Unreadable { class, .. } => class,
-        }
-    }
-
-    pub fn reason(self) -> &'static str {
-        match self {
-            Self::Unsupported { .. } => "unsupported",
-            Self::Unreadable { reason, .. } => reason,
-        }
-    }
-}
-
 /// The production source: the host's harness backend read through the trait default-closed method.
 pub struct BackendDeclarations(pub Arc<dyn LlmExecutionBackend>);
 

@@ -12,7 +12,7 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u4-context-edits` at
 ## Evidence trail
 
 - `crates/daemon/src/edit_receipts.rs` `unconfirmed_survivor` and the `Action::Suppress` branch of `ReceiptStore::prepare`.
-- `docs/host-wire-protocol.md` Section 7.8 fixes the `survivors` field and the three reasons.
+- `docs/host-wire-protocol.md` Section 7.8 fixes the `survivors` field and the five reasons.
 
 ## Failure scenario
 

@@ -1,6 +1,6 @@
 //! Selection is not permission and preparation is not application: a receipt records what the daemon forwarded, and only an acknowledgment carrying the applied identity completes it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
@@ -322,29 +322,36 @@ pub enum PrepareOutcome {
     Failure(&'static str),
 }
 
-/// Parent Q10: suppression is whole-message; a survivor confirmed only for a span, a survivor whose buffer length disagrees with the context's span for the same occurrence, or a selected occurrence absent from the survivors is not a confirmed survivor.
+/// Suppression requires each selected occurrence to have a survivor covering its entire
+/// buffer: the survivor's `buffer_len` must equal the context's span for that occurrence,
+/// and the survivor's span must be null or `[0, buffer_len]`. A selected occurrence absent
+/// from `context.spans` returns `selection_not_in_spans`; duplicate survivor occurrence
+/// IDs return `malformed_survivor`. Every list is indexed once.
 fn unconfirmed_survivor(context: &Context, survivors: &[WireSpan]) -> Option<&'static str> {
     if survivors.is_empty() {
         return Some("no_survivor_proof");
     }
-    if survivors
-        .iter()
-        .any(|survivor| OccurrenceId::parse(&survivor.occurrence_id).is_err())
-    {
-        return Some("malformed_survivor");
+    let mut confirmed: HashMap<&str, &WireSpan> = HashMap::with_capacity(survivors.len());
+    for survivor in survivors {
+        if OccurrenceId::parse(&survivor.occurrence_id).is_err() {
+            return Some("malformed_survivor");
+        }
+        if confirmed
+            .insert(survivor.occurrence_id.as_str(), survivor)
+            .is_some()
+        {
+            return Some("malformed_survivor");
+        }
+    }
+    let mut declared: HashMap<&str, &WireSpan> = HashMap::with_capacity(context.spans.len());
+    for span in &context.spans {
+        declared.entry(span.occurrence_id.as_str()).or_insert(span);
     }
     for occurrence_id in &context.selection {
-        let Some(declared) = context
-            .spans
-            .iter()
-            .find(|span| span.occurrence_id == *occurrence_id)
-        else {
-            return Some("unconfirmed_survivor");
+        let Some(declared) = declared.get(occurrence_id.as_str()) else {
+            return Some("selection_not_in_spans");
         };
-        match survivors
-            .iter()
-            .find(|survivor| survivor.occurrence_id == *occurrence_id)
-        {
+        match confirmed.get(occurrence_id.as_str()) {
             None => return Some("unconfirmed_survivor"),
             Some(survivor) if survivor.buffer_len != declared.buffer_len => {
                 return Some("unconfirmed_survivor");
@@ -638,7 +645,8 @@ impl ReceiptStore {
         self.receipts.contains_key(preparation_id)
     }
 
-    pub fn action(&self, preparation_id: &str) -> Option<Action> {
+    pub fn action(&mut self, now: Instant, preparation_id: &str) -> Option<Action> {
+        self.expire(now);
         self.receipts
             .get(preparation_id)
             .map(|receipt| receipt.action)
@@ -787,12 +795,13 @@ impl HandlerCore {
             request,
             APPLY,
             |store, scope, parsed: ApplyRequest| {
-                if let Some(action) = store.action(&parsed.preparation_id)
+                let now = Instant::now();
+                if let Some(action) = store.action(now, &parsed.preparation_id)
                     && let Err(denied) = gate(&scope, action)
                 {
                     return refusal(denied);
                 }
-                match store.apply(Instant::now(), &parsed.preparation_id, &parsed.context) {
+                match store.apply(now, &parsed.preparation_id, &parsed.context) {
                     Ok(ApplyOutcome::Forwarded {
                         forwarded_identity,
                         action,
@@ -834,13 +843,14 @@ impl HandlerCore {
             request,
             CONFIRM,
             |store, scope, parsed: ConfirmRequest| {
-                if let Some(action) = store.action(&parsed.preparation_id)
+                let now = Instant::now();
+                if let Some(action) = store.action(now, &parsed.preparation_id)
                     && let Err(denied) = gate(&scope, action)
                 {
                     return refusal(denied);
                 }
                 match store.confirm(
-                    Instant::now(),
+                    now,
                     &parsed.preparation_id,
                     &parsed.forwarded_identity,
                     parsed.applied_identity.as_deref(),
@@ -907,6 +917,19 @@ mod tests {
             Err(ApplyRefusal::Refused(Refusal::ReceiptUnavailable))
         ));
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn an_expired_key_is_invisible_to_the_gate_lookup_and_answers_receipt_unavailable() {
+        let start = Instant::now();
+        let mut store = ReceiptStore::new(limits(8, Duration::from_secs(10)), "inc".to_string());
+        let key = prepared(&mut store, start);
+        let later = start + Duration::from_secs(10);
+        assert_eq!(store.action(later, &key), None);
+        assert!(matches!(
+            store.apply(later, &key, &context("rev")),
+            Err(ApplyRefusal::Refused(Refusal::ReceiptUnavailable))
+        ));
     }
 
     #[test]

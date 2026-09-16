@@ -359,6 +359,30 @@ async fn suppression_needs_whole_message_survivor_proof_for_every_selected_occur
     .await;
     assert_eq!(malformed["reason"], "malformed_survivor", "{malformed}");
 
+    for survivors in [
+        json!([whole(OCC_A), whole(OCC_B), {"occurrence_id": OCC_B, "buffer_len": 100, "span": [0, 40]}]),
+        json!([{"occurrence_id": OCC_B, "buffer_len": 100, "span": [0, 40]}, whole(OCC_B), whole(OCC_A)]),
+    ] {
+        let duplicated = call(&daemon, prepare(&project, "suppress", survivors)).await;
+        assert_eq!(duplicated["outcome"], "preparation_failure", "{duplicated}");
+        assert_eq!(
+            duplicated["reason"], "malformed_survivor",
+            "a duplicated occurrence is refused regardless of entry order: {duplicated}"
+        );
+    }
+
+    let mut unknown_selection = prepare(&project, "suppress", json!([whole(OCC_A), whole(OCC_B)]));
+    unknown_selection["spans"] = json!([whole(OCC_A)]);
+    let unknown_selection = call(&daemon, unknown_selection).await;
+    assert_eq!(
+        unknown_selection["outcome"], "preparation_failure",
+        "{unknown_selection}"
+    );
+    assert_eq!(
+        unknown_selection["reason"], "selection_not_in_spans",
+        "a selected occurrence absent from the context's spans is the context's defect, not the survivor proof's: {unknown_selection}"
+    );
+
     let partial = call(
         &daemon,
         prepare(&project, "suppress", json!([whole(OCC_A)])),

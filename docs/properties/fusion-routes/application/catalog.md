@@ -43,8 +43,9 @@ a read never evicts and an edit that may already be applied is never dropped.
 A limits change keeps the receipts.
 
 Parent decisions for the gate recorded here. RP2.8 Q7: the capability answer
-is not wire-visible except as the `capability_unsupported` terminal on a
-gated `retrieval.prepare`; Append is not a gated class. Q10: suppression is
+is not wire-visible except as the `capability_unsupported` and
+`capability_undeclared` terminals on a gated `retrieval.prepare`,
+`retrieval.apply`, or `retrieval.confirm`; Append is not a gated class. Q10: suppression is
 whole-message, so a survivor confirmed only for a span is not a confirmed
 survivor and the recipe carrier for empty replacement is unchanged
 (`replace` with `edit_bytes` zero); cross-step reuse is a declared class
@@ -314,9 +315,11 @@ Check: `always` - no survivors is `no_survivor_proof`; one of two selected
 occurrences confirmed is `unconfirmed_survivor`, as is a survivor whose buffer
 length disagrees with the context's span for the same occurrence; a survivor
 with a partial span is `span_granularity`; a survivor that is not an
-occurrence identifier is `malformed_survivor`; both confirmed whole, with a
-null span or a span covering the context's buffer, prepares. `always` because
-the check runs on every suppression.
+occurrence identifier is `malformed_survivor`, as is a survivors set carrying
+two entries for one occurrence, in either order; a selected occurrence absent
+from the context's own spans is `selection_not_in_spans`; both confirmed
+whole, with a null span or a span covering the context's buffer, prepares.
+`always` because the check runs on every suppression.
 Fault/timing angle: Partial visibility or a replaced slot between the plugin's
 observation and the prepare.
 Required faults and enabling state: A harness declaring suppression; survivor
