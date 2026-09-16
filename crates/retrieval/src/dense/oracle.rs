@@ -85,7 +85,7 @@ pub(super) trait RowSource {
         layout: &RowLayout,
     ) -> Result<Option<Vec<f32>>, OracleRefusal>;
 
-    /// Runs after every page with whether rows remain past it.
+    /// Runs after every page whose rows were all visited, with whether rows remain past it.
     fn after_page(&mut self, _more: bool) {}
 }
 
@@ -328,7 +328,6 @@ pub(super) fn walk(
             Err(ScanStop::Budget) => return exhausted(ranking),
             Err(ScanStop::Projection(error)) => return Err(error.into()),
         };
-        source.after_page(more);
         if let Some(last) = page.last() {
             after.clone_from(&last.candidate.occurrence_id);
             let Some(present) =
@@ -336,6 +335,7 @@ pub(super) fn walk(
             else {
                 return exhausted(ranking);
             };
+            source.after_page(more);
             let flow = judge_and_score(
                 kernel,
                 request,
@@ -354,6 +354,8 @@ pub(super) fn walk(
                 ControlFlow::Break(None) => return exhausted(ranking),
                 ControlFlow::Continue(()) => {}
             }
+        } else {
+            source.after_page(more);
         }
         if !more {
             break;
