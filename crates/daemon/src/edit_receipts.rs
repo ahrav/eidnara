@@ -272,13 +272,14 @@ fn derive(domain: &str, components: &[&[u8]]) -> String {
         .collect()
 }
 
-/// `span` defaults to the whole buffer when absent, so a misspelled key is refused rather than silently widening the selection.
+/// `span: null` selects the whole buffer; a misspelled or omitted `span` key is refused rather than silently widening the selection.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WireSpan {
     pub occurrence_id: String,
     pub buffer_len: u64,
-    pub span: Option<(u64, u64)>,
+    #[serde(deserialize_with = "crate::deserialize_nullable")]
+    pub span: Option<Option<(u64, u64)>>,
 }
 
 /// The context a preparation binds and an apply restates; the digest over it is what stale detection compares.
@@ -300,7 +301,7 @@ impl Context {
             .map(|wire| {
                 SelectedSpan::new(
                     OccurrenceId::parse(&wire.occurrence_id)?,
-                    wire.span.map(|(start, end)| Span { start, end }),
+                    wire.span.flatten().map(|(start, end)| Span { start, end }),
                     wire.buffer_len,
                 )
             })
@@ -425,6 +426,7 @@ fn unconfirmed_survivor(context: &Context, survivors: &[WireSpan]) -> Option<&'s
             Some(survivor)
                 if survivor
                     .span
+                    .flatten()
                     .is_some_and(|(start, end)| start != 0 || end != survivor.buffer_len) =>
             {
                 return Some("span_granularity");
