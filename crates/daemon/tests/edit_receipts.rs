@@ -711,6 +711,15 @@ async fn outcomes_are_distinct_and_capacity_is_bound_before_preparation() {
         refused["error"], "invalid_params",
         "a misspelled span key is refused instead of widening to the whole buffer: {refused}"
     );
+    let mut extra = ctx.clone();
+    extra["selections"] = json!([]);
+    let refused = consumer.apply(&key, extra.clone()).await;
+    assert_eq!(
+        refused["error"], "invalid_params",
+        "an unknown top-level field is refused even though the context is flattened: {refused}"
+    );
+    let refused = consumer.prepare(extra, "append", 1).await;
+    assert_eq!(refused["error"], "invalid_params", "{refused}");
     let mut foreign = apply(daemon.project(), &key, ctx);
     foreign["project_root"] = json!(daemon.project().join("elsewhere").to_str().unwrap());
     let refused = consumer.call(foreign).await;

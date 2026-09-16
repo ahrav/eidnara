@@ -114,7 +114,7 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_changed_context_between_prepare_and_apply_is_stale_and_forwards_nothing`; `crates/daemon/tests/edit_receipts.rs` `outcomes_are_distinct_and_capacity_is_bound_before_preparation` for the misspelled span key.
 Guarantee: An apply whose current context revision, representation, selected spans, or span set differs from the prepared one is refused as `stale_preparation` before anything is forwarded, and the preparation stays usable under its own context; a `spans` item with an unknown field is `invalid_params` rather than a whole-buffer span.
-Check: `always` - a changed revision, a changed representation, a changed span end, and a dropped span each answer `stale_preparation` with no effect logged; the same preparation then forwards under its original context; a span item spelled `spn` is `invalid_params`. `always` because the digest is recomputed on every apply and every span item is parsed strictly.
+Check: `always` - a changed revision, a changed representation, a changed span end, and a dropped span each answer `stale_preparation` with no effect logged; the same preparation then forwards under its original context; a span item spelled `spn` is `invalid_params`, and so is an unknown top-level field such as `selections` on apply and prepare, although the context is flattened into the body. `always` because the digest is recomputed on every apply and every span item is parsed strictly.
 Fault/timing angle: Context changes, including compaction, between prepare and apply.
 Required faults and enabling state: A prepared receipt and a differing context body.
 Confidence: high - [evidence](evidence/apply-stale-preparation-is-rejected-before-edit.md).
