@@ -145,7 +145,8 @@ and `a_required_payload_beyond_the_legacy_cut_is_materialized_and_charged_whole`
 `crates/daemon/src/packing.rs` test
 `the_sixty_four_kib_silent_cut_is_not_inherited`.
 Guarantee: Every materialized required byte equals the selected payload byte
-and is charged through the named estimator; the required-only cost exactly at
+and is charged through the named accounting profile as the rendered delta of
+its fragment (the `accounting/` part fixes the delta rule); the required-only cost exactly at
 the token limit succeeds and one above fails; no required payload is cut at
 64 KiB or anywhere else.
 Check: `always` - the materialized bytes equal the persisted payload bytes;

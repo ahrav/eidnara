@@ -1,0 +1,200 @@
+# RP2.8 rendered-delta accounting properties
+
+## Scope and provenance
+
+System: `/local/home/ahrav/scratch/eidnara`.
+Base: `aa69fca2` (the tip of the RP2.8 U3 branch the U4a change was authored
+against). Method: `../../METHOD.md` and `property-discovery-and-catalog`.
+
+Source: the RP2.8 specification
+([#629](https://github.com/ahrav/eidnara/issues/629)), whose packing and
+accounting contract and acceptance rows AC7 and AC8 name these obligations,
+and the RP2.8 U4a ticket ([#634](https://github.com/ahrav/eidnara/issues/634))
+that lands their executable checks.
+
+This part owns the accounting profile, the revision-keyed cost cache, the
+rendered-delta charge each admitted item carries, and the rendered-bytes and
+estimated-tokens bounds. Serialization through the exact-byte guard and
+overflow repair are the U4b part.
+
+## Observation contract
+
+The profile and charge types are `crates/daemon/src/packing/accounting.rs`;
+the render ledger is `crates/daemon/src/packing/render.rs`; the cache is
+`crates/daemon/src/token_cache.rs`. `crates/daemon/tests/packing_accounting.rs`
+exercises them directly and through `prepare_required`;
+`crates/daemon/tests/packing_optional.rs` observes the ledger the optional
+phase closes. The exact profile counts through `tokenizer::estimate_tokens`;
+the test profile counts one token per rendered byte so limits sit on byte
+boundaries.
+
+## Q5 rulings
+
+Recorded by the repository owner at the U4a change:
+
+- The accounting revision is the length-prefixed pair of the profile identity
+  and its revision source: for the exact profile the SHA-256 of the embedded
+  Claude BPE vocabulary blob (`10:claude-bpe;64:<digest>`), for a heuristic
+  its stated degradation. No manifest version takes part.
+- The daemon owns the accounting profile end to end; the wire carries only the
+  profile identity and revision for the harness to echo and the daemon to
+  validate at apply (consumed by U5a).
+- The separator the legacy composer emits before the memory block is a
+  declared exclusion named `separator-before-memory-block` in every profile's
+  declared-uncharged set; the packer's own render has no uncharged byte.
+- For packed required spans the 64 KiB per-line cut is a defect, not a bound:
+  the packing path never cuts; the legacy memory-line render keeps its own cut
+  outside this ticket.
+
+## Index
+
+| Slug | Type | Reachability | Semantics | Status | Confidence |
+| --- | --- | --- | --- | --- | --- |
+| [packing-charge-equals-rendered-delta](#packing-charge-equals-rendered-delta) | safety | test-only | always | active | high |
+| [packing-cost-cache-keyed-by-accounting-revision](#packing-cost-cache-keyed-by-accounting-revision) | safety | default-production | always | active | high |
+| [packing-heuristic-counts-never-carry-the-exact-label](#packing-heuristic-counts-never-carry-the-exact-label) | safety | test-only | always | active | high |
+| [packing-accounting-bounds-refuse-at-limit-plus-one](#packing-accounting-bounds-refuse-at-limit-plus-one) | safety | test-only | always | active | high |
+
+## Records
+
+### packing-charge-equals-rendered-delta
+
+Type: safety
+Reachability: test-only - `Ledger` is filled by `prepare_required` and
+`prepare_optional`, which have no production caller at this base (`grep -rn
+'prepare_required\|prepare_optional' crates --include=*.rs` finds the daemon
+packing module and its tests).
+Status: active
+Exercised: yes - `crates/daemon/tests/packing_accounting.rs`
+`every_charge_equals_the_whole_render_delta_and_every_byte_is_charged` and
+`a_tail_run_longer_than_the_lookback_still_charges_the_whole_render_delta`;
+`crates/daemon/tests/packing_optional.rs`
+`optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget`
+and `same_parent_spans_group_and_are_charged_as_one_merged_range`;
+`crates/daemon/tests/packing_required.rs`
+`required_cost_at_the_limit_succeeds_and_one_above_fails_without_truncation`.
+Guarantee: Every item the packer admits is charged the estimate of the
+rendered prefix plus item minus the estimate of the rendered prefix, including
+wrappers, separators, and escapes; a group wrapper is charged once at the
+group's first admitted member as its own ledger entries; the sum of charges
+equals the whole-render estimate; every rendered byte belongs to exactly one
+charge, and a charge gap is a safety failure.
+Check: `always` - for generated fragment sequences, including non-ASCII and
+XML-significant bytes, under the exact profile, a linear byte profile, and a
+non-linear heuristic with headroom, each appended fragment's charge equals the
+whole-prefix delta computed over the whole render, the sum of charges equals
+the estimate of the final text, and the entries' byte counts sum to the
+render's length; some generated renders exceed the lookback so the
+piece-anchored path is the one compared, and a tail run of one character
+class longer than the lookback still matches; a group's scan cost equals the
+byte length of its whole fragment under the byte profile and the wrapper
+appears as `GroupOpen` and `GroupClose` entries. `always` because one
+under-charged item is an over-budget edit.
+Fault/timing angle: none.
+Required faults and enabling state: Generated fragments with XML-significant
+bytes and lengths up to 2500, so escapes and multi-piece boundaries occur.
+Confidence: high - [evidence](evidence/packing-charge-equals-rendered-delta.md).
+The oracle recomputes the delta over the whole prefix, independent of the
+production anchor; the exact profile's anchor is a piece boundary found by
+the tokenizer's own scanner, and heuristics are re-estimated over the whole
+render because they promise no locality.
+Existing check: none before this change; the U2 reservation charged raw
+payload bytes.
+Impact: A charge that omits a wrapper or an escape lets the serialized body
+exceed the provider limit the caller trusted.
+Open questions: None.
+
+### packing-cost-cache-keyed-by-accounting-revision
+
+Type: safety
+Reachability: default-production - every existing caller of
+`cached_estimate_tokens` and `count_with_digest` now keys under the exact
+tokenizer revision.
+Status: active
+Exercised: yes - `crates/daemon/src/token_cache.rs`
+`a_count_cached_under_one_revision_is_not_served_under_another` and the
+retained cache tests; `crates/daemon/tests/packing_accounting.rs`
+`a_count_cached_under_one_revision_is_not_served_under_another_profile`.
+Guarantee: A count cached under one accounting revision is never served under
+another; the same content under the same revision hits; generation rotation
+and clearing preserve both.
+Check: `always` - two revisions counting the same content return their own
+counts on the first and every later call; rotating `current` into `previous`
+keeps each revision's entry; the exact revision string is `10:claude-bpe;64:`
+plus a 64-hex vocabulary digest, and two component pairs that would collide
+under a plain separator derive different revisions. `always` because a
+cross-revision hit is a silent mis-charge.
+Fault/timing angle: Concurrent misses may count the same content twice; both
+insert the same value under the same key.
+Required faults and enabling state: Two profiles with different revisions and
+different counting functions over one content.
+Confidence: high - [evidence](evidence/packing-cost-cache-keyed-by-accounting-revision.md).
+Existing check: `crates/daemon/src/token_cache.rs`
+`kind_prefixed_and_raw_content_keys_do_not_alias` covered content-key domain
+separation before this change; it now runs under the revisioned key.
+Impact: A tokenizer or profile change would serve stale counts to every
+session until the cache rotated.
+Open questions: None.
+
+### packing-heuristic-counts-never-carry-the-exact-label
+
+Type: safety
+Reachability: test-only - no production heuristic profile exists at this base.
+Status: active
+Exercised: yes - `crates/daemon/tests/packing_accounting.rs`
+`a_heuristic_count_carries_its_authority_and_headroom_and_never_the_exact_label`;
+the `compile_fail` doctest on `Charge`.
+Guarantee: Every count carries the authority of the profile that produced
+it; a heuristic profile's charges are `Heuristic` with a named degradation and
+headroom in permille; `with_headroom` adds the headroom rounded up and adds
+nothing for the exact authority; a `Charge` cannot be constructed outside the
+profile, so the exact label cannot be forged.
+Check: `always` - a heuristic profile's charge reports its degradation and
+headroom, and `with_headroom` on 3 tokens at 250 permille is 4; the exact
+profile's authority is `Exact` and its headroom adds nothing; the struct
+literal for `Charge` fails to compile. `always` because an exact label on a
+heuristic count would claim provider proof the count does not have.
+Fault/timing angle: none.
+Required faults and enabling state: A heuristic profile with a non-zero
+headroom.
+Confidence: high - [evidence](evidence/packing-heuristic-counts-never-carry-the-exact-label.md).
+Existing check: none before this change.
+Impact: A heuristic count labeled exact would pass U5a's whole-invocation
+validation with no headroom.
+Open questions:
+
+- Whether heuristic headroom is an approved limit or a policy constant is
+  RP2.9's Q4; tests use fixture values. (needs human input)
+
+### packing-accounting-bounds-refuse-at-limit-plus-one
+
+Type: safety
+Reachability: test-only - same as the first record.
+Status: active
+Exercised: yes - `crates/daemon/tests/packing_accounting.rs`
+`rendered_bytes_and_estimated_tokens_bounds_refuse_at_limit_plus_one`,
+`the_required_phase_refuses_a_render_beyond_the_accounting_bounds`, and
+`the_optional_phase_refuses_a_render_beyond_the_accounting_bounds_and_a_foreign_profile`.
+Guarantee: The rendered-bytes and estimated-tokens bounds admit a render at
+their supplied limit and refuse one past it with an `AccountingExceeded`
+naming the bound, the value, and the limit, under each enabled profile, at the
+end of the required phase and at the end of the optional phase; the token
+bound compares the headroom-adjusted total, the same quantity the budget
+consumed. The optional phase refuses a profile other than the one the required
+ledger was charged under.
+Check: `always` - a closed ledger at exactly both limits is admitted; each
+bound reduced by one refuses with its own name and values; through the
+required entry and through the optional entry the refusal is
+`PreparationRefusal::Accounting`; a foreign profile at the optional entry is
+`PreparationRefusal::ProfileMismatch`. `always` because every bound is a
+fail-closed limit.
+Fault/timing angle: none.
+Required faults and enabling state: Each bound set one below the render in
+isolation.
+Confidence: high - [evidence](evidence/packing-accounting-bounds-refuse-at-limit-plus-one.md).
+Existing check: none before this change.
+Impact: An unbounded render emits over-budget bytes.
+Open questions:
+
+- The approved numeric values belong to RP2.9; tests use fixture values and
+  claim no production approval. (needs human input)

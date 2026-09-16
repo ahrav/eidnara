@@ -92,6 +92,25 @@ const CLAUDE_PAT_STR: &str = concat!(
 /// parity with the reference holds in practice while worst-case latency stays linear.
 pub const MAX_PIECE_BYTES: usize = 4096;
 
+/// The embedded vocabulary bytes the counts derive from, so an accounting
+/// layer can fingerprint the exact tokenizer it links against.
+pub fn vocab_blob() -> &'static [u8] {
+    VOCAB_BLOB
+}
+
+/// A byte offset at which piece scanning of `text` and of `text` followed by
+/// any suffix agree from that offset onward, found within the last `lookback`
+/// bytes when possible. The first piece scanned from an arbitrary offset may
+/// be the tail of a longer piece, so the second piece's start is the first
+/// trustworthy boundary; when the tail holds fewer than two pieces the offset
+/// is zero and a caller tokenizes the whole text.
+pub fn suffix_anchor(text: &str, lookback: usize) -> usize {
+    let from = text.floor_char_boundary(text.len().saturating_sub(lookback));
+    let mut starts = scan::pieces(&text[from..]).map(|(start, _)| from + start);
+    starts.next();
+    starts.next().unwrap_or(0)
+}
+
 fn vocab() -> &'static bpe::Vocab {
     static VOCAB: OnceLock<bpe::Vocab> = OnceLock::new();
     VOCAB.get_or_init(|| bpe::Vocab::from_blob(VOCAB_BLOB))

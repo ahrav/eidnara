@@ -315,7 +315,7 @@ fn every_selected_span_is_grouped_or_carries_a_typed_reason() {
 #[test]
 fn the_scan_skips_and_continues_and_the_prefix_packer_does_not() {
     let costs = [11u64, 4, 6];
-    let scan = skip_and_continue(10u64, costs.len(), |_, i| costs[i]);
+    let scan = skip_and_continue(10u64, costs.len(), &mut (), |(), i| costs[i], |(), _| {});
     assert_eq!(scan.admitted, vec![1, 2]);
     assert_eq!(scan.skipped, vec![0]);
     assert_eq!(scan.remaining, 0);
@@ -332,13 +332,19 @@ fn the_scan_skips_and_continues_and_the_prefix_packer_does_not() {
         "the prefix-packer negative control diverges"
     );
 
-    let unused = skip_and_continue(10u64, 2, |_, i| [3u64, 3][i]);
+    let unused = skip_and_continue(10u64, 2, &mut (), |(), i| [3u64, 3][i], |(), _| {});
     assert_eq!(unused.remaining, 4, "unused budget is success");
     let mut visits = 0;
-    skip_and_continue(10u64, 5, |_, _| {
-        visits += 1;
-        1u64
-    });
+    skip_and_continue(
+        10u64,
+        5,
+        &mut visits,
+        |visits, _| {
+            *visits += 1;
+            1u64
+        },
+        |_, _| {},
+    );
     assert_eq!(visits, 5, "each item is visited once");
 }
 
@@ -543,7 +549,8 @@ fn production_grouping_and_scan_never_diverge_from_the_frozen_reference() {
             reference_refused.sort();
             prop_assert_eq!(refused, reference_refused);
 
-            let scan = skip_and_continue(budget, costs.len(), |_, i| costs[i]);
+            let scan =
+                skip_and_continue(budget, costs.len(), &mut (), |(), i| costs[i], |(), _| {});
             let (admitted, skipped, remaining) = frozen_packer::scan(&costs, budget);
             prop_assert_eq!(
                 (scan.admitted, scan.skipped, scan.remaining),

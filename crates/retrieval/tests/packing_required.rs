@@ -234,7 +234,7 @@ fn reservation_charges_every_byte_and_stops_exactly_at_the_limit() {
         .collect();
     let admitted = admit_required(&facts, &bounds(100)).unwrap();
     let bytes: [&[u8]; 2] = [b"abcd", b"efghij"];
-    let per_byte = |bytes: &[u8]| bytes.len() as u64;
+    let per_byte = |_: &retrieval::packing::AdmittedRequired<'_>, bytes: &[u8]| bytes.len() as u64;
 
     let reserved = reserve_required(&admitted, &bytes, 10, per_byte).unwrap();
     assert_eq!(reserved.charged, 10);
@@ -284,7 +284,7 @@ fn reservation_charges_every_byte_and_stops_exactly_at_the_limit() {
         "charged is the sum through the item that crossed the limit"
     );
     assert_eq!(
-        reserve_required(&admitted, &bytes, u64::MAX, |_| u64::MAX),
+        reserve_required(&admitted, &bytes, u64::MAX, |_, _| u64::MAX),
         Err(RequiredContextFailure::OverBudget {
             limit: u64::MAX,
             charged: u64::MAX,

@@ -94,15 +94,11 @@ pub(crate) fn trim_memories_to_budget(
         .filter(|memory| is_positive_memory_category(&memory.category))
         .collect();
     let mut open_categories: Vec<&str> = Vec::new();
-    let mut seen_admitted = 0;
     let scan = skip_and_continue(
         budget.floor() as u64 - wrapper as u64,
         positive.len(),
-        |admitted, index| {
-            for admitted in &admitted[seen_admitted..] {
-                open_categories.push(positive[*admitted].category.as_str());
-            }
-            seen_admitted = admitted.len();
+        &mut open_categories,
+        |open_categories, index| {
             let memory = positive[index];
             let mut cost = estimate_tokens(&(render_memory_line(memory) + "\n"));
             if !open_categories.contains(&memory.category.as_str()) {
@@ -111,6 +107,7 @@ pub(crate) fn trim_memories_to_budget(
             }
             cost as u64
         },
+        |open_categories, index| open_categories.push(positive[index].category.as_str()),
     );
     scan.admitted
         .iter()
