@@ -481,7 +481,8 @@ impl HandlerCore {
 
 #[cfg(test)]
 mod tests {
-    use kernel::{ObjectRow, Sensitivity, SurfaceVisibility};
+    use kernel::{DecisionPayload, ObjectRow, Sensitivity, SurfaceVisibility};
+    use serde_json::json;
 
     use super::*;
 
@@ -503,6 +504,129 @@ mod tests {
             labeled: false,
             scope_id: None,
         }
+    }
+
+    fn populated_row() -> VisibleRow {
+        let mut row = row("decision", "memory");
+        row.object.invalidated_commit_seq = Some(9);
+        row.object.superseded_by = Some("memory-decision-2".to_string());
+        row.object.sensitivity = Sensitivity::Sensitive;
+        row.object.source_id = "line \"quoted\" \\ tab\t ünïcödé".to_string();
+        row.visibility = SurfaceVisibility::Hidden;
+        row.labeled = true;
+        row.scope_id = Some("scope-1".to_string());
+        row
+    }
+
+    fn decision(object_id: &str) -> DecisionRow {
+        DecisionRow {
+            decision_id: format!("{object_id}-decision"),
+            object_id: object_id.to_string(),
+            proposition_id: None,
+            scope_id: Some("scope-1".to_string()),
+            anchor_id: None,
+            evidence_id: None,
+            decision_kind: "fact".to_string(),
+            payload: DecisionPayload {
+                summary: "summary with \"quotes\"".to_string(),
+                rationale: "rationale\nwith newline".to_string(),
+            },
+            created_commit_seq: 3,
+            sensitivity: Sensitivity::Normal,
+        }
+    }
+
+    /// `to_value` of a struct emits its keys in sorted order, so this tree fixes field order too.
+    fn row_value(row: &VisibleRow, decision: Option<&DecisionRow>, known_as_of: i64) -> Value {
+        json!({
+            "object": row.object,
+            "visibility": row.visibility.as_str(),
+            "labeled": row.labeled,
+            "scope_id": row.scope_id,
+            "token": {"object_id": row.object.object_id, "known_as_of": known_as_of},
+            "decision": decision.map(|decision| json!({
+                "decision_kind": decision.decision_kind,
+                "payload": decision.payload,
+            })),
+        })
+    }
+
+    /// A column added to `ObjectRow` or `DecisionPayload` fails here instead of silently leaving the wire.
+    #[test]
+    fn object_and_payload_mirrors_match_the_kernel_structs() {
+        let row = populated_row();
+        let decision = decision(&row.object.object_id);
+        let out = row_out(&row, Some(&decision), 7);
+
+        let object_via_row = serde_json::to_value(&row.object).unwrap();
+        assert_eq!(serde_json::to_value(&out.object).unwrap(), object_via_row);
+        assert_eq!(
+            serde_json::to_string(&out.object).unwrap(),
+            serde_json::to_string(&object_via_row).unwrap(),
+            "ObjectOut must declare its fields in the sorted order a Value map emits"
+        );
+
+        let payload = &out.decision.as_ref().unwrap().payload;
+        let payload_via_row = serde_json::to_value(&decision.payload).unwrap();
+        assert_eq!(serde_json::to_value(payload).unwrap(), payload_via_row);
+        assert_eq!(
+            serde_json::to_string(payload).unwrap(),
+            serde_json::to_string(&payload_via_row).unwrap(),
+            "PayloadOut must declare its fields in the sorted order a Value map emits"
+        );
+    }
+
+    #[test]
+    fn read_body_bytes_match_the_value_tree_encoding() {
+        let populated = populated_row();
+        let bare = row("observation", "notes");
+        let unserved = row("decision", "other");
+        let decision = decision(&populated.object.object_id);
+        let mut decisions = HashMap::new();
+        decisions.insert(populated.object.object_id.clone(), decision);
+        let response = ReadResponse {
+            known_as_of: 41,
+            tip: 42,
+            rows: vec![populated, bare, unserved],
+            truncated: false,
+            decisions,
+        };
+        let expected_rows: Vec<Value> = response.rows[..2]
+            .iter()
+            .map(|row| {
+                row_value(
+                    row,
+                    response.decisions.get(&row.object.object_id),
+                    response.known_as_of,
+                )
+            })
+            .collect();
+        let expected = json!({
+            "known_as_of": response.known_as_of,
+            "tip": response.tip,
+            "gated": true,
+            "truncated": true,
+            "rows": expected_rows,
+            "state": {"kind": "available"},
+        });
+        let expected = serde_json::to_vec(&expected).unwrap();
+
+        let body = Arc::new(ReadBody {
+            response,
+            gated: true,
+            truncated: true,
+            served: 2,
+        });
+        let mut emitted = Vec::new();
+        body.emit(&mut emitted).unwrap();
+        assert_eq!(
+            String::from_utf8(emitted.clone()).unwrap(),
+            String::from_utf8(expected).unwrap()
+        );
+
+        let output = PreparedOutput::emit(body);
+        let measured = output.measure().unwrap();
+        assert_eq!(measured.len(), emitted.len());
     }
 
     #[test]
