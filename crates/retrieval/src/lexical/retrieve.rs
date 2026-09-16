@@ -288,8 +288,8 @@ fn scan(
     if let Some(result) = scan_with(conn, LATE_JOIN_SQL, probe, ordinal, scan_rows, budget, best)? {
         return Ok(result);
     }
-    scan_with(conn, PROBE_SQL, probe, ordinal, scan_rows, budget, best)
-        .map(|result| result.unwrap_or((0, false)))
+    scan_with(conn, PROBE_SQL, probe, ordinal, scan_rows, budget, best)?
+        .ok_or(ScanStop::Projection(ProjectionError::CorruptRow))
 }
 
 /// `None` when a shortlisted row is stale and the result may be inexact.

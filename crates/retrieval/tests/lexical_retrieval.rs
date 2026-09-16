@@ -772,30 +772,67 @@ fn a_tombstoned_row_is_excluded_at_the_engine() {
         )
         .unwrap();
 
+    assert_stale_row_excluded_at_every_scan_bound(&fixture, &request, &before, "gamma");
+}
+
+#[test]
+fn an_orphaned_lexical_row_is_excluded_at_the_engine() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse");
+    let before = fixture.reference(&request);
+    assert!(before.contains(&fixture.id("gamma")));
+
+    // Removing the occurrence while its lexical row stays orphans the match.
+    let raw = fixture.raw();
+    raw.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    raw.execute(
+        "DELETE FROM occurrences WHERE occurrence_id=?1",
+        [fixture.id("gamma")],
+    )
+    .unwrap();
+    let orphaned: i64 = raw
+        .query_row(
+            "SELECT count(*) FROM lexical WHERE occurrence_id=?1",
+            [fixture.id("gamma")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(orphaned > 0);
+
+    assert_stale_row_excluded_at_every_scan_bound(&fixture, &request, &before, "gamma");
+}
+
+/// `before` is the reference order with `stale` still live. For every `scan_rows` from 1 through
+/// `before.len()`, retrieval must return the live prefix of that order and report truncation only
+/// while live rows remain past the bound, wherever `stale` sat in the shortlist.
+fn assert_stale_row_excluded_at_every_scan_bound(
+    fixture: &Fixture,
+    request: &[Probe],
+    before: &[String],
+    stale: &str,
+) {
+    let stale_id = fixture.id(stale);
     let retrieval = fixture
-        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .retrieve(request, bounds(), &EvalBudget::unbounded())
         .unwrap();
     assert_eq!(retrieval.completion, Completion::Complete);
     assert_eq!(retrieval.consumed.scanned_rows, before.len() - 1);
-    assert!(!ids_of(&retrieval).contains(&fixture.id("gamma")));
+    assert!(!ids_of(&retrieval).contains(&stale_id));
     assert_eq!(retrieval.contributions.len(), before.len() - 1);
 
     let expected: Vec<String> = before
         .iter()
-        .filter(|id| **id != fixture.id("gamma"))
+        .filter(|id| **id != stale_id)
         .cloned()
         .collect();
-    let gamma_at = before
-        .iter()
-        .position(|id| *id == fixture.id("gamma"))
-        .unwrap();
+    let stale_at = before.iter().position(|id| *id == stale_id).unwrap();
     for scan_rows in 1..=before.len() {
         let tight = RetrievalBounds {
             scan_rows: NonZeroUsize::new(scan_rows).unwrap(),
             ..bounds()
         };
         let retrieval = fixture
-            .retrieve(&request, tight, &EvalBudget::unbounded())
+            .retrieve(request, tight, &EvalBudget::unbounded())
             .unwrap();
         let want = &expected[..scan_rows.min(expected.len())];
         assert_eq!(ids_of(&retrieval), want, "scan_rows={scan_rows}");
@@ -806,7 +843,7 @@ fn a_tombstoned_row_is_excluded_at_the_engine() {
             } else {
                 Completion::Complete
             },
-            "scan_rows={scan_rows} gamma_at={gamma_at}"
+            "scan_rows={scan_rows} stale_at={stale_at}"
         );
     }
 }
