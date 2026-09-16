@@ -30,7 +30,12 @@ fn axis(index: usize) -> Vec<f32> {
 }
 
 /// Publishes one base of `rows` under `hold_id` with a delta that replaces the first row, then returns what compaction reserves for the pair and the heap it peaks at.
-fn reserved_and_peak(fixture: &mut Fixture, rows: Vec<ExportedRow>, hold_id: &str) -> (u64, u64) {
+fn reserved_and_peak(
+    fixture: &mut Fixture,
+    rows: Vec<ExportedRow>,
+    hold_id: &str,
+    max_entries: usize,
+) -> (u64, u64) {
     let checkpoint = |commit_seq: i64| ProjectionCheckpoint {
         snapshot_commit_seq: commit_seq - 1,
         checkpoint_commit_seq: commit_seq,
@@ -54,7 +59,7 @@ fn reserved_and_peak(fixture: &mut Fixture, rows: Vec<ExportedRow>, hold_id: &st
         .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();
     let view = acquire_view(fixture, &mut |_| {}).unwrap();
-    let max_entries = NonZeroUsize::new(64).unwrap();
+    let max_entries = NonZeroUsize::new(max_entries).unwrap();
 
     // The reservation is what a limit exactly at the view's own bytes refuses.
     let resident_before = fixture.ledger.census().resident;
@@ -93,7 +98,7 @@ fn the_resident_reservation_bounds_the_compactors_heap_peak() {
             vector: axis(i),
         })
         .collect();
-    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7");
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7", 64);
     let row_bytes = ROWS as u64 * u64::from(DIMENSION) * 4;
     assert!(
         peak <= reserved,
@@ -115,7 +120,7 @@ fn a_long_checkpoint_in_the_sidecar_stays_within_the_reservation() {
         occurrence_id: "alpha".to_owned(),
         vector: support::vector_store::unit([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
     }];
-    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, &hold_id);
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, &hold_id, 64);
     assert!(
         peak <= reserved,
         "compaction peaked at {peak} heap bytes against a {reserved}-byte reservation"
@@ -124,5 +129,49 @@ fn a_long_checkpoint_in_the_sidecar_stays_within_the_reservation() {
         reserved < 8 * hold_id.len() as u64,
         "the reservation is a bound, not a blank cheque: {reserved} for a {}-byte hold id",
         hold_id.len()
+    );
+}
+
+/// One eight-wide unit row along `axis`.
+fn narrow(axis: usize) -> Vec<f32> {
+    let mut raw = [0.0f32; 8];
+    raw[axis] = 1.0;
+    support::vector_store::unit(raw)
+}
+
+#[test]
+fn a_winner_count_past_a_power_of_two_stays_within_the_reservation() {
+    // 4097 narrow rows: the resolver's winner vector doubles to 8192 slots, and the rows are too small to hide that.
+    let mut fixture = Fixture::new();
+    let rows = (0..4097)
+        .map(|i| ExportedRow {
+            occurrence_id: format!("{i:04}"),
+            vector: narrow(i % 8),
+        })
+        .collect();
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7", 8192);
+    assert!(
+        peak <= reserved,
+        "compaction peaked at {peak} heap bytes against a {reserved}-byte reservation"
+    );
+}
+
+#[test]
+fn a_long_model_name_stays_within_the_reservation() {
+    // The model name is in the sidecar and in the compatibility identity, so every path that serializes either holds another copy.
+    let mut fixture = Fixture::new();
+    fixture.generation.embedding_model = "m".repeat(1 << 20);
+    let rows = vec![ExportedRow {
+        occurrence_id: "alpha".to_owned(),
+        vector: narrow(0),
+    }];
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7", 64);
+    assert!(
+        peak <= reserved,
+        "compaction peaked at {peak} heap bytes against a {reserved}-byte reservation"
+    );
+    assert!(
+        reserved < 8 << 20,
+        "the reservation is a bound, not a blank cheque: {reserved} for a 1 MiB model name"
     );
 }

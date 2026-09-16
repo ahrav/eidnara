@@ -621,6 +621,39 @@ fn a_prefix_that_compacts_to_its_own_base_refuses_so_a_replay_publishes_nothing(
 }
 
 #[test]
+fn a_prefix_whose_winners_cannot_be_calibrated_refuses_with_the_calibration_rejection() {
+    // Both layers calibrate on their own; the winners leave coordinate 1 with a subnormal maximum whose int8 scale is zero.
+    let tiny = f32::from_bits(1);
+    let mut fixture = Fixture::new();
+    let base = fixture.layer_from(&export(
+        &[
+            ("alpha", vec![1.0, tiny, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            ("beta", vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        ],
+        &[],
+        10,
+    ));
+    let delta = fixture.layer_from(&export(&[("beta", axis(0))], &[], 12));
+    fixture
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let before = fixture.generations();
+    assert_eq!(
+        compact_view(&fixture, &view).unwrap_err(),
+        CompactionRefusal::Build(VectorRefusal::Calibration(
+            retrieval::dense::scalar::CalibrationRejection::ScaleUnderflow { coordinate: 1 }
+        ))
+    );
+    assert_eq!(fixture.generations(), before);
+    assert_eq!(held(&fixture.ledger, ResourceClass::CompactionScratch), 0);
+    assert!(
+        std::fs::read_dir(fixture.work_dir()).map_or(true, |mut d| d.next().is_none()),
+        "the build's files are gone with the refusal"
+    );
+}
+
+#[test]
 fn a_selection_at_the_last_sequence_refuses_publication_before_staging_anything() {
     let mut fixture = Fixture::new();
     let base = fixture.layer_from(&export(&corpus(), &[], 10));

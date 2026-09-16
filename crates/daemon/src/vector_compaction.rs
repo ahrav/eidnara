@@ -185,7 +185,7 @@ pub fn compact(
             .map(|winner| winner.occurrence_id.as_str()),
         std::iter::empty(),
     );
-    // Beyond the build's own peak, compaction holds each winner's identifier twice, in the resolution and in the export, the cut's digests, the prefix's checkpoint it hands the build, and one row's bytes and decode in flight while the export fills.
+    // Beyond the build's own peak, compaction holds each winner's identifier twice, in the resolution and in the export, the winner vector at the capacity its pushes grew it to, the cut's digests, the prefix's checkpoint it hands the build, and one row's bytes and decode in flight while the export fills.
     let identifier_bytes = resolved.winners.iter().fold(0u64, |total, winner| {
         total.saturating_add(winner.occurrence_id.len() as u64)
     });
@@ -193,9 +193,8 @@ pub fn compact(
     let dimension = u64::from(view.layout().dimension);
     let own = identifier_bytes
         .saturating_mul(2)
-        .saturating_add(
-            rows.saturating_mul((size_of::<Winner>() + size_of::<ExportedRow>()) as u64),
-        )
+        .saturating_add((resolved.winners.capacity() * size_of::<Winner>()) as u64)
+        .saturating_add(rows.saturating_mul(size_of::<ExportedRow>() as u64))
         .saturating_add(cut.digest.len() as u64)
         .saturating_add(cut.base.len() as u64)
         .saturating_add(
@@ -247,14 +246,11 @@ pub fn compact(
             return Err(CompactionRefusal::Build(refusal));
         }
     };
-    // The inventory is sized while the rows' reservation still covers the sidecar's serialization.
-    let written: u64 = built
-        .sidecar
-        .stage_manifest()
-        .files
-        .iter()
-        .map(|file| file.size)
-        .sum();
+    // The inventory is sized while the rows' reservation still covers one serialization of the sidecar; the manifest and its identity hashes would hold several more.
+    let written = built.sidecar.files.iter().map(|file| file.size).fold(
+        built.sidecar.canonical_bytes().len() as u64,
+        u64::saturating_add,
+    );
     drop(rows_held);
     let compacted = Compacted {
         cut,

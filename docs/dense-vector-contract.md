@@ -440,11 +440,18 @@ was compacted or replaced by someone else and refuses the same way.
 The ledger refuses the next delta past `vector_delta_count`, and a namespace
 at the cap admits no delta until a compaction clears it. Every layer a view
 pins holds at least one row, and the newest layer's rows are never hidden, so
-every acquirable prefix resolves to at least one live row and compacts.
-Compaction re-encodes the winners under a fresh calibration, so the new base's
-scales are its own and a tail delta's codes keep scoring with that delta's
-scales. Scheduling compaction when the cap is reached belongs to the
-maintenance owner and is not part of this module.
+every acquirable prefix resolves to at least one live row. Compaction
+re-encodes the winners under a fresh calibration, so the new base's scales
+are its own and a tail delta's codes keep scoring with that delta's scales.
+That calibration is the recipe's, and the winners can fail it where each
+layer alone did not: a coordinate whose largest winner magnitude is subnormal
+has a zero int8 scale, and the build refuses as
+`Build(Calibration(ScaleUnderflow))` before writing a file, its reservations
+ending with the refusal. Such a live set cannot be published as one layer by
+any path, so the refusal is a property of the rows, not of the compactor;
+retrying does not clear it, and neither would a fresh base. Scheduling
+compaction when the cap is reached belongs to the maintenance owner and is
+not part of this module.
 
 ## The pinned reader
 
