@@ -304,6 +304,22 @@ impl Fixture {
             .unwrap();
     }
 
+    /// Makes `objects` decisions the kernel admits, so their occurrences become eligible contributions.
+    fn admit(&self, objects: &[&str]) {
+        self.kernel
+            .commit(
+                intent(&format!("admit-{}", objects.join("+"))),
+                |envelope| {
+                    for object in objects {
+                        envelope.insert_decision(decision(object))?;
+                        envelope.record_admission(admission(object))?;
+                    }
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+    }
+
     fn project(&self, rows: &[Row]) {
         let through = self.kernel.tip().unwrap();
         let identities: Vec<Vec<(&str, &str)>> = rows.iter().map(Row::identity).collect();
@@ -433,6 +449,16 @@ impl Fixture {
 
     fn raw(&self) -> Connection {
         Connection::open(self.root.path().join("search").join("search.sqlite")).unwrap()
+    }
+
+    /// The subsequence of `occurrence_ids` the kernel admits: only the seeded corpus objects are decisions it knows.
+    fn eligible(&self, occurrence_ids: &[String]) -> Vec<String> {
+        let admitted: Vec<String> = self.rows.iter().map(Row::occurrence_id).collect();
+        occurrence_ids
+            .iter()
+            .filter(|occurrence_id| admitted.contains(occurrence_id))
+            .cloned()
+            .collect()
     }
 }
 
@@ -880,6 +906,192 @@ fn assert_stale_row_excluded_at_every_scan_bound(
             "scan_rows={scan_rows} stale_at={stale_at}"
         );
     }
+}
+
+/// Every `bulk` row says `parse` in three tokens, so their ranks tie and only identifier bytes order them.
+fn project_bulk(fixture: &Fixture, count: usize) -> Vec<Row> {
+    let bulk: Vec<Row> = (0..count)
+        .map(|n| Row::claim(&format!("bulk-{n}"), &format!("bulk parse {n}")))
+        .collect();
+    fixture.project(&bulk);
+    bulk
+}
+
+fn object_of<'a>(rows: &'a [Row], occurrence_id: &str) -> &'a str {
+    &rows
+        .iter()
+        .find(|row| row.occurrence_id() == occurrence_id)
+        .unwrap()
+        .object
+}
+
+fn tombstone_raw(fixture: &Fixture, occurrence_id: &str) {
+    fixture
+        .raw()
+        .execute(
+            "INSERT INTO occurrence_tombstones(occurrence_id, invalidated_commit_seq, reason, recorded_at) VALUES (?1, 99, 'retired', 0)",
+            [occurrence_id],
+        )
+        .unwrap();
+}
+
+#[test]
+fn tombstoned_rows_inside_the_scan_bound_do_not_take_slots_or_hide_truncation() {
+    let fixture = Fixture::all_admitted();
+    let bulk = project_bulk(&fixture, 2500);
+    let request = probes("parse");
+    let reference = fixture.reference(&request);
+    let scan = bounds().scan_rows.get();
+    let page = scan + 1;
+    assert!(reference.len() > 2 * scan);
+
+    // Dead rows cover the whole first page and part of the second, so the live prefix spans three pages.
+    let dead = scan + 6;
+    for occurrence_id in &reference[..dead] {
+        tombstone_raw(&fixture, occurrence_id);
+    }
+    // Admitted sentinels sit at every edge a paging error could move, so the contributions are exactly the sentinels the scan took.
+    let boundary = (dead / page + 1) * page;
+    assert!(dead < boundary - 1 && boundary < dead + scan - 1);
+    let sentinels = [
+        dead - 1,
+        dead,
+        boundary - 1,
+        boundary,
+        dead + scan - 1,
+        dead + scan,
+    ];
+    let objects: Vec<&str> = sentinels
+        .iter()
+        .map(|&index| object_of(&bulk, &reference[index]))
+        .collect();
+    fixture.admit(&objects);
+    let expected: Vec<String> = [dead, boundary - 1, boundary, dead + scan - 1]
+        .iter()
+        .map(|&index| reference[index].clone())
+        .collect();
+
+    let wide = RetrievalBounds {
+        max_accepted: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        batch_rows: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        ..bounds()
+    };
+    let retrieval = fixture
+        .retrieve(&request, wide, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(ids_of(&retrieval), expected);
+    assert_eq!(retrieval.consumed.scanned_rows, scan);
+    assert_eq!(retrieval.consumed.judged, scan + expected.len());
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+}
+
+#[test]
+fn a_dead_row_that_fills_the_page_past_the_bound_leaves_the_result_complete() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse");
+    let scan = bounds().scan_rows.get();
+    let corpus_hits = fixture.reference(&request).len();
+    project_bulk(&fixture, scan + 1 - corpus_hits);
+    let reference = fixture.reference(&request);
+    assert_eq!(reference.len(), scan + 1);
+
+    tombstone_raw(&fixture, &reference[0]);
+    let retrieval = fixture
+        .retrieve(
+            &request,
+            RetrievalBounds {
+                max_accepted: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+                batch_rows: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+                ..bounds()
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(ids_of(&retrieval), fixture.eligible(&reference[1..]));
+    assert_eq!(retrieval.consumed.scanned_rows, scan);
+    assert_eq!(
+        retrieval.consumed.judged,
+        scan + retrieval.contributions.len()
+    );
+    assert_eq!(retrieval.completion, Completion::Complete);
+}
+
+#[test]
+fn a_repeated_probe_runs_the_engine_once_and_replays_its_counters() {
+    let fixture = Fixture::all_admitted();
+    project_bulk(&fixture, 2500);
+    let wide = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(4096).unwrap(),
+        max_accepted: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        batch_rows: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        ..bounds()
+    };
+    let polls_for = |request: &str| {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counting = {
+            let polls = Arc::clone(&polls);
+            move || {
+                polls.fetch_add(1, Ordering::Relaxed);
+                false
+            }
+        };
+        let retrieval = fixture
+            .store
+            .with_conn_interruptible(Instant::now() + Duration::from_secs(60), counting, |conn| {
+                Ok(retrieve(
+                    conn,
+                    &fixture.kernel,
+                    &probes(request),
+                    fixture.authority(),
+                    wide,
+                    &EvalBudget::unbounded(),
+                ))
+            })
+            .unwrap()
+            .unwrap();
+        (retrieval, polls.load(Ordering::Relaxed))
+    };
+
+    let (single, single_polls) = polls_for("parse");
+    let (repeated, repeated_polls) = polls_for("parse parse parse parse");
+    assert_eq!(single.completion, Completion::Complete);
+    assert_eq!(single.consumed.probes, 1);
+    assert_eq!(single.consumed.scanned_rows, 2504);
+    assert_eq!(repeated.consumed.probes, 4);
+    assert_eq!(repeated.consumed.scanned_rows, 4 * 2504);
+    assert_eq!(keyed(&repeated), keyed(&single));
+    assert!(
+        repeated
+            .contributions
+            .iter()
+            .all(|contribution| contribution.ordinal == 0)
+    );
+    assert!(single_polls >= 3, "the handler polled: {single_polls}");
+    // The progress handler polls per VM-instruction interval, so four engine runs would poll about four times as often.
+    assert!(
+        repeated_polls < 2 * single_polls,
+        "repeated probes rescanned: {repeated_polls} polls against {single_polls}"
+    );
+
+    let distinct = fixture
+        .retrieve(
+            &probes("parse fetch parse fetch"),
+            wide,
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    let forward = fixture
+        .retrieve(&probes("parse fetch"), wide, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(keyed(&distinct), keyed(&forward));
+    assert_eq!(distinct.consumed.probes, 4);
+    assert_eq!(
+        distinct.consumed.scanned_rows,
+        2 * forward.consumed.scanned_rows
+    );
 }
 
 #[test]
