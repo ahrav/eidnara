@@ -450,8 +450,8 @@ every acquirable prefix resolves to at least one live row. Compaction
 re-encodes the winners under a fresh calibration, so the new base's scales
 are its own and a tail delta's codes keep scoring with that delta's scales.
 That calibration is the recipe's, and the winners can fail it where each
-layer alone did not: a coordinate whose largest winner magnitude is subnormal
-has a zero int8 scale, and the build refuses as
+layer alone did not: a coordinate whose largest winner magnitude divided by
+127 rounds to zero in f32 has no int8 scale, and the build refuses as
 `Build(Calibration(ScaleUnderflow))` before writing a file, its reservations
 ending with the refusal. Such a live set cannot be published as one layer by
 any path, so the refusal is a property of the rows, not of the compactor;
