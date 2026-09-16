@@ -12,7 +12,7 @@ System: `/local/home/ahrav/scratch/eidnara`. Base:
 | Same parent, other revision | `Grouping::derive` over the tool call at revision 2. | `packing.identity.same_parent_at_another_revision_selected` | packing-group-key-is-never-parent-alone |
 | Same parent, other representation | `Grouping::derive` over `tool_error`. | `packing.identity.same_parent_at_another_representation_selected` | packing-group-key-is-never-parent-alone |
 | Class outside the grouping set | `Grouping::derive` over every `OccurrenceClass::ALL` member. | `packing.identity.non_grouping_class_selected` | packing-group-key-is-never-parent-alone |
-| Stored column, tuple bit, or whole tuple disagrees | `Grouping::derive` with an altered revision, representation, or span, or one flipped tuple bit; a raw connection rewriting the stored column or replacing the tuple with another occurrence's before `read_selected`. | `packing.identity.stored_column_disagrees_with_tuple` | packing-group-key-is-never-parent-alone, packing-attribution-follows-the-occurrence-row |
+| Stored column, tuple bit, or whole tuple disagrees | `Grouping::derive` with an altered revision, representation, or span, or one flipped tuple bit; a raw connection rewriting the stored revision, span, representation, or class column of a persisted row of any class, or replacing the tuple with another occurrence's, before `read_selected`. | `packing.identity.stored_column_disagrees_with_tuple` | packing-group-key-is-never-parent-alone, packing-attribution-follows-the-occurrence-row |
 
 Every seam is a pure function or an in-process SQLite store; no fault
 injection framework is needed for this part. Marker status lives in

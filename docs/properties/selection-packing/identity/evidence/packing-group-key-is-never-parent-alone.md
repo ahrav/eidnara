@@ -14,14 +14,19 @@ representation with a typed result for classes that do not group.
   and refuses a revision, representation, or span that disagrees with the tuple.
 - `crates/retrieval/src/packing.rs` `Grouping::applies_to` encodes the Q1
   ruling: only `raw_tool_spans` groups.
-- `crates/retrieval/src/packing.rs` `Grouping::derive` returns
-  `NonGrouping(class)` for every other class and otherwise wraps the parent key
-  with the class and representation as explicit components.
+- `crates/retrieval/src/packing.rs` `Grouping::derive` runs
+  `ParentGroupKey::derive` for every class as the tuple witness, then returns
+  `NonGrouping(class)` for every class outside the grouping set and otherwise
+  wraps the parent key with the class and representation as explicit
+  components. A non-grouping class that skipped the witness would let a
+  rewritten revision or class column pass `read_selected` and reach the
+  eligibility candidate.
 - `crates/retrieval/tests/packing_identity.rs`
   `grouping_keys_need_parent_revision_and_representation_together`,
-  `classes_outside_the_grouping_set_yield_the_typed_non_grouping_result`, and
-  `grouping_refuses_columns_that_disagree_with_the_tuple` assert the clauses
-  over the kernel's real tuple encoding.
+  `classes_outside_the_grouping_set_yield_the_typed_non_grouping_result`,
+  `grouping_refuses_columns_that_disagree_with_the_tuple`, and
+  `non_grouping_rows_whose_columns_disagree_with_the_tuple_are_refused` assert
+  the clauses over the kernel's real tuple encoding.
 
 ## Failure scenario
 
@@ -38,6 +43,7 @@ None. The key is a pure function of the row.
 
 - Spans of one tool call at two revisions and two representations, plus a
   whole-buffer occurrence of the same call.
-- One well-formed occurrence of every class.
+- One well-formed occurrence of every class, persisted, then rewritten column
+  by column through a raw connection and read back.
 - A tuple presented with an altered revision, representation, or span, and
   every single-bit flip of the tuple.
