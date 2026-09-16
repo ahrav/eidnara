@@ -1,0 +1,146 @@
+# Fusion identity contract
+
+`crates/retrieval/src/fusion/` implements this document. It freezes the
+identities the RP2.7 fusion boundary ranks by, groups by, selects, and binds
+edits to, and the admission rules a lane ranking must pass before fusion sums
+it. RP2.7.U2 (fusion arithmetic), RP2.7.U3 (the daemon query route),
+RP2.7.U4 (prepare and confirm), and RP2.8 (packing and grouping) consume these
+types and must not invent a second identity for any of them.
+
+Changing any rule below, or any `-v1` domain tag, requires the matching edit
+to this document in the same change and a new domain tag for every digest
+whose bytes change.
+
+## Ranking unit
+
+The ranking unit is the kernel occurrence identifier: SHA-256 over the
+length-delimited occurrence tuple defined in
+`docs/properties/search-projection/construction-contracts.md` CC4, spelled as
+64 lowercase hex characters. `OccurrenceId::parse` admits exactly that
+spelling. Uppercase, prefixed, truncated, or extended spellings are refused,
+never normalized, so one occurrence has one spelling everywhere.
+
+Payload identity (CC5) deduplicates bytes only. Two occurrences with equal
+payload bytes at different source, revision, representation, or span
+identities are two ranking units.
+
+`OccurrenceId` orders by digest bytes. That byte order is the tie order every
+ranking in this contract uses.
+
+## Lanes
+
+`Lane` is the closed set `Exact`, `Lexical`, `Dense`. `Lane::ORDER` is that
+sequence and is the one order fusion sums lane contributions in. The lane
+codes `exact`, `lexical`, and `dense` are the spelling a future wire encoding
+uses; no wire literal carries them yet.
+
+`RawScore` is a lane's own value for one hit and names its lane:
+`Exact` (membership, no score), `Lexical(f64)` (FTS5 rank, lower is better),
+`Dense(f64)` (similarity, higher is better). Scores are compared only within
+one lane and are retained beside fused scores unchanged.
+
+## Lane rankings
+
+`LaneRanking::consolidate(lane, encoding_version, hits)` turns any multiset of
+hits from any number of probes or generations into the lane's declared
+ranking:
+
+1. Every hit's score kind must match `lane`; a foreign kind is refused.
+2. Every score must be finite; NaN and infinities are refused.
+3. `encoding_version` must equal `kernel::source_identity::OCCURRENCE_ENCODING_VERSION`;
+   any other stamp is refused, because identifiers minted under another
+   encoding do not name the same occurrences. This also refuses mixed
+   versions across lanes, since every ranking passes the same check.
+4. Each occurrence keeps its best score in the lane's own direction.
+5. Entries order by score, best first, then by occurrence identifier bytes.
+6. Positions are assigned once as `1..=n`.
+
+Duplicated or permuted hits therefore produce a bit-identical ranking.
+
+The exact lane returns a set in key and page order with no rank. Its
+declared ranking follows from rule 4 and rule 5: every member ties, so the
+ranking is the members in occurrence-identifier byte order with positions
+`1..=n`. This is the parent specification's Q1 identity decision.
+
+`DeclaredLanes::admit(rankings)` holds at most one ranking per lane in
+`Lane::ORDER`. A second ranking for one lane is refused.
+
+## Probe and generation identities
+
+`ProbeOrdinal(u32)` is one compiled query atom's zero-based position in its
+request. `GenerationId` is one immutable vector generation spelled as its
+registered `generation_id`, constructed through `GenerationId::parse` or
+`TryFrom<&VectorGeneration>`. Both apply the kernel identity-value rule
+(nonempty, at most `MAX_IDENTITY_VALUE_BYTES`, no control characters). The
+daemon applies the same rule to a consumer binding's `generation_id` before it
+records a lifecycle intent, so every generation this daemon registers has a
+`GenerationId` spelling and `TryFrom` cannot refuse a live generation. Both are
+provenance. Neither is a ranking unit and neither enters a lane ranking entry,
+so a probe or generation cannot vote more than once.
+
+## Parent groups
+
+`ParentId` is the whole-buffer lineage digest of an occurrence's source at
+one representation: the kernel lineage encoding (role byte `0x01`, revision
+omitted) with no span, hashed with SHA-256. Every span occurrence of one
+source at one representation shares it. A whole-buffer occurrence's parent is
+its own lineage identifier. Because it is a lineage-role digest it never
+equals an occurrence identifier.
+
+`ParentGroupKey` is the parent plus the occurrence's own revision, derived
+only through `ParentGroupKey::derive(tuple, class, revision, representation, span)`.
+The revision, representation, and span witness the stored tuple; a derived
+column that disagrees with the tuple bytes is refused. Spans of one source at
+different revisions form different groups. This is RP2.8's Q1 decision:
+grouping never mixes bytes from two revisions, and a parent key never stands
+in for an occurrence.
+
+## Selection digest
+
+`SelectionDigest::derive(selection)` is SHA-256 over:
+
+```text
+"eidnara-retrieval-selection-v1" 0x00
+count64(selection)
+  len64(occurrence_bytes) occurrence_bytes   once per entry, in fused order
+```
+
+It changes whenever fused order or membership changes.
+
+## Preparation digest
+
+`SelectedSpan::new(occurrence, span, buffer_len)` normalizes a whole-buffer
+range to `None` exactly as the kernel does before minting an occurrence, and
+refuses a reversed range or one that exceeds the buffer.
+
+`PreparationDigest::derive(inputs)` is SHA-256 over:
+
+```text
+"eidnara-retrieval-preparation-v1" 0x00
+len64(context_revision) context_revision
+len64(context_representation) context_representation
+count64(spans)
+  len64(occurrence_bytes) occurrence_bytes
+  len64(span) span            0x00, or 0x01 start64 end64
+len64(selection_digest) selection_digest
+```
+
+`ContextRevision` is the harness context's revision token.
+`ContextRepresentation` is the surface the invocation is assembled on. The
+digest changes when the context revision, the representation, any selected
+span, span order, span count, or the selection changes, and two inputs that
+split their text into components differently never derive one digest.
+
+## Invocation identity
+
+`InvocationId`, `ContextRevision`, and `ContextRepresentation` are opaque
+tokens validated by the kernel identity-value rule: nonempty, at most
+`MAX_IDENTITY_VALUE_BYTES`, no control characters. The host mints them; the
+daemon binds them to a route.
+
+## No scope
+
+No type in this contract carries a project, session, or harness. Parsing or
+constructing an identity yields bytes and never an authorization. The route
+binding supplies scope and compares it before any identity is admitted, and a
+user-supplied identifier cannot widen that scope.

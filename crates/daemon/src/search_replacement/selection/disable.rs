@@ -16,9 +16,10 @@ pub(super) struct Maintenance {
 }
 
 impl Maintenance {
-    /// A finished task has dropped its reader, so this owner pins nothing.
+    /// A finished task has dropped its reader, so this owner pins nothing. The reader drops
+    /// before the join handle reports the task finished.
     pub(super) fn pins(&self) -> bool {
-        !self.task.is_finished()
+        !self.task.is_finished() && !self.supervisor.drained()
     }
 }
 

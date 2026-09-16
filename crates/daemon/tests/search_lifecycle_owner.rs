@@ -1322,10 +1322,8 @@ async fn a_manifest_that_changes_the_maintenance_bounds_rotates_the_supervisor()
         "the gate keeps the manifest the running supervisor's bounds came from until it is stopped"
     );
     owner.stop_maintenance(&handle).await.unwrap();
-    assert!(matches!(
-        owner.run_slice(&slice_budget()),
-        SliceOutcome::Current
-    ));
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(matches!(outcome, SliceOutcome::Current), "{outcome:?}");
     assert!(
         owner.maintenance().is_some(),
         "a supervisor restarts under the new bounds"
