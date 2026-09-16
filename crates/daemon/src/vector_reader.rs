@@ -496,7 +496,7 @@ pub fn rank(
         })?;
     }
     // The page's decoded rows plus the one raw row being read.
-    let bytes = u64::try_from(request.bounds.page_rows.get())
+    let bytes = u64::try_from(request.bounds.page_rows.min(request.bounds.max_rows).get())
         .ok()
         .and_then(|rows| rows.checked_add(1))
         .and_then(|rows| rows.checked_mul(u64::from(view.layout.dimension)))

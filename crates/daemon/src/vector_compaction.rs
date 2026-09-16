@@ -178,20 +178,16 @@ pub fn compact(
     let footprint = vector_generation::footprint(
         expected,
         &checkpoint,
-        resolved
-            .winners
-            .iter()
-            .map(|winner| winner.occurrence_id.as_str()),
+        resolved.winners.iter().map(|winner| winner.occurrence_id),
         std::iter::empty(),
     );
-    // Beyond the build's own peak, compaction holds each winner's identifier twice, in the resolution and in the export, the winner vector at the capacity its pushes grew it to, the cut's digests, the prefix's checkpoint it hands the build, and one row's bytes and decode in flight while the export fills.
+    // Beyond the build's own peak, compaction holds each winner's identifier in the export, the winner vector at the capacity its pushes grew it to, the cut's digests, the export's own copy of the generation, kernel, and checkpoint it hands the build, and one row's bytes and decode in flight while the export fills.
     let identifier_bytes = resolved.winners.iter().fold(0u64, |total, winner| {
         total.saturating_add(winner.occurrence_id.len() as u64)
     });
     let rows = resolved.winners.len() as u64;
     let dimension = u64::from(view.layout().dimension);
     let own = identifier_bytes
-        .saturating_mul(2)
         .saturating_add((resolved.winners.capacity() * size_of::<Winner>()) as u64)
         .saturating_add(rows.saturating_mul(size_of::<ExportedRow>() as u64))
         .saturating_add(cut.digest.len() as u64)
@@ -202,7 +198,18 @@ pub fn compact(
                 .map(|delta| (delta.len() + size_of::<String>()) as u64)
                 .sum::<u64>(),
         )
-        .saturating_add(checkpoint.hold_id.len() as u64)
+        .saturating_add(
+            [
+                expected.generation.generation_id.len(),
+                expected.generation.embedding_model.len(),
+                expected.generation.tokenizer_fingerprint.len(),
+                expected.kernel_incarnation_id.len(),
+                checkpoint.hold_id.len(),
+            ]
+            .iter()
+            .map(|len| *len as u64)
+            .sum::<u64>(),
+        )
         .saturating_add(dimension.saturating_mul(8));
     let rows_held = staging.ledger.reserve(
         staging.admission,
@@ -225,13 +232,15 @@ pub fn compact(
                 fault,
             })?;
         exported.push(ExportedRow {
-            occurrence_id: winner.occurrence_id.clone(),
+            occurrence_id: winner.occurrence_id.to_owned(),
             vector,
         });
     }
     let built = match vector_generation::build(
         expected,
         &LiveRows {
+            generation: expected.generation.clone(),
+            kernel_incarnation_id: expected.kernel_incarnation_id.to_owned(),
             checkpoint,
             rows: exported,
             tombstones: Vec::new(),

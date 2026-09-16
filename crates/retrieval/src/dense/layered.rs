@@ -78,7 +78,7 @@ static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
 /// Merges the winners, in identifier order, with the walk's rows in the same order.
 struct ResolvedRows<'a> {
     layers: &'a [Layer<'a>],
-    winners: Vec<Winner>,
+    winners: Vec<Winner<'a>>,
     next: usize,
     revoked: usize,
     /// The last page read had no rows after it, so every winner still ahead of the cursor is past the live population.
@@ -109,25 +109,25 @@ impl RowSource for ResolvedRows<'_> {
                 }
                 std::cmp::Ordering::Equal => {
                     self.next += 1;
-                    let occurrence_id = &winner.occurrence_id;
+                    let occurrence_id = winner.occurrence_id;
                     let vector = match self.layers[winner.layer].rows.row(winner.row) {
                         Ok(vector) => vector,
                         Err(RowFault::Rejected(rejection)) => {
                             return Err(OracleRefusal::StoredRow {
-                                occurrence_id: occurrence_id.clone(),
+                                occurrence_id: occurrence_id.to_owned(),
                                 rejection,
                             });
                         }
                         Err(RowFault::Unavailable(detail)) => {
                             return Err(OracleRefusal::Unreadable {
-                                occurrence_id: occurrence_id.clone(),
+                                occurrence_id: occurrence_id.to_owned(),
                                 detail,
                             });
                         }
                     };
                     codec::validate(&vector, layout).map_err(|rejection| {
                         OracleRefusal::StoredRow {
-                            occurrence_id: occurrence_id.clone(),
+                            occurrence_id: occurrence_id.to_owned(),
                             rejection,
                         }
                     })?;
@@ -171,8 +171,7 @@ fn rank_layers_inner(
     budget: &EvalBudget,
     hook: impl FnMut(Window<'_>),
 ) -> Result<LayeredRanking, LayeredRefusal> {
-    let resolved = resolve::resolve(request.layers, request.max_entries)?;
-    // The resolver made every epoch equal to the base's; the layers must also be the generation's.
+    budget.check().map_err(|_| OracleRefusal::BudgetExhausted)?;
     if let Some(layer) = request
         .layers
         .iter()
@@ -183,6 +182,7 @@ fn rank_layers_inner(
             generation: request.generation.generation_epoch,
         });
     }
+    let resolved = resolve::resolve(request.layers, request.max_entries)?;
     let mut account = LayerAccount {
         winners: resolved.winners.len(),
         superseded: resolved.superseded,

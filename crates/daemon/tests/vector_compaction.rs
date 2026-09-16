@@ -752,6 +752,8 @@ fn the_scratch_reservation_is_sized_from_the_winners_identifiers_and_the_sidecar
         .map(|i| (format!("{i:02}").repeat(500), axis(i as usize)))
         .collect();
     let long_export = LiveRows {
+        generation: fixture.generation.clone(),
+        kernel_incarnation_id: fixture.identity.kernel_incarnation_id.clone(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: 9,
             checkpoint_commit_seq: 10,
@@ -768,6 +770,8 @@ fn the_scratch_reservation_is_sized_from_the_winners_identifiers_and_the_sidecar
     };
     let base = fixture.layer_from(&long_export);
     let delta = fixture.layer_from(&LiveRows {
+        generation: fixture.generation.clone(),
+        kernel_incarnation_id: fixture.identity.kernel_incarnation_id.clone(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: 11,
             checkpoint_commit_seq: 12,
@@ -794,8 +798,13 @@ fn the_scratch_reservation_is_sized_from_the_winners_identifiers_and_the_sidecar
     // The model name is 6 KiB, so the sidecar alone exceeds a 4 KiB fixed allowance.
     let mut fixture = Fixture::new();
     fixture.generation.embedding_model = "model-".repeat(1024);
-    let base = fixture.layer_from(&export(&corpus(), &[], 10));
-    let delta = fixture.layer_from(&export(&[("alpha", axis(7))], &[], 12));
+    // The exports name the generation they were read under, which is now the long-named one.
+    let mut base_export = export(&corpus(), &[], 10);
+    base_export.generation = fixture.generation.clone();
+    let mut delta_export = export(&[("alpha", axis(7))], &[], 12);
+    delta_export.generation = fixture.generation.clone();
+    let base = fixture.layer_from(&base_export);
+    let delta = fixture.layer_from(&delta_export);
     fixture
         .publish(&fixture.compose(1, &base, &[delta]).unwrap())
         .unwrap();

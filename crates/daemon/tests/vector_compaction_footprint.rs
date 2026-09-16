@@ -48,6 +48,8 @@ fn reserved_and_peak(
             let mut vector = rows[0].vector.clone();
             vector.rotate_right(i + 1);
             fixture.layer_from(&LiveRows {
+                generation: fixture.generation.clone(),
+                kernel_incarnation_id: fixture.identity.kernel_incarnation_id.clone(),
                 checkpoint: checkpoint(12 + i as i64),
                 rows: vec![ExportedRow {
                     occurrence_id: rows[0].occurrence_id.clone(),
@@ -58,6 +60,8 @@ fn reserved_and_peak(
         })
         .collect();
     let base = fixture.layer_from(&LiveRows {
+        generation: fixture.generation.clone(),
+        kernel_incarnation_id: fixture.identity.kernel_incarnation_id.clone(),
         checkpoint: checkpoint(10),
         rows,
         tombstones: Vec::new(),
@@ -165,9 +169,9 @@ fn a_winner_count_past_a_power_of_two_stays_within_the_reservation() {
 
 #[test]
 fn a_long_model_name_stays_within_the_reservation() {
-    // The model name is in the sidecar and in the compatibility identity, so every path that serializes either holds another copy.
+    // The model name is in the sidecar and in the compatibility identity, so every path that serializes either holds another copy. Half the record-size cap keeps the composition record admissible.
     let mut fixture = Fixture::new();
-    fixture.generation.embedding_model = "m".repeat(1 << 20);
+    fixture.generation.embedding_model = "m".repeat(1 << 19);
     let rows = vec![ExportedRow {
         occurrence_id: "alpha".to_owned(),
         vector: narrow(0),
@@ -178,8 +182,8 @@ fn a_long_model_name_stays_within_the_reservation() {
         "compaction peaked at {peak} heap bytes against a {reserved}-byte reservation"
     );
     assert!(
-        reserved < 8 << 20,
-        "the reservation is a bound, not a blank cheque: {reserved} for a 1 MiB model name"
+        reserved < 8 << 19,
+        "the reservation is a bound, not a blank cheque: {reserved} for a 512 KiB model name"
     );
 }
 

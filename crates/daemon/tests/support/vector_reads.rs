@@ -17,7 +17,7 @@ use retrieval::dense::export::{ExportedRow, LiveRows};
 use retrieval::dense::{LayeredRanking, OracleBounds};
 
 use super::dense_projection::{Projection, occurrence_id};
-use super::vector_store::{Fixture, unit};
+use super::vector_store::{Fixture, KERNEL, generation, unit};
 
 pub const OBJECTS: [&str; 5] = ["alpha", "beta", "gamma", "delta", "epsilon"];
 
@@ -53,6 +53,8 @@ pub fn export(rows: &[(&str, Vec<f32>)], tombstones: &[&str], checkpoint: i64) -
         .collect();
     tombstones.sort();
     LiveRows {
+        generation: generation(),
+        kernel_incarnation_id: KERNEL.to_owned(),
         checkpoint: ProjectionCheckpoint {
             snapshot_commit_seq: checkpoint - 1,
             checkpoint_commit_seq: checkpoint,
