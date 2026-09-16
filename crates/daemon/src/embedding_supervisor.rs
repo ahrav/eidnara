@@ -593,6 +593,10 @@ impl EmbeddingSupervisor {
         self.tracker.close();
     }
 
+    pub(crate) fn drained(&self) -> bool {
+        self.tracker.is_closed() && self.tracker.is_empty()
+    }
+
     /// The tracked task retains the reader until the slice loop and native census have drained.
     pub(crate) fn spawn_pinned(
         self: &Arc<Self>,

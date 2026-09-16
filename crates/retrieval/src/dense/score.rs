@@ -84,27 +84,27 @@ impl<T> TopK<T> {
         }
     }
 
+    pub fn admits(&self, score: f64, occurrence_id: &str) -> bool {
+        self.heap.len() < self.k.get()
+            || self.heap.peek().is_some_and(|worst| {
+                rank_order((score, occurrence_id), worst.0.key()) == Ordering::Less
+            })
+    }
+
+    /// A row that ranks at or below the current worst member when the set is full is dropped.
     pub fn offer(&mut self, ranked: Ranked, payload: T) {
-        if !self.admits(&ranked) {
+        if self.heap.len() < self.k.get() {
+            self.heap.push(Worst(ranked, payload));
             return;
         }
-        if self.heap.len() == self.k.get() {
+        if self.admits(ranked.score, &ranked.occurrence_id) {
             self.heap.pop();
+            self.heap.push(Worst(ranked, payload));
         }
-        self.heap.push(Worst(ranked, payload));
     }
 
     pub fn is_empty(&self) -> bool {
         self.heap.is_empty()
-    }
-
-    /// Whether `ranked` would enter the set if offered now: always while the set is short of `k`, otherwise only strictly ahead of the current worst member.
-    pub fn admits(&self, ranked: &Ranked) -> bool {
-        self.heap.len() < self.k.get()
-            || self
-                .heap
-                .peek()
-                .is_some_and(|worst| rank_order(ranked.key(), worst.0.key()) == Ordering::Less)
     }
 
     /// Best first.

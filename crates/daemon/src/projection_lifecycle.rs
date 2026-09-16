@@ -14,6 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use host_runtime::LifecycleTransactionLock;
 use host_runtime::lifecycle::is_canonical_payload_digest;
+use kernel::source_identity::well_formed_value;
 use retrieval::dispatch::valid_authorization_ref;
 use rustix::fs::{FlockOperation, OFlags};
 use serde::{Deserialize, Serialize};
@@ -165,7 +166,7 @@ impl LifecycleIntent {
             return Err(format!("schema {}", self.schema));
         }
         check_invariants(
-            &self.consumer.consumer_id,
+            &self.consumer,
             self.transition,
             self.authorization_ref.as_deref(),
             self.cause,
@@ -221,15 +222,21 @@ impl LifecycleIntent {
     }
 }
 
-/// `record` rejects and `read` marks unavailable intents with a blank consumer or an invalid transition, `authorization_ref`, and cause combination.
+/// `record` rejects and `read` marks unavailable intents with a blank consumer, a generation id
+/// outside the kernel identity-value rule, or an invalid transition, `authorization_ref`, and
+/// cause combination. The generation rule is the one `retrieval::fusion::GenerationId` applies,
+/// so every generation admitted here has a fusion spelling.
 fn check_invariants(
-    consumer_id: &str,
+    consumer: &ConsumerBinding,
     transition: Transition,
     authorization_ref: Option<&str>,
     cause: Cause,
 ) -> Result<(), IntentRefusal> {
-    if consumer_id.trim().is_empty() {
+    if consumer.consumer_id.trim().is_empty() {
         return Err(IntentRefusal::InvalidConsumer);
+    }
+    if !well_formed_value(&consumer.generation_id) {
+        return Err(IntentRefusal::InvalidGeneration);
     }
     match (transition, authorization_ref, cause) {
         (Transition::AuthorizedRecovery, None, _) => Err(IntentRefusal::MissingAuthorization),
@@ -311,6 +318,10 @@ pub enum IntentRefusal {
     Disabled,
     #[error("the consumer binding names no consumer")]
     InvalidConsumer,
+    #[error(
+        "the consumer binding's generation id is empty, over the identity size bound, or holds a control character"
+    )]
+    InvalidGeneration,
     #[error("an authorized recovery needs an operator authorization reference")]
     MissingAuthorization,
     #[error(
@@ -1174,7 +1185,7 @@ impl ProjectionLifecycle {
 
 pub(crate) fn check_request(request: &LifecycleRequest, now: i64) -> Result<(), IntentRefusal> {
     check_invariants(
-        &request.consumer.consumer_id,
+        &request.consumer,
         request.transition,
         request.authorization_ref.as_deref(),
         request.cause,

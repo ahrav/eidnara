@@ -286,9 +286,14 @@ probe that ranked it best, and that probe's ordinal. It reads no payload bytes.
 A contribution is a recall candidate for the caller's fusion or rendering step;
 it carries no authorization and its rank is comparable only within one request.
 
-Each probe runs as one `MATCH ?` bound through `ToSql`, joined to `occurrences`
-with tombstoned rows excluded, ordered by `rank` then `occurrence_id`, and
-limited to `scan_rows`. Zero probes issue no `MATCH` and return
+Each probe is one `MATCH ?` bound through `ToSql`, ordered by `rank` then
+`occurrence_id`, and limited to `scan_rows`. The probe first shortlists the top
+rows of `lexical` alone, then joins the shortlist to `occurrences` and marks any
+row whose occurrence is missing or tombstoned. A marked row would hold a slot a
+live row should take, so the probe then reruns the exact query that joins
+`occurrences` and excludes tombstoned rows before the limit. Either way the
+returned rows are the same: the live rows in comparator order, bounded by
+`scan_rows`. Zero probes issue no `MATCH` and return
 `Completion::Empty`. An occurrence hit by several probes keeps its lowest rank;
 among equal ranks it keeps the lowest ordinal. The comparator throughout is
 rank ascending, then occurrence identifier bytes ascending, so the result of a

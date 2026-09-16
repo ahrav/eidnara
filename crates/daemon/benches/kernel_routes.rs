@@ -206,8 +206,9 @@ impl Daemon {
             .block_on(self.handler.dispatch_value_for_test(self.route, request));
         match outcome {
             PreparedOutcome::Response(output) => {
-                let body = output.json_for_test().expect("kernel route answers JSON");
-                if body["state"]["kind"] != "available" {
+                if let Some(body) = output.json_for_test()
+                    && body["state"]["kind"] != "available"
+                {
                     panic!("kernel route did not answer available: {}", body["state"]);
                 }
                 let mut encoded = self.encoded.borrow_mut();

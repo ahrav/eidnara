@@ -20,9 +20,11 @@ pub mod dense;
 pub mod dispatch;
 pub mod eligibility;
 pub mod exact;
+pub mod fusion;
 pub mod identity_sweep;
 pub mod lexical;
 pub mod message_cleanup;
+pub mod packing;
 pub mod retirement;
 mod scan;
 pub mod vectors;
@@ -305,6 +307,9 @@ pub enum ProjectionError {
     },
     #[error("the linked engine is unsupported: {reason}")]
     Unsupported { reason: &'static str },
+    /// The connection's progress handler stopped the statement, so the caller's budget ended the read rather than the engine failing.
+    #[error("sqlite: the statement was interrupted")]
+    Interrupted,
     #[error("sqlite: {0}")]
     Sqlite(String),
 }
@@ -317,7 +322,11 @@ impl From<lexical::LexicalRefusal> for ProjectionError {
 
 impl From<rusqlite::Error> for ProjectionError {
     fn from(error: rusqlite::Error) -> Self {
-        Self::Sqlite(error.to_string())
+        if storage::is_interrupted(&error) {
+            Self::Interrupted
+        } else {
+            Self::Sqlite(error.to_string())
+        }
     }
 }
 
@@ -327,7 +336,7 @@ impl From<OccurrenceRefusal> for ProjectionError {
     }
 }
 
-fn parse_sensitivity(value: &str) -> Option<Sensitivity> {
+pub(crate) fn parse_sensitivity(value: &str) -> Option<Sensitivity> {
     Sensitivity::ALL
         .iter()
         .copied()

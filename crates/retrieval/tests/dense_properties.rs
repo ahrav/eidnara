@@ -82,7 +82,7 @@ fn top_k_equals_sort_then_truncate_for_every_offer_order() {
                     let mut with_row = offered.clone();
                     with_row.push((*score, id.clone()));
                     let belongs = model(with_row, k).iter().any(|(_, member)| member == id);
-                    prop_assert_eq!(top.admits(&ranked), belongs, "row {} at k={}", id, k);
+                    prop_assert_eq!(top.admits(*score, id), belongs, "row {} at k={}", id, k);
                     top.offer(ranked, ());
                     offered.push((*score, id.clone()));
                 }

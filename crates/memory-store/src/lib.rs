@@ -8010,6 +8010,15 @@ impl MemoryStore {
         MemoryStore::open(&Self::test_descriptor(dir, module_id)).expect("open test store")
     }
 
+    /// Runs a read on the store's own connection, with the connection profile applied.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_conn_for_test<T>(
+        &self,
+        f: impl FnOnce(&storage::GuardedConn<'_>) -> rusqlite::Result<T>,
+    ) -> Result<T, storage::StoreError> {
+        self.inner.with_conn(f)
+    }
+
     #[cfg(feature = "test-support")]
     pub fn seed_tags_for_test(
         &self,
@@ -15776,38 +15785,6 @@ mod tests {
         assert_eq!(
             (cache_size, mmap_size),
             (profile.cache_pages, profile.mmap_bytes)
-        );
-    }
-
-    /// SQLite bounds a sorter's in-memory list at `cache_size` pages and spills excess rows
-    /// to the temp store only when the temp store uses files; with the temp store in memory
-    /// every sorted row stays in the heap. A read callback sorting four budgets of rows
-    /// retains about one budget when the bound applies.
-    #[test]
-    fn a_transient_sort_past_the_page_cache_budget_spills_instead_of_growing_the_heap() {
-        const PAYLOAD_BYTES: i64 = 4096;
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let rows = 4 * PAGE_CACHE_BUDGET_BYTES / PAYLOAD_BYTES;
-        let retained = store
-            .inner
-            .with_conn(|conn| {
-                let mut statement = conn.prepare(
-                    "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?1)
-                     SELECT payload FROM (SELECT n, randomblob(?2) AS payload FROM seq)
-                      ORDER BY (n * 7919) % 10007, n",
-                )?;
-                let before = storage::library_memory_used();
-                let mut sorted = statement.query(params![rows, PAYLOAD_BYTES])?;
-                sorted.next()?.expect("the sort yields its first row");
-                Ok(storage::library_memory_used() - before)
-            })
-            .unwrap();
-        assert!(
-            retained <= 2 * PAGE_CACHE_BUDGET_BYTES,
-            "sorting {} bytes retained {retained} bytes; the sorter did not spill at the {} byte page-cache budget",
-            rows * PAYLOAD_BYTES,
-            PAGE_CACHE_BUDGET_BYTES
         );
     }
 

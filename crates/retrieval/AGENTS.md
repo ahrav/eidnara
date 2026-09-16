@@ -26,3 +26,18 @@ imports no host-runtime or daemon type. Every dense bound is caller-supplied
 with no default. Changing the row encoding, the metric, the scoring
 arithmetic, the tie order, or the layer precedence rule requires the matching
 document edit in the same change.
+
+`src/fusion/` implements `docs/fusion-identity-contract.md`. Changing an
+identity spelling, the lane set or its order, a consolidation rule, a digest
+domain tag or component layout, or the parent derivation requires the matching
+document edit in the same change and a new domain tag for every digest whose
+bytes change. Identity types carry no project, session, or harness.
+
+`src/packing.rs` reads selected occurrences by occurrence identity and derives
+the grouping key. Attribution (sensitivity, provenance, eligibility candidate)
+comes from the occurrence's own row; `PayloadRef` is never an input to any
+read. Only `raw_tool_spans` groups (`Grouping::applies_to`); every other class
+derives `Grouping::NonGrouping`, and `GroupingKey` is derive-only. The crate holds no eligibility verdict: candidates go
+to `eligibility::judge_occurrences` and the report stays with the caller.
+Changing the grouping class set or the key's components requires the matching
+edit in `docs/properties/selection-packing/identity/catalog.md`.

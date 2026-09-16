@@ -300,9 +300,18 @@ mod sqlite_backend {
 
         /// Acquires the connection by polling until `deadline` rather than blocking past the caller's budget; a deadline that has already passed is refused before the first attempt.
         fn lock_conn_within(&self, deadline: Instant) -> Result<ConnGuard<'_>, StoreError> {
+            self.lock_conn_until(deadline, &mut || false)
+        }
+
+        /// `stop` ends connection acquisition at the next polling iteration, rather than waiting until `deadline`.
+        fn lock_conn_until(
+            &self,
+            deadline: Instant,
+            stop: &mut impl FnMut() -> bool,
+        ) -> Result<ConnGuard<'_>, StoreError> {
             self.refuse_reentry()?;
             loop {
-                if Instant::now() >= deadline {
+                if Instant::now() >= deadline || stop() {
                     return Err(StoreError::Deadline);
                 }
                 match self.conn.try_lock() {
@@ -380,20 +389,21 @@ mod sqlite_backend {
             self.read_on(guard, None::<fn() -> bool>, f)
         }
 
-        /// [`Self::with_conn_within`] whose statements are also interrupted once `stop` returns `true`.
+        /// Runs `f` with a connection acquired by `deadline`; `stop` ends both the acquisition wait and the statements.
+        /// `stop` is polled once per acquisition iteration and once per progress-handler interval, so it must be cheap, side-effect free apart from latching, and must not panic: SQLite treats a panicking handler as "continue".
         /// SQLite's [progress callback](https://www.sqlite.org/c3ref/progress_handler.html) uses an approximate VM-instruction interval, not a wall-clock timeout.
         /// The handler is removed before the transaction ends, including when `f` unwinds, so a later read on the same connection cannot be interrupted by an earlier caller's `stop`.
         ///
         /// # Errors
         ///
-        /// Returns [`StoreError::Deadline`] when `stop` interrupted a statement that `f` propagated, or when the connection was not acquired by `deadline`; otherwise as [`Self::with_conn_within`].
+        /// Returns [`StoreError::Deadline`] when `stop` ended the acquisition wait or interrupted a statement that `f` propagated, or when the connection was not acquired by `deadline`; otherwise as [`Self::with_conn_within`].
         pub fn with_conn_interruptible<T>(
             &self,
             deadline: Instant,
-            stop: impl FnMut() -> bool + Send + 'static,
+            mut stop: impl FnMut() -> bool + Send + 'static,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
         ) -> Result<T, StoreError> {
-            let guard = self.lock_conn_within(deadline)?;
+            let guard = self.lock_conn_until(deadline, &mut stop)?;
             self.read_on(guard, Some(stop), f)
         }
 
@@ -693,10 +703,12 @@ mod sqlite_backend {
             if !self.armed {
                 return Ok(());
             }
-            self.armed = false;
             self.conn
                 .progress_handler(0, None::<fn() -> bool>)
-                .map_err(backend_error)
+                .map_err(backend_error)?;
+            // Disarming only after success leaves the drop path to retry a failed removal.
+            self.armed = false;
+            Ok(())
         }
     }
 
@@ -788,10 +800,26 @@ mod sqlite_backend {
 
     /// Bytes the SQLite library holds through its allocator, across every connection in
     /// the process, so an assertion on a delta must leave room for concurrent connections.
+    /// Zero unless [`enable_library_memory_statistics`] ran first in this process: the
+    /// workspace builds SQLite with `SQLITE_DEFAULT_MEMSTATUS=0`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn library_memory_used() -> i64 {
         // SAFETY: `sqlite3_memory_used` takes no pointers and reads no Rust-managed memory.
         unsafe { rusqlite::ffi::sqlite3_memory_used() }
+    }
+
+    /// Turns on SQLite's allocation statistics for this process. SQLite accepts the
+    /// setting only before its first initialization, so this must run before any
+    /// connection opens; the result is `false` once that window has closed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn enable_library_memory_statistics() -> bool {
+        // SAFETY: `sqlite3_config` with `SQLITE_CONFIG_MEMSTATUS` reads one integer
+        // argument and touches no Rust-managed memory; SQLite refuses the call with
+        // `SQLITE_MISUSE` rather than acting on it after initialization.
+        let rc = unsafe {
+            rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 1 as c_int)
+        };
+        rc == rusqlite::ffi::SQLITE_OK
     }
 
     /// Reaches pragmas and statement batches but not the authorizer, so a maintenance
@@ -914,6 +942,14 @@ mod sqlite_backend {
                 #[cfg(any(test, feature = "test-support"))]
                 gate,
             }
+        }
+
+        /// Leaves a progress handler installed past the read, which a negative control uses to show that the untouched-later-read oracle detects a leaked hook.
+        #[cfg(test)]
+        pub(crate) fn leak_progress_handler_for_test(&self) {
+            self.conn
+                .progress_handler(1, Some(|| true))
+                .expect("a progress handler installs on an open connection");
         }
 
         /// # Errors
@@ -3028,6 +3064,8 @@ mod sqlite_backend {
 
 #[cfg(all(feature = "sqlite", feature = "test-support"))]
 pub use sqlite_backend::after_commit_for_test;
+#[cfg(all(feature = "sqlite", any(test, feature = "test-support")))]
+pub use sqlite_backend::enable_library_memory_statistics;
 #[cfg(all(feature = "sqlite", any(test, feature = "test-support")))]
 pub use sqlite_backend::library_memory_used;
 #[cfg(feature = "sqlite")]
@@ -5545,7 +5583,15 @@ mod tests {
             |c: &GuardedConn<'_>, sql: &str| c.query_row(sql, [], |row| row.get::<_, i64>(0));
         let far = || Instant::now() + Duration::from_secs(60);
 
-        let r = store.with_conn_interruptible(far(), || true, |c| count(c, long_scan));
+        // The first poll happens during acquisition; only the progress handler's later polls stop.
+        let after_acquisition = || {
+            let mut polls = 0;
+            move || {
+                polls += 1;
+                polls > 1
+            }
+        };
+        let r = store.with_conn_interruptible(far(), after_acquisition(), |c| count(c, long_scan));
         assert!(matches!(r, Err(StoreError::Deadline)), "{r:?}");
         assert_eq!(
             store
@@ -5557,7 +5603,7 @@ mod tests {
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             store.with_conn_interruptible(
                 far(),
-                || true,
+                after_acquisition(),
                 |_| -> rusqlite::Result<i64> {
                     panic!("the callback unwinds while the handler is installed")
                 },
@@ -5578,6 +5624,80 @@ mod tests {
             20_000
         );
         drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Negative control for the untouched-later-read oracle: a handler that is not removed does interrupt the next read, so the oracle detects a leak.
+    #[test]
+    fn a_leaked_progress_handler_interrupts_the_next_read_on_the_connection() {
+        let (root, d) = tmp();
+        let store = open_sqlite(&d, KV_BASELINE).expect("open");
+        let polled = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) SELECT count(*) FROM n";
+        let far = || Instant::now() + Duration::from_secs(60);
+        let count = |c: &GuardedConn<'_>| c.query_row(polled, [], |row| row.get::<_, i64>(0));
+        // The leaked handler already interrupts the statements that finish this read.
+        let _ = store.with_conn(|c| {
+            c.leak_progress_handler_for_test();
+            Ok(())
+        });
+        let leaked = store.with_conn_within(far(), count);
+        assert!(leaked.is_err(), "{leaked:?}");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cancelled_stop_ends_the_connection_acquisition_wait_before_the_deadline() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+
+        let (root, d) = tmp();
+        let store = Arc::new(open_sqlite(&d, KV_BASELINE).expect("open"));
+        let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let holder = Arc::clone(&store);
+        let holding = thread::spawn(move || {
+            holder
+                .with_conn(|_| {
+                    held_tx.send(()).unwrap();
+                    let _ = hold_rx.recv_timeout(Duration::from_secs(10));
+                    Ok(())
+                })
+                .expect("the holder's read completes");
+        });
+        held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&stop);
+        let polled = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&polled);
+        let started = Instant::now();
+        let waiter = thread::spawn(move || {
+            store.with_conn_interruptible(
+                Instant::now() + Duration::from_secs(30),
+                move || {
+                    if observed.load(Ordering::SeqCst) {
+                        return true;
+                    }
+                    seen.store(true, Ordering::SeqCst);
+                    false
+                },
+                |_| Ok(()),
+            )
+        });
+        while !polled.load(Ordering::SeqCst) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the waiter never polled the stop predicate while the connection was held"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        stop.store(true, Ordering::SeqCst);
+        let result = waiter.join().unwrap();
+        assert!(matches!(result, Err(StoreError::Deadline)), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        hold_tx.send(()).unwrap();
+        holding.join().unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -18,6 +18,7 @@ use storage::{
     GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, StoreError, open_sqlite,
 };
 
+use crate::request_budget::SharedBudget;
 use crate::search_writer::{Quarantine, QuarantineKind};
 
 /// The page cache the projection connection is allowed, in KiB.
@@ -382,9 +383,36 @@ impl SearchProjection {
         self.run(f, Access::ReadWithin(deadline))
     }
 
+    /// [`Self::read_within`] whose acquisition wait and SQLite VM steps also stop on the request's cancellation.
+    ///
+    /// The progress handler is request-local: the store removes it before the transaction ends and on unwind, so a later request on the same connection is never interrupted by this one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchProjectionError::Store`] carrying [`StoreError::Deadline`] when the budget was exhausted before acquisition, during the wait, or during a statement; the caller reads [`SharedBudget::exhaustion`] to tell cancellation from deadline.
+    pub fn read_under<T>(
+        &self,
+        budget: &SharedBudget,
+        f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
+    ) -> Result<T, SearchProjectionError> {
+        self.run(
+            f,
+            Access::ReadUnder {
+                deadline: budget.deadline(),
+                stop: Box::new(budget.stop_predicate()),
+            },
+        )
+    }
+
     /// Runs `f` under the store's transaction of the given access. A refusal
     /// from `f` rolls the transaction back and is returned as itself; a store
     /// failure is returned as the store's.
+    ///
+    /// An engine interrupt is the caller's budget ending the statement, so
+    /// [`ProjectionError::Interrupted`] leaves as [`StoreError::Deadline`] on
+    /// every access mode. Consumers that classify a returned
+    /// [`SearchProjectionError::Projection`] refusal never see the variant, so a
+    /// cancellation is never classified as a storage fault.
     fn run<T>(
         &self,
         f: impl FnOnce(&GuardedConn<'_>) -> Result<T, ProjectionError>,
@@ -392,10 +420,10 @@ impl SearchProjection {
     ) -> Result<T, SearchProjectionError> {
         let mut outcome: Option<Result<T, ProjectionError>> = None;
         let mut quarantine = None;
+        // Read before the match below moves `access`, whose `ReadUnder` arm owns a boxed predicate.
+        let is_read = access.is_read();
         let inner = |conn: &GuardedConn<'_>| -> rusqlite::Result<()> {
-            if !access.is_read()
-                && let Some(found) = self.quarantine()
-            {
+            if !is_read && let Some(found) = self.quarantine() {
                 quarantine = Some(found);
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
@@ -405,9 +433,7 @@ impl SearchProjection {
             if failed {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
-            if !access.is_read()
-                && let Some(found) = self.quarantine()
-            {
+            if !is_read && let Some(found) = self.quarantine() {
                 quarantine = Some(found);
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
@@ -418,6 +444,9 @@ impl SearchProjection {
             Access::WriteWithin(deadline) => self.store.with_conn_fenced_within(deadline, inner),
             Access::Read => self.store.with_conn(inner),
             Access::ReadWithin(deadline) => self.store.with_conn_within(deadline, inner),
+            Access::ReadUnder { deadline, stop } => {
+                self.store.with_conn_interruptible(deadline, stop, inner)
+            }
         };
         if let Some(quarantine) = quarantine {
             return Err(SearchProjectionError::Quarantined(quarantine));
@@ -427,6 +456,7 @@ impl SearchProjection {
                 store_result?;
                 Ok(value)
             }
+            Some(Err(ProjectionError::Interrupted)) => Err(StoreError::Deadline.into()),
             Some(Err(error)) => Err(error.into()),
             None => {
                 store_result?;
@@ -438,16 +468,22 @@ impl SearchProjection {
     }
 }
 
-#[derive(Clone, Copy)]
 enum Access {
     Write,
     WriteWithin(Instant),
     Read,
     ReadWithin(Instant),
+    ReadUnder {
+        deadline: Instant,
+        stop: Box<dyn FnMut() -> bool + Send + 'static>,
+    },
 }
 
 impl Access {
-    fn is_read(self) -> bool {
-        matches!(self, Self::Read | Self::ReadWithin(_))
+    fn is_read(&self) -> bool {
+        matches!(
+            self,
+            Self::Read | Self::ReadWithin(_) | Self::ReadUnder { .. }
+        )
     }
 }

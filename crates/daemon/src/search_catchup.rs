@@ -954,6 +954,11 @@ pub(crate) fn classify(error: &ProjectionError) -> Refusal {
         | ProjectionError::Lexical(_)
         | ProjectionError::LexicalRowidCollision { .. }
         | ProjectionError::CorruptRow => Refusal::Integrity,
-        ProjectionError::Unsupported { .. } | ProjectionError::Sqlite(_) => Refusal::Storage,
+        // `SearchProjection::run` returns an interrupt as `StoreError::Deadline` before any
+        // refusal reaches this classifier, so the arm only completes the match; an interrupt
+        // is a cancellation, never a storage fault.
+        ProjectionError::Unsupported { .. }
+        | ProjectionError::Interrupted
+        | ProjectionError::Sqlite(_) => Refusal::Storage,
     }
 }

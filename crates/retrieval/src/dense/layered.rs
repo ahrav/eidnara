@@ -1,6 +1,6 @@
 //! Ranks the live required occurrences of the projection against the rows a composition's layers resolve to.
 //! Resolution runs first and alone: the winners are fixed before any row is judged, so neither enumeration order nor score can choose among layers.
-//! Rows go through `oracle::walk`: visited in identifier order, scored, judged in bounded batches only when they can enter the top-K, and re-judged once at the end.
+//! The walk is the oracle's: live required rows in identifier order, scored, judged in bounded batches only where a row could enter the bounded top-K, and re-judged once at the end.
 //! A winner the projection no longer lists as live is revoked and never scored; no older row of its occurrence stands in for it.
 //! A live required row no layer holds is a coverage shortfall, as in the oracle.
 

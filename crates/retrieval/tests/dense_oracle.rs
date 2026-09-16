@@ -7,9 +7,7 @@ use std::time::{Duration, Instant};
 
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
-use kernel::{
-    ArtifactDestination, EligibilityVerdict, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
-};
+use kernel::{ArtifactDestination, EligibilityVerdict, KernelStore, MAX_ELIGIBILITY_CANDIDATES};
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
 use retrieval::dense::codec::{
@@ -69,9 +67,10 @@ fn a_population_larger_than_k_yields_the_reference_prefix_and_visits_every_requi
         }
     );
     assert!(ranking.consumed.pages >= 4, "{:?}", ranking.consumed);
+    // Every row is scored, but only a row that could enter the top-3 when visited is judged, then the 3 held rows are re-judged.
     assert!(
-        ranking.consumed.judged < 8 + 3,
-        "a row behind a full top-K is not judged: {:?}",
+        (3 + 3..8 + 3).contains(&ranking.consumed.judged),
+        "{:?}",
         ranking.consumed
     );
     assert!(ranking.consumed.batches <= ranking.consumed.pages + 1);
@@ -220,8 +219,8 @@ fn a_higher_scoring_excluded_row_never_displaces_an_eligible_one_and_stays_a_pol
 }
 
 #[test]
-fn a_row_behind_a_full_top_k_is_scored_but_never_judged_so_its_exclusion_is_not_counted() {
-    // Visit order puts `alpha` (the best against `axis(0)`) in the first page and `theta` (the worst) last.
+fn a_row_that_cannot_enter_the_top_k_when_visited_is_scored_but_never_judged() {
+    // `theta` scores lowest against the axis; the kernel hides it.
     let admitted: Vec<&str> = OBJECTS
         .iter()
         .copied()
@@ -229,47 +228,96 @@ fn a_row_behind_a_full_top_k_is_scored_but_never_judged_so_its_exclusion_is_not_
         .collect();
     let fixture = Fixture::new(&admitted, corpus());
     let query = axis(0);
-
-    let (ranking, visited) = fixture.rank_recording(&query, bounds(1));
-    assert_eq!(ranking.completion, Completion::Complete);
-    assert_eq!(ids_of(&ranking), vec![fixture.id("alpha")]);
-    assert_visited_once(&fixture, &visited);
-    assert_eq!(
-        ranking.coverage.with_vector, 8,
-        "every row is still read and scored"
+    let reference = fixture.reference(&query, &admitted);
+    let theta = fixture.id("theta");
+    let before_theta = fixture
+        .dense_ids()
+        .iter()
+        .take_while(|id| **id != theta)
+        .count();
+    assert!(
+        before_theta >= 1,
+        "the visit order must reach theta after another row"
     );
+
+    // One row per page: the top-K is full of better rows before theta is visited, so theta is not judged.
+    let lazy = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(1).unwrap(),
+                ..bounds(before_theta)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(lazy.completion, Completion::Complete);
+    assert_eq!(keyed(&lazy), reference[..before_theta]);
     assert_eq!(
-        (ranking.consumed.judged, ranking.consumed.batches),
-        (2 + 1, 2),
-        "only the first page and the re-judgment reach the kernel: {:?}",
-        ranking.consumed
+        lazy.coverage.with_vector, 8,
+        "theta is still visited and scored"
     );
     assert!(
-        ranking.consumed.excluded.is_empty(),
-        "the unadmitted loser was never judged"
+        lazy.consumed.excluded.is_empty(),
+        "a row that could not enter the top-K is not judged: {:?}",
+        lazy.consumed
     );
+    assert!(
+        lazy.consumed.judged < 8 + before_theta,
+        "{:?}",
+        lazy.consumed
+    );
+
+    // One page holding every row: theta is selected against an empty top-K and judged.
+    let eager = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(8).unwrap(),
+                ..bounds(before_theta)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(keyed(&eager), keyed(&lazy));
+    assert_eq!(
+        eager.consumed.excluded,
+        vec![(EligibilityVerdict::Hidden, 1)]
+    );
+    assert_eq!(eager.consumed.judged, 8 + before_theta);
 }
 
 #[test]
-fn a_row_with_malformed_eligibility_identity_refuses_the_request_whether_or_not_it_can_rank() {
-    // `theta` scores worst against `axis(0)` and is visited last; with `k = 1` it can never enter the top-K.
-    // The schema has no CHECK on the digest's shape, so a projection row can carry one the kernel refuses.
-    for k in [1, 8] {
-        let fixture = Fixture::all_admitted();
-        let changed = fixture
-            .raw()
-            .execute(
-                "UPDATE occurrences SET source_artifact_digest='not-a-digest' WHERE occurrence_id=?1",
-                [fixture.id("theta")],
-            )
-            .unwrap();
-        assert_eq!(changed, 1);
-
-        let outcome = fixture.rank(&axis(0), bounds(k), &EvalBudget::unbounded());
+fn a_corrupt_identity_field_is_refused_whether_or_not_its_row_could_enter_the_top_k() {
+    // `theta` scores lowest against the axis, so with one row per page it is visited after the top-K is full.
+    let fixture = Fixture::all_admitted();
+    let theta = fixture.id("theta");
+    let before_theta = fixture
+        .dense_ids()
+        .iter()
+        .take_while(|id| **id != theta)
+        .count();
+    assert!(before_theta >= 1);
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrences SET source_object_id='' WHERE occurrence_id=?1",
+            rusqlite::params![theta],
+        )
+        .unwrap();
+    for page_rows in [1, 8] {
+        let outcome = fixture.rank(
+            &axis(0),
+            OracleBounds {
+                page_rows: NonZeroUsize::new(page_rows).unwrap(),
+                ..bounds(before_theta)
+            },
+            &EvalBudget::unbounded(),
+        );
         assert_eq!(
-            outcome.map(|ranking| ranking.completion),
-            Err(OracleRefusal::Kernel(KernelError::InvalidInput)),
-            "k={k}: a malformed row refuses the request even when its score cannot rank"
+            outcome,
+            Err(OracleRefusal::Kernel(kernel::KernelError::InvalidInput)),
+            "page_rows={page_rows}: paging must not decide whether a corrupt identity field is detected"
         );
     }
 }
@@ -1077,7 +1125,11 @@ fn page_size_changes_the_batch_count_but_not_the_ranking() {
         );
         assert_eq!(keyed(&ranking), reference[..4], "page_rows={page_rows}");
         assert_visited_once(&fixture, &visited);
-        assert!(ranking.consumed.batches <= ranking.consumed.pages + 1);
+        assert!(
+            ranking.consumed.batches <= ranking.consumed.pages + 1,
+            "a page with no row that could enter the top-K runs no batch: {:?}",
+            ranking.consumed
+        );
         if let Some(previous) = &previous {
             assert_eq!(&keyed(&ranking), previous);
         }
