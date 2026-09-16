@@ -247,6 +247,20 @@ fn the_gate_admits_compressed_activation_only_under_an_installed_evaluator_and_w
     assert_eq!(gate.renew_for_test(passing()), Renewal::Kept);
     assert!(!hook_grant.invalidated.is_cancelled());
     assert!(gate.admit_compressed_activation().is_ok());
+
+    // A campaign that passes under a new daemon binding admits, but the grant issued under the old binding does not carry over to it.
+    let grant = gate.admit_compressed_activation().unwrap();
+    let mut rebound = passing();
+    rebound.binding.as_mut().unwrap().hardware = "other-hardware".to_owned();
+    compression(&mut rebound).binding.hardware = "other-hardware".to_owned();
+    assert_eq!(rebound.judge_compressed_activation(), Ok(()));
+    assert_eq!(
+        gate.renew_for_test(rebound),
+        Renewal::Invalidated,
+        "an activation admitted under one binding does not survive a refresh to another"
+    );
+    assert!(grant.invalidated.is_cancelled());
+    assert!(gate.admit_compressed_activation().is_ok());
 }
 
 #[test]

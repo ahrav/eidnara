@@ -924,7 +924,7 @@ impl HookGate {
         self.replace(Some(evaluator));
     }
 
-    /// Installs `evaluator` without cancelling grants when the manifest and identity match and every hook the old evaluator admitted stays admitted. Any other change cancels as [`HookGate::close`] does. A disabled gate stores the evaluator and stays latched.
+    /// Installs `evaluator` without cancelling grants when the manifest and identity match, every hook the old evaluator admitted stays admitted, and an admitted activation stays admitted under the same binding. Any other change cancels as [`HookGate::close`] does. A disabled gate stores the evaluator and stays latched.
     pub(crate) fn renew(&self, evaluator: EvidenceEvaluator) -> Renewal {
         let mut state = self
             .state
@@ -939,7 +939,8 @@ impl HookGate {
                     .iter()
                     .all(|hook| old.judge(*hook).is_err() || evaluator.judge(*hook).is_ok())
                 && (old.judge_compressed_activation().is_err()
-                    || evaluator.judge_compressed_activation().is_ok())
+                    || (evaluator.judge_compressed_activation().is_ok()
+                        && old.binding == evaluator.binding))
         }) {
             Renewal::Kept
         } else {
