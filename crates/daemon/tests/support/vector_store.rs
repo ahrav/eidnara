@@ -110,17 +110,30 @@ impl Fixture {
     }
 
     pub fn with_dimension(dimension: u32) -> Self {
+        Self::build(dimension, None)
+    }
+
+    /// A fixture whose identity, gate, ledger, and generation all name `model`, so a long name reaches every path that carries it.
+    pub fn with_embedding_model(model: &str) -> Self {
+        Self::build(DIMENSION, Some(model))
+    }
+
+    fn build(dimension: u32, model: Option<&str>) -> Self {
         let root = tempfile::tempdir().unwrap();
         let store = GenerationStore::open(Some(root.path())).unwrap();
         let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
-        let identity = identity(KERNEL, dimension);
+        let mut identity = identity(KERNEL, dimension);
+        if let Some(model) = model {
+            identity.embedding_model = model.to_owned();
+        }
         let gate = Arc::new(HookGate::closed());
         gate.install(passing_evaluator(&identity, 0, &ProjectionHook::ALL));
         let admission = gate
             .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
             .unwrap();
         let ledger = Ledger::new(Arc::clone(&gate), InvalidationIdentity::from(&identity));
-        let generation = generation_of(dimension);
+        let mut generation = generation_of(dimension);
+        generation.embedding_model = identity.embedding_model.clone();
         Self {
             root,
             store,
@@ -215,7 +228,7 @@ impl Fixture {
     pub fn layer_from(&self, export: &LiveRows) -> VerifiedVectors {
         let built = build(&self.expected(), export, &self.work_dir()).unwrap();
         let digest = stage(&built, &self.staging()).unwrap();
-        verify(&self.store, &digest, &self.expected()).unwrap()
+        verify(&self.store, &digest, &self.expected(), u64::MAX).unwrap()
     }
 
     pub fn compose(
@@ -247,6 +260,7 @@ impl Fixture {
             digest,
             &self.expected(),
             NonZeroUsize::new(4).unwrap(),
+            u64::MAX,
         )
         .map(|verified| verified.composition.members())
     }
@@ -324,6 +338,7 @@ impl Fixture {
             self.transaction(),
             &self.expected(),
             NonZeroUsize::new(4).unwrap(),
+            u64::MAX,
             NonZeroUsize::new(8).unwrap(),
         )
         .map(|recovered| (recovered.composition.digest, recovered.selector))

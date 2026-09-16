@@ -35,9 +35,16 @@ impl KernelDaemon {
     /// Starts the daemon with `project_config` written to the project's
     /// `.eidnara/eidnara.jsonc` before the route binds, so the binding reads it.
     pub async fn start_with_project_config(project_config: Option<Value>) -> Self {
-        let data = tempfile::tempdir().unwrap();
+        Self::start_in(tempfile::tempdir().unwrap(), project_config).await
+    }
+
+    /// Starts the daemon over `data`, so records written there before the start are found by it.
+    pub async fn start_in(data: tempfile::TempDir, project_config: Option<Value>) -> Self {
         let descriptor: StorageDescriptor = dev_descriptor_at(data.path().to_str().unwrap());
-        let handler = Handler::new();
+        let handler = Handler::new().with_local_embeddings(super::embedding_fixtures::component(
+            &super::embedding_fixtures::TestEngine::new(),
+            host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
+        ));
         handler.disable_kernel_sampler_for_test();
         let init = HostInit {
             host_capabilities: Vec::new(),

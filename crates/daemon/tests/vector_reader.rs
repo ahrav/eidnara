@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use daemon::projection_gates::{Admission, Denial};
 use daemon::vector_admission::{Pool, RESIDENT_LIMIT, Refusal, ResourceClass};
 use daemon::vector_composition::publish;
-use daemon::vector_generation::{ExpectedVectors, ROWS_FILE, Staging};
+use daemon::vector_generation::{ExpectedVectors, ROWS_FILE, Staging, VerifiedVectors};
 use daemon::vector_reader::{
     AcquireEvent, AcquireRefusal, PinnedVectors, RankRefusal, RankRequest, acquire, rank,
 };
@@ -386,6 +386,41 @@ fn a_publisher_that_runs_while_a_reader_verifies_moves_the_selector_and_the_read
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
     assert_eq!(view.digest(), new_digest);
     assert_eq!(view.members(), vec![new_base.digest.clone()]);
+}
+
+#[test]
+fn a_selected_record_naming_more_members_than_the_bound_is_skipped_before_any_member_is_pinned() {
+    let mut fixture = Fixture::new();
+    let corpus = corpus();
+    let base = fixture.layer_from(&export(&corpus, &[], 10));
+    let valid = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&valid).unwrap();
+    // A record naming one more delta than `max_deltas`, all of them real generations, so every listed member could be pinned.
+    let deltas: Vec<VerifiedVectors> = (0..=bounds().max_deltas.get())
+        .map(|i| fixture.layer_from(&export(&[("alpha", axis(i % 8))], &[], 12 + i as i64)))
+        .collect();
+    let mut forged = fixture.compose(2, &base, &deltas[..1]).unwrap();
+    forged
+        .deltas
+        .extend(deltas[1..].iter().map(|delta| delta.digest.clone()));
+    let selected = fixture.stage_record(&forged.canonical_bytes(), &forged);
+    fixture
+        .store
+        .select_vector(&selected, fixture.transaction(), &mut |_| Ok(()))
+        .unwrap();
+
+    let mut verifications = 0;
+    let view = acquire_view(&mut fixture, &mut |event| {
+        if event == AcquireEvent::BeforeVerification {
+            verifications += 1;
+        }
+    })
+    .unwrap();
+    assert_eq!(view.digest(), valid.digest());
+    assert_eq!(
+        verifications, 1,
+        "the oversized record is skipped without being secured; only the fallback reaches verification"
+    );
 }
 
 #[test]

@@ -35,6 +35,8 @@ use crate::vector_generation::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReaderBounds {
     pub max_deltas: NonZeroUsize,
+    /// Bytes one member's payload may total; verification holds every member's payload at once.
+    pub max_member_bytes: u64,
     /// Compositions recovery may fully verify when the selected one does not.
     pub recovery_bound: NonZeroUsize,
 }
@@ -281,7 +283,7 @@ struct Secured {
     pinned: Pinned,
 }
 
-/// Pins `candidate` and its members under `protection`, then reserves the members' resident bytes and records the pinned bytes. `None` when the record or a member cannot be pinned or does not name its members: the candidate would not verify either, and the next one is tried.
+/// Pins `candidate` and its members under `protection`, then reserves the members' resident bytes and records the pinned bytes. `None` when the record or a member cannot be pinned, does not name its members, or names more members than `max_deltas` admits: the candidate would not verify either, and the next one is tried without pinning what it lists.
 ///
 /// # Errors
 ///
@@ -289,6 +291,7 @@ struct Secured {
 fn secure(
     store: &GenerationStore,
     candidate: &Candidate,
+    max_deltas: NonZeroUsize,
     ledger: &Arc<Ledger>,
     grant: &Admission,
     protection: LifecycleTransactionLock,
@@ -299,6 +302,10 @@ fn secure(
     let Ok(members) = record.members() else {
         return Ok(None);
     };
+    // The base and at most `max_deltas` deltas; more would be refused at verification after every listed member was pinned under the lock.
+    if members.len().saturating_sub(1) > max_deltas.get() {
+        return Ok(None);
+    }
     let mut pins = Vec::with_capacity(members.len() + 1);
     pins.push(record);
     let mut resident = 0u64;
@@ -359,7 +366,15 @@ pub fn acquire(
                 current,
             });
         }
-        let Some(secured) = secure(&store, &candidate, ledger, grant, protection)? else {
+        let Some(secured) = secure(
+            &store,
+            &candidate,
+            bounds.max_deltas,
+            ledger,
+            grant,
+            protection,
+        )?
+        else {
             continue;
         };
         observe(AcquireEvent::BeforeVerification);
@@ -368,6 +383,7 @@ pub fn acquire(
             &candidate.digest,
             expected,
             bounds.max_deltas,
+            bounds.max_member_bytes,
         ) else {
             continue;
         };

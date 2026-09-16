@@ -54,7 +54,7 @@ fn publish_compacted(
         compacted,
         &fixture.staging(),
         &fixture.expected(),
-        max_deltas(),
+        bounds(),
         &fixture.work_dir(),
         &mut |_| Ok(()),
     )
@@ -246,6 +246,7 @@ fn a_tail_published_after_the_cut_is_carried_once_with_its_precedence_and_a_stal
         &fixture.store,
         &cut_view.members()[1],
         &fixture.expected(),
+        u64::MAX,
     )
     .unwrap();
     let with_tail = fixture.compose(2, &base, &[d1_verified, d2]).unwrap();
@@ -263,7 +264,7 @@ fn a_tail_published_after_the_cut_is_carried_once_with_its_precedence_and_a_stal
         &compacted,
         &fixture.staging(),
         &fixture.expected(),
-        max_deltas(),
+        bounds(),
         &fixture.work_dir(),
         &mut |event| {
             if event == ProfileEvent::BeforeRename {
@@ -341,7 +342,7 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
         &compacted,
         &fixture.staging(),
         &fixture.expected(),
-        max_deltas(),
+        bounds(),
         &fixture.work_dir(),
         &mut |event| {
             if event == ProfileEvent::AfterRename {
@@ -364,6 +365,7 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
         fixture.transaction(),
         &fixture.expected(),
         max_deltas(),
+        u64::MAX,
         NonZeroUsize::new(8).unwrap(),
     )
     .unwrap();
@@ -400,7 +402,7 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
         &compacted,
         &fixture.staging(),
         &fixture.expected(),
-        max_deltas(),
+        bounds(),
         &record_dir,
         &mut |event| {
             if event == ProfileEvent::BeforeRename {
@@ -432,7 +434,7 @@ fn an_unknown_publication_outcome_is_reconciled_and_never_republished_as_a_secon
         &compacted,
         &fixture.staging(),
         &fixture.expected(),
-        max_deltas(),
+        bounds(),
         &record_dir,
         &mut |_| Ok(()),
     )
@@ -563,9 +565,13 @@ fn at_the_delta_cap_further_deltas_are_refused_and_compaction_clears_the_cap() {
     fixture.set_limit(DELTA_LIMIT, 1);
     let one = fixture.compose(1, &base, &[d1]).unwrap();
     fixture.publish(&one).unwrap();
-    let d1_again =
-        daemon::vector_generation::verify(&fixture.store, &one.deltas[0], &fixture.expected())
-            .unwrap();
+    let d1_again = daemon::vector_generation::verify(
+        &fixture.store,
+        &one.deltas[0],
+        &fixture.expected(),
+        u64::MAX,
+    )
+    .unwrap();
     let two = fixture.compose(2, &base, &[d1_again, d2]).unwrap();
     assert_eq!(
         fixture.publish(&two).unwrap_err(),
@@ -580,12 +586,20 @@ fn at_the_delta_cap_further_deltas_are_refused_and_compaction_clears_the_cap() {
     let compacted = compact_view(&fixture, &view).unwrap();
     let published = publish_compacted(&fixture, &compacted).unwrap();
     assert_eq!(published.tail.len(), 0, "the cap is clear again");
-    let compacted_base =
-        daemon::vector_generation::verify(&fixture.store, &published.base, &fixture.expected())
-            .unwrap();
-    let d2_again =
-        daemon::vector_generation::verify(&fixture.store, &two.deltas[1], &fixture.expected())
-            .unwrap();
+    let compacted_base = daemon::vector_generation::verify(
+        &fixture.store,
+        &published.base,
+        &fixture.expected(),
+        u64::MAX,
+    )
+    .unwrap();
+    let d2_again = daemon::vector_generation::verify(
+        &fixture.store,
+        &two.deltas[1],
+        &fixture.expected(),
+        u64::MAX,
+    )
+    .unwrap();
     let next = fixture
         .compose(published.sequence + 1, &compacted_base, &[d2_again])
         .unwrap();
@@ -683,6 +697,7 @@ fn a_tail_the_delta_limit_no_longer_admits_refuses_publication_before_staging_th
         &fixture.store,
         &cut_view.members()[1],
         &fixture.expected(),
+        u64::MAX,
     )
     .unwrap();
     let d2 = fixture.layer_from(&export(&[("beta", axis(6))], &[], 14));
@@ -831,9 +846,8 @@ fn the_scratch_reservation_is_sized_from_the_winners_identifiers_and_the_sidecar
     compacted.discard().unwrap();
 
     // The model name is 6 KiB, so the sidecar alone exceeds a 4 KiB fixed allowance.
-    let mut fixture = Fixture::new();
-    fixture.generation.embedding_model = "model-".repeat(1024);
-    // The exports name the generation they were read under, which is now the long-named one.
+    let mut fixture = Fixture::with_embedding_model(&"model-".repeat(1024));
+    // The exports name the generation they were read under, which is the long-named one.
     let mut base_export = export(&corpus(), &[], 10);
     base_export.generation = fixture.generation.clone();
     let mut delta_export = export(&[("alpha", axis(7))], &[], 12);

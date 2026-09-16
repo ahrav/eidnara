@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use daemon::coverage::ProjectionCoverage;
+use daemon::projection_admission::{ADMISSION_DIR, EVIDENCE_RECORD, MANIFEST_RECORD};
 use daemon::projection_gates::{
     APPROVED_OBSERVERS, CAPABILITIES, COMPRESSION_CRITERIA, CapabilityDisposition,
     CapabilityEvidence, CompressionBinding, CompressionEvidence, CompressionRecord, Evidence,
@@ -11,11 +12,11 @@ use daemon::projection_gates::{
     Outcome, ProjectionHook, REQUIRED_LIMITS, ResourceEvidence, RuntimeManifest, TRACE_STAGES,
     TraceKind, VECTOR_LIMITS,
 };
-use kernel::EgressSnapshot;
-use kernel::source_identity::OccurrenceClass;
 use retrieval::ProjectionIdentity;
-use retrieval::batch::{ProjectionCheckpoint, VectorGeneration, dense_eligible};
-use retrieval::coverage::{ClassCoverage, CoverageReport, DenseDisposition};
+use serde_json::{Value, json};
+use std::fs;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::Path;
 
 pub const POLICY: &str = "source-policy.v1";
 pub const MODEL: &str = "tiny-test-model";
@@ -42,46 +43,7 @@ pub fn identity(kernel_incarnation_id: &str, vector_dimension: u32) -> Projectio
 
 /// The coverage report an empty projection under `identity` observes at `kernel_tip`.
 pub fn empty_coverage(identity: &ProjectionIdentity, kernel_tip: i64) -> ProjectionCoverage {
-    ProjectionCoverage {
-        report: CoverageReport {
-            identity: identity.clone(),
-            checkpoint: ProjectionCheckpoint {
-                snapshot_commit_seq: kernel_tip,
-                checkpoint_commit_seq: kernel_tip,
-                hold_id: "test-hold".to_owned(),
-            },
-            generation: VectorGeneration {
-                generation_id: "test-generation".to_owned(),
-                embedding_model: identity.embedding_model.clone(),
-                tokenizer_fingerprint: identity.tokenizer_fingerprint.clone(),
-                vector_dimension: identity.vector_dimension,
-                generation_epoch: identity.generation_epoch,
-            },
-            classes: OccurrenceClass::ALL
-                .into_iter()
-                .map(|class| ClassCoverage {
-                    class,
-                    dense: if dense_eligible(class) {
-                        DenseDisposition::Required
-                    } else {
-                        DenseDisposition::LexicalOnly
-                    },
-                    lexical: 0,
-                    dense_required: 0,
-                    valid_vectors: 0,
-                    missing: 0,
-                    pending: 0,
-                    missing_without_pending: 0,
-                    tombstoned: 0,
-                })
-                .collect(),
-        },
-        kernel_snapshot: EgressSnapshot {
-            tip: kernel_tip,
-            classification_generation: Some(0),
-        },
-        exclusions: Vec::new(),
-    }
+    ProjectionCoverage::unregistered(identity, kernel_tip)
 }
 
 /// An evaluator whose manifest enables `enabled` and whose evidence passes every gate under `identity`: every limit at its maximum, an approved observer at zero bytes, every required capability proved and the optional one proved off, and both harnesses passed under the identity.
@@ -196,4 +158,130 @@ pub fn open_gate() -> Arc<HookGate> {
         &ProjectionHook::ALL,
     ));
     Arc::new(gate)
+}
+
+pub const LAG_LIMIT: u64 = 4;
+pub const LIMIT: u64 = 1_000_000;
+pub const HEAP_BYTES: u64 = 1024;
+
+/// The fixture manifest's value for `name`: a short lag, a disk bound wide enough for a staged seed and its capture, and `LIMIT` for the rest.
+pub fn fixture_limit(name: &str) -> u64 {
+    match name {
+        "catchup_lag_commits" => LAG_LIMIT,
+        "capture_disk_bytes" => 64 << 20,
+        _ => LIMIT,
+    }
+}
+
+pub fn manifest_json(identity: &ProjectionIdentity, enabled: &[ProjectionHook]) -> Value {
+    manifest_json_with(identity, enabled, &[])
+}
+
+/// The fixture manifest with `overrides` replacing the named limits.
+pub fn manifest_json_with(
+    identity: &ProjectionIdentity,
+    enabled: &[ProjectionHook],
+    overrides: &[(&str, u64)],
+) -> Value {
+    let limits: serde_json::Map<String, Value> = REQUIRED_LIMITS
+        .into_iter()
+        .map(|name| {
+            let value = overrides
+                .iter()
+                .find(|(overridden, _)| *overridden == name)
+                .map_or_else(|| fixture_limit(name), |(_, value)| *value);
+            (name.to_owned(), json!(value))
+        })
+        .collect();
+    let hooks: serde_json::Map<String, Value> = ProjectionHook::ALL
+        .iter()
+        .map(|hook| {
+            (
+                hook.id().to_owned(),
+                json!({ "enabled": enabled.contains(hook) }),
+            )
+        })
+        .collect();
+    json!({
+        "protocol_version": identity.limit_manifest_protocol_version,
+        "invalidation_identity": invalidation_json(identity),
+        "limits": limits,
+        "hooks": hooks,
+    })
+}
+
+pub fn invalidation_json(identity: &ProjectionIdentity) -> Value {
+    json!({
+        "schema_version": identity.schema_version,
+        "tokenizer_fingerprint": identity.tokenizer_fingerprint,
+        "analysis_identity": identity.analysis_identity,
+        "embedding_model": identity.embedding_model,
+        "projection_policy_version": identity.projection_policy_version,
+        "identity_contract_version": identity.identity_contract_version,
+        "limit_manifest_protocol_version": identity.limit_manifest_protocol_version,
+        "vector_dimension": identity.vector_dimension,
+        "generation_epoch": identity.generation_epoch,
+    })
+}
+
+/// A campaign record whose every dimension passes under `identity`.
+pub fn campaign_json(identity: &ProjectionIdentity) -> Value {
+    let proved: serde_json::Map<String, Value> = CAPABILITIES
+        .iter()
+        .map(|capability| {
+            let outcome = match capability.disposition {
+                CapabilityDisposition::Required => "supported",
+                CapabilityDisposition::OptionalDisabled => "unsupported",
+            };
+            (capability.name.to_owned(), json!(outcome))
+        })
+        .collect();
+    let capabilities: serde_json::Map<String, Value> = HARNESSES
+        .iter()
+        .map(|harness| ((*harness).to_owned(), Value::Object(proved.clone())))
+        .collect();
+    let harness_runs: serde_json::Map<String, Value> = HARNESSES
+        .iter()
+        .map(|harness| ((*harness).to_owned(), passed_run_json(identity)))
+        .collect();
+    json!({
+        "invalidation_identity": invalidation_json(identity),
+        "resource": {
+            "observer": APPROVED_OBSERVERS[0],
+            "decoded_heap_high_water_bytes": HEAP_BYTES,
+        },
+        "capabilities": capabilities,
+        "harness_runs": harness_runs,
+    })
+}
+
+pub fn write_record(home: &Path, record: &str, bytes: &[u8]) {
+    let dir = home.join(ADMISSION_DIR);
+    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&dir) {
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+    let path = dir.join(record);
+    fs::write(&path, bytes).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+pub fn write_records(home: &Path, manifest: &Value, campaign: &Value) {
+    write_record(
+        home,
+        MANIFEST_RECORD,
+        &serde_json::to_vec_pretty(manifest).unwrap(),
+    );
+    write_record(
+        home,
+        EVIDENCE_RECORD,
+        &serde_json::to_vec_pretty(campaign).unwrap(),
+    );
+}
+
+/// A passed harness run recorded under `identity`.
+pub fn passed_run_json(identity: &ProjectionIdentity) -> Value {
+    json!({
+        "outcome": "passed",
+        "invalidation_identity": invalidation_json(identity),
+    })
 }

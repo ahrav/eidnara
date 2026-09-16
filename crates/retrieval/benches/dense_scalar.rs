@@ -1,12 +1,17 @@
-//! Times the scalar recipe at fixed dimensions so a change to the arithmetic shows up as a change in one number, not in a ranking.
+//! Local, warm-input API and scoring-kernel costs; not a retrieval-latency or memory-bandwidth benchmark.
+//! Calibration includes validation and the scale digest; encoding/decoding include allocation and drop.
+//! Scoring uses predecoded Vec-backed rows, with no eligibility checks, I/O, or ranking.
+//! Throughput counts coordinates, not rows or bytes. Synthetic inputs and short runs are exploratory.
 
 use std::hint::black_box;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use retrieval::dense::codec::{Metric, RowLayout};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use retrieval::dense::codec::{self, Metric, RowLayout};
 use retrieval::dense::inner_product;
-use retrieval::dense::scalar::{calibrate, encode, weighted_dot};
+use retrieval::dense::scalar::{
+    Scales, calibrate, decode_codes, encode, encode_codes, weighted_dot,
+};
 
 const DIMENSIONS: [u32; 3] = [128, 384, 1024];
 const ROWS: usize = 256;
@@ -49,37 +54,84 @@ fn scalar_benches(c: &mut Criterion) {
             .iter()
             .map(|row| encode(&layout, &scales, row).unwrap().codes)
             .collect();
+        for count in [1, rows.len()] {
+            group.throughput(Throughput::Elements(count as u64 * u64::from(dimension)));
+            group.bench_with_input(
+                BenchmarkId::new(format!("calibrate_{count}_rows"), dimension),
+                &rows[..count],
+                |b, rows| {
+                    b.iter(|| {
+                        calibrate(
+                            black_box(&layout),
+                            black_box(rows).iter().map(Vec::as_slice),
+                        )
+                        .unwrap()
+                    })
+                },
+            );
+        }
+        group.throughput(Throughput::Elements(u64::from(dimension)));
         group.bench_with_input(
-            BenchmarkId::new("calibrate_256_rows", dimension),
-            &rows,
-            |b, rows| b.iter(|| calibrate(&layout, rows.iter().map(Vec::as_slice)).unwrap()),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("encode_row", dimension),
+            BenchmarkId::new("validate_row", dimension),
             &rows[0],
-            |b, row| b.iter(|| encode(&layout, &scales, black_box(row)).unwrap()),
+            |b, row| {
+                b.iter(|| {
+                    black_box(&layout).check().unwrap();
+                    codec::validate(black_box(row), black_box(&layout)).unwrap();
+                })
+            },
         );
+        let mut clipped_query = vec![0.0; dimension as usize];
+        clipped_query[0] = 1.0;
+        assert_eq!(encode(&layout, &scales, &rows[0]).unwrap().clipped, 0);
+        assert_eq!(encode(&layout, &scales, &clipped_query).unwrap().clipped, 1);
+        for (name, row) in [
+            ("encode_row", &rows[0]),
+            ("encode_clipped_query", &clipped_query),
+        ] {
+            group.bench_with_input(BenchmarkId::new(name, dimension), row, |b, row| {
+                b.iter(|| encode(black_box(&layout), black_box(&scales), black_box(row)).unwrap())
+            });
+        }
+        let code_bytes = encode_codes(&codes[0]);
         group.bench_with_input(
-            BenchmarkId::new("weighted_dot_256_docs", dimension),
+            BenchmarkId::new("decode_codes_row", dimension),
+            &code_bytes,
+            |b, bytes| b.iter(|| decode_codes(black_box(bytes), black_box(dimension)).unwrap()),
+        );
+        let scale_bytes = scales.encode();
+        group.bench_with_input(
+            BenchmarkId::new("decode_scales", dimension),
+            &scale_bytes,
+            |b, bytes| b.iter(|| Scales::decode(black_box(bytes), black_box(dimension)).unwrap()),
+        );
+        group.throughput(Throughput::Elements(
+            rows.len() as u64 * u64::from(dimension),
+        ));
+        group.bench_with_input(
+            BenchmarkId::new(format!("weighted_dot_{}_docs", codes.len()), dimension),
             &codes,
             |b, codes| {
                 b.iter(|| {
                     let mut total = 0.0f64;
-                    for doc in codes {
-                        total += weighted_dot(&scales, black_box(&codes[0]), doc);
+                    let query = black_box(&codes[0]);
+                    let scales = black_box(&scales);
+                    for doc in black_box(codes) {
+                        total += weighted_dot(scales, query, doc);
                     }
                     total
                 })
             },
         );
         group.bench_with_input(
-            BenchmarkId::new("f32_inner_product_256_docs", dimension),
+            BenchmarkId::new(format!("f32_inner_product_{}_docs", rows.len()), dimension),
             &rows,
             |b, rows| {
                 b.iter(|| {
                     let mut total = 0.0f64;
-                    for row in rows {
-                        total += inner_product(black_box(&rows[0]), row);
+                    let query = black_box(&rows[0]);
+                    for row in black_box(rows) {
+                        total += inner_product(query, row);
                     }
                     total
                 })

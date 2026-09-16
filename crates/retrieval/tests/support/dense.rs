@@ -420,7 +420,7 @@ impl Fixture {
 
     /// Snapshots the kernel so a later `restore` replaces its incarnation.
     pub fn backup(&self) -> std::path::PathBuf {
-        let backup_dir = tempfile::tempdir().unwrap();
+        let backup_dir = tempfile::tempdir_in(self.root.path()).unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
@@ -434,7 +434,6 @@ impl Fixture {
                 capture_pin_expires_at: None,
             })
             .unwrap();
-        // The directory outlives the fixture; restore reads it after this function returns.
         let _ = backup_dir.keep();
         manifest.destination_path
     }

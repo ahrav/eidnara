@@ -11,6 +11,8 @@ mod anchor;
 pub mod applicability;
 mod backup;
 mod cas;
+mod claim_causality;
+mod claim_facts;
 mod commit_read;
 mod consumer_obligations;
 mod current_input;
@@ -65,6 +67,17 @@ pub use cas::{
     ArtifactDeletionFault, ArtifactDeletionHook, ArtifactGcFault, ArtifactIngestFault,
     ArtifactIngestHook,
 };
+pub use claim_causality::{
+    CLAIM_CAUSALITY_DETAIL_VERSION, CLAIM_CAUSALITY_KIND, CausalClass, CausalEvidence,
+    CausalOperation, CausalReading, CausalRecord, ClaimCausalityError, ClaimCausalityOutcome,
+    ClaimCausalityRequest, DERIVED_FROM_DEPENDENCY_KIND, MAX_DERIVATION_PARENTS, ParentReference,
+    UnknownReason,
+};
+pub use claim_facts::{
+    AdmissionFacts, ClaimDecisionFacts, ClaimFactBounds, ClaimFacts, ClaimFactsError,
+    ClaimFactsSnapshot, ClaimOccurrence, ExcludedRepresentation, MAX_CLAIM_OBJECT_ID_BYTES,
+    RepresentationExclusion, ServedFacts, ServedStanding, SupportingApproval,
+};
 pub use commit_read::{
     CommitPage, CommitPageBounds, CommitReadError, CommitReadIncarnation, CommitReadRequest,
     CommitReadTarget, CommitSpan, CompleteCommit, PageEnd,
@@ -76,7 +89,8 @@ pub use current_input::{
 };
 pub use eligibility::{
     EligibilityBatch, EligibilityCandidate, EligibilityVerdict, MAX_ELIGIBILITY_CANDIDATES,
-    MAX_ELIGIBILITY_OBJECT_ID_BYTES, ProjectScope,
+    MAX_ELIGIBILITY_OBJECT_ID_BYTES, ProjectScope, SurfaceEligibilityBatch,
+    SurfaceEligibilityWithClaims, SurfaceVerdict,
 };
 pub use envelope::{
     AlignmentProjectionSpec, CommitIntent, CommitReceipt, DependentObservationQuery, DomainSpec,

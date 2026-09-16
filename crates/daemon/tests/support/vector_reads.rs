@@ -68,6 +68,7 @@ pub fn export(rows: &[(&str, Vec<f32>)], tombstones: &[&str], checkpoint: i64) -
 pub fn bounds() -> ReaderBounds {
     ReaderBounds {
         max_deltas: NonZeroUsize::new(4).unwrap(),
+        max_member_bytes: u64::MAX,
         recovery_bound: NonZeroUsize::new(8).unwrap(),
     }
 }

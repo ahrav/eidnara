@@ -85,7 +85,7 @@ pub(super) trait RowSource {
         layout: &RowLayout,
     ) -> Result<Option<Vec<f32>>, OracleRefusal>;
 
-    /// Runs after every page with whether rows remain past it.
+    /// Runs after every page whose rows were all visited, with whether rows remain past it.
     fn after_page(&mut self, _more: bool) {}
 }
 
@@ -205,6 +205,7 @@ pub enum OracleRefusal {
 pub enum Window<'a> {
     /// A live required row is about to be decoded.
     Visited(&'a str),
+    AfterJudgment,
     AfterPage(usize),
     BeforeRevalidation,
 }
@@ -333,18 +334,22 @@ pub(super) fn walk(
             Err(ScanStop::Budget) => return exhausted(ranking),
             Err(ScanStop::Projection(error)) => return Err(error.into()),
         };
-        source.after_page(more);
         if let Some(last) = page.last() {
             after.clone_from(&last.candidate.occurrence_id);
-            let present = decode_page(page, &layout, source, &mut ranking, &mut hook)?;
+            let Some(present) =
+                decode_page(page, &layout, source, budget, &mut ranking, &mut hook)?
+            else {
+                return exhausted(ranking);
+            };
+            source.after_page(more);
             let flow = judge_and_score(
                 kernel,
                 request,
-                &layout,
                 present,
                 budget,
                 &mut ranking,
                 &mut top,
+                &mut hook,
             )?;
             hook(Window::AfterPage(ranking.consumed.pages));
             match flow {
@@ -355,6 +360,8 @@ pub(super) fn walk(
                 ControlFlow::Break(None) => return exhausted(ranking),
                 ControlFlow::Continue(()) => {}
             }
+        } else {
+            source.after_page(more);
         }
         if !more {
             break;
@@ -429,19 +436,25 @@ fn read_page(
     Ok((page, false))
 }
 
+type DecodedPage = (Vec<OccurrenceCandidate>, Vec<Vec<f32>>);
+
 /// Every present vector of the page is obtained and validated before any row of it is judged; a missing vector is counted and its row is neither judged nor scored.
 fn decode_page(
     page: Vec<PageRow>,
     layout: &RowLayout,
     source: &mut impl RowSource,
+    budget: &EvalBudget,
     ranking: &mut ExhaustiveRanking,
     hook: &mut impl FnMut(Window<'_>),
-) -> Result<(Vec<OccurrenceCandidate>, Vec<Vec<f32>>), OracleRefusal> {
+) -> Result<Option<DecodedPage>, OracleRefusal> {
     ranking.consumed.pages += 1;
     let mut candidates = Vec::with_capacity(page.len());
     let mut vectors = Vec::with_capacity(page.len());
     for row in page {
         hook(Window::Visited(&row.candidate.occurrence_id));
+        if budget.is_exhausted() {
+            return Ok(None);
+        }
         ranking.coverage.required += 1;
         match source.vector(&row, layout)? {
             Some(vector) => {
@@ -453,7 +466,7 @@ fn decode_page(
             None => ranking.coverage.missing_without_pending += 1,
         }
     }
-    Ok((candidates, vectors))
+    Ok(Some((candidates, vectors)))
 }
 
 /// Judges the page's present rows in one batch and offers the eligible ones to the top-K.
@@ -461,11 +474,11 @@ fn decode_page(
 fn judge_and_score(
     kernel: &KernelStore,
     request: &Walk<'_>,
-    layout: &RowLayout,
-    (candidates, vectors): (Vec<OccurrenceCandidate>, Vec<Vec<f32>>),
+    (candidates, vectors): DecodedPage,
     budget: &EvalBudget,
     ranking: &mut ExhaustiveRanking,
     top: &mut TopK<OccurrenceCandidate>,
+    hook: &mut impl FnMut(Window<'_>),
 ) -> Result<ControlFlow<Option<AuthorityMoved>>, OracleRefusal> {
     if candidates.is_empty() {
         return Ok(ControlFlow::Continue(()));
@@ -475,29 +488,29 @@ fn judge_and_score(
     else {
         return Ok(ControlFlow::Break(None));
     };
-    if let Some(moved) = moved {
-        // The moved batch's verdicts describe other facts, so none is admitted; its exclusions are still judged work.
-        for judged in report.occurrences {
-            if let Disposition::PolicyExcluded(verdict) = judged.disposition {
-                tally_exclusion(&mut ranking.consumed.excluded, verdict);
-            }
+    hook(Window::AfterJudgment);
+    // Exclusions are judged work whether the page is then scored, cancelled, or discarded for a moved authority.
+    for judged in &report.occurrences {
+        if let Disposition::PolicyExcluded(verdict) = judged.disposition {
+            tally_exclusion(&mut ranking.consumed.excluded, verdict);
         }
+    }
+    if let Some(moved) = moved {
+        // The moved batch's verdicts describe other facts, so none is admitted.
         return Ok(ControlFlow::Break(Some(moved)));
     }
     for ((candidate, vector), judged) in candidates.into_iter().zip(vectors).zip(report.occurrences)
     {
-        match judged.disposition {
-            Disposition::Eligible => {
-                let ranked = Ranked {
-                    occurrence_id: candidate.occurrence_id.clone(),
-                    class: candidate.class,
-                    score: score(layout.metric, request.query, &vector),
-                };
-                top.offer(ranked, candidate);
-            }
-            Disposition::PolicyExcluded(verdict) => {
-                tally_exclusion(&mut ranking.consumed.excluded, verdict);
-            }
+        if budget.is_exhausted() {
+            return Ok(ControlFlow::Break(None));
+        }
+        if judged.disposition == Disposition::Eligible {
+            let ranked = Ranked {
+                occurrence_id: candidate.occurrence_id.clone(),
+                class: candidate.class,
+                score: score(request.layout.metric, request.query, &vector),
+            };
+            top.offer(ranked, candidate);
         }
     }
     Ok(ControlFlow::Continue(()))

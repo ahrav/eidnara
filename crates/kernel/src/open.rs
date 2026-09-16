@@ -1416,6 +1416,8 @@ mod tests {
 pub(crate) struct AcquireLimit {
     deadline: Option<Instant>,
     interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// A second flag whose raising also stops the wait and is copied into `interrupt`.
+    parent: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl AcquireLimit {
@@ -1448,7 +1450,16 @@ impl AcquireLimit {
         Self {
             deadline,
             interrupt,
+            parent: None,
         }
+    }
+
+    pub(crate) fn with_parent(
+        mut self,
+        parent: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Self {
+        self.parent = parent;
+        self
     }
 
     pub(crate) fn until(deadline: Instant) -> Self {
@@ -1480,6 +1491,16 @@ impl AcquireLimit {
             .as_ref()
             .is_some_and(|interrupt| interrupt.load(Ordering::Relaxed))
         {
+            return true;
+        }
+        if self
+            .parent
+            .as_ref()
+            .is_some_and(|parent| parent.load(Ordering::Relaxed))
+        {
+            if let Some(interrupt) = &self.interrupt {
+                interrupt.store(true, Ordering::Relaxed);
+            }
             return true;
         }
         if self

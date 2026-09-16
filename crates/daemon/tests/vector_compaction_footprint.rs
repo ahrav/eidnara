@@ -170,8 +170,7 @@ fn a_winner_count_past_a_power_of_two_stays_within_the_reservation() {
 #[test]
 fn a_long_model_name_stays_within_the_reservation() {
     // The model name is in the sidecar and in the compatibility identity, so every path that serializes either holds another copy. Half the record-size cap keeps the composition record admissible.
-    let mut fixture = Fixture::new();
-    fixture.generation.embedding_model = "m".repeat(1 << 19);
+    let mut fixture = Fixture::with_embedding_model(&"m".repeat(1 << 19));
     let rows = vec![ExportedRow {
         occurrence_id: "alpha".to_owned(),
         vector: narrow(0),

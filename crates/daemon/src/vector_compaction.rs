@@ -13,7 +13,7 @@ use retrieval::dense::{ResolveRefusal, RowAccess, RowFault, Winner, resolve};
 use crate::vector_admission::{self, Reservation, ResourceClass};
 use crate::vector_composition::{self, Composition, CompositionRefusal, CompositionSpec, Progress};
 use crate::vector_generation::{self, BuiltVectors, ExpectedVectors, Staging, VectorRefusal};
-use crate::vector_reader::PinnedVectors;
+use crate::vector_reader::{PinnedVectors, ReaderBounds};
 
 /// The frozen prefix: the composition a view pinned when compaction began, member by member.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,7 +287,7 @@ pub struct Published {
     pub sequence: u64,
 }
 
-/// Only the deltas past the cut are verified here: the view verified and pinned the cut's members at acquisition, and none of them is a member of the new composition. `staging` holds the exclusive transaction lock, so the selection cannot move between the readback and the publication.
+/// Only the deltas past the cut are verified here, each under `bounds.max_member_bytes` as the reader verifies a member: the view verified and pinned the cut's members at acquisition, and none of them is a member of the new composition. `staging` holds the exclusive transaction lock, so the selection cannot move between the readback and the publication.
 ///
 /// # Errors
 ///
@@ -296,10 +296,11 @@ pub fn publish(
     compacted: &Compacted,
     staging: &Staging<'_>,
     expected: &ExpectedVectors<'_>,
-    max_deltas: NonZeroUsize,
+    bounds: ReaderBounds,
     work_dir: &Path,
     observer: &mut dyn FnMut(ProfileEvent) -> Result<(), GenerationError>,
 ) -> Result<Published, CompactionRefusal> {
+    let max_deltas = bounds.max_deltas;
     let selected = match staging.store.read_vector_current()? {
         CurrentProfile::Current(digest) => digest,
         CurrentProfile::Absent => return Err(CompactionRefusal::NoSelection),
@@ -333,13 +334,25 @@ pub fn publish(
         .map_err(CompositionRefusal::Deltas)?;
     let carried = tail
         .iter()
-        .map(|delta| vector_composition::verify_member(staging.store, delta, expected))
+        .map(|delta| {
+            vector_composition::verify_member(
+                staging.store,
+                delta,
+                expected,
+                bounds.max_member_bytes,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     let base_digest =
         vector_generation::stage(&compacted.built, staging).map_err(CompactionRefusal::Stage)?;
-    let base = vector_generation::verify(staging.store, &base_digest, expected)
-        .map_err(CompactionRefusal::Stage)?;
+    let base = vector_generation::verify(
+        staging.store,
+        &base_digest,
+        expected,
+        bounds.max_member_bytes,
+    )
+    .map_err(CompactionRefusal::Stage)?;
     let composition = vector_composition::compose(&CompositionSpec {
         expected,
         sequence,

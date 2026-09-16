@@ -7,10 +7,12 @@ use kernel::{
     ArtifactDestination, EgressSnapshot, EligibilityVerdict, KernelError, KernelStore,
     MAX_ELIGIBILITY_CANDIDATES, ProjectScope,
 };
-use retrieval::ProjectionError;
-use retrieval::batch::{VectorGeneration, dense_eligible};
-use retrieval::coverage::{ClassCoverage, CoverageBounds, CoverageReport, CoverageUnavailable};
+use retrieval::batch::{ProjectionCheckpoint, VectorGeneration, dense_eligible};
+use retrieval::coverage::{
+    ClassCoverage, CoverageBounds, CoverageReport, CoverageUnavailable, DenseDisposition,
+};
 use retrieval::eligibility::{Disposition, live_candidates};
+use retrieval::{ProjectionError, ProjectionIdentity};
 
 use crate::search_projection::{SearchProjection, SearchProjectionError};
 
@@ -60,6 +62,62 @@ pub struct ProjectionCoverage {
 }
 
 impl ProjectionCoverage {
+    /// The observation of a home with no projection: every class is known empty, nothing is pending, and the checkpoint sits at the kernel tip `tip`. No generation is registered, so the generation id is empty. This is what the daemon knows before a family is selected; it is not a report on any stored row.
+    pub fn unregistered(identity: &ProjectionIdentity, tip: i64) -> Self {
+        Self {
+            report: CoverageReport {
+                identity: identity.clone(),
+                checkpoint: ProjectionCheckpoint {
+                    snapshot_commit_seq: tip,
+                    checkpoint_commit_seq: tip,
+                    hold_id: String::new(),
+                },
+                generation: VectorGeneration {
+                    generation_id: String::new(),
+                    embedding_model: identity.embedding_model.clone(),
+                    tokenizer_fingerprint: identity.tokenizer_fingerprint.clone(),
+                    vector_dimension: identity.vector_dimension,
+                    generation_epoch: identity.generation_epoch,
+                },
+                classes: OccurrenceClass::ALL
+                    .into_iter()
+                    .map(|class| ClassCoverage {
+                        class,
+                        dense: if dense_eligible(class) {
+                            DenseDisposition::Required
+                        } else {
+                            DenseDisposition::LexicalOnly
+                        },
+                        lexical: 0,
+                        dense_required: 0,
+                        valid_vectors: 0,
+                        missing: 0,
+                        pending: 0,
+                        missing_without_pending: 0,
+                        tombstoned: 0,
+                    })
+                    .collect(),
+            },
+            kernel_snapshot: EgressSnapshot {
+                tip,
+                classification_generation: None,
+            },
+            exclusions: Vec::new(),
+        }
+    }
+
+    /// A projection's own report against the kernel tip `tip`, with its live occurrences judged for no project: the exclusions are unknown, and the snapshot names no classification generation. Admission reads the report and the tip; a per-project reading needs [`observe_coverage`].
+    pub fn unjudged(report: CoverageReport, tip: i64) -> Self {
+        Self {
+            report,
+            kernel_snapshot: EgressSnapshot {
+                tip,
+                classification_generation: None,
+            },
+            exclusions: Vec::new(),
+        }
+    }
+
     pub fn class(&self, class: OccurrenceClass) -> &ClassCoverage {
         self.report.class(class)
     }

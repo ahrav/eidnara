@@ -3,7 +3,6 @@
 
 use std::fmt;
 
-/// Rows are unit-normalized, so the inner product is the cosine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Metric {
     InnerProduct,
@@ -94,23 +93,28 @@ pub fn encode(row: &[f32]) -> Vec<u8> {
     row.iter().flat_map(|value| value.to_le_bytes()).collect()
 }
 
-/// Splits bytes into little-endian f32 words without judging them; a trailing partial word is refused.
-pub fn decode_words(bytes: &[u8]) -> Result<Vec<f32>, RowRejection> {
+/// Checks truncation eagerly but decodes lazily, so callers can reject the word count before allocating.
+pub(super) fn decode_words(
+    bytes: &[u8],
+) -> Result<impl ExactSizeIterator<Item = f32> + '_, RowRejection> {
     let (words, rest) = bytes.as_chunks::<4>();
     if !rest.is_empty() {
         return Err(RowRejection::TruncatedWord { bytes: bytes.len() });
     }
-    Ok(words.iter().map(|word| f32::from_le_bytes(*word)).collect())
+    Ok(words.iter().map(|word| f32::from_le_bytes(*word)))
 }
 
 /// Truncation and dimension are checked before any coordinate is read; the norm is not, so a stored row can be read where the generation's tolerance is unknown.
 pub fn decode_shape(bytes: &[u8], dimension: u32) -> Result<Vec<f32>, RowRejection> {
-    let row = decode_words(bytes)?;
-    validate_shape(&row, dimension)?;
+    let words = decode_words(bytes)?;
+    check_dimension(words.len(), dimension)?;
+    let row: Vec<f32> = words.collect();
+    check_finite(&row)?;
     Ok(row)
 }
 
 pub fn decode(bytes: &[u8], layout: &RowLayout) -> Result<Vec<f32>, RowRejection> {
+    layout.check()?;
     let row = decode_shape(bytes, layout.dimension)?;
     check_norm(&row, layout.unit_norm_tolerance)?;
     Ok(row)
@@ -122,6 +126,7 @@ pub fn validate_shape(row: &[f32], dimension: u32) -> Result<(), RowRejection> {
 }
 
 pub fn validate(row: &[f32], layout: &RowLayout) -> Result<(), RowRejection> {
+    layout.check()?;
     validate_shape(row, layout.dimension)?;
     check_norm(row, layout.unit_norm_tolerance)
 }
