@@ -12,7 +12,7 @@ assertions, not adequacy.
 | `crates/daemon/src/transform_unit/host_tests.rs`, `request_cancel_waits_for_committed_transform_and_releases_scratch` | Transform units join on cancel and release scratch. | unaudited | Transform path, no `EvalBudget`. |
 | `crates/storage/src/lib.rs`, `an_interruptible_read_stops_a_running_statement_and_a_later_read_is_untouched` | The scope interrupts a statement and the next read is untouched, including after unwind. | unaudited | Storage only; no request budget. |
 | `crates/retrieval/tests/lexical_retrieval.rs`, `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion` | The lexical lane reports an engine interrupt as budget exhaustion. | unaudited | Drives the scope from the test, not from a request. |
-| `crates/kernel/tests/kernel_source_budgets.rs`, test-local `CancelOnDrop` | A budget cancelled on drop stops a kernel scan. | unaudited | Test-only guard; no production owner. |
+| `crates/kernel/tests/kernel_source_budgets.rs`, `bounded_capture_export_complete_commits_and_ack_preserve_fencing` | The acknowledgement succeeds and its checkpoint remains durable despite guard-drop cancellation. | unaudited | Kernel acknowledgement boundary, not an interrupted scan or daemon request. |
 
 Suspiciously quiet areas: before this part no production caller used
 `with_conn_interruptible`, and no daemon type owned a request budget.

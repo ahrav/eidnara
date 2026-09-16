@@ -246,9 +246,12 @@ mod tests {
     /// A poller whose `exhaustion` call straddles the guard's drop must still read the drop as
     /// cancellation: the deadline is an hour away, so `Deadline` can only come from observing the
     /// interrupt flag without the reason that was published before it. The window is two atomic
-    /// loads wide, so the trial repeats until the drop has landed inside it many times over.
+    /// loads wide; each trial drops only after the poller has completed one `None` poll, so the
+    /// drop lands while the poller is live, and repeated trials raise the chance that it lands
+    /// inside the window.
     #[test]
     fn a_poll_that_straddles_the_guard_drop_never_reports_a_deadline() {
+        use std::sync::atomic::AtomicUsize;
         const TRIALS: usize = 400;
         let mut verdicts = Vec::with_capacity(TRIALS);
         for _ in 0..TRIALS {
@@ -257,16 +260,23 @@ mod tests {
                 RequestBudget::derive(cancel, Some(3_600_000), Some(Duration::from_secs(3_600)))
                     .unwrap();
             let clone = budget.shared().clone();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&polls);
             let poller = std::thread::spawn(move || {
                 loop {
-                    if let Some(reason) = clone.exhaustion() {
+                    let reason = clone.exhaustion();
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    if let Some(reason) = reason {
                         return reason;
                     }
                 }
             });
-            // A short spin lets the poller reach its loop before the drop lands.
-            let spin_until = Instant::now() + Duration::from_micros(20);
-            while Instant::now() < spin_until {
+            let give_up = Instant::now() + Duration::from_secs(5);
+            while polls.load(Ordering::SeqCst) == 0 {
+                assert!(
+                    Instant::now() < give_up,
+                    "the poller never completed a poll"
+                );
                 std::hint::spin_loop();
             }
             drop(budget);

@@ -24,7 +24,9 @@ request on the shared connection.
   therefore never receive the variant.
 - `crates/daemon/tests/request_budget_reads.rs` cancels one request's read
   and then runs a fresh request's read and a plain bounded read on the same
-  connection.
+  connection; a second case cancels a budget after its read succeeded and
+  runs a plain bounded read first, so a handler the success path left behind
+  is not masked by a replacement.
 - `crates/storage/src/lib.rs` test
   `a_leaked_progress_handler_interrupts_the_next_read_on_the_connection`
   installs a handler outside the scope and shows the next read is interrupted.

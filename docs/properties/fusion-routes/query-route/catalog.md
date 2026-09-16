@@ -79,8 +79,10 @@ Required faults and enabling state: A held connection on another thread; a
 Confidence: high - [evidence](evidence/route-budget-is-derived-once-before-queue-wait.md).
 The deadline is one `Instant` copied into every clone; the stop predicate
 folds the host's cancellation into the same flag.
-Existing check: `crates/kernel/tests/kernel_source_budgets.rs` uses a
-test-local cancel-on-drop budget, status unaudited; `crates/retrieval/tests/lexical_retrieval.rs`
+Existing check: `crates/kernel/tests/kernel_source_budgets.rs`
+`bounded_capture_export_complete_commits_and_ack_preserve_fencing` cancels a
+budget on drop across the acknowledgement boundary, not across a running
+scan, status unaudited; `crates/retrieval/tests/lexical_retrieval.rs`
 `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion`
 drives the storage scope directly, status unaudited.
 Impact: A stage with its own fresh budget could outlive the caller's deadline,
@@ -97,6 +99,7 @@ called only from `crates/daemon/tests/request_budget_reads.rs` and
 Status: active
 Exercised: yes - `crates/daemon/tests/request_budget_reads.rs`
 `a_later_request_on_the_same_connection_is_not_interrupted_by_a_prior_cancellation`,
+`a_cancellation_after_a_successful_read_does_not_interrupt_a_later_plain_read`,
 `cancelling_the_request_interrupts_a_held_read_and_reports_exhaustion`,
 `an_interrupted_statement_is_the_deadline_error_on_every_access_mode`; and
 `crates/storage/src/lib.rs`
@@ -154,9 +157,11 @@ drop's classification under a concurrent poll covered by
 and pin clauses wait for the route (U3b) and the dense lane (U3c) that hold
 them.
 Guarantee: After client cancellation the blocking worker is joined before the
-request settles; the connection it holds stays held until the read returns
-and is released only after the join; a panic inside the blocking closure
-surfaces as its typed failure and still settles.
+request settles; the connection it holds stays held until the interrupted
+read returns, then `read_on` releases it as the read completes, before the
+worker is joined, so connection ownership ends with the read while
+work-tracker ownership ends with the join; a panic inside the blocking
+closure surfaces as its typed failure and still settles.
 Check: `always` - a real client cancels a request whose handler is suspended
 at `run_blocking` with no `select!` arm; the read reports exhaustion at a time
 no later than the host's error publication for that channel; the projection

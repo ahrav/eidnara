@@ -14,6 +14,8 @@ use tokio_util::sync::CancellationToken;
 /// The 200-million-step recursive query keeps the read active for interruption tests; the progress handler polls every 1,000 VM steps.
 const LONG_SCAN: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 200000000) SELECT count(*) FROM c";
 const SHORT_SCAN: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 1000) SELECT count(*) FROM c";
+/// `MEDIUM_SCAN` gives a leaked progress handler multiple polling opportunities.
+const MEDIUM_SCAN: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 200000) SELECT count(*) FROM c";
 const CEILING: Duration = Duration::from_secs(30);
 
 fn scan(sql: &str) -> impl FnOnce(&GuardedConn<'_>) -> Result<i64, ProjectionError> + '_ {
@@ -134,6 +136,28 @@ fn a_later_request_on_the_same_connection_is_not_interrupted_by_a_prior_cancella
             .read_within(Instant::now() + Duration::from_secs(1), scan(SHORT_SCAN))
             .unwrap(),
         1000
+    );
+}
+
+/// The plain read runs before any fresh `read_under`: a replacement handler would mask the
+/// handler left behind by a successful `read_under`.
+#[test]
+fn a_cancellation_after_a_successful_read_does_not_interrupt_a_later_plain_read() {
+    let (_dir, projection) = open();
+    let (token, prior) = derive(CEILING.as_millis() as u64);
+    assert_eq!(
+        projection
+            .read_under(prior.shared(), scan(SHORT_SCAN))
+            .unwrap(),
+        1000
+    );
+    token.cancel();
+    assert!(prior.is_exhausted());
+    assert_eq!(
+        projection
+            .read_within(Instant::now() + Duration::from_secs(10), scan(MEDIUM_SCAN))
+            .unwrap(),
+        200_000
     );
 }
 

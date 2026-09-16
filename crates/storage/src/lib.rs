@@ -5651,15 +5651,29 @@ mod tests {
         held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&stop);
+        let polled = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&polled);
         let started = Instant::now();
         let waiter = thread::spawn(move || {
             store.with_conn_interruptible(
                 Instant::now() + Duration::from_secs(30),
-                move || observed.load(Ordering::SeqCst),
+                move || {
+                    if observed.load(Ordering::SeqCst) {
+                        return true;
+                    }
+                    seen.store(true, Ordering::SeqCst);
+                    false
+                },
                 |_| Ok(()),
             )
         });
-        thread::sleep(Duration::from_millis(50));
+        while !polled.load(Ordering::SeqCst) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the waiter never polled the stop predicate while the connection was held"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
         stop.store(true, Ordering::SeqCst);
         let result = waiter.join().unwrap();
         assert!(matches!(result, Err(StoreError::Deadline)), "{result:?}");
