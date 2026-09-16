@@ -164,6 +164,8 @@ pub struct Consumed {
 pub struct ExhaustiveRanking {
     /// Re-judged rows, best first, at most `k`.
     pub ranked: Vec<Ranked>,
+    /// The terms each `ranked` row was judged under, in `ranked` order, so a later revalidation judges the same facts without another projection read.
+    pub candidates: Vec<OccurrenceCandidate>,
     pub completion: Completion,
     pub coverage: DenseCoverage,
     /// The snapshot every ranked row was judged under; `None` if no batch ran.
@@ -306,6 +308,7 @@ pub(super) fn walk(
 
     let mut ranking = ExhaustiveRanking {
         ranked: Vec::new(),
+        candidates: Vec::new(),
         completion: Completion::Complete,
         coverage: DenseCoverage::default(),
         snapshot: None,
@@ -576,9 +579,12 @@ fn revalidate(
     }
     ranking.snapshot = Some(report.snapshot);
     ranking.incarnation = Some(report.incarnation);
-    for (row, judged) in ranked.into_iter().zip(report.occurrences) {
+    for ((row, candidate), judged) in ranked.into_iter().zip(candidates).zip(report.occurrences) {
         match judged.disposition {
-            Disposition::Eligible => ranking.ranked.push(row),
+            Disposition::Eligible => {
+                ranking.ranked.push(row);
+                ranking.candidates.push(candidate);
+            }
             Disposition::PolicyExcluded(verdict) => {
                 tally_exclusion(&mut ranking.consumed.excluded, verdict);
             }

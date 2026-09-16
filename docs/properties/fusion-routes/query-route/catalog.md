@@ -238,10 +238,13 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_handler.rs`
 `scope_harness_and_disable_are_decided_before_any_candidate_read`.
-Guarantee: A request naming another project root, an unbound session, or a
-harness other than the route binding's is refused before the body is parsed,
-before any candidate row is read, and before any payload byte is touched; the
-binding is the only authority and no request field grants scope.
+Guarantee: A request naming another project root or an unbound session is
+refused before the body is parsed; a `harness` claim other than the route
+binding's is refused as soon as the body is parsed, before the limit set,
+the budget, any candidate row, or any payload byte is read; the binding is
+the only authority and no request field grants scope. The claim lives in the
+body, so a body that fails to parse is refused as `invalid_params` whatever
+harness it names, and no protected work runs on either path.
 Check: `always` - on a daemon whose kernel holds rows, a foreign
 `project_root` answers the kernel routes' `invalid`/`project_mismatch` state,
 an unknown `session_id` answers a transport error, and a `harness` claim other
@@ -271,6 +274,9 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route.rs`
 `each_bound_saturates_before_its_protected_work` and
+`a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves`,
+`crates/daemon/src/query_route.rs`
+`a_response_bound_below_the_empty_envelope_is_refused_at_installation`, and
 `crates/daemon/tests/query_route_handler.rs`
 `scope_harness_and_disable_are_decided_before_any_candidate_read`.
 Guarantee: Every bound in `QueryRouteLimits` is checked before the work it
@@ -278,24 +284,30 @@ protects: query bytes before classification, the selector count and lexical
 atoms against `probes` before any page or scan, scan rows and accepted rows
 inside the lexical lane, the fused union inside `fuse`, the validation batch
 per kernel call, result rows and response bytes before each entry is
-serialized; an absent limit set disables the route; a limit set the kernel
-could not serve is refused at installation; the U3a bridge refuses an
-unapproved deadline ceiling.
+serialized and the response bytes against the envelope before any entry; an
+absent limit set disables the route; a limit set the kernel could not serve,
+whose `response_bytes` cannot hold the empty envelope, or whose
+`response_bytes` exceeds `dispatch::MAX_WIRE_BODY_BYTES` is refused at
+installation; the U3a bridge refuses an unapproved deadline ceiling.
 Check: `always` - `result_rows = 1` materializes one entry and reports
 `truncated` while the fused ranking keeps every entry; a 200-byte
 `response_bytes` materializes fewer entries than the ranking holds and the
-serialized body is at most 200 bytes; `fused_union = 1` ends the request as
-`lane_unavailable` with reason `fused_union` and the fusion phase is the last
-one reached; one exact page of one row reports the exact lane `incomplete`
-with reason `page_bound`; `validation_batch = 1` judges in several batches and
-returns the same entries; `probes = 1` refuses two selectors as invalid before
-the exact phase runs and reports two prose atoms as the lexical lane
-`unavailable` while the exact lane still serves; `lexical_accepted = 1` and
-`lexical_scan_rows = 1` report `accepted_bound` and `scan_bound`; a query over
-`query_bytes` is refused as invalid at the handler and again by `classify`; a
-`validation_batch` over the kernel's candidate maximum is refused by
-`set_query_route_limits` and installs nothing. `always` because each bound must
-hold on every request.
+serialized body is at most 200 bytes; a `response_bytes` equal to
+`QueryRouteLimits::response_floor` passes `validate` and a degraded envelope
+over it ends the request as `lane_unavailable` with reason `response_bytes`;
+`fused_union = 1` ends the request as `lane_unavailable` with reason
+`fused_union` and the fusion phase is the last one reached; one exact page of
+one row reports the exact lane `incomplete` with reason `page_bound`;
+`validation_batch = 1` judges in several batches and returns the same entries;
+`probes = 1` refuses two selectors as invalid before the exact phase runs and
+reports two prose atoms as the lexical lane `unavailable` while the exact lane
+still serves; `lexical_accepted = 1` and `lexical_scan_rows = 1` report
+`accepted_bound` and `scan_bound`; a query over `query_bytes` is refused as
+invalid at the handler and again by `classify`; a `validation_batch` over the
+kernel's candidate maximum is refused by `set_query_route_limits` and installs
+nothing; a `response_bytes` one below the floor is refused by `validate` with
+the floor named, and one above the wire body maximum is refused with the
+maximum named. `always` because each bound must hold on every request.
 Fault/timing angle: None; saturation is reached by shrinking one limit at a
 time on a fixed corpus.
 Required faults and enabling state: A projection with more matching rows than
@@ -328,19 +340,20 @@ Exercised: yes - `crates/daemon/tests/query_route.rs`
 `the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`.
 Guarantee: The request budget is checked after the embedding await and at the
 start of probe compilation, the exact scan, the lexical scan, the dense scan,
-fusion, revalidation, materialization, and response construction; a cancellation or a lapsed deadline observed at any of
-them ends the request with `cancelled` or `deadline` and no ranking.
-Check: `always` - for each of the eight phases (the dense scan included), a
+lane admission, fusion, revalidation, materialization, and response
+construction; a cancellation or a lapsed deadline observed at any of them ends
+the request with `cancelled` or `deadline` and no ranking.
+Check: `always` - for each of the nine phases (the dense scan included), a
 hook that cancels the budget's token when that phase begins yields
 `Terminal::Cancelled`, and a hook that sleeps past a 600 ms remaining duration
 yields `Terminal::Deadline`; in both halves the hook records the phases
 reached and the target is the last one, so the terminal is attributed to that
-phase; a healthy run visits the eight phases once each in order; a
+phase; a healthy run visits the nine phases once each in order; a
 cancellation raised inside the dense producer is the budget's verdict, and a
 deadline that lapses during the embedding await ends the request before the
-scan is submitted. The revalidation check guards the kernel
-judging, and each validation batch checks again. `always` because every phase
-transition performs the check.
+scan is submitted. The revalidation check guards the kernel judging, and the
+hook fires again before every later validation slice so a test can act between
+slices. `always` because every phase transition performs the check.
 Fault/timing angle: Cancellation between phases; the projection read's own
 progress handler covers cancellation inside a statement, see
 `route-sql-cancellation-is-request-local`.
@@ -361,17 +374,28 @@ Reachability: test-only
 Status: active
 Exercised: partial - the join-before-settle clause is covered by
 `crates/daemon/src/request_budget/host_tests.rs`
-`cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling`;
-the route's own holders and the envelope bound are not yet measured.
+`cancelling_a_suspended_handler_interrupts_the_held_read_and_joins_it_before_settling`,
+and the connection-release clause by `crates/daemon/tests/query_route.rs`
+`the_projection_connection_is_free_while_the_lanes_are_admitted`; the route's
+own holders and the envelope bound are not yet measured.
 Guarantee: Once a request is cancelled, the tracked blocking work that runs
 its lanes finishes, the lifecycle pin and the projection connection it holds
 are released, and the request settles within an approved fault-free envelope;
 a permanently blocked read stays visible as unresolved work rather than being
-settled early.
+settled early. The projection connection is held only while the lanes read
+the projection; every kernel reader the exact and lexical lanes take is
+acquired after it is released, so those lanes never wait for a kernel reader
+while other projection readers and writers wait for it. The dense oracle
+judges each page it scores under the connection, so a dense request holds the
+connection across its eligibility batches.
 Check: `always` - the handler awaits `run_unit` with the budget guard alive
 and drops the guard only after the join; the closure owns the pin for its
-whole run. The envelope bound and a holder census over the pin and the guard
-are not yet asserted. `always` because every cancelled request must drain.
+whole run; a second budgeted projection read placed by the `before_phase` hook
+at the admission, fusion, and revalidation phases succeeds, so the connection
+is free during every exact and lexical judgment; the dense lane is undeclared
+in that witness. The envelope bound and a holder census
+over the pin and the guard are not yet asserted. `always` because every
+cancelled request must drain.
 Fault/timing angle: Cancellation while the lanes hold the projection
 connection; cancellation while the closure waits to pin the lifecycle.
 Required faults and enabling state: A real host and client; a held projection
@@ -387,6 +411,10 @@ Open questions:
 
 - The drain envelope is an RP2.9 number; until it is approved the record has
   no bound to assert. (needs human input)
+- The dense oracle judges pages under the projection connection because its
+  bounded top-K admits a row before the next page is read; releasing the
+  connection would mean scanning up to `max_rows` vectors first and judging
+  after, a change to `retrieval::dense::exhaustive`. (needs human input)
 
 ### route-candidate-ids-never-widen-scope
 
@@ -395,28 +423,40 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route.rs`
 `revalidation_excludes_retired_and_foreign_occurrences` and
+`exact_lane_positions_and_bounds_count_only_eligible_rows`, and
 `crates/daemon/tests/query_route_handler.rs`
 `scope_harness_and_disable_are_decided_before_any_candidate_read`.
-Guarantee: The request carries no occurrence identifiers, and the lexical
-lane and revalidation judge every candidate under the route binding's project
-scope; an occurrence a lane ranks is materialized only when the kernel judges
-it eligible under that scope, so no identifier a caller or a lane produces
-widens authorization.
+Guarantee: The request carries no occurrence identifiers, and both lanes and
+revalidation judge every candidate under the route binding's project scope
+before any position is assigned; an occurrence a lane reads is ranked only
+when the kernel judges it eligible under that scope, so no identifier a caller
+or a lane produces widens authorization, and a row the caller may not see
+earns no lane position, no fused position, and no union slot. The exact
+lane's `exact_page_rows` by `exact_pages` bound counts rows read, including
+tombstoned and ineligible rows, because `exact::page` carries no scope and the
+kernel judges only after the projection connection is released; `page_bound`
+therefore reports that the read bound was reached, not that every unread row
+would have been visible.
 Check: `always` - a request body with an `occurrence_ids` field is refused
 as invalid by `deny_unknown_fields`; under a foreign project scope the same
 projection rows yield a `fused` answer with no entries because every lane
-result is excluded before materialization. `always` because every entry passes
+result is excluded before fusion; after one of two named objects is retired,
+the surviving entries occupy positions `1..n` in both the exact lane and the
+fused order, and a `fused_union` equal to the survivor count is not exceeded.
+`always` because every lane hit is judged before ranking and every entry passes
 revalidation.
 Fault/timing angle: None.
 Required faults and enabling state: A projection populated from one project;
-a second `ProjectScope` that owns none of its rows.
+a second `ProjectScope` that owns none of its rows; a retirement materialized
+into the kernel's source descriptors while the projection keeps the rows.
 Confidence: high - [evidence](evidence/route-candidate-ids-never-widen-scope.md).
 The scope is taken from `RouteScope`, never from the body.
 Existing check: `crates/daemon/tests/claim_eligibility.rs`
 `retrieval_adapter_agrees_with_daemon_and_kernel_on_one_snapshot` foreign-scope
 assertions, status unaudited.
 Impact: A caller could name an identifier from another project and receive
-its position or payload.
+its position or payload, or learn from a position gap how many rows of a named
+object exist outside its scope.
 Open questions: None.
 
 ### route-final-revalidation-precedes-every-result
@@ -425,33 +465,43 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route.rs`
-`revalidation_excludes_retired_and_foreign_occurrences`.
+`revalidation_excludes_retired_and_foreign_occurrences` and
+`revalidation_refuses_verdicts_joined_across_a_moved_kernel_snapshot`.
 Guarantee: Every fused entry is judged by the kernel's budget-aware
 eligibility adapter under the bound scope and destination after fusion and
-before materialization; an entry the kernel no longer admits is filtered out
+before materialization, with every slice of one request judged at one kernel
+snapshot and incarnation; an entry the kernel no longer admits is filtered out
 without recomputing scores or positions; no retrieval-side verdict copy is
 consulted.
 Check: `always` - after a decision is retired in the kernel while the
 projection still holds its rows, the same query returns strictly fewer
 entries, every remaining entry was present before, and the answer is not
-degraded; under a foreign scope every entry is excluded. `always` because the
-filter runs on every result set.
+degraded; under a foreign scope every entry is excluded; a kernel commit
+between two revalidation slices ends the request with `lane_unavailable` and
+reason `snapshot_changed` rather than an answer. `always` because the filter
+runs on every result set and every slice is compared with the first slice's
+snapshot.
 Fault/timing angle: The retirement lands between the projection snapshot and
-the query.
+the query; a commit lands between two revalidation slices.
 Required faults and enabling state: A projection built from a kernel snapshot;
 a later `retire_decision` commit materialized into the kernel's source
-descriptors.
+descriptors; a `validation_batch` of one and a commit placed by the
+`before_phase` hook at the second revalidation check.
 Confidence: high - [evidence](evidence/route-final-revalidation-precedes-every-result.md).
-`live_candidates_by_id` reads the candidates the lanes produced at the lanes'
-snapshot and `judge_occurrences_within_budget` judges them in
-`validation_batch` slices; `Fused::filter` keeps positions, so a withheld
-entry leaves a gap in `position`, which the specification accepts because
-positions are never recomputed after fusion.
+Each lane hands the candidate terms it was admitted with to revalidation, so
+no projection read follows the lanes' read; `judge_tracked` judges them in
+`validation_batch` slices and reports movement through `authority_moved`;
+`Fused::filter` keeps positions, so a withheld entry leaves a gap in
+`position`, which the specification accepts because positions are never
+recomputed after fusion.
 Existing check: `crates/daemon/tests/claim_eligibility.rs` retirement
 assertions, status unaudited; `crates/retrieval/tests/fusion.rs` filter test,
-status unaudited.
+status unaudited; `crates/retrieval/tests/lexical_retrieval.rs`
+`a_snapshot_that_moves_between_admission_batches_stops_admission`, status
+unaudited.
 Impact: A retired or corrected occurrence could be returned with a live
-position.
+position, or verdicts taken before and after a canonical change could be
+joined into one answer.
 Open questions: None.
 
 ### route-healthy-authorized-query-completes-fused
@@ -505,7 +555,10 @@ Exercised: partial - `crates/daemon/src/query_route.rs`
 set and its codes; `crates/daemon/tests/query_route.rs`
 `a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves` drives a
 failed exact lane (`no_checkpoint`) through the route with the lexical lane
-serving; no route stage raises `RequiredContextFailure` until the packing
+serving, and
+`a_stored_identifier_outside_the_contract_makes_the_lane_unavailable` drives a
+corrupt stored identifier through the lexical lane (`identity`) with the exact
+lane serving; no route stage raises `RequiredContextFailure` until the packing
 integration lands.
 Guarantee: The route's terminal set is closed - `unauthorized`, `deadline`,
 `cancelled`, `lane_unavailable`, `required_context_failure`, `disabled` - each
@@ -514,7 +567,8 @@ failure raised by packing is one of them rather than a degraded answer.
 Check: `always` - every variant maps to a distinct code and to a
 `{"kind":"terminal","terminal":<code>}` response; a `lane_unavailable`
 terminal carries a `reason` code; the failure of a non-dense lane for a
-non-budget reason is reported per lane as `unavailable` with a closed reason
+non-budget reason, including a stored occurrence identifier that is not the
+contract spelling, is reported per lane as `unavailable` with a closed reason
 code and the answer `degraded` while the other lane's ranking is served, and
 every declared lane failing is `lane_unavailable`.
 `always` because the set is the wire contract.
@@ -536,22 +590,27 @@ Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_handler.rs`
 `scope_harness_and_disable_are_decided_before_any_candidate_read` and
-`the_running_daemon_answers_a_fused_query_from_its_converged_family`.
+`the_running_daemon_serves_the_route_from_its_converged_family`.
 Guarantee: The route is disabled by removing its limit set; while disabled
-every authorized request receives the `disabled` terminal and no kernel,
-projection, or lifecycle state is read or written by the route; re-enabling
-installs a limit set and requires no data change.
+every authorized request whose kernel store is ready receives the `disabled`
+terminal and no canonical, projection, or lifecycle state is read or written
+by the route; re-enabling installs a limit set and requires no data change.
 Check: `always` - a fresh daemon answers `disabled`; a refused limit set
 installs nothing; after limits are installed it serves; after
 `set_query_route_limits(None)` it answers `disabled` again and the kernel's
 tip and lease epoch are unchanged; after reinstalling it serves an answer
 equal to the one before the disable and the kernel is still unchanged.
-`always` because the check is the first stage after authorization.
-Fault/timing angle: None.
+`always` because the check is the first stage after the binding resolves.
+Fault/timing angle: A request that arrives while the kernel store is starting
+or unavailable is answered by the binding's `state` response before the limit
+set is consulted, as on every `kernel.*` route; the tests run against a ready
+daemon and do not cover that window.
 Required faults and enabling state: A converged family so the enabled answer
 is `fused`.
 Confidence: high - [evidence](evidence/route-rollback-disables-without-mutating-canonical-truth.md).
-The disable path returns before the budget is derived or the pin is taken.
+The disable path returns before the budget is derived or the pin is taken;
+`kernel_route_scope` acquires the store handle, which reads the store's phase
+and no canonical row.
 Existing check: `crates/daemon/tests/search_replacement/disable.rs` family
 disable tests, status unaudited.
 Impact: A rollback that mutated canonical rows to match a projection would be

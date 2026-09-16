@@ -12,8 +12,11 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
 ## Evidence trail
 
 - `crates/daemon/src/query_route.rs` `set_query_route_limits(None)` clears
-  the limit set; `handle_retrieval_query` answers `disabled` right after
-  authorization and before the budget, the pin, or any read.
+  the limit set; `handle_retrieval_query` answers `disabled` right after the
+  binding resolves and before the budget, the pin, or any projection or
+  canonical read. `kernel_route_scope` acquires the store handle first, so a
+  request during the store's `Starting` or unavailable phase receives that
+  kernel `state` answer instead of `disabled`.
 - `crates/daemon/src/lib.rs` `HandlerCore::query_route` starts as `None`.
 - `crates/daemon/tests/query_route_handler.rs` disable and re-enable
   assertions in both tests.
@@ -24,7 +27,8 @@ A rollback that edits canonical rows to match a projection cannot be undone.
 
 ## Timing windows and dependencies
 
-None.
+The daemon's store-starting window: the binding answers `state` before the
+limit set is consulted. The tests run against a ready daemon.
 
 ## What a test must construct
 

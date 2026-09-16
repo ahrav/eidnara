@@ -56,11 +56,12 @@ pub const WEIGHTS: LaneWeights = LaneWeights {
     dense: 1.0,
 };
 pub const K: f64 = 7.0;
-pub const ALL_PHASES: [Phase; 8] = [
+pub const ALL_PHASES: [Phase; 9] = [
     Phase::Probes,
     Phase::Exact,
     Phase::Lexical,
     Phase::Dense,
+    Phase::Admission,
     Phase::Fusion,
     Phase::Revalidation,
     Phase::Materialization,
@@ -293,6 +294,57 @@ impl Fixture {
             .unwrap();
         self.store
             .release_source_hold(&self.binding(), &hold.hold_id, hold.captured_at)
+            .unwrap();
+    }
+
+    /// Retires `object` in the kernel and materializes the retirement into the source descriptors the eligibility adapter judges, leaving the projection's rows in place.
+    pub async fn retire(&self, object: &str) {
+        let retired = self
+            .daemon
+            .commit(
+                &format!("retire-{object}"),
+                vec![json!({"op": "retire_decision", "object_id": object})],
+            )
+            .await;
+        assert_eq!(retired["state"]["kind"], "available", "{retired}");
+        let report = ClaimMaterializer::new(&self.store, ProviderEgress::LocalOnly)
+            .run_episode(commit_bounds(), NOW)
+            .unwrap();
+        assert!(report.retired > 0, "{report:?}");
+    }
+
+    /// Advances the kernel tip without touching any decision the fixture queries.
+    pub fn move_kernel_snapshot(&self) {
+        self.store
+            .commit(intent("move-snapshot"), |envelope| {
+                envelope.retire_decision("third")?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    /// Copies the occurrence behind `occurrence_id` under an identifier outside the contract spelling, with a lexical row so the lexical lane hits it.
+    pub fn corrupt_lexical_copy(&self, occurrence_id: &str) {
+        self.projection
+            .write(|conn| {
+                conn.execute(
+                    "INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
+                         span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                         source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at)
+                     SELECT 'not-an-occurrence-identifier',tuple,lineage_id,class,revision,representation,
+                         span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                         source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at
+                     FROM occurrences WHERE occurrence_id=?1",
+                    [occurrence_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO lexical(rowid,original,parts,occurrence_id)
+                     SELECT 1<<40,original,parts,'not-an-occurrence-identifier'
+                     FROM lexical WHERE occurrence_id=?1",
+                    [occurrence_id],
+                )?;
+                Ok(())
+            })
             .unwrap();
     }
 
