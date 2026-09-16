@@ -65,6 +65,7 @@ pub mod projection_admission;
 pub mod projection_gates;
 pub mod projection_lifecycle;
 pub mod release_contract;
+pub mod request_budget;
 pub mod vector_admission;
 pub mod vector_compaction;
 pub mod vector_composition;
@@ -17956,6 +17957,8 @@ impl Handler {
 mod tests {
     #[path = "transform_unit/tests.rs"]
     mod blocking_unit_tests;
+    #[path = "request_budget/host_tests.rs"]
+    mod request_budget_host_tests;
 
     use super::*;
     use crate::metered_decode::{
