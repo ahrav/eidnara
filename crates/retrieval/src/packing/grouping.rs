@@ -16,6 +16,8 @@ pub struct Selected<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ungrouped {
+    /// Only an explicit span can be empty; an empty whole-object row is its
+    /// own group.
     EmptySpan,
     SpanOverflow,
     /// Every span of the disagreeing run is refused.
@@ -138,7 +140,7 @@ fn merge(
     members.retain(|member| {
         let reason = if member.end < member.start {
             Some(Ungrouped::SpanOverflow)
-        } else if member.end == member.start {
+        } else if member.end == member.start && !member.whole_buffer {
             Some(Ungrouped::EmptySpan)
         } else if member.end - member.start != member.bytes.len() as u64 {
             Some(Ungrouped::SpanOverflow)

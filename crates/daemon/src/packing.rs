@@ -177,6 +177,12 @@ impl PackingTrace {
 pub enum PreparationRefusal {
     Required(RequiredContextFailure<ClaudeTokens>),
     OptionalBound(BoundExceeded),
+    /// An optional group's summed range costs are not representable; `at` is
+    /// the group's fused position. Nothing is saturated into an admissible
+    /// cost.
+    OptionalCostOverflow {
+        at: usize,
+    },
     Deadline,
     Projection(ProjectionError),
     Storage(String),
@@ -491,16 +497,21 @@ pub fn prepare_optional(
     let partition = group(&selected);
     trace.optional(OptionalEvent::Grouped, None);
 
-    let costs: Vec<ClaudeTokens> = partition
+    let costs = partition
         .groups
         .iter()
         .map(|group| {
-            group.ranges.iter().fold(ClaudeTokens::ZERO, |sum, range| {
-                sum.checked_add(inputs.estimator.cost(&range.bytes))
-                    .unwrap_or(ClaudeTokens::MAX)
-            })
+            group
+                .ranges
+                .iter()
+                .try_fold(ClaudeTokens::ZERO, |sum, range| {
+                    sum.checked_add(inputs.estimator.cost(&range.bytes))
+                })
+                .ok_or(PreparationRefusal::OptionalCostOverflow {
+                    at: group.first_fused,
+                })
         })
-        .collect();
+        .collect::<Result<Vec<ClaudeTokens>, _>>()?;
     let scan = skip_and_continue(required.remaining, partition.groups.len(), |_, index| {
         costs[index]
     });

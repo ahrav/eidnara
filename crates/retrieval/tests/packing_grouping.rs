@@ -542,8 +542,7 @@ fn production_grouping_and_scan_never_diverge_from_the_frozen_reference() {
                         let slice =
                             |end: u64| parent.as_bytes()[*start as usize..end as usize].to_vec();
                         if *object {
-                            let cut = (*end as usize).max(1);
-                            promoted_memory(&format!("decision-{call}"), &parent[..cut])
+                            promoted_memory(&format!("decision-{call}"), &parent[..*end as usize])
                         } else if *whole {
                             tool_span(&call, revision, "tool_output", parent, None)
                         } else if start == end {
@@ -652,9 +651,15 @@ fn whole_objects_of_one_class_are_their_own_group_in_both_implementations() {
         promoted_memory("decision-a", "alpha"),
         promoted_memory("decision-b", "alpha"),
         promoted_memory("decision-c", "beta"),
+        promoted_memory("decision-d", ""),
     ];
     let partition = group(&selected(&rows));
-    assert_eq!(partition.groups.len(), 3);
+    assert_eq!(partition.groups.len(), 4);
     assert!(partition.refused.is_empty());
+    let empty = &partition.groups[3];
+    assert_eq!(empty.ranges.len(), 1);
+    assert_eq!(empty.ranges[0].span, Span { start: 0, end: 0 });
+    assert!(empty.ranges[0].bytes.is_empty());
+    assert_eq!(empty.ranges[0].members, vec![rows[3].0.occurrence]);
     grouping_agrees_with_reference(&rows).unwrap();
 }

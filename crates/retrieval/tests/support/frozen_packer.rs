@@ -3,13 +3,14 @@
 
 use std::collections::BTreeMap;
 
-pub const VERSION: &str = "packing-reference-v2";
+pub const VERSION: &str = "packing-reference-v3";
 
 pub const RULE_TEXT: &str = "\
 Grouping: partition selected spans by grouping key; whole-object classes are \
 their own group. Within a key, refuse a reversed span as an overflow, refuse an \
-empty span, and refuse a span whose length is not its payload length or that \
-reaches past a whole-buffer sibling that itself passed those checks. Sort by \
+empty explicit span, and refuse a span whose length is not its payload length \
+or that reaches past a whole-buffer sibling that itself passed those checks. An \
+empty whole-object row is its own empty range. Sort by \
 (start, end, identifier). Two spans merge when the second starts at or before \
 the first ends; merged bytes are the first's bytes followed by the second's \
 bytes after the overlap. A run whose overlapping bytes disagree is refused \
@@ -69,7 +70,7 @@ pub fn group(spans: &[RefSpan]) -> (Vec<RefGroup>, Vec<(u64, RefReason)>) {
         for span in members {
             if span.end < span.start {
                 refused.push((span.id, RefReason::Overflow));
-            } else if span.end == span.start {
+            } else if span.end == span.start && !span.whole_buffer {
                 refused.push((span.id, RefReason::Empty));
             } else if span.end - span.start != span.bytes.len() as u64 {
                 refused.push((span.id, RefReason::Overflow));
@@ -117,6 +118,18 @@ pub fn group(spans: &[RefSpan]) -> (Vec<RefGroup>, Vec<(u64, RefReason)>) {
         }
         valid.sort_by_key(|span| (span.start, span.end, span.id));
         for span in &valid {
+            if span.start == span.end {
+                ranges.push((
+                    RefRange {
+                        start: span.start,
+                        end: span.end,
+                        bytes: Vec::new(),
+                        members: vec![span.id],
+                    },
+                    false,
+                ));
+                continue;
+            }
             let (range, _) = ranges
                 .iter_mut()
                 .find(|(range, _)| range.start <= span.start && span.start < range.end)

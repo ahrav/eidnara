@@ -6,8 +6,9 @@ mod support;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use daemon::packing::{
-    ClaudeTokens, OptionalAdmission, OptionalExclusion, OptionalRequest, PackingTrace,
-    PreparationRefusal, RequiredInputs, StageEvent, prepare_optional, prepare_required,
+    ClaudeTokens, CostEstimator, OptionalAdmission, OptionalExclusion, OptionalRequest,
+    PackingTrace, PreparationRefusal, RequiredInputs, StageEvent, prepare_optional,
+    prepare_required,
 };
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
@@ -42,6 +43,22 @@ fn run(
     optional_bounds: &OptionalBounds,
     budget: u64,
 ) -> (Result<OptionalAdmission, PreparationRefusal>, PackingTrace) {
+    run_with(
+        fixture,
+        optional_requests,
+        optional_bounds,
+        budget,
+        &ByteEstimator,
+    )
+}
+
+fn run_with(
+    fixture: &Fixture,
+    optional_requests: &[OptionalRequest],
+    optional_bounds: &OptionalBounds,
+    budget: u64,
+    estimator: &dyn CostEstimator,
+) -> (Result<OptionalAdmission, PreparationRefusal>, PackingTrace) {
     let mut trace = PackingTrace::default();
     trace.note_retrieval_call();
     let eval = EvalBudget::unbounded();
@@ -50,7 +67,7 @@ fn run(
         project: &fixture.project,
         destination: kernel::ArtifactDestination::Local,
         budget: &eval,
-        estimator: &ByteEstimator,
+        estimator,
     };
     let required = prepare_required(
         &fixture.store,
@@ -141,6 +158,43 @@ fn same_parent_spans_group_and_are_charged_as_one_merged_range() {
     assert_eq!(grouped.ranges[0].bytes, PARENT.as_bytes()[0..10]);
     assert_eq!(grouped.ranges[1].bytes, PARENT.as_bytes()[15..20]);
     assert_eq!(admission.admitted[1].cost, ClaudeTokens::new(15));
+}
+
+/// Charges nothing for the required payload so the optional phase starts with
+/// the whole `u64` range, and more than half of it for every other range.
+struct HalfPlusOneEstimator;
+
+impl CostEstimator for HalfPlusOneEstimator {
+    fn profile(&self) -> &'static str {
+        "half-plus-one"
+    }
+
+    fn cost(&self, bytes: &[u8]) -> ClaudeTokens {
+        if bytes == REQUIRED.payload.as_bytes() {
+            ClaudeTokens::new(0)
+        } else {
+            ClaudeTokens::new(u64::MAX / 2 + 1)
+        }
+    }
+}
+
+#[test]
+fn a_group_whose_cost_overflows_is_refused_not_admitted_at_a_saturated_cost() {
+    let a = tool_range("tool", PARENT, 0, 6);
+    let c = tool_range("tool", PARENT, 15, 20);
+    let fixture = Fixture::new(&[REQUIRED, a, c]);
+    let requests = [optional(&a), optional(&c)];
+    let (result, _) = run_with(
+        &fixture,
+        &requests,
+        &wide(),
+        u64::MAX,
+        &HalfPlusOneEstimator,
+    );
+    match result {
+        Err(PreparationRefusal::OptionalCostOverflow { at }) => assert_eq!(at, 0),
+        other => panic!("an unrepresentable cost must not be admitted: {other:?}"),
+    }
 }
 
 #[test]

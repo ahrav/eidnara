@@ -24,7 +24,7 @@ The pure functions are `crates/retrieval/src/packing/grouping.rs` `group` and
 `admit_optional_set`, exercised by `crates/retrieval/tests/packing_grouping.rs`
 against the oracle parent in `crates/retrieval/tests/fixtures/packing/groups.json`
 and the frozen reference in `crates/retrieval/tests/support/frozen_packer.rs`
-(`packing-reference-v2`). The daemon entry is `crates/daemon/src/packing.rs`
+(`packing-reference-v3`). The daemon entry is `crates/daemon/src/packing.rs`
 `prepare_optional`, exercised by `crates/daemon/tests/packing_optional.rs`;
 `PackingTrace` is the observation point for stage order and payload loads.
 The production packer receives selected bytes only; the parent buffer exists
@@ -49,6 +49,9 @@ grouper and the frozen reference:
 
 - A whole-buffer sibling bounds its key only after it passed the reversed,
   empty, and length checks itself.
+- A whole-object row whose payload is empty (persistence permits a zero-byte
+  payload) has no span to refuse: it is its own group with one empty range,
+  as the required phase admits the same payload at zero cost.
 - Within a key, members sort by `(start, end, occurrence)`. Two persisted
   spans of one key never share offsets, because the identifier covers the
   span; the identifier tiebreak fixes member order for damaged rows so the
@@ -68,7 +71,7 @@ grouper and the frozen reference:
 | --- | --- | --- | --- | --- | --- |
 | [packing-groups-carry-only-selected-bytes](#packing-groups-carry-only-selected-bytes) | safety | test-only | always | active | high |
 | [packing-coverage-is-a-per-identity-partition](#packing-coverage-is-a-per-identity-partition) | safety | test-only | always | active | high |
-| [packing-optional-scan-skips-and-continues](#packing-optional-scan-skips-and-continues) | safety | test-only | always | active | high |
+| [packing-optional-scan-skips-and-continues](#packing-optional-scan-skips-and-continues) | safety | default-production | always | active | high |
 | [packing-optional-bounds-refuse-at-limit-plus-one](#packing-optional-bounds-refuse-at-limit-plus-one) | safety | test-only | always | active | high |
 
 ## Records
@@ -150,9 +153,13 @@ Open questions: None.
 ### packing-optional-scan-skips-and-continues
 
 Type: safety
-Reachability: test-only - `skip_and_continue` is also the memory-trim rule in
-`crates/daemon/src/m0_compose.rs` `trim_memories_to_budget`, which is
-default-production; the packing scan itself has no production caller.
+Reachability: default-production - `skip_and_continue` is the memory-trim
+rule: `crates/daemon/src/canonical_memory.rs` calls
+`crates/daemon/src/m0_compose.rs` `trim_memories_to_budget`, which delegates to
+`skip_and_continue` with no configuration gate. The optional packer's use of the
+same rule through `prepare_optional` has no production caller at this base
+(same grep as the first record); the memory-trim path carries the production
+reachability.
 Status: active
 Exercised: yes - `crates/retrieval/tests/packing_grouping.rs`
 `the_scan_skips_and_continues_and_the_prefix_packer_does_not` and the
