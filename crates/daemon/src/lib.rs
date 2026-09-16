@@ -3719,9 +3719,31 @@ impl Handler {
         route: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
+        self.dispatch_value_on(route, request, transform_unit::DetachedRunner::default())
+            .await
+    }
+
+    /// Cancels the request when its first blocking step is submitted.
+    pub async fn dispatch_value_for_test_cancelling_before_steps(
+        &self,
+        route: RouteHandle,
+        request: Value,
+    ) -> PreparedOutcome {
+        let runner = transform_unit::DetachedRunner {
+            cancel_before_step: true,
+            ..Default::default()
+        };
+        self.dispatch_value_on(route, request, runner).await
+    }
+
+    async fn dispatch_value_on(
+        &self,
+        route: RouteHandle,
+        request: Value,
+        runner: transform_unit::DetachedRunner,
+    ) -> PreparedOutcome {
         let reserve = metered_decode::unbounded_reserve();
         let meter = ResidentMeter::new(&reserve);
-        let runner = transform_unit::DetachedRunner::default();
         let entry = PassEntry {
             core: &self.core,
             route,

@@ -449,6 +449,82 @@ async fn a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_n
     fixture.daemon.shutdown().await;
 }
 
+/// When lexical analysis refuses prose, a ready dense lane returns a degraded dense-only fusion instead of `no_lane`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ready_dense_lane_serves_alone_when_the_lexical_lane_refuses_the_prose() {
+    let fixture = Fixture::build().await;
+    fixture.store_vectors(vector_for);
+    let producer = ExhaustiveProducer {
+        limits: dense_limits(),
+    };
+    let limits = with_dense();
+    let words: Vec<String> = (0..=limits.probes.get())
+        .map(|i| format!("word{i}"))
+        .collect();
+    let query = words.join(" ");
+    let (_token, budget) = request_budget(10_000);
+    let outcome = execute(
+        &fixture.projection,
+        &fixture.store,
+        Authority {
+            project: &fixture.project,
+            destination: ArtifactDestination::Local,
+        },
+        &limits,
+        budget.shared(),
+        &query,
+        DenseLane::Ready {
+            query: &query_vector(),
+            generation_id: GENERATION,
+            producer: &producer,
+        },
+        |_| {},
+    );
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(failure) => panic!("a ready dense lane serves the query: {failure:?}"),
+    };
+    assert_eq!(
+        outcome.statuses,
+        [
+            LaneStatus::Undeclared,
+            LaneStatus::Unavailable("too_many_atoms"),
+            LaneStatus::Complete
+        ],
+        "{}",
+        outcome.body
+    );
+    assert_eq!(outcome.body["degraded"], true);
+    assert!(!entry_ids(&outcome.body).is_empty(), "{}", outcome.body);
+    assert!(
+        outcome
+            .fused
+            .entries()
+            .iter()
+            .all(|entry| entry.lane(Lane::Dense).is_some())
+    );
+
+    let undeclared = execute(
+        &fixture.projection,
+        &fixture.store,
+        Authority {
+            project: &fixture.project,
+            destination: ArtifactDestination::Local,
+        },
+        &limits,
+        budget.shared(),
+        &query,
+        DenseLane::Undeclared,
+        |_| {},
+    );
+    assert!(
+        matches!(undeclared, Err(QueryFailure::Unavailable("no_lane"))),
+        "every declared lane failing is still no_lane: {:?}",
+        undeclared.err()
+    );
+    fixture.daemon.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete() {
     let fixture = Fixture::build().await;

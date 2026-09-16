@@ -516,7 +516,7 @@ Check: `always` - every variant maps to a distinct code and to a
 terminal carries a `reason` code; the failure of a non-dense lane for a
 non-budget reason is reported per lane as `unavailable` with a closed reason
 code and the answer `degraded` while the other lane's ranking is served, and
-both lanes failing is `lane_unavailable`.
+every declared lane failing is `lane_unavailable`.
 `always` because the set is the wire contract.
 Fault/timing angle: None.
 Required faults and enabling state: A packing stage that misses required
@@ -606,6 +606,7 @@ Exercised: yes - `crates/daemon/tests/query_route_dense.rs`
 `an_unavailable_embedding_lane_degrades_to_a_nonempty_exact_and_lexical_answer`,
 `producer_corruption_is_typed_while_a_foreign_query_shape_degrades_the_lane`,
 `a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_no_producer`,
+`a_ready_dense_lane_serves_alone_when_the_lexical_lane_refuses_the_prose`,
 and `a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete`;
 `crates/daemon/src/query_route.rs`
 `a_lane_that_is_not_ready_is_an_unavailability_never_a_fault`;
@@ -633,8 +634,12 @@ with an artifact fault ends that request as `embedding_failed` and the next
 request reports the lane `disabled`; a selector-only request, at the `execute`
 level with a ready lane and through the handler with a counting embedder,
 reports the dense lane `undeclared`, carries no dense contribution, and makes
-no embedding or producer call; no producer runs when the lane is unavailable;
-a live row without a vector leaves the lane `incomplete` with reason
+no embedding or producer call; a request over the probe bound and one
+cancelled before its embedding step starts make no embedding call; no producer
+runs when the lane is unavailable; a prose query the lexical lane refuses is
+served by a ready dense lane alone, `degraded`, and is `no_lane` only when
+every declared lane fails; a live row without a vector leaves the lane
+`incomplete` with reason
 `coverage_shortfall` and a `max_rows` of one leaves it `row_bound`, both
 degraded; a NaN tolerance is refused at installation; a budget that lapses
 during the embedding step is `deadline` even when the embedder also faulted.

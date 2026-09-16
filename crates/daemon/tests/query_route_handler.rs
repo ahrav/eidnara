@@ -389,6 +389,26 @@ async fn the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades
     );
     assert_eq!(slow.calls.load(Ordering::SeqCst), 1);
 
+    let queued = Arc::new(ScriptedEmbedder {
+        outcome: Ok(vec![1.0; 8]),
+        calls: AtomicUsize::new(0),
+        delay: Duration::ZERO,
+    });
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::clone(&queued) as Arc<dyn QueryEmbedder>));
+    let answer = body(
+        daemon
+            .outcome_cancelling_before_steps(request(&project, "id:rule explicit contract"))
+            .await,
+    );
+    assert_eq!(terminal(&answer), "cancelled");
+    assert_eq!(
+        queued.calls.load(Ordering::SeqCst),
+        0,
+        "a request cancelled before its embedding step starts is not embedded"
+    );
+
     daemon.handler().set_query_embedder_for_test(None);
     let answer = body(
         daemon
@@ -435,6 +455,20 @@ async fn a_selector_only_request_is_never_embedded_and_leaves_the_dense_lane_und
         embedder.calls.load(Ordering::SeqCst),
         0,
         "a request the selector classifier refuses is not embedded"
+    );
+
+    let mut over_bound: Vec<String> = (0..=limits().probes.get())
+        .map(|i| format!("id:rule{i}"))
+        .collect();
+    over_bound.push("explicit contract".to_string());
+    let refused = daemon
+        .outcome(request(&project, &over_bound.join(" ")))
+        .await;
+    assert_eq!(error_code(refused), "invalid_params");
+    assert_eq!(
+        embedder.calls.load(Ordering::SeqCst),
+        0,
+        "a request over the probe bound is refused before it is embedded"
     );
 
     let answer = body(

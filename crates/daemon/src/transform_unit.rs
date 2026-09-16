@@ -67,6 +67,7 @@ impl UnitRunner for RequestCtx {
 #[derive(Default)]
 pub(crate) struct DetachedRunner {
     pub(crate) cancel: CancellationToken,
+    pub(crate) cancel_before_step: bool,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -90,6 +91,9 @@ impl UnitRunner for DetachedRunner {
         &self,
         work: Box<dyn FnOnce() + Send>,
     ) -> Pin<Box<dyn Future<Output = Result<(), BlockingWorkFailed>> + Send + 'static>> {
+        if self.cancel_before_step {
+            self.cancel.cancel();
+        }
         let joined = tokio::task::spawn_blocking(work);
         Box::pin(async move {
             match joined.await {

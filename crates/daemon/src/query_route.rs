@@ -571,6 +571,22 @@ fn hit(occurrence_id: &str, raw_score: RawScore) -> Option<LaneHit> {
         })
 }
 
+/// The `id:` selector values the exact lane probes; the probe bound applies to their count.
+fn object_ids(intent: &Intent) -> Vec<&str> {
+    let selectors: Vec<&Selector> = match intent {
+        Intent::Direct(selector) => vec![selector],
+        Intent::Hybrid(mentions) => mentions.iter().map(|mention| &mention.selector).collect(),
+    };
+    selectors
+        .iter()
+        .filter(|selector| selector.family == Family::Id)
+        .filter_map(|selector| match &selector.value {
+            SelectorValue::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn exact_lane(
     conn: &GuardedConn<'_>,
     kernel_incarnation_id: &str,
@@ -578,18 +594,7 @@ fn exact_lane(
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
 ) -> Result<LaneOutput, QueryFailure> {
-    let selectors: Vec<&Selector> = match intent {
-        Intent::Direct(selector) => vec![selector],
-        Intent::Hybrid(mentions) => mentions.iter().map(|mention| &mention.selector).collect(),
-    };
-    let object_ids: Vec<&str> = selectors
-        .iter()
-        .filter(|selector| selector.family == Family::Id)
-        .filter_map(|selector| match &selector.value {
-            SelectorValue::Text(text) => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
+    let object_ids = object_ids(intent);
     if object_ids.is_empty() {
         return Ok(LaneOutput::undeclared());
     }
@@ -741,15 +746,6 @@ pub fn execute(
             before_phase(Phase::Lexical);
             check(budget)?;
             let lexical = lexical_lane(conn, kernel, authority, &intent, query, limits, budget)?;
-            if exact.ranking.is_none() && lexical.ranking.is_none() {
-                let both_undeclared = exact.status == LaneStatus::Undeclared
-                    && lexical.status == LaneStatus::Undeclared;
-                return Err(if both_undeclared {
-                    QueryFailure::InvalidQuery("the query yields no probe".to_string())
-                } else {
-                    QueryFailure::Unavailable("no_lane")
-                });
-            }
             before_phase(Phase::Dense);
             check(budget)?;
             let dense = if has_prose(&intent, query) {
@@ -757,6 +753,17 @@ pub fn execute(
             } else {
                 LaneOutput::undeclared()
             };
+            let lanes = [&exact, &lexical, &dense];
+            if lanes.iter().all(|lane| lane.ranking.is_none()) {
+                let all_undeclared = lanes
+                    .iter()
+                    .all(|lane| lane.status == LaneStatus::Undeclared);
+                return Err(if all_undeclared {
+                    QueryFailure::InvalidQuery("the query yields no probe".to_string())
+                } else {
+                    QueryFailure::Unavailable("no_lane")
+                });
+            }
             before_phase(Phase::Fusion);
             check(budget)?;
             let rankings = [exact.ranking, lexical.ranking, dense.ranking]
@@ -994,16 +1001,21 @@ impl HandlerCore {
             harness: _,
         } = scope;
         let query = parsed.query;
-        // A request without prose declares no dense lane, so inference is not spent on it; `execute` classifies again and answers a refused selector itself.
+        // Requests without prose or with more than `limits.probes` ID selectors skip dense inference.
         let embeds = limits.dense.is_some()
-            && classify(&query, selector_bounds(&limits))
-                .is_ok_and(|intent| has_prose(&intent, &query));
+            && classify(&query, selector_bounds(&limits)).is_ok_and(|intent| {
+                has_prose(&intent, &query) && object_ids(&intent).len() <= limits.probes.get()
+            });
         let embedded = if embeds {
             let embedder = self.query_embedder(&lifecycle);
             let slot: Arc<Mutex<Option<EmbedResult>>> = Arc::default();
             let text = query.clone();
             let written = Arc::clone(&slot);
+            let observed = shared.clone();
             let step = runner.run_step(Box::new(move || {
+                if observed.is_exhausted() {
+                    return;
+                }
                 let result = embedder.embed(&text);
                 *written
                     .lock()

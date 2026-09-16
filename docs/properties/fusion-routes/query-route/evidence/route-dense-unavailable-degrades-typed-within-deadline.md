@@ -35,6 +35,7 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u3b-query-route` at
   `an_unavailable_embedding_lane_degrades_to_a_nonempty_exact_and_lexical_answer`
   `producer_corruption_is_typed_while_a_foreign_query_shape_degrades_the_lane`,
   `a_request_without_prose_leaves_a_ready_dense_lane_undeclared_and_runs_no_producer`,
+  `a_ready_dense_lane_serves_alone_when_the_lexical_lane_refuses_the_prose`,
   and `a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete`.
 - `crates/daemon/tests/query_route_handler.rs`
   `a_selector_only_request_is_never_embedded_and_leaves_the_dense_lane_undeclared`
