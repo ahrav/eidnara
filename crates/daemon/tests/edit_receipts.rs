@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use daemon::dispatch::PreparedOutcome;
 use daemon::edit_receipts::{RETENTION_FLOOR, ReceiptLimits, ReceiptLimitsRefusal};
+use host_runtime::{BindOutcome, CompositeComponent, RouteHandle, RouteIdentity};
 use serde_json::{Value, json};
 use support::kernel_daemon::{KernelDaemon, SESSION};
 
@@ -150,6 +151,101 @@ fn id(prepared: &Value) -> String {
 fn terminal(value: &Value) -> &str {
     assert_eq!(value["kind"], "terminal", "{value}");
     value["terminal"].as_str().unwrap()
+}
+
+async fn bind_other_project(daemon: &KernelDaemon) -> (RouteHandle, std::path::PathBuf) {
+    let root = daemon.data_home().join("other-project");
+    std::fs::create_dir_all(&root).unwrap();
+    let route = RouteHandle {
+        channel: 8,
+        epoch: 1,
+    };
+    let identity = RouteIdentity {
+        project_root: root.clone(),
+        harness: "test".to_owned(),
+        session: SESSION.to_owned(),
+        consumer_module_id: None,
+        consumer_launch_nonce: None,
+        consumer_capabilities: Vec::new(),
+        admission_facts: None,
+        credential_fingerprints: std::collections::BTreeMap::new(),
+    };
+    assert!(matches!(
+        daemon.handler().bind(route, identity).await,
+        BindOutcome::Accept
+    ));
+    (route, root)
+}
+
+async fn call_on(daemon: &KernelDaemon, route: RouteHandle, request: Value) -> Value {
+    match daemon
+        .handler()
+        .dispatch_value_for_test(route, request)
+        .await
+    {
+        PreparedOutcome::Response(output) => output.json_for_test().unwrap().clone(),
+        PreparedOutcome::Error { code, message } => json!({"error": code, "message": message}),
+        PreparedOutcome::Streamed => panic!("streamed"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_receipt_belongs_to_the_project_that_prepared_it() {
+    let daemon = KernelDaemon::start().await;
+    let mut narrow = limits();
+    narrow.max_keys = NonZeroUsize::new(1).unwrap();
+    daemon
+        .handler()
+        .set_edit_receipt_limits(Some(narrow))
+        .unwrap();
+    let consumer = Consumer::new(&daemon);
+    let (other_route, other_root) = bind_other_project(&daemon).await;
+    let ctx = context("rev-1", "repr-1", 10);
+
+    let key = id(&consumer.prepare(ctx.clone(), "append", 10).await);
+    let elsewhere = call_on(&daemon, other_route, apply(&other_root, &key, ctx.clone())).await;
+    assert_eq!(
+        terminal(&elsewhere),
+        "receipt_unavailable",
+        "another project's route holds no receipt for the key: {elsewhere}"
+    );
+    let elsewhere = call_on(
+        &daemon,
+        other_route,
+        confirm(&other_root, &key, "f", Some("f"), "append"),
+    )
+    .await;
+    assert_eq!(terminal(&elsewhere), "receipt_unavailable");
+    let forwarded = consumer.apply(&key, ctx.clone()).await;
+    assert_eq!(
+        forwarded["kind"], "forwarded",
+        "the preparing project's route still forwards: {forwarded}"
+    );
+
+    let other_key = call_on(
+        &daemon,
+        other_route,
+        prepare(&other_root, ctx.clone(), "append", 10),
+    )
+    .await;
+    assert_eq!(
+        other_key["kind"], "prepared",
+        "the count bound is per project, so a full project does not refuse another: {other_key}"
+    );
+    let still = consumer.apply(&key, ctx.clone()).await;
+    assert_eq!(
+        still["state"], "in_flight",
+        "another project's mint never evicts this project's receipt: {still}"
+    );
+    let forwarded = call_on(
+        &daemon,
+        other_route,
+        apply(&other_root, id(&other_key).as_str(), ctx),
+    )
+    .await;
+    assert_eq!(forwarded["kind"], "forwarded");
+    assert_eq!(consumer.effects().len(), 1);
+    daemon.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -567,6 +663,14 @@ async fn outcomes_are_distinct_and_capacity_is_bound_before_preparation() {
         .confirm(&key, &effect, Some(&effect), "unknown")
         .await;
     assert_eq!(unknown["error"], "invalid_params", "{unknown}");
+    let mut misspelled_span = ctx.clone();
+    misspelled_span["spans"][0] =
+        json!({"occurrence_id": OCC_A, "buffer_len": 100, "spn": [0, 10]});
+    let refused = consumer.apply(&key, misspelled_span).await;
+    assert_eq!(
+        refused["error"], "invalid_params",
+        "a misspelled span key is refused instead of widening to the whole buffer: {refused}"
+    );
     let mut foreign = apply(daemon.project(), &key, ctx);
     foreign["project_root"] = json!(daemon.project().join("elsewhere").to_str().unwrap());
     let refused = consumer.call(foreign).await;

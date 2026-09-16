@@ -21,8 +21,11 @@ pub(crate) const PREPARE: &str = "retrieval.prepare";
 pub(crate) const APPLY: &str = "retrieval.apply";
 pub(crate) const CONFIRM: &str = "retrieval.confirm";
 
-/// Parent Q9: the longest supported retry path, one route deadline ceiling plus one client retry of the same length; a retention below it would expire a key a legal retry still needs.
+/// Two 30 s wire request deadlines (`docs/host-wire-protocol.md` Section 11), so one request plus one full-length retry never meets an expired key. The wire deadline is fixed; it is not the operator's `deadline_ceiling` for `retrieval.query`.
 pub const RETENTION_FLOOR: Duration = Duration::from_secs(60);
+
+/// Expiry and eviction scan one project's receipts on every request, so the count bound has a ceiling.
+pub const MAX_KEYS_CEILING: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ReceiptLimitsRefusal {
@@ -30,6 +33,8 @@ pub enum ReceiptLimitsRefusal {
         "retention {retention:?} is shorter than the longest supported retry path {RETENTION_FLOOR:?}"
     )]
     RetentionBelowFloor { retention: Duration },
+    #[error("max_keys {max_keys} is above the ceiling {MAX_KEYS_CEILING}")]
+    MaxKeysAboveCeiling { max_keys: usize },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +50,11 @@ impl ReceiptLimits {
         if self.retention < RETENTION_FLOOR {
             return Err(ReceiptLimitsRefusal::RetentionBelowFloor {
                 retention: self.retention,
+            });
+        }
+        if self.max_keys.get() > MAX_KEYS_CEILING {
+            return Err(ReceiptLimitsRefusal::MaxKeysAboveCeiling {
+                max_keys: self.max_keys.get(),
             });
         }
         Ok(())
@@ -134,12 +144,52 @@ struct Receipt {
     state: State,
 }
 
+/// `ReceiptStore` applies `max_keys` independently to each project.
+#[derive(Debug, Default)]
+struct ProjectReceipts {
+    receipts: BTreeMap<String, Receipt>,
+}
+
+impl ProjectReceipts {
+    fn expire(&mut self, now: Instant, retention: Duration) {
+        self.receipts
+            .retain(|_, receipt| now.duration_since(receipt.created) < retention);
+    }
+
+    /// When adding a receipt exceeds `max_keys`, remove the oldest non-in-flight receipts; fail if too few are available, because an in-flight receipt's edit may already be applied.
+    fn make_room(&mut self, max_keys: NonZeroUsize) -> bool {
+        let excess = (self.receipts.len() + 1).saturating_sub(max_keys.get());
+        if excess == 0 {
+            return true;
+        }
+        let mut settled: Vec<(Instant, &String)> = self
+            .receipts
+            .iter()
+            .filter(|(_, receipt)| !matches!(receipt.state, State::InFlight { .. }))
+            .map(|(id, receipt)| (receipt.created, id))
+            .collect();
+        if settled.len() < excess {
+            return false;
+        }
+        settled.sort_unstable();
+        let victims: Vec<String> = settled
+            .into_iter()
+            .take(excess)
+            .map(|(_, id)| id.clone())
+            .collect();
+        for id in victims {
+            self.receipts.remove(&id);
+        }
+        true
+    }
+}
+
 /// Bounded by count and by age; an entry past either bound is dropped, and a dropped key is refused rather than replayed.
 pub struct ReceiptStore {
     limits: ReceiptLimits,
     incarnation: String,
     sequence: u64,
-    receipts: BTreeMap<String, Receipt>,
+    projects: BTreeMap<String, ProjectReceipts>,
 }
 
 impl ReceiptStore {
@@ -148,33 +198,24 @@ impl ReceiptStore {
             limits,
             incarnation,
             sequence: 0,
-            receipts: BTreeMap::new(),
+            projects: BTreeMap::new(),
         }
     }
 
     fn expire(&mut self, now: Instant) {
         let retention = self.limits.retention;
-        self.receipts
-            .retain(|_, receipt| now.duration_since(receipt.created) < retention);
+        self.projects.retain(|_, project| {
+            project.expire(now, retention);
+            !project.receipts.is_empty()
+        });
     }
 
-    /// The count bound is enforced only when a key is minted: the oldest receipt that is not in flight makes room, and when every receipt is in flight the new preparation fails instead of dropping one whose edit may already be applied.
-    fn make_room(&mut self) -> bool {
-        while self.receipts.len() >= self.limits.max_keys.get() {
-            let victim = self
-                .receipts
-                .iter()
-                .filter(|(_, receipt)| !matches!(receipt.state, State::InFlight { .. }))
-                .min_by_key(|(_, receipt)| receipt.created)
-                .map(|(id, _)| id.clone());
-            match victim {
-                Some(id) => {
-                    self.receipts.remove(&id);
-                }
-                None => return false,
-            }
-        }
-        true
+    fn project(&mut self, project: &str) -> &mut ProjectReceipts {
+        self.projects.entry(project.to_string()).or_default()
+    }
+
+    fn receipts(&self, project: &str) -> Option<&BTreeMap<String, Receipt>> {
+        self.projects.get(project).map(|p| &p.receipts)
     }
 
     pub fn set_limits(&mut self, limits: ReceiptLimits) {
@@ -202,7 +243,9 @@ fn derive(domain: &str, components: &[&[u8]]) -> String {
         .collect()
 }
 
+/// `span` defaults to the whole buffer when absent, so a misspelled key is refused rather than silently widening the selection.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WireSpan {
     pub occurrence_id: String,
     pub buffer_len: u64,
@@ -333,8 +376,28 @@ impl From<Refusal> for ApplyRefusal {
     }
 }
 
+const INCARNATION_BYTES: usize = 8;
+const INCARNATION_HEX_LEN: usize = INCARNATION_BYTES * 2;
+const IDENTITY_HEX_LEN: usize = 64;
+
+fn lowercase_hex(text: &str) -> bool {
+    text.bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Lowercase hex prevents case variants from representing distinct identities.
 fn well_formed_identity(identity: &str) -> bool {
-    identity.len() == 64 && identity.bytes().all(|b| b.is_ascii_hexdigit())
+    identity.len() == IDENTITY_HEX_LEN && lowercase_hex(identity)
+}
+
+fn well_formed_preparation_id(preparation_id: &str) -> bool {
+    preparation_id
+        .split_once('-')
+        .is_some_and(|(incarnation, identity)| {
+            incarnation.len() == INCARNATION_HEX_LEN
+                && lowercase_hex(incarnation)
+                && well_formed_identity(identity)
+        })
 }
 
 impl ReceiptStore {
@@ -342,6 +405,7 @@ impl ReceiptStore {
     pub fn prepare(
         &mut self,
         now: Instant,
+        project: &str,
         context: &Context,
         action: Action,
         accounting_profile: &str,
@@ -360,7 +424,8 @@ impl ReceiptStore {
         let digest = context.digest()?;
         let selection = context.selection_digest()?;
         self.expire(now);
-        if !self.make_room() {
+        let max_keys = self.limits.max_keys;
+        if !self.project(project).make_room(max_keys) {
             return Ok(PrepareOutcome::Failure("receipt_capacity"));
         }
         let fingerprint = derive(
@@ -382,7 +447,7 @@ impl ReceiptStore {
                 &[fingerprint.as_bytes(), &self.sequence.to_be_bytes()],
             )
         );
-        self.receipts.insert(
+        self.project(project).receipts.insert(
             preparation_id.clone(),
             Receipt {
                 digest: Some(digest),
@@ -403,20 +468,29 @@ impl ReceiptStore {
     pub fn apply(
         &mut self,
         now: Instant,
+        project: &str,
         preparation_id: &str,
         context: &Context,
     ) -> Result<ApplyOutcome, ApplyRefusal> {
         let digest = context.digest()?;
         self.expire(now);
         if !self.owns(preparation_id) {
-            return Ok(match self.receipts.get(preparation_id).map(|r| &r.state) {
+            let recorded = self
+                .receipts(project)
+                .and_then(|receipts| receipts.get(preparation_id))
+                .map(|receipt| &receipt.state);
+            return Ok(match recorded {
                 Some(State::Complete { outcome, .. }) => {
                     ApplyOutcome::Complete { outcome: *outcome }
                 }
                 _ => ApplyOutcome::Unknown,
             });
         }
-        let Some(receipt) = self.receipts.get_mut(preparation_id) else {
+        let Some(receipt) = self
+            .projects
+            .get_mut(project)
+            .and_then(|receipts| receipts.receipts.get_mut(preparation_id))
+        else {
             return Err(Refusal::ReceiptUnavailable.into());
         };
         let prepared = receipt.digest;
@@ -452,16 +526,22 @@ impl ReceiptStore {
                 }
                 ApplyOutcome::Complete { outcome: *outcome }
             }
-            State::Unknown { .. } => ApplyOutcome::Unknown,
+            State::Unknown { .. } => {
+                if prepared != Some(digest) {
+                    return Err(Refusal::Conflict.into());
+                }
+                ApplyOutcome::Unknown
+            }
         };
         Ok(outcome)
     }
 
     /// Applied is recorded only when the acknowledgment's applied identity equals the identity the daemon forwarded; an acknowledgment without one leaves the key `Unknown`.
-    /// Parent Q9 read-back: for a key of another incarnation the daemon holds no record, so the adapter's own forwarded and applied identities are the evidence; they must be well formed and equal, and the reclassification is recorded so the key does not fall back to `Unknown`.
+    /// For a key of another incarnation the daemon has no record; it accepts only a minted-shape key with equal, well-formed forwarded and applied identities, then records the classification so the key does not fall back to `Unknown`.
     pub fn confirm(
         &mut self,
         now: Instant,
+        project: &str,
         preparation_id: &str,
         forwarded_identity: &str,
         applied_identity: Option<&str>,
@@ -469,41 +549,57 @@ impl ReceiptStore {
     ) -> Result<ConfirmOutcome, Refusal> {
         self.expire(now);
         if !self.owns(preparation_id) {
-            if let Some(receipt) = self.receipts.get(preparation_id)
+            if let Some(receipt) = self
+                .receipts(project)
+                .and_then(|receipts| receipts.get(preparation_id))
                 && let State::Complete {
                     forwarded_identity: recorded,
                     outcome: known,
                 } = &receipt.state
             {
-                return if recorded == forwarded_identity && *known == outcome {
+                return if recorded == forwarded_identity
+                    && applied_identity == Some(recorded.as_str())
+                    && *known == outcome
+                {
                     Ok(ConfirmOutcome::Complete { outcome })
                 } else {
                     Err(Refusal::Conflict)
                 };
             }
-            return match applied_identity {
-                Some(applied) if applied == forwarded_identity && well_formed_identity(applied) => {
-                    if self.make_room() {
-                        self.receipts.insert(
-                            preparation_id.to_string(),
-                            Receipt {
-                                digest: None,
-                                action: Action::Append,
-                                edit_bytes: 0,
-                                created: now,
-                                state: State::Complete {
-                                    forwarded_identity: forwarded_identity.to_string(),
-                                    outcome,
-                                },
-                            },
-                        );
-                    }
-                    Ok(ConfirmOutcome::Complete { outcome })
-                }
-                _ => Ok(ConfirmOutcome::Unknown),
-            };
+            let read_back = applied_identity.is_some_and(|applied| {
+                applied == forwarded_identity
+                    && well_formed_identity(applied)
+                    && well_formed_preparation_id(preparation_id)
+            });
+            if !read_back {
+                return Ok(ConfirmOutcome::Unknown);
+            }
+            // Answering `complete` for a read-back that is not recorded would let the key fall back to `unknown` and accept a contradictory second outcome.
+            let max_keys = self.limits.max_keys;
+            let receipts = self.project(project);
+            if !receipts.make_room(max_keys) {
+                return Err(Refusal::ReceiptUnavailable);
+            }
+            receipts.receipts.insert(
+                preparation_id.to_string(),
+                Receipt {
+                    digest: None,
+                    action: Action::Append,
+                    edit_bytes: 0,
+                    created: now,
+                    state: State::Complete {
+                        forwarded_identity: forwarded_identity.to_string(),
+                        outcome,
+                    },
+                },
+            );
+            return Ok(ConfirmOutcome::Complete { outcome });
         }
-        let Some(receipt) = self.receipts.get_mut(preparation_id) else {
+        let Some(receipt) = self
+            .projects
+            .get_mut(project)
+            .and_then(|receipts| receipts.receipts.get_mut(preparation_id))
+        else {
             return Err(Refusal::ReceiptUnavailable);
         };
         match &receipt.state {
@@ -551,20 +647,21 @@ impl ReceiptStore {
     }
 
     pub fn len(&self) -> usize {
-        self.receipts.len()
+        self.projects.values().map(|p| p.receipts.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.receipts.is_empty()
+        self.len() == 0
     }
 
-    pub fn holds(&self, preparation_id: &str) -> bool {
-        self.receipts.contains_key(preparation_id)
+    pub fn holds(&self, project: &str, preparation_id: &str) -> bool {
+        self.receipts(project)
+            .is_some_and(|receipts| receipts.contains_key(preparation_id))
     }
 }
 
 pub(crate) fn fresh_incarnation() -> String {
-    let mut nonce = [0u8; 8];
+    let mut nonce = [0u8; INCARNATION_BYTES];
     getrandom::getrandom(&mut nonce).expect("OS entropy for the receipt incarnation");
     nonce.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -604,20 +701,22 @@ impl HandlerCore {
         Ok(())
     }
 
+    /// The bound project scopes every receipt, so a key is honored only on a route of the project that prepared it.
     fn with_receipts<T>(
         &self,
         channel: RouteHandle,
         request: Value,
         operation: &str,
-        f: impl FnOnce(&mut ReceiptStore, T) -> PreparedOutcome,
+        f: impl FnOnce(&mut ReceiptStore, &str, T) -> PreparedOutcome,
     ) -> PreparedOutcome
     where
         T: serde::de::DeserializeOwned,
     {
-        let (_scope, parsed) = match self.kernel_request::<T>(channel, request, operation) {
+        let (scope, parsed) = match self.kernel_request::<T>(channel, request, operation) {
             Ok(bound) => bound,
             Err(outcome) => return outcome,
         };
+        let project = scope.project.scope_id();
         let mut slot = self
             .edit_receipts
             .lock()
@@ -625,7 +724,7 @@ impl HandlerCore {
         let Some(store) = slot.as_mut() else {
             return refusal(Refusal::Disabled);
         };
-        f(store, parsed)
+        f(store, &project, parsed)
     }
 
     pub(crate) fn handle_retrieval_prepare(
@@ -637,8 +736,9 @@ impl HandlerCore {
             channel,
             request,
             PREPARE,
-            |store, parsed: PrepareRequest| match store.prepare(
+            |store, project, parsed: PrepareRequest| match store.prepare(
                 Instant::now(),
+                project,
                 &parsed.context,
                 parsed.action,
                 &parsed.accounting_profile,
@@ -669,8 +769,9 @@ impl HandlerCore {
             channel,
             request,
             APPLY,
-            |store, parsed: ApplyRequest| match store.apply(
+            |store, project, parsed: ApplyRequest| match store.apply(
                 Instant::now(),
+                project,
                 &parsed.preparation_id,
                 &parsed.context,
             ) {
@@ -713,8 +814,9 @@ impl HandlerCore {
             channel,
             request,
             CONFIRM,
-            |store, parsed: ConfirmRequest| match store.confirm(
+            |store, project, parsed: ConfirmRequest| match store.confirm(
                 Instant::now(),
+                project,
                 &parsed.preparation_id,
                 &parsed.forwarded_identity,
                 parsed.applied_identity.as_deref(),
@@ -738,6 +840,8 @@ impl HandlerCore {
 mod tests {
     use super::*;
 
+    const PROJECT: &str = "project:test";
+
     fn limits(max_keys: usize, retention: Duration) -> ReceiptLimits {
         ReceiptLimits {
             max_keys: NonZeroUsize::new(max_keys).unwrap(),
@@ -758,7 +862,7 @@ mod tests {
 
     fn prepared(store: &mut ReceiptStore, now: Instant) -> String {
         match store
-            .prepare(now, &context("rev"), Action::Append, "profile", 1)
+            .prepare(now, PROJECT, &context("rev"), Action::Append, "profile", 1)
             .unwrap()
         {
             PrepareOutcome::Prepared(prepared) => prepared.preparation_id,
@@ -773,32 +877,68 @@ mod tests {
         let key = prepared(&mut store, start);
         for step in 1..5 {
             let now = start + Duration::from_secs(step * 2);
-            assert!(store.apply(now, &key, &context("rev")).is_ok(), "{step}");
+            assert!(
+                store.apply(now, PROJECT, &key, &context("rev")).is_ok(),
+                "{step}"
+            );
         }
         assert!(matches!(
-            store.apply(start + Duration::from_secs(10), &key, &context("rev")),
+            store.apply(
+                start + Duration::from_secs(10),
+                PROJECT,
+                &key,
+                &context("rev")
+            ),
             Err(ApplyRefusal::Refused(Refusal::ReceiptUnavailable))
         ));
         assert!(store.is_empty());
+    }
+
+    /// A key another daemon incarnation minted: sixteen hex characters, a dash, sixty-four hex characters.
+    fn foreign_key(seed: &str) -> String {
+        format!("{}-{}", seed.repeat(8), seed.repeat(32))
     }
 
     #[test]
     fn a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete() {
         let now = Instant::now();
         let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
-        let key = "other-abc";
+        let key = &foreign_key("0f");
         assert!(matches!(
-            store.apply(now, key, &context("rev")),
+            store.apply(now, PROJECT, key, &context("rev")),
             Ok(ApplyOutcome::Unknown)
         ));
         assert!(matches!(
-            store.confirm(now, key, "bogus", Some("bogus"), Outcome::Keep),
+            store.confirm(now, PROJECT, key, "bogus", Some("bogus"), Outcome::Keep),
+            Ok(ConfirmOutcome::Unknown)
+        ));
+        let upper = "AB".repeat(32);
+        assert!(matches!(
+            store.confirm(now, PROJECT, key, &upper, Some(&upper), Outcome::Keep),
             Ok(ConfirmOutcome::Unknown)
         ));
         let identity = "ab".repeat(32);
+        for malformed in ["other-abc", "", &"ab".repeat(40), &identity] {
+            assert!(
+                matches!(
+                    store.confirm(
+                        now,
+                        PROJECT,
+                        malformed,
+                        &identity,
+                        Some(&identity),
+                        Outcome::Keep
+                    ),
+                    Ok(ConfirmOutcome::Unknown)
+                ),
+                "{malformed:?}"
+            );
+            assert!(!store.holds(PROJECT, malformed), "{malformed:?}");
+        }
         assert!(matches!(
             store.confirm(
                 now,
+                PROJECT,
                 key,
                 &identity,
                 Some("cd".repeat(32).as_str()),
@@ -807,19 +947,44 @@ mod tests {
             Ok(ConfirmOutcome::Unknown)
         ));
         assert!(matches!(
-            store.confirm(now, key, &identity, Some(&identity), Outcome::Keep),
+            store.confirm(now, PROJECT, key, &identity, Some(&identity), Outcome::Keep),
             Ok(ConfirmOutcome::Complete {
                 outcome: Outcome::Keep
             })
         ));
         assert!(matches!(
-            store.apply(now, key, &context("rev")),
+            store.apply(now, PROJECT, key, &context("rev")),
             Ok(ApplyOutcome::Complete {
                 outcome: Outcome::Keep
             })
         ));
         assert!(matches!(
-            store.confirm(now, key, &identity, Some(&identity), Outcome::Append),
+            store.confirm(
+                now,
+                PROJECT,
+                key,
+                &identity,
+                Some(&identity),
+                Outcome::Append
+            ),
+            Err(Refusal::Conflict)
+        ));
+        assert!(
+            matches!(
+                store.confirm(now, PROJECT, key, &identity, None, Outcome::Keep),
+                Err(Refusal::Conflict)
+            ),
+            "a recorded read-back is judged against its applied identity, not only its forward"
+        );
+        assert!(matches!(
+            store.confirm(
+                now,
+                PROJECT,
+                key,
+                &identity,
+                Some("cd".repeat(32).as_str()),
+                Outcome::Keep
+            ),
             Err(Refusal::Conflict)
         ));
         assert_eq!(store.len(), 1);
@@ -831,13 +996,117 @@ mod tests {
         let mut store = ReceiptStore::new(limits(1, RETENTION_FLOOR), "inc".to_string());
         let key = prepared(&mut store, now);
         assert!(matches!(
-            store.apply(now, &key, &context("rev")),
+            store.apply(now, PROJECT, &key, &context("rev")),
             Ok(ApplyOutcome::Forwarded { .. })
         ));
         assert!(matches!(
-            store.prepare(now, &context("rev"), Action::Append, "profile", 1),
+            store.prepare(now, PROJECT, &context("rev"), Action::Append, "profile", 1),
             Ok(PrepareOutcome::Failure("receipt_capacity"))
         ));
-        assert!(store.holds(&key));
+        assert!(store.holds(PROJECT, &key));
+    }
+
+    #[test]
+    fn a_read_back_the_store_cannot_record_is_refused_rather_than_answered_complete() {
+        let now = Instant::now();
+        let mut store = ReceiptStore::new(limits(1, RETENTION_FLOOR), "inc".to_string());
+        let key = prepared(&mut store, now);
+        assert!(matches!(
+            store.apply(now, PROJECT, &key, &context("rev")),
+            Ok(ApplyOutcome::Forwarded { .. })
+        ));
+        let foreign = foreign_key("0a");
+        let identity = "ab".repeat(32);
+        assert!(matches!(
+            store.confirm(
+                now,
+                PROJECT,
+                &foreign,
+                &identity,
+                Some(&identity),
+                Outcome::Keep
+            ),
+            Err(Refusal::ReceiptUnavailable)
+        ));
+        assert!(!store.holds(PROJECT, &foreign));
+        assert!(
+            store.holds(PROJECT, &key),
+            "the in-flight receipt is never the victim"
+        );
+        assert!(
+            matches!(
+                store.apply(now, PROJECT, &foreign, &context("rev")),
+                Ok(ApplyOutcome::Unknown)
+            ),
+            "an unrecorded read-back leaves the key unknown"
+        );
+    }
+
+    #[test]
+    fn a_changed_digest_against_an_unknown_receipt_is_a_conflict() {
+        let now = Instant::now();
+        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        let key = prepared(&mut store, now);
+        let Ok(ApplyOutcome::Forwarded {
+            forwarded_identity, ..
+        }) = store.apply(now, PROJECT, &key, &context("rev"))
+        else {
+            panic!("first apply forwards");
+        };
+        assert!(matches!(
+            store.confirm(
+                now,
+                PROJECT,
+                &key,
+                &forwarded_identity,
+                None,
+                Outcome::Append
+            ),
+            Ok(ConfirmOutcome::Unknown)
+        ));
+        assert!(matches!(
+            store.apply(now, PROJECT, &key, &context("other")),
+            Err(ApplyRefusal::Refused(Refusal::Conflict))
+        ));
+        assert!(matches!(
+            store.apply(now, PROJECT, &key, &context("rev")),
+            Ok(ApplyOutcome::Unknown)
+        ));
+    }
+
+    #[test]
+    fn max_keys_is_capped_and_a_narrower_limit_evicts_the_oldest_settled_receipts_at_the_next_mint()
+    {
+        let start = Instant::now();
+        assert!(matches!(
+            limits(MAX_KEYS_CEILING + 1, RETENTION_FLOOR).validate(),
+            Err(ReceiptLimitsRefusal::MaxKeysAboveCeiling { .. })
+        ));
+        assert!(limits(MAX_KEYS_CEILING, RETENTION_FLOOR).validate().is_ok());
+
+        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        let keys: Vec<String> = (0..8)
+            .map(|step| prepared(&mut store, start + Duration::from_secs(step)))
+            .collect();
+        let in_flight = &keys[0];
+        assert!(matches!(
+            store.apply(start, PROJECT, in_flight, &context("rev")),
+            Ok(ApplyOutcome::Forwarded { .. })
+        ));
+        store.set_limits(limits(3, RETENTION_FLOOR));
+        let newest = prepared(&mut store, start + Duration::from_secs(9));
+        assert_eq!(store.len(), 3);
+        assert!(
+            store.holds(PROJECT, in_flight),
+            "the in-flight receipt is never the victim"
+        );
+        assert!(
+            store.holds(PROJECT, &keys[7]),
+            "the youngest settled receipt survives"
+        );
+        assert!(store.holds(PROJECT, &newest));
+        for evicted in &keys[1..7] {
+            assert!(!store.holds(PROJECT, evicted));
+        }
     }
 }
