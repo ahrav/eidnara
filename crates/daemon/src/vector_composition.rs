@@ -10,8 +10,8 @@ use std::path::Path;
 
 use host_runtime::generation::ValidatedGeneration;
 use host_runtime::generation::{
-    CurrentProfile, GenerationError, GenerationManifest, GenerationStore, MEMBERS_FILE_NAME,
-    ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET, WireMembers,
+    CurrentProfile, GenerationError, GenerationManifest, GenerationStore, MAX_MANIFEST_BYTES,
+    MEMBERS_FILE_NAME, ManifestFile, ProfileEvent, StageMeta, VECTOR_SELECTION_TARGET, WireMembers,
 };
 use host_runtime::lifecycle::LifecycleTransactionLock;
 
@@ -434,13 +434,22 @@ impl std::fmt::Debug for VerifiedComposition {
 ///
 /// # Errors
 ///
-/// A generation of another owner or schema, a record that is not canonical or does not agree with its members file, a record whose identity is not `expected`, a member that fails [`verify`], or a topology outside the contract.
+/// A generation of another owner or schema, a record above the metadata size cap, a record that is not canonical or does not agree with its members file, a record whose identity is not `expected`, a member that fails [`verify`], or a topology outside the contract.
 pub fn verify_composition(
     store: &GenerationStore,
     digest: &str,
     expected: &ExpectedVectors<'_>,
     max_deltas: NonZeroUsize,
 ) -> Result<VerifiedComposition, CompositionRefusal> {
+    // The manifest is read before any listed file is hashed or held in memory.
+    let manifest = store.manifest(digest)?;
+    if manifest
+        .files
+        .iter()
+        .any(|file| file.size > MAX_MANIFEST_BYTES as u64)
+    {
+        return Err(CompositionRefusal::NotComposition("record size"));
+    }
     let generation = store.validate(digest)?;
     verify_validated(store, generation, expected, max_deltas)
 }

@@ -84,7 +84,7 @@ fn is_profile_temp_name(name: &str) -> bool {
 }
 
 /// Manifest and lifecycle-evidence readers each cap input at 1 MiB.
-const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// Capacity preflight reserves 1 MiB for metadata that coexists until rename.
 const CAPACITY_FIXED_OVERHEAD_BYTES: u64 = 1024 * 1024;
@@ -586,6 +586,7 @@ impl GenerationStore {
     }
 
     /// Members named by any complete generation in `digests`, so a member is never reclaimed before every record that names it is; a record of unknown schema may name members this build cannot read, so it counts as quarantined.
+    /// A record whose members cannot be read is also quarantined when it is retained anyway: a reader pins it, or its manifest carries an unknown schema behind a directory mode this build rejects.
     fn named_members(&self, digests: &[String]) -> (BTreeSet<String>, bool) {
         let mut members = BTreeSet::new();
         let mut quarantined = false;
@@ -593,7 +594,15 @@ impl GenerationStore {
             match self.members_of(digest) {
                 Ok(found) => members.extend(found),
                 Err(GenerationError::UnsupportedStateSchema) => quarantined = true,
-                Err(_) => {}
+                Err(_) => {
+                    let pinned = matches!(
+                        lock_for_reclamation(&self.generations_fd, digest),
+                        Err(Reclamation::Pinned)
+                    );
+                    if pinned || self.is_quarantined_schema(digest) {
+                        quarantined = true;
+                    }
+                }
             }
         }
         (members, quarantined)
@@ -981,6 +990,15 @@ impl GenerationStore {
         }
         if selected.contains(digest) {
             return Err(invalid("corrupt owner selection is protected"));
+        }
+        let (named, named_quarantined) = self.named_members(&self.digests()?);
+        if named_quarantined {
+            return Err(GenerationError::UnsupportedStateSchema);
+        }
+        if named.contains(digest) {
+            return Err(invalid(
+                "corrupt member of a retained composition is protected",
+            ));
         }
         let _pin = lock_for_reclamation(&self.generations_fd, digest).map_err(|err| match err {
             Reclamation::Pinned => invalid("corrupt generation is pinned"),
@@ -2658,6 +2676,62 @@ mod tests {
             Err(GenerationError::NativePayloadInvalid {
                 detail: "members repeat a digest"
             })
+        ));
+    }
+
+    #[test]
+    fn a_future_schema_record_behind_a_rejected_directory_mode_still_protects_its_members() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let member = stage_default(&store, src.path());
+        let members = serde_json::to_vec(&WireMembers {
+            schema: 1,
+            members: vec![member.clone()],
+        })
+        .unwrap();
+        let sources = [SourceSpec {
+            rel_path: MEMBERS_FILE_NAME.to_owned(),
+            source: write_source(src.path(), "members", &members),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        let record = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        // Another selection leaves both the record and its member unprotected by any selector.
+        let successor = vec![SourceSpec {
+            rel_path: "bin/eidnara-host".to_owned(),
+            source: write_source(src.path(), "launcher-b", b"#successor-binary"),
+            executable: true,
+            expected_size: None,
+            expected_sha256: None,
+        }];
+        store
+            .stage_and_promote(&successor, &meta(), &BTreeSet::new())
+            .unwrap();
+
+        let record_dir = store.root().join(GENERATIONS_DIR_NAME).join(&record);
+        let manifest_path = record_dir.join(GENERATION_MANIFEST_NAME);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        value["schema"] = 7.into();
+        std::fs::write(&manifest_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        std::fs::set_permissions(&record_dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+        let report = store.prune(&BTreeSet::new()).unwrap();
+        assert_eq!(report.removed_generations, 0);
+        assert!(report.quarantined >= 1);
+        assert!(
+            store.validate(&member).is_ok(),
+            "the member the record may name stays"
+        );
+        assert!(matches!(
+            store.discard_unselected(
+                &store.manifest(&member).unwrap(),
+                &LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap(),
+                &BTreeSet::new()
+            ),
+            Err(GenerationError::UnsupportedStateSchema)
         ));
     }
 

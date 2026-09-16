@@ -932,6 +932,64 @@ fn a_reader_pinning_a_superseded_composition_keeps_its_members_through_prune() {
 }
 
 #[test]
+fn a_pinned_composition_whose_members_file_is_unreadable_quarantines_pruning() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&first).unwrap();
+    let pinned = fixture.store.validate(&first.digest()).unwrap();
+    pinned.pin().unwrap();
+    let other_base = fixture.layer(7, 11);
+    let second = fixture.compose(2, &other_base, &[]).unwrap();
+    fixture.publish(&second).unwrap();
+
+    // The pinned record is retained but its members cannot be read, so nothing may be reclaimed.
+    fixture.corrupt(&first.digest(), MEMBERS_FILE_NAME);
+    let report = fixture.store.prune(&BTreeSet::new()).unwrap();
+    assert_eq!(report.removed_generations, 0);
+    assert!(report.quarantined >= 1);
+    assert!(fixture.generations().contains(&base.digest));
+    assert!(matches!(
+        fixture.store.discard_unselected(
+            &base.sidecar.stage_manifest(),
+            &fixture.tx,
+            &BTreeSet::new()
+        ),
+        Err(GenerationError::UnsupportedStateSchema)
+    ));
+}
+
+#[test]
+fn exchange_repair_refuses_a_corrupt_member_of_a_pinned_composition() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let first = fixture.compose(1, &base, &[]).unwrap();
+    fixture.publish(&first).unwrap();
+    let pinned = fixture.store.validate(&first.digest()).unwrap();
+    pinned.pin().unwrap();
+    let other_base = fixture.layer(7, 11);
+    let second = fixture.compose(2, &other_base, &[]).unwrap();
+    fixture.publish(&second).unwrap();
+
+    fs::write(fixture.generation_dir(&base.digest).join("extra"), b"x").unwrap();
+    assert!(fixture.store.validate(&base.digest).is_err());
+    let rebuilt = build(&fixture.expected(), &export(1, 10), &fixture.work_dir()).unwrap();
+    assert_eq!(rebuilt.digest(), base.digest);
+    assert!(
+        stage(&rebuilt, &fixture.staging()).is_err(),
+        "a member of a pinned composition is not exchanged under its reader"
+    );
+    assert!(
+        fixture.generation_dir(&base.digest).join("extra").exists(),
+        "the occupant is left as it is"
+    );
+    drop(pinned);
+    fixture.store.prune(&BTreeSet::new()).unwrap();
+    let rebuilt = build(&fixture.expected(), &export(1, 10), &fixture.work_dir()).unwrap();
+    assert_eq!(stage(&rebuilt, &fixture.staging()).unwrap(), base.digest);
+}
+
+#[test]
 fn an_unreadable_selected_composition_quarantines_pruning_while_a_corrupt_member_does_not() {
     let fixture = Fixture::new();
     let base = fixture.layer(1, 10);
@@ -1133,6 +1191,18 @@ fn equal_sequences_without_a_selector_recover_deterministically_and_a_selector_n
     assert_eq!(
         fixture.store.read_vector_current().unwrap(),
         CurrentProfile::Absent
+    );
+}
+
+#[test]
+fn verification_refuses_an_oversized_record_before_opening_the_generation() {
+    let fixture = Fixture::new();
+    let base = fixture.layer(1, 10);
+    let template = fixture.compose(1, &base, &[]).unwrap();
+    let digest = fixture.stage_record(&vec![b'x'; 1024 * 1024 + 1], &template);
+    assert_eq!(
+        fixture.verify_composition(&digest).unwrap_err(),
+        CompositionRefusal::NotComposition("record size")
     );
 }
 

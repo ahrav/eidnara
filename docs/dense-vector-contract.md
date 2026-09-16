@@ -350,13 +350,14 @@ is `vector-generation`; a composition's is `vector-composition`, and
 `select_vector` refuses any other. Any generation may list `members.json`, digests the store must retain with
 it: pruning retains every member named by any complete generation in the
 store, so a member outlives every record that names it by one prune pass;
-discard refuses a member of any record; exchange repair refuses to replace a
-selected record. The store reads only a generation's manifest and members
-file for this, never its payload, so a corrupt payload of a selected
-generation does not stop pruning; a selected generation whose manifest or
-members file cannot be read, or any generation of unknown schema, makes the
-members unknown, and the store then behaves as with a quarantined selector:
-temps only are reclaimed and discard refuses. The members rule is owner
+discard and exchange repair refuse a member of any record; exchange repair
+also refuses to replace a selected record. The store reads only a
+generation's manifest and members file for this, never its payload, so a
+corrupt payload of a selected generation does not stop pruning; a selected or
+pinned generation whose manifest or members file cannot be read, or any
+generation of unknown schema, including one behind a directory mode this
+build rejects, makes the members unknown, and the store then behaves as with
+a quarantined selector: temps only are reclaimed and discard refuses. The members rule is owner
 agnostic: a search seed that lists members retains them the same way, though
 no search seed does. The store's selection primitive checks inventory, sizes, modes,
 hashes, the target, and that every listed member validates; the daemon's
