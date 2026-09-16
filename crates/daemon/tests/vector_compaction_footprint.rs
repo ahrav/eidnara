@@ -29,34 +29,41 @@ fn axis(index: usize) -> Vec<f32> {
     raw
 }
 
-/// Publishes one base of `rows` under `hold_id` with a delta that replaces the first row, then returns what compaction reserves for the pair and the heap it peaks at.
+/// Publishes one base of `rows` under `hold_id` with `deltas` layers that each replace the first row, then returns what compaction reserves for the stack and the heap it peaks at.
 fn reserved_and_peak(
     fixture: &mut Fixture,
     rows: Vec<ExportedRow>,
     hold_id: &str,
     max_entries: usize,
+    deltas: usize,
 ) -> (u64, u64) {
     let checkpoint = |commit_seq: i64| ProjectionCheckpoint {
         snapshot_commit_seq: commit_seq - 1,
         checkpoint_commit_seq: commit_seq,
         hold_id: hold_id.to_owned(),
     };
-    let replaced = ExportedRow {
-        occurrence_id: rows[0].occurrence_id.clone(),
-        vector: rows[0].vector.iter().rev().copied().collect(),
-    };
+    let deltas: Vec<_> = (0..deltas)
+        .map(|i| {
+            // The first row rotated by `i + 1` places: a distinct unit vector per delta.
+            let mut vector = rows[0].vector.clone();
+            vector.rotate_right(i + 1);
+            fixture.layer_from(&LiveRows {
+                checkpoint: checkpoint(12 + i as i64),
+                rows: vec![ExportedRow {
+                    occurrence_id: rows[0].occurrence_id.clone(),
+                    vector,
+                }],
+                tombstones: Vec::new(),
+            })
+        })
+        .collect();
     let base = fixture.layer_from(&LiveRows {
         checkpoint: checkpoint(10),
         rows,
         tombstones: Vec::new(),
     });
-    let delta = fixture.layer_from(&LiveRows {
-        checkpoint: checkpoint(12),
-        rows: vec![replaced],
-        tombstones: Vec::new(),
-    });
     fixture
-        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .publish(&fixture.compose(1, &base, &deltas).unwrap())
         .unwrap();
     let view = acquire_view(fixture, &mut |_| {}).unwrap();
     let max_entries = NonZeroUsize::new(max_entries).unwrap();
@@ -98,7 +105,7 @@ fn the_resident_reservation_bounds_the_compactors_heap_peak() {
             vector: axis(i),
         })
         .collect();
-    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7", 64);
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7", 64, 1);
     let row_bytes = ROWS as u64 * u64::from(DIMENSION) * 4;
     assert!(
         peak <= reserved,
@@ -120,7 +127,7 @@ fn a_long_checkpoint_in_the_sidecar_stays_within_the_reservation() {
         occurrence_id: "alpha".to_owned(),
         vector: support::vector_store::unit([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
     }];
-    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, &hold_id, 64);
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, &hold_id, 64, 1);
     assert!(
         peak <= reserved,
         "compaction peaked at {peak} heap bytes against a {reserved}-byte reservation"
@@ -149,7 +156,7 @@ fn a_winner_count_past_a_power_of_two_stays_within_the_reservation() {
             vector: narrow(i % 8),
         })
         .collect();
-    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7", 8192);
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7", 8192, 1);
     assert!(
         peak <= reserved,
         "compaction peaked at {peak} heap bytes against a {reserved}-byte reservation"
@@ -165,7 +172,7 @@ fn a_long_model_name_stays_within_the_reservation() {
         occurrence_id: "alpha".to_owned(),
         vector: narrow(0),
     }];
-    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7", 64);
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, "hold-7", 64, 1);
     assert!(
         peak <= reserved,
         "compaction peaked at {peak} heap bytes against a {reserved}-byte reservation"
@@ -173,5 +180,21 @@ fn a_long_model_name_stays_within_the_reservation() {
     assert!(
         reserved < 8 << 20,
         "the reservation is a bound, not a blank cheque: {reserved} for a 1 MiB model name"
+    );
+}
+
+#[test]
+fn a_full_delta_stack_stays_within_the_reservation() {
+    // Four deltas under a 1 MiB checkpoint: everything but the per-layer state is sized to the byte, so a layer-count allocation left live through the build shows.
+    let mut fixture = Fixture::new();
+    let hold_id = "h".repeat(1 << 20);
+    let rows = vec![ExportedRow {
+        occurrence_id: "alpha".to_owned(),
+        vector: narrow(0),
+    }];
+    let (reserved, peak) = reserved_and_peak(&mut fixture, rows, &hold_id, 64, 4);
+    assert!(
+        peak <= reserved,
+        "compaction peaked at {peak} heap bytes against a {reserved}-byte reservation"
     );
 }

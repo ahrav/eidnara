@@ -168,8 +168,7 @@ pub fn compact(
     if cut.deltas.is_empty() {
         return Err(CompactionRefusal::BaseOnly { base: cut.base });
     }
-    let layers = view.resolver_layers();
-    let resolved = resolve(&layers, max_entries)?;
+    let resolved = resolve(&view.resolver_layers(), max_entries)?;
     let checkpoint = view
         .layers()
         .last()
