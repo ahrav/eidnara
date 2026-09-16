@@ -67,8 +67,12 @@ fn a_population_larger_than_k_yields_the_reference_prefix_and_visits_every_requi
         }
     );
     assert!(ranking.consumed.pages >= 4, "{:?}", ranking.consumed);
-    assert_eq!(ranking.consumed.judged, 8 + 3);
-    assert_eq!(ranking.consumed.batches, ranking.consumed.pages + 1);
+    assert!(
+        ranking.consumed.judged < 8 + 3,
+        "a row behind a full top-K is not judged: {:?}",
+        ranking.consumed
+    );
+    assert!(ranking.consumed.batches <= ranking.consumed.pages + 1);
     assert!(ranking.consumed.excluded.is_empty());
     assert!(ranking.snapshot.is_some());
     for row in &ranking.ranked {
@@ -211,6 +215,37 @@ fn a_higher_scoring_excluded_row_never_displaces_an_eligible_one_and_stays_a_pol
         "exclusion is not a coverage shortfall"
     );
     assert_eq!(ranking.coverage.missing(), 0);
+}
+
+#[test]
+fn a_row_behind_a_full_top_k_is_scored_but_never_judged_so_its_exclusion_is_not_counted() {
+    // Visit order puts `alpha` (the best against `axis(0)`) in the first page and `theta` (the worst) last.
+    let admitted: Vec<&str> = OBJECTS
+        .iter()
+        .copied()
+        .filter(|object| *object != "theta")
+        .collect();
+    let fixture = Fixture::new(&admitted, corpus());
+    let query = axis(0);
+
+    let (ranking, visited) = fixture.rank_recording(&query, bounds(1));
+    assert_eq!(ranking.completion, Completion::Complete);
+    assert_eq!(ids_of(&ranking), vec![fixture.id("alpha")]);
+    assert_visited_once(&fixture, &visited);
+    assert_eq!(
+        ranking.coverage.with_vector, 8,
+        "every row is still read and scored"
+    );
+    assert_eq!(
+        (ranking.consumed.judged, ranking.consumed.batches),
+        (2 + 1, 2),
+        "only the first page and the re-judgment reach the kernel: {:?}",
+        ranking.consumed
+    );
+    assert!(
+        ranking.consumed.excluded.is_empty(),
+        "the unadmitted loser was never judged"
+    );
 }
 
 #[test]
@@ -1016,7 +1051,7 @@ fn page_size_changes_the_batch_count_but_not_the_ranking() {
         );
         assert_eq!(keyed(&ranking), reference[..4], "page_rows={page_rows}");
         assert_visited_once(&fixture, &visited);
-        assert_eq!(ranking.consumed.batches, ranking.consumed.pages + 1);
+        assert!(ranking.consumed.batches <= ranking.consumed.pages + 1);
         if let Some(previous) = &previous {
             assert_eq!(&keyed(&ranking), previous);
         }

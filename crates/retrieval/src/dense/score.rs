@@ -104,6 +104,15 @@ impl<T> TopK<T> {
         self.heap.is_empty()
     }
 
+    /// Whether `ranked` would enter the set if offered now: always while the set is short of `k`, otherwise only ahead of the current worst member.
+    pub fn admits(&self, ranked: &Ranked) -> bool {
+        self.heap.len() < self.k.get()
+            || self
+                .heap
+                .peek()
+                .is_some_and(|worst| rank_order(ranked.key(), worst.0.key()) == Ordering::Less)
+    }
+
     /// Best first.
     pub fn into_ranked(self) -> Vec<(Ranked, T)> {
         self.heap

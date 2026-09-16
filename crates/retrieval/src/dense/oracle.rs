@@ -1,5 +1,5 @@
 //! Walks every live occurrence whose class requires a vector in occurrence identifier order through bounded keyset pages, inside the caller's read transaction.
-//! Each page is decoded and validated, judged for canonical eligibility in one kernel batch, scored, and offered to a bounded top-K; the top-K is re-judged once before return.
+//! Rows outside a full top-K's admission threshold are scored but not judged; no such row can be returned.
 //! A live required row without a vector is a coverage shortfall, so the result is incomplete even when every scored row was eligible; a kernel snapshot or incarnation that moves between batches ends the walk the same way.
 //! The walk itself is shared: a `RowSource` supplies the page query and the vector of each visited row, so the oracle reads `occurrence_vectors` and the layered ranking reads resolved layer rows through one judgment, admission, and revalidation path.
 
@@ -154,9 +154,10 @@ pub enum Completion {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Consumed {
     pub pages: usize,
+    /// Rows the kernel judged, at their page or at final revalidation; rows behind a full top-K are scored but not judged.
     pub judged: usize,
     pub batches: usize,
-    /// Rows the kernel judged ineligible before or at final revalidation, by verdict in judgment order.
+    /// Judged rows the kernel found ineligible, by verdict in judgment order.
     pub excluded: Vec<(EligibilityVerdict, usize)>,
 }
 
@@ -469,17 +470,33 @@ fn decode_page(
     Ok(Some((candidates, vectors)))
 }
 
-/// Judges the page's present rows in one batch and offers the eligible ones to the top-K.
+/// The admission threshold is the top-K before this page: a row behind the worst member of a full top-K is dropped unjudged, since no later row can loosen the bound.
 /// A moved authority discards the page's verdicts and stops the walk with its reason; a budget that ends inside the judgment stops it with none, the reason already recorded.
 fn judge_and_score(
     kernel: &KernelStore,
     request: &Walk<'_>,
-    (candidates, vectors): DecodedPage,
+    (page, vectors): DecodedPage,
     budget: &EvalBudget,
     ranking: &mut ExhaustiveRanking,
     top: &mut TopK<OccurrenceCandidate>,
     hook: &mut impl FnMut(Window<'_>),
 ) -> Result<ControlFlow<Option<AuthorityMoved>>, OracleRefusal> {
+    let mut candidates = Vec::new();
+    let mut scored = Vec::new();
+    for (candidate, vector) in page.into_iter().zip(vectors) {
+        if budget.is_exhausted() {
+            return Ok(ControlFlow::Break(None));
+        }
+        let ranked = Ranked {
+            occurrence_id: candidate.occurrence_id.clone(),
+            class: candidate.class,
+            score: score(request.layout.metric, request.query, &vector),
+        };
+        if top.admits(&ranked) {
+            candidates.push(candidate);
+            scored.push(ranked);
+        }
+    }
     if candidates.is_empty() {
         return Ok(ControlFlow::Continue(()));
     }
@@ -499,17 +516,12 @@ fn judge_and_score(
         // The moved batch's verdicts describe other facts, so none is admitted.
         return Ok(ControlFlow::Break(Some(moved)));
     }
-    for ((candidate, vector), judged) in candidates.into_iter().zip(vectors).zip(report.occurrences)
+    for ((candidate, ranked), judged) in candidates.into_iter().zip(scored).zip(report.occurrences)
     {
         if budget.is_exhausted() {
             return Ok(ControlFlow::Break(None));
         }
         if judged.disposition == Disposition::Eligible {
-            let ranked = Ranked {
-                occurrence_id: candidate.occurrence_id.clone(),
-                class: candidate.class,
-                score: score(request.layout.metric, request.query, &vector),
-            };
             top.offer(ranked, candidate);
         }
     }
