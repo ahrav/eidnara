@@ -147,7 +147,8 @@ pub enum IncompleteReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Completion {
-    /// Every live required row was visited, carried a valid vector, and was judged under one snapshot.
+    /// Every live required row was visited and carried a valid vector; every judged row, including the returned set, was judged under one snapshot.
+    /// Only rows that could enter the top-K when visited were judged, so completion describes the ranking, not a policy verdict on every row.
     Complete,
     Incomplete(IncompleteReason),
 }
@@ -250,7 +251,7 @@ static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
 /// # Errors
 ///
 /// A budget that ends before any page is read is [`OracleRefusal::BudgetExhausted`]; one that ends later leaves the result [`Completion::Incomplete`] with no ranked rows.
-/// A stored vector that fails the layout refuses the whole request as [`OracleRefusal::StoredRow`]; no row of its page is scored.
+/// A stored vector that fails the layout refuses the whole request as [`OracleRefusal::StoredRow`]; no row of its page is judged or returned, though rows of that page visited before it were scored and are discarded.
 pub fn exhaustive(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
@@ -447,6 +448,7 @@ struct Selected {
 }
 
 /// Every present vector of the page is obtained, validated, and scored; a missing vector is counted and its row is neither judged nor scored.
+/// A row with a vector has its identity fields validated before `top.admits` is consulted, so a corrupt row is refused even when it could not enter the top-K.
 /// Returns the rows that would enter the top-K as it stood before the page, with their scores; only they are judged.
 fn score_page(
     page: Vec<PageRow>,
@@ -468,6 +470,7 @@ fn score_page(
         match source.vector(&row, &request.layout)? {
             Some(vector) => {
                 ranking.coverage.with_vector += 1;
+                row.candidate.candidate.validate()?;
                 let score = score(request.layout.metric, request.query, &vector);
                 if top.admits(score, &row.candidate.occurrence_id) {
                     selected.candidates.push(row.candidate);

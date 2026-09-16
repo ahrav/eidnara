@@ -288,6 +288,41 @@ fn a_row_that_cannot_enter_the_top_k_when_visited_is_scored_but_never_judged() {
 }
 
 #[test]
+fn a_corrupt_identity_field_is_refused_whether_or_not_its_row_could_enter_the_top_k() {
+    // `theta` scores lowest against the axis, so with one row per page it is visited after the top-K is full.
+    let fixture = Fixture::all_admitted();
+    let theta = fixture.id("theta");
+    let before_theta = fixture
+        .dense_ids()
+        .iter()
+        .take_while(|id| **id != theta)
+        .count();
+    assert!(before_theta >= 1);
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrences SET source_object_id='' WHERE occurrence_id=?1",
+            rusqlite::params![theta],
+        )
+        .unwrap();
+    for page_rows in [1, 8] {
+        let outcome = fixture.rank(
+            &axis(0),
+            OracleBounds {
+                page_rows: NonZeroUsize::new(page_rows).unwrap(),
+                ..bounds(before_theta)
+            },
+            &EvalBudget::unbounded(),
+        );
+        assert_eq!(
+            outcome,
+            Err(OracleRefusal::Kernel(kernel::KernelError::InvalidInput)),
+            "page_rows={page_rows}: paging must not decide whether a corrupt identity field is detected"
+        );
+    }
+}
+
+#[test]
 fn a_missing_required_vector_is_a_coverage_shortfall_and_never_a_complete_result() {
     let fixture = Fixture::all_admitted();
     let query = axis(0);

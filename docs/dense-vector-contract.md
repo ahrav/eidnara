@@ -59,7 +59,8 @@ row or a query row that fails the predicate is refused before scoring. The
 oracle refuses the whole request when a stored row of the generation fails,
 because a generation with an invalid member is not the generation the caller
 asked about; rows of earlier pages have already been scored and discarded at
-that point, and no row of the refusing page is scored.
+that point, as have the rows of the refusing page visited before the failing
+one; no row of the refusing page is judged or returned.
 
 ## Scoring arithmetic
 
@@ -92,15 +93,20 @@ generation inside the caller's read transaction:
   (`batch::dense_eligible`), visited in occurrence identifier byte order
   regardless of class, through bounded keyset pages of `page_rows` rows over
   the `occurrences` primary key. Visit order therefore equals tie order.
-- Each page is decoded, validated, and scored. Only the rows that would enter
-  the top-`k` set as it stood before the page are judged for canonical
-  eligibility, in one kernel batch; the eligible ones are then offered to the
-  set. A page with no such row runs no batch. Eligibility precedes admission;
+- Each page is decoded, validated, and scored. Every row with a vector has
+  its identity fields validated as a kernel candidate before its score is
+  consulted, so a corrupt row is refused (`Kernel`) whatever `page_rows` is.
+  Only the rows that would enter the top-`k` set as it stood before the page
+  are judged for canonical eligibility, in one kernel batch; the eligible
+  ones are then offered to the set. A page with no such row runs no batch.
+  Eligibility precedes admission;
   enumeration order and score never decide eligibility, only whether a row is
   judged at all. The returned set equals the one a walk judging every row
   would return: a member of the final top-`k` outranks the worst held member
   at every earlier point of the walk. `Consumed.judged`, `batches`, and
-  `excluded` describe the judged rows, not the population.
+  `excluded` describe the judged rows, not the population; `Complete` means
+  every live required row was visited with a valid vector and every judged
+  row was judged under one snapshot, not that every row was judged.
   A row without a vector is counted and neither judged nor scored.
 - The top-`k` set is re-judged in one batch before it is returned. A row the
   kernel no longer admits is dropped and counted as an exclusion.
