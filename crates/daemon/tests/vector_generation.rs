@@ -522,6 +522,12 @@ fn staging_refuses_a_build_whose_provenance_is_not_the_admitted_identity() {
             "generation_epoch",
             Box::new(|i: &mut ProjectionIdentity| i.generation_epoch = 2),
         ),
+        (
+            "kernel_incarnation_id",
+            Box::new(|i: &mut ProjectionIdentity| {
+                i.kernel_incarnation_id = "other-kernel".to_owned()
+            }),
+        ),
     ] {
         // The gate holds evidence for identity B and admits under it; the build carries identity A.
         let mut other = fixture.identity.clone();

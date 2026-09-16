@@ -284,17 +284,21 @@ The vector selector is `vector-profile.json`, beside the host and search
 selectors. `select_vector` refuses a generation whose manifest target is not
 `vector-generation`; the search selector keeps its existing behavior and
 checks no target. Pruning retains every owner-selected generation, discard
-refuses one, and exchange repair refuses to replace one. A corrupt or
-quarantined owner selector may name any digest, so it stops reclamation for
-every caller (`prune` removes only temps and counts each such selector,
-`discard_unselected` and exchange repair refuse) and refuses selection through
-that selector, as the search selector already did. It does not stop staging
-new bytes or selecting through the other selectors: those touch nothing the
-uncertain selector could name, and a host or daemon rolled back to a build
-that predates the selector's schema must still be able to launch and publish.
-Verification holds a generation's payload in memory and takes a caller byte
-bound; a manifest whose files total more than it is refused before any payload
-is read. The store's selection primitive checks
+refuses one, and exchange repair refuses to replace one. An owner selector of
+unknown schema is quarantined: it may name any digest, so `prune` removes only
+temps and counts each such selector, `discard_unselected` and exchange repair
+refuse, and selection through that selector refuses, as the search selector
+already did. A corrupt owner selector (malformed bytes, a noncanonical digest,
+or failed security checks) is an error from every path that reads it: `prune`,
+`discard_unselected`, and exchange repair fail before removing anything, and
+selection through it fails. Neither stops staging new bytes or selecting
+through the other selectors: those touch nothing the uncertain selector could
+name, and a host or daemon rolled back to a build that predates the selector's
+schema must still be able to launch and publish. Verification holds a
+generation's payload in memory and takes a caller byte bound; a manifest whose
+files total more than it is refused before any payload is held. The store's
+validation has already streamed each file through a fixed buffer to check its
+hash, so the bound limits memory, not I/O. The store's selection primitive checks
 inventory, sizes, modes, and hashes only; the daemon's semantic verification
 of a generation precedes selection, and selecting or recovering a complete
 composition is a separate contract.

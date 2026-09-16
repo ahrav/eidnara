@@ -311,7 +311,7 @@ pub fn build(
 }
 
 /// Stages a build into `store` after the admission gate accepts its whole inventory against the staged-bytes limit; a refused admission stages nothing.
-/// The build's provenance must be the identity the admission is bound to: a sidecar for another model, tokenizer, dimension, or epoch is refused before the gate is consulted, so no generation is published under another identity's evidence.
+/// The build's provenance must be the identity the admission is bound to: a sidecar for another model, tokenizer, dimension, epoch, or kernel incarnation is refused before the gate is consulted, so no generation is published under another identity's evidence and none is published that `verify` under this identity would refuse.
 /// `_transaction` is the caller's exclusive hold on the store's transaction lock; hold it until the digest is pinned or protected.
 ///
 /// # Errors
@@ -339,6 +339,9 @@ pub fn stage(
     }
     if sidecar.generation_epoch != identity.generation_epoch {
         return Err(field("generation_epoch"));
+    }
+    if sidecar.kernel_incarnation_id != identity.kernel_incarnation_id {
+        return Err(field("kernel_incarnation_id"));
     }
     let manifest = sidecar.stage_manifest();
     let bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
@@ -374,7 +377,7 @@ impl std::fmt::Debug for VerifiedVectors {
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
-/// Verification holds every payload in memory, so a manifest whose files total more than `max_bytes` is refused before any payload is read; the caller bounds its own memory as `live_rows` bounds the export.
+/// Verification holds every payload in memory, so a manifest whose files total more than `max_bytes` is refused before any payload is held; the store's validation has already streamed each file through a fixed buffer to check its hash, so the bound limits memory, not I/O. The caller bounds its own memory as `live_rows` bounds the export.
 ///
 /// # Errors
 ///
