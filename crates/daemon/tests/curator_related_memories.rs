@@ -942,6 +942,76 @@ fn a_budget_spent_after_a_disclosure_ends_the_page_with_its_hits() {
 }
 
 #[test]
+fn a_span_probe_is_charged_the_whole_artifact_it_read() {
+    let fixture = Fixture::open();
+    let artifact = usize::try_from(MAX_PROBE_ARTIFACT_BYTES).unwrap();
+    let page_budget = usize::try_from(MAX_PAGE_PROBE_BYTES).unwrap();
+    // Unrelated one-byte spans over near-maximal artifacts: each probe reads and checks the whole artifact, so one more than a page's budget holds must spill onto a second page.
+    let probes = page_budget / artifact + 1;
+    let filler = "filler words ".repeat((artifact - 64) / 13);
+    for index in 0..probes {
+        let object = format!("decision-s{index}");
+        fixture.decision(&object);
+        let text = format!("{filler}{index}");
+        let evidence = fixture.ingest(&format!("s{index}"), text.as_bytes(), false);
+        fixture.spanned_descriptor(
+            &format!("s{index}"),
+            "canonical_claims",
+            "decision_summary",
+            &[("object_id", object.as_str())],
+            &evidence,
+            &text,
+            Some(Span { start: 0, end: 1 }),
+        );
+    }
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let page = fixture.page(&mut discovery, &mut broker, None).unwrap();
+    assert_eq!(
+        page.completeness,
+        Completeness::ProbeBound,
+        "the bytes a span probe costs are the artifact's, not the span's"
+    );
+    assert!(page.hits.is_empty() && !page.withheld);
+    let rest = fixture
+        .page(&mut discovery, &mut broker, page.next_cursor.as_deref())
+        .unwrap();
+    assert_eq!(rest.completeness, Completeness::Complete);
+}
+
+#[test]
+fn a_subject_without_matchers_completes_without_touching_the_store() {
+    let fixture = Fixture::open();
+    seed(&fixture, 2);
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new("a to be or");
+    assert!(discovery.terms().is_empty());
+    let budget = EvalBudget::unbounded();
+    budget.cancel();
+    let page = discovery
+        .page(&fixture.store, &mut broker, None, &budget, fixture.now)
+        .expect("nothing to find needs no snapshot, so a spent budget is not consulted");
+    assert_eq!(page.completeness, Completeness::Complete);
+    assert!(page.hits.is_empty() && !page.withheld && page.next_cursor.is_none());
+    // A cursor this run never issued is still refused.
+    assert_eq!(
+        discovery
+            .page(
+                &fixture.store,
+                &mut broker,
+                Some("cur-1"),
+                &budget,
+                fixture.now
+            )
+            .unwrap_err()
+            .code,
+        RefusalCode::InvalidCursor
+    );
+}
+
+#[test]
 fn an_exhausted_budget_refuses_the_page_without_probing_or_disclosing() {
     let fixture = Fixture::open();
     seed(&fixture, 4);

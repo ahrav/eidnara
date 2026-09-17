@@ -26,7 +26,8 @@ pub const MAX_PROBE_ARTIFACT_BYTES: u64 = context_core::redaction::MAX_REDACTABL
 pub const MAX_EXCERPT_BYTES: usize = 512;
 /// Cursors a run keeps resolvable; the oldest is forgotten first.
 pub const MAX_LIVE_CURSORS: usize = 64;
-const MAX_QUERY_TERMS: usize = 32;
+/// Matcher terms per subject; the sorted surplus is counted in [`RelatedMemoryDiscovery::dropped_terms`] rather than matched.
+pub const MAX_QUERY_TERMS: usize = 32;
 /// Shortest subject token used as a matcher; shorter tokens match too much to locate anything.
 const MIN_TERM_BYTES: usize = 4;
 /// Bytes kept before the first matching term so an excerpt carries its lead-in.
@@ -86,8 +87,10 @@ struct Cursor {
 
 /// Run-scoped discovery state: the subject's matcher terms and the cursors this run has issued.
 pub struct RelatedMemoryDiscovery {
-    /// ASCII-lowercased subject tokens of [`MIN_TERM_BYTES`] to [`MAX_TERM_BYTES`]; a candidate is related when its text contains one.
+    /// ASCII-lowercased subject tokens of [`MIN_TERM_BYTES`] to [`MAX_TERM_BYTES`], the first [`MAX_QUERY_TERMS`] in sorted order; a candidate is related when its text contains one.
     terms: Vec<String>,
+    /// Eligible tokens beyond [`MAX_QUERY_TERMS`] that are not matchers; a memory mentioning only one of them is not found.
+    dropped_terms: usize,
     /// Issued cursors, oldest first; a cursor token not in this table was never issued by this run or has been forgotten.
     cursors: VecDeque<(String, Cursor)>,
     issued: usize,
@@ -102,9 +105,11 @@ impl RelatedMemoryDiscovery {
             .collect();
         terms.sort();
         terms.dedup();
+        let dropped_terms = terms.len().saturating_sub(MAX_QUERY_TERMS);
         terms.truncate(MAX_QUERY_TERMS);
         Self {
             terms,
+            dropped_terms,
             cursors: VecDeque::new(),
             issued: 0,
         }
@@ -115,7 +120,12 @@ impl RelatedMemoryDiscovery {
         &self.terms
     }
 
-    /// One page of related memories. A `None` cursor starts at the current tip; a cursor this run issued continues at its snapshot; any other cursor is refused. A subject with no matcher term has nothing to find, so it completes at once without probing anything.
+    /// Eligible subject tokens that exceeded [`MAX_QUERY_TERMS`] and are not matchers. When this is not zero, a `Complete` walk covered every candidate but not every term of the subject.
+    pub fn dropped_terms(&self) -> usize {
+        self.dropped_terms
+    }
+
+    /// One page of related memories. A `None` cursor starts at the current tip; a cursor this run issued continues at its snapshot; any other cursor is refused. A subject with no matcher term has nothing to find, so it completes at once without touching the store.
     pub fn page(
         &mut self,
         store: &KernelStore,
@@ -124,13 +134,26 @@ impl RelatedMemoryDiscovery {
         budget: &EvalBudget,
         now_ms: i64,
     ) -> Result<RelatedPage, Refusal> {
-        let mut cursor = match cursor {
-            Some(token) => self
-                .cursors
-                .iter()
-                .find(|(issued, _)| issued == token)
-                .map(|(_, cursor)| cursor.clone())
-                .ok_or_else(|| refusal(RefusalCode::InvalidCursor))?,
+        let issued = cursor
+            .map(|token| {
+                self.cursors
+                    .iter()
+                    .find(|(issued, _)| issued == token)
+                    .map(|(_, cursor)| cursor.clone())
+                    .ok_or_else(|| refusal(RefusalCode::InvalidCursor))
+            })
+            .transpose()?;
+        if self.terms.is_empty() {
+            // Nothing to find needs no snapshot: the store and the budget are not consulted.
+            return Ok(RelatedPage {
+                hits: Vec::new(),
+                next_cursor: None,
+                completeness: Completeness::Complete,
+                withheld: false,
+            });
+        }
+        let mut cursor = match issued {
+            Some(cursor) => cursor,
             None => Cursor {
                 tip: store
                     .tip_within_budget(budget)
@@ -144,9 +167,6 @@ impl RelatedMemoryDiscovery {
         let mut examined = 0usize;
         let mut probed = 0u64;
         let mut advanced = false;
-        if self.terms.is_empty() {
-            return Ok(self.finish(cursor, hits, withheld, Completeness::Complete));
-        }
         loop {
             let remaining = MAX_RELATED_CANDIDATES_PER_PAGE.saturating_sub(examined);
             let Some(max_rows) = NonZeroUsize::new(remaining.min(MAX_RELATED_PAGE_HITS)) else {
@@ -262,8 +282,8 @@ impl RelatedMemoryDiscovery {
         now_ms: i64,
     ) -> Result<Step, Refusal> {
         let max_bytes = room.min(MAX_PROBE_ARTIFACT_BYTES);
-        let (bytes, offset) = match broker.probe_canonical_source(store, expectation, max_bytes) {
-            Ok(Probed::Bytes { bytes, start }) => (bytes, start),
+        let (bytes, selected) = match broker.probe_canonical_source(store, expectation, max_bytes) {
+            Ok(Probed::Bytes { bytes, selected }) => (bytes, selected),
             // An artifact no page could probe is skipped; one this page has no room left for waits for the next page.
             Ok(Probed::TooLarge { byte_length }) if byte_length > MAX_PROBE_ARTIFACT_BYTES => {
                 return Ok(Step::Skipped { probed_bytes: 0 });
@@ -278,9 +298,12 @@ impl RelatedMemoryDiscovery {
             Err(refusal) if refusal.code.is_capacity() => return Err(refusal),
             Err(_) => return Ok(Step::Skipped { probed_bytes: 0 }),
         };
+        // The whole artifact was read, whatever the span selects; that is what the page is charged.
         let probed_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        // The render check already proved the artifact is UTF-8; ASCII folding keeps every byte offset in the folded copy equal to its offset in the artifact.
-        let text = std::str::from_utf8(&bytes).map_err(|_| refusal(RefusalCode::Undecodable))?;
+        // The render check already proved the artifact is UTF-8 and the Kernel validated the span on char boundaries; ASCII folding keeps every byte offset in the folded copy equal to its offset in the artifact.
+        let offset = u64::try_from(selected.start).unwrap_or(u64::MAX);
+        let text =
+            std::str::from_utf8(&bytes[selected]).map_err(|_| refusal(RefusalCode::Undecodable))?;
         let Some(span) = self.excerpt_span(text) else {
             return Ok(Step::Unrelated { probed_bytes });
         };
@@ -289,7 +312,7 @@ impl RelatedMemoryDiscovery {
             return Ok(Step::Stop(Completeness::CapacityBound));
         }
         let alias = broker.aliases.issue(expectation.clone());
-        // The probe returned the descriptor's selection; the disclosed span is located in the artifact.
+        // The match was found in the descriptor's selection; the disclosed span is located in the artifact.
         let span = offset + span.start as u64..offset + span.end as u64;
         let read = match broker.read(store, alias.as_str(), Some(span.clone()), now_ms) {
             Ok(read) => read,
@@ -417,6 +440,17 @@ mod tests {
         let span = discovery.excerpt_span(&text).unwrap();
         assert!(span.end - span.start <= MAX_EXCERPT_BYTES);
         assert!(text[span].contains(&longest));
+    }
+
+    #[test]
+    fn matcher_terms_beyond_the_cap_are_counted_not_hidden() {
+        let tokens: Vec<String> = (0..MAX_QUERY_TERMS + 3)
+            .map(|index| format!("term{index:03}"))
+            .collect();
+        let discovery = RelatedMemoryDiscovery::new(&tokens.join(" "));
+        assert_eq!(discovery.terms().len(), MAX_QUERY_TERMS);
+        assert_eq!(discovery.dropped_terms(), 3);
+        assert_eq!(RelatedMemoryDiscovery::new("workspace").dropped_terms(), 0);
     }
 
     #[test]
