@@ -1182,13 +1182,14 @@ export function createRustModeTransform(
             assertCurrentPass();
             if (preflightError) throw preflightError;
             const usage = passUsageSnapshot;
+            // The usage sample's percentage was computed against `resolveContextLimit`, which substitutes the 128k default for a model models.dev cannot name, so inverting it recovers that default rather than a host report.
             const reportedContextLimit =
-                resolvedContextLimit && resolvedContextLimit > 0
-                    ? resolvedContextLimit
-                    : usage && usage.percentage > 0
-                      ? Math.round(usage.inputTokens / (usage.percentage / 100))
-                      : undefined;
-            const contextLimit = reportedContextLimit ?? 128_000;
+                resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : undefined;
+            const contextLimit =
+                reportedContextLimit ??
+                (usage && usage.percentage > 0
+                    ? Math.round(usage.inputTokens / (usage.percentage / 100))
+                    : 128_000);
             const threshold = resolveExecuteThreshold(
                 deps.executeThresholdPercentage ?? 65,
                 modelKey ?? undefined,

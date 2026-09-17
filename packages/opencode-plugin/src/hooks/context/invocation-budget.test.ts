@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { installTokenizerForTest, resetTokenEstimatorForTest } from "../../shared/token-estimator";
+import {
+    estimateTokens,
+    HEURISTIC_CHARS_PER_TOKEN,
+    installTokenizerForTest,
+    resetTokenEstimatorForTest,
+} from "../../shared/token-estimator";
 import {
     chargeInvocation,
     HARNESS_PROFILE_IDENTITY,
@@ -17,7 +22,7 @@ describe("invocation budget", () => {
         const charge = chargeInvocation(lengths, 250);
         expect(charge.entries).toBe(3);
         expect(charge.bytes).toBe(167);
-        expect(charge.estimatedTokens).toBe(Math.ceil(167 / 3.5));
+        expect(charge.estimatedTokens).toBe(Math.ceil(167 / HEURISTIC_CHARS_PER_TOKEN));
         expect(charge.chargedTokens).toBe(Math.ceil((charge.estimatedTokens * 1250) / 1000));
         expect(charge.profile.identity).toBe(HARNESS_PROFILE_IDENTITY);
         expect(charge.profile.authority).toBe("heuristic");
@@ -63,5 +68,14 @@ describe("invocation budget", () => {
         installTokenizerForTest(null);
         expect(harnessProfile().revision).not.toBe(before);
         expect(harnessProfile().authority).toBe("heuristic");
+    });
+
+    it("charges by the same heuristic the estimator falls back to", () => {
+        installTokenizerForTest(null);
+        for (const length of [1, 3, 4, 167, 4_096, 358_401]) {
+            expect(chargeInvocation([length], 0).estimatedTokens).toBe(
+                estimateTokens("x".repeat(length)),
+            );
+        }
     });
 });
