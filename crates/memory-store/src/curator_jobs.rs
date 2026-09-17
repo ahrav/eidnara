@@ -37,8 +37,8 @@ const MAX_TARGET_JSON_BYTES: usize = 1024;
 pub const CURATOR_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const MAX_CURATOR_METADATA_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024;
 pub const MAX_CURATOR_METADATA_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
-/// Permanent receipt charge every admitted job keeps for the store incarnation.
-pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 1024;
+/// Permanent receipt charge every admitted job keeps for the store incarnation: the job row, its receipt, and up to four attempt markers.
+pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 4096;
 /// Worst-case temporary allowance a reservation prepays for its input, holds, manifest, and attempt metadata; released when the job is terminal.
 pub const CURATOR_JOB_ALLOWANCE_BYTES: u64 = 32 * 1024;
 /// Temporary allowance one frozen page holds until it leaves the `frozen` state.
@@ -847,17 +847,20 @@ fn curator_write(project: &str, operation: &str) -> Result<PreparedWrite, Memory
     Ok(write)
 }
 
+/// The store's own durable incarnation, read inside the caller's transaction.
+pub(crate) fn store_incarnation_in_tx(conn: &GuardedConn<'_>) -> rusqlite::Result<String> {
+    conn.query_row(
+        "SELECT database_incarnation_id FROM curator_store_identity WHERE id = 0",
+        [],
+        |row| row.get(0),
+    )
+}
+
 impl MemoryStore {
     /// The store's own durable incarnation, written once at genesis; reopen keeps it and a replaced file has another.
     pub fn curator_store_incarnation(&self) -> Result<String, MemoryStoreError> {
         self.inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT database_incarnation_id FROM curator_store_identity WHERE id = 0",
-                    [],
-                    |row| row.get(0),
-                )
-            })
+            .with_conn(store_incarnation_in_tx)
             .map_err(Into::into)
     }
 
@@ -982,7 +985,7 @@ impl MemoryStore {
         )
     }
 
-    /// Marks every reserved or ready job and every frozen page whose deadline is at or before `now_ms` as expired. Expiry releases allowances, keeps receipts, and never moves a slot cursor.
+    /// Marks every reserved or ready job and every frozen page whose deadline is at or before `now_ms` as expired. A job whose receipt is still in progress is left to its own completion. Expiry releases allowances, keeps receipts, and never moves a slot cursor.
     pub fn expire_curator_work(&self, now_ms: i64) -> Result<(usize, usize), CuratorJobError> {
         // The sweep carries no caller text, so it records no scan and needs no owner scope.
         let write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
@@ -992,7 +995,11 @@ impl MemoryStore {
                     "UPDATE curator_jobs
                         SET state = 'terminal', outcome = 'expired', allowance_bytes = 0,
                             input_json = NULL, updated_at_ms = ?1
-                      WHERE state IN ('reserved', 'ready') AND queue_deadline_ms <= ?1",
+                      WHERE state IN ('reserved', 'ready') AND queue_deadline_ms <= ?1
+                        AND NOT EXISTS(SELECT 1 FROM curator_receipts r
+                                        WHERE r.project = curator_jobs.project
+                                          AND r.causal_identity = curator_jobs.causal_identity
+                                          AND r.state = 'in_progress')",
                     [now_ms],
                 )?;
                 let pages = coordinated.tx().execute(

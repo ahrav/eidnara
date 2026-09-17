@@ -225,7 +225,7 @@ pub(crate) fn redaction_error(error: MemoryStoreError) -> rusqlite::Error {
 /// Resolve the MODULE authority row a kind's protocol is fenced on. A MODULE
 /// row wins over stale twins under other context store UUIDs, matching
 /// `module_authority_for_project`. Returns `(generation, epoch)`.
-fn module_authority_tx(
+pub(crate) fn module_authority_tx(
     tx: &GuardedConn<'_>,
     kind: &TaskLeaseKind,
     project: &str,

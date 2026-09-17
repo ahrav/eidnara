@@ -534,36 +534,31 @@ mod sqlite_backend {
             self.fenced_write(&guard, Some(deadline), f)
         }
 
-        /// [`Self::with_conn_fenced`] followed by one synchronous handoff of the value the
-        /// callback prepared. `f` runs under the fenced transaction and returns its result
-        /// together with an optional prepared value; after the transaction commits, and while
-        /// this store still holds its connection, `handoff` consumes that value exactly once and
-        /// its result is returned beside `f`'s. A failed commit returns the error and never calls
-        /// `handoff`; a callback that prepares nothing skips it. `handoff` runs outside any
-        /// transaction with a read-only view of the connection, so it can recheck durable state
-        /// but cannot write, and it must return without blocking: the connection is released only
-        /// after it returns.
+        /// [`Self::with_conn_fenced`] followed by one synchronous handoff. `f` runs under the
+        /// fenced transaction; after it commits, and while this store still holds its
+        /// connection, `handoff` runs exactly once with a read-only view of the connection and
+        /// the committed value, and its result is returned beside `f`'s. A failed commit returns
+        /// the error and never calls `handoff`. `handoff` runs outside any transaction, so it can
+        /// recheck durable state but cannot write, and it must return without blocking: the
+        /// connection is released only after it returns.
         ///
         /// # Errors
         ///
         /// As [`Self::with_conn_fenced`]; a `handoff` error surfaces as [`StoreError::Backend`]
         /// after the commit has already happened.
-        pub fn with_conn_fenced_then_handoff<T, P, H>(
+        pub fn with_conn_fenced_then_handoff<T, H>(
             &self,
-            f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<(T, Option<P>)>,
-            handoff: impl FnOnce(&GuardedConn<'_>, P) -> rusqlite::Result<H>,
-        ) -> Result<(T, Option<H>), StoreError> {
+            f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
+            handoff: impl FnOnce(&GuardedConn<'_>, &T) -> rusqlite::Result<H>,
+        ) -> Result<(T, H), StoreError> {
             let guard = self.lock_conn()?;
-            let (out, prepared) = self.fenced_write(&guard, None, f)?;
-            let Some(prepared) = prepared else {
-                return Ok((out, None));
-            };
+            let out = self.fenced_write(&guard, None, f)?;
             let scope = CallbackScope::read_only(&guard, &self.gate)?;
-            let handed = handoff(&GuardedConn::new(&guard, &self.gate), prepared);
+            let handed = handoff(&GuardedConn::new(&guard, &self.gate), &out);
             let released = scope.release();
             let handed = handed.map_err(|e| StoreError::Backend(e.to_string()))?;
             released?;
-            Ok((out, Some(handed)))
+            Ok((out, handed))
         }
 
         fn fenced_write<T>(
@@ -6871,7 +6866,7 @@ mod tests {
             .with_conn_fenced_then_handoff(
                 |tx| {
                     tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", [])?;
-                    Ok((1, Some("prepared")))
+                    Ok("prepared")
                 },
                 |conn, prepared| {
                     handed.set(handed.get() + 1);
@@ -6887,13 +6882,13 @@ mod tests {
                 },
             )
             .expect("commit then handoff");
-        assert_eq!((rows, delivered.as_deref()), (1, Some("prepared:1")));
+        assert_eq!((rows, delivered.as_str()), ("prepared", "prepared:1"));
         assert_eq!(handed.get(), 1);
-        let failed: Result<(i32, Option<()>), StoreError> = store.with_conn_fenced_then_handoff(
+        let failed: Result<(i32, ()), StoreError> = store.with_conn_fenced_then_handoff(
             |tx| {
                 tx.execute("INSERT INTO kv (k, v) VALUES ('c', '3')", [])?;
                 tx.query_row("SELECT * FROM does_not_exist", [], |_| Ok(()))?;
-                Ok((2, Some("never")))
+                Ok(2)
             },
             |_, _| {
                 handed.set(handed.get() + 1);
@@ -6902,10 +6897,6 @@ mod tests {
         );
         assert!(matches!(failed, Err(StoreError::Backend(_))));
         assert_eq!(handed.get(), 1, "a failed commit hands nothing off");
-        let (_, skipped): (i32, Option<()>) = store
-            .with_conn_fenced_then_handoff(|_| Ok((3, None::<()>)), |_, ()| Ok(()))
-            .expect("nothing to hand off");
-        assert!(skipped.is_none());
         let n: i64 = store
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
             .expect("count");

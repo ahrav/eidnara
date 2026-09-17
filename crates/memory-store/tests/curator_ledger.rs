@@ -278,6 +278,7 @@ fn first_claim_fixes_both_deadlines_and_a_takeover_inherits_them() {
                 "worker-a",
                 0,
                 1,
+                KERNEL,
                 CuratorReceiptTerminal::Abstained,
                 None,
                 later
@@ -289,7 +290,7 @@ fn first_claim_fixes_both_deadlines_and_a_takeover_inherits_them() {
 
 #[test]
 fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
-    let fixture = Fixture::open();
+    let mut fixture = Fixture::open();
     let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
     fixture.begin(&claim, T0);
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -381,25 +382,25 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
         )
         .unwrap();
     // The claim and the attempt bound lapse together, so either recheck may fire first.
-    assert!(matches!(
+    assert_eq!(
         outcome,
         DispatchOutcome::ChargedNotDispatched {
             attempt_index: 1,
-            reason: CuratorLedgerRefusal::Cutoff | CuratorLedgerRefusal::ClaimInvalid
-        }
-    ));
+            reason: CuratorLedgerRefusal::Cutoff,
+            finished: true,
+        },
+        "the claim outlives the attempt bound, so only the attempt deadline lapsed"
+    );
     assert_eq!(fixture.attempts(), 2, "the unsent marker stays consumed");
-    fixture
+    let attempts = fixture
         .store
-        .finish_curator_attempt(
-            PROJECT,
-            &fixture.identity,
-            1,
-            1,
-            CuratorAttemptTerminal::NotDispatched,
-            T0 + 4,
-        )
+        .list_curator_attempts(PROJECT, &fixture.identity)
         .unwrap();
+    assert_eq!(
+        attempts[1].terminal.map(|(kind, _)| kind),
+        Some(CuratorAttemptTerminal::NotDispatched),
+        "the dispatch path records the no-disclosure proof itself"
+    );
     assert_eq!(
         refusal(
             fixture
@@ -408,6 +409,7 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
                     PROJECT,
                     &fixture.identity,
                     1,
+                    &claim,
                     1,
                     CuratorAttemptTerminal::Failed,
                     T0 + 5
@@ -415,6 +417,64 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
                 .unwrap_err()
         ),
         CuratorLedgerRefusal::AttemptTerminal
+    );
+    // A stale claim cannot stamp an outcome on the sent attempt; the owning claim can, once.
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .finish_curator_attempt(
+                    PROJECT,
+                    &fixture.identity,
+                    1,
+                    "crc:someone-else",
+                    0,
+                    CuratorAttemptTerminal::Complete,
+                    T0 + 5
+                )
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::AttemptTerminal
+    );
+    // A commit that fails after the insert statement hands nothing off and charges nothing: the model exceeds the column bound the Rust pre-check does not know.
+    let mut long_model = marker(1);
+    long_model.model = "m".repeat(257);
+    let counter = Rc::clone(&never);
+    assert!(matches!(
+        fixture
+            .store
+            .dispatch_curator_attempt(
+                PROJECT,
+                &fixture.identity,
+                1,
+                &claim,
+                KERNEL,
+                &long_model,
+                (),
+                || T0 + 6,
+                |()| {
+                    *counter.borrow_mut() += 1;
+                }
+            )
+            .unwrap_err(),
+        CuratorLedgerError::Store(_)
+    ));
+    assert_eq!(*never.borrow(), 0);
+    assert_eq!(fixture.attempts(), 2);
+    // A sent attempt left unterminated is unknown: reopen changes nothing and no path finishes or redispatches it.
+    let before = fixture
+        .store
+        .list_curator_attempts(PROJECT, &fixture.identity)
+        .unwrap();
+    assert_eq!(before[0].terminal, None);
+    fixture.reopen();
+    assert_eq!(
+        fixture
+            .store
+            .list_curator_attempts(PROJECT, &fixture.identity)
+            .unwrap(),
+        before,
+        "an ambiguous marker survives reopen exactly as committed"
     );
     // Cancellation withholds the handoff too, and refuses further markers.
     fixture
@@ -545,6 +605,27 @@ fn four_attempts_across_generations_exhaust_the_allowance_and_the_cutoff_starts_
         cutoff,
         "an attempt never outlives the cutoff"
     );
+    // The attempt that ran to its bound still completes under its claim.
+    let finished = fixture
+        .store
+        .complete_curator_receipt(
+            PROJECT,
+            &identity,
+            &claim,
+            "completion-near",
+            "worker-c",
+            1,
+            1,
+            KERNEL,
+            CuratorReceiptTerminal::Abstained,
+            None,
+            cutoff - 1,
+        )
+        .unwrap();
+    assert!(
+        matches!(finished, LeaseCompleteOutcome::Applied { .. }),
+        "{finished:?}"
+    );
     assert_eq!(
         refusal(
             fixture
@@ -562,7 +643,8 @@ fn four_attempts_across_generations_exhaust_the_allowance_and_the_cutoff_starts_
                 )
                 .unwrap_err()
         ),
-        CuratorLedgerRefusal::Cutoff
+        CuratorLedgerRefusal::Fenced,
+        "a completed receipt takes no attempt, and the cutoff would refuse one anyway"
     );
 }
 
@@ -587,6 +669,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 "worker-a",
                 0,
                 1,
+                KERNEL,
                 CuratorReceiptTerminal::Complete,
                 None,
                 T0 + 1
@@ -606,6 +689,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 "worker-a",
                 0,
                 2,
+                KERNEL,
                 CuratorReceiptTerminal::Complete,
                 Some(&selection),
                 T0 + 1
@@ -632,6 +716,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
             "worker-a",
             0,
             1,
+            KERNEL,
             CuratorReceiptTerminal::Complete,
             Some(&selection),
             T0 + 2,
@@ -670,6 +755,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 "worker-a",
                 0,
                 1,
+                KERNEL,
                 CuratorReceiptTerminal::Complete,
                 Some(&selection),
                 T0 + 3
@@ -688,6 +774,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 "worker-a",
                 0,
                 1,
+                KERNEL,
                 CuratorReceiptTerminal::Failed,
                 None,
                 T0 + 4
@@ -793,12 +880,15 @@ fn bounded_transition_sequences_preserve_allowance_deadlines_and_generation_fenc
                         Ok(DispatchOutcome::Handed { .. }) => {
                             assert!(!charged_unsent && !completed)
                         }
-                        Ok(DispatchOutcome::ChargedNotDispatched { reason, .. }) => {
+                        Ok(DispatchOutcome::ChargedNotDispatched {
+                            reason, finished, ..
+                        }) => {
                             assert!(charged_unsent);
                             assert!(matches!(
                                 reason,
                                 CuratorLedgerRefusal::Cutoff | CuratorLedgerRefusal::ClaimInvalid
                             ));
+                            assert!(finished, "the withheld marker is finished not_dispatched");
                         }
                         Err(error) => {
                             let reason = refusal(error);
@@ -857,6 +947,7 @@ fn bounded_transition_sequences_preserve_allowance_deadlines_and_generation_fenc
                             &format!("worker-{worker}"),
                             0,
                             generation,
+                            KERNEL,
                             CuratorReceiptTerminal::Abstained,
                             None,
                             now,

@@ -532,6 +532,19 @@ BEGIN SELECT RAISE(ABORT, 'curator receipt deadlines and incarnations are writte
 CREATE TRIGGER curator_attempts_no_delete BEFORE DELETE ON curator_attempts
 BEGIN SELECT RAISE(ABORT, 'a committed curator attempt stays consumed'); END;
 
+CREATE TRIGGER curator_attempts_marker_immutable
+BEFORE UPDATE OF generation, attempt_index, body_digest, request_bytes, provider, model,
+    credential_id, policy_union_digest, attempt_deadline_ms, committed_at_ms
+ON curator_attempts
+BEGIN SELECT RAISE(ABORT, 'a curator attempt marker is written once'); END;
+
+CREATE TRIGGER curator_attempts_reject_secret_insert BEFORE INSERT ON curator_attempts
+BEGIN
+    SELECT reject_transaction_text(NEW.provider),
+           reject_transaction_text(NEW.model),
+           reject_transaction_text(NEW.credential_id);
+END;
+
 CREATE TABLE transform_session_roots (
             session_id  TEXT NOT NULL,
             project_root TEXT NOT NULL,
