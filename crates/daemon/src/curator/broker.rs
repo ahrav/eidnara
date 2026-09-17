@@ -123,6 +123,16 @@ pub enum ReferenceExpectation {
 }
 
 impl ReferenceExpectation {
+    /// The evidence row the reference names; a staged subject is a candidate row, not evidence.
+    pub fn evidence_id(&self) -> Option<&str> {
+        match self {
+            Self::NativeSource { evidence_id, .. }
+            | Self::CanonicalSource { evidence_id, .. }
+            | Self::TemporaryCapture { evidence_id, .. } => Some(evidence_id),
+            Self::StagedSubject { .. } => None,
+        }
+    }
+
     pub fn origin(&self) -> OriginClass {
         match self {
             Self::StagedSubject { .. } => OriginClass::StagedSubject,
@@ -257,7 +267,7 @@ pub struct Refusal {
     pub code: RefusalCode,
 }
 
-fn refuse(alias: Option<&Alias>, code: RefusalCode) -> Refusal {
+pub(crate) fn refuse(alias: Option<&Alias>, code: RefusalCode) -> Refusal {
     Refusal {
         alias: alias.cloned(),
         code,

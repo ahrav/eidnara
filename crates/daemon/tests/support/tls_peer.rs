@@ -1,5 +1,6 @@
 //! A scripted local TLS peer for the Curator sender proofs: a test-only authority and leaf for `localhost`, an encrypted-byte counter on the peer's socket, and one connection per scripted exchange.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -202,6 +203,100 @@ impl Peer {
             observed
         })
     }
+}
+
+impl Peer {
+    /// Serves one scripted response per accepted connection, in order, and reports what each connection carried. The task ends after the last response; a client that connects fewer times leaves the remaining script unserved and the report short.
+    pub fn serve_script(
+        &mut self,
+        responses: Vec<Vec<u8>>,
+    ) -> tokio::task::JoinHandle<Vec<Observed>> {
+        self.serve_script_with(responses, |_| Box::pin(async {}))
+    }
+
+    /// [`Self::serve_script`] with `before_respond` run after each request is read and before its response is written, given the connection's index.
+    pub fn serve_script_with(
+        &mut self,
+        responses: Vec<Vec<u8>>,
+        mut before_respond: impl FnMut(usize) -> Pin<Box<dyn Future<Output = ()> + Send>>
+        + Send
+        + 'static,
+    ) -> tokio::task::JoinHandle<Vec<Observed>> {
+        let listener = self.listener.take().unwrap();
+        let acceptor = self.acceptor.clone();
+        let connections = self.connections.clone();
+        tokio::spawn(async move {
+            let mut observations = Vec::with_capacity(responses.len());
+            for (index, response) in responses.into_iter().enumerate() {
+                let Ok(Ok((tcp, _))) =
+                    tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
+                else {
+                    return observations;
+                };
+                connections.fetch_add(1, Ordering::SeqCst);
+                let counting = Counting {
+                    inner: tcp,
+                    received: Arc::new(AtomicUsize::new(0)),
+                };
+                let Ok(mut tls) = acceptor.accept(counting).await else {
+                    return observations;
+                };
+                let mut observed = Observed::default();
+                let mut raw = Vec::new();
+                let mut buffer = [0u8; 16 * 1024];
+                loop {
+                    let Ok(read) = tls.read(&mut buffer).await else {
+                        return observations;
+                    };
+                    if read == 0 {
+                        return observations;
+                    }
+                    raw.extend_from_slice(&buffer[..read]);
+                    if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                        observed.head = String::from_utf8(raw[..split].to_vec()).unwrap();
+                        let length: usize = observed
+                            .head
+                            .to_ascii_lowercase()
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length: ").map(str::to_string)
+                            })
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        while raw.len() < split + 4 + length {
+                            let Ok(read) = tls.read(&mut buffer).await else {
+                                return observations;
+                            };
+                            if read == 0 {
+                                return observations;
+                            }
+                            raw.extend_from_slice(&buffer[..read]);
+                        }
+                        observed.body = raw[split + 4..split + 4 + length].to_vec();
+                        break;
+                    }
+                }
+                before_respond(index).await;
+                let _ = tls.write_all(&response).await;
+                let _ = tls.shutdown().await;
+                observations.push(observed);
+            }
+            observations
+        })
+    }
+}
+
+/// A Messages response whose one text block is `text`, JSON-escaped.
+pub fn text_response(text: &str) -> Vec<u8> {
+    let escaped = serde_json::to_string(text).unwrap();
+    json_response(
+        "200 OK",
+        &format!(
+            r#"{{"id":"msg_1","type":"message","role":"assistant","model":"claude-canonical-1","content":[{{"type":"text","text":{escaped}}}],"stop_reason":"end_turn","usage":{{"input_tokens":3,"output_tokens":4}}}}"#
+        ),
+        "",
+    )
 }
 
 pub fn no_wait() -> BeforeRead {

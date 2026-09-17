@@ -152,10 +152,12 @@ pub enum AbstainReason {
     PartialDisclosure,
     /// The model declined to conclude.
     ModelDeclined,
+    /// The run spent its rounds, requests, or time without concluding.
+    BudgetExhausted,
 }
 
 impl AbstainReason {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::OwnerSensitive,
         Self::WrongScope,
         Self::Secret,
@@ -163,6 +165,7 @@ impl AbstainReason {
         Self::UndisclosedCitation,
         Self::PartialDisclosure,
         Self::ModelDeclined,
+        Self::BudgetExhausted,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -174,6 +177,7 @@ impl AbstainReason {
             Self::UndisclosedCitation => "undisclosed_citation",
             Self::PartialDisclosure => "partial_disclosure",
             Self::ModelDeclined => "model_declined",
+            Self::BudgetExhausted => "budget_exhausted",
         }
     }
 

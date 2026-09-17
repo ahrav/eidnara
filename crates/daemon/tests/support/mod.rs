@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod applied;
+pub mod curator_corpus;
 pub mod dense_projection;
 #[cfg(unix)]
 pub mod direct_host;

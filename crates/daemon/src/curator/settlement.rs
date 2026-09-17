@@ -30,11 +30,13 @@ pub struct TaskClaim {
     pub slot: i64,
 }
 
-/// What the run produced: a proposal to publish, or the model's own decision not to conclude.
+/// What the run produced: a proposal to publish, the model's own decision not to conclude, a run that spent its rounds or requests without concluding, or a run the broker refused before the model saw its subject.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunResult {
     Proposal(Box<ReviewProposal>),
     Declined,
+    Exhausted,
+    Refused(RefusalCode),
 }
 
 /// How one settlement ended in the Memory Store.
@@ -121,6 +123,15 @@ impl Settlement<'_> {
         let proposal = match result {
             RunResult::Declined => {
                 return content_free(ContentFree::Abstained(AbstainReason::ModelDeclined));
+            }
+            RunResult::Exhausted => {
+                return content_free(ContentFree::Abstained(AbstainReason::BudgetExhausted));
+            }
+            RunResult::Refused(code) => {
+                return match Verdict::from_refusal(code) {
+                    Verdict::Abstain(reason) => content_free(ContentFree::Abstained(reason)),
+                    Verdict::Store(error) => Err(SettlementError::Store(error)),
+                };
             }
             RunResult::Proposal(proposal) => proposal,
         };
