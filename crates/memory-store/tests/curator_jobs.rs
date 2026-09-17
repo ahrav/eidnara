@@ -135,7 +135,7 @@ fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job(
         .finish_curator_job(
             "proj",
             &job.causal_identity,
-            CuratorJobOutcome::Abstained,
+            CuratorJobOutcome::Failed,
             NOW + 10,
         )
         .unwrap();
@@ -146,7 +146,7 @@ fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job(
         ReserveOutcome::Existing(existing) => {
             assert_eq!(
                 existing.state,
-                CuratorJobState::Terminal(CuratorJobOutcome::Abstained)
+                CuratorJobState::Terminal(CuratorJobOutcome::Failed)
             );
         }
         other => panic!("expected the terminal row, got {other:?}"),
@@ -202,7 +202,7 @@ fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job(
             .unwrap()
             .unwrap()
             .state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Abstained)
+        CuratorJobState::Terminal(CuratorJobOutcome::Failed)
     );
     // Evidence that becomes available at the unchanged target is a causal change; conflicting availability for one id is a producer error.
     let mut flipped = inputs("cand-1");
@@ -596,7 +596,7 @@ fn capacity_counts_reserved_and_ready_and_refusal_writes_nothing() {
     // A terminal outcome frees the slot but keeps its receipt charge.
     let first = inputs("cand-0").causal_identity().unwrap();
     store
-        .finish_curator_job("proj", &first, CuratorJobOutcome::Completed, NOW + 1)
+        .finish_curator_job("proj", &first, CuratorJobOutcome::Failed, NOW + 1)
         .unwrap();
     let after = store.curator_headroom("proj").unwrap();
     assert_eq!(after.pending_jobs, MAX_PENDING_CURATOR_JOBS_PER_PROJECT - 1);
@@ -710,7 +710,7 @@ fn expiry_records_terminal_outcomes_without_resurrection_and_receipts_survive_re
                 .finish_curator_job(
                     "proj",
                     &ready_job.causal_identity,
-                    CuratorJobOutcome::Completed,
+                    CuratorJobOutcome::Failed,
                     deadline
                 )
                 .unwrap_err()

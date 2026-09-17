@@ -1062,6 +1062,7 @@ impl MemoryStore {
         )
     }
 
+    /// Closes a job from outside a run. `Completed` and `Abstained` are execution outcomes that only a receipt completion records, with the attempt and selection evidence behind them; they are refused here.
     pub fn finish_curator_job(
         &self,
         project: &str,
@@ -1069,6 +1070,12 @@ impl MemoryStore {
         outcome: CuratorJobOutcome,
         now_ms: i64,
     ) -> Result<CuratorJob, CuratorJobError> {
+        if matches!(
+            outcome,
+            CuratorJobOutcome::Completed | CuratorJobOutcome::Abstained
+        ) {
+            return Err(CuratorJobError::Refused(CuratorJobRefusal::InvalidRequest));
+        }
         self.curator_transaction(
             project,
             "finish",

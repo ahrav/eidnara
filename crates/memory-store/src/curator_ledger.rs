@@ -629,11 +629,11 @@ pub fn finish_curator_attempt_in_tx(
     if terminal == CuratorAttemptTerminal::NotDispatched {
         return Err(refuse(CuratorLedgerRefusal::InvalidRequest));
     }
-    // A result that arrives at or after the attempt's own deadline is over budget: it cannot close the marker as complete, only as failed, cancelled, or unknown.
+    // A result that arrives at or after the attempt's own deadline is over budget: it cannot close the marker as complete, only as failed, cancelled, or unknown. A result dated before the marker it answers is a clock that stepped back, refused by name like a lagging commit.
     if terminal == CuratorAttemptTerminal::Complete {
-        let deadline: Option<i64> = conn
+        let window: Option<(i64, i64)> = conn
             .query_row(
-                "SELECT attempt_deadline_ms FROM curator_attempts
+                "SELECT committed_at_ms, attempt_deadline_ms FROM curator_attempts
                   WHERE project = ?1 AND causal_identity = ?2 AND generation = ?3 AND attempt_index = ?4",
                 params![
                     project,
@@ -641,11 +641,16 @@ pub fn finish_curator_attempt_in_tx(
                     generation_param(generation).map_err(refuse)?,
                     i64::from(attempt_index)
                 ],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if deadline.is_some_and(|deadline| now_ms >= deadline) {
-            return Err(refuse(CuratorLedgerRefusal::Cutoff));
+        if let Some((committed_at_ms, deadline)) = window {
+            if now_ms < committed_at_ms {
+                return Err(refuse(CuratorLedgerRefusal::ClockBehind));
+            }
+            if now_ms >= deadline {
+                return Err(refuse(CuratorLedgerRefusal::Cutoff));
+            }
         }
     }
     record_attempt_terminal_in_tx(

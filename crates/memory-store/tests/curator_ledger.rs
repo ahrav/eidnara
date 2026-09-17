@@ -2517,3 +2517,69 @@ fn a_cancelled_receipt_records_cancelled_even_when_the_worker_reports_an_unbacke
         Some(CuratorReceiptTerminal::Cancelled)
     );
 }
+
+#[test]
+fn a_complete_attempt_terminal_dated_before_its_marker_is_refused_as_clock_behind() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let DispatchOutcome::Handed { attempt_index, .. } =
+        fixture.dispatch(1, &claim, T0 + 10).unwrap()
+    else {
+        panic!("first attempt hands off")
+    };
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .finish_curator_attempt(
+                    PROJECT,
+                    &fixture.identity,
+                    1,
+                    &claim,
+                    attempt_index,
+                    CuratorAttemptTerminal::Complete,
+                    T0 + 9,
+                )
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::ClockBehind
+    );
+    assert_eq!(
+        fixture
+            .store
+            .list_curator_attempts(PROJECT, &fixture.identity)
+            .unwrap()[0]
+            .terminal,
+        None
+    );
+}
+
+#[test]
+fn execution_outcomes_are_written_only_by_receipt_completion() {
+    let fixture = Fixture::open();
+    for outcome in [CuratorJobOutcome::Completed, CuratorJobOutcome::Abstained] {
+        let error = fixture
+            .store
+            .finish_curator_job(PROJECT, &fixture.identity, outcome, T0 + 1)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                memory_store::curator_jobs::CuratorJobError::Refused(
+                    memory_store::curator_jobs::CuratorJobRefusal::InvalidRequest
+                )
+            ),
+            "{error:?}"
+        );
+    }
+    assert!(matches!(
+        fixture
+            .store
+            .lookup_curator_job(PROJECT, &fixture.identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        CuratorJobState::Ready(_)
+    ));
+}
