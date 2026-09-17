@@ -354,6 +354,35 @@ fn changed_bytes_binding_or_deadline_are_reported_as_changed() {
             .unwrap()
     });
     assert_eq!(count, 1);
+    // Replay compares the candidate row's own witness and deadline, the fields a targeted read checks.
+    mutate(
+        directory.path(),
+        "UPDATE candidates SET lease_expires_at=lease_expires_at-1 WHERE candidate_id='subject-1'",
+        [],
+    );
+    assert_eq!(
+        stage_refusal(
+            store
+                .stage_review_input(subject_spec("run-1", "subject-1", origin))
+                .unwrap_err()
+        ),
+        ReviewStageRefusal::Changed,
+        "a candidate deadline that drifted from the request is a change"
+    );
+    mutate(
+        directory.path(),
+        "UPDATE candidates SET lease_expires_at=lease_expires_at+1, provenance_witness=?1 WHERE candidate_id='subject-1'",
+        params![br#"{"kind":"review","binding":{"schema":"future"}}"#.to_vec()],
+    );
+    assert_eq!(
+        stage_refusal(
+            store
+                .stage_review_input(subject_spec("run-1", "subject-1", origin))
+                .unwrap_err()
+        ),
+        ReviewStageRefusal::Changed,
+        "a candidate witness that drifted from the request is a change"
+    );
 }
 
 #[test]

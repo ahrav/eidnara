@@ -760,22 +760,27 @@ fn classify_replay(tx: &Transaction<'_>, spec: &RedactedCandidate) -> Result<(),
     }
     let candidate = tx
         .query_row_cached(
-            "SELECT extraction_run_id,candidate_kind,payload FROM candidates WHERE candidate_id=?1",
+            "SELECT extraction_run_id,candidate_kind,payload,provenance_witness,lease_expires_at
+             FROM candidates WHERE candidate_id=?1",
             [spec.candidate_id.as_str()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             },
         )
         .optional()
         .map_err(store)?;
-    if let Some((run_id, kind, payload)) = candidate
+    if let Some((run_id, kind, payload, witness, lease_expires_at)) = candidate
         && (run_id != spec.extraction_run_id
             || kind != spec.candidate_kind.text
-            || payload != spec.payload.text.as_bytes())
+            || payload != spec.payload.text.as_bytes()
+            || witness != spec.witness
+            || lease_expires_at != spec.lease_expires_at)
     {
         return Err(ReviewStageRefusal::Changed.into());
     }
