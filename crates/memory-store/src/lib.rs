@@ -2766,7 +2766,7 @@ const PASS_TRACE_HISTORY_RING_LEN: usize = 256;
 /// The receipt field ids of the two writers that append to `scheduler_history`.
 const OBSERVATION_RING_FIELDS: &[&str] = &["scheduler_observation", "scheduler_history"];
 
-fn active_scan_owner_key(parts: &[&str]) -> String {
+pub(crate) fn active_scan_owner_key(parts: &[&str]) -> String {
     let mut key = String::new();
     for part in parts {
         use std::fmt::Write;

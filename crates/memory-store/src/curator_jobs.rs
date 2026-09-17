@@ -1074,8 +1074,23 @@ impl MemoryStore {
             "finish",
             |_| Ok(()),
             |conn| {
-                finish_curator_job_in_tx(conn, project, causal_identity, outcome, now_ms)
-                    .map(WriteDisposition::Applied)
+                let job =
+                    finish_curator_job_in_tx(conn, project, causal_identity, outcome, now_ms)?;
+                // A claim on a finished job can do nothing but renew; fence it here rather than leave it to the sweep.
+                let job_id: i64 = conn.query_row(
+                    "SELECT job_id FROM curator_jobs WHERE project = ?1 AND causal_identity = ?2",
+                    params![project, causal_identity],
+                    |row| row.get(0),
+                )?;
+                crate::task_lease::fence_task_claims_tx(
+                    conn,
+                    &crate::curator_ledger::CURATOR_REVIEW_TASK,
+                    project,
+                    job_id,
+                    "stale",
+                    now_ms,
+                )?;
+                Ok(WriteDisposition::Applied(job))
             },
         )
     }

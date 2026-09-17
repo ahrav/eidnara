@@ -16,11 +16,11 @@ use crate::curator_jobs::{
 };
 use crate::task_lease::{
     LeaseAcquireOutcome, LeaseCompleteOutcome, LeaseCompletion, LeaseSelected, TaskLeaseKind,
-    module_authority_tx, redaction_error,
+    redaction_error,
 };
 use crate::{
     MemoryStore, MemoryStoreError, NOTE_EVAL_NO_WORK_RETENTION_MS, NOTE_EVAL_RESPONSE_REDACT_MS,
-    NOTE_EVAL_TERMINAL_RETENTION_MS, WriteDisposition,
+    NOTE_EVAL_TERMINAL_RETENTION_MS, WriteDisposition, active_scan_owner_key,
 };
 
 /// Run deadline measured from the first claim.
@@ -145,6 +145,8 @@ pub struct CuratorReceipt {
     pub causal_identity: String,
     pub database_incarnation_id: String,
     pub kernel_incarnation_id: String,
+    /// The authority row the run is bound to: the context store that owned `memories` at begin, and its generation then.
+    pub authority_context_store: String,
     pub authority_generation: u64,
     pub generation: u64,
     pub claim_id: String,
@@ -263,7 +265,7 @@ const RECEIPT_COLUMNS: &str =
     "project, causal_identity, database_incarnation_id, kernel_incarnation_id,
      authority_generation, state, generation, claim_id, run_deadline_ms, execution_cutoff_ms,
      cancelled_at_ms, terminal_kind, selected_generation, selected_candidate_id,
-     selected_payload_digest, created_at_ms";
+     selected_payload_digest, created_at_ms, authority_context_store";
 
 fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorReceipt> {
     let invalid = |column: usize, value: String| {
@@ -292,6 +294,7 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorReceipt>
         causal_identity: row.get(1)?,
         database_incarnation_id: row.get(2)?,
         kernel_incarnation_id: row.get(3)?,
+        authority_context_store: row.get(16)?,
         authority_generation: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
         generation: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
         claim_id: row.get(7)?,
@@ -355,6 +358,29 @@ fn claim_is_live(
     Ok(live_claim_expiry(conn, project, causal_identity, claim_id, now_ms)?.is_some())
 }
 
+/// The `memories` authority row the ledger binds to: the owning context store and its generation. Rows are versioned per context store, so the pair, not the generation alone, identifies an authority.
+fn current_authority(
+    conn: &GuardedConn<'_>,
+    project: &str,
+) -> rusqlite::Result<Option<(String, i64)>> {
+    conn.query_row(
+        "SELECT context_store_uuid, generation FROM authority
+          WHERE project = ?1 AND domain = ?2 AND state = 'MODULE'
+          ORDER BY context_store_uuid
+          LIMIT 1",
+        params![project, CURATOR_REVIEW_TASK.authority_domain],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+}
+
+fn authority_matches(receipt: &CuratorReceipt, current: Option<(String, i64)>) -> bool {
+    current.is_some_and(|(context_store, generation)| {
+        context_store == receipt.authority_context_store
+            && i64::try_from(receipt.authority_generation).ok() == Some(generation)
+    })
+}
+
 /// The job's queue deadline while it is still Ready and inside that deadline; `None` once it is not open for any attempt or handoff.
 fn job_open_deadline(
     conn: &GuardedConn<'_>,
@@ -384,13 +410,12 @@ pub fn begin_curator_receipt_in_tx(
         return Err(refuse(CuratorLedgerRefusal::InvalidRequest));
     }
     let incarnation = store_incarnation_in_tx(conn)?;
-    let authority = module_authority_tx(conn, &CURATOR_REVIEW_TASK, project)?
-        .map(|(generation, _)| generation)
+    let (authority_context_store, authority) = current_authority(conn, project)?
         .ok_or_else(|| refuse(CuratorLedgerRefusal::AuthorityChanged))?;
     if let Some(existing) = load_receipt(conn, project, causal_identity)? {
         if existing.database_incarnation_id != incarnation
             || existing.kernel_incarnation_id != kernel_incarnation_id
-            || i64::try_from(existing.authority_generation).ok() != Some(authority)
+            || !authority_matches(&existing, Some((authority_context_store, authority)))
         {
             return Err(refuse(CuratorLedgerRefusal::BindingMismatch));
         }
@@ -422,9 +447,9 @@ pub fn begin_curator_receipt_in_tx(
     conn.execute(
         "INSERT INTO curator_receipts (
              project, causal_identity, database_incarnation_id, kernel_incarnation_id,
-             authority_generation, state, generation, claim_id, run_deadline_ms,
-             execution_cutoff_ms, created_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, 'in_progress', 1, ?6, ?7, ?8, ?9, ?9)",
+             authority_generation, authority_context_store, state, generation, claim_id,
+             run_deadline_ms, execution_cutoff_ms, created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?10, 'in_progress', 1, ?6, ?7, ?8, ?9, ?9)",
         params![
             project,
             causal_identity,
@@ -435,6 +460,7 @@ pub fn begin_curator_receipt_in_tx(
             run_deadline_ms,
             run_deadline_ms - CURATOR_SETTLEMENT_RESERVE_MS,
             now_ms,
+            authority_context_store,
         ],
     )?;
     load_receipt(conn, project, causal_identity)?
@@ -442,7 +468,7 @@ pub fn begin_curator_receipt_in_tx(
         .ok_or_else(|| refuse(CuratorLedgerRefusal::Missing))
 }
 
-/// Adopts an in-progress receipt at `predecessor_generation` under the next generation with a new live claim. Deadlines are not in the update, so they are inherited unchanged; a takeover at or past the cutoff succeeds but can start no attempt. The receipt's bound authority generation must still be current: a claim acquired after the `memories` authority moved cannot adopt a receipt begun under the old one, so no completion publishes across that change.
+/// Adopts an in-progress receipt at `predecessor_generation` under the next generation with a new live claim. Deadlines are not in the update, so they are inherited unchanged; a takeover at or past the cutoff succeeds but can start no attempt. The receipt's bound authority row (context store and generation) must still be current: a claim acquired after the `memories` authority moved cannot adopt a receipt begun under the old one, so no completion publishes across that change.
 pub fn take_over_curator_receipt_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -457,21 +483,7 @@ pub fn take_over_curator_receipt_in_tx(
     }
     let receipt = load_receipt(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorLedgerRefusal::Missing))?;
-    if module_authority_tx(conn, &CURATOR_REVIEW_TASK, project)?.map(|(generation, _)| generation)
-        != i64::try_from(receipt.authority_generation).ok()
-    {
-        return Err(refuse(CuratorLedgerRefusal::AuthorityChanged));
-    }
-    // Authority rows are versioned per context store, so two stores can share a generation number; the fence the transition put on the receipt's own claim is the durable record that it moved.
-    let predecessor_fence: Option<Option<String>> = conn
-        .query_row(
-            "SELECT terminal_kind FROM note_eval_claims
-              WHERE project = ?1 AND task_kind = ?2 AND claim_id = ?3",
-            params![project, CURATOR_REVIEW_TASK.task_kind, receipt.claim_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if predecessor_fence.flatten().as_deref() == Some("authority_changed") {
+    if !authority_matches(&receipt, current_authority(conn, project)?) {
         return Err(refuse(CuratorLedgerRefusal::AuthorityChanged));
     }
     let changed = conn.execute(
@@ -528,9 +540,7 @@ pub fn commit_curator_attempt_in_tx(
     {
         return Err(refuse(CuratorLedgerRefusal::BindingMismatch));
     }
-    if module_authority_tx(conn, &CURATOR_REVIEW_TASK, project)?.map(|(generation, _)| generation)
-        != i64::try_from(receipt.authority_generation).ok()
-    {
+    if !authority_matches(&receipt, current_authority(conn, project)?) {
         return Err(refuse(CuratorLedgerRefusal::AuthorityChanged));
     }
     if receipt.cancelled_at_ms.is_some() {
@@ -1134,7 +1144,14 @@ impl MemoryStore {
                 } else {
                     (terminal, selection)
                 };
-                // The candidate id is caller text the receipt keeps for the store incarnation; it is scanned like every other Curator identity, and the table trigger refuses it again.
+                // The candidate id is caller text the receipt keeps for the store incarnation; it is scanned like every other Curator identity, and the table trigger refuses it again. The receipt owns the scan beside the claim, so the evidence outlives the claim's retention window.
+                if selection.is_some() {
+                    coordinated.domain_owner(
+                        "project",
+                        project,
+                        active_scan_owner_key(&["curator-ledger", "complete", causal_identity]),
+                    );
+                }
                 let candidate_id = selection
                     .map(|selection| {
                         coordinated

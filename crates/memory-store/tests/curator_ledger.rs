@@ -496,9 +496,12 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
         ),
         CuratorLedgerRefusal::AttemptTerminal
     );
-    // A commit that fails inside the insert statement hands nothing off and charges nothing: the credential carries a secret the table trigger refuses and the Rust pre-check does not scan.
-    let mut long_model = marker(1);
-    long_model.credential_id = format!("cred-{AWS_KEY}");
+    // A store failure inside the fenced write, after every Rust pre-check and identity scan passed, hands nothing off and charges nothing: a temp shadow of the attempts table makes the write scope refuse before the callback runs. The callback-fails-after-its-insert case is storage's own `commit_then_handoff_runs_the_handoff_once_after_commit_and_never_after_a_failed_commit`.
+    fixture
+        .store
+        .execute_tag_sql_for_test("CREATE TEMP TABLE curator_attempts (x)")
+        .unwrap();
+    let long_model = marker(1);
     let counter = Rc::clone(&never);
     assert!(matches!(
         fixture
@@ -517,8 +520,12 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
                 }
             )
             .unwrap_err(),
-        CuratorLedgerError::Store(_)
+        CuratorLedgerError::Store(error) if error.to_string().contains("shadows")
     ));
+    fixture
+        .store
+        .execute_tag_sql_for_test("DROP TABLE temp.curator_attempts")
+        .unwrap();
     assert_eq!(*never.borrow(), 0);
     assert_eq!(fixture.attempts(), 2);
     // A sent attempt left unterminated is unknown: reopen changes nothing and no path finishes or redispatches it.
@@ -2258,4 +2265,153 @@ fn a_takeover_is_refused_across_context_stores_even_at_an_equal_generation() {
         CuratorLedgerRefusal::AuthorityChanged
     );
     assert_eq!(receipt(&fixture).claim_id, claim);
+}
+
+#[test]
+fn a_takeover_is_refused_across_context_stores_when_the_predecessor_claim_had_already_expired() {
+    let mut fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let CuratorBeginOutcome::Begun(r) = fixture.begin(&claim, T0) else {
+        panic!("first claim begins")
+    };
+    // The worker crashes; a late renewal records the claim expired before ownership moves, so the transition has no live claim to fence.
+    assert_eq!(
+        fixture
+            .store
+            .renew_curator_task(
+                PROJECT,
+                &claim,
+                "worker-a",
+                0,
+                fixture.registration,
+                T0 + CURATOR_TASK_LEASE_MS
+            )
+            .unwrap(),
+        memory_store::NoteEvalRenewOutcome::Expired
+    );
+    drain_memories_authority(&fixture.store, T0 + CURATOR_TASK_LEASE_MS + 1);
+    fixture.registration = activate_memories_under(&fixture.store, "ctx-b");
+    assert_eq!(fixture.registration as u64, r.authority_generation);
+    let successor = fixture
+        .claim("acq-2", "worker-b", T0 + CURATOR_TASK_LEASE_MS + 2)
+        .unwrap();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .take_over_curator_receipt(
+                    PROJECT,
+                    &fixture.identity,
+                    1,
+                    &successor,
+                    T0 + CURATOR_TASK_LEASE_MS + 3
+                )
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::AuthorityChanged
+    );
+    assert_eq!(receipt(&fixture).claim_id, claim);
+}
+
+#[test]
+fn a_standalone_job_finish_fences_the_live_claim() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture
+        .store
+        .finish_curator_job(
+            PROJECT,
+            &fixture.identity,
+            CuratorJobOutcome::Failed,
+            T0 + 1,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            fixture
+                .store
+                .renew_curator_task(PROJECT, &claim, "worker-a", 0, fixture.registration, T0 + 2)
+                .unwrap(),
+            memory_store::NoteEvalRenewOutcome::TerminalReplay { ref kind, .. } if kind == "stale"
+        ),
+        "the claim on a finished job is fenced in the same transaction"
+    );
+}
+
+#[test]
+fn the_selected_candidate_scan_is_owned_by_the_receipt_not_only_the_claim() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    fixture.completed_attempt(1, &claim, T0);
+    assert!(matches!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Complete,
+            Some(&selection()),
+            T0 + 2
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Applied { .. }
+    ));
+    let owners: i64 = fixture
+        .store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT COUNT(DISTINCT domain_owner_id) FROM scan_owner_copies
+                  WHERE field_id = 'selected_candidate_id'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        owners, 2,
+        "the claim's owner is retired with the claim; the receipt's owner keeps the scan"
+    );
+}
+
+/// `job_id INTEGER PRIMARY KEY` makes the claim's task id the row's declared key, so a rebuild cannot renumber it. This SQLite already preserved rowids through `VACUUM`; the declaration turns that into a guarantee.
+#[test]
+fn a_claim_keeps_its_job_across_a_vacuum() {
+    let fixture = Fixture::open();
+    // A second job sits after the fixture's in row order; the fixture's own row is then removed underneath, leaving a gap a rebuild could close.
+    let second = ready_job(&fixture.store, "cand-2");
+    let LeaseAcquireOutcome::Claim { claim, .. } = fixture
+        .store
+        .acquire_curator_task(
+            PROJECT,
+            "acq-2",
+            "worker-a",
+            0,
+            fixture.registration,
+            &second,
+            T0,
+        )
+        .unwrap()
+    else {
+        panic!("the second job is leasable")
+    };
+    fixture
+        .store
+        .execute_tag_sql_for_test(&format!(
+            "DELETE FROM curator_jobs WHERE causal_identity = '{}'; VACUUM;",
+            fixture.identity
+        ))
+        .unwrap();
+    assert!(
+        matches!(
+            fixture
+                .store
+                .begin_curator_receipt(PROJECT, &second, KERNEL, &claim.claim_id, T0 + 1)
+                .unwrap(),
+            CuratorBeginOutcome::Begun(_)
+        ),
+        "the claim still names its job after the rebuild"
+    );
 }

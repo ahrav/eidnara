@@ -409,7 +409,10 @@ CREATE TRIGGER curator_store_identity_no_reinsert BEFORE INSERT ON curator_store
 WHEN EXISTS (SELECT 1 FROM curator_store_identity)
 BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 
+-- `job_id` is the task id a Curator claim persists; a declared integer key survives a
+-- rebuild, where a hidden rowid may be renumbered.
 CREATE TABLE curator_jobs (
+            job_id INTEGER PRIMARY KEY,
             project TEXT NOT NULL CHECK (length(project) > 0),
             causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
             producer TEXT NOT NULL CHECK (length(producer) BETWEEN 1 AND 64),
@@ -426,7 +429,7 @@ CREATE TABLE curator_jobs (
             receipt_charge_bytes INTEGER NOT NULL CHECK (receipt_charge_bytes > 0),
             created_at_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
-            PRIMARY KEY (project, causal_identity),
+            UNIQUE (project, causal_identity),
             CHECK ((state = 'terminal') = (outcome IS NOT NULL)),
             CHECK (state <> 'ready' OR input_json IS NOT NULL),
             CHECK (state <> 'reserved' OR input_json IS NULL)
@@ -504,6 +507,7 @@ CREATE TABLE curator_receipts (
             database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) = 32),
             kernel_incarnation_id TEXT NOT NULL CHECK (length(kernel_incarnation_id) = 32),
             authority_generation INTEGER NOT NULL CHECK (authority_generation >= 0),
+            authority_context_store TEXT NOT NULL CHECK (length(authority_context_store) > 0),
             state TEXT NOT NULL CHECK (state IN ('in_progress', 'complete')),
             generation INTEGER NOT NULL CHECK (generation >= 1),
             claim_id TEXT NOT NULL CHECK (length(claim_id) BETWEEN 1 AND 200),
@@ -552,7 +556,7 @@ CREATE TRIGGER curator_receipts_no_delete BEFORE DELETE ON curator_receipts
 BEGIN SELECT RAISE(ABORT, 'curator receipts survive for the store incarnation'); END;
 
 CREATE TRIGGER curator_receipts_deadlines_immutable
-BEFORE UPDATE OF run_deadline_ms, execution_cutoff_ms, created_at_ms, database_incarnation_id, kernel_incarnation_id, authority_generation
+BEFORE UPDATE OF run_deadline_ms, execution_cutoff_ms, created_at_ms, database_incarnation_id, kernel_incarnation_id, authority_generation, authority_context_store
 ON curator_receipts
 BEGIN SELECT RAISE(ABORT, 'curator receipt deadlines, incarnations, and authority are written once'); END;
 
