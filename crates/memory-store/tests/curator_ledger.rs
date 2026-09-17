@@ -306,15 +306,14 @@ fn first_claim_fixes_both_deadlines_and_a_takeover_inherits_them() {
     assert_eq!(taken.generation, 2);
     assert_eq!(taken.run_deadline_ms, receipt.run_deadline_ms);
     assert_eq!(taken.execution_cutoff_ms, receipt.execution_cutoff_ms);
+    // A repeated takeover by the claim that now owns the receipt replays it unchanged.
+    let replayed = fixture
+        .store
+        .take_over_curator_receipt(PROJECT, &fixture.identity, 1, &successor, later)
+        .unwrap();
     assert_eq!(
-        refusal(
-            fixture
-                .store
-                .take_over_curator_receipt(PROJECT, &fixture.identity, 1, &successor, later)
-                .unwrap_err()
-        ),
-        CuratorLedgerRefusal::Fenced,
-        "the predecessor generation is gone"
+        (replayed.generation, replayed.claim_id.as_str()),
+        (2, successor.as_str())
     );
     // The predecessor cannot dispatch or complete under its lost generation.
     assert_eq!(
@@ -472,7 +471,7 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
                     &claim,
                     1,
                     CuratorAttemptTerminal::Failed,
-                    T0 + 5
+                    T0 + 4 + CURATOR_ATTEMPT_MAX_MS
                 )
                 .unwrap_err()
         ),
@@ -489,8 +488,8 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
                     1,
                     "crc:someone-else",
                     0,
-                    CuratorAttemptTerminal::Complete,
-                    T0 + 5
+                    CuratorAttemptTerminal::Failed,
+                    T0 + 4 + CURATOR_ATTEMPT_MAX_MS
                 )
                 .unwrap_err()
         ),
@@ -2914,4 +2913,107 @@ fn a_completion_dated_before_any_later_attempt_event_is_refused() {
         }
     );
     assert_eq!(receipt(&fixture).terminal, None);
+}
+
+#[test]
+fn a_begin_dated_before_the_first_claim_is_refused_as_clock_behind() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .begin_curator_receipt(PROJECT, &fixture.identity, KERNEL, &claim, T0 - 1)
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::ClockBehind
+    );
+    assert!(
+        fixture
+            .store
+            .lookup_curator_receipt(PROJECT, &fixture.identity)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn an_attempt_terminal_dated_before_a_later_marker_is_refused_as_clock_behind() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let DispatchOutcome::Handed { attempt_index, .. } =
+        fixture.dispatch(1, &claim, T0 + 1).unwrap()
+    else {
+        panic!("first attempt hands off")
+    };
+    let mut next = marker(1);
+    next.body_digest = "b".repeat(64);
+    assert!(matches!(
+        fixture
+            .store
+            .dispatch_curator_attempt(
+                PROJECT,
+                &fixture.identity,
+                1,
+                &claim,
+                KERNEL,
+                &next,
+                "prepared",
+                || T0 + 30,
+                |prepared| prepared,
+            )
+            .unwrap(),
+        DispatchOutcome::Handed { .. }
+    ));
+    // The ledger already holds a marker at T0 + 30; the first attempt cannot close at T0 + 20.
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .finish_curator_attempt(
+                    PROJECT,
+                    &fixture.identity,
+                    1,
+                    &claim,
+                    attempt_index,
+                    CuratorAttemptTerminal::Complete,
+                    T0 + 20,
+                )
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::ClockBehind
+    );
+}
+
+#[test]
+fn a_takeover_by_the_claim_that_already_owns_the_receipt_replays_without_advancing() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    for now in [T0 + 1, T0 + 2] {
+        let r = fixture
+            .store
+            .take_over_curator_receipt(PROJECT, &fixture.identity, 1, &claim, now)
+            .unwrap();
+        assert_eq!((r.generation, r.claim_id.as_str()), (1, claim.as_str()));
+    }
+    let batches: i64 = fixture
+        .store
+        .with_conn_for_test(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM scan_batches", [], |row| row.get(0))
+        })
+        .unwrap();
+    let before = batches;
+    fixture
+        .store
+        .take_over_curator_receipt(PROJECT, &fixture.identity, 1, &claim, T0 + 3)
+        .unwrap();
+    let after: i64 = fixture
+        .store
+        .with_conn_for_test(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM scan_batches", [], |row| row.get(0))
+        })
+        .unwrap();
+    assert_eq!(after, before, "a replayed takeover records no new audit");
 }

@@ -452,6 +452,10 @@ pub fn begin_curator_receipt_in_tx(
         params![project, CURATOR_REVIEW_TASK.task_kind, causal_identity],
         |row| row.get(0),
     )?;
+    // A begin dated before the claim that authorizes it is a clock that stepped back; nothing in the ledger yet would catch it later.
+    if now_ms < first_claimed_at_ms {
+        return Err(refuse(CuratorLedgerRefusal::ClockBehind));
+    }
     let run_deadline_ms = first_claimed_at_ms
         .checked_add(CURATOR_RUN_DEADLINE_MS)
         .ok_or_else(|| refuse(CuratorLedgerRefusal::InvalidRequest))?;
@@ -499,6 +503,10 @@ pub fn take_over_curator_receipt_in_tx(
         .ok_or_else(|| refuse(CuratorLedgerRefusal::Missing))?;
     if !authority_matches(&receipt, current_authority(conn, project)?) {
         return Err(refuse(CuratorLedgerRefusal::AuthorityChanged));
+    }
+    // The claim that already owns the receipt has nothing to take over: the call replays the receipt unchanged rather than fencing its own generation and growing the ledger.
+    if receipt.terminal.is_none() && receipt.claim_id == claim_id {
+        return Ok(receipt);
     }
     let changed = conn.execute(
         "UPDATE curator_receipts
@@ -655,8 +663,15 @@ pub fn finish_curator_attempt_in_tx(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if let Some((committed_at_ms, deadline)) = window {
-        if now_ms < committed_at_ms {
+    if let Some((_, deadline)) = window {
+        // The floor is the newest event the ledger holds for the job, not only this marker's commit: a terminal dated before a later marker or terminal is a clock behind the ledger.
+        let newest_event_ms: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0)), 0)
+               FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2",
+            params![project, causal_identity],
+            |row| row.get(0),
+        )?;
+        if now_ms < newest_event_ms {
             return Err(refuse(CuratorLedgerRefusal::ClockBehind));
         }
         if terminal == CuratorAttemptTerminal::Complete && now_ms >= deadline {
@@ -892,15 +907,22 @@ impl MemoryStore {
         now_ms: i64,
     ) -> Result<CuratorReceipt, CuratorLedgerError> {
         self.ledger_transaction(project, "take-over", causal_identity, |conn| {
-            take_over_curator_receipt_in_tx(
+            // A takeover by the claim that already owns the receipt is a replay: it writes nothing and records no audit.
+            let already_owned = load_receipt(conn, project, causal_identity)?
+                .is_some_and(|receipt| receipt.terminal.is_none() && receipt.claim_id == claim_id);
+            let receipt = take_over_curator_receipt_in_tx(
                 conn,
                 project,
                 causal_identity,
                 predecessor_generation,
                 claim_id,
                 now_ms,
-            )
-            .map(WriteDisposition::Applied)
+            )?;
+            Ok(if already_owned {
+                WriteDisposition::Replay(receipt)
+            } else {
+                WriteDisposition::Applied(receipt)
+            })
         })
     }
 
@@ -1191,6 +1213,21 @@ impl MemoryStore {
                 } else {
                     (terminal, selection)
                 };
+                // The evidence and clock checks made before the lease are repeated here, serialized with the write: a dispatch that landed in between leaves a newer event, and a publication dated before it, or one no longer backed, is stale rather than published.
+                if terminal == CuratorReceiptTerminal::Complete {
+                    let (backed, newest_event_ms): (bool, i64) = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM curator_attempts
+                                        WHERE project = ?1 AND causal_identity = ?2
+                                          AND generation = ?3 AND terminal_kind = 'complete'),
+                                COALESCE(MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0)), 0)
+                           FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2",
+                        params![project, causal_identity, generation],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    if !backed || now_ms < newest_event_ms {
+                        return Ok(LeaseCompletion::Stale);
+                    }
+                }
                 // The candidate id is caller text the receipt keeps for the store incarnation; it is scanned like every other Curator identity, and the table trigger refuses it again. The receipt owns the scan beside the claim, so the evidence outlives the claim's retention window.
                 if selection.is_some() {
                     coordinated.domain_owner(
