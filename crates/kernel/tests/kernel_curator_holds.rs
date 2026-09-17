@@ -43,6 +43,11 @@ fn inspect<T>(root: &std::path::Path, read: impl FnOnce(&Connection) -> T) -> T 
     read(&conn)
 }
 
+fn mutate(root: &std::path::Path, sql: &str, params: impl rusqlite::Params) {
+    let conn = Connection::open(root.join("kernel.sqlite")).unwrap();
+    conn.execute(sql, params).unwrap();
+}
+
 fn incarnation(root: &std::path::Path) -> String {
     inspect(root, |conn| {
         conn.query_row(
@@ -663,6 +668,103 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
         .release_review_hold(&review_hold.hold_id, &review)
         .unwrap();
     assert!(fixture.pin(&review_hold.hold_id).3.is_some());
+}
+
+#[test]
+fn review_transfer_requires_the_execution_generation_and_a_live_proposal_deadline() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let evidence = fixture.ingest("held", b"held bytes", None);
+    let stale = fixture.binding("job-1", 1);
+    let stale_hold = fixture
+        .store
+        .acquire_execution_hold(&stale, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    // A successor generation staged its own proposal; the stale worker's hold cannot become its review hold.
+    let created = fixture.stage_proposal("job-1", 2, now - 1_000, now + DAY_MS - 1_000);
+    let successor = provisional_result_identity("job-1", 2);
+    let successor_review = fixture.binding(&successor.candidate_id, 2);
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(
+                    &stale_hold.hold_id,
+                    &stale,
+                    &successor_review,
+                    created + REVIEW_EXPIRY_MAX_MS,
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "the review subject must be the execution generation's own provisional result"
+    );
+    assert_eq!(
+        fixture.pins(),
+        pins_before,
+        "a refused transfer writes no review pin"
+    );
+    assert!(
+        fixture.pin(&stale_hold.hold_id).3.is_none(),
+        "a refused transfer leaves the execution hold live"
+    );
+    let deadline: i64 = inspect(fixture.root(), |conn| {
+        conn.query_row(
+            "SELECT lease_expires_at FROM candidates WHERE candidate_id=?1",
+            [successor.candidate_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        deadline,
+        now + DAY_MS - 1_000,
+        "a refused transfer moves no proposal deadline"
+    );
+
+    // The matching proposal's lease has expired, so no review hold may pin its bytes.
+    let execution = fixture.binding("job-2", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    let created = fixture.stage_proposal("job-2", 1, now - 1_000, now + DAY_MS - 1_000);
+    let identity = provisional_result_identity("job-2", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    mutate(
+        fixture.root(),
+        "UPDATE candidates SET lease_expires_at=?1 WHERE candidate_id=?2",
+        rusqlite::params![now - 1, identity.candidate_id],
+    );
+    mutate(
+        fixture.root(),
+        "UPDATE extraction_runs SET lease_expires_at=?1 WHERE extraction_run_id=?2",
+        rusqlite::params![now - 1, identity.extraction_run_id],
+    );
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(
+                    &hold.hold_id,
+                    &execution,
+                    &review,
+                    created + REVIEW_EXPIRY_MAX_MS,
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "an expired proposal cannot anchor a review hold"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
+    assert_eq!(
+        fixture.retain_until(&evidence),
+        None,
+        "a refused transfer moves no retention"
+    );
 }
 
 #[test]

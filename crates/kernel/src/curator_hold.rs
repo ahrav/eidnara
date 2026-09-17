@@ -247,7 +247,7 @@ impl KernelStore {
         Ok(hold)
     }
 
-    /// In one envelope: acquire the review hold over the execution hold's still-live references, move the staged proposal's queue deadline and the still-future `retain_until` of Curator-captured evidence forward to the review expiry, then release the execution hold. `review.subject` must be the provisional candidate the execution job's generation staged; `review_expires_at` is at most [`REVIEW_EXPIRY_MAX_MS`] after that candidate's creation. Deadlines only move later; expired references are never extended and ownership never changes.
+    /// In one envelope: acquire the review hold over the execution hold's still-live references, move the staged proposal's queue deadline and the still-future `retain_until` of Curator-captured evidence forward to the review expiry, then release the execution hold. `review` must carry the execution binding's generation, and `review.subject` must be the provisional candidate that generation staged, with both its candidate and run deadlines still ahead of the store clock; `review_expires_at` is at most [`REVIEW_EXPIRY_MAX_MS`] after that candidate's creation. Deadlines only move later; expired references are never extended and ownership never changes.
     pub fn transfer_execution_to_review(
         &self,
         execution_hold_id: &str,
@@ -260,8 +260,9 @@ impl KernelStore {
         let execution_hold_id =
             identity(execution_hold_id).map_err(|_| CuratorHoldRefusal::InvalidRequest)?;
         let now = current_time_ms();
-        let expected = provisional_result_identity(&execution.subject, review.generation);
+        let expected = provisional_result_identity(&execution.subject, execution.generation);
         if review_expires_at <= now
+            || review.generation != execution.generation
             || review.subject != expected.candidate_id
             || execution.project_digest != review.project_digest
             || execution.kernel_incarnation != review.kernel_incarnation
@@ -280,8 +281,9 @@ impl KernelStore {
                 "SELECT c.created_at FROM candidates c JOIN extraction_runs r USING(extraction_run_id)
                  WHERE c.candidate_id=?1
                    AND (c.terminal_state IS NULL OR c.terminal_state='completed')
-                   AND (r.terminal_state IS NULL OR r.terminal_state='completed')",
-                [review.subject.as_str()],
+                   AND (r.terminal_state IS NULL OR r.terminal_state='completed')
+                   AND c.lease_expires_at>?2 AND r.lease_expires_at>?2",
+                params![review.subject, now],
                 |row| row.get(0),
             )
             .optional()
@@ -590,8 +592,6 @@ fn precharge(
         facts.push(load_live_evidence(tx, &evidence_id)?);
     }
     let (lower, upper) = project_range(&binding.project_digest);
-    let project_held = held_backing(tx, Some((&lower, &upper)))?;
-    let host_held = held_backing(tx, None)?;
     let mut project_new = 0u64;
     let mut host_new = 0u64;
     let mut seen = BTreeMap::new();
@@ -629,13 +629,34 @@ fn precharge(
             host_new = host_new.saturating_add(fact.byte_length);
         }
     }
-    if project_held.saturating_add(project_new) > quota.project_bytes {
-        return Err(CuratorHoldRefusal::ProjectBackingExhausted.into());
+    // The aggregate scans run only when the request adds bytes: an artifact the project already holds is also held on the host, so `project_new == 0` implies `host_new == 0`.
+    if project_new > 0 {
+        let project_held = held_backing(tx, Some((&lower, &upper)))?;
+        if project_held.saturating_add(project_new) > quota.project_bytes {
+            return Err(CuratorHoldRefusal::ProjectBackingExhausted.into());
+        }
     }
-    if host_held.saturating_add(host_new) > quota.host_bytes {
-        return Err(CuratorHoldRefusal::HostBackingExhausted.into());
+    if host_new > 0 {
+        let host_held = held_backing(tx, None)?;
+        if host_held.saturating_add(host_new) > quota.host_bytes {
+            return Err(CuratorHoldRefusal::HostBackingExhausted.into());
+        }
     }
     Ok(facts)
+}
+
+macro_rules! held_backing_sql {
+    ($scope:literal) => {
+        concat!(
+            "SELECT SUM(byte_length) FROM (
+                 SELECT e.artifact_digest,MAX(e.byte_length) AS byte_length FROM capture_pin_refs r
+                 JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
+                 JOIN evidence_meta e ON e.evidence_id=r.evidence_id
+                 WHERE p.pin_kind IN (?1,?2) AND p.released_at IS NULL AND r.released_at IS NULL",
+            $scope,
+            " GROUP BY e.artifact_digest)"
+        )
+    };
 }
 
 /// Distinct artifact bytes active Curator pins hold, over one project's owner range or the whole host.
@@ -643,16 +664,9 @@ fn held_backing(
     tx: &Transaction<'_>,
     project: Option<(&str, &str)>,
 ) -> Result<u64, CuratorHoldError> {
-    let (lower, upper) = project.unwrap_or(("", ""));
-    let total: Option<i64> = tx
-        .query_row_cached(
-            "SELECT SUM(byte_length) FROM (
-                 SELECT e.artifact_digest,MAX(e.byte_length) AS byte_length FROM capture_pin_refs r
-                 JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
-                 JOIN evidence_meta e ON e.evidence_id=r.evidence_id
-                 WHERE p.pin_kind IN (?1,?2) AND p.released_at IS NULL AND r.released_at IS NULL
-                   AND (?3='' OR (p.owner_id>=?3 AND p.owner_id<?4))
-                 GROUP BY e.artifact_digest)",
+    let total: Option<i64> = match project {
+        Some((lower, upper)) => tx.query_row_cached(
+            held_backing_sql!(" AND p.owner_id>=?3 AND p.owner_id<?4"),
             params![
                 CURATOR_EXECUTION_HOLD_KIND,
                 CURATOR_REVIEW_HOLD_KIND,
@@ -660,8 +674,14 @@ fn held_backing(
                 upper
             ],
             |row| row.get(0),
-        )
-        .map_err(sqlite)?;
+        ),
+        None => tx.query_row_cached(
+            held_backing_sql!(""),
+            params![CURATOR_EXECUTION_HOLD_KIND, CURATOR_REVIEW_HOLD_KIND],
+            |row| row.get(0),
+        ),
+    }
+    .map_err(sqlite)?;
     u64::try_from(total.unwrap_or(0)).map_err(corrupt)
 }
 
