@@ -66,7 +66,8 @@ a wildcard pass that questioned the framing.
    integration test; the required part's payload-rewrite seam existed. Closed
    at this change: `a_corrupt_optional_payload_is_excluded_and_the_scan_continues`
    alters a payload row, asserts the `Corrupt` exclusion, the sound row's
-   admission, and that the corrupt load is not charged. Listed under the
+   admission, and that the corrupt bytes count as a load before the digest
+   check, matching the `required/` ruling that the read is the load. Listed under the
    partition record and the fault-map.
 2. **`OptionalCostOverflow` has no record.** `prepare_optional` refuses a group
    whose summed range cost is unrepresentable, and
