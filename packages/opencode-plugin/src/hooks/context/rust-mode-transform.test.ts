@@ -10,6 +10,13 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { deriveWindowGeometry } from "../../shared/window-geometry";
 import * as editRecipe from "./edit-recipe";
+import * as eventResolvers from "./event-resolvers";
+import {
+    DEFAULT_CONTEXT_LIMIT,
+    resolveContextLimit,
+    resolveTrustedContextLimit,
+} from "./event-resolvers";
+import { chargeInvocation } from "./invocation-budget";
 import {
     MODULE_ORDINAL_PAGE_SIZE,
     MODULE_PAGE_MAX_BYTES,
@@ -521,6 +528,156 @@ describe("Rust mode transform request", () => {
             current_total_input_tokens: 64_000,
             context_limit_tokens: 128_000,
         });
+    });
+
+    const GATED_MODEL = { providerID: "eidnara-test", modelID: "gated-window" };
+
+    /** Reports `limit` as the models.dev limit for `GATED_MODEL`, the one source the invocation gate reads. */
+    function trustContextLimit(limit: number) {
+        return spyOn(eventResolvers, "resolveTrustedContextLimit").mockImplementation(
+            (providerID, modelID) =>
+                providerID === GATED_MODEL.providerID && modelID === GATED_MODEL.modelID
+                    ? limit
+                    : undefined,
+        );
+    }
+
+    function gatedMessages(sessionId: string): MessageLike[] {
+        const messages = makeMessages(sessionId);
+        (messages[0]!.info as Record<string, unknown>).model = GATED_MODEL;
+        return messages;
+    }
+
+    for (const fits of [true, false]) {
+        it(`${fits ? "publishes when the whole invocation fits the context limit with headroom" : "declines the pass when the whole invocation exceeds the context limit"} and leaves the host array intact`, async () => {
+            const sessionId = `rust-invocation-budget-${fits}-${Date.now()}`;
+            installAvailabilityDb(sessionId, {});
+            installRawRows(sessionId, rawRows(1));
+            const messages = gatedMessages(sessionId);
+            const candidate = [...messages, ...makeMessages(sessionId)];
+            const charged = chargeInvocation(
+                candidate.map((entry) => editRecipe.canonicalJsonLength(entry)),
+                250,
+            ).chargedTokens;
+            const { client, calls } = recordingClient((request) =>
+                recipeResponse(request, candidate),
+            );
+            const deps = makeDeps();
+            const limit = fits ? charged : charged - 1;
+            const limitSpy = trustContextLimit(limit);
+            // The usage sample inverts to the opposite verdict, so the gate is proven to read the trusted limit.
+            const invertedLimit = fits ? charged - 1 : charged + 1_000;
+            deps.contextUsageMap.set(sessionId, {
+                usage: { percentage: 50, inputTokens: invertedLimit / 2 },
+                updatedAt: Date.now(),
+                lastResponseTime: Date.now(),
+                hasUsageTokens: true,
+                model: GATED_MODEL,
+            });
+            const transform = createRustModeTransform(deps, { moduleClient: client });
+            const member = messages[0];
+            const output = { messages: [...messages] as unknown[] };
+            const array = output.messages;
+            const logSpy = spyOn(logger.sessionLog, "warn");
+            try {
+                await transform.run(sessionId, output);
+                expect(output.messages).toBe(array);
+                expect(calls).toHaveLength(1);
+                if (fits) {
+                    expect(output.messages).toEqual(candidate);
+                } else {
+                    expect(output.messages).toHaveLength(1);
+                    expect(output.messages[0]).toBe(member);
+                    expect(
+                        sessionLogs(logSpy, sessionId).some((line) =>
+                            line.includes(
+                                `pass declined: invocation_budget (${charged} charged tokens over ${limit}, growing from`,
+                            ),
+                        ),
+                    ).toBe(true);
+                }
+                expect(transform.getState(sessionId).failureCount).toBe(0);
+            } finally {
+                logSpy.mockRestore();
+                limitSpy.mockRestore();
+            }
+        });
+    }
+
+    it("publishes a candidate over the context limit when it is no larger than the incoming surface", async () => {
+        const sessionId = `rust-invocation-shrinks-${Date.now()}`;
+        installAvailabilityDb(sessionId, {});
+        installRawRows(sessionId, rawRows(1));
+        const messages = gatedMessages(sessionId);
+        const candidate = makeMessages(sessionId);
+        const { client } = recordingClient((request) => recipeResponse(request, candidate));
+        const deps = makeDeps();
+        const limitSpy = trustContextLimit(1);
+        deps.contextUsageMap.set(sessionId, {
+            usage: { percentage: 50, inputTokens: 1 },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+            model: GATED_MODEL,
+        });
+        const transform = createRustModeTransform(deps, { moduleClient: client });
+        const output = { messages: [...messages] as unknown[] };
+        try {
+            await transform.run(sessionId, output);
+        } finally {
+            limitSpy.mockRestore();
+        }
+        expect(output.messages).toEqual(candidate);
+    });
+
+    it("gates nothing for a model models.dev cannot name, although its usage sample inverts to the 128k default", async () => {
+        const sessionId = `rust-invocation-untrusted-limit-${Date.now()}`;
+        installAvailabilityDb(sessionId, {});
+        installRawRows(sessionId, rawRows(1));
+        const model = { providerID: "unknown-provider", modelID: "unknown-model-xyz" };
+        expect(resolveTrustedContextLimit(model.providerID, model.modelID)).toBeUndefined();
+        // Every producer of `usage.percentage` divides by `resolveContextLimit`, which is the 128k default for this model, so inverting the sample recovers a limit the host never reported.
+        const inputTokens = 64_000;
+        const percentage =
+            (inputTokens / resolveContextLimit(model.providerID, model.modelID)) * 100;
+        expect(Math.round(inputTokens / (percentage / 100))).toBe(DEFAULT_CONTEXT_LIMIT);
+        const messages = makeMessages(sessionId);
+        (messages[0]!.info as Record<string, unknown>).model = model;
+        // 128k tokens at 3.5 chars per token under 25% headroom is about 358k canonical characters; this candidate grows past it.
+        const candidate = [
+            ...messages,
+            ...rowMessages(sessionId, rawRows(1), () => "x".repeat(400_000)),
+        ];
+        expect(
+            chargeInvocation(
+                candidate.map((entry) => editRecipe.canonicalJsonLength(entry)),
+                250,
+            ).chargedTokens,
+        ).toBeGreaterThan(DEFAULT_CONTEXT_LIMIT);
+        const { client } = recordingClient((request) => recipeResponse(request, candidate));
+        const deps = makeDeps();
+        deps.contextUsageMap.set(sessionId, {
+            usage: { percentage, inputTokens },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+            model,
+        });
+        const transform = createRustModeTransform(deps, { moduleClient: client });
+        const output = { messages: [...messages] as unknown[] };
+        const logSpy = spyOn(logger.sessionLog, "warn");
+        try {
+            await transform.run(sessionId, output);
+            expect(
+                sessionLogs(logSpy, sessionId).filter((line) =>
+                    line.includes("pass declined: invocation_budget"),
+                ),
+            ).toEqual([]);
+            expect(output.messages).toEqual(candidate);
+            expect(transform.getState(sessionId).failureCount).toBe(0);
+        } finally {
+            logSpy.mockRestore();
+        }
     });
 
     it("sends the combined todowrite map and live-permission verdict", async () => {

@@ -12,11 +12,43 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u4-context-edits` at
 ## Evidence trail
 
 - `crates/daemon/src/edit_receipts.rs` capacity check before minting.
-- The adapter half is RP2.8.U5.
+- `packages/opencode-plugin/src/hooks/context/invocation-budget.ts`
+  `chargeInvocation` sums the candidate entries' canonical JSON lengths, the
+  same per-entry lengths the recipe application already measured, charges them
+  through `estimateTokensFromLength` from `shared/token-estimator.ts` (the one
+  `HEURISTIC_CHARS_PER_TOKEN` the estimator's own fallback divides by), adds
+  `headroomPermille`, and labels the result with `harnessProfile()`: identity
+  `opencode-heuristic`, revision `generation:<estimator generation>`, authority
+  `heuristic`. `validateInvocation` admits a charge within the limit, admits a
+  candidate no larger in bytes than the incoming surface, admits everything
+  when the limit is unknown, and refuses the rest.
+- `packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts` calls it
+  on `application.lengths` against `inputLengths` after every other
+  publication guard and before `replaceHostArrayContents`. The bound is
+  `resolveTrustedContextLimit` alone: the usage sample's percentage is not fed
+  back as a limit, because `event-handler.ts` and `plugin/rpc-handlers.ts`
+  compute it against `resolveContextLimit`, which substitutes the 128k default
+  for a model models.dev cannot name, so inverting it would enforce that
+  default as if the host had reported it. The inversion still sizes
+  `contextLimit` for thresholds. A refusal is a `PassDeclined` with reason
+  `invocation_budget`, the pass-through disabled path.
+- `packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts`
+  checks the charge arithmetic, the limit and limit-minus-one boundary, the
+  shrinking and unknown-limit admissions, that the revision moves with the
+  estimator generation, and that the charge equals `estimateTokens` under the
+  forced heuristic; `rust-mode-transform.test.ts` drives the three outcomes
+  through the transform with the host array observed under a spied
+  `resolveTrustedContextLimit` whose usage sample inverts to the opposite
+  verdict, and publishes a growing candidate charged over 128k tokens for an
+  unknown model whose usage sample was computed against the default.
 
 ## Failure scenario
 
-An edit that fits its own bound overflows the invocation.
+An edit that fits its own bound overflows the invocation; or a validation that
+estimates only the packed entry admits a surface whose other entries already
+fill the window; or a gate that inverts the usage percentage declines every
+growing candidate over 128k charged tokens for a model models.dev cannot name,
+silently disabling the transform on large-context or unlisted models.
 
 ## Timing windows and dependencies
 
@@ -24,7 +56,13 @@ None: the invocation bound is checked on one assembled request.
 
 ## What a test must construct
 
-The RP2.8.U5 adapter.
+- A candidate surface larger than the incoming one under a models.dev limit
+  one below the charged total, with a usage sample inverting to the opposite
+  verdict.
+- A candidate no larger than the incoming surface under a limit of one token.
+- A model models.dev cannot name, a usage sample computed against the 128k
+  default, and a growing candidate charged over 128k tokens.
+- An estimator swap through `installTokenizerForTest`.
 
 ## Investigation log
 

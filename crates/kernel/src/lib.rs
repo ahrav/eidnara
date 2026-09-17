@@ -32,6 +32,7 @@ mod source_descriptor;
 mod source_export;
 mod source_hold;
 pub mod source_identity;
+pub mod write_observer;
 
 pub use admission::{
     AdmissionDecision, AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, Disposition,

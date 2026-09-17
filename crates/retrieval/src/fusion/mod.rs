@@ -9,9 +9,9 @@ mod lane;
 mod rrf;
 
 pub use identity::{
-    ContextRepresentation, ContextRevision, GenerationId, IdentityRefusal, InvocationId,
-    OccurrenceId, ParentGroupKey, ParentId, PreparationDigest, PreparationInputs, ProbeOrdinal,
-    SelectedSpan, SelectionDigest,
+    AccountingProfileIdentity, AccountingProfileRevision, ContextRepresentation, ContextRevision,
+    GenerationId, IdentityRefusal, InvocationId, OccurrenceId, ParentGroupKey, ParentId,
+    PreparationDigest, PreparationInputs, ProbeOrdinal, SelectedSpan, SelectionDigest,
 };
 pub use lane::{DeclaredLanes, Lane, LaneEntry, LaneHit, LaneRanking, RawScore};
 pub use rrf::{

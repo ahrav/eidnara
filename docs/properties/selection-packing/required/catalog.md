@@ -145,7 +145,8 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `ClaudeTokens::from_budget` has no production
-caller at this base; the route that parses a wire budget lands with U5a.
+caller at this base; no route parses a wire budget yet, so the manifest's
+packing group is the only budget source a caller can reach.
 Status: active
 Exercised: yes - `crates/daemon/src/packing/mod.rs` tests
 `budgets_are_integers_and_never_clamped` and

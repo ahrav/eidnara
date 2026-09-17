@@ -36,7 +36,7 @@ use kernel::source_identity::{
     EncodedOccurrence, Occurrence, OccurrenceRefusal, Span, derived_lineage_id, encode,
     encode_preserving_span, identity_digest, select,
 };
-use kernel::{MAX_PAYLOAD_BYTES, Sensitivity};
+use kernel::{MAX_PAYLOAD_BYTES, Sensitivity, write_observer};
 use rusqlite::{OptionalExtension, params};
 use storage::{CachedStatement, GuardedConn};
 
@@ -796,13 +796,22 @@ fn persist_with_digests<'c>(
         });
     }
     // Insert payload rows before occurrence rows to satisfy the foreign key.
+    let mut inserted = false;
     for item in &prepared {
         if item.insert_payload {
             statements.insert_payload(item, persisted_at)?;
+            inserted = true;
         }
         if item.insert_occurrence {
             statements.insert_occurrence(item, persisted_at)?;
+            inserted = true;
         }
+    }
+    if inserted {
+        write_observer::record(
+            write_observer::Boundary::Projection,
+            write_observer::PROJECTION_CAUSE,
+        );
     }
     Ok(prepared
         .into_iter()
@@ -884,6 +893,10 @@ pub fn tombstone_occurrence(
                     recorded_at,
                 ],
             )?;
+            write_observer::record(
+                write_observer::Boundary::Projection,
+                write_observer::PROJECTION_CAUSE,
+            );
             true
         }
     };

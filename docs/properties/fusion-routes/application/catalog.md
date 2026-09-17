@@ -23,8 +23,15 @@ receipt store behind `retrieval.prepare`, `retrieval.apply`, and
 
 Parent decisions recorded here. Q7: a deliberate second application of one
 selection is a legal intent, so the tuple (daemon incarnation, context
-revision, action, selection digest, accounting profile) is a length-delimited
-fingerprint and the identity minted at preparation is the key. Q8: the
+revision, action, selection digest, accounting profile identity and revision)
+is a length-delimited fingerprint and the identity minted at preparation is
+the key. Q5: the daemon owns the accounting profile; it binds its current
+profile into the preparation digest and the fingerprint, answers it on the
+prepared reply, and an apply must echo it, refusing `profile_mismatch` before
+the digest comparison and `profile_unavailable` when the daemon holds none.
+Q7 (capability visibility): the answer stays off the wire and `append` is
+never gated; the plugin treats a capability terminal as a denial for the rest
+of the route epoch. Q8: the
 incarnation signal is a random value minted whenever a receipt limit set is
 installed over no store, so a restart or an uninstall retires it, and every
 preparation identity carries it as its prefix; a key of another incarnation is
@@ -67,9 +74,12 @@ visibility belongs to the harness adapter that assembles the invocation
 
 ## Reachability and observation contract
 
-Every record here is `test-only`: the routes answer `disabled` until
+Every daemon-route record here is `test-only`: the routes answer `disabled` until
 `Handler::set_edit_receipt_limits` installs an approved set, and no production
-caller installs one yet. Observation points: `ReceiptStore::{prepare, apply,
+caller installs one yet. The one plugin-side record,
+`apply-adapter-validates-entire-assembled-invocation`, is `default-production`:
+the OpenCode transform runs its gate on every publication whether or not the
+daemon routes are enabled. Observation points: `ReceiptStore::{prepare, apply,
 confirm}` and the three handlers in `crates/daemon/src/edit_receipts.rs`. The
 witnesses drive a `KernelDaemon` through `dispatch_value_for_test` in
 `crates/daemon/tests/edit_receipts.rs`, with an independent edit log of every
@@ -134,9 +144,9 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_changed_context_between_prepare_and_apply_is_stale_and_forwards_nothing`; `crates/daemon/tests/edit_receipts.rs` `outcomes_are_distinct_and_capacity_is_bound_before_preparation` for the misspelled span key.
-Guarantee: An apply whose current context revision, representation, selected spans, or span set differs from the prepared one is refused as `stale_preparation` before anything is forwarded, and the preparation stays usable under its own context; a `spans` item with an unknown field is `invalid_params` rather than a whole-buffer span.
-Check: `always` - a changed revision, a changed representation, a changed span end, and a dropped span each answer `stale_preparation` with no effect logged; the same preparation then forwards under its original context; a span item spelled `spn` or one that omits `span` is `invalid_params`, and so is an unknown top-level field such as `selections` on apply and prepare, although the context is flattened into the body. `always` because the digest is recomputed on every apply and every span item is parsed strictly.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_changed_context_between_prepare_and_apply_is_stale_and_forwards_nothing`; `crates/daemon/tests/edit_receipts.rs` `outcomes_are_distinct_and_capacity_is_bound_before_preparation` for the misspelled span key; `crates/daemon/tests/edit_receipts.rs` `the_daemon_binds_its_profile_at_prepare_and_an_apply_must_echo_it_exactly` for the accounting profile.
+Guarantee: An apply whose current context revision, representation, selected spans, or span set differs from the prepared one is refused as `stale_preparation` before anything is forwarded, and the preparation stays usable under its own context; an apply whose echoed accounting profile is not the daemon's is refused as `profile_mismatch`, one against a daemon holding no profile as `profile_unavailable`, and a malformed profile is `invalid_params`; a `spans` item with an unknown field is `invalid_params` rather than a whole-buffer span.
+Check: `always` - a changed revision, a changed representation, a changed span end, and a dropped span each answer `stale_preparation` with no effect logged; the same preparation then forwards under its original context; the prepared answer carries the exact tokenizer's identity and revision, an echo with another revision or another identity answers `profile_mismatch`, a one-member object or a bare string is `invalid_params`, and after the profile is withdrawn both a new prepare and an apply of a pending receipt answer `profile_unavailable`, all with no effect logged; a span item spelled `spn` or one that omits `span` is `invalid_params`, and so is an unknown top-level field such as `selections` on apply and prepare, although the context is flattened into the body. `always` because the digest, which covers the profile, is recomputed on every apply and every span item is parsed strictly.
 Fault/timing angle: Context changes, including compaction, between prepare and apply.
 Required faults and enabling state: A prepared receipt and a differing context body.
 Confidence: high - [evidence](evidence/apply-stale-preparation-is-rejected-before-edit.md).
@@ -150,7 +160,7 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`, `uninstalling_the_limit_set_drops_the_receipts_like_a_restart_so_a_read_back_still_lands`, and `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`; `crates/daemon/src/edit_receipts.rs` `a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete` and `a_read_back_the_store_cannot_record_is_refused_rather_than_answered_complete`.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`, `uninstalling_the_limit_set_drops_the_receipts_like_a_restart_so_a_read_back_still_lands`, `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`, and `every_application_outcome_leaves_the_kernel_tip_and_write_counters_unchanged`, which reads `kernel::write_observer` before and after disable, failure, stale refusal, lost acknowledgment, decline, and uninstall and then commits one explicit observer control write (`CONTROL_CAUSE`, not a packing cause); `crates/daemon/src/edit_receipts.rs` `a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete` and `a_read_back_the_store_cannot_record_is_refused_rather_than_answered_complete`.
 Guarantee: After a daemon restart, or after the limit set is uninstalled and reinstalled, every key of the prior incarnation is `unknown`, whether it had been forwarded or only prepared; after a lost acknowledgment the key is `unknown`; `unknown` is sticky, forwards nothing on retry, and is reclassified only by a confirm whose applied identity equals the forwarded identity.
 Check: `always` - a forwarded key and a prepared key from a shut-down daemon answer `unknown` on a fresh daemon and again on retry with an empty edit log; a confirm without an applied identity, with another identity, with an uppercase or otherwise malformed one, or for a key without the minted `<incarnation>-<identity>` shape leaves `unknown` and records nothing; a confirm with the exact identity answers `complete`, later applies read `complete`, and another outcome, a missing applied identity, or another applied identity is `conflict`; a read-back over a project whose every receipt is in flight is `receipt_unavailable`, records nothing, and the key stays `unknown`; a forwarded key answers `unknown` after the limit set is uninstalled and reinstalled on one daemon, and its read-back answers `complete` with one effect logged; on one daemon a confirm without an applied identity turns an in-flight receipt `unknown`, the retry forwards nothing, and a read-back naming another forward or another applied identity is `conflict` because the forwarded identity stays recorded through `unknown`. `always` because the incarnation prefix and the state are read on every request.
 Fault/timing angle: Daemon restart after forward, restart after prepare, lost acknowledgment.
@@ -166,9 +176,9 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`; `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`.
-Guarantee: The daemon records the attempt and the forwarded identity before answering `forwarded`, and marks the receipt complete only on a confirm carrying an applied identity equal to that forwarded identity; a receipt alone, a confirm without an applied identity, or a confirm naming another forward never completes it.
-Check: `always` - a confirm for a never-forwarded preparation is `conflict`; a confirm with a forwarded identity other than the recorded one is `conflict`; a confirm without an applied identity is `unknown`; only the exact identity completes. `always` because the acknowledgment is the only path to `complete`.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`; `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`; `packages/opencode-plugin/src/hooks/context/context-application.test.ts` `never reports applied when the acknowledgment is lost, whatever the daemon answers`, `never reports applied from a daemon receipt alone`, `reports unknown, not an error, when the confirm cannot reach the daemon after publication`, and `reports unknown, never refused, when the daemon answers the confirm with a terminal after publication`.
+Guarantee: The daemon records the attempt and the forwarded identity before answering `forwarded`, and marks the receipt complete only on a confirm carrying an applied identity equal to that forwarded identity; a receipt alone, a confirm without an applied identity, or a confirm naming another forward never completes it. On the plugin side, `refused` is answered only before publication; once `publish` has run, a confirm the daemon refuses (`receipt_unavailable`, `conflict`, `disabled`, or a capability terminal) or cannot receive is `unknown` carrying the preparation, forwarded, and applied identities and the daemon's terminal, because the host may hold the edit whatever the daemon says.
+Check: `always` - a confirm for a never-forwarded preparation is `conflict`; a confirm with a forwarded identity other than the recorded one is `conflict`; a confirm without an applied identity is `unknown`; only the exact identity completes; the plugin publishes exactly once and answers `unknown` with the identities and the terminal for each of `receipt_unavailable`, `conflict`, and `disabled` on confirm. `always` because the acknowledgment is the only path to `complete` and the plugin's result kinds are decided after publication by whether the daemon confirmed the applied identity, never by the refusal shape.
 Fault/timing angle: A stale apply acknowledging after a newer forward.
 Required faults and enabling state: A forwarded receipt and confirms with wrong or absent identities.
 Confidence: high - [evidence](evidence/apply-daemon-receipt-does-not-mark-harness-edit-applied.md).
@@ -370,27 +380,52 @@ Open questions: None.
 ### apply-adapter-validates-entire-assembled-invocation
 
 Type: safety
-Reachability: test-only
+Reachability: default-production - the OpenCode plugin validates every
+candidate surface before `replaceHostArrayContents` in
+`packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts`.
 Status: active
-Exercised: partial - the daemon's boundary is the capacity check in
+Exercised: yes - the daemon's boundary is the capacity check in
 `crates/daemon/tests/edit_receipts.rs`
 `outcomes_are_distinct_and_capacity_is_bound_before_preparation`; the
-whole-invocation validation with accounting headroom is RP2.8.U5's adapter
-and has no witness here.
+adapter's whole-invocation validation is
+`packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts` and,
+through the transform's publication step,
+`packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts`
+`publishes when the whole invocation fits the context limit with headroom`,
+`declines the pass when the whole invocation exceeds the context limit`,
+`publishes a candidate over the context limit when it is no larger than the
+incoming surface`, and `gates nothing for a model models.dev cannot name,
+although its usage sample inverts to the 128k default`.
 Guarantee: The daemon binds append allowance and replacement capacity before
-preparation and the harness adapter validates the entire assembled invocation
-with accounting headroom before it applies; a payload that fits alone but not
-in the invocation is refused by the adapter, never applied.
-Check: `always` - the daemon half is the capacity witness; the adapter half is
-unimplemented. `always` because every application crosses both.
+preparation, and the OpenCode plugin charges every entry of the candidate
+message-entry surface by its canonical length under the estimator's heuristic
+ratio plus headroom, and declines the pass before publication when the charge
+exceeds the model's reported context limit and the candidate is larger than
+the incoming surface; a payload that fits alone but not in the invocation is
+refused by the adapter, never applied; a candidate no larger than the incoming
+surface is never refused for the window's own size; a limit the host has not
+reported gates nothing, and the usage sample's percentage is not a report,
+because the producers compute it against the 128k default for a model
+models.dev cannot name; and the local estimate is labeled heuristic under the
+estimator generation, never exact.
+Check: `always` - the charge equals the ceiling of the summed lengths over the
+heuristic ratio, then times one plus the headroom, and equals `estimateTokens`
+under the forced heuristic for the same length; the transform reads the bound
+from `resolveTrustedContextLimit` alone, admits at the limit, refuses one below
+it with the host array unchanged, and publishes a shrinking candidate under a
+one-token limit; a growing candidate charged over 128k tokens publishes for an
+unknown model whose usage sample inverts to the default; the profile carries
+the heuristic authority and the estimator generation as its revision. `always`
+because every application crosses both bounds.
 Fault/timing angle: None.
-Required faults and enabling state: The RP2.8.U5 adapter.
-Confidence: low - [evidence](evidence/apply-adapter-validates-entire-assembled-invocation.md).
+Required faults and enabling state: A models.dev limit one below the charged
+total while the usage sample inverts to the opposite verdict; a model
+models.dev cannot name with a usage sample computed against the default; an
+estimator swap that moves the generation.
+Confidence: high - [evidence](evidence/apply-adapter-validates-entire-assembled-invocation.md).
 Existing check: None found.
 Impact: An edit that fits its own bound could overflow the invocation.
-Open questions:
-
-- The adapter-side validation lands with RP2.8.U5. (needs human input)
+Open questions: None.
 
 ### apply-enabled-outcomes-are-proven-on-real-harness-paths
 
@@ -399,9 +434,15 @@ Reachability: test-only
 Status: active
 Exercised: partial - `crates/daemon/tests/context_capabilities.rs`
 `the_real_harness_tables_allow_exactly_the_recorded_classes` drives the
-recorded OpenCode and Pi declarations through bound routes; the enabled
-outcomes with plugin-supplied applied identity on a running harness wait for
-RP2.8.U5.
+recorded OpenCode and Pi declarations through bound routes;
+`packages/opencode-plugin/src/hooks/context/context-application.test.ts`
+drives the plugin's prepare, apply, and confirm client against a scripted
+daemon and witnesses the applied identity, the lost acknowledgment under both
+daemon answers, the receipt-alone negative control, the confirm that cannot
+reach the daemon after publication, and the capability fallback latched per
+route; the client has no production caller because no daemon route yet
+produces a packed body, and the run against a real OpenCode server is not
+performed.
 Guarantee: On the OpenCode path each enabled class has a witnessed outcome
 carrying plugin-supplied applied identity; on the Pi path every gated class is
 denied and pure packing still works; a plugin build without the transform
@@ -411,11 +452,17 @@ through a bound `pi` route; the OpenCode allowed set is witnessed at the gate;
 the applied-identity witnesses are not yet possible without the harness-side
 apply. `always` because every enablement claim needs its witness.
 Fault/timing angle: None.
-Required faults and enabling state: A running harness with the RP2.8.U5 apply.
-Confidence: low - [evidence](evidence/apply-enabled-outcomes-are-proven-on-real-harness-paths.md).
+Required faults and enabling state: A running OpenCode server driving the
+plugin's `ContextApplication` client against the daemon.
+Confidence: medium - [evidence](evidence/apply-enabled-outcomes-are-proven-on-real-harness-paths.md).
 Existing check: `crates/daemon/tests/model_execution_roundtrip.rs` real harness
 subprocess runs, status unaudited.
 Impact: A class could be declared enabled without a harness ever proving it.
 Open questions:
 
-- The applied-identity witnesses land with RP2.8.U5. (needs human input)
+- The end-to-end run against a real OpenCode server is outstanding; the
+  scripted-daemon witnesses stand in for it. The server harness exists
+  (`packages/e2e-tests`, a real `opencode serve` against
+  `direct_host_fixture`); the missing piece is the scenario, since no daemon
+  route produces a packed body and no production caller wires
+  `ContextApplication`. (needs human input)

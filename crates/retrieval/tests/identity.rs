@@ -12,9 +12,10 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use retrieval::batch::VectorGeneration;
 use retrieval::fusion::{
-    ContextRepresentation, ContextRevision, DeclaredLanes, GenerationId, IdentityRefusal,
-    InvocationId, Lane, LaneHit, LaneRanking, OccurrenceId, ParentGroupKey, ParentId,
-    PreparationDigest, PreparationInputs, RawScore, SelectedSpan, SelectionDigest,
+    AccountingProfileIdentity, AccountingProfileRevision, ContextRepresentation, ContextRevision,
+    DeclaredLanes, GenerationId, IdentityRefusal, InvocationId, Lane, LaneHit, LaneRanking,
+    OccurrenceId, ParentGroupKey, ParentId, PreparationDigest, PreparationInputs, RawScore,
+    SelectedSpan, SelectionDigest,
 };
 
 const SEED: [u8; 32] = *b"fusion-identity-laws-seed-000001";
@@ -366,11 +367,15 @@ fn preparation_digest_tracks_every_component_and_never_merges_component_splits()
     let selected = |occurrence, span| SelectedSpan::new(occurrence, span, 20).unwrap();
     let context = ContextRevision::parse("rev-7").unwrap();
     let text = ContextRepresentation::parse("message-entry").unwrap();
+    let profile = AccountingProfileIdentity::parse("claude-bpe").unwrap();
+    let revision = AccountingProfileRevision::parse("10:claude-bpe;3:abc").unwrap();
     let inputs = PreparationInputs {
         context: &context,
         representation: &text,
         spans: &[selected(a, None), selected(b, range(3, 9))],
         selection: &selection,
+        profile_identity: &profile,
+        profile_revision: &revision,
     };
     let base = PreparationDigest::derive(inputs);
     assert_eq!(base, PreparationDigest::derive(inputs));
@@ -378,7 +383,17 @@ fn preparation_digest_tracks_every_component_and_never_merges_component_splits()
     let other_context = ContextRevision::parse("rev-8").unwrap();
     let other_surface = ContextRepresentation::parse("system-prompt").unwrap();
     let other_selection = SelectionDigest::derive(&[b, a]);
+    let other_profile = AccountingProfileIdentity::parse("bytes").unwrap();
+    let other_revision = AccountingProfileRevision::parse("10:claude-bpe;3:abd").unwrap();
     let changed = [
+        PreparationInputs {
+            profile_identity: &other_profile,
+            ..inputs
+        },
+        PreparationInputs {
+            profile_revision: &other_revision,
+            ..inputs
+        },
         PreparationInputs {
             context: &other_context,
             ..inputs
@@ -429,13 +444,33 @@ fn preparation_digest_tracks_every_component_and_never_merges_component_splits()
             context: &split_left.0,
             representation: &split_left.1,
             spans: &[],
-            selection: &selection,
+            ..inputs
         }),
         PreparationDigest::derive(PreparationInputs {
             context: &split_right.0,
             representation: &split_right.1,
             spans: &[],
-            selection: &selection,
+            ..inputs
+        })
+    );
+    let profile_split_left = (
+        AccountingProfileIdentity::parse("ab").unwrap(),
+        AccountingProfileRevision::parse("c").unwrap(),
+    );
+    let profile_split_right = (
+        AccountingProfileIdentity::parse("a").unwrap(),
+        AccountingProfileRevision::parse("bc").unwrap(),
+    );
+    assert_ne!(
+        PreparationDigest::derive(PreparationInputs {
+            profile_identity: &profile_split_left.0,
+            profile_revision: &profile_split_left.1,
+            ..inputs
+        }),
+        PreparationDigest::derive(PreparationInputs {
+            profile_identity: &profile_split_right.0,
+            profile_revision: &profile_split_right.1,
+            ..inputs
         })
     );
 }

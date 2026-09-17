@@ -41,7 +41,11 @@ Recorded by the repository owner at the U4a change:
   sharing the exact cache key. No manifest version takes part.
 - The daemon owns the accounting profile end to end; the wire carries only the
   profile identity and revision for the harness to echo and the daemon to
-  validate at apply (consumed by U5a).
+  validate at apply. The binding is `AccountingBinding` in
+  `crates/daemon/src/edit_receipts.rs`, answered on `retrieval.prepare`,
+  required on `retrieval.apply`, and part of the preparation digest; its
+  records are `docs/properties/fusion-routes/application/catalog.md`
+  `apply-stale-preparation-is-rejected-before-edit`.
 - The separator the legacy composer emits before the memory block is a
   declared exclusion named `separator-before-memory-block`, reported by every
   profile's `declared_uncharged`; the packer's own render has no uncharged

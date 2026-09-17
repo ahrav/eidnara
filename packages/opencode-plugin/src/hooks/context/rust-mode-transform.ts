@@ -34,6 +34,7 @@ import {
     resolveModelKey,
     resolveTrustedContextLimit,
 } from "./event-resolvers";
+import { validateInvocation } from "./invocation-budget";
 import { isModuleTransportGenerationChangedResult } from "./module-transport";
 import {
     annotateOrdinals,
@@ -774,6 +775,8 @@ function buildTransformBody(args: {
 }
 
 const CANDIDATE_SLOT_BYTES = 8;
+/** Charged on top of the heuristic estimate because the estimator undercounts relative to the provider's tokenizer. */
+const INVOCATION_HEADROOM_PERMILLE = 250;
 /** WIRE_PROJECTION_FACTOR accounts for the CK text, the native text, the paging parse copy, and the page texts. */
 const WIRE_PROJECTION_FACTOR = 4;
 
@@ -781,6 +784,7 @@ type PassDeclineReason =
     | "cleared"
     | "superseded"
     | "capture_bytes"
+    | "invocation_budget"
     | "unsupported_source"
     | "host_container"
     | "source_changed"
@@ -1178,12 +1182,14 @@ export function createRustModeTransform(
             assertCurrentPass();
             if (preflightError) throw preflightError;
             const usage = passUsageSnapshot;
+            // The usage sample's percentage was computed against `resolveContextLimit`, which substitutes the 128k default for a model models.dev cannot name, so inverting it recovers that default rather than a host report.
+            const reportedContextLimit =
+                resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : undefined;
             const contextLimit =
-                resolvedContextLimit && resolvedContextLimit > 0
-                    ? resolvedContextLimit
-                    : usage && usage.percentage > 0
-                      ? Math.round(usage.inputTokens / (usage.percentage / 100))
-                      : 128_000;
+                reportedContextLimit ??
+                (usage && usage.percentage > 0
+                    ? Math.round(usage.inputTokens / (usage.percentage / 100))
+                    : 128_000);
             const threshold = resolveExecuteThreshold(
                 deps.executeThresholdPercentage ?? 65,
                 modelKey ?? undefined,
@@ -1604,6 +1610,19 @@ export function createRustModeTransform(
                 const publishRejection = hostArrayReplacementRejection(target);
                 if (publishRejection !== null) {
                     throw new PassDeclined(sessionId, "host_container", publishRejection);
+                }
+                // Every candidate entry's canonical length is charged, not the inserted payload alone.
+                const invocation = validateInvocation(application.lengths, inputLengths, {
+                    maxTokens: reportedContextLimit,
+                    headroomPermille: INVOCATION_HEADROOM_PERMILLE,
+                });
+                if (!invocation.ok) {
+                    throw new PassDeclined(
+                        sessionId,
+                        "invocation_budget",
+                        `${invocation.candidate.chargedTokens} charged tokens over ${invocation.limit}, growing from ${invocation.incoming.bytes} to ${invocation.candidate.bytes} bytes, under ${invocation.candidate.profile.identity} ${invocation.candidate.profile.revision}`,
+                        "warn",
+                    );
                 }
                 logStage(sessionId, "apply", applyStartedAt, timings);
                 const applyReplaceStartedAt = performance.now();

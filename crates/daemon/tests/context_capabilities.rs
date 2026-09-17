@@ -44,7 +44,6 @@ fn prepare(project: &Path, action: &str, survivors: Value) -> Value {
         "spans": [whole(OCC_A), whole(OCC_B)],
         "selection": [OCC_A, OCC_B],
         "action": action,
-        "accounting_profile": "profile-a",
         "edit_bytes": 4,
         "survivors": survivors,
     })
@@ -355,6 +354,7 @@ async fn the_declaration_is_latched_at_bind_and_reread_by_a_new_bind() {
         "session_id": SESSION,
         "project_root": project.to_str().unwrap(),
         "preparation_id": key,
+        "accounting_profile": prepared["accounting_profile"],
         "context_revision": "rev-1",
         "representation": "repr-1",
         "spans": [whole(OCC_A), whole(OCC_B)],

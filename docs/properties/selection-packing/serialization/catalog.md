@@ -224,9 +224,9 @@ serialized-bytes bound at `finalize`; a source tripwire finds none of the
 legacy budget helpers in the packing sources and no `selection.rs` under
 `packing/`. The tripwire is a name check, not a proof that no second
 authority exists: bounds are caller-supplied values, so the single-authority
-claim rests on the production caller, which U5a lands. `always` because an
-unapproved or partial limit set would let the packer run under a bound nobody
-approved.
+claim rests on the production caller, which does not exist at this base:
+`finalize` has no route. `always` because an unapproved or partial limit set
+would let the packer run under a bound nobody approved.
 Fault/timing angle: none.
 Required faults and enabling state: Manifest fixtures with the group and
 each malformation.

@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 use host_runtime::RouteHandle;
 use kernel::source_identity::Span;
 use retrieval::fusion::{
-    ContextRepresentation, ContextRevision, IdentityRefusal, OccurrenceId, PreparationDigest,
-    PreparationInputs, SelectedSpan, SelectionDigest,
+    AccountingProfileIdentity, AccountingProfileRevision, ContextRepresentation, ContextRevision,
+    IdentityRefusal, OccurrenceId, PreparationDigest, PreparationInputs, SelectedSpan,
+    SelectionDigest,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -19,6 +20,7 @@ use host_runtime::model_execution::backend::EditClass;
 use crate::context_capabilities::CapabilityDenial;
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::RouteScope;
+use crate::packing::AccountingProfile;
 use crate::{HandlerCore, invalid_params_error};
 
 pub(crate) const PREPARE: &str = "retrieval.prepare";
@@ -128,6 +130,10 @@ pub enum Refusal {
     StalePreparation,
     /// Same key, different digest, identity, or outcome.
     Conflict,
+    /// The daemon holds no accounting profile, so nothing can be prepared or applied under one.
+    ProfileUnavailable,
+    /// The profile the caller echoes is not the daemon's; checked before the digest so the answer names the profile rather than the context.
+    ProfileMismatch,
 }
 
 impl Refusal {
@@ -139,6 +145,8 @@ impl Refusal {
             Self::ReceiptUnavailable => "receipt_unavailable",
             Self::StalePreparation => "stale_preparation",
             Self::Conflict => "conflict",
+            Self::ProfileUnavailable => "profile_unavailable",
+            Self::ProfileMismatch => "profile_mismatch",
         }
     }
 }
@@ -217,18 +225,33 @@ impl ProjectReceipts {
 pub struct ReceiptStore {
     limits: ReceiptLimits,
     incarnation: String,
+    profile: Option<BoundProfile>,
     sequence: u64,
     projects: BTreeMap<String, ProjectReceipts>,
 }
 
 impl ReceiptStore {
-    pub fn new(limits: ReceiptLimits, incarnation: String) -> Self {
-        Self {
+    pub fn new(
+        limits: ReceiptLimits,
+        incarnation: String,
+        profile: Option<AccountingBinding>,
+    ) -> Result<Self, IdentityRefusal> {
+        Ok(Self {
             limits,
             incarnation,
+            profile: profile.map(BoundProfile::parse).transpose()?,
             sequence: 0,
             projects: BTreeMap::new(),
-        }
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn withdraw_profile(&mut self) {
+        self.profile = None;
+    }
+
+    fn profile(&self) -> Result<&BoundProfile, Refusal> {
+        self.profile.as_ref().ok_or(Refusal::ProfileUnavailable)
     }
 
     fn expire(&mut self, now: Instant) {
@@ -282,6 +305,41 @@ pub struct WireSpan {
     pub span: Option<Option<(u64, u64)>>,
 }
 
+/// The accounting profile as the wire names it; the daemon binds its own into every preparation and an apply echoes it back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountingBinding {
+    pub identity: String,
+    pub revision: String,
+}
+
+impl AccountingBinding {
+    pub fn of(profile: &AccountingProfile) -> Self {
+        Self {
+            identity: profile.identity().to_owned(),
+            revision: profile.revision().as_str().to_owned(),
+        }
+    }
+}
+
+/// The daemon's bound profile, parsed once when the store is built so a malformed daemon profile is refused at installation rather than reported as a caller's `invalid_params`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundProfile {
+    wire: AccountingBinding,
+    identity: AccountingProfileIdentity,
+    revision: AccountingProfileRevision,
+}
+
+impl BoundProfile {
+    fn parse(wire: AccountingBinding) -> Result<Self, IdentityRefusal> {
+        Ok(Self {
+            identity: AccountingProfileIdentity::parse(&wire.identity)?,
+            revision: AccountingProfileRevision::parse(&wire.revision)?,
+            wire,
+        })
+    }
+}
+
 /// The context a preparation binds and an apply restates; the digest over it is what stale detection compares.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Context {
@@ -292,7 +350,7 @@ pub struct Context {
 }
 
 impl Context {
-    fn digest(&self) -> Result<PreparationDigest, IdentityRefusal> {
+    fn digest(&self, profile: &BoundProfile) -> Result<PreparationDigest, IdentityRefusal> {
         let context = ContextRevision::parse(&self.context_revision)?;
         let representation = ContextRepresentation::parse(&self.representation)?;
         let spans = self
@@ -316,6 +374,8 @@ impl Context {
             representation: &representation,
             spans: &spans,
             selection: &SelectionDigest::derive(&selection),
+            profile_identity: &profile.identity,
+            profile_revision: &profile.revision,
         }))
     }
 
@@ -335,7 +395,6 @@ struct PrepareRequest {
     #[serde(flatten)]
     context: Context,
     action: Action,
-    accounting_profile: String,
     edit_bytes: u64,
     /// Adapter-supplied proof of the spans that survive in the current context; suppression is prepared only for selected occurrences this set confirms whole.
     #[serde(default)]
@@ -346,6 +405,7 @@ struct PrepareRequest {
 #[serde(deny_unknown_fields)]
 struct ApplyRequest {
     preparation_id: String,
+    accounting_profile: AccountingBinding,
     #[serde(flatten)]
     context: Context,
 }
@@ -365,6 +425,7 @@ pub struct Prepared {
     pub preparation_id: String,
     pub preparation_digest: String,
     pub fingerprint: String,
+    pub accounting_profile: AccountingBinding,
 }
 
 pub enum PrepareOutcome {
@@ -458,18 +519,18 @@ pub enum ConfirmOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApplyRefusal {
+pub enum RequestRefusal {
     Refused(Refusal),
     Invalid(IdentityRefusal),
 }
 
-impl From<IdentityRefusal> for ApplyRefusal {
+impl From<IdentityRefusal> for RequestRefusal {
     fn from(refusal: IdentityRefusal) -> Self {
         Self::Invalid(refusal)
     }
 }
 
-impl From<Refusal> for ApplyRefusal {
+impl From<Refusal> for RequestRefusal {
     fn from(refusal: Refusal) -> Self {
         Self::Refused(refusal)
     }
@@ -501,20 +562,20 @@ fn well_formed_preparation_id(preparation_id: &str) -> bool {
 
 impl ReceiptStore {
     /// Parent Q7: a second application of one selection is a legal intent, so the tuple is a fingerprint and the identity minted here is the key.
-    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
         now: Instant,
         project: &str,
         context: &Context,
         action: Action,
-        accounting_profile: &str,
         edit_bytes: u64,
         survivors: &[WireSpan],
-    ) -> Result<PrepareOutcome, IdentityRefusal> {
+    ) -> Result<PrepareOutcome, RequestRefusal> {
         self.expire(now);
+        let profile = self.profile()?.clone();
         // A malformed context is `invalid_params` for every action; the capacity and survivor answers below are outcomes for a well-formed request.
-        let digest = context.digest()?;
+        let digest = context.digest(&profile)?;
+        let profile = profile.wire;
         let selection = context.selection_digest()?;
         let capacity = match action {
             Action::Append => Some((self.limits.append_allowance_bytes, "append_allowance")),
@@ -546,7 +607,8 @@ impl ReceiptStore {
                 context.context_revision.as_bytes(),
                 action.code().as_bytes(),
                 selection.as_bytes(),
-                accounting_profile.as_bytes(),
+                profile.identity.as_bytes(),
+                profile.revision.as_bytes(),
             ],
         );
         self.sequence += 1;
@@ -572,6 +634,7 @@ impl ReceiptStore {
             preparation_id,
             preparation_digest: digest.to_string(),
             fingerprint,
+            accounting_profile: profile,
         }))
     }
 
@@ -581,10 +644,17 @@ impl ReceiptStore {
         now: Instant,
         project: &str,
         preparation_id: &str,
+        echoed: &AccountingBinding,
         context: &Context,
-    ) -> Result<ApplyOutcome, ApplyRefusal> {
+    ) -> Result<ApplyOutcome, RequestRefusal> {
         self.expire(now);
-        let digest = context.digest()?;
+        let profile = self.profile()?;
+        // A malformed echo is `invalid_params` like every other identity value; a well-formed foreign one is a mismatch.
+        let echoed = BoundProfile::parse(echoed.clone())?;
+        if echoed != *profile {
+            return Err(Refusal::ProfileMismatch.into());
+        }
+        let digest = context.digest(profile)?;
         if !self.owns(preparation_id) {
             let recorded = self
                 .receipts(project)
@@ -842,11 +912,30 @@ impl HandlerCore {
         match (limits, slot.as_mut()) {
             (Some(limits), Some(store)) => store.set_limits(limits),
             (Some(limits), None) => {
-                *slot = Some(ReceiptStore::new(limits, fresh_incarnation()));
+                *slot = Some(
+                    ReceiptStore::new(
+                        limits,
+                        fresh_incarnation(),
+                        Some(AccountingBinding::of(&AccountingProfile::exact_tokenizer())),
+                    )
+                    .expect("the exact tokenizer profile is a well-formed identity value"),
+                );
             }
             (None, _) => *slot = None,
         }
         Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn withdraw_accounting_profile(&self) {
+        if let Some(store) = self
+            .edit_receipts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            store.withdraw_profile();
+        }
     }
 
     /// The bound project scopes every receipt, so a key is honored only on a route of the project that prepared it.
@@ -893,7 +982,6 @@ impl HandlerCore {
                     project,
                     &parsed.context,
                     parsed.action,
-                    &parsed.accounting_profile,
                     parsed.edit_bytes,
                     &parsed.survivors,
                 ) {
@@ -902,13 +990,15 @@ impl HandlerCore {
                         "preparation_id": prepared.preparation_id,
                         "preparation_digest": prepared.preparation_digest,
                         "fingerprint": prepared.fingerprint,
+                        "accounting_profile": prepared.accounting_profile,
                     })),
                     Ok(PrepareOutcome::Failure(reason)) => response(json!({
                         "kind": "outcome",
                         "outcome": Outcome::PreparationFailure.code(),
                         "reason": reason,
                     })),
-                    Err(identity) => identity_refusal(PREPARE, identity),
+                    Err(RequestRefusal::Refused(refused)) => refusal(refused),
+                    Err(RequestRefusal::Invalid(identity)) => identity_refusal(PREPARE, identity),
                 }
             },
         )
@@ -930,7 +1020,13 @@ impl HandlerCore {
                 {
                     return refusal(denied);
                 }
-                match store.apply(now, project, &parsed.preparation_id, &parsed.context) {
+                match store.apply(
+                    now,
+                    project,
+                    &parsed.preparation_id,
+                    &parsed.accounting_profile,
+                    &parsed.context,
+                ) {
                     Ok(ApplyOutcome::Forwarded {
                         forwarded_identity,
                         action,
@@ -955,8 +1051,8 @@ impl HandlerCore {
                     Ok(ApplyOutcome::Unknown) => {
                         response(json!({ "kind": "receipt", "state": "unknown" }))
                     }
-                    Err(ApplyRefusal::Refused(refused)) => refusal(refused),
-                    Err(ApplyRefusal::Invalid(identity)) => identity_refusal(APPLY, identity),
+                    Err(RequestRefusal::Refused(refused)) => refusal(refused),
+                    Err(RequestRefusal::Invalid(identity)) => identity_refusal(APPLY, identity),
                 }
             },
         )
@@ -1016,6 +1112,13 @@ mod tests {
         }
     }
 
+    fn profile() -> AccountingBinding {
+        AccountingBinding {
+            identity: "bytes".to_string(),
+            revision: "5:bytes;1:1".to_string(),
+        }
+    }
+
     fn context(revision: &str) -> Context {
         Context {
             context_revision: revision.to_string(),
@@ -1027,15 +1130,7 @@ mod tests {
 
     fn prepared(store: &mut ReceiptStore, now: Instant) -> String {
         match store
-            .prepare(
-                now,
-                PROJECT,
-                &context("rev"),
-                Action::Append,
-                "profile",
-                1,
-                &[],
-            )
+            .prepare(now, PROJECT, &context("rev"), Action::Append, 1, &[])
             .unwrap()
         {
             PrepareOutcome::Prepared(prepared) => prepared.preparation_id,
@@ -1046,12 +1141,19 @@ mod tests {
     #[test]
     fn a_key_expires_by_its_creation_time_not_by_its_last_use() {
         let start = Instant::now();
-        let mut store = ReceiptStore::new(limits(8, Duration::from_secs(10)), "inc".to_string());
+        let mut store = ReceiptStore::new(
+            limits(8, Duration::from_secs(10)),
+            "inc".to_string(),
+            Some(profile()),
+        )
+        .unwrap();
         let key = prepared(&mut store, start);
         for step in 1..5 {
             let now = start + Duration::from_secs(step * 2);
             assert!(
-                store.apply(now, PROJECT, &key, &context("rev")).is_ok(),
+                store
+                    .apply(now, PROJECT, &key, &profile(), &context("rev"))
+                    .is_ok(),
                 "{step}"
             );
         }
@@ -1060,9 +1162,10 @@ mod tests {
                 start + Duration::from_secs(10),
                 PROJECT,
                 &key,
+                &profile(),
                 &context("rev")
             ),
-            Err(ApplyRefusal::Refused(Refusal::ReceiptUnavailable))
+            Err(RequestRefusal::Refused(Refusal::ReceiptUnavailable))
         ));
         assert!(store.is_empty());
     }
@@ -1075,34 +1178,23 @@ mod tests {
     #[test]
     fn a_malformed_context_is_invalid_before_capacity_or_survivor_proof_is_judged() {
         let now = Instant::now();
-        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        let mut store = ReceiptStore::new(
+            limits(8, RETENTION_FLOOR),
+            "inc".to_string(),
+            Some(profile()),
+        )
+        .unwrap();
         let mut malformed = context("rev");
         malformed.selection = vec!["zz".to_string()];
         assert!(
             store
-                .prepare(
-                    now,
-                    PROJECT,
-                    &malformed,
-                    Action::Suppress,
-                    "profile",
-                    0,
-                    &[]
-                )
+                .prepare(now, PROJECT, &malformed, Action::Suppress, 0, &[])
                 .is_err(),
             "a suppression without survivors is still a malformed context first"
         );
         assert!(
             store
-                .prepare(
-                    now,
-                    PROJECT,
-                    &malformed,
-                    Action::Append,
-                    "profile",
-                    1000,
-                    &[]
-                )
+                .prepare(now, PROJECT, &malformed, Action::Append, 1000, &[])
                 .is_err(),
             "an append over the allowance is still a malformed context first"
         );
@@ -1112,23 +1204,33 @@ mod tests {
     #[test]
     fn an_expired_key_is_invisible_to_the_gate_lookup_and_answers_receipt_unavailable() {
         let start = Instant::now();
-        let mut store = ReceiptStore::new(limits(8, Duration::from_secs(10)), "inc".to_string());
+        let mut store = ReceiptStore::new(
+            limits(8, Duration::from_secs(10)),
+            "inc".to_string(),
+            Some(profile()),
+        )
+        .unwrap();
         let key = prepared(&mut store, start);
         let later = start + Duration::from_secs(10);
         assert_eq!(store.action(later, PROJECT, &key), None);
         assert!(matches!(
-            store.apply(later, PROJECT, &key, &context("rev")),
-            Err(ApplyRefusal::Refused(Refusal::ReceiptUnavailable))
+            store.apply(later, PROJECT, &key, &profile(), &context("rev")),
+            Err(RequestRefusal::Refused(Refusal::ReceiptUnavailable))
         ));
     }
 
     #[test]
     fn a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete() {
         let now = Instant::now();
-        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        let mut store = ReceiptStore::new(
+            limits(8, RETENTION_FLOOR),
+            "inc".to_string(),
+            Some(profile()),
+        )
+        .unwrap();
         let key = &foreign_key("0f");
         assert!(matches!(
-            store.apply(now, PROJECT, key, &context("rev")),
+            store.apply(now, PROJECT, key, &profile(), &context("rev")),
             Ok(ApplyOutcome::Unknown)
         ));
         assert!(matches!(
@@ -1176,7 +1278,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            store.apply(now, PROJECT, key, &context("rev")),
+            store.apply(now, PROJECT, key, &profile(), &context("rev")),
             Ok(ApplyOutcome::Complete {
                 outcome: Outcome::Keep
             })
@@ -1216,22 +1318,19 @@ mod tests {
     #[test]
     fn a_full_store_of_in_flight_receipts_refuses_a_new_preparation() {
         let now = Instant::now();
-        let mut store = ReceiptStore::new(limits(1, RETENTION_FLOOR), "inc".to_string());
+        let mut store = ReceiptStore::new(
+            limits(1, RETENTION_FLOOR),
+            "inc".to_string(),
+            Some(profile()),
+        )
+        .unwrap();
         let key = prepared(&mut store, now);
         assert!(matches!(
-            store.apply(now, PROJECT, &key, &context("rev")),
+            store.apply(now, PROJECT, &key, &profile(), &context("rev")),
             Ok(ApplyOutcome::Forwarded { .. })
         ));
         assert!(matches!(
-            store.prepare(
-                now,
-                PROJECT,
-                &context("rev"),
-                Action::Append,
-                "profile",
-                1,
-                &[]
-            ),
+            store.prepare(now, PROJECT, &context("rev"), Action::Append, 1, &[]),
             Ok(PrepareOutcome::Failure("receipt_capacity"))
         ));
         assert!(store.holds(PROJECT, &key));
@@ -1240,11 +1339,16 @@ mod tests {
     #[test]
     fn an_unknown_receipt_is_never_the_victim_because_its_edit_may_be_applied() {
         let now = Instant::now();
-        let mut store = ReceiptStore::new(limits(1, RETENTION_FLOOR), "inc".to_string());
+        let mut store = ReceiptStore::new(
+            limits(1, RETENTION_FLOOR),
+            "inc".to_string(),
+            Some(profile()),
+        )
+        .unwrap();
         let key = prepared(&mut store, now);
         let Ok(ApplyOutcome::Forwarded {
             forwarded_identity, ..
-        }) = store.apply(now, PROJECT, &key, &context("rev"))
+        }) = store.apply(now, PROJECT, &key, &profile(), &context("rev"))
         else {
             panic!("first apply forwards");
         };
@@ -1253,15 +1357,7 @@ mod tests {
             Ok(ConfirmOutcome::Unknown)
         ));
         assert!(matches!(
-            store.prepare(
-                now,
-                PROJECT,
-                &context("rev"),
-                Action::Append,
-                "profile",
-                1,
-                &[]
-            ),
+            store.prepare(now, PROJECT, &context("rev"), Action::Append, 1, &[]),
             Ok(PrepareOutcome::Failure("receipt_capacity"))
         ));
         assert!(store.holds(PROJECT, &key));
@@ -1283,19 +1379,16 @@ mod tests {
     #[test]
     fn a_refused_request_still_expires_receipts_past_retention() {
         let start = Instant::now();
-        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        let mut store = ReceiptStore::new(
+            limits(8, RETENTION_FLOOR),
+            "inc".to_string(),
+            Some(profile()),
+        )
+        .unwrap();
         prepared(&mut store, start);
         let later = start + RETENTION_FLOOR;
         assert!(matches!(
-            store.prepare(
-                later,
-                PROJECT,
-                &context("rev"),
-                Action::Append,
-                "profile",
-                101,
-                &[]
-            ),
+            store.prepare(later, PROJECT, &context("rev"), Action::Append, 101, &[]),
             Ok(PrepareOutcome::Failure("append_allowance"))
         ));
         assert!(store.is_empty(), "an over-capacity prepare expires");
@@ -1305,8 +1398,8 @@ mod tests {
             ..context("rev")
         };
         assert!(matches!(
-            store.apply(later, PROJECT, "inc-x", &malformed),
-            Err(ApplyRefusal::Invalid(_))
+            store.apply(later, PROJECT, "inc-x", &profile(), &malformed),
+            Err(RequestRefusal::Invalid(_))
         ));
         assert!(store.is_empty(), "a malformed apply expires");
     }
@@ -1314,10 +1407,15 @@ mod tests {
     #[test]
     fn a_read_back_the_store_cannot_record_is_refused_rather_than_answered_complete() {
         let now = Instant::now();
-        let mut store = ReceiptStore::new(limits(1, RETENTION_FLOOR), "inc".to_string());
+        let mut store = ReceiptStore::new(
+            limits(1, RETENTION_FLOOR),
+            "inc".to_string(),
+            Some(profile()),
+        )
+        .unwrap();
         let key = prepared(&mut store, now);
         assert!(matches!(
-            store.apply(now, PROJECT, &key, &context("rev")),
+            store.apply(now, PROJECT, &key, &profile(), &context("rev")),
             Ok(ApplyOutcome::Forwarded { .. })
         ));
         let foreign = foreign_key("0a");
@@ -1340,7 +1438,7 @@ mod tests {
         );
         assert!(
             matches!(
-                store.apply(now, PROJECT, &foreign, &context("rev")),
+                store.apply(now, PROJECT, &foreign, &profile(), &context("rev")),
                 Ok(ApplyOutcome::Unknown)
             ),
             "an unrecorded read-back leaves the key unknown"
@@ -1350,11 +1448,16 @@ mod tests {
     #[test]
     fn a_changed_digest_against_an_unknown_receipt_is_a_conflict() {
         let now = Instant::now();
-        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        let mut store = ReceiptStore::new(
+            limits(8, RETENTION_FLOOR),
+            "inc".to_string(),
+            Some(profile()),
+        )
+        .unwrap();
         let key = prepared(&mut store, now);
         let Ok(ApplyOutcome::Forwarded {
             forwarded_identity, ..
-        }) = store.apply(now, PROJECT, &key, &context("rev"))
+        }) = store.apply(now, PROJECT, &key, &profile(), &context("rev"))
         else {
             panic!("first apply forwards");
         };
@@ -1370,11 +1473,11 @@ mod tests {
             Ok(ConfirmOutcome::Unknown)
         ));
         assert!(matches!(
-            store.apply(now, PROJECT, &key, &context("other")),
-            Err(ApplyRefusal::Refused(Refusal::Conflict))
+            store.apply(now, PROJECT, &key, &profile(), &context("other")),
+            Err(RequestRefusal::Refused(Refusal::Conflict))
         ));
         assert!(matches!(
-            store.apply(now, PROJECT, &key, &context("rev")),
+            store.apply(now, PROJECT, &key, &profile(), &context("rev")),
             Ok(ApplyOutcome::Unknown)
         ));
     }
@@ -1389,13 +1492,18 @@ mod tests {
         ));
         assert!(limits(MAX_KEYS_CEILING, RETENTION_FLOOR).validate().is_ok());
 
-        let mut store = ReceiptStore::new(limits(8, RETENTION_FLOOR), "inc".to_string());
+        let mut store = ReceiptStore::new(
+            limits(8, RETENTION_FLOOR),
+            "inc".to_string(),
+            Some(profile()),
+        )
+        .unwrap();
         let keys: Vec<String> = (0..8)
             .map(|step| prepared(&mut store, start + Duration::from_secs(step)))
             .collect();
         let in_flight = &keys[0];
         assert!(matches!(
-            store.apply(start, PROJECT, in_flight, &context("rev")),
+            store.apply(start, PROJECT, in_flight, &profile(), &context("rev")),
             Ok(ApplyOutcome::Forwarded { .. })
         ));
         store.set_limits(limits(3, RETENTION_FLOOR));
