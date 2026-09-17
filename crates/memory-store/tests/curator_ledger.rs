@@ -2713,3 +2713,99 @@ fn a_lease_acquisition_needs_a_canonical_causal_identity() {
     }
     assert!(fixture.claim("acq-1", "worker-a", T0).is_some());
 }
+
+#[test]
+fn a_clock_that_steps_back_between_commit_and_handoff_withholds_the_request() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let reads = std::cell::Cell::new(0);
+    let outcome = fixture
+        .store
+        .dispatch_curator_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &claim,
+            KERNEL,
+            &marker(1),
+            "prepared",
+            || {
+                reads.set(reads.get() + 1);
+                if reads.get() == 1 { T0 + 10 } else { T0 + 5 }
+            },
+            |prepared| prepared,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            DispatchOutcome::ChargedNotDispatched {
+                attempt_index: 0,
+                reason: CuratorLedgerRefusal::ClockBehind,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(fixture.attempts(), 1, "the marker stays charged");
+}
+
+#[test]
+fn a_completion_dated_before_its_attempt_evidence_is_refused() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    fixture.completed_attempt(1, &claim, T0 + 10);
+    // The attempt closed complete at T0 + 11; a completion stamped earlier is a clock that stepped back.
+    assert_eq!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Complete,
+            Some(&selection()),
+            T0 + 10,
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Conflict {
+            kind: "clock_behind"
+        }
+    );
+    assert_eq!(receipt(&fixture).terminal, None);
+    assert!(matches!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Complete,
+            Some(&selection()),
+            T0 + 11,
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Applied { .. }
+    ));
+}
+
+#[test]
+fn the_run_deadline_is_measured_from_the_first_claim_on_the_job_even_after_a_pre_begin_crash() {
+    let fixture = Fixture::open();
+    // The first worker claims and crashes before beginning; its claim lapses without a receipt.
+    fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let later = T0 + CURATOR_TASK_LEASE_MS + 1;
+    let successor = fixture.claim("acq-2", "worker-b", later).unwrap();
+    let CuratorBeginOutcome::Begun(r) = fixture.begin(&successor, later + 1) else {
+        panic!("the successor begins")
+    };
+    assert_eq!(
+        r.run_deadline_ms,
+        T0 + CURATOR_RUN_DEADLINE_MS,
+        "the budget runs from the first claim on the job"
+    );
+}

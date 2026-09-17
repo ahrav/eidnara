@@ -324,16 +324,16 @@ fn load_receipt(
     .optional()
 }
 
-/// The live claim's `(expires_at, created_at_ms)`. The `note_id` match binds the claim to this job's row, so a claim a worker holds on another job cannot drive this job's receipt.
-fn live_claim(
+/// The live claim's expiry. The `note_id` match binds the claim to this job's row, so a claim a worker holds on another job cannot drive this job's receipt.
+fn live_claim_expiry(
     conn: &GuardedConn<'_>,
     project: &str,
     causal_identity: &str,
     claim_id: &str,
     now_ms: i64,
-) -> rusqlite::Result<Option<(i64, i64)>> {
+) -> rusqlite::Result<Option<i64>> {
     conn.query_row(
-        "SELECT expires_at, created_at_ms FROM note_eval_claims
+        "SELECT expires_at FROM note_eval_claims
           WHERE project = ?1 AND task_kind = ?2 AND claim_id = ?3
             AND terminal_kind IS NULL AND expires_at > ?4
             AND note_id = (SELECT job_id FROM curator_jobs
@@ -345,22 +345,9 @@ fn live_claim(
             now_ms,
             causal_identity
         ],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| row.get(0),
     )
     .optional()
-}
-
-fn live_claim_expiry(
-    conn: &GuardedConn<'_>,
-    project: &str,
-    causal_identity: &str,
-    claim_id: &str,
-    now_ms: i64,
-) -> rusqlite::Result<Option<i64>> {
-    Ok(
-        live_claim(conn, project, causal_identity, claim_id, now_ms)?
-            .map(|(expires_at, _)| expires_at),
-    )
 }
 
 fn claim_is_live(
@@ -370,7 +357,7 @@ fn claim_is_live(
     claim_id: &str,
     now_ms: i64,
 ) -> rusqlite::Result<bool> {
-    Ok(live_claim(conn, project, causal_identity, claim_id, now_ms)?.is_some())
+    Ok(live_claim_expiry(conn, project, causal_identity, claim_id, now_ms)?.is_some())
 }
 
 /// The `memories` authority row the ledger binds to: the owning context store and its generation. Rows are versioned per context store, so the pair, not the generation alone, identifies an authority.
@@ -412,7 +399,7 @@ fn job_open_deadline(
     .optional()
 }
 
-/// Writes the receipt at generation 1 for a Ready job, or reports the receipt it already has. The run deadline is the claim's creation time plus [`CURATOR_RUN_DEADLINE_MS`]; a begin at or after it is refused. The store's own incarnation is read inside the transaction; the caller supplies the Kernel incarnation it validated, which must be the one a staged subject was sealed under.
+/// Writes the receipt at generation 1 for a Ready job, or reports the receipt it already has. The run deadline is the creation time of the first claim ever taken on the job plus [`CURATOR_RUN_DEADLINE_MS`]; a begin at or after it is refused. The store's own incarnation is read inside the transaction; the caller supplies the Kernel incarnation it validated, which must be the one a staged subject was sealed under.
 pub fn begin_curator_receipt_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -454,10 +441,18 @@ pub fn begin_curator_receipt_in_tx(
     {
         return Err(refuse(CuratorLedgerRefusal::BindingMismatch));
     }
-    let (_, claimed_at_ms) = live_claim(conn, project, causal_identity, claim_id, now_ms)?
-        .ok_or_else(|| refuse(CuratorLedgerRefusal::ClaimInvalid))?;
-    // The budget runs from the claim, not from this call, so a worker that waits before beginning spends its own run, and one that begins with none left gets no receipt.
-    let run_deadline_ms = claimed_at_ms
+    if !claim_is_live(conn, project, causal_identity, claim_id, now_ms)? {
+        return Err(refuse(CuratorLedgerRefusal::ClaimInvalid));
+    }
+    // The budget runs from the first claim ever taken on the job, not from this call or this claim: a worker that waits before beginning spends the run, a predecessor that crashed before beginning spent part of it, and a begin with none left gets no receipt. Terminal claims outlive any run, so the earliest is always on record.
+    let first_claimed_at_ms: i64 = conn.query_row(
+        "SELECT MIN(created_at_ms) FROM note_eval_claims
+          WHERE project = ?1 AND task_kind = ?2
+            AND note_id = (SELECT job_id FROM curator_jobs WHERE project = ?1 AND causal_identity = ?3)",
+        params![project, CURATOR_REVIEW_TASK.task_kind, causal_identity],
+        |row| row.get(0),
+    )?;
+    let run_deadline_ms = first_claimed_at_ms
         .checked_add(CURATOR_RUN_DEADLINE_MS)
         .ok_or_else(|| refuse(CuratorLedgerRefusal::InvalidRequest))?;
     if now_ms >= run_deadline_ms {
@@ -982,6 +977,10 @@ impl MemoryStore {
                     let receipt = load_receipt(conn, project, causal_identity)?;
                     Ok(match receipt {
                         None => Some(CuratorLedgerRefusal::Missing),
+                        // A clock that reads earlier than the marker it just committed cannot judge any deadline below; the charged attempt is withheld.
+                        Some(_) if live < attempt.committed_at_ms => {
+                            Some(CuratorLedgerRefusal::ClockBehind)
+                        }
                         // The binding the commit checked is checked again: a receipt taken over, completed, or rebound since then owns this marker no longer.
                         Some(receipt)
                             if receipt.terminal.is_some()
@@ -1145,19 +1144,25 @@ impl MemoryStore {
         let publishing = terminal == CuratorReceiptTerminal::Complete
             && receipt.cancelled_at_ms.is_none()
             && now_ms < receipt.run_deadline_ms;
-        if publishing
-            && !self
+        if publishing {
+            let evidence = self
                 .list_curator_attempts(project, causal_identity)?
-                .iter()
-                .any(|attempt| {
-                    i64::try_from(attempt.generation).ok() == Some(generation)
-                        && matches!(
-                            attempt.terminal,
-                            Some((CuratorAttemptTerminal::Complete, _))
-                        )
-                })
-        {
-            return Ok(LeaseCompleteOutcome::Conflict { kind: "invalid" });
+                .into_iter()
+                .filter(|attempt| i64::try_from(attempt.generation).ok() == Some(generation))
+                .find_map(|attempt| match attempt.terminal {
+                    Some((CuratorAttemptTerminal::Complete, at_ms)) => Some(at_ms),
+                    _ => None,
+                });
+            match evidence {
+                None => return Ok(LeaseCompleteOutcome::Conflict { kind: "invalid" }),
+                // A completion dated before the result it publishes is a clock that stepped back; the claim survives so the worker can retry once it catches up.
+                Some(at_ms) if now_ms < at_ms => {
+                    return Ok(LeaseCompleteOutcome::Conflict {
+                        kind: "clock_behind",
+                    });
+                }
+                Some(_) => {}
+            }
         }
         self.complete_task_lease(
             &CURATOR_REVIEW_TASK,
