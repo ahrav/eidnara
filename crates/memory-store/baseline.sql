@@ -507,7 +507,7 @@ CREATE TABLE curator_receipts (
             database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) = 32),
             kernel_incarnation_id TEXT NOT NULL CHECK (length(kernel_incarnation_id) = 32),
             authority_generation INTEGER NOT NULL CHECK (authority_generation >= 0),
-            authority_context_store TEXT NOT NULL CHECK (length(authority_context_store) > 0),
+            authority_context_store TEXT NOT NULL CHECK (length(authority_context_store) BETWEEN 1 AND 256),
             state TEXT NOT NULL CHECK (state IN ('in_progress', 'complete')),
             generation INTEGER NOT NULL CHECK (generation >= 1),
             claim_id TEXT NOT NULL CHECK (length(claim_id) BETWEEN 1 AND 200),

@@ -1105,13 +1105,13 @@ fn the_sweep_releases_a_job_whose_receipt_was_orphaned_by_a_crashed_worker() {
         "a receipt inside its run deadline is left to its worker or a successor"
     );
 
-    // Both workers crashed and no successor ever claimed either job. Once the queue deadline passes
-    // the sweep must release the jobs and close the receipts, or each job holds its allowance and a
-    // pending slot for the rest of the store incarnation.
+    // Both workers crashed and no successor ever claimed either job. Once the run deadlines pass
+    // (observed here at the queue deadline) the sweep must release the jobs and close the
+    // receipts, or each job holds its allowance and a pending slot for the rest of the store incarnation.
     assert_eq!(
         fixture.store.expire_curator_work(queue_deadline).unwrap(),
         (2, 0),
-        "an orphaned receipt past its run deadline no longer shields an expired job"
+        "an orphaned receipt past its run deadline no longer shields its job"
     );
     let job = fixture
         .store
@@ -2413,5 +2413,107 @@ fn a_claim_keeps_its_job_across_a_vacuum() {
             CuratorBeginOutcome::Begun(_)
         ),
         "the claim still names its job after the rebuild"
+    );
+}
+
+#[test]
+fn the_sweep_closes_an_orphaned_receipt_and_its_job_at_the_run_deadline() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let CuratorBeginOutcome::Begun(r) = fixture.begin(&claim, T0) else {
+        panic!("first claim begins")
+    };
+    assert_eq!(
+        fixture
+            .store
+            .expire_curator_work(r.run_deadline_ms - 1)
+            .unwrap(),
+        (0, 0)
+    );
+    // The worker crashed and no successor came; nothing can publish after the run deadline, so the job is released then, not 24 hours later.
+    assert_eq!(
+        fixture
+            .store
+            .expire_curator_work(r.run_deadline_ms)
+            .unwrap(),
+        (1, 0)
+    );
+    assert_eq!(
+        receipt(&fixture).terminal,
+        Some(CuratorReceiptTerminal::Expired)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .lookup_curator_job(PROJECT, &fixture.identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .curator_headroom(PROJECT)
+            .unwrap()
+            .pending_jobs,
+        0
+    );
+}
+
+#[test]
+fn a_receipt_refuses_an_authority_store_identity_over_the_identity_bound() {
+    let mut fixture = Fixture::open();
+    drain_memories_authority(&fixture.store, T0);
+    fixture.registration = activate_memories_under(&fixture.store, &"c".repeat(257));
+    let claim = fixture.claim("acq-1", "worker-a", T0 + 1).unwrap();
+    let error = fixture
+        .store
+        .begin_curator_receipt(PROJECT, &fixture.identity, KERNEL, &claim, T0 + 2)
+        .unwrap_err();
+    assert_eq!(refusal(error), CuratorLedgerRefusal::AuthorityChanged);
+    assert!(
+        fixture
+            .store
+            .lookup_curator_receipt(PROJECT, &fixture.identity)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_cancelled_receipt_records_cancelled_even_when_the_worker_reports_an_unbacked_complete() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    assert!(matches!(
+        fixture.dispatch(1, &claim, T0 + 1).unwrap(),
+        DispatchOutcome::Handed { .. }
+    ));
+    fixture
+        .store
+        .cancel_curator_receipt(PROJECT, &fixture.identity, T0 + 2)
+        .unwrap();
+    // The attempt was never closed complete; the cancellation still decides the terminal.
+    assert_eq!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Complete,
+            Some(&selection()),
+            T0 + 3,
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Applied {
+            response_json: "{\"terminal\":\"cancelled\"}".to_string()
+        }
+    );
+    assert_eq!(
+        receipt(&fixture).terminal,
+        Some(CuratorReceiptTerminal::Cancelled)
     );
 }

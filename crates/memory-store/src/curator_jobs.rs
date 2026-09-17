@@ -38,10 +38,10 @@ const MAX_TARGET_JSON_BYTES: usize = 1024;
 pub const CURATOR_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const MAX_CURATOR_METADATA_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024;
 pub const MAX_CURATOR_METADATA_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
-/// Permanent receipt charge every admitted job keeps for the store incarnation: the job row, its receipt, and up to four attempt markers, all sized at their byte bounds. Worst case: the job row (project 256, firing id 256, target 1024, template 256, digests 128) about 2 KiB; the receipt (project, claim id 200, candidate 256, digest 64, incarnations 64) about 1 KiB; four markers (project, provider 128, model 256, credential 256, digests 128) about 1 KiB each; plus the primary-key index entry each row repeats, about 2.5 KiB together. Terminal rows keep it, so it also bounds lifetime admissions per store incarnation: `MAX_CURATOR_METADATA_BYTES_PER_PROJECT / CURATOR_RECEIPT_CHARGE_BYTES` (4,096) jobs per project and four times that per host before reservation refuses for good.
+/// Permanent receipt charge every admitted job keeps for the store incarnation: the job row, its receipt, and up to four attempt markers, all sized at their byte bounds. Worst case: the job row (project 256, firing id 256, target 1024, template 256, digests 128) about 2 KiB; the receipt (project, authority store 256, claim id 200, candidate 256, digest 64, incarnations 64) about 1.3 KiB; four markers (project, provider 128, model 256, credential 256, digests 128) about 1 KiB each; plus the primary-key index entry each row repeats, about 2.5 KiB together. Terminal rows keep it, so it also bounds lifetime admissions per store incarnation: `MAX_CURATOR_METADATA_BYTES_PER_PROJECT / CURATOR_RECEIPT_CHARGE_BYTES` (4,096) jobs per project and four times that per host before reservation refuses for good.
 pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 16 * 1024;
-/// Permanent receipt charge each frozen page keeps once terminal: its compact row without references or cursor.
-pub const FROZEN_PAGE_RECEIPT_CHARGE_BYTES: u64 = 1024;
+/// Permanent receipt charge each frozen page keeps once terminal: the compact row (project, slot id, and selection attempt at 256 bytes each, plus state and timestamps) and the primary-key index entry that repeats those keys, about 1.7 KiB at the bounds.
+pub const FROZEN_PAGE_RECEIPT_CHARGE_BYTES: u64 = 4096;
 /// Worst-case temporary allowance a reservation prepays for its input, holds, manifest, and attempt metadata; released when the job is terminal.
 pub const CURATOR_JOB_ALLOWANCE_BYTES: u64 = 32 * 1024;
 /// Allowance a `frozen` page holds for its serialized references, sized to [`MAX_FROZEN_PAGE_BYTES`]; terminal pages hold none.
@@ -1095,13 +1095,13 @@ impl MemoryStore {
         )
     }
 
-    /// Expires reserved or ready jobs and frozen selections at their deadlines. In-progress receipts block job expiry until their run deadline passes; expired receipts, and receipts whose job another owner already closed, close at their run deadline as `cancelled` when a cancellation was recorded, `unknown` when they have an unterminated attempt, otherwise `expired`, and the job outcome follows the receipt as a completion would map it. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts, and the live claim of any terminal job is fenced `expired`, so a worker that keeps renewing cannot hold a ledger slot for a job that no longer exists.
+    /// Expires reserved or ready jobs and frozen selections at their deadlines. An in-progress receipt inside its run deadline shields its job; at the run deadline the receipt closes as `cancelled` when a cancellation was recorded, `unknown` when it has an unterminated attempt, otherwise `expired`, and its job goes terminal in the same sweep with the outcome a completion would have mapped. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts, and the live claim of any terminal job is fenced `expired`, so a worker that keeps renewing cannot hold a ledger slot for a job that no longer exists.
     pub fn expire_curator_work(&self, now_ms: i64) -> Result<(usize, usize), CuratorJobError> {
         // The sweep carries no caller text, so it records no scan and needs no owner scope.
         let write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
         write
             .execute(&self.inner, |coordinated| {
-                // Orphaned receipts close before their jobs are terminalized in the same transaction; a receipt left in progress by a job finished elsewhere closes at its run deadline too.
+                // Nothing can publish once a receipt's run deadline has passed, so an in-progress receipt closes there whatever its job's state, and the job follows in the same transaction rather than holding a pending slot until its queue deadline.
                 coordinated.tx().execute(
                     "UPDATE curator_receipts
                         SET state = 'complete', updated_at_ms = ?1,
@@ -1113,15 +1113,10 @@ impl MemoryStore {
                                    AND a.causal_identity = curator_receipts.causal_identity
                                    AND a.terminal_kind IS NULL)
                               THEN 'unknown' ELSE 'expired' END
-                      WHERE state = 'in_progress' AND run_deadline_ms <= ?1
-                        AND EXISTS(SELECT 1 FROM curator_jobs j
-                                    WHERE j.project = curator_receipts.project
-                                      AND j.causal_identity = curator_receipts.causal_identity
-                                      AND (j.state = 'terminal'
-                                           OR (j.state IN ('reserved', 'ready')
-                                               AND j.queue_deadline_ms <= ?1)))",
+                      WHERE state = 'in_progress' AND run_deadline_ms <= ?1",
                     [now_ms],
                 )?;
+                // A job expires at its queue deadline, or as soon as its receipt is closed; an in-progress receipt inside its run deadline still shields the job.
                 let jobs = coordinated.tx().execute(
                     "UPDATE curator_jobs
                         SET state = 'terminal', allowance_bytes = 0, input_json = NULL, updated_at_ms = ?1,
@@ -1133,7 +1128,12 @@ impl MemoryStore {
                                   FROM curator_receipts r
                                  WHERE r.project = curator_jobs.project
                                    AND r.causal_identity = curator_jobs.causal_identity), 'expired')
-                      WHERE state IN ('reserved', 'ready') AND queue_deadline_ms <= ?1
+                      WHERE state IN ('reserved', 'ready')
+                        AND (queue_deadline_ms <= ?1
+                             OR EXISTS(SELECT 1 FROM curator_receipts r
+                                        WHERE r.project = curator_jobs.project
+                                          AND r.causal_identity = curator_jobs.causal_identity
+                                          AND r.state = 'complete'))
                         AND NOT EXISTS(SELECT 1 FROM curator_receipts r
                                         WHERE r.project = curator_jobs.project
                                           AND r.causal_identity = curator_jobs.causal_identity

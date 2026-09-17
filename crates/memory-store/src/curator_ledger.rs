@@ -36,6 +36,8 @@ pub const CURATOR_MAX_REQUEST_BYTES: u64 = 256 * 1024;
 pub const MAX_PROVIDER_BYTES: usize = 128;
 pub const MAX_MODEL_BYTES: usize = 256;
 pub const MAX_CREDENTIAL_ID_BYTES: usize = 256;
+/// The authority row's context store identity is copied onto every receipt; one the receipt charge cannot hold is not a bindable authority.
+pub const MAX_AUTHORITY_CONTEXT_STORE_BYTES: usize = 256;
 /// One attempt bound plus the settlement reserve, so an attempt that runs to its bound still has a live claim to record its result under, while a crashed worker's claim frees inside the run so a takeover can still finish before the cutoff. A live worker renews between attempts.
 pub const CURATOR_TASK_LEASE_MS: i64 = CURATOR_ATTEMPT_MAX_MS + CURATOR_SETTLEMENT_RESERVE_MS;
 
@@ -411,6 +413,7 @@ pub fn begin_curator_receipt_in_tx(
     }
     let incarnation = store_incarnation_in_tx(conn)?;
     let (authority_context_store, authority) = current_authority(conn, project)?
+        .filter(|(context_store, _)| context_store.len() <= MAX_AUTHORITY_CONTEXT_STORE_BYTES)
         .ok_or_else(|| refuse(CuratorLedgerRefusal::AuthorityChanged))?;
     if let Some(existing) = load_receipt(conn, project, causal_identity)? {
         if existing.database_incarnation_id != incarnation
@@ -1099,17 +1102,20 @@ impl MemoryStore {
             MemoryStoreError::Serde("generation exceeds the storable range".to_string())
         })?;
         // A caller holding another generation or another claim is fenced before the lease is touched, whether or not the receipt is already terminal, so a stale worker's completion ends nothing and a claim on another job cannot be spent here.
-        let fenced = self
+        let Some(receipt) = self
             .lookup_curator_receipt(project, causal_identity)?
-            .is_none_or(|receipt| {
-                i64::try_from(receipt.generation).ok() != Some(generation)
-                    || receipt.claim_id != claim_id
-            });
-        if fenced {
+            .filter(|receipt| {
+                i64::try_from(receipt.generation).ok() == Some(generation)
+                    && receipt.claim_id == claim_id
+            })
+        else {
             return Ok(LeaseCompleteOutcome::Conflict { kind: "fenced" });
-        }
-        // A published result must come from an attempt this generation closed `complete` inside its budget; the store has no other evidence the selection exists. A complete terminal never reverts, so this read outside the lease is authoritative, and the claim survives the refusal.
-        if terminal == CuratorReceiptTerminal::Complete
+        };
+        // A published result must come from an attempt this generation closed `complete` inside its budget; the store has no other evidence the selection exists. A complete terminal never reverts, so this read outside the lease is authoritative, and the claim survives the refusal. A receipt already cancelled or past its run deadline records that instead, so it needs no evidence here; the transaction below reads the row again before it decides.
+        let publishing = terminal == CuratorReceiptTerminal::Complete
+            && receipt.cancelled_at_ms.is_none()
+            && now_ms < receipt.run_deadline_ms;
+        if publishing
             && !self
                 .list_curator_attempts(project, causal_identity)?
                 .iter()
