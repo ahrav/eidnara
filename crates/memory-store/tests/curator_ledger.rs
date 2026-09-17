@@ -3017,3 +3017,32 @@ fn a_takeover_by_the_claim_that_already_owns_the_receipt_replays_without_advanci
         .unwrap();
     assert_eq!(after, before, "a replayed takeover records no new audit");
 }
+
+#[test]
+fn every_completion_terminal_is_floored_at_the_newest_attempt_event() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    assert!(matches!(
+        fixture.dispatch(1, &claim, T0 + 30).unwrap(),
+        DispatchOutcome::Handed { .. }
+    ));
+    assert_eq!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Failed,
+            None,
+            T0 + 20,
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Conflict {
+            kind: "clock_behind"
+        }
+    );
+    assert_eq!(receipt(&fixture).terminal, None);
+}

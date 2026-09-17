@@ -1162,35 +1162,34 @@ impl MemoryStore {
         else {
             return Ok(LeaseCompleteOutcome::Conflict { kind: "fenced" });
         };
+        // A completion dated before any event the ledger already holds for the job, a marker commit or a terminal in any generation, is a clock that stepped back, whatever terminal it reports; the claim survives so the worker can retry once it catches up.
+        let attempts = self.list_curator_attempts(project, causal_identity)?;
+        let newest_event_ms = attempts
+            .iter()
+            .flat_map(|attempt| {
+                std::iter::once(attempt.committed_at_ms)
+                    .chain(attempt.terminal.map(|(_, at_ms)| at_ms))
+            })
+            .max();
+        if newest_event_ms.is_some_and(|newest| now_ms < newest) {
+            return Ok(LeaseCompleteOutcome::Conflict {
+                kind: "clock_behind",
+            });
+        }
         // A published result must come from an attempt this generation closed `complete` inside its budget; the store has no other evidence the selection exists. A complete terminal never reverts, so this read outside the lease is authoritative, and the claim survives the refusal. A receipt already cancelled or past its run deadline records that instead, so it needs no evidence here; the transaction below reads the row again before it decides.
         let publishing = terminal == CuratorReceiptTerminal::Complete
             && receipt.cancelled_at_ms.is_none()
             && now_ms < receipt.run_deadline_ms;
-        if publishing {
-            let attempts = self.list_curator_attempts(project, causal_identity)?;
-            let backed = attempts.iter().any(|attempt| {
+        if publishing
+            && !attempts.iter().any(|attempt| {
                 i64::try_from(attempt.generation).ok() == Some(generation)
                     && matches!(
                         attempt.terminal,
                         Some((CuratorAttemptTerminal::Complete, _))
                     )
-            });
-            if !backed {
-                return Ok(LeaseCompleteOutcome::Conflict { kind: "invalid" });
-            }
-            // A completion dated before any event the ledger already holds for the job, a marker commit or a terminal in any generation, is a clock that stepped back; the claim survives so the worker can retry once it catches up.
-            let newest_event_ms = attempts
-                .iter()
-                .flat_map(|attempt| {
-                    std::iter::once(attempt.committed_at_ms)
-                        .chain(attempt.terminal.map(|(_, at_ms)| at_ms))
-                })
-                .max();
-            if newest_event_ms.is_some_and(|newest| now_ms < newest) {
-                return Ok(LeaseCompleteOutcome::Conflict {
-                    kind: "clock_behind",
-                });
-            }
+            })
+        {
+            return Ok(LeaseCompleteOutcome::Conflict { kind: "invalid" });
         }
         self.complete_task_lease(
             &CURATOR_REVIEW_TASK,
@@ -1213,20 +1212,20 @@ impl MemoryStore {
                 } else {
                     (terminal, selection)
                 };
-                // The evidence and clock checks made before the lease are repeated here, serialized with the write: a dispatch that landed in between leaves a newer event, and a publication dated before it, or one no longer backed, is stale rather than published.
-                if terminal == CuratorReceiptTerminal::Complete {
-                    let (backed, newest_event_ms): (bool, i64) = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM curator_attempts
-                                        WHERE project = ?1 AND causal_identity = ?2
-                                          AND generation = ?3 AND terminal_kind = 'complete'),
-                                COALESCE(MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0)), 0)
-                           FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2",
-                        params![project, causal_identity, generation],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )?;
-                    if !backed || now_ms < newest_event_ms {
-                        return Ok(LeaseCompletion::Stale);
-                    }
+                // The clock and evidence checks made before the lease are repeated here, serialized with the write: a dispatch that landed in between leaves a newer event, and a completion dated before it, or a publication no longer backed, is stale rather than written.
+                let (backed, newest_event_ms): (bool, i64) = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM curator_attempts
+                                    WHERE project = ?1 AND causal_identity = ?2
+                                      AND generation = ?3 AND terminal_kind = 'complete'),
+                            COALESCE(MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0)), 0)
+                       FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2",
+                    params![project, causal_identity, generation],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                if now_ms < newest_event_ms
+                    || (terminal == CuratorReceiptTerminal::Complete && !backed)
+                {
+                    return Ok(LeaseCompletion::Stale);
                 }
                 // The candidate id is caller text the receipt keeps for the store incarnation; it is scanned like every other Curator identity, and the table trigger refuses it again. The receipt owns the scan beside the claim, so the evidence outlives the claim's retention window.
                 if selection.is_some() {
