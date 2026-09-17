@@ -4,7 +4,7 @@ import {
     type ApplicationTarget,
     CapabilityLatch,
     ContextApplication,
-    type EntryEdit,
+    type Edit,
     editEntries,
     isPackedEntry,
     PACKED_ENTRY_ID_PREFIX,
@@ -62,14 +62,18 @@ function forwarded(body: Record<string, unknown>) {
     };
 }
 
-function target(overrides: Partial<ApplicationTarget> = {}): ApplicationTarget {
+function target(
+    overrides: Partial<ApplicationTarget<unknown[]>> & { entries?: () => readonly unknown[] } = {},
+): ApplicationTarget<unknown[]> {
+    const { entries = () => [], ...rest } = overrides;
     return {
         route: ROUTE,
         context,
-        entries: () => [],
         body: "packed body",
+        edit: (action, preparationId, body) =>
+            editEntries(entries(), action, ROUTE.sessionId, preparationId, body),
         publish: async (_edit, forwardedIdentity) => forwardedIdentity,
-        ...overrides,
+        ...rest,
     };
 }
 
@@ -130,27 +134,27 @@ describe("entry edits", () => {
     it("appends one host-shaped owned entry and reports append", () => {
         const edit = editEntries([system], "append", "ses-1", "new", "fresh");
         expect(edit.outcome).toBe("append");
-        expect(edit.entries).toEqual([
+        expect(edit.surface).toEqual([
             system,
             {
                 info: { id: `${PACKED_ENTRY_ID_PREFIX}new`, role: "user", sessionID: "ses-1" },
                 parts: [{ type: "text", text: "fresh" }],
             },
         ]);
-        expect(isPackedEntry(edit.entries[1])).toBe(true);
+        expect(isPackedEntry(edit.surface[1])).toBe(true);
         expect(isPackedEntry(system)).toBe(false);
     });
 
     it("keeps an existing owned entry rather than appending a second", () => {
         const edit = editEntries([system, owned], "append", "ses-1", "new", "fresh");
         expect(edit.outcome).toBe("keep");
-        expect(edit.entries).toEqual([system, owned]);
+        expect(edit.surface).toEqual([system, owned]);
     });
 
     it("replaces the owned entry and keeps every other entry in order", () => {
         const edit = editEntries([system, owned, trailing], "replace", "ses-1", "new", "fresh");
         expect(edit.outcome).toBe("applied_replacement");
-        expect(edit.entries).toEqual([
+        expect(edit.surface).toEqual([
             system,
             trailing,
             {
@@ -163,21 +167,21 @@ describe("entry edits", () => {
     it("treats an empty replacement as a replacement that leaves the slot absent", () => {
         const edit = editEntries([system, owned], "replace", "ses-1", "new", "");
         expect(edit.outcome).toBe("applied_replacement");
-        expect(edit.entries).toEqual([system]);
-        expect(edit.entries.some(isPackedEntry)).toBe(false);
+        expect(edit.surface).toEqual([system]);
+        expect(edit.surface.some(isPackedEntry)).toBe(false);
     });
 
     it("treats an empty append as keep with the surface unchanged", () => {
         const edit = editEntries([system], "append", "ses-1", "new", "");
         expect(edit.outcome).toBe("keep");
-        expect(edit.entries).toEqual([system]);
+        expect(edit.surface).toEqual([system]);
     });
 });
 
 describe("prepare, apply, confirm", () => {
     it("echoes the daemon's profile at apply, edits the live surface, and reports the applied outcome", async () => {
         const { calls, transport } = daemon(honest());
-        const published: EntryEdit[] = [];
+        const published: Edit<unknown[]>[] = [];
         const live: unknown[] = [];
         const app = new ContextApplication(transport, new CapabilityLatch());
         const result = await app.run(
@@ -208,7 +212,7 @@ describe("prepare, apply, confirm", () => {
         expect(calls[2]!.body.applied_identity).toBe("fe".repeat(32));
         expect(calls[2]!.body.outcome).toBe("append");
         expect(published).toHaveLength(1);
-        expect(published[0]!.entries.some(isPackedEntry)).toBe(true);
+        expect(published[0]!.surface.some(isPackedEntry)).toBe(true);
     });
 
     it("never reports applied when the acknowledgment is lost, whatever the daemon answers", async () => {

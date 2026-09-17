@@ -1,19 +1,19 @@
 import { tokenEstimatorGeneration } from "../../shared/token-estimator";
 
-/** The plugin's estimator validates the invocation locally; it is never the daemon's bound profile and never labeled exact. */
-export const HARNESS_PROFILE_IDENTITY = "opencode-heuristic";
+/** A harness's own estimator validates the invocation locally; it is never the daemon's bound profile and never labeled exact. */
+export type HarnessProfileIdentity = "opencode-heuristic" | "pi-heuristic";
 
 const CHARS_PER_TOKEN = 3.5;
 
 export interface HarnessProfile {
-    identity: typeof HARNESS_PROFILE_IDENTITY;
+    identity: HarnessProfileIdentity;
     revision: string;
     authority: "heuristic";
 }
 
-export function harnessProfile(): HarnessProfile {
+export function harnessProfile(identity: HarnessProfileIdentity): HarnessProfile {
     return {
-        identity: HARNESS_PROFILE_IDENTITY,
+        identity,
         revision: `generation:${tokenEstimatorGeneration()}`,
         authority: "heuristic",
     };
@@ -23,6 +23,7 @@ export interface InvocationBudget {
     /** `undefined` when the host has not reported a context limit; nothing is gated then. */
     maxTokens: number | undefined;
     headroomPermille: number;
+    profile: HarnessProfileIdentity;
 }
 
 export interface InvocationCharge {
@@ -39,17 +40,17 @@ export type InvocationValidation =
 
 export function chargeInvocation(
     entryLengths: readonly number[],
-    headroomPermille: number,
+    budget: Pick<InvocationBudget, "headroomPermille" | "profile">,
 ): InvocationCharge {
     let bytes = 0;
     for (const length of entryLengths) bytes += length;
     const estimatedTokens = Math.ceil(bytes / CHARS_PER_TOKEN);
     return {
-        profile: harnessProfile(),
+        profile: harnessProfile(budget.profile),
         entries: entryLengths.length,
         bytes,
         estimatedTokens,
-        chargedTokens: Math.ceil((estimatedTokens * (1000 + headroomPermille)) / 1000),
+        chargedTokens: Math.ceil((estimatedTokens * (1000 + budget.headroomPermille)) / 1000),
     };
 }
 
@@ -59,10 +60,10 @@ export function validateInvocation(
     incomingLengths: readonly number[],
     budget: InvocationBudget,
 ): InvocationValidation {
-    const candidate = chargeInvocation(candidateLengths, budget.headroomPermille);
+    const candidate = chargeInvocation(candidateLengths, budget);
     if (budget.maxTokens === undefined) return { ok: true, candidate, reason: "limit_unknown" };
     if (candidate.chargedTokens <= budget.maxTokens) return { ok: true, candidate, reason: "fits" };
-    const incoming = chargeInvocation(incomingLengths, budget.headroomPermille);
+    const incoming = chargeInvocation(incomingLengths, budget);
     if (candidate.bytes <= incoming.bytes) return { ok: true, candidate, reason: "shrinks" };
     return { ok: false, candidate, incoming, limit: budget.maxTokens };
 }

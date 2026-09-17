@@ -70,6 +70,10 @@ const NOT_PORTED =
  */
 const AWAITING_CONSUMER = new Map<string, string>([
     [
+        "context-application-pi.ts",
+        "its consumer is the system-prompt packing pass, which waits on a daemon route that produces a packed body",
+    ],
+    [
         "pi-pressure.ts",
         "its consumer wrote session pressure to a session-meta database this package does not port",
     ],

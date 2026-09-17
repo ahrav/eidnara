@@ -63,7 +63,18 @@ firing check is an open obligation, not a passed one.
 | `packing.application.capability_denied_then_rebound` | opencode | `sometimes` | apply-context-capabilities-default-closed-per-harness | `context-application.test.ts` `falls back to append once when the class is unsupported and latches it for the route`, `denies a class for the rest of the route epoch and forgets it on rebind`. |
 | `packing.application.zero_write_episode` | opencode | `sometimes` | apply-unknown-outcome-never-replays-blindly | `crates/daemon/tests/edit_receipts.rs` `every_application_outcome_leaves_the_kernel_tip_and_write_counters_unchanged`. |
 
+| `packing.application.pi_gated_class_denied` | pi | `sometimes` | apply-enabled-outcomes-are-proven-on-real-harness-paths | `crates/daemon/tests/context_capabilities.rs` `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing`; `packages/pi-plugin/src/context-application-pi.test.ts` `never simulates a denied class`. |
+| `packing.application.pi_consumer_strings_advertised` | pi | `sometimes` | apply-consumer-capability-strings-never-authorize-edits | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (two binds, one outcome set). |
+| `packing.application.pi_profile_echoed` | pi | `sometimes` | apply-stale-preparation-is-rejected-before-edit | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (apply carries the prepared profile; a `pi-heuristic` echo is `profile_mismatch`); `context-application-pi.test.ts` `resolves a lost acknowledgment to unknown and leaves nothing applied on a refusal` (`profile_unavailable`, `profile_mismatch`, `stale_preparation`). |
+| `packing.application.pi_acknowledgment_lost` | pi | `sometimes` | apply-daemon-receipt-does-not-mark-harness-edit-applied | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (`lost:unknown`); `context-application-pi.test.ts` lost acknowledgment. |
+| `packing.application.pi_invocation_over_limit` | pi | `sometimes` | apply-adapter-validates-entire-assembled-invocation | `context-application-pi.test.ts` `keeps the prompt unchanged when the candidate would grow past the usable window`. |
+| `packing.application.pi_preparation_failure` | pi | `sometimes` | apply-append-allowance-and-replacement-capacity-are-bound-before-preparation | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (`oversized:preparation_failure:append_allowance`); `context-application-pi.test.ts` `reports a preparation failure by its reason and leaves the prompt unchanged`. |
+| `packing.application.pi_zero_write_episode` | pi | `sometimes` | apply-unknown-outcome-never-replays-blindly | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (tip and projection counter unchanged). |
+
 Unfired markers by harness: OpenCode, `packing.application.real_server_outcome`
 (the end-to-end run against a real OpenCode server; no harness exists in this
-repository). Pi: none named yet; the Pi set is frozen before U5b implements
-against it.
+repository). Pi, `packing.application.pi_runner_outcome` (the run through
+`packages/e2e-tests/src/pi-runner/` against a built plugin; not performed
+here). Gated outcomes on Pi stay unsupported until the Pi assembled invocation
+is ruled (parent Q6); the exercised set is pure packing plus
+`preparation_failure`.

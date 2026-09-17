@@ -532,7 +532,7 @@ describe("Rust mode transform request", () => {
             const candidate = [...makeMessages(sessionId), ...makeMessages(sessionId)];
             const charged = chargeInvocation(
                 candidate.map((entry) => editRecipe.canonicalJsonLength(entry)),
-                250,
+                { headroomPermille: 250, profile: "opencode-heuristic" },
             ).chargedTokens;
             const { client, calls } = recordingClient((request) =>
                 recipeResponse(request, candidate),

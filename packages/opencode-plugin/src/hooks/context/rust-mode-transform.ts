@@ -1614,6 +1614,7 @@ export function createRustModeTransform(
                 const invocation = validateInvocation(application.lengths, inputLengths, {
                     maxTokens: reportedContextLimit,
                     headroomPermille: INVOCATION_HEADROOM_PERMILLE,
+                    profile: "opencode-heuristic",
                 });
                 if (!invocation.ok) {
                     throw new PassDeclined(

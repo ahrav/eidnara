@@ -385,19 +385,24 @@ Exercised: yes - the daemon's boundary is the capacity check in
 `crates/daemon/tests/edit_receipts.rs`
 `outcomes_are_distinct_and_capacity_is_bound_before_preparation`; the
 adapter's whole-invocation validation is
-`packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts` and,
-through the transform's publication step,
+`packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts`; on Pi,
+`packages/pi-plugin/src/context-application-pi.test.ts` charges the whole
+system prompt under the `pi-heuristic` profile inside `editSystemPrompt`, so a
+candidate the usable window refuses is `keep` with the prompt unchanged; and,
+through the OpenCode transform's publication step,
 `packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts`
 `publishes when the whole invocation fits the context limit with headroom`,
 `declines the pass when the whole invocation exceeds the context limit`, and
 `publishes a candidate over the context limit when it is no larger than the
 incoming surface`.
 Guarantee: The daemon binds append allowance and replacement capacity before
-preparation, and the OpenCode plugin charges every entry of the candidate
-message-entry surface by its canonical length under the plugin's heuristic
-ratio plus headroom, and declines the pass before publication when the charge
-exceeds the model's reported context limit and the candidate is larger than
-the incoming surface; a payload that fits alone but not in the invocation is
+preparation, and each plugin charges its whole assembled surface under its own
+heuristic profile plus headroom: the OpenCode plugin every entry of the
+candidate message-entry surface by its canonical length, the Pi plugin the
+whole system prompt by its length; each declines publication when the charge
+exceeds the limit and the candidate is larger than the incoming surface, the
+OpenCode plugin against the model's reported context limit and the Pi plugin
+against Pi's usable window (the window less its output reserve); a payload that fits alone but not in the invocation is
 refused by the adapter, never applied; a candidate no larger than the incoming
 surface is never refused for the window's own size; a limit the host has not
 reported gates nothing; and the local estimate is labeled heuristic under the
@@ -431,18 +436,33 @@ daemon answers, the receipt-alone negative control, the confirm that cannot
 reach the daemon after publication, and the capability fallback latched per
 route; the client has no production caller because no daemon route yet
 produces a packed body, and the run against a real OpenCode server is not
-performed.
+performed. On Pi, `crates/daemon/tests/context_capabilities.rs`
+`pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing`
+drives every gated class, an over-allowance preparation, a foreign profile
+echo, and the append lifecycle through two `pi` binds, and
+`packages/pi-plugin/src/context-application-pi.test.ts` drives the same client
+with the system-prompt slot; neither plugin has a production caller for the
+client because no daemon route yet produces a packed body, and the run through
+the Pi runner is not performed.
 Guarantee: On the OpenCode path each enabled class has a witnessed outcome
 carrying plugin-supplied applied identity; on the Pi path every gated class is
-denied and pure packing still works; a plugin build without the transform
-hook never produces an applied outcome.
+denied, pure packing appends one owned block to the system prompt, a denied
+class is never simulated, two binds differing only in advertised consumer
+strings yield one outcome set, and a lost acknowledgment is `unknown`; a
+plugin build without the transform hook never produces an applied outcome.
 Check: `always` - the Pi denials and the pure-packing append are witnessed
-through a bound `pi` route; the OpenCode allowed set is witnessed at the gate;
-the applied-identity witnesses are not yet possible without the harness-side
-apply. `always` because every enablement claim needs its witness.
+through a bound `pi` route with the daemon's profile echoed at apply, the
+outcome set is `[capability_unsupported x3, preparation_failure
+append_allowance, profile_mismatch, append complete, lost unknown]` under both
+consumer-string sets with the kernel tip and projection counter unchanged; the plugin's `replace` intent on Pi falls back to `append` once,
+latches the denial, and a second run keeps the existing block rather than
+writing a second; the OpenCode allowed set is witnessed at the gate; the
+OpenCode applied-identity witnesses come from the scripted daemon. `always`
+because every enablement claim needs its witness.
 Fault/timing angle: None.
 Required faults and enabling state: A running OpenCode server driving the
-plugin's `ContextApplication` client against the daemon.
+plugin's `ContextApplication` client against the daemon; the Pi runner with a
+built plugin for the Pi arm.
 Confidence: medium - [evidence](evidence/apply-enabled-outcomes-are-proven-on-real-harness-paths.md).
 Existing check: `crates/daemon/tests/model_execution_roundtrip.rs` real harness
 subprocess runs, status unaudited.
