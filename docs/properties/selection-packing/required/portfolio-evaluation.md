@@ -81,6 +81,11 @@ a wildcard pass that questioned the framing itself.
    replaced first; record 3 charges through the injected `ByteEstimator` and
    the 64 KiB test uses ASCII. A record on the production profile belongs
    with the route that selects it (U5a).
+   Superseded at U4a: the estimator is gone. The lossy conversion is
+   `render::required_fragment` (`crates/daemon/src/packing/render.rs`), the
+   exact profile counts through `tokenizer::estimate_tokens`, and
+   `../accounting/` owns the profile's records; the route that selects a
+   profile is still U5a.
 
 ## Biases for a human
 

@@ -18,7 +18,9 @@ packer control.
 - `crates/retrieval/tests/packing_grouping.rs`
   `the_scan_skips_and_continues_and_the_prefix_packer_does_not` and the
   differential proptest; `crates/daemon/tests/packing_optional.rs` runs the
-  same costs through the daemon entry over the budget the required phase left.
+  same shape through the daemon entry over the budget the required phase left:
+  three groups whose rendered-delta costs are big, small, medium with a budget
+  of small plus medium, so the first is skipped and the two behind it admitted.
 
 ## Failure scenario
 
@@ -31,8 +33,9 @@ None.
 
 ## What a test must construct
 
-- Costs 11, 4, 6 with remaining budget 10, through the pure function and the
-  daemon entry.
+- Costs 11, 4, 6 with remaining budget 10 through the pure function; through
+  the daemon entry, three groups whose rendered costs are big, small, medium
+  with a budget of small plus medium.
 - Generated cost lists and budgets compared against the reference.
 
 ## Investigation log

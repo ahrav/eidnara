@@ -9,8 +9,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use daemon::packing::{
-    ClaudeTokens, CostEstimator, PackingTrace, PreparationRefusal, RequiredEvent, RequiredInputs,
-    RequiredMaterialization, StageEvent, prepare_required,
+    AccountingProfile, ClaudeTokens, PackingTrace, PreparationRefusal, RequiredEvent,
+    RequiredInputs, RequiredMaterialization, StageEvent, prepare_required,
 };
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::encode;
@@ -18,7 +18,10 @@ use kernel::{ArtifactDestination, EligibilityVerdict};
 use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{RequiredBound, RequiredBounds, RequiredContextFailure, RequiredRequest};
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
-use support::packing::{Fixture, ToolSpan, bounds, tool_span, while_connection_is_held};
+use support::packing::{
+    Fixture, ToolSpan, accounting_bounds, bounds, required_render_total, tool_span,
+    while_connection_is_held,
+};
 
 fn required_failure(
     result: &Result<RequiredMaterialization, PreparationRefusal>,
@@ -61,26 +64,40 @@ const SECOND: ToolSpan = tool_span("call-2", "1", "the second one, longer by a b
 fn required_cost_at_the_limit_succeeds_and_one_above_fails_without_truncation() {
     let fixture = Fixture::new(&[FIRST, SECOND]);
     let requests = [FIRST.request(), SECOND.request()];
-    let total = (FIRST.payload.len() + SECOND.payload.len()) as u64;
+    let total = required_render_total(&[FIRST, SECOND]);
+    let items = total - required_render_total(&[]);
 
     let (ok, trace) = fixture.prepare(&requests, &bounds(total), &EvalBudget::unbounded());
     let materialized = ok.unwrap();
-    assert_eq!(materialized.charged, ClaudeTokens::new(total));
-    assert_eq!(materialized.profile, "one-token-per-byte");
+    assert_eq!(materialized.charged(), ClaudeTokens::new(total));
+    assert_eq!(
+        materialized.ledger().profile().identity(),
+        "one-token-per-byte"
+    );
+    assert_eq!(materialized.ledger().total(), ClaudeTokens::new(total));
+    assert_eq!(
+        materialized
+            .ledger()
+            .entries()
+            .iter()
+            .map(|entry| entry.bytes)
+            .sum::<usize>(),
+        materialized.ledger().text().len()
+    );
     let bytes: Vec<&[u8]> = materialized
-        .items
+        .items()
         .iter()
         .map(|item| item.bytes.as_slice())
         .collect();
     assert_eq!(bytes, vec![FIRST.selected_bytes(), SECOND.selected_bytes()]);
     assert_eq!(
         materialized
-            .items
+            .items()
             .iter()
             .map(|item| item.cost.get())
             .sum::<u64>(),
-        total,
-        "every materialized byte is charged"
+        items,
+        "the items are charged every rendered byte past the block open"
     );
     assert_eq!(trace.payload_loads(), 2);
     assert_eq!(
@@ -109,7 +126,7 @@ fn required_cost_at_the_limit_succeeds_and_one_above_fails_without_truncation() 
     assert_no_optional_work(&trace);
 
     let (below, _) = fixture.prepare(&requests, &bounds(total + 1), &EvalBudget::unbounded());
-    assert_eq!(below.unwrap().charged, ClaudeTokens::new(total));
+    assert_eq!(below.unwrap().charged(), ClaudeTokens::new(total));
 }
 
 #[test]
@@ -360,25 +377,18 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
     assert_no_optional_work(&trace);
 }
 
-/// The estimator runs after the last projection hold; a budget that ends
+/// The profile prices after the last projection hold; a budget that ends
 /// there still refuses the phase rather than returning a materialization.
 #[test]
 fn a_budget_that_ends_during_reservation_refuses_the_materialization() {
-    struct CancellingEstimator(EvalBudget);
-
-    impl CostEstimator for CancellingEstimator {
-        fn profile(&self) -> &'static str {
-            "cancels-on-first-cost"
-        }
-
-        fn cost(&self, bytes: &[u8]) -> ClaudeTokens {
-            self.0.cancel();
-            ClaudeTokens::new(bytes.len() as u64)
-        }
-    }
-
     let fixture = Fixture::new(&[FIRST]);
     let budget = EvalBudget::unbounded();
+    let cancelling = budget.clone();
+    let profile =
+        AccountingProfile::heuristic("cancels-on-first-cost", "cancels", 0, move |text| {
+            cancelling.cancel();
+            text.len()
+        });
     let mut trace = PackingTrace::default();
     let result = prepare_required(
         &fixture.store,
@@ -387,10 +397,11 @@ fn a_budget_that_ends_during_reservation_refuses_the_materialization() {
             project: &fixture.project,
             destination: ArtifactDestination::Local,
             budget: &budget,
-            estimator: &CancellingEstimator(budget.clone()),
+            profile: &profile,
         },
         &[FIRST.request()],
         &bounds(1 << 20),
+        &accounting_bounds(),
         &mut trace,
     );
     assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
@@ -471,16 +482,17 @@ fn a_required_payload_beyond_the_legacy_cut_is_materialized_and_charged_whole() 
     static BIG_PAYLOAD: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| "x".repeat(LEN));
     let big = tool_span("call-big", "1", BIG_PAYLOAD.as_str());
     let fixture = Fixture::new(&[big]);
-    let (result, _) = fixture.prepare(
-        &[big.request()],
-        &bounds(LEN as u64),
-        &EvalBudget::unbounded(),
-    );
+    let total = required_render_total(&[big]);
+    let (result, _) = fixture.prepare(&[big.request()], &bounds(total), &EvalBudget::unbounded());
     let materialized = result.unwrap();
-    assert_eq!(materialized.items.len(), 1);
-    assert_eq!(materialized.items[0].bytes.len(), LEN);
-    assert_eq!(materialized.items[0].bytes, BIG_PAYLOAD.as_bytes());
-    assert_eq!(materialized.charged, ClaudeTokens::new(LEN as u64));
+    assert_eq!(materialized.items().len(), 1);
+    assert_eq!(materialized.items()[0].bytes.len(), LEN);
+    assert_eq!(materialized.items()[0].bytes, BIG_PAYLOAD.as_bytes());
+    assert_eq!(materialized.charged(), ClaudeTokens::new(total));
+    assert!(
+        materialized.charged().get() > LEN as u64,
+        "the wrapper is charged too"
+    );
 }
 
 #[test]

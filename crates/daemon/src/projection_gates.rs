@@ -208,6 +208,60 @@ pub const VECTOR_DELTA_COUNT: &str = "vector_delta_count";
 /// Limits the vector ledger reads when a manifest carries them. They are optional in the manifest: a manifest without one refuses the vector work that needs it, and nothing else, so an existing deployment keeps its other hooks.
 pub const VECTOR_LIMITS: [&str; 3] = [VECTOR_RESIDENT_BYTES, VECTOR_DISK_BYTES, VECTOR_DELTA_COUNT];
 
+/// The packing bounds, carried as one group: a manifest that names any of them
+/// must name all of them and carry [`PACKING_APPROVAL_ID`] enabled, so a value
+/// declared without approval fails at parse rather than bounding a request.
+pub const PACKING_LIMITS: [&str; 11] = [
+    "packing_fused_candidates",
+    "packing_payload_loads",
+    "packing_payload_bytes",
+    "packing_item_bytes",
+    "packing_parents",
+    "packing_spans_per_parent",
+    "packing_rendered_bytes",
+    "packing_estimated_tokens",
+    "packing_serialized_bytes",
+    "packing_adjustment_passes",
+    "packing_deadline_ms",
+];
+
+/// The `hooks` key under which a manifest approves the packing bounds it carries. Like the compressed-activation flag it is not a projection hook.
+pub const PACKING_APPROVAL_ID: &str = "search_projection.packing.approved";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackingManifest {
+    pub fused_candidates: u64,
+    pub payload_loads: u64,
+    pub payload_bytes: u64,
+    pub item_bytes: u64,
+    pub parents: u64,
+    pub spans_per_parent: u64,
+    pub rendered_bytes: u64,
+    pub estimated_tokens: u64,
+    pub serialized_bytes: u64,
+    pub adjustment_passes: u64,
+    pub deadline_ms: u64,
+}
+
+impl PackingManifest {
+    fn parse(limits: &serde_json::Map<String, Value>) -> Result<Self, ManifestRefusal> {
+        let limit = |name| required_limit(limits, name);
+        Ok(Self {
+            fused_candidates: limit("packing_fused_candidates")?,
+            payload_loads: limit("packing_payload_loads")?,
+            payload_bytes: limit("packing_payload_bytes")?,
+            item_bytes: limit("packing_item_bytes")?,
+            parents: limit("packing_parents")?,
+            spans_per_parent: limit("packing_spans_per_parent")?,
+            rendered_bytes: limit("packing_rendered_bytes")?,
+            estimated_tokens: limit("packing_estimated_tokens")?,
+            serialized_bytes: limit("packing_serialized_bytes")?,
+            adjustment_passes: limit("packing_adjustment_passes")?,
+            deadline_ms: limit("packing_deadline_ms")?,
+        })
+    }
+}
+
 const MANIFEST_FIELDS: [&str; 4] = [
     "protocol_version",
     "invalidation_identity",
@@ -229,6 +283,8 @@ pub enum ManifestRefusal {
     NonNumericLimit(String),
     #[error("{0} is not a runtime limit")]
     UnknownLimit(String),
+    #[error("packing limits are declared without the packing approval flag")]
+    PackingUnapproved,
     #[error("{0} is not a projection hook")]
     UnknownHook(String),
     #[error("hook {0} carries a flag that is not a boolean")]
@@ -247,6 +303,19 @@ pub struct RuntimeManifest {
     pub enabled: BTreeMap<ProjectionHook, bool>,
     /// The [`COMPRESSED_ACTIVATION_ID`] flag; absent is disabled.
     pub compressed_activation: bool,
+    /// The [`PACKING_LIMITS`] group when the manifest carries it.
+    pub packing: Option<PackingManifest>,
+}
+
+fn required_limit(
+    limits: &serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<u64, ManifestRefusal> {
+    limits
+        .get(name)
+        .ok_or_else(|| ManifestRefusal::MissingLimit(name.to_owned()))?
+        .as_u64()
+        .ok_or_else(|| ManifestRefusal::NonNumericLimit(name.to_owned()))
 }
 
 impl RuntimeManifest {
@@ -286,13 +355,7 @@ impl RuntimeManifest {
             .ok_or(ManifestRefusal::Shape)?;
         let mut limits = BTreeMap::new();
         for name in REQUIRED_LIMITS {
-            let value = limits_object
-                .get(name)
-                .ok_or_else(|| ManifestRefusal::MissingLimit(name.to_owned()))?;
-            let limit = value
-                .as_u64()
-                .ok_or_else(|| ManifestRefusal::NonNumericLimit(name.to_owned()))?;
-            limits.insert(name.to_owned(), limit);
+            limits.insert(name.to_owned(), required_limit(limits_object, name)?);
         }
         for name in VECTOR_LIMITS {
             if let Some(value) = limits_object.get(name) {
@@ -302,8 +365,15 @@ impl RuntimeManifest {
                 limits.insert(name.to_owned(), limit);
             }
         }
+        let packing = PACKING_LIMITS
+            .iter()
+            .any(|name| limits_object.contains_key(*name))
+            .then(|| PackingManifest::parse(limits_object))
+            .transpose()?;
         if let Some(extra) = limits_object.keys().find(|key| {
-            !REQUIRED_LIMITS.contains(&key.as_str()) && !VECTOR_LIMITS.contains(&key.as_str())
+            !REQUIRED_LIMITS.contains(&key.as_str())
+                && !VECTOR_LIMITS.contains(&key.as_str())
+                && !PACKING_LIMITS.contains(&key.as_str())
         }) {
             return Err(ManifestRefusal::UnknownLimit(extra.clone()));
         }
@@ -313,6 +383,7 @@ impl RuntimeManifest {
             .ok_or(ManifestRefusal::Shape)?;
         let mut enabled = BTreeMap::new();
         let mut compressed_activation = false;
+        let mut packing_approved = false;
         for (id, entry) in hooks_object {
             let flag = entry
                 .as_object()
@@ -325,9 +396,16 @@ impl RuntimeManifest {
                 compressed_activation = flag;
                 continue;
             }
+            if id == PACKING_APPROVAL_ID {
+                packing_approved = flag;
+                continue;
+            }
             let hook = ProjectionHook::from_id(id)
                 .ok_or_else(|| ManifestRefusal::UnknownHook(id.clone()))?;
             enabled.insert(hook, flag);
+        }
+        if packing.is_some() && !packing_approved {
+            return Err(ManifestRefusal::PackingUnapproved);
         }
         Ok(Self {
             protocol_version,
@@ -335,6 +413,7 @@ impl RuntimeManifest {
             limits,
             enabled,
             compressed_activation,
+            packing,
         })
     }
 }

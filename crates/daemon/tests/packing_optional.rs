@@ -9,17 +9,18 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use daemon::packing::{
-    ClaudeTokens, CostEstimator, OptionalAdmission, OptionalEvent, OptionalExclusion,
-    OptionalRequest, PackingTrace, PreparationRefusal, RequiredInputs, StageEvent,
-    prepare_optional, prepare_required,
+    AccountingProfile, BLOCK_CLOSE_FRAGMENT, Charged, ClaudeTokens, OptionalAdmission,
+    OptionalEvent, OptionalExclusion, OptionalRequest, PackingTrace, PreparationRefusal,
+    RequiredInputs, StageEvent, prepare_optional, prepare_required, render,
 };
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
 use retrieval::fusion::OccurrenceId;
-use retrieval::packing::{OptionalBound, OptionalBounds};
+use retrieval::packing::{OptionalBound, OptionalBounds, RequiredContextFailure};
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
 use support::packing::{
-    ByteEstimator, Fixture, ToolSpan, bounds, tool_range, tool_span, while_connection_is_held,
+    Fixture, ToolSpan, accounting_bounds, bounds, byte_profile, required_render_total, tool_range,
+    tool_span, while_connection_is_held,
 };
 
 const REQUIRED: ToolSpan = tool_span("req", "1", "required bytes\n");
@@ -49,28 +50,28 @@ fn run(
     optional_bounds: &OptionalBounds,
     budget: u64,
 ) -> (Result<OptionalAdmission, PreparationRefusal>, PackingTrace) {
-    run_with(
+    run_with_profile(
         fixture,
         optional_requests,
         optional_bounds,
         budget,
-        &ByteEstimator,
+        &byte_profile(),
     )
 }
 
-fn run_with(
+fn run_with_profile(
     fixture: &Fixture,
     optional_requests: &[OptionalRequest],
     optional_bounds: &OptionalBounds,
     budget: u64,
-    estimator: &dyn CostEstimator,
+    profile: &AccountingProfile,
 ) -> (Result<OptionalAdmission, PreparationRefusal>, PackingTrace) {
     run_under(
         fixture,
         optional_requests,
         optional_bounds,
         budget,
-        estimator,
+        profile,
         &EvalBudget::unbounded(),
     )
 }
@@ -81,7 +82,7 @@ fn run_under(
     optional_requests: &[OptionalRequest],
     optional_bounds: &OptionalBounds,
     budget: u64,
-    estimator: &dyn CostEstimator,
+    profile: &AccountingProfile,
     eval: &EvalBudget,
 ) -> (Result<OptionalAdmission, PreparationRefusal>, PackingTrace) {
     let mut trace = PackingTrace::default();
@@ -91,13 +92,14 @@ fn run_under(
         project: &fixture.project,
         destination: kernel::ArtifactDestination::Local,
         budget: eval,
-        estimator,
+        profile,
     };
     let required = prepare_required(
         &fixture.store,
         inputs,
         &[REQUIRED.request()],
         &bounds(budget),
+        &accounting_bounds(),
         &mut trace,
     )
     .unwrap();
@@ -107,6 +109,7 @@ fn run_under(
         &required,
         optional_requests,
         optional_bounds,
+        &accounting_bounds(),
         &mut trace,
     );
     (result, trace)
@@ -129,30 +132,70 @@ fn optional_starts_after_the_last_required_event(trace: &PackingTrace) {
 
 #[test]
 fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget() {
-    let eleven = tool_span("opt-a", "1", "elevenbytes");
+    let eleven = tool_span(
+        "opt-a",
+        "1",
+        "a group whose rendered cost alone exceeds what the other two cost together, \
+         so the scan must skip it and continue to the smaller groups behind it",
+    );
     let four = tool_span("opt-b", "1", "four");
     let six = tool_span("opt-c", "1", "sixsix");
-    assert_eq!(
-        (eleven.payload.len(), four.payload.len(), six.payload.len()),
-        (11, 4, 6)
-    );
     let fixture = Fixture::new(&[REQUIRED, eleven, four, six]);
-    let budget = REQUIRED.payload.len() as u64 + 10;
     let requests = [optional(&eleven), optional(&four), optional(&six)];
-    let (result, trace) = run(&fixture, &requests, &wide(), budget);
+    let required_charge = required_render_total(&[REQUIRED]);
+
+    let (generous, _) = run(&fixture, &requests, &wide(), 1 << 20);
+    let generous = generous.unwrap();
+    let cost_of = |first_fused: usize| {
+        generous
+            .admitted()
+            .iter()
+            .find(|group| group.group.first_fused == first_fused)
+            .map(|group| group.cost.get())
+            .unwrap()
+    };
+    let (big, small, medium) = (cost_of(0), cost_of(1), cost_of(2));
+    assert!(small < medium && medium < big, "{small} {medium} {big}");
+    for group in generous.admitted() {
+        assert_eq!(
+            group.cost,
+            ClaudeTokens::new(render::group_fragment(&group.group).len() as u64),
+            "a group's cost is its rendered delta under the byte profile"
+        );
+    }
+    assert_eq!(
+        generous
+            .ledger()
+            .entries()
+            .iter()
+            .map(|entry| entry.bytes)
+            .sum::<usize>(),
+        generous.ledger().text().len()
+    );
+
+    let remaining = small + medium;
+    assert!(big > remaining, "the first group alone must not fit");
+    // The budget covers the closed render, so the block close is part of it.
+    let close = render::BLOCK_CLOSE_FRAGMENT.len() as u64;
+    let (result, trace) = run(
+        &fixture,
+        &requests,
+        &wide(),
+        required_charge + remaining + close,
+    );
     let admission = result.unwrap();
     let admitted: Vec<_> = admission
-        .admitted
+        .admitted()
         .iter()
         .map(|group| (group.group.first_fused, group.cost.get()))
         .collect();
-    assert_eq!(admitted, vec![(1, 4), (2, 6)]);
-    assert_eq!(admission.skipped.len(), 1);
-    assert_eq!(admission.skipped[0].group.first_fused, 0);
-    assert_eq!(admission.skipped[0].cost, ClaudeTokens::new(11));
-    assert_eq!(admission.remaining, ClaudeTokens::new(0));
-    assert!(admission.excluded.is_empty());
-    assert!(admission.ungrouped.is_empty());
+    assert_eq!(admitted, vec![(1, small), (2, medium)]);
+    assert_eq!(admission.skipped().len(), 1);
+    assert_eq!(admission.skipped()[0].group.first_fused, 0);
+    assert_eq!(admission.skipped()[0].cost, ClaudeTokens::new(big));
+    assert_eq!(admission.remaining(), ClaudeTokens::new(0));
+    assert!(admission.excluded().is_empty());
+    assert!(admission.ungrouped().is_empty());
     assert_eq!(trace.payload_loads(), 4);
     assert_eq!(
         trace
@@ -164,10 +207,23 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
         "the non-empty optional batch was judged once"
     );
     optional_starts_after_the_last_required_event(&trace);
+    let text = admission.ledger().text();
+    assert!(text.starts_with("<packed-context>\n<required"));
+    assert!(text.ends_with("</group>\n</packed-context>\n"));
+    assert!(
+        !text.contains("so the scan must skip it"),
+        "a skipped group is not rendered"
+    );
+    assert!(text.contains("four") && text.contains("sixsix"));
 
-    let (spare, _) = run(&fixture, &requests[1..], &wide(), budget + 3);
+    let (spare, _) = run(
+        &fixture,
+        &requests[1..],
+        &wide(),
+        required_charge + remaining + close + 3,
+    );
     assert_eq!(
-        spare.unwrap().remaining,
+        spare.unwrap().remaining(),
         ClaudeTokens::new(3),
         "unused budget is success"
     );
@@ -183,51 +239,246 @@ fn same_parent_spans_group_and_are_charged_as_one_merged_range() {
     let requests = [optional(&other), optional(&a), optional(&b), optional(&c)];
     let (result, _) = run(&fixture, &requests, &wide(), 1 << 20);
     let admission = result.unwrap();
-    assert_eq!(admission.admitted.len(), 2);
-    assert_eq!(admission.admitted[0].group.first_fused, 0);
-    let grouped = &admission.admitted[1].group;
-    assert_eq!(grouped.first_fused, 1);
-    assert_eq!(grouped.ranges.len(), 2);
-    assert_eq!(grouped.ranges[0].bytes, PARENT.as_bytes()[0..10]);
-    assert_eq!(grouped.ranges[1].bytes, PARENT.as_bytes()[15..20]);
-    assert_eq!(admission.admitted[1].cost, ClaudeTokens::new(15));
+    assert_eq!(admission.admitted().len(), 2);
+    assert_eq!(admission.admitted()[0].group.first_fused, 0);
+    let grouped = &admission.admitted()[1];
+    assert_eq!(grouped.group.first_fused, 1);
+    assert_eq!(grouped.group.ranges.len(), 2);
+    assert_eq!(grouped.group.ranges[0].bytes, PARENT.as_bytes()[0..10]);
+    assert_eq!(grouped.group.ranges[1].bytes, PARENT.as_bytes()[15..20]);
+    assert_eq!(
+        grouped.cost,
+        ClaudeTokens::new(render::group_fragment(&grouped.group).len() as u64)
+    );
+    let wrapper_entries: Vec<_> = admission
+        .ledger()
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry.item, Charged::GroupOpen(1) | Charged::GroupClose(1)))
+        .collect();
+    assert_eq!(
+        wrapper_entries.len(),
+        2,
+        "the group wrapper is charged once, as its own entries"
+    );
+    let range_entries = admission
+        .ledger()
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry.item, Charged::Range(1, _)))
+        .count();
+    assert_eq!(range_entries, 2);
 }
 
-/// Charges nothing for the required payload so the optional phase starts with
-/// the whole `u64` range, and more than half of it for every other range.
-struct HalfPlusOneEstimator;
-
-impl CostEstimator for HalfPlusOneEstimator {
-    fn profile(&self) -> &'static str {
-        "half-plus-one"
-    }
-
-    fn cost(&self, bytes: &[u8]) -> ClaudeTokens {
-        if bytes == REQUIRED.payload.as_bytes() {
-            ClaudeTokens::new(0)
-        } else {
-            ClaudeTokens::new(u64::MAX / 2 + 1)
+/// The scan deducts each group's priced cost from the budget; the ledger
+/// charges the group's entries. The two must agree under a profile whose
+/// headroom rounds per charge, and the budget must cover the closed render.
+#[test]
+fn a_groups_priced_cost_equals_its_charged_entries_and_the_budget_covers_the_closed_render() {
+    let a = tool_range("tool", PARENT, 0, 6);
+    let b = tool_range("tool", PARENT, 4, 10);
+    let c = tool_range("tool", PARENT, 15, 20);
+    let other = tool_span("other", "1", "zz");
+    let fixture = Fixture::new(&[REQUIRED, a, b, c, other]);
+    let requests = [optional(&other), optional(&a), optional(&b), optional(&c)];
+    let headroom = AccountingProfile::heuristic("bytes-over-four", "bytes/4", 250, |text| {
+        text.len().div_ceil(4)
+    });
+    for profile in [
+        byte_profile(),
+        headroom,
+        AccountingProfile::exact_tokenizer(),
+    ] {
+        let limit = 1 << 20;
+        let (result, _) = run_with_profile(&fixture, &requests, &wide(), limit, &profile);
+        let admission = result.unwrap();
+        assert_eq!(admission.admitted().len(), 2, "{}", profile.identity());
+        for (index, group) in admission.admitted().iter().enumerate() {
+            let charged = admission
+                .ledger()
+                .entries()
+                .iter()
+                .filter(|entry| match entry.item {
+                    Charged::GroupOpen(i) | Charged::Range(i, _) | Charged::GroupClose(i) => {
+                        i == index
+                    }
+                    _ => false,
+                })
+                .map(|entry| entry.charge.with_headroom().get())
+                .sum::<u64>();
+            assert_eq!(
+                group.cost.get(),
+                charged,
+                "{}: group {index} priced {} but charged {charged}",
+                profile.identity(),
+                group.cost.get()
+            );
         }
+        assert_eq!(
+            limit - admission.remaining().get(),
+            admission.ledger().total_with_headroom().get(),
+            "{}: the budget consumed equals the closed ledger's total",
+            profile.identity()
+        );
     }
+}
+
+/// A heuristic whose count is not monotonic in the render: an odd number of
+/// rendered spans counts as more than half the `u64` range, an even number as
+/// nothing. The required render has no span and costs nothing; a group of
+/// three ranges is priced at two deltas above half the range, whose sum is
+/// unrepresentable.
+fn half_plus_one_on_odd_spans() -> AccountingProfile {
+    AccountingProfile::heuristic("half-plus-one", "odd spans", 0, |text| {
+        if text.matches("<span").count() % 2 == 1 {
+            (u64::MAX / 2 + 1) as usize
+        } else {
+            0
+        }
+    })
 }
 
 #[test]
 fn a_group_whose_cost_overflows_is_refused_not_admitted_at_a_saturated_cost() {
     let a = tool_range("tool", PARENT, 0, 6);
+    let b = tool_range("tool", PARENT, 8, 12);
     let c = tool_range("tool", PARENT, 15, 20);
-    let fixture = Fixture::new(&[REQUIRED, a, c]);
-    let requests = [optional(&a), optional(&c)];
-    let (result, _) = run_with(
+    let fixture = Fixture::new(&[REQUIRED, a, b, c]);
+    let requests = [optional(&a), optional(&b), optional(&c)];
+    let (result, _) = run_with_profile(
         &fixture,
         &requests,
         &wide(),
         u64::MAX,
-        &HalfPlusOneEstimator,
+        &half_plus_one_on_odd_spans(),
     );
     match result {
         Err(PreparationRefusal::OptionalCostOverflow { at }) => assert_eq!(at, 0),
         other => panic!("an unrepresentable cost must not be admitted: {other:?}"),
     }
+}
+
+/// The required phase reserves the block open and the required fragments;
+/// the optional phase must still close the block. A limit the required render
+/// meets exactly leaves no room for the close, so the optional phase refuses
+/// rather than returning a render the budget does not cover.
+#[test]
+fn a_required_render_that_leaves_no_room_for_the_close_refuses_the_optional_phase() {
+    let a = tool_span("opt-a", "1", "aaaa");
+    let fixture = Fixture::new(&[REQUIRED, a]);
+    let limit = required_render_total(&[REQUIRED]);
+    for requests in [&[][..], &[optional(&a)][..]] {
+        let (result, _) = run(&fixture, requests, &wide(), limit);
+        match result {
+            Err(PreparationRefusal::Required(RequiredContextFailure::OverBudget {
+                limit: reported,
+                charged,
+            })) => {
+                assert_eq!(reported, ClaudeTokens::new(limit));
+                assert_eq!(
+                    charged,
+                    ClaudeTokens::new(limit + BLOCK_CLOSE_FRAGMENT.len() as u64)
+                );
+            }
+            Ok(admission) => panic!(
+                "the closed render is {} tokens over a {limit} limit: {admission:?}",
+                admission.ledger().total_with_headroom().get()
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// A heuristic whose count scales with the rendered prefix prices the close
+/// higher after a group is admitted than the reserve taken before the scan.
+/// The budget is set so the group fits the scan exactly; the closed render
+/// then exceeds the limit by the drift, and the phase refuses rather than
+/// returning it.
+#[test]
+fn a_close_priced_above_its_reserve_after_admission_refuses_the_optional_phase() {
+    let a = tool_span("opt-a", "1", "aaaa");
+    let fixture = Fixture::new(&[REQUIRED, a]);
+    let prefix_scaled =
+        AccountingProfile::heuristic("prefix-scaled", "len*(1+groups)", 0, |text| {
+            text.len() * (1 + text.matches("</group>").count())
+        });
+    let (probe, _) = run_with_profile(&fixture, &[optional(&a)], &wide(), 1 << 20, &prefix_scaled);
+    let probe = probe.unwrap();
+    assert_eq!(probe.admitted().len(), 1);
+    let closed = probe.ledger().total_with_headroom().get();
+    let close_entry = probe
+        .ledger()
+        .entries()
+        .iter()
+        .find(|entry| entry.item == Charged::BlockClose)
+        .unwrap()
+        .charge
+        .with_headroom()
+        .get();
+    let reserve = BLOCK_CLOSE_FRAGMENT.len() as u64;
+    assert!(
+        close_entry > reserve,
+        "the profile must drift: {close_entry} vs {reserve}"
+    );
+    let limit = closed - (close_entry - reserve);
+    let (result, _) = run_with_profile(&fixture, &[optional(&a)], &wide(), limit, &prefix_scaled);
+    match result {
+        Err(PreparationRefusal::CloseOverBudget {
+            limit: reported,
+            charged,
+        }) => {
+            assert_eq!(reported, ClaudeTokens::new(limit));
+            assert_eq!(charged, ClaudeTokens::new(closed));
+        }
+        Ok(admission) => panic!(
+            "the closed render is {} tokens over a {limit} limit: {admission:?}",
+            admission.ledger().total_with_headroom().get()
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The close is priced after the last deadline poll of the scan; a budget
+/// that ends inside that pricing still refuses the phase.
+#[test]
+fn a_budget_that_ends_while_the_close_is_priced_refuses_the_optional_phase() {
+    let a = tool_span("opt-a", "1", "aaaa");
+    let fixture = Fixture::new(&[REQUIRED, a]);
+    let budget = EvalBudget::unbounded();
+    let cancelling = budget.clone();
+    let profile = AccountingProfile::heuristic("cancels-at-close", "cancels", 0, move |text| {
+        if text.ends_with(&format!("</group>\n{BLOCK_CLOSE_FRAGMENT}")) {
+            cancelling.cancel();
+        }
+        text.len()
+    });
+    let mut trace = PackingTrace::default();
+    let inputs = RequiredInputs {
+        kernel: &fixture.kernel,
+        project: &fixture.project,
+        destination: kernel::ArtifactDestination::Local,
+        budget: &budget,
+        profile: &profile,
+    };
+    let required = prepare_required(
+        &fixture.store,
+        inputs,
+        &[REQUIRED.request()],
+        &bounds(1 << 20),
+        &accounting_bounds(),
+        &mut trace,
+    )
+    .unwrap();
+    let result = prepare_optional(
+        &fixture.store,
+        inputs,
+        &required,
+        &[optional(&a)],
+        &wide(),
+        &accounting_bounds(),
+        &mut trace,
+    );
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
 }
 
 #[test]
@@ -272,11 +523,11 @@ fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation()
     ];
     let (result, trace) = run(&fixture, &requests, &wide(), 1 << 20);
     let admission = result.unwrap();
-    assert_eq!(admission.admitted.len(), 1);
+    assert_eq!(admission.admitted().len(), 1);
     // `Duplicate` names the later request; the identity's first request still
     // carries its own reason, so a repeated missing identity reports both.
     assert_eq!(
-        admission.excluded,
+        admission.excluded(),
         vec![
             (live.id(), OptionalExclusion::Duplicate),
             (unknown.id(), OptionalExclusion::Duplicate),
@@ -307,7 +558,7 @@ fn an_optional_bound_at_limit_plus_one_refuses_with_the_bound_before_any_load() 
         ..wide()
     };
     let (ok, _) = run(&fixture, &requests, &two, 1 << 20);
-    assert_eq!(ok.unwrap().admitted.len(), 2);
+    assert_eq!(ok.unwrap().admitted().len(), 2);
     let one = OptionalBounds {
         max_fused_candidates: NonZeroUsize::MIN,
         ..wide()
@@ -387,12 +638,12 @@ fn a_corrupt_optional_payload_is_excluded_and_the_scan_continues() {
     );
     let admission = result.unwrap();
     assert_eq!(
-        admission.excluded,
+        admission.excluded(),
         vec![(damaged.id(), OptionalExclusion::Corrupt)]
     );
-    assert_eq!(admission.admitted.len(), 1);
+    assert_eq!(admission.admitted().len(), 1);
     assert_eq!(
-        admission.admitted[0].group.members().collect::<Vec<_>>(),
+        admission.admitted()[0].group.members().collect::<Vec<_>>(),
         vec![sound.id()]
     );
     assert_eq!(
@@ -418,6 +669,7 @@ fn a_deadline_that_passes_while_the_connection_is_held_refuses_the_optional_phas
         Arc::new(AtomicBool::new(false)),
     );
     let mut trace = PackingTrace::default();
+    let profile = byte_profile();
     let (waited, result) = while_connection_is_held(&fixture, || {
         prepare_optional(
             &fixture.store,
@@ -426,11 +678,12 @@ fn a_deadline_that_passes_while_the_connection_is_held_refuses_the_optional_phas
                 project: &fixture.project,
                 destination: kernel::ArtifactDestination::Local,
                 budget: &short,
-                estimator: &ByteEstimator,
+                profile: &profile,
             },
             &required,
             &[optional(&a)],
             &wide(),
+            &accounting_bounds(),
             &mut trace,
         )
     });
@@ -451,32 +704,27 @@ fn a_deadline_that_passes_while_the_connection_is_held_refuses_the_optional_phas
 /// returning an admission, as the required phase refuses its reservation.
 #[test]
 fn a_budget_that_ends_during_optional_costing_refuses_the_admission() {
-    /// Charges the required payload and cancels the budget on the first
-    /// optional range.
-    struct CancellingEstimator(EvalBudget);
-
-    impl CostEstimator for CancellingEstimator {
-        fn profile(&self) -> &'static str {
-            "cancels-on-first-optional-cost"
-        }
-
-        fn cost(&self, bytes: &[u8]) -> ClaudeTokens {
-            if bytes != REQUIRED.payload.as_bytes() {
-                self.0.cancel();
-            }
-            ClaudeTokens::new(bytes.len() as u64)
-        }
-    }
-
     let a = tool_span("opt-a", "1", "aaaa");
     let fixture = Fixture::new(&[REQUIRED, a]);
     let budget = EvalBudget::unbounded();
+    let cancelling = budget.clone();
+    let profile = AccountingProfile::heuristic(
+        "cancels-on-first-optional-cost",
+        "cancels",
+        0,
+        move |text| {
+            if text.contains("<span") {
+                cancelling.cancel();
+            }
+            text.len()
+        },
+    );
     let (result, trace) = run_under(
         &fixture,
         &[optional(&a)],
         &wide(),
         1 << 20,
-        &CancellingEstimator(budget.clone()),
+        &profile,
         &budget,
     );
     assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
@@ -531,11 +779,12 @@ fn an_optional_set_with_no_live_row_completes_without_a_kernel_judgment() {
                 project: &fixture.project,
                 destination: kernel::ArtifactDestination::Local,
                 budget: &short,
-                estimator: &ByteEstimator,
+                profile: &byte_profile(),
             },
             &required,
             &missing,
             &wide(),
+            &accounting_bounds(),
             &mut trace,
         );
         assert!(
@@ -546,11 +795,11 @@ fn an_optional_set_with_no_live_row_completes_without_a_kernel_judgment() {
         (result, trace)
     });
     let admission = result.unwrap();
-    assert!(admission.admitted.is_empty());
-    assert_eq!(admission.excluded.len(), 3);
+    assert!(admission.admitted().is_empty());
+    assert_eq!(admission.excluded().len(), 3);
     assert!(
         admission
-            .excluded
+            .excluded()
             .iter()
             .all(|(_, exclusion)| *exclusion == OptionalExclusion::Missing)
     );

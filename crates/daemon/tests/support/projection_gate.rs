@@ -76,6 +76,7 @@ pub fn passing_evaluator(
                 .collect(),
             enabled: enabled.iter().map(|hook| (*hook, true)).collect(),
             compressed_activation: true,
+            packing: None,
         },
         current: current.clone(),
         evidence: Evidence {
