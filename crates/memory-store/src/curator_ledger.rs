@@ -383,6 +383,27 @@ fn authority_matches(receipt: &CuratorReceipt, current: Option<(String, i64)>) -
     })
 }
 
+/// The newest instant the ledger already holds for the job: every marker commit and terminal, the receipt's creation and latest takeover, and every claim's creation. A write dated before it is a clock that stepped back and is refused as `ClockBehind` rather than judged against a time the ledger has already passed.
+fn ledger_clock_floor(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    causal_identity: &str,
+) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT MAX(
+             COALESCE((SELECT MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0))
+                         FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2), 0),
+             COALESCE((SELECT MAX(created_at_ms, updated_at_ms) FROM curator_receipts
+                        WHERE project = ?1 AND causal_identity = ?2), 0),
+             COALESCE((SELECT MAX(created_at_ms) FROM note_eval_claims
+                        WHERE project = ?1 AND task_kind = ?3
+                          AND note_id = (SELECT job_id FROM curator_jobs
+                                          WHERE project = ?1 AND causal_identity = ?2)), 0))",
+        params![project, causal_identity, CURATOR_REVIEW_TASK.task_kind],
+        |row| row.get(0),
+    )
+}
+
 /// The job's queue deadline while it is still Ready and inside that deadline; `None` once it is not open for any attempt or handoff.
 fn job_open_deadline(
     conn: &GuardedConn<'_>,
@@ -580,14 +601,8 @@ pub fn commit_curator_attempt_in_tx(
         .min(claim_expires_at);
     let request_bytes = i64::try_from(marker.request_bytes)
         .map_err(|_| refuse(CuratorLedgerRefusal::InvalidRequest))?;
-    // A lagging clock is refused by name: it leaves the allowance untouched, unlike exhaustion. The floor is the newest event the ledger holds for the job, a marker commit or a recorded terminal.
-    let newest_event_ms: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0)), 0)
-           FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2",
-        params![project, causal_identity],
-        |row| row.get(0),
-    )?;
-    if now_ms < newest_event_ms {
+    // A lagging clock is refused by name: it leaves the allowance untouched, unlike exhaustion. The floor is the newest instant the ledger holds for the job.
+    if now_ms < ledger_clock_floor(conn, project, causal_identity)? {
         return Err(refuse(CuratorLedgerRefusal::ClockBehind));
     }
     // The allowance and the clock floor are evaluated inside the statement: at most four markers across every generation, and no marker dated before an earlier commit or terminal.
@@ -664,14 +679,8 @@ pub fn finish_curator_attempt_in_tx(
         )
         .optional()?;
     if let Some((_, deadline)) = window {
-        // The floor is the newest event the ledger holds for the job, not only this marker's commit: a terminal dated before a later marker or terminal is a clock behind the ledger.
-        let newest_event_ms: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0)), 0)
-               FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2",
-            params![project, causal_identity],
-            |row| row.get(0),
-        )?;
-        if now_ms < newest_event_ms {
+        // The floor is the newest instant the ledger holds for the job, not only this marker's commit: a terminal dated before a later marker, terminal, takeover, or claim is a clock behind the ledger.
+        if now_ms < ledger_clock_floor(conn, project, causal_identity)? {
             return Err(refuse(CuratorLedgerRefusal::ClockBehind));
         }
         if terminal == CuratorAttemptTerminal::Complete && now_ms >= deadline {
@@ -942,9 +951,12 @@ impl MemoryStore {
             if receipt.cancelled_at_ms.is_some() {
                 return Ok(WriteDisposition::Replay(()));
             }
-            // Past the run deadline the run is already over; a late cancellation must not turn its `expired` into `cancelled`.
+            // Past the run deadline the run is already over; a late cancellation must not turn its `expired` into `cancelled`. A cancellation dated before the ledger's newest instant is a clock that stepped back.
             if now_ms >= receipt.run_deadline_ms {
                 return Err(refuse(CuratorLedgerRefusal::Cutoff));
+            }
+            if now_ms < ledger_clock_floor(conn, project, causal_identity)? {
+                return Err(refuse(CuratorLedgerRefusal::ClockBehind));
             }
             conn.execute(
                 "UPDATE curator_receipts SET cancelled_at_ms = ?3, updated_at_ms = ?3
@@ -1140,7 +1152,12 @@ impl MemoryStore {
         selection: Option<&ResultSelection>,
         now_ms: i64,
     ) -> Result<LeaseCompleteOutcome, MemoryStoreError> {
+        // `Cancelled` and `Expired` are derived from the receipt's own state below; a worker cannot supply them.
         if (terminal == CuratorReceiptTerminal::Complete) != selection.is_some()
+            || matches!(
+                terminal,
+                CuratorReceiptTerminal::Cancelled | CuratorReceiptTerminal::Expired
+            )
             || selection.is_some_and(|selection| {
                 !is_lower_hex(&selection.payload_digest, 64)
                     || selection.candidate_id.is_empty()
@@ -1162,25 +1179,42 @@ impl MemoryStore {
         else {
             return Ok(LeaseCompleteOutcome::Conflict { kind: "fenced" });
         };
-        // A completion dated before any event the ledger already holds for the job, a marker commit or a terminal in any generation, is a clock that stepped back, whatever terminal it reports; the claim survives so the worker can retry once it catches up.
-        let attempts = self.list_curator_attempts(project, causal_identity)?;
-        let newest_event_ms = attempts
-            .iter()
-            .flat_map(|attempt| {
-                std::iter::once(attempt.committed_at_ms)
-                    .chain(attempt.terminal.map(|(_, at_ms)| at_ms))
-            })
-            .max();
-        if newest_event_ms.is_some_and(|newest| now_ms < newest) {
-            return Ok(LeaseCompleteOutcome::Conflict {
-                kind: "clock_behind",
-            });
+        // A claim already terminal has nothing left to decide: the lease ledger replays its stored response or reports the conflict, and the clock and evidence checks for a new completion do not apply.
+        let (claim_terminal, floor): (bool, i64) = self.inner.with_conn(|conn| {
+            let terminal: Option<bool> = conn
+                .query_row(
+                    "SELECT terminal_kind IS NOT NULL FROM note_eval_claims
+                      WHERE project = ?1 AND task_kind = ?2 AND claim_id = ?3",
+                    params![project, CURATOR_REVIEW_TASK.task_kind, claim_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok((
+                terminal.unwrap_or(false),
+                ledger_clock_floor(conn, project, causal_identity)?,
+            ))
+        })?;
+        if !claim_terminal {
+            // The receipt's Kernel binding is checked here as well, so a mismatch is a refusal rather than a stale write that ends the claim.
+            if receipt.kernel_incarnation_id != kernel_incarnation_id {
+                return Ok(LeaseCompleteOutcome::Conflict {
+                    kind: "binding_mismatch",
+                });
+            }
+            // A completion dated before any instant the ledger already holds for the job is a clock that stepped back, whatever terminal it reports; the claim survives so the worker can retry once it catches up.
+            if now_ms < floor {
+                return Ok(LeaseCompleteOutcome::Conflict {
+                    kind: "clock_behind",
+                });
+            }
         }
+        let attempts = self.list_curator_attempts(project, causal_identity)?;
         // A published result must come from an attempt this generation closed `complete` inside its budget; the store has no other evidence the selection exists. A complete terminal never reverts, so this read outside the lease is authoritative, and the claim survives the refusal. A receipt already cancelled or past its run deadline records that instead, so it needs no evidence here; the transaction below reads the row again before it decides.
         let publishing = terminal == CuratorReceiptTerminal::Complete
             && receipt.cancelled_at_ms.is_none()
             && now_ms < receipt.run_deadline_ms;
-        if publishing
+        if !claim_terminal
+            && publishing
             && !attempts.iter().any(|attempt| {
                 i64::try_from(attempt.generation).ok() == Some(generation)
                     && matches!(
@@ -1213,16 +1247,14 @@ impl MemoryStore {
                     (terminal, selection)
                 };
                 // The clock and evidence checks made before the lease are repeated here, serialized with the write: a dispatch that landed in between leaves a newer event, and a completion dated before it, or a publication no longer backed, is stale rather than written.
-                let (backed, newest_event_ms): (bool, i64) = tx.query_row(
+                let backed: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM curator_attempts
                                     WHERE project = ?1 AND causal_identity = ?2
-                                      AND generation = ?3 AND terminal_kind = 'complete'),
-                            COALESCE(MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0)), 0)
-                       FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2",
+                                      AND generation = ?3 AND terminal_kind = 'complete')",
                     params![project, causal_identity, generation],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| row.get(0),
                 )?;
-                if now_ms < newest_event_ms
+                if now_ms < ledger_clock_floor(tx, project, causal_identity)?
                     || (terminal == CuratorReceiptTerminal::Complete && !backed)
                 {
                     return Ok(LeaseCompletion::Stale);

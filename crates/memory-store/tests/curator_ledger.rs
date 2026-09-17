@@ -542,13 +542,14 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
         before,
         "an ambiguous marker survives reopen exactly as committed"
     );
-    // Cancellation withholds the handoff too, and refuses further markers.
+    // Cancellation withholds the handoff too, and refuses further markers. The clock has passed the recorded no-disclosure proof.
+    let after_proof = T0 + 5 + CURATOR_ATTEMPT_MAX_MS;
     fixture
         .store
-        .cancel_curator_receipt(PROJECT, &fixture.identity, T0 + 6)
+        .cancel_curator_receipt(PROJECT, &fixture.identity, after_proof)
         .unwrap();
     assert_eq!(
-        refusal(fixture.dispatch(1, &claim, T0 + 7).unwrap_err()),
+        refusal(fixture.dispatch(1, &claim, after_proof + 1).unwrap_err()),
         CuratorLedgerRefusal::Cancelled
     );
     assert_eq!(fixture.attempts(), 2);
@@ -3045,4 +3046,142 @@ fn every_completion_terminal_is_floored_at_the_newest_attempt_event() {
         }
     );
     assert_eq!(receipt(&fixture).terminal, None);
+}
+
+#[test]
+fn a_marker_dated_before_its_receipt_is_refused_as_clock_behind() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0 + 50);
+    assert_eq!(
+        refusal(fixture.dispatch(1, &claim, T0 + 40).unwrap_err()),
+        CuratorLedgerRefusal::ClockBehind
+    );
+    assert_eq!(fixture.attempts(), 0);
+}
+
+#[test]
+fn a_backdated_cancellation_is_refused_as_clock_behind() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    assert!(matches!(
+        fixture.dispatch(1, &claim, T0 + 30).unwrap(),
+        DispatchOutcome::Handed { .. }
+    ));
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .cancel_curator_receipt(PROJECT, &fixture.identity, T0 + 20)
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::ClockBehind
+    );
+    assert_eq!(receipt(&fixture).cancelled_at_ms, None);
+}
+
+#[test]
+fn a_terminal_completion_replays_before_any_clock_or_evidence_check() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    fixture.completed_attempt(1, &claim, T0 + 10);
+    let first = complete(
+        &fixture,
+        &fixture.identity,
+        &claim,
+        "c-1",
+        "worker-a",
+        1,
+        CuratorReceiptTerminal::Complete,
+        Some(&selection()),
+        T0 + 12,
+    )
+    .unwrap();
+    let LeaseCompleteOutcome::Applied { response_json } = first else {
+        panic!("{first:?}")
+    };
+    // The response was lost; the retry carries the same completion id and a clock that has stepped back.
+    assert_eq!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Complete,
+            Some(&selection()),
+            T0 + 5,
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Replayed { response_json }
+    );
+}
+
+#[test]
+fn derived_receipt_terminals_cannot_be_supplied_by_the_worker() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    for terminal in [
+        CuratorReceiptTerminal::Cancelled,
+        CuratorReceiptTerminal::Expired,
+    ] {
+        assert_eq!(
+            complete(
+                &fixture,
+                &fixture.identity,
+                &claim,
+                "c-1",
+                "worker-a",
+                1,
+                terminal,
+                None,
+                T0 + 1,
+            )
+            .unwrap(),
+            LeaseCompleteOutcome::Conflict { kind: "invalid" }
+        );
+    }
+    assert_eq!(receipt(&fixture).terminal, None);
+}
+
+#[test]
+fn a_kernel_binding_mismatch_is_refused_before_the_lease_is_spent() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    assert_eq!(
+        fixture
+            .store
+            .complete_curator_receipt(
+                PROJECT,
+                &fixture.identity,
+                &claim,
+                "c-1",
+                "worker-a",
+                0,
+                1,
+                &"1b".repeat(16),
+                CuratorReceiptTerminal::Failed,
+                None,
+                T0 + 1,
+            )
+            .unwrap(),
+        LeaseCompleteOutcome::Conflict {
+            kind: "binding_mismatch"
+        }
+    );
+    assert!(
+        matches!(
+            fixture
+                .store
+                .renew_curator_task(PROJECT, &claim, "worker-a", 0, fixture.registration, T0 + 2)
+                .unwrap(),
+            memory_store::NoteEvalRenewOutcome::Renewed { .. }
+        ),
+        "the claim survives a binding mismatch"
+    );
 }
