@@ -1016,13 +1016,28 @@ fn frozen_pages_are_bounded_retained_under_deferral_and_enqueued_once() {
             .contains("deadline has passed"),
         "a late enqueue is refused as expired"
     );
+    // Any completion at or after the deadline is refused the same way, so the receipt does not depend on whether the sweep ran first.
+    assert_eq!(
+        refusal(
+            store
+                .complete_frozen_selection(
+                    "proj-1",
+                    "slot-1",
+                    "attempt-1",
+                    FrozenSelectionState::FailedSlot,
+                    NOW + CURATOR_QUEUE_LIFETIME_MS
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::Expired
+    );
     let failed = store
         .complete_frozen_selection(
-            "proj-1",
+            "proj-2",
             "slot-1",
             "attempt-1",
             FrozenSelectionState::FailedSlot,
-            NOW + CURATOR_QUEUE_LIFETIME_MS,
+            NOW + 20,
         )
         .unwrap();
     assert_eq!(failed.state, FrozenSelectionState::FailedSlot);

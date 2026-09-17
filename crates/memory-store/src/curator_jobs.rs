@@ -816,7 +816,7 @@ pub fn freeze_selection_in_tx(
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
-/// Moves a frozen page to a terminal state, dropping its references and cursor and releasing its allowance; the receipt charge stays. An `Enqueued` result still carries the page, so the caller advances its slot to `next_cursor` in the same transaction; `Expired` and `FailedSlot` return a compact receipt and leave the cursor where it was. Capacity deferral is not a state: the page stays `frozen` in its slot for a later attempt.
+/// Moves a frozen page to a terminal state, dropping its references and cursor and releasing its allowance; the receipt charge stays. An `Enqueued` result still carries the page, so the caller advances its slot to `next_cursor` in the same transaction; `Expired` and `FailedSlot` return a compact receipt and leave the cursor where it was. Any completion at or after the selection deadline is refused as expired and left for the sweep, so the receipt does not depend on transaction ordering. Capacity deferral is not a state: the page stays `frozen` in its slot for a later attempt.
 pub fn complete_frozen_selection_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -833,7 +833,7 @@ pub fn complete_frozen_selection_in_tx(
     if existing.state != FrozenSelectionState::Frozen {
         return Err(refuse(CuratorJobRefusal::Terminal));
     }
-    if state == FrozenSelectionState::Enqueued && existing.selection_deadline_ms <= now_ms {
+    if existing.selection_deadline_ms <= now_ms {
         return Err(refuse(CuratorJobRefusal::Expired));
     }
     conn.execute(
