@@ -335,7 +335,7 @@ pub struct DisclosureLedger {
     cited: BTreeSet<Alias>,
     /// Set when any attempt's outcome is unknown: bytes may have reached the model without a recorded disclosure.
     uncertain: bool,
-    /// Set when a capacity refusal followed a disclosure: the model reasoned over a truncated evidence set.
+    /// Set when a capacity refusal withheld requested evidence: the model reasoned over a truncated evidence set.
     partial: bool,
     union: PolicyUnion,
 }
@@ -393,11 +393,9 @@ impl DisclosureLedger {
         &self.union
     }
 
-    /// A capacity refusal after at least one disclosure leaves the evidence set truncated.
+    /// A capacity refusal leaves the evidence set truncated whether it came before or after a disclosure: the run asked for evidence it will not see.
     pub fn record_partial_disclosure(&mut self) {
-        if !self.disclosed.is_empty() {
-            self.partial = true;
-        }
+        self.partial = true;
     }
 
     /// Whether a conclusion may be published: nothing is usable after an unknown or partial disclosure.
@@ -487,10 +485,9 @@ pub struct EvidenceRead {
     pub sensitivity: Sensitivity,
 }
 
-/// The run's Kernel-side bindings: the project scope and the execution hold every disclosed byte must be protected by.
+/// The run's Kernel-side bindings: the execution hold every disclosed byte must be protected by, whose project is the run's project.
 #[derive(Debug, Clone)]
 pub struct RunBinding {
-    pub project: ProjectScope,
     pub hold: CuratorHoldBinding,
     pub hold_id: String,
     /// Where disclosed bytes go. A remote model admits only `Normal`, remote-allowed evidence; unproven sources stay policy-blocked there.
@@ -504,6 +501,8 @@ pub struct EvidenceBroker {
     pub buffers: RunBufferMap,
     pub ledger: DisclosureLedger,
     binding: RunBinding,
+    /// The scope eligibility is judged under; derived from the hold's project so the two can never name different projects.
+    project: ProjectScope,
     /// First alias disclosed per origin key, so a second form of one decision is reported as the same origin rather than fresh support.
     origins: BTreeMap<String, Alias>,
     /// The origin key each disclosure recorded; `shared_origin` reads this rather than recomputing a key from the expectation.
@@ -524,13 +523,16 @@ pub struct EvidenceBroker {
 pub type AfterLoadHook = Box<dyn FnMut(&KernelStore)>;
 
 impl EvidenceBroker {
-    pub fn new(binding: RunBinding, question: QuestionTemplate) -> Self {
-        Self {
+    /// Refuses a hold binding whose project digest is not a digest; every other check on it is the Kernel's.
+    pub fn new(binding: RunBinding, question: QuestionTemplate) -> Result<Self, KernelError> {
+        let project = ProjectScope::new(&binding.hold.project_digest)?;
+        Ok(Self {
             aliases: AliasTable::default(),
             accounting: InvestigationAccounting::new(),
             buffers: RunBufferMap::new(MAX_RUN_BUFFER_BYTES),
             ledger: DisclosureLedger::new(question),
             binding,
+            project,
             origins: BTreeMap::new(),
             origin_keys: BTreeMap::new(),
             checked_artifacts: BTreeSet::new(),
@@ -538,7 +540,7 @@ impl EvidenceBroker {
             extended: BTreeSet::new(),
             #[cfg(feature = "test-support")]
             after_load_for_test: None,
-        }
+        })
     }
 
     /// Lowers the inspection ceiling for tests (Q23); a value above [`MAX_ISSUED_INSPECTIONS`] is clamped to it.
@@ -592,7 +594,7 @@ impl EvidenceBroker {
             .filter(|first| *first != alias))
     }
 
-    /// Reads one reference for disclosure: resolves the alias, checks the destination verdict, grows the execution hold over the artifact, revalidates the Kernel expectation at `now`, loads the bytes once, renders the requested range, runs the render check, charges the bytes, and records the disclosure. Any refusal happens before bytes are retained or disclosed, and a refusal that truncates the evidence set marks the ledger partial.
+    /// Reads one reference for disclosure: resolves the alias, checks the destination verdict, grows the execution hold over the artifact, revalidates the Kernel expectation at `now` (never earlier than the wall clock, so a stale run timestamp cannot revive an expired reference), loads the bytes once, renders the requested range, runs the render check, charges the bytes, and records the disclosure. Any refusal happens before bytes are retained or disclosed, and a refusal that truncates the evidence set marks the ledger partial.
     pub fn read(
         &mut self,
         store: &KernelStore,
@@ -616,6 +618,7 @@ impl EvidenceBroker {
         range: Option<Range<u64>>,
         now_ms: i64,
     ) -> Result<EvidenceRead, Refusal> {
+        let now_ms = now_ms.max(crate::now_ms());
         let (alias, expectation) = self
             .aliases
             .resolve(alias)
@@ -694,6 +697,10 @@ impl EvidenceBroker {
                 evidence_id,
                 occurrence_tuple,
             } => {
+                // A decision-derived class resolves only through its originating decision; issued as native it would outlive a retraction.
+                if decision_derived(*class) {
+                    return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
+                }
                 let judged = self.judge(
                     store,
                     &alias,
@@ -730,6 +737,9 @@ impl EvidenceBroker {
                 originating_decision_id,
                 decision_source_revision,
             } => {
+                if !decision_derived(*class) {
+                    return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
+                }
                 // The originating decision's standing caps the descriptor's (Q34): a retracted, superseded, or hidden decision revokes every form derived from it.
                 let judged = self.judge(
                     store,
@@ -947,7 +957,7 @@ impl EvidenceBroker {
         }
         let batch = store
             .judge_surface_eligibility(
-                &self.binding.project,
+                &self.project,
                 self.binding.destination,
                 Surface::ExplicitSearch,
                 &candidates,
@@ -1036,6 +1046,14 @@ fn hold_refusal(error: CuratorHoldError) -> RefusalCode {
             RefusalCode::Store
         }
     }
+}
+
+/// The classes whose descriptors are forms of one decision, and so carry an originating decision.
+const fn decision_derived(class: OccurrenceClass) -> bool {
+    matches!(
+        class,
+        OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory
+    )
 }
 
 /// Two excerpts or revisions of one native source are one origin: the key is the class and identity fields, without revision, representation, or span. Identity values are control-character free, so the unit separator cannot occur inside one.

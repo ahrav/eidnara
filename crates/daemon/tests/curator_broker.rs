@@ -9,10 +9,9 @@ use kernel::source_identity::{Occurrence, OccurrenceClass, Span};
 use kernel::{
     ArtifactIngestRequest, CURATOR_CAPTURE_RETENTION_CLASS, CommitIntent, CuratorHoldBinding,
     DecisionPayload, DecisionSpec, Dimension, DomainSpec, ExtractedFact, KernelStore,
-    MAX_CURATOR_HOLD_REFERENCES, ProjectScope, ProviderEgress, ReviewBinding, ReviewOwner,
-    ReviewPayload, ReviewStagingSpec, ReviewSubject, ScopeSpec, ScopeTermSpec, Sensitivity,
-    SourceDependency, SourceDescriptorPolicy, SourceDescriptorRequest, SourceSpan,
-    StagingTerminalState,
+    MAX_CURATOR_HOLD_REFERENCES, ProviderEgress, ReviewBinding, ReviewOwner, ReviewPayload,
+    ReviewStagingSpec, ReviewSubject, ScopeSpec, ScopeTermSpec, Sensitivity, SourceDependency,
+    SourceDescriptorPolicy, SourceDescriptorRequest, SourceSpan, StagingTerminalState,
 };
 use kernel::{EligibilityVerdict, SurfaceVisibility};
 use sha2::{Digest, Sha256};
@@ -175,13 +174,13 @@ impl Fixture {
             .unwrap();
         EvidenceBroker::new(
             RunBinding {
-                project: ProjectScope::new(project).unwrap(),
                 hold: binding,
                 hold_id: hold.hold_id,
                 destination,
             },
             QuestionTemplate::ExtractedFacts,
         )
+        .unwrap()
     }
 
     fn review_binding(&self) -> ReviewBinding {
@@ -1254,4 +1253,196 @@ fn a_classification_tightened_between_the_verdict_and_the_load_is_not_disclosed(
         RefusalCode::PolicyBlocked,
         "the tightened class refuses before the hold on every later read"
     );
+}
+
+#[test]
+fn a_run_has_one_project_and_it_is_the_holds() {
+    let fixture = Fixture::open();
+    let (capture_id, _) = fixture.ingest("capture", b"capture", true);
+    let hold_binding = fixture.hold_binding(PROJECT);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&hold_binding, &[capture_id], fixture.now + 2 * HOUR_MS)
+        .unwrap();
+    // The scope eligibility is judged under is derived from the hold, not supplied beside it; a hold whose project is not a digest yields no broker.
+    let mut malformed = hold_binding;
+    malformed.project_digest = "project-a".to_string();
+    assert!(
+        EvidenceBroker::new(
+            RunBinding {
+                hold: malformed,
+                hold_id: hold.hold_id,
+                destination: kernel::ArtifactDestination::Local,
+            },
+            QuestionTemplate::ExtractedFacts,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_native_reference_may_not_carry_a_decision_derived_class() {
+    let fixture = Fixture::open();
+    fixture.decision("decision-a");
+    let claim_text = "the claim as canonical text";
+    let claim_evidence = fixture.ingest("claim", claim_text.as_bytes(), false);
+    let (claim_object, claim_tuple) = fixture.descriptor(Publish {
+        key: "claim",
+        class: "canonical_claims",
+        representation: "decision_summary",
+        identity: &[("object_id", "decision-a")],
+        evidence: &claim_evidence,
+        buffer: claim_text,
+        span: None,
+    });
+    fixture
+        .store
+        .commit(intent("retire"), |envelope| {
+            envelope.retire_decision("decision-a")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&claim_evidence.0));
+    // Issued through the native variant, the retracted decision would never be judged.
+    let native = broker.aliases.issue(ReferenceExpectation::NativeSource {
+        object_id: claim_object.clone(),
+        class: OccurrenceClass::CanonicalClaims,
+        source_revision: 1,
+        artifact_digest: claim_evidence.1.clone(),
+        evidence_id: claim_evidence.0.clone(),
+        occurrence_tuple: claim_tuple,
+    });
+    assert_eq!(
+        broker
+            .read(&fixture.store, native.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::ExpectationChanged,
+        "a canonical class resolves only through its originating decision"
+    );
+    // And the converse: a canonical reference must name a decision-derived class.
+    let native_text = "a native message";
+    let native_evidence = fixture.ingest("native", native_text.as_bytes(), false);
+    let (native_object, _) = fixture.descriptor(Publish {
+        key: "native",
+        class: "messages",
+        representation: "text",
+        identity: &[
+            ("project_id", "proj-a"),
+            ("harness", "opencode"),
+            ("session_id", "sess-01"),
+            ("message_id", "msg-001"),
+            ("block_index", "0"),
+        ],
+        evidence: &native_evidence,
+        buffer: native_text,
+        span: None,
+    });
+    fixture.decision("decision-live");
+    let canonical = broker.aliases.issue(ReferenceExpectation::CanonicalSource {
+        object_id: native_object,
+        class: OccurrenceClass::Messages,
+        source_revision: 1,
+        artifact_digest: native_evidence.1,
+        evidence_id: native_evidence.0,
+        originating_decision_id: "decision-live".to_string(),
+        decision_source_revision: 1,
+    });
+    assert_eq!(
+        broker
+            .read(&fixture.store, canonical.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::ExpectationChanged
+    );
+    assert!(broker.ledger.disclosed().next().is_none());
+}
+
+#[test]
+fn a_capacity_refusal_before_the_first_disclosure_still_truncates_the_evidence_set() {
+    let fixture = Fixture::open();
+    let (small_id, small_digest) = fixture.ingest("small", b"tiny", true);
+    let (big_id, big_digest) = fixture.ingest("big", &[b'y'; 32 * 1024], true);
+    let mut broker = fixture
+        .broker(PROJECT, &[small_id.clone(), big_id.clone()])
+        .with_buffer_limit(64);
+    let oversized = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: big_id,
+            artifact_digest: big_digest,
+            byte_length: 32 * 1024,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    let small = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: small_id,
+            artifact_digest: small_digest,
+            byte_length: 4,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    // The run asked for evidence it will not see before it saw anything at all.
+    assert_eq!(
+        broker
+            .read(&fixture.store, oversized.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::BufferLimit
+    );
+    broker
+        .read(&fixture.store, small.as_str(), None, fixture.now)
+        .unwrap();
+    assert!(
+        !broker.ledger.conclusions_usable(),
+        "the order of refusal and disclosure does not change what the model reasoned over"
+    );
+}
+
+#[test]
+fn a_capture_past_its_retention_on_the_wall_clock_is_refused_whatever_now_the_caller_passes() {
+    let fixture = Fixture::open();
+    let retain_until = now_ms() + 50;
+    let handle = fixture
+        .store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent("short"),
+            payload: b"short-lived capture".to_vec(),
+            evidence_id: "evidence-short".to_string(),
+            object_id: "evidence-object-short".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: "local_file".to_string(),
+            source_id: "src/short".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+            retain_until: Some(retain_until),
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap();
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&handle.evidence_id));
+    let alias = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: handle.evidence_id,
+            artifact_digest: handle.digest,
+            byte_length: 19,
+            retain_until,
+        });
+    while now_ms() <= retain_until {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // A stale run timestamp still precedes the deadline; the wall clock does not.
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now - HOUR_MS)
+            .unwrap_err()
+            .code,
+        RefusalCode::ExpectationChanged,
+        "an expired acquisition reference is refused against the current clock"
+    );
+    assert!(broker.ledger.disclosed().next().is_none());
 }
