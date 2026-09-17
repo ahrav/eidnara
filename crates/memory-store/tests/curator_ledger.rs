@@ -2080,3 +2080,38 @@ fn an_attempt_never_outlives_the_job_queue_deadline() {
     );
     assert_eq!(receipt(&fixture).terminal, None);
 }
+
+#[test]
+fn the_curator_lease_wrappers_bound_the_project_before_the_ledger() {
+    let fixture = Fixture::open();
+    let long = "p".repeat(257);
+    // The generic lease path accepts any non-empty project once an authority row exists for it.
+    let preparing = fixture
+        .store
+        .authority_begin_prepare("ctx", &long, "memories")
+        .unwrap();
+    fixture
+        .store
+        .authority_finish_prepare(
+            "ctx",
+            &long,
+            "memories",
+            preparing.generation,
+            "hash",
+            "hash",
+            true,
+        )
+        .unwrap();
+    assert!(
+        fixture
+            .store
+            .acquire_curator_task(&long, "acq-1", "worker-a", 0, 1, &fixture.identity, T0)
+            .is_err()
+    );
+    assert!(
+        fixture
+            .store
+            .renew_curator_task(&long, "crc:x", "worker-a", 0, 1, T0)
+            .is_err()
+    );
+}

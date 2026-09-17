@@ -743,6 +743,7 @@ impl MemoryStore {
         causal_identity: &str,
         now_ms: i64,
     ) -> Result<LeaseAcquireOutcome<String>, MemoryStoreError> {
+        check_project(project)?;
         let identity = causal_identity.to_string();
         self.acquire_task_lease(
             &CURATOR_REVIEW_TASK,
@@ -801,6 +802,7 @@ impl MemoryStore {
         registration_generation: i64,
         now_ms: i64,
     ) -> Result<crate::task_lease::LeaseRenewOutcome, MemoryStoreError> {
+        check_project(project)?;
         self.renew_task_lease(
             &CURATOR_REVIEW_TASK,
             project,
