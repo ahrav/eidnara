@@ -131,7 +131,10 @@ impl Charge {
         self.authority
     }
 
-    pub fn less(self, before: ClaudeTokens) -> Self {
+    /// The render ledger's delta; a profile's count is the only other source
+    /// of a charge, so an exact label never leaves the crate cheaper than it
+    /// was counted.
+    pub(crate) fn less(self, before: ClaudeTokens) -> Self {
         Self {
             tokens: self
                 .tokens

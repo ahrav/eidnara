@@ -37,8 +37,8 @@ pub struct LedgerEntry {
 /// Staged stores fragments priced against a ledger's current render but not
 /// appended. `cost` is the sum of the entries' headroom-adjusted charges, so
 /// a caller that deducts it and then commits charges exactly what it deducted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Staged {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Staged {
     entries: Vec<(LedgerEntry, String)>,
     cost: Option<ClaudeTokens>,
     tail_tokens: ClaudeTokens,
@@ -46,12 +46,8 @@ pub struct Staged {
 
 impl Staged {
     /// `None` when the sum is not representable; nothing is saturated.
-    pub fn cost(&self) -> Option<ClaudeTokens> {
+    pub(crate) fn cost(&self) -> Option<ClaudeTokens> {
         self.cost
-    }
-
-    pub fn entries(&self) -> impl Iterator<Item = &LedgerEntry> {
-        self.entries.iter().map(|(entry, _)| entry)
     }
 }
 
@@ -151,7 +147,7 @@ impl Ledger {
     /// boundary, so each delta is taken over the tail from the anchor; a
     /// heuristic makes no such promise and is re-estimated over the whole
     /// render.
-    pub fn stage(&self, fragments: impl IntoIterator<Item = (Charged, String)>) -> Staged {
+    pub(crate) fn stage(&self, fragments: impl IntoIterator<Item = (Charged, String)>) -> Staged {
         let mut scratch = self.text[self.anchor..].to_owned();
         let mut before = self.tail_tokens;
         let mut cost = Some(ClaudeTokens::ZERO);
@@ -176,7 +172,7 @@ impl Ledger {
     }
 
     /// Appends staged fragments at the charges they were priced at.
-    pub fn commit(&mut self, staged: Staged) {
+    pub(crate) fn commit(&mut self, staged: Staged) {
         for (entry, fragment) in staged.entries {
             self.text.push_str(&fragment);
             self.total = self
