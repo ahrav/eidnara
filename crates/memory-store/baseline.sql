@@ -403,6 +403,12 @@ BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 CREATE TRIGGER curator_store_identity_no_delete BEFORE DELETE ON curator_store_identity
 BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 
+-- REPLACE runs as delete-then-insert and skips the delete trigger unless
+-- `recursive_triggers` is on, so a second insert is refused outright.
+CREATE TRIGGER curator_store_identity_no_reinsert BEFORE INSERT ON curator_store_identity
+WHEN EXISTS (SELECT 1 FROM curator_store_identity)
+BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
+
 CREATE TABLE curator_jobs (
             project TEXT NOT NULL CHECK (length(project) > 0),
             causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
@@ -410,6 +416,7 @@ CREATE TABLE curator_jobs (
             firing_id TEXT NOT NULL CHECK (length(firing_id) BETWEEN 1 AND 256),
             ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
             target_json TEXT NOT NULL CHECK (length(target_json) BETWEEN 1 AND 1024),
+            question_template TEXT NOT NULL CHECK (length(question_template) BETWEEN 1 AND 256),
             input_fingerprint TEXT NOT NULL CHECK (length(input_fingerprint) = 64),
             state TEXT NOT NULL CHECK (state IN ('reserved', 'ready', 'terminal')),
             input_json TEXT CHECK (input_json IS NULL OR length(input_json) <= 8192),
@@ -433,10 +440,13 @@ CREATE INDEX idx_curator_jobs_state
 
 -- Caller text in a job row is identity: a detected secret refuses the row at every
 -- entry point, including transaction-local composition, instead of being redacted.
+-- Fingerprinted causal fields never reach a column; `reserve_curator_job_in_tx` scans them.
 CREATE TRIGGER curator_jobs_reject_secret_insert BEFORE INSERT ON curator_jobs
 BEGIN
-    SELECT reject_transaction_text(NEW.firing_id),
+    SELECT reject_transaction_text(NEW.producer),
+           reject_transaction_text(NEW.firing_id),
            reject_transaction_text(NEW.target_json),
+           reject_transaction_text(NEW.question_template),
            reject_transaction_text(COALESCE(NEW.input_json, ''));
 END;
 
@@ -447,28 +457,41 @@ END;
 
 -- One frozen Memory Classifier selection page per project, retained until its
 -- selection deadline. `state` moves frozen -> enqueued | expired | failed_slot; only
--- `frozen` counts against capacity, and a capacity deferral leaves it frozen. The page keeps its references and the
--- continuation cursor so an enqueue commits both or neither.
+-- `frozen` counts against capacity, and a capacity deferral leaves it frozen. A frozen
+-- page keeps its references and continuation cursor so an enqueue commits both or
+-- neither; a terminal row drops both and keeps its receipt charge, so the table is
+-- bounded by the metadata quota the same way `curator_jobs` is.
 CREATE TABLE curator_frozen_selections (
             project TEXT NOT NULL CHECK (length(project) > 0),
             slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),
             selection_attempt TEXT NOT NULL CHECK (length(selection_attempt) BETWEEN 1 AND 256),
-            page_json TEXT NOT NULL CHECK (length(page_json) BETWEEN 1 AND 8192),
+            page_json TEXT CHECK (page_json IS NULL OR length(page_json) BETWEEN 1 AND 65536),
             reference_count INTEGER NOT NULL CHECK (reference_count BETWEEN 1 AND 8),
             next_cursor TEXT CHECK (next_cursor IS NULL OR length(next_cursor) <= 512),
             state TEXT NOT NULL CHECK (state IN ('frozen', 'enqueued', 'expired', 'failed_slot')),
             selection_deadline_ms INTEGER NOT NULL,
+            allowance_bytes INTEGER NOT NULL CHECK (allowance_bytes >= 0),
+            receipt_charge_bytes INTEGER NOT NULL CHECK (receipt_charge_bytes > 0),
             created_at_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
-            PRIMARY KEY (project, slot_id, selection_attempt)
+            PRIMARY KEY (project, slot_id, selection_attempt),
+            CHECK ((state = 'frozen') = (page_json IS NOT NULL)),
+            CHECK (state = 'frozen' OR next_cursor IS NULL)
         );
 
 CREATE INDEX idx_curator_frozen_selections_state
             ON curator_frozen_selections(project, state, selection_deadline_ms);
 
+CREATE INDEX idx_curator_frozen_selections_deadline
+            ON curator_frozen_selections(state, selection_deadline_ms);
+
 CREATE TRIGGER curator_frozen_selections_reject_secret_insert
 BEFORE INSERT ON curator_frozen_selections
-BEGIN SELECT reject_transaction_text(NEW.page_json); END;
+BEGIN
+    SELECT reject_transaction_text(NEW.slot_id),
+           reject_transaction_text(NEW.selection_attempt),
+           reject_transaction_text(COALESCE(NEW.page_json, ''));
+END;
 
 -- One Curator receipt per admitted job: the run deadline and execution cutoff are
 -- written at the first claim and inherited unchanged by every takeover; the
