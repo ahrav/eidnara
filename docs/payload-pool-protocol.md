@@ -1,17 +1,16 @@
 # Payload Pool Protocol
 
-Low-level transport authority for the shared-memory channel described by
-`docs/host-wire-protocol.md` Section 7.7. The Host Wire Protocol stays the
-application authority: it owns the 21-byte header, JSON bodies, control
-operations, send outcomes, and the exact 67,108,864-byte body maximum. This
-document owns how one complete frame is carried between two processes: the
-mapping layout, the descriptor, the completion cell, the wake protocol, the
-identifiers that must match, and the access rules every reader and writer of
-the shared mapping follows.
+This document defines how the shared-memory channel carries a complete frame
+between two processes. It covers mapping layout, descriptors, completion cells,
+wakes, identifiers, and access to shared memory.
+
+`docs/host-wire-protocol.md` Section 7.7 defines the application protocol:
+the 21-byte header, JSON bodies, control operations, send outcomes, and the
+exact 67,108,864-byte body maximum.
 
 Wire names and literals here are versioned. Changing any of them requires a
-protocol change and a new layout version; there is no negotiation, fallback, or
-second layout.
+protocol change and a new layout version. There is no negotiation, fallback,
+or second layout.
 
 Implementation: `crates/shm-transport/src/{pool.rs, backend/retained.rs,
 backend/ring.rs, lease.rs, descriptor.rs, profile.rs}`.
@@ -26,14 +25,15 @@ backend/ring.rs, lease.rs, descriptor.rs, profile.rs}`.
 | Application header version | unchanged (`WIRE_V3_VERSION`) | byte 4 of every frame header |
 | Discovery schema | unchanged (`2`) | connection file |
 
-One mismatch on any identifier retires the connection before application
-traffic. No old layout is decoded and no compatibility matrix exists.
+A mismatch in any identifier retires the connection before application
+traffic. Peers do not decode old layouts. There is no compatibility matrix.
 
 ## 2. Geometry
 
-One direction is one pool. A pool has fixed block classes; every block holds one
-complete frame, header first, at a fixed offset both peers compute from the same
-validated `PoolGeometry`. Nothing a peer writes moves a block.
+Each direction has one pool with fixed block classes. Each block holds one
+complete frame, header first. Both peers compute its fixed offset from the
+same validated `PoolGeometry`. A peer cannot move a block by writing to the
+mapping.
 
 | Inventory | Class | Full-frame bytes per block | Blocks |
 | --- | --- | ---: | ---: |
@@ -58,18 +58,18 @@ of 48. Ordinary reservations may hold at most 32 unconsumed descriptors;
 control and terminal reservations may use all 48.
 
 Ordinary reservations take the smallest ordinary class whose body capacity
-covers the caller's bound. There is no spill into a larger class, no shared
-free list, and no coalescing: a class that is empty refuses (`Exhausted`) even
-when larger blocks are free. Control reservations use only the control class;
-terminal reservations use only the terminal class. A body larger than the
+covers the caller's bound. There is no spill into a larger class, shared free
+list, or coalescing. An empty class refuses the reservation (`Exhausted`), even
+when larger blocks are free. Control reservations use only the control class.
+Terminal reservations use only the terminal class. A body larger than the
 inventory's largest class is refused (`BoundExceedsClass`) before any block is
 taken.
 
 Block backing per direction is 95,817,728 bytes (89.254 MiB ordinary plus
-2.125 MiB reserved). Every profile, including test profiles, must place one
-maximum frame in its largest ordinary class; the geometry validator also bounds
-blocks and descriptors at 4,096 each so a hostile grant cannot force a large
-allocation before it is trusted.
+2.125 MiB reserved). Every profile, including test profiles, must fit one
+maximum frame in its largest ordinary class. The geometry validator caps both
+blocks and descriptors at 4,096. A hostile grant therefore cannot force a
+large allocation before validation.
 
 ## 3. Grant
 
@@ -87,19 +87,20 @@ descriptor, one per direction:
 | 114 | 8 | total mapping bytes |
 | 122 | 4 | reserved, zero |
 
-Decoding validates the geometry, recomputes the mapping layout at the host page
-size, and refuses a grant whose total disagrees with the computed layout, whose
-reserved tail is nonzero, or whose version is not 4. The setup layer also
-requires both grants to name the sole profile's geometry, to carry lane `0` in
-the host-to-peer field and lane `1` in the peer-to-host field, and to name pools
-with no traffic in flight (`Ring::is_fresh`).
+The decoder validates the geometry and recomputes the mapping layout at the
+host page size. It refuses a grant if the total differs from the computed
+layout, the reserved tail is nonzero, or the version is not 4.
+
+The setup layer also requires both grants to match the sole profile's geometry.
+The host-to-peer field must carry lane `0`; the peer-to-host field must carry
+lane `1`. Both pools must have no traffic in flight (`Ring::is_fresh`).
 
 ## 4. Mapping layout
 
-One sealed memfd per direction, `F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL`,
-mode `0600`, owned by the creating user; the attaching peer verifies seals,
-size, type, mode, and owner before mapping. Regions, in order, with 128-byte
-control pages:
+Each direction uses one memfd with seals
+`F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL`, mode `0600`, and the creating
+user as owner. Before mapping, the attaching peer verifies seals, size, type,
+mode, and owner. Regions appear in this order, with 128-byte control pages:
 
 | Region | Size | Writers |
 | --- | --- | --- |
@@ -129,18 +130,21 @@ The producer keeps a private ledger: one state (`Free`, `Reserved`,
 and one list of published blocks. The ledger is allocated before activation and
 never grows.
 
-1. **Reclaim.** Before every reservation, and on every capacity wake, the
-   producer swaps each return-summary word to zero with `Acquire` and visits
-   only the blocks whose bits were set, so a payload a reader keeps holding
-   costs nothing per reservation. Each visited completion cell is checked
-   against the producer's ledger as a `CompletionRecord`: a cell equal to the
-   block's issued generation returns a published block to its class free list;
-   a cell behind, or a flag for a block already reclaimed, is a stale return
-   and frees nothing; a cell ahead of any issued generation, or a flag on a
-   block id outside the geometry, is a protocol error that quarantines the
-   pool. A cell written without its flag is still caught: reservation refuses
-   to reuse a free block whose cell is at or past the generation it would issue,
-   and `Ring::probe` scans every published block's cell.
+1. **Reclaim.** Before every reservation and on every capacity wake, the
+   producer swaps each return-summary word to zero with `Acquire`. It visits
+   only blocks whose bits were set. A payload still held by a reader adds no
+   work per reservation.
+
+   The producer checks each visited cell against its ledger as a
+   `CompletionRecord`. A cell equal to the block's issued generation returns
+   a published block to its class free list. A cell behind that generation,
+   or a flag for an already reclaimed block, is stale and frees nothing.
+   A cell ahead of any issued generation is a protocol error that quarantines
+   the pool. So is a flag for a block id outside the geometry.
+
+   A cell written without its flag is still caught. Reservation refuses to
+   reuse a free block whose cell is at or past the generation it would issue.
+   `Ring::probe` also scans every published block's cell.
 2. **Descriptor headroom.** `published - consumed` is read with `Acquire` and
    checked for monotonicity and depth. Ordinary reservations need it below 32;
    reserved reservations need it below 48.
@@ -151,11 +155,11 @@ never grows.
    or an in-place `LeaseSpan` whose length is the caller's bound, never the
    class slack. Writes use relaxed atomic stores of the width `AccessShape`
    assigns to each byte.
-5. **Commit.** `commit(body_len)` requires `body_len == written()` and a header
-   whose declared length is `body_len` and whose version byte is the
-   application version. The producer copies the header into the block, stores
-   `block`, `generation`, `body_len`, then `sequence` into slot
-   `(sequence - 1) % 48` with relaxed stores, and advances `published` from its
+5. **Commit.** `commit(body_len)` requires `body_len == written()`. The header
+   must declare that `body_len` and carry the application version byte.
+   The producer copies the header into the block. It then stores `block`,
+   `generation`, `body_len`, and finally `sequence` into slot
+   `(sequence - 1) % 48` with relaxed stores. It advances `published` from its
    private record to `sequence` with an `AcqRel` compare-exchange. A sequence
    that would wrap retires the producer before any store.
 6. **Wake.** Bump the data wake generation (`SeqCst`) and, if `parked` was
@@ -211,16 +215,15 @@ any thread:
    `WakeFailed` and discarded by drop. The return itself stands either way.
 
 The final drop performs no `Ring` call, waits for no slot, and mutates no free
-list; test builds observe those three as `unreachable` code points
+list. Test builds observe those three as `unreachable` code points
 (`lease::observers`). It also allocates no completion node and makes no N-API
-call, but neither has a code point in this crate: the pool publishes into a
-fixed cell, and the N-API boundary lives in the native addon, whose
-detach-before-return rule keeps it out of a final drop.
+call. Neither has a code point in this crate. The pool publishes into a fixed
+cell. The N-API boundary lives in the native addon; its detach-before-return
+rule keeps N-API calls out of a final drop.
 
-The backing is unmapped and its admission charge settled when the last holder
-drops. An endpoint exit therefore never unmaps a block a reader still holds,
-and a late return after the endpoint exits publishes only into the retired
-pool's cells.
+The last holder's drop unmaps the backing and settles its admission charge.
+An endpoint exit therefore cannot unmap a block a reader still holds.
+A return after endpoint exit publishes only into the retired pool's cells.
 
 ## 8. Wake channels
 
@@ -239,39 +242,40 @@ peer closed its doorbell holders, not that it unmapped the pool.
 
 ## 9. Quarantine, retirement, and accounting
 
-`quarantined` on the lifecycle page is set by whichever peer observes impossible
-shared state; each handle also latches quarantine privately, so a peer that
-clears the flag cannot revive the handle. A quarantined pool refuses
-reservation, publication, and receive; outstanding leases keep reading and
-return normally.
+The peer that observes impossible shared state sets `quarantined` on the
+lifecycle page. Each handle also records quarantine privately. Clearing the
+shared flag cannot revive a handle. A quarantined pool refuses reservation,
+publication, and receive. Outstanding leases keep reading and return normally.
 
 Retirement (`Retired`) happens when a sequence or generation would wrap. The
 producer grants no further reservation; live leases, charges, and the peer's
 consumption are unaffected.
 
-Admission charges every connection before activation with the complete layout
-total (`mapping_bytes`), the private ledgers (`ledger_bytes`), descriptors,
-blocks (`leases`), mappings, file descriptors, retained wake handles, and the
-client instance. The worker charge refunds when the endpoint thread exits. The
-backing charge is shared by both directions' retained backing and refunds when
-the last lease has returned and both handles have dropped, or moves to the
-quarantined bucket. The host takes end-of-file on both of a connection's data
-doorbells as the proof that the peer dropped its rings and every lease; a peer
-that still holds either two seconds after the host's endpoint retires moves the
-backing charge to the quarantined bucket. If quarantine accounting itself fails,
-the charge stays counted as active for the process lifetime; nothing refunds
-storage whose release is unproved.
+Before activation, admission charges each connection for the complete layout
+(`mapping_bytes`), private ledgers (`ledger_bytes`), descriptors, blocks
+(`leases`), mappings, file descriptors, retained wake handles, and client
+instance. The worker charge refunds when the endpoint thread exits.
+
+Both directions share the backing charge. It refunds after the last lease
+returns and both handles drop, or moves to the quarantined bucket.
+The host treats end-of-file on both data doorbells as proof that the peer
+dropped its rings and every lease. If the peer still holds either two seconds
+after the host endpoint retires, the backing charge moves to the quarantined
+bucket. If quarantine accounting fails, the charge stays active for the
+process lifetime. Storage whose release is unproved is never refunded.
 
 One connection commits 191,668,296 bytes: two mappings of 95,825,920 bytes and
-two ledgers of 8,228 bytes (187 blocks at 44 bytes). The host admits
-connections under a fixed ceiling of 1 GiB (`MAX_RING_RESIDENT_BYTES` in
-`crates/host-runtime/src/ring_transport.rs`), so the default and maximum
-`max_connections` is 5. The FIFO ring this layout replaced charged 64 MiB per
-direction and fitted 8. Blocks are backed on first touch and no page is ever
-returned to the kernel, so a connection's resident bytes grow toward its charge
-over its lifetime; the ceiling bounds resident bytes, not only the virtual
-commitment. The quarantine bucket counts against the same ceiling, so five
-quarantined connections exhaust the process until it restarts.
+two ledgers of 8,228 bytes (187 blocks at 44 bytes). The host uses a fixed
+1 GiB ceiling (`MAX_RING_RESIDENT_BYTES` in
+`crates/host-runtime/src/ring_transport.rs`). The default and maximum
+`max_connections` is therefore 5. The replaced FIFO ring charged 64 MiB per
+direction and fitted 8.
+
+Blocks are backed on first touch. Pages are never returned to the kernel, so
+resident bytes grow toward the connection's charge over its lifetime.
+The ceiling bounds resident bytes, not only virtual commitment. Quarantined
+charges count against the same ceiling. Five quarantined connections exhaust
+the process until it restarts.
 
 ## 10. Source-access contract
 
@@ -286,15 +290,15 @@ bytes in this crate is:
 - `LeaseSpan::read_byte`, `copy_to`, and `checksum`, which use the same shape.
 
 No `&[u8]` or `&mut [u8]` over the arena is ever formed. A copy stabilizes the
-destination bytes, not the source: a peer that writes a published block after
-publication violates the protocol, and a write that uses the block's exact span
-is observed as stale or torn bytes, never undefined behavior. The no-UB claim is
-conditional on access shape: concurrent accesses to shared bytes must be
-disjoint or share identical boundaries (`LeaseSpan::new`). An overlapping range
-with shifted boundaries assigns another width to the same bytes, which is a
-mixed-size race the shape does not cover and this contract does not protect
-against. Consumers therefore decode only from private copies,
-and validate the copied header against the copied body length before parsing.
+destination bytes, not the source. A peer that writes a published block
+violates the protocol. If the write uses the block's exact span, readers may
+observe stale or torn bytes, but not undefined behavior.
+
+That guarantee depends on access shape. Concurrent accesses must be disjoint
+or share identical boundaries (`LeaseSpan::new`). Overlapping ranges with
+shifted boundaries assign different widths to the same bytes. That mixed-size
+race is outside this contract. Consumers therefore decode only private copies.
+Before parsing, they validate the copied header against the copied body length.
 
 The producer's raw-pointer escape is `ProducerReservation::segment`, whose span
 is exactly the caller's bound; the consumer's is `PayloadLease::body`, whose
@@ -315,23 +319,29 @@ are the Host Wire Protocol's and are enforced by the publisher's selection
 policy, not by this layer.
 
 The host publisher (`Publisher` in `crates/host-runtime/src/ring_transport.rs`)
-implements that policy as follows. Pending frames keep admission order.
-Pure-header `Ping`, `Pong`, `Cancel`, and `Goodbye` take the control reserve;
-`Error` and `StreamEnd` bodies that fit the terminal class take the terminal
-reserve; everything else, including a channel-0 `Request`, is ordinary and
-never bypasses. A control other than `Goodbye` publishes past a blocked
-ordinary head at once. A terminal publishes past it only when no earlier
-pending frame shares its `(channel, corr)`, so a stream's data always precedes
-its end. `Goodbye` waits for every earlier frame. A frame past its deadline
-retires as `not_sent` with nothing published. Each connection holds 63 terminal
-credits; a request takes one before dispatch and the credit returns when the
-terminal's block physically returns, so admitted requests never exceed the
-terminal inventory while one block stays free for a pre-admission rejection.
+keeps pending frames in admission order and selects inventory as follows:
+
+- Pure-header `Ping`, `Pong`, `Cancel`, and `Goodbye` use the control reserve.
+- `Error` and `StreamEnd` use the terminal reserve if their bodies fit that
+  class.
+- Everything else, including a channel-0 `Request`, is ordinary and never
+  bypasses.
+
+A control frame other than `Goodbye` passes a blocked ordinary head at once.
+A terminal frame passes only when no earlier pending frame shares its
+`(channel, corr)`. A stream's data therefore always precedes its end.
+`Goodbye` waits for every earlier frame. A frame past its deadline retires as
+`not_sent` without publishing.
+
+Each connection holds 63 terminal credits. A request takes one before dispatch.
+The credit returns when the terminal's block physically returns. Admitted
+requests cannot exceed the terminal inventory, and one block stays free for
+a pre-admission rejection.
 
 The managed Rust client (`crates/host-runtime/src/client.rs`) and the native
-addon behind the TypeScript client (`packages/shm-native`) publish through the
-same rule. Both classify the inventory from the wire header before a
-nonblocking reservation, keep data frames in admission order, let only a
-liveness `Pong` bypass waiting data, and park on the capacity doorbell with
-the arm-and-recheck protocol of section 8 when an inventory is exhausted, so a
-consumption or return by the host is the only wake they need.
+addon behind the TypeScript client (`packages/shm-native`) use the same rule.
+Both classify inventory from the wire header before a nonblocking reservation.
+They keep data frames in admission order and let only a liveness `Pong` bypass
+waiting data. When an inventory is exhausted, they park on the capacity
+doorbell using section 8's arm-and-recheck protocol. Host consumption or return
+provides the wake they need.

@@ -8,12 +8,15 @@ tasks #546, #548, #552, #550).
 
 Provenance: the record set is the 41 canonical slugs the Independent Payload
 Pools specification (#524, "Property catalog") enumerates by acceptance section:
-37 safety, 3 liveness, 1 reachability. Check semantics here are 39 `always`,
+37 safety, 3 liveness, 1 reachability. The set now has 40 active records and
+one invalidated model-only record, `capacity-model-conservation`.
+The original check semantics are 39 `always`,
 1 `unreachable` (the forbidden-operation observers), and 1 `reachable`; the
 specification's `always-or-unreached` and `sometimes` records are expressed as
 `always` checks whose situation markers carry the enabling-state obligation,
 because every optional path they described is now unconditional in the
-replacement. 64 constant situation markers and the three instrumented
+replacement. Of the original 64 situation markers, 63 remain required;
+`model.self_checks_run` retired with the capacity model. The three instrumented
 forbidden-operation observers are preserved; the two further forbidden
 operations are design guarantees without a code point (see below). Records were authored against the tree of this catalog's introducing commit on
 branch `payload-pools/546-owned-pool-transport`; every `file:line` was resolved
@@ -25,8 +28,8 @@ line text, or a named replacement where the cited code changed). Read
 A documented guarantee is a claim under test. `Exercised` names the witness
 that constructs the record's enabling state at HEAD; `not yet` and `partial`
 records name the implementation task that owns the missing witness. Nothing
-here is performance evidence; the capacity model under `capacity-model/` is
-uncalibrated sizing input.
+here is performance evidence. The capacity research model and its results
+were removed; its invalidated record preserves only historical traceability.
 
 ## Reachability classes
 
@@ -58,7 +61,7 @@ covers the addon side.
 
 ## Situation markers
 
-64 constant markers name independent enabling states. Each is listed
+63 constant markers name currently required independent enabling states. Each is listed
 in its record's `Required faults and enabling state` line as `marker:<name>`.
 A marker fires on a correct implementation; none asserts a violation.
 
@@ -106,7 +109,7 @@ A marker fires on a correct implementation; none asserts a violation.
 | `real-process-current-layout-witness` | reachability | test-only | `reachable` | partial |
 | `malformed-fixture-valid-baseline` | safety | test-only | `always` | yes |
 | `fuzz-adapter-current-contract` | safety | test-only | `always` | yes |
-| `capacity-model-conservation` | safety | test-only | `always` | yes |
+| `capacity-model-conservation` | safety | test-only | `always` (retired) | not yet (invalidated) |
 
 ## Ownership, framing, and progress
 
@@ -799,19 +802,25 @@ Open questions:
 ### capacity-model-conservation
 
 Type: safety
-Reachability: test-only
-Status: active
-Exercised: yes - `python3 docs/properties/independent-payload-pools/capacity-model/simulate.py` passes its self-checks and prints the ten recorded scenarios; the outputs are recorded in `capacity-model/results.md` and labeled uncalibrated.
-Guarantee: The capacity model conserves leases across every scenario, classifies refusals disjointly, and drains completely; its results are sizing input, not performance evidence.
-Check: `always` - self-checks pass and every scenario reports `unfinished_after_drain == 0` and `descriptor_refusals + sum(class_refusals) == would_block`.
+Reachability: test-only - historical model, removed from this repository.
+Status: invalidated
+Exercised: not yet - the model and its recorded results were removed; no current
+witness exercises this model-only claim.
+Guarantee: The former capacity model conserved leases, classified refusals
+disjointly, and drained completely; it was sizing input, not production proof.
+Check: `always` - retired model-only condition: `unfinished_after_drain == 0`
+and `descriptor_refusals + sum(class_refusals) == would_block`. This is not a
+current check or instruction to rerun the removed model.
 Fault/timing angle: None.
-Required faults and enabling state: A model run. Markers: marker:`model.self_checks_run`.
-Confidence: high - [evidence](evidence/capacity-model-conservation.md). Verified against the tree of this catalog's introducing commit: `docs/properties/independent-payload-pools/capacity-model/simulate.py`; `docs/properties/independent-payload-pools/capacity-model/results.md`.
-Existing check: `python3 docs/properties/independent-payload-pools/capacity-model/simulate.py` passes its self-checks and prints the ten recorded scenarios; the outputs are recorded in `capacity-model/results.md` and labeled uncalibrated.
-Impact: A model that loses leases misleads the initial sizing.
-Open questions:
-
-- Handoff: none.
+Required faults and enabling state: None in the current suite. Retired marker:
+`model.self_checks_run`.
+Confidence: high - [evidence](evidence/capacity-model-conservation.md) confirms
+retirement, not a currently exercised model guarantee.
+Existing check: None; the model self-check executable no longer exists.
+Impact: Historical sizing output cannot establish current model or transport
+correctness. Production conservation remains covered by
+`class-allocation-conservation`.
+Open questions: None.
 
 ## Relationship map
 

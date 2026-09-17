@@ -1,3 +1,4 @@
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import type { HostModuleTransport } from "./module-transport";
 
 export type EditClass = "suppression" | "replacement" | "cross_step_reuse";
@@ -37,9 +38,11 @@ export interface RouteKey {
     routeEpoch: number;
 }
 
-/** `capability_unsupported` or `capability_undeclared` denies the class on one route until its epoch changes; `append` is never latched. */
+/** `capability_unsupported` or `capability_undeclared` denies the class on one route until its epoch changes; `append` is never latched. An evicted denial costs one more daemon refusal before it latches again. */
 export class CapabilityLatch {
-    private readonly routes = new Map<string, { routeEpoch: number; denied: Set<EditClass> }>();
+    private readonly routes = new BoundedSessionMap<{ routeEpoch: number; denied: Set<EditClass> }>(
+        1000,
+    );
 
     chooseAction(intent: PackedAction, route: RouteKey): PackedAction {
         const cls = gatedClass(intent);
@@ -169,7 +172,7 @@ export interface ApplicationTarget<Surface> {
     body: string;
     /** Computes the edit against the surface as it is when the daemon has forwarded. */
     edit: (action: PackedAction, preparationId: string, body: string) => Edit<Surface>;
-    /** Returns the identity the host observed, or `undefined` when the acknowledgment was lost. */
+    /** Returns the identity the host observed, or `undefined` when the acknowledgment was lost; a rejection is read the same way. */
     publish: (edit: Edit<Surface>, forwardedIdentity: string) => Promise<string | undefined>;
     signal?: AbortSignal;
 }
@@ -247,14 +250,16 @@ export class ContextApplication {
         target: ApplicationTarget<Surface>,
     ): Promise<ApplicationResult> {
         let action = this.latch.chooseAction(intent, target.route);
+        // Read once: the bytes the daemon authorizes are the bytes published.
+        const body = target.body;
         for (;;) {
             const answer = await this.call(target, "retrieval.prepare", {
                 ...target.context,
                 action,
-                edit_bytes: new TextEncoder().encode(target.body).length,
+                edit_bytes: new TextEncoder().encode(body).length,
             });
             const refused = this.refusal(answer);
-            if (refused === undefined) return this.applyPrepared(action, answer, target);
+            if (refused === undefined) return this.applyPrepared(action, answer, target, body);
             const latched = this.latch.observeTerminal(refused.terminal, refused.cls, target.route);
             if (!latched || action === "append") return refused;
             action = "append";
@@ -265,6 +270,7 @@ export class ContextApplication {
         action: PackedAction,
         answer: unknown,
         target: ApplicationTarget<Surface>,
+        body: string,
     ): Promise<ApplicationResult> {
         const prepared = parsePrepared(answer);
         if (prepared.kind === "failure") return prepared;
@@ -284,8 +290,14 @@ export class ContextApplication {
         }
         const { forwardedIdentity } = applied;
 
-        const edit = target.edit(action, preparationId, target.body);
-        const appliedIdentity = await target.publish(edit, forwardedIdentity);
+        const edit = target.edit(action, preparationId, body);
+        let appliedIdentity: string | undefined;
+        try {
+            appliedIdentity = await target.publish(edit, forwardedIdentity);
+        } catch {
+            // The daemon has forwarded and the host may hold the edit: a rejected publication is a lost acknowledgment.
+            appliedIdentity = undefined;
+        }
         let confirmed: unknown;
         try {
             // The host may already hold the edit, so the confirm runs without the caller's abort signal and a transport failure is `unknown`, not an error.

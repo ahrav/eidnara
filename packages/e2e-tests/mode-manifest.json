@@ -91,7 +91,7 @@
             ]
         },
         {
-            "path": "tests/rust-multi-frame-delta-perf.test.ts",
+            "path": "tests/rust-multi-frame-delta.test.ts",
             "tier": "rust-only",
             "rationale": "large provider-visible tail stays intact across one-page reuse and bounded multi-page retransmission",
             "contract_refs": [

@@ -24,7 +24,6 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import * as ts from "typescript";
-import { validateCommittedMatrix } from "../../scripts/validate-shm-hardening-matrix";
 import type { IncidentCatalog, IncidentVariant, SourceInventory } from "./contract";
 import { EXECUTABLE_LANES } from "./contract";
 import { rowDigest } from "./history";
@@ -93,11 +92,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Fail closed because the fixed-ring matrix has no unresolved state. */
-function assertDeferralStillPermitted(label: string): void {
-    const outcome = validateCommittedMatrix().outcome;
+/** Deferred records never satisfy executed mutation evidence. */
+function assertDeferralStillPermitted(label: string): never {
     throw new Error(
-        `${label} is deferred, but the fixed-ring matrix is ${outcome}: this claim needs a real mutation record instead of a deferral`,
+        `${label} is deferred: this claim needs a real mutation record instead of a deferral`,
     );
 }
 

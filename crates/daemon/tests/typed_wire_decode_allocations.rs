@@ -21,12 +21,10 @@ use memory_store::WireMessage;
 #[global_allocator]
 static GLOBAL: alloc_recorder::RecordingAlloc = alloc_recorder::RecordingAlloc;
 
-const REQUEST_40: &[u8] = include_bytes!(
-    "../../../docs/properties/typed-wire-decode/resources/evidence/eg1-decode-projection/before/corpus/decode-40msgs_2KiB_mixed.json"
-);
-const REQUEST_200: &[u8] = include_bytes!(
-    "../../../docs/properties/typed-wire-decode/resources/evidence/eg1-decode-projection/before/corpus/decode-200msgs_2KiB_mixed.json"
-);
+const REQUEST_40: &[u8] =
+    include_bytes!("fixtures/typed-wire-decode/decode-40msgs_2KiB_mixed.json");
+const REQUEST_200: &[u8] =
+    include_bytes!("fixtures/typed-wire-decode/decode-200msgs_2KiB_mixed.json");
 
 const MAX_EVENTS_PER_MESSAGE: usize = 16;
 const MESSAGE_COUNT: usize = 40;

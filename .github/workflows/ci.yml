@@ -28,10 +28,16 @@ env:
 
 jobs:
   # Skipping a job needs positive evidence that none of its inputs changed.
-  # `steps.filter` runs only for pull requests; missing outputs make every job run.
+  # `steps.filter` runs only for pull requests; missing outputs make every
+  # job run.
   #
-  # `docs/` stays out of the Rust filters: the schema-migration step in `gates` rejects any manifest path or `include!` that reaches `docs/` or a `.md` file.
-  # `test` also lists the non-Rust files the kernel and retrieval tests open at runtime: `release/` manifests, `docs/host-wire-protocol.md`, and the search-projection fault maps, witness matrix, specification traceability, and frozen schema inventory. A change to any of them must rerun the tests even though no `rust` path changed.
+  # `docs/` stays out of the Rust filters: the schema-migration step in
+  # `gates` rejects any manifest path or `include!` that reaches `docs/`
+  # or a `.md` file.
+  # `test` also lists non-Rust files opened by kernel and retrieval tests:
+  # `release/` manifests, `docs/host-wire-protocol.md`, and search-projection
+  # fault maps, witness matrix, specification traceability, and frozen schema
+  # inventory. Changes to these files must rerun tests even without Rust edits.
   changes:
     name: changed paths
     runs-on: ubuntu-latest
@@ -66,7 +72,7 @@ jobs:
               - *workflow
               - *cargo
               - 'crates/shm-transport/**'
-              # `crates/shm-transport/tests/contract.rs` reads the protocol document's
+              # `crates/shm-transport/tests/contract.rs` reads the protocol
               # identifier table, so the document is a test input.
               - 'docs/payload-pool-protocol.md'
             rust: &rust
@@ -90,7 +96,7 @@ jobs:
               - *workflow
               - *cargo
               - 'crates/shm-transport/**'
-              # The direct-host E2E fixture links host-runtime, so host-runtime changes
+              # The direct-host E2E fixture links host-runtime. Changes there
               # select this job even when no package file moves.
               - 'crates/host-runtime/**'
               - 'crates/daemon/**'
@@ -373,29 +379,39 @@ jobs:
           node-version: 24
 
       - name: Install TypeScript tooling
-        if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
+        if: >-
+          needs.changes.result != 'success' ||
+          needs.changes.outputs.ts == 'true'
         run: bun install --frozen-lockfile
 
       - name: TypeScript
-        if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
+        if: >-
+          needs.changes.result != 'success' ||
+          needs.changes.outputs.ts == 'true'
         run: bun run check:repo
 
       - name: Rust toolchain
         run: rustup toolchain install 1.98 --profile minimal --component rustfmt
 
       - name: Incident history and verifier gates
-        # Both validators use the pull request base SHA or protected push `before` SHA.
-        # An unprotected push, a scheduled run, and a manual dispatch have no trusted base, so the step is skipped there.
-        # The validators import `typescript`, so the install above must have run: a path-filtered pull request without TypeScript changes installs here instead.
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_protected)
+        # Both validators use the PR base SHA or protected push `before` SHA.
+        # Skip unprotected pushes, schedules, and manual dispatches because
+        # they have no trusted base. The validators import `typescript`:
+        # a path-filtered PR without TypeScript changes installs here instead.
+        if: >-
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && github.ref_protected)
         run: |
           if [ ! -d node_modules ]; then bun install --frozen-lockfile; fi
           bun run --cwd packages/e2e-tests validate:incident-history:ci
           bun run --cwd packages/e2e-tests validate:incident-verifiers:ci
 
-      # `bun test` resolves QuickJS and the TUI from source and node_modules, so only these smokes exercise the shipped bundles.
+      # `bun test` resolves QuickJS and the TUI from source and node_modules.
+      # Only these smokes exercise the shipped bundles.
       - name: Plugin bundle smokes
-        if: needs.changes.result != 'success' || needs.changes.outputs.ts == 'true'
+        if: >-
+          needs.changes.result != 'success' ||
+          needs.changes.outputs.ts == 'true'
         run: bun run --cwd packages/opencode-plugin smoke
 
       - name: Rust format
@@ -436,7 +452,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
+    if: >-
+      ${{ !cancelled() && (needs.changes.result != 'success' ||
+      needs.changes.outputs.rust == 'true') }}
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -447,7 +465,8 @@ jobs:
         run: rustup toolchain install 1.98 --profile minimal --component clippy
 
       # Swatinem/rust-cache v2.9.2
-      # PRs restore `main`'s cache without saving, preventing a separate cache entry for each PR job.
+      # PRs restore `main`'s cache without saving, preventing a separate
+      # cache entry for each PR job.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -484,7 +503,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
+    if: >-
+      ${{ !cancelled() && (needs.changes.result != 'success' ||
+      needs.changes.outputs.test == 'true') }}
     strategy:
       fail-fast: false
       matrix:
@@ -514,12 +535,6 @@ jobs:
           cargo +1.98 nextest run --profile ci --workspace --all-targets
           --all-features --locked --partition slice:${{ matrix.shard }}/2
 
-      - name: Benches in test mode
-        if: matrix.shard == 1
-        # `.config/nextest.toml` keeps bench targets out of nextest.
-        # `--bench '*'` selects only bench targets; `--benches` also runs library unit tests.
-        run: cargo +1.98 test --workspace --all-features --locked --bench '*'
-
       - name: Doctests
         if: matrix.shard == 1
         # nextest does not run doctests.
@@ -530,7 +545,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: [changes, test-shards]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
+    if: >-
+      ${{ !cancelled() && (needs.changes.result != 'success' ||
+      needs.changes.outputs.test == 'true') }}
     steps:
       - name: Verify test shards
         env:
@@ -542,7 +559,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
+    if: >-
+      ${{ !cancelled() && (needs.changes.result != 'success' ||
+      needs.changes.outputs.rust == 'true') }}
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -602,8 +621,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: changes
-    # `shm-transport` has no path dependencies, so only its own sources reach Miri.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.shm == 'true') }}
+    # `shm-transport` has no path dependencies; only its sources reach Miri.
+    if: >-
+      ${{ !cancelled() && (needs.changes.result != 'success' ||
+      needs.changes.outputs.shm == 'true') }}
     env:
       # A dated nightly keeps this required gate reproducible; bump the
       # date deliberately.
@@ -638,17 +659,19 @@ jobs:
           cargo "+$MIRI_TOOLCHAIN" miri test -p shm-transport --lib --locked \
             -- lease:: backend::ring::miri 2>&1 | tee miri.log
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' miri.log
-          for witness in \
-            lease::tests::owned_lease_exposes_exact_bytes_and_returns_exactly_once \
-            lease::tests::owned_lease_drop_returns_once_after_moving_to_another_thread \
-            lease::tests::stale_completion_cannot_lower_a_newer_one \
-            lease::tests::backing_outlives_the_last_endpoint_handle_until_the_lease_returns \
-            lease::tests::final_drop_reaches_no_forbidden_operation \
-            lease::tests::copy_in_then_copy_out_round_trips_at_every_alignment_and_length \
-            lease::tests::span_reads_tolerate_a_concurrent_writer \
-            backend::ring::miri::descriptor_snapshot_is_copied_out_field_by_field_and_validated \
-            backend::ring::miri::completion_cell_publication_is_monotonic \
-            backend::ring::miri::lifecycle_snapshot_sees_a_write_made_through_the_raw_page; do
+          witnesses=(
+            lease::tests::owned_lease_exposes_exact_bytes_and_returns_exactly_once
+            lease::tests::owned_lease_drop_returns_once_after_moving_to_another_thread
+            lease::tests::stale_completion_cannot_lower_a_newer_one
+            lease::tests::backing_outlives_the_last_endpoint_handle_until_the_lease_returns
+            lease::tests::final_drop_reaches_no_forbidden_operation
+            lease::tests::copy_in_then_copy_out_round_trips_at_every_alignment_and_length
+            lease::tests::span_reads_tolerate_a_concurrent_writer
+            backend::ring::miri::descriptor_snapshot_is_copied_out_field_by_field_and_validated
+            backend::ring::miri::completion_cell_publication_is_monotonic
+            backend::ring::miri::lifecycle_snapshot_sees_a_write_made_through_the_raw_page
+          )
+          for witness in "${witnesses[@]}"; do
             grep -Fq "test $witness ... ok" miri.log || {
               echo "required Miri witness did not run and pass: $witness" >&2
               exit 1
@@ -660,7 +683,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.shm == 'true') }}
+    if: >-
+      ${{ !cancelled() && (needs.changes.result != 'success' ||
+      needs.changes.outputs.shm == 'true') }}
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: >-
         valgrind --tool=memcheck --leak-check=full
@@ -692,13 +717,17 @@ jobs:
         # selected by name so a renamed test cannot drop out silently.
         run: |
           set -euo pipefail
-          cargo +1.98 test -p shm-transport --test ring --locked 2>&1 | tee valgrind.log
-          for witness in \
-            production_profile_round_trips_a_maximum_frame_in_both_directions \
-            artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected \
-            non_regular_attachment_object_is_rejected_before_mapping; do
+          cargo +1.98 test -p shm-transport --test ring --locked 2>&1 |
+            tee valgrind.log
+          witnesses=(
+            production_profile_round_trips_a_maximum_frame_in_both_directions
+            artifact_mismatch_fails_before_mapping_and_unsealed_objects_are_rejected
+            non_regular_attachment_object_is_rejected_before_mapping
+          )
+          for witness in "${witnesses[@]}"; do
             grep -Fq "test $witness ... ok" valgrind.log || {
-              echo "required Valgrind witness did not run and pass: $witness" >&2
+              echo "required Valgrind witness did not run and pass:" \
+                "$witness" >&2
               exit 1
             }
           done
@@ -708,7 +737,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.shm == 'true') }}
+    if: >-
+      ${{ !cancelled() && (needs.changes.result != 'success' ||
+      needs.changes.outputs.shm == 'true') }}
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -729,12 +760,16 @@ jobs:
         # and each is required by name.
         run: |
           set -euo pipefail
-          cargo +1.98 test -p shm-transport --test ring --locked -- two_process 2>&1 | tee two-process.log
-          for witness in \
-            two_process_exchange_holds_a_reuses_b_and_wakes_on_return \
-            two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return; do
+          cargo +1.98 test -p shm-transport --test ring --locked \
+            -- two_process 2>&1 | tee two-process.log
+          witnesses=(
+            two_process_exchange_holds_a_reuses_b_and_wakes_on_return
+            two_process_descriptor_consumption_wakes_a_parked_producer_without_a_return
+          )
+          for witness in "${witnesses[@]}"; do
             grep -Fq "test $witness ... ok" two-process.log || {
-              echo "required two-process witness did not run and pass: $witness" >&2
+              echo "required two-process witness did not run and pass:" \
+                "$witness" >&2
               exit 1
             }
           done
@@ -744,7 +779,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.native == 'true') }}
+    if: >-
+      ${{ !cancelled() && (needs.changes.result != 'success' ||
+      needs.changes.outputs.native == 'true') }}
     env:
       # The claimed-target flag makes an addon-load failure fail the suite
       # instead of skipping the tests that need the artifact.
@@ -821,7 +858,9 @@ jobs:
     timeout-minutes: 30
     # `cargo update` resolves against the registry at run time, so results
     # reflect registry state rather than the change under review.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

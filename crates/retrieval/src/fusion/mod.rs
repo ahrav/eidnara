@@ -3,7 +3,6 @@
 //!
 //! No type in this module carries a project, session, or harness.
 //! Parsing or constructing an identity yields bytes, never an authorization; the route binding supplies scope and compares it before any identity is admitted.
-//! `docs/fusion-identity-contract.md` states the frozen rules; changing one requires the matching document edit in the same change.
 
 mod identity;
 mod lane;

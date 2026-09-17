@@ -173,6 +173,5 @@ wire; the plugin unit tests cover the client side against recipe fakes.
 ## Known gap
 
 Canonical lengths for non-integer numeric content can differ by a few bytes
-between the two appliers (`1.0` versus `1`); see
-[`docs/transform-edit-recipe.md`](../../../transform-edit-recipe.md). The
+between the two appliers (`1.0` versus `1`). The
 64 MiB reconstruction cap is checked with each side's own measurement.

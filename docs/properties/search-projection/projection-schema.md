@@ -151,9 +151,8 @@ Indexes:
 
 One FTS5 row per live occurrence, holding the analyzer's original atoms in
 `original`, its conservative parts in `parts`, and the occurrence identifier as
-an unindexed column. The tokenizer, detail mode, and column layout are the
-analysis contract in `docs/lexical-analysis-contract.md`;
-`retrieval::lexical::fts5_table_args()` renders the same arguments, and the
+an unindexed column. `retrieval::lexical::fts5_table_args()` defines the
+tokenizer, detail mode, and column layout. The
 projection identity's `analysis_identity` records the contract the rows were
 built under. The rowid is one of the four 64-bit words of the occurrence
 identifier with the sign bit cleared (`retrieval::lexical::rowids`): the first

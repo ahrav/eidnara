@@ -544,16 +544,12 @@ the rest. Findings are reproduced with its citations; the disposition is ours.
    `removal_ranges` at `:307`, `GRANT_BYTES` at `:45`. Disposition: a
    generated HEAD anchor table is at the top of `catalog.md`; the per-record
    rewrite landed on 2026-09-05 (gap 6 below).
-2. **`operation-counters-are-observed-not-declared`.** The transport now counts
-   its own syscalls (`SyscallCounters`, `page_removals`, `syscall_counters()`,
-   pinned by `syscall_counters_track_only_actual_ring_syscalls`), the counter
-   set is the seven fields in `evidence.rs:7-22`, and the cited check moved to
-   `tests/evidence.rs` with two siblings. Record re-derived; the residual is
-   which counters are observed versus computed.
-3. **`measured-transfer-is-witnessed-by-the-data`.** The bench folds received
-   bytes into the checksum and fails the run against an independent expectation
-   (`hardware_envelope.rs:656-664`, `:742-748`). Verdict flipped to a
-   regression contract.
+2. **`operation-counters-are-observed-not-declared`.** Invalidated by the
+   benchmark cleanup. The former counter-gate implementation, tests,
+   benchmark, and manifest are removed; no current provenance verdict remains.
+3. **`measured-transfer-is-witnessed-by-the-data`.** Invalidated by the
+   benchmark cleanup. The consumer fold and expected-checksum comparison were
+   removed with the benchmark; its former partial witness no longer exists.
 4. **`identity-and-schema-rejection-is-one-contract`.** Both readers quarantine
    on every rejection (`quarantine_with` at `ring.rs:1316-1318`, `:2073-2075`).
    Disposition arm and its `needs human input` question dropped; enforcement
