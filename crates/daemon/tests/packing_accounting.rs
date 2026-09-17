@@ -384,8 +384,8 @@ fn the_optional_phase_refuses_a_render_beyond_the_accounting_bounds_and_a_foreig
         &mut trace,
     )
     .unwrap();
-    let bytes = closed.ledger.rendered_bytes();
-    let tokens = closed.ledger.total_with_headroom();
+    let bytes = closed.ledger().rendered_bytes();
+    let tokens = closed.ledger().total_with_headroom();
     assert!(bytes > materialized.ledger().rendered_bytes());
 
     for (bounds, expected) in [
