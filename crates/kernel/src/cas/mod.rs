@@ -96,8 +96,7 @@ impl ProviderEgress {
     /// Egress proofs derive provider classes from this list.
     pub const ALL: &'static [Self] = &[Self::RemoteAllowed, Self::LocalOnly];
 
-    /// The stored `provider_egress_class` literal.
-    pub fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::RemoteAllowed => "remote_allowed",
             Self::LocalOnly => "local_only",

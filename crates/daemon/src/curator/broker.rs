@@ -9,22 +9,19 @@ use context_core::curator_policy_union::{PolicyUnion, PolicyUnionMember};
 use context_core::redaction::{contains_redaction_token, reject_secret_text};
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, CURATOR_CAPTURE_RETENTION_CLASS, CuratorHold, CuratorHoldBinding,
-    CuratorHoldError, CuratorHoldKind, EligibilityCandidate, EligibilityVerdict, HeldEvidence,
-    KernelError, KernelStore, OPERATOR_REDACTION_PLACEHOLDER, ProjectScope, ProviderEgress,
-    ReviewBinding, ReviewPayload, ReviewReadError, ReviewStagedReference, RunBufferMap,
-    RunBufferRefusal, SOURCE_DESCRIPTOR_KIND, Sensitivity, SourceDescriptorDetail, Surface,
+    ArtifactDestination, ArtifactEligibility, ArtifactHandle, CURATOR_CAPTURE_RETENTION_CLASS,
+    CuratorHoldBinding, CuratorHoldError, CuratorHoldKind, EligibilityCandidate,
+    EligibilityVerdict, HeldEvidence, KernelError, KernelStore, MAX_RUN_BUFFER_BYTES,
+    OPERATOR_REDACTION_PLACEHOLDER, ProjectScope, ReviewBinding, ReviewPayload, ReviewReadError,
+    ReviewStagedReference, RunBufferMap, RunBufferRefusal, SOURCE_DESCRIPTOR_KIND, Sensitivity,
+    SourceDescriptorDetail, Surface, SurfaceVisibility,
 };
+use sha2::{Digest, Sha256};
 
 pub const MAX_ISSUED_INSPECTIONS: usize = 32;
 pub const MAX_OPERATIONS_PER_BATCH: usize = 8;
 /// Rendered model-visible evidence bytes per run, charged on every render including resends.
 pub const MAX_MODEL_VISIBLE_BYTES: u64 = 128 * 1024;
-pub const MAX_RUN_BUFFER_BYTES: u64 = 16 * 1024 * 1024;
-/// Per-match excerpt bound for search results (Q19), in bytes of the captured buffer.
-pub const MAX_SEARCH_EXCERPT_BYTES: u64 = 512;
-/// Per-search excerpt total (Q19).
-pub const MAX_SEARCH_EXCERPT_TOTAL_BYTES: u64 = 8 * 1024;
 const ALIAS_PREFIX: &str = "ref-";
 
 /// The fixed host-authored question templates a run may carry (Q24). Source-derived bound questions are not a supported input.
@@ -46,6 +43,11 @@ impl QuestionTemplate {
         match self {
             Self::ExtractedFacts => "extracted_facts",
         }
+    }
+
+    /// The template's lineage revision: a digest of its text, so an edited prompt changes every union that carried it.
+    pub fn revision(self) -> String {
+        format!("{:x}", Sha256::digest(self.text().as_bytes()))
     }
 
     /// Only the fixed identifiers resolve; any other input, including one carrying question text, is refused.
@@ -207,6 +209,8 @@ pub enum RefusalCode {
     ByteLimit,
     #[error("buffer_limit")]
     BufferLimit,
+    #[error("hold_limit")]
+    HoldLimit,
     #[error("expectation_changed")]
     ExpectationChanged,
     #[error("scope")]
@@ -219,6 +223,8 @@ pub enum RefusalCode {
     HoldInvalid,
     #[error("render_check")]
     RenderCheck,
+    #[error("undecodable")]
+    Undecodable,
     #[error("unsupported_question")]
     UnsupportedQuestion,
     #[error("store")]
@@ -247,10 +253,17 @@ pub struct ProvenanceTag {
     pub alias: Option<Alias>,
     /// Byte range the buffer occupies in the assembled prompt; assigned by the prompt assembler.
     pub prompt_range: Range<usize>,
-    /// The Remote verdict the bytes were judged under and the snapshot tip it was judged at; host-authored text carries `None`.
-    pub remote_verdict: Option<(EligibilityVerdict, i64)>,
-    pub render_check_passed: bool,
+    /// The verdict and visibility the Kernel gave the referenced object at the snapshot tip; host-authored text, staged subjects, and captures carry `None`.
+    pub verdict: Option<JudgedAt>,
     pub charged_bytes: u64,
+}
+
+/// One Kernel eligibility judgement as recorded on a tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JudgedAt {
+    pub verdict: EligibilityVerdict,
+    pub visibility: SurfaceVisibility,
+    pub tip: i64,
 }
 
 /// Rendered bytes with their tag; the bytes are owned by the render and borrowed by the assembler.
@@ -262,7 +275,7 @@ pub struct RenderedBuffer {
 
 /// Detection-only render check over materialized bytes: a secret or a redaction placeholder refuses disclosure (Q7). Host-authored text passes through the same check so a template can never carry protected text.
 pub fn check_render(bytes: &[u8], alias: Option<&Alias>) -> Result<(), Refusal> {
-    let text = std::str::from_utf8(bytes).map_err(|_| refuse(alias, RefusalCode::RenderCheck))?;
+    let text = std::str::from_utf8(bytes).map_err(|_| refuse(alias, RefusalCode::Undecodable))?;
     if contains_redaction_token(text)
         || text.contains(OPERATOR_REDACTION_PLACEHOLDER)
         || reject_secret_text(text).is_err()
@@ -311,6 +324,8 @@ pub struct DisclosureLedger {
     cited: BTreeSet<Alias>,
     /// Set when any attempt's outcome is unknown: bytes may have reached the model without a recorded disclosure.
     uncertain: bool,
+    /// Set when a capacity refusal followed a disclosure: the model reasoned over a truncated evidence set.
+    partial: bool,
     union: PolicyUnion,
 }
 
@@ -320,7 +335,7 @@ impl DisclosureLedger {
         ledger.union.insert(PolicyUnionMember {
             kind: "question_template".to_string(),
             id: question.id().to_string(),
-            revision: "1".to_string(),
+            revision: question.revision(),
             owner_id: None,
             owner_revision: None,
         });
@@ -367,9 +382,16 @@ impl DisclosureLedger {
         &self.union
     }
 
+    /// A capacity refusal after at least one disclosure leaves the evidence set truncated.
+    pub fn record_partial_disclosure(&mut self) {
+        if !self.disclosed.is_empty() {
+            self.partial = true;
+        }
+    }
+
     /// Whether a conclusion may be published: nothing is usable after an unknown or partial disclosure.
     pub fn conclusions_usable(&self) -> bool {
-        !self.uncertain
+        !self.uncertain && !self.partial
     }
 }
 
@@ -468,6 +490,8 @@ pub struct EvidenceBroker {
     binding: RunBinding,
     /// Origin keys already disclosed, so a second form of one decision is reported as the same origin rather than fresh support.
     origins: BTreeMap<String, Alias>,
+    /// Artifacts whose whole buffer passed the render check, so a range split cannot hide a marker or secret across two reads.
+    checked_artifacts: BTreeSet<String>,
 }
 
 impl EvidenceBroker {
@@ -479,12 +503,19 @@ impl EvidenceBroker {
             ledger: DisclosureLedger::new(question),
             binding,
             origins: BTreeMap::new(),
+            checked_artifacts: BTreeSet::new(),
         }
     }
 
     /// Lowers the inspection ceiling for tests (Q23); production keeps [`MAX_ISSUED_INSPECTIONS`].
     pub fn with_inspection_limit(mut self, max_inspections: usize) -> Self {
         self.accounting = InvestigationAccounting::with_inspection_limit(max_inspections);
+        self
+    }
+
+    /// Lowers the run buffer ceiling for tests; production keeps the 16 MiB bound.
+    pub fn with_buffer_limit(mut self, capacity: u64) -> Self {
+        self.buffers = RunBufferMap::new(capacity);
         self
     }
 
@@ -502,8 +533,7 @@ impl EvidenceBroker {
                 origin: OriginClass::HostAuthored,
                 alias: None,
                 prompt_range: 0..0,
-                remote_verdict: None,
-                render_check_passed: true,
+                verdict: None,
                 charged_bytes: 0,
             },
         })
@@ -530,19 +560,24 @@ impl EvidenceBroker {
             .aliases
             .resolve(alias)
             .map(|(alias, expectation)| (alias.clone(), expectation.clone()))?;
-        self.accounting.admit_operation(Some(&alias))?;
+        let admitted = self.accounting.admit_operation(Some(&alias));
+        if admitted.is_err() {
+            self.ledger.record_partial_disclosure();
+        }
+        admitted?;
         self.ledger.record_inspection(&alias);
         if range.as_ref().is_some_and(|range| range.end <= range.start) {
             return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
         }
-        let (bytes, verdict, sensitivity, member) = match &expectation {
+        let (bytes, verdict, sensitivity, member, origin_key) = match &expectation {
             ReferenceExpectation::StagedSubject { reference, binding } => {
-                let row = store
-                    .read_review_input(reference, binding, now_ms)
-                    .map_err(|error| refuse(Some(&alias), staged_refusal(error)))?;
                 if binding.project_digest != self.binding.hold.project_digest {
                     return Err(refuse(Some(&alias), RefusalCode::Scope));
                 }
+                let row = store
+                    .read_review_input(reference, binding, now_ms)
+                    .map_err(|error| refuse(Some(&alias), staged_refusal(error)))?;
+                self.gate_destination(&alias, row.sensitivity)?;
                 let text = match row.payload {
                     ReviewPayload::Subject(subject) => subject
                         .facts
@@ -554,11 +589,15 @@ impl EvidenceBroker {
                         return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                     }
                 };
+                let bytes = slice_range(text.as_bytes(), range.as_ref())
+                    .ok_or_else(|| refuse(Some(&alias), RefusalCode::InvalidRange))?;
+                self.charge(&alias, bytes.len())?;
                 (
-                    text.into_bytes(),
+                    bytes,
                     None,
                     row.sensitivity,
                     expectation.policy_member(None),
+                    expectation.origin_key(),
                 )
             }
             ReferenceExpectation::TemporaryCapture {
@@ -569,6 +608,9 @@ impl EvidenceBroker {
             } => {
                 if *retain_until <= now_ms {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
+                }
+                if range.as_ref().is_some_and(|range| range.end > *byte_length) {
+                    return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
                 }
                 let held = self.hold_evidence(store, &alias, evidence_id, now_ms)?;
                 if held.artifact_digest != *artifact_digest
@@ -584,6 +626,7 @@ impl EvidenceBroker {
                     None,
                     held.sensitivity,
                     expectation.policy_member(None),
+                    expectation.origin_key(),
                 )
             }
             ReferenceExpectation::NativeSource {
@@ -594,7 +637,7 @@ impl EvidenceBroker {
                 evidence_id,
                 occurrence_tuple,
             } => {
-                let (verdict, tip) = self.judge(
+                let judged = self.judge(
                     store,
                     &alias,
                     object_id,
@@ -602,7 +645,7 @@ impl EvidenceBroker {
                     artifact_digest,
                     None,
                 )?;
-                let detail = self.descriptor(store, &alias, object_id, tip)?;
+                let detail = self.descriptor(store, &alias, object_id, judged.tip)?;
                 if detail.class != class.code()
                     || detail.occurrence_tuple != *occurrence_tuple
                     || detail.artifact_digest != *artifact_digest
@@ -612,11 +655,23 @@ impl EvidenceBroker {
                 }
                 let held = self.hold_evidence(store, &alias, evidence_id, now_ms)?;
                 let bytes = self.load_range(store, &alias, &held, range.clone())?;
+                // Two excerpts or revisions of one native source are one origin: the key is the identity tuple, without revision, representation, or span.
+                let origin_key = format!(
+                    "native:{}:{}",
+                    class.code(),
+                    detail
+                        .identity
+                        .iter()
+                        .map(|(field, value)| format!("{}={}", field.len(), value))
+                        .collect::<Vec<_>>()
+                        .join("\u{1f}")
+                );
                 (
                     bytes,
-                    Some((verdict, tip)),
+                    Some(judged),
                     held.sensitivity,
                     expectation.policy_member(None),
+                    origin_key,
                 )
             }
             ReferenceExpectation::CanonicalSource {
@@ -629,7 +684,7 @@ impl EvidenceBroker {
                 decision_source_revision,
             } => {
                 // The originating decision's standing caps the descriptor's (Q34): a retracted, superseded, or hidden decision revokes every form derived from it.
-                let (verdict, tip) = self.judge(
+                let judged = self.judge(
                     store,
                     &alias,
                     object_id,
@@ -637,7 +692,7 @@ impl EvidenceBroker {
                     artifact_digest,
                     Some((originating_decision_id, *decision_source_revision)),
                 )?;
-                let detail = self.descriptor(store, &alias, object_id, tip)?;
+                let detail = self.descriptor(store, &alias, object_id, judged.tip)?;
                 let decision_in_tuple = detail
                     .identity
                     .iter()
@@ -653,17 +708,16 @@ impl EvidenceBroker {
                 let bytes = self.load_range(store, &alias, &held, range.clone())?;
                 (
                     bytes,
-                    Some((verdict, tip)),
+                    Some(judged),
                     held.sensitivity,
                     expectation.policy_member(Some(*decision_source_revision)),
+                    expectation.origin_key(),
                 )
             }
         };
         check_render(&bytes, Some(&alias))?;
         let charged = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        self.accounting.charge_render(Some(&alias), charged)?;
         self.ledger.record_disclosure(&alias, member.clone());
-        let origin_key = expectation.origin_key();
         self.origins
             .entry(origin_key.clone())
             .or_insert_with(|| alias.clone());
@@ -674,8 +728,7 @@ impl EvidenceBroker {
                     origin: expectation.origin(),
                     alias: Some(alias.clone()),
                     prompt_range: 0..0,
-                    remote_verdict: verdict,
-                    render_check_passed: true,
+                    verdict,
                     charged_bytes: charged,
                 },
             },
@@ -713,17 +766,45 @@ impl EvidenceBroker {
         let held = held
             .pop()
             .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
-        // Default-Sensitive policy: a remote model receives only Normal, remote-allowed evidence; a private read or a repository path proves nothing.
-        if self.binding.destination == ArtifactDestination::Remote
-            && (held.sensitivity != Sensitivity::Normal
-                || held.provider_egress_class != ProviderEgress::RemoteAllowed.as_str())
-        {
+        // The Kernel's egress verdict folds every live reference to the digest for this destination; default-Sensitive policy means unproven evidence never reaches a remote model.
+        let facts = store
+            .artifact_egress_facts(
+                &ArtifactHandle {
+                    digest: held.artifact_digest.clone(),
+                    evidence_id: held.evidence_id.clone(),
+                },
+                self.binding.destination,
+            )
+            .map_err(|_| refuse(Some(alias), RefusalCode::ExpectationChanged))?;
+        if facts.eligibility != ArtifactEligibility::Allowed {
             return Err(refuse(Some(alias), RefusalCode::PolicyBlocked));
         }
         Ok(held)
     }
 
-    /// Charges and loads the artifact once, then copies the requested range out of the retained buffer.
+    /// Staged subjects are not artifacts; the same destination rule applies to their stored class.
+    fn gate_destination(&self, alias: &Alias, sensitivity: Sensitivity) -> Result<(), Refusal> {
+        if sensitivity == Sensitivity::Secret
+            || (self.binding.destination == ArtifactDestination::Remote
+                && sensitivity != Sensitivity::Normal)
+        {
+            return Err(refuse(Some(alias), RefusalCode::PolicyBlocked));
+        }
+        Ok(())
+    }
+
+    /// Charges rendered bytes before any load; a refusal here also marks the disclosure set partial.
+    fn charge(&mut self, alias: &Alias, bytes: usize) -> Result<(), Refusal> {
+        let charged = self
+            .accounting
+            .charge_render(Some(alias), u64::try_from(bytes).unwrap_or(u64::MAX));
+        if charged.is_err() {
+            self.ledger.record_partial_disclosure();
+        }
+        charged
+    }
+
+    /// Charges the range, loads the artifact once, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret.
     fn load_range(
         &mut self,
         store: &KernelStore,
@@ -731,24 +812,41 @@ impl EvidenceBroker {
         held: &HeldEvidence,
         range: Option<Range<u64>>,
     ) -> Result<Vec<u8>, Refusal> {
-        self.buffers
+        let range = range.unwrap_or(0..held.byte_length);
+        if range.end > held.byte_length {
+            return Err(refuse(Some(alias), RefusalCode::InvalidRange));
+        }
+        self.charge(
+            alias,
+            usize::try_from(range.end - range.start).unwrap_or(usize::MAX),
+        )?;
+        let loaded = self
+            .buffers
             .load(store, held)
             .map_err(|error| match error {
                 RunBufferRefusal::CapacityExhausted => {
+                    self.ledger.record_partial_disclosure();
                     refuse(Some(alias), RefusalCode::BufferLimit)
                 }
                 RunBufferRefusal::Unreadable | RunBufferRefusal::RangeOutOfBounds => {
                     refuse(Some(alias), RefusalCode::ExpectationChanged)
                 }
             })?;
-        let range = range.unwrap_or(0..held.byte_length);
+        if loaded || !self.checked_artifacts.contains(&held.artifact_digest) {
+            let whole = self
+                .buffers
+                .slice(&held.artifact_digest, 0..held.byte_length)
+                .map_err(|_| refuse(Some(alias), RefusalCode::ExpectationChanged))?;
+            check_render(whole, Some(alias))?;
+            self.checked_artifacts.insert(held.artifact_digest.clone());
+        }
         self.buffers
             .slice(&held.artifact_digest, range)
             .map(<[u8]>::to_vec)
             .map_err(|_| refuse(Some(alias), RefusalCode::InvalidRange))
     }
 
-    /// Judges the descriptor, and the originating decision when there is one, for Remote disclosure under the run's project scope on the explicit-search surface. The weaker verdict of the pair governs.
+    /// Judges the descriptor, and the originating decision when there is one, for the run's destination under its project scope on the explicit-search surface. The decision's standing caps the descriptor's; the tag records the descriptor's own verdict and visibility.
     fn judge(
         &self,
         store: &KernelStore,
@@ -757,7 +855,7 @@ impl EvidenceBroker {
         source_revision: i64,
         artifact_digest: &str,
         decision: Option<(&str, i64)>,
-    ) -> Result<(EligibilityVerdict, i64), Refusal> {
+    ) -> Result<JudgedAt, Refusal> {
         let mut candidates = vec![EligibilityCandidate {
             object_id: object_id.to_string(),
             source_revision,
@@ -778,11 +876,15 @@ impl EvidenceBroker {
                 &candidates,
             )
             .map_err(|_| refuse(Some(alias), RefusalCode::Store))?;
-        for (candidate, verdict) in candidates.iter().zip(&batch.verdicts) {
-            let is_decision = decision.is_some_and(|(id, _)| id == candidate.object_id);
+        // A snapshot taken during a classification change is not a grant.
+        if !batch.is_reusable() {
+            return Err(refuse(Some(alias), RefusalCode::Store));
+        }
+        for (position, verdict) in batch.verdicts.iter().enumerate() {
+            let is_decision = position == 1;
             let code = match verdict.verdict {
                 EligibilityVerdict::Ok => None,
-                // A descriptor is never a served object; its disclosure is judged by its evidence below. A decision no surface serves is not disclosable.
+                // A descriptor is never a served object; its bytes are judged by the artifact egress fold. A decision no surface serves is not disclosable.
                 EligibilityVerdict::Hidden if !is_decision => None,
                 EligibilityVerdict::Hidden | EligibilityVerdict::ProviderSensitive => {
                     Some(RefusalCode::PolicyBlocked)
@@ -800,10 +902,15 @@ impl EvidenceBroker {
                 return Err(refuse(Some(alias), code));
             }
         }
-        Ok((EligibilityVerdict::Ok, batch.snapshot.tip))
+        let descriptor = batch.verdicts[0];
+        Ok(JudgedAt {
+            verdict: descriptor.verdict,
+            visibility: descriptor.visibility,
+            tip: batch.snapshot.tip,
+        })
     }
 
-    /// The descriptor observation of `object_id` at `tip`; anything but exactly one live descriptor row refuses.
+    /// The descriptor observation of `object_id` at `tip`; a missing row, another observation kind, or an undecodable detail refuses.
     fn descriptor(
         &self,
         store: &KernelStore,
@@ -811,19 +918,16 @@ impl EvidenceBroker {
         object_id: &str,
         tip: i64,
     ) -> Result<SourceDescriptorDetail, Refusal> {
-        let rows = store
-            .observations_for_object_as_of(object_id, tip)
-            .map_err(|_| refuse(Some(alias), RefusalCode::Store))?;
-        let mut descriptors = rows
-            .into_iter()
-            .filter(|row| row.observation_kind == SOURCE_DESCRIPTOR_KIND);
-        let (Some(row), None) = (descriptors.next(), descriptors.next()) else {
-            return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
-        };
+        let row = store
+            .observation_for_object_as_of(object_id, tip)
+            .map_err(|_| refuse(Some(alias), RefusalCode::Store))?
+            .filter(|row| row.observation_kind == SOURCE_DESCRIPTOR_KIND)
+            .ok_or_else(|| refuse(Some(alias), RefusalCode::ExpectationChanged))?;
         row.payload
             .detail
             .as_deref()
             .and_then(|detail| serde_json::from_str::<SourceDescriptorDetail>(detail).ok())
+            .filter(|detail| detail.descriptor_version == kernel::SOURCE_DESCRIPTOR_DETAIL_VERSION)
             .ok_or_else(|| refuse(Some(alias), RefusalCode::ExpectationChanged))
     }
 }
@@ -848,7 +952,7 @@ fn hold_refusal(error: CuratorHoldError) -> RefusalCode {
         CuratorHoldError::Refused(kernel::CuratorHoldRefusal::ProjectBackingExhausted)
         | CuratorHoldError::Refused(kernel::CuratorHoldRefusal::HostBackingExhausted)
         | CuratorHoldError::Refused(kernel::CuratorHoldRefusal::TooManyReferences) => {
-            RefusalCode::BufferLimit
+            RefusalCode::HoldLimit
         }
         CuratorHoldError::Refused(_) => RefusalCode::HoldInvalid,
         CuratorHoldError::Store(KernelError::Deadline) | CuratorHoldError::Store(_) => {
@@ -861,16 +965,14 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// A hold the coordinator acquired before the first read; the broker only grows it.
-pub fn run_binding(
-    project: ProjectScope,
-    hold: &CuratorHold,
-    binding: CuratorHoldBinding,
-) -> RunBinding {
-    RunBinding {
-        project,
-        hold: binding,
-        hold_id: hold.hold_id.clone(),
-        destination: ArtifactDestination::Remote,
+/// The requested range of `bytes`, or the whole slice when no range was asked for; an out-of-bounds range is `None`.
+fn slice_range(bytes: &[u8], range: Option<&Range<u64>>) -> Option<Vec<u8>> {
+    match range {
+        None => Some(bytes.to_vec()),
+        Some(range) => {
+            let start = usize::try_from(range.start).ok()?;
+            let end = usize::try_from(range.end).ok()?;
+            bytes.get(start..end).map(<[u8]>::to_vec)
+        }
     }
 }

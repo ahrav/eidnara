@@ -1,7 +1,7 @@
 //! Real-store proofs for the Curator evidence broker: scope and staleness refusal, live-origin revocation, canonical and promoted deduplication, uncited-context lineage, unsupported bound questions (Q24), the render check, hold growth, and the accounting bounds.
 
 use daemon::curator::broker::{
-    EvidenceBroker, MAX_MODEL_VISIBLE_BYTES, MAX_OPERATIONS_PER_BATCH, OriginClass,
+    EvidenceBroker, JudgedAt, MAX_MODEL_VISIBLE_BYTES, MAX_OPERATIONS_PER_BATCH, OriginClass,
     QuestionTemplate, ReferenceExpectation, RefusalCode, RunBinding,
 };
 use kernel::source_identity::{Occurrence, OccurrenceClass};
@@ -12,6 +12,7 @@ use kernel::{
     ScopeSpec, ScopeTermSpec, Sensitivity, SourceDependency, SourceDescriptorPolicy,
     SourceDescriptorRequest, SourceSpan, StagingTerminalState,
 };
+use kernel::{EligibilityVerdict, SurfaceVisibility};
 use sha2::{Digest, Sha256};
 
 const DOMAIN: &str = "domain";
@@ -217,6 +218,28 @@ impl Fixture {
         }
     }
 
+    /// The reference of the subject `staged_subject` sealed, for a second broker.
+    fn staged_reference(&self) -> ReferenceExpectation {
+        let payload = ReviewPayload::Subject(ReviewSubject {
+            facts: vec![ExtractedFact {
+                text: "bun builds the workspace".to_string(),
+                span: SourceSpan {
+                    alias: "s1".to_string(),
+                    start: 0,
+                    end: 4,
+                },
+            }],
+        });
+        ReferenceExpectation::StagedSubject {
+            reference: kernel::ReviewStagedReference {
+                database_incarnation_id: incarnation(self.directory.path()),
+                candidate_id: "subject-1".to_string(),
+                payload_digest: payload.digest().unwrap(),
+            },
+            binding: self.review_binding(),
+        }
+    }
+
     fn decision(&self, object: &str) {
         self.store
             .commit(intent(&format!("decision-{object}")), |envelope| {
@@ -294,12 +317,13 @@ impl Fixture {
             .unwrap();
         let object_id = published.unwrap();
         let tip = self.store.tip().unwrap();
-        let rows = self
+        let row = self
             .store
-            .observations_for_object_as_of(&object_id, tip)
+            .observation_for_object_as_of(&object_id, tip)
+            .unwrap()
             .unwrap();
         let detail: kernel::SourceDescriptorDetail =
-            serde_json::from_str(rows[0].payload.detail.as_deref().unwrap()).unwrap();
+            serde_json::from_str(row.payload.detail.as_deref().unwrap()).unwrap();
         (object_id, detail.occurrence_tuple)
     }
 }
@@ -339,6 +363,44 @@ fn staged_subjects_and_captures_read_through_kernel_expectations_and_grow_the_ho
     );
     assert_eq!(broker.accounting.model_visible_bytes(), 24);
     assert_eq!(broker.accounting.issued_inspections(), 1);
+    // A range applies to a subject too, and an out-of-bounds range is refused before it is charged.
+    let ranged = broker
+        .read(
+            &fixture.store,
+            subject_alias.as_str(),
+            Some(0..3),
+            fixture.now + 2,
+        )
+        .unwrap();
+    assert_eq!(ranged.buffer.bytes, b"bun");
+    assert_eq!(
+        broker
+            .read(
+                &fixture.store,
+                subject_alias.as_str(),
+                Some(0..99),
+                fixture.now + 2
+            )
+            .unwrap_err()
+            .code,
+        RefusalCode::InvalidRange
+    );
+    assert_eq!(broker.accounting.model_visible_bytes(), 27);
+    // A staged subject is Sensitive, so a remote destination never receives it.
+    let mut remote = fixture.broker_for(
+        PROJECT,
+        std::slice::from_ref(&other_id),
+        kernel::ArtifactDestination::Remote,
+    );
+    let remote_alias = remote.aliases.issue(fixture.staged_reference());
+    assert_eq!(
+        remote
+            .read(&fixture.store, remote_alias.as_str(), None, fixture.now + 2)
+            .unwrap_err()
+            .code,
+        RefusalCode::PolicyBlocked
+    );
+    assert_eq!(remote.accounting.model_visible_bytes(), 0);
 
     // The capture is not yet held; reading it grows the execution hold before any byte is loaded.
     let before = fixture.store.validate_held_evidence(
@@ -383,7 +445,7 @@ fn staged_subjects_and_captures_read_through_kernel_expectations_and_grow_the_ho
         )
         .unwrap();
     assert_eq!(broker.buffers.loaded(), 1);
-    assert_eq!(broker.accounting.model_visible_bytes(), 24 + 4 + 8);
+    assert_eq!(broker.accounting.model_visible_bytes(), 27 + 4 + 8);
     assert_eq!(
         broker
             .read(
@@ -551,9 +613,20 @@ fn render_check_refuses_secrets_and_placeholders_without_redacting() {
     };
     let secret_len = stored_len(&secret_id, &secret_digest);
     let placeholder_len = stored_len(&placeholder_id, &placeholder_digest);
-    for (evidence_id, digest, len) in [
-        (secret_id, secret_digest, secret_len),
-        (placeholder_id, placeholder_digest, placeholder_len),
+    // A detected secret makes the artifact Secret at ingest, so the Kernel's egress verdict refuses it for every destination before any render; the operator placeholder passes classification and is refused by the render check itself.
+    for (evidence_id, digest, len, code) in [
+        (
+            secret_id,
+            secret_digest,
+            secret_len,
+            RefusalCode::PolicyBlocked,
+        ),
+        (
+            placeholder_id,
+            placeholder_digest,
+            placeholder_len,
+            RefusalCode::RenderCheck,
+        ),
     ] {
         let alias = broker
             .aliases
@@ -566,18 +639,39 @@ fn render_check_refuses_secrets_and_placeholders_without_redacting() {
         let refusal = broker
             .read(&fixture.store, alias.as_str(), None, fixture.now)
             .unwrap_err();
-        assert_eq!(refusal.code, RefusalCode::RenderCheck);
+        assert_eq!(refusal.code, code);
         assert_eq!(refusal.alias.as_ref(), Some(&alias));
-        assert_eq!(
-            refusal.to_string(),
-            format!("render_check ({})", alias.as_str())
-        );
+        assert_eq!(refusal.to_string(), format!("{code} ({})", alias.as_str()));
     }
     assert_eq!(
         broker.accounting.model_visible_bytes(),
-        0,
-        "a refused render charges nothing"
+        placeholder_len,
+        "bytes are charged before they are loaded, so a render-check refusal keeps its charge while a policy refusal never reaches the charge"
     );
+    // A range that stops inside the placeholder cannot slip past the check: the whole buffer is checked when it is first loaded.
+    let (split_id, split_digest) = fixture.ingest("split", placeholder.as_bytes(), true);
+    let mut split_broker = fixture.broker(PROJECT, std::slice::from_ref(&split_id));
+    let split = split_broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: split_id,
+            artifact_digest: split_digest,
+            byte_length: placeholder_len,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    assert_eq!(
+        split_broker
+            .read(&fixture.store, split.as_str(), Some(0..4), fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::RenderCheck
+    );
+    assert_eq!(
+        split_broker.buffers.loaded(),
+        1,
+        "the buffer is retained but nothing renders from it"
+    );
+    assert!(split_broker.ledger.disclosed().next().is_none());
     assert!(broker.ledger.disclosed().next().is_none());
     assert!(
         broker
@@ -674,7 +768,15 @@ fn canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_b
         .unwrap();
     assert_eq!(first.buffer.bytes, claim_text.as_bytes());
     assert_eq!(first.origin_key, "decision:decision-a");
-    assert!(first.buffer.tag.remote_verdict.is_some());
+    assert_eq!(
+        first.buffer.tag.verdict,
+        Some(JudgedAt {
+            verdict: EligibilityVerdict::Hidden,
+            visibility: SurfaceVisibility::Hidden,
+            tip: fixture.store.tip().unwrap(),
+        }),
+        "the tag records the descriptor's own judgement; the decision's standing gated the read"
+    );
     assert_eq!(broker.shared_origin(claim_alias.as_str()).unwrap(), None);
     let second = broker
         .read(&fixture.store, promoted_alias.as_str(), None, fixture.now)
@@ -691,6 +793,11 @@ fn canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_b
         .read(&fixture.store, native_alias.as_str(), None, fixture.now)
         .unwrap();
     assert_ne!(native.origin_key, first.origin_key);
+    assert!(native.origin_key.starts_with("native:messages:"));
+    assert!(
+        !native.origin_key.contains(&native_evidence.1),
+        "an origin key is identity, not a hash"
+    );
     assert_eq!(broker.shared_origin(native_alias.as_str()).unwrap(), None);
     // A fabricated identity tuple is refused before bytes are read.
     let mut forged = native_tuple.clone();
@@ -831,8 +938,8 @@ fn accounting_bounds_operations_bytes_and_uncertain_disclosure() {
     let big = broker
         .aliases
         .issue(ReferenceExpectation::TemporaryCapture {
-            evidence_id: big_id,
-            artifact_digest: big_digest,
+            evidence_id: big_id.clone(),
+            artifact_digest: big_digest.clone(),
             byte_length: 4096,
             retain_until: fixture.now + HOUR_MS,
         });
@@ -860,10 +967,49 @@ fn accounting_bounds_operations_bytes_and_uncertain_disclosure() {
         1,
         "one artifact loads once however often it renders"
     );
-    assert!(broker.ledger.conclusions_usable());
-    broker.ledger.record_uncertain_disclosure();
     assert!(
         !broker.ledger.conclusions_usable(),
-        "an unknown attempt makes every conclusion unusable"
+        "a capacity refusal after a disclosure leaves the evidence set partial"
     );
+    // A fresh run: an artifact beyond the run buffer ceiling is refused before loading, and that refusal too is partial once anything was disclosed.
+    let (small_id, small_digest) = fixture.ingest("small", b"tiny", true);
+    let mut broker = fixture
+        .broker(PROJECT, &[small_id.clone(), big_id.clone()])
+        .with_buffer_limit(64);
+    let small = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: small_id,
+            artifact_digest: small_digest,
+            byte_length: 4,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    let oversized = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: big_id,
+            artifact_digest: big_digest,
+            byte_length: 4096,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    broker
+        .read(&fixture.store, small.as_str(), None, fixture.now)
+        .unwrap();
+    assert!(broker.ledger.conclusions_usable());
+    assert_eq!(
+        broker
+            .read(&fixture.store, oversized.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::BufferLimit
+    );
+    assert_eq!(
+        broker.buffers.loaded(),
+        1,
+        "the oversized artifact was never loaded"
+    );
+    assert!(!broker.ledger.conclusions_usable());
+    let mut uncertain = broker;
+    uncertain.ledger.record_uncertain_disclosure();
+    assert!(!uncertain.ledger.conclusions_usable());
 }
