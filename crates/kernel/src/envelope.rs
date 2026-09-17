@@ -1791,6 +1791,7 @@ impl RedactedCandidate {
             || spec.source_kind.trim().is_empty()
             || spec.source_id.trim().is_empty()
             || spec.candidate_kind.trim().is_empty()
+            || crate::review_staging::is_review_kind(&spec.candidate_kind)
         {
             return Err(KernelError::InvalidInput);
         }

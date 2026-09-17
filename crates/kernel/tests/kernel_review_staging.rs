@@ -1015,3 +1015,141 @@ fn staged_review_rows_are_invisible_to_canonical_reads_and_inadmissible() {
     assert_eq!(store.tip().unwrap(), tip_before);
     assert_eq!(counts(directory.path()), before);
 }
+
+#[test]
+fn renewal_refuses_a_review_run_by_its_witness_kind_alone() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let origin = now_ms();
+    store
+        .stage_review_input(subject_spec("run-1", "subject-1", origin))
+        .unwrap();
+    let run_lease = |root: &std::path::Path| -> (i64, i64) {
+        inspect(root, |conn| {
+            conn.query_row(
+                "SELECT heartbeat_at,lease_expires_at FROM extraction_runs WHERE extraction_run_id='run-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        })
+    };
+    let before = run_lease(directory.path());
+    // A review witness whose binding no longer decodes under this build's schema still names the review kind.
+    mutate(
+        directory.path(),
+        "UPDATE extraction_runs SET provenance_witness=?1 WHERE extraction_run_id='run-1'",
+        params![br#"{"kind":"review","binding":{"schema":"future"}}"#.to_vec()],
+    );
+    assert_eq!(
+        store
+            .renew_staging_run("run-1", origin + 1, origin + 1 + HOUR_MS)
+            .unwrap_err(),
+        KernelError::Conflict,
+        "the renewal guard keys off the witness kind, not the binding schema"
+    );
+    assert_eq!(run_lease(directory.path()), before);
+    // A witness that is not JSON at all is refused rather than treated as a public run.
+    mutate(
+        directory.path(),
+        "UPDATE extraction_runs SET provenance_witness=?1 WHERE extraction_run_id='run-1'",
+        params![vec![0u8]],
+    );
+    assert_eq!(
+        store
+            .renew_staging_run("run-1", origin + 1, origin + 1 + HOUR_MS)
+            .unwrap_err(),
+        KernelError::Conflict,
+        "an undecodable witness fails closed"
+    );
+    assert_eq!(run_lease(directory.path()), before);
+    // Positive control: a public run with a public witness still renews.
+    store
+        .stage_candidate(StagingCandidateSpec {
+            extraction_run_id: "public-run".to_string(),
+            candidate_id: "public-candidate".to_string(),
+            extractor: "fixture".to_string(),
+            source_kind: "repo".to_string(),
+            source_id: "source".to_string(),
+            source_revision: 1,
+            candidate_kind: "domain".to_string(),
+            payload: "payload".to_string(),
+            provenance: None,
+            recorded_at: origin,
+            lease_expires_at: origin + HOUR_MS,
+        })
+        .unwrap();
+    store
+        .renew_staging_run("public-run", origin + 1, origin + 1 + HOUR_MS)
+        .unwrap();
+}
+
+#[test]
+fn sealing_a_run_floors_terminal_at_by_every_active_candidate() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let origin = now_ms();
+    let first = store
+        .stage_review_input(subject_spec("run-1", "subject-1", origin))
+        .unwrap();
+    // A sibling recorded later than the run's first heartbeat, inside the store's skew bound.
+    let later = origin + 30_000;
+    let mut sibling_spec = subject_spec("run-1", "subject-2", later);
+    sibling_spec.queue_deadline_at = origin + DAY_MS;
+    sibling_spec.payload = subject("the tests use nextest");
+    let sibling = store.stage_review_input(sibling_spec).unwrap();
+    assert_eq!(
+        lifecycle(directory.path(), "subject-2"),
+        (later, origin + DAY_MS, None)
+    );
+    assert_eq!(
+        store
+            .finish_staging_run("run-1", StagingTerminalState::Completed, later - 1)
+            .unwrap_err(),
+        KernelError::InvalidInput,
+        "a terminal time before a live candidate's heartbeat is an input error, not a dead run"
+    );
+    assert_eq!(
+        lifecycle(directory.path(), "subject-1"),
+        (origin, origin + DAY_MS, None)
+    );
+    seal(&store, "run-1", later);
+    for reference in [&first, &sibling] {
+        let row = store
+            .read_review_input(reference, &job_binding(), later + 1)
+            .unwrap();
+        assert_eq!(row.lifecycle.sealed_at, later);
+    }
+}
+
+#[test]
+fn public_staging_cannot_use_a_review_candidate_kind() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let origin = now_ms();
+    for kind in [REVIEW_SUBJECT_KIND, REVIEW_PROPOSAL_KIND] {
+        let spec = StagingCandidateSpec {
+            extraction_run_id: format!("public-{kind}"),
+            candidate_id: format!("candidate-{kind}"),
+            extractor: "fixture".to_string(),
+            source_kind: "repo".to_string(),
+            source_id: "source".to_string(),
+            source_revision: 1,
+            candidate_kind: kind.to_string(),
+            payload: "payload".to_string(),
+            provenance: None,
+            recorded_at: origin,
+            lease_expires_at: origin + HOUR_MS,
+        };
+        assert_eq!(
+            store.stage_candidate(spec).unwrap_err(),
+            KernelError::InvalidInput,
+            "{kind} is reserved for the review path"
+        );
+    }
+    let count: i64 = inspect(directory.path(), |conn| {
+        conn.query_row("SELECT COUNT(*) FROM extraction_runs", [], |row| row.get(0))
+            .unwrap()
+    });
+    assert_eq!(count, 0);
+}
