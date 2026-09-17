@@ -12,7 +12,7 @@ per-item-maximum bounds to the optional phase.
 - `crates/retrieval/src/packing/scan.rs` `admit_optional_set` checks every
   bound in row order before any byte is loaded and returns `BoundExceeded`
   with the bound and the crossing position.
-- `crates/daemon/src/packing.rs` `prepare_optional` lowers a caller
+- `crates/daemon/src/packing/mod.rs` `prepare_optional` lowers a caller
   fused-candidates bound above `MAX_ELIGIBILITY_CANDIDATES` to that cap and
   checks the request count against it before the read hold, then calls
   `admit_optional_set` after eligibility and before the load hold, mapping

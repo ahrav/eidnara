@@ -1,8 +1,17 @@
 //! Required occurrences complete before optional work, under an integer
 //! `ClaudeTokens` budget.
 
+pub mod accounting;
+pub mod render;
+
 use std::fmt;
 use std::num::NonZeroUsize;
+
+pub use accounting::{AccountingProfile, Authority, Charge, DECLARED_UNCHARGED};
+pub use render::{
+    AccountingBound, AccountingBounds, AccountingExceeded, BLOCK_CLOSE_FRAGMENT,
+    BLOCK_OPEN_FRAGMENT, Charged, Ledger, LedgerEntry, admit_render,
+};
 
 use kernel::applicability::EvalBudget;
 use kernel::{
@@ -93,25 +102,6 @@ pub enum BudgetRefusal {
     TooLarge,
 }
 
-pub trait CostEstimator {
-    fn profile(&self) -> &'static str;
-    fn cost(&self, bytes: &[u8]) -> ClaudeTokens;
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TokenizerEstimator;
-
-impl CostEstimator for TokenizerEstimator {
-    fn profile(&self) -> &'static str {
-        "tokenizer-estimate"
-    }
-
-    fn cost(&self, bytes: &[u8]) -> ClaudeTokens {
-        let text = String::from_utf8_lossy(bytes);
-        ClaudeTokens(tokenizer::estimate_tokens(&text) as u64)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequiredEvent {
     Read,
@@ -182,9 +172,20 @@ impl PackingTrace {
 pub enum PreparationRefusal {
     Required(RequiredContextFailure<ClaudeTokens>),
     OptionalBound(BoundExceeded),
-    /// An optional group's summed range costs are not representable; `at` is
-    /// the group's fused position. Nothing is saturated into an admissible
-    /// cost.
+    Accounting(AccountingExceeded),
+    /// The optional phase was offered a profile other than the one the
+    /// required ledger was charged under.
+    ProfileMismatch,
+    /// The block close, priced after the admitted groups, cost more than the
+    /// reserve taken before the scan, so the closed render exceeds the token
+    /// limit. A profile whose count is local to the tail never drifts.
+    CloseOverBudget {
+        limit: ClaudeTokens,
+        charged: ClaudeTokens,
+    },
+    /// An optional group's summed fragment charges are not representable;
+    /// `at` is the group's fused position. Nothing is saturated into an
+    /// admissible cost.
     OptionalCostOverflow {
         at: usize,
     },
@@ -224,7 +225,7 @@ pub struct RequiredInputs<'a> {
     pub project: &'a ProjectScope,
     pub destination: ArtifactDestination,
     pub budget: &'a EvalBudget,
-    pub estimator: &'a dyn CostEstimator,
+    pub profile: &'a AccountingProfile,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -249,11 +250,32 @@ impl fmt::Debug for MaterializedRequired {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequiredMaterialization {
-    pub profile: &'static str,
-    pub items: Vec<MaterializedRequired>,
-    pub charged: ClaudeTokens,
+    items: Vec<MaterializedRequired>,
+    charged: ClaudeTokens,
+    remaining: ClaudeTokens,
+    ledger: Ledger,
+}
+
+impl RequiredMaterialization {
+    pub fn items(&self) -> &[MaterializedRequired] {
+        &self.items
+    }
+
+    /// The block open and every required item's rendered delta, with
+    /// headroom.
+    pub fn charged(&self) -> ClaudeTokens {
+        self.charged
+    }
+
     /// The token limit left for optional work.
-    pub remaining: ClaudeTokens,
+    pub fn remaining(&self) -> ClaudeTokens {
+        self.remaining
+    }
+
+    /// The block open and the required fragments rendered so far.
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
 }
 
 /// The kernel judges at most `MAX_ELIGIBILITY_CANDIDATES` per batch, so a
@@ -317,6 +339,7 @@ pub fn prepare_required(
     inputs: RequiredInputs<'_>,
     requests: &[RequiredRequest],
     bounds: &RequiredBounds<ClaudeTokens>,
+    accounting: &AccountingBounds,
     trace: &mut PackingTrace,
 ) -> Result<RequiredMaterialization, PreparationRefusal> {
     deadline(&inputs)?;
@@ -405,11 +428,35 @@ pub fn prepare_required(
     }
     let borrowed: Vec<&[u8]> = bytes.iter().map(Vec::as_slice).collect();
     deadline(&inputs)?;
-    let reservation = reserve_required(&admitted, &borrowed, bounds.token_limit, |bytes| {
-        inputs.estimator.cost(bytes)
+    let mut ledger = Ledger::open(inputs.profile.clone());
+    let block_open = ledger.total_with_headroom();
+    let Some(items_limit) = bounds.token_limit.checked_sub(block_open) else {
+        return Err(RequiredContextFailure::OverBudget {
+            limit: bounds.token_limit,
+            charged: block_open,
+        }
+        .into());
+    };
+    let reservation = reserve_required(&admitted, &borrowed, items_limit, |item, bytes| {
+        let occurrence = item.row().occurrence;
+        ledger
+            .append(
+                Charged::Required(occurrence),
+                &render::required_fragment(occurrence, bytes),
+            )
+            .with_headroom()
+    })
+    .map_err(|failure| match failure {
+        RequiredContextFailure::OverBudget { charged, .. } => RequiredContextFailure::OverBudget {
+            limit: bounds.token_limit,
+            charged: charged.checked_add(block_open).unwrap_or(ClaudeTokens::MAX),
+        },
+        other => other,
     })?;
     deadline(&inputs)?;
     trace.required(RequiredEvent::Reserved, None);
+    admit_render(&ledger, accounting).map_err(PreparationRefusal::Accounting)?;
+    let charged = ledger.total_with_headroom();
 
     let items = admitted
         .iter()
@@ -423,13 +470,13 @@ pub fn prepare_required(
         })
         .collect();
     Ok(RequiredMaterialization {
-        profile: inputs.estimator.profile(),
         items,
-        charged: reservation.charged,
+        charged,
         remaining: bounds
             .token_limit
-            .checked_sub(reservation.charged)
+            .checked_sub(charged)
             .unwrap_or(ClaudeTokens::ZERO),
+        ledger,
     })
 }
 
@@ -454,6 +501,8 @@ pub struct CostedGroup {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionalAdmission {
+    /// The closed render: block, required items, admitted groups.
+    pub ledger: Ledger,
     pub admitted: Vec<CostedGroup>,
     /// Groups visited and skipped, in fused order.
     pub skipped: Vec<CostedGroup>,
@@ -474,9 +523,13 @@ pub fn prepare_optional(
     required: &RequiredMaterialization,
     requests: &[OptionalRequest],
     bounds: &OptionalBounds,
+    accounting: &AccountingBounds,
     trace: &mut PackingTrace,
 ) -> Result<OptionalAdmission, PreparationRefusal> {
     deadline(&inputs)?;
+    if inputs.profile != required.ledger.profile() {
+        return Err(PreparationRefusal::ProfileMismatch);
+    }
     let bounds = &OptionalBounds {
         max_fused_candidates: bounds.max_fused_candidates.min(KERNEL_BATCH_CAP),
         ..*bounds
@@ -582,25 +635,80 @@ pub fn prepare_optional(
     let partition = group(&selected);
     trace.optional(OptionalEvent::Grouped, None);
 
-    let costs = partition
-        .groups
-        .iter()
-        .map(|group| {
-            group
-                .ranges
-                .iter()
-                .try_fold(ClaudeTokens::ZERO, |sum, range| {
-                    sum.checked_add(inputs.estimator.cost(&range.bytes))
-                })
-                .ok_or(PreparationRefusal::OptionalCostOverflow {
-                    at: group.first_fused,
-                })
-        })
-        .collect::<Result<Vec<ClaudeTokens>, _>>()?;
-    let scan = skip_and_continue(required.remaining, partition.groups.len(), |_, index| {
-        costs[index]
-    });
+    let ledger = required.ledger.clone();
+    // The close is part of the render the budget must cover, so its charge is
+    // held back from the scan and settled once the closing charge is known. A
+    // required render that leaves no room for it is over budget, not closed
+    // past the limit.
+    let close_reserve = ledger.delta(BLOCK_CLOSE_FRAGMENT).with_headroom();
+    let Some(scan_budget) = required.remaining.checked_sub(close_reserve) else {
+        return Err(RequiredContextFailure::OverBudget {
+            limit: required
+                .charged
+                .checked_add(required.remaining)
+                .unwrap_or(ClaudeTokens::MAX),
+            charged: required
+                .charged
+                .checked_add(close_reserve)
+                .unwrap_or(ClaudeTokens::MAX),
+        }
+        .into());
+    };
+    let mut costs: Vec<ClaudeTokens> = Vec::with_capacity(partition.groups.len());
+    // A group whose priced sum is unrepresentable is never admitted at a
+    // saturated cost; the first such group refuses the phase after the scan.
+    let mut overflow: Option<usize> = None;
+    // Each group is priced once as the entries it would be charged as; the
+    // admit callback commits that same pricing, so the deducted cost and the
+    // ledger's charges cannot diverge.
+    let mut state: (Ledger, Option<render::Staged>) = (ledger, None);
+    let scan = skip_and_continue(
+        scan_budget,
+        partition.groups.len(),
+        &mut state,
+        |(ledger, staged), index| {
+            if inputs.budget.is_exhausted() {
+                costs.push(ClaudeTokens::MAX);
+                return ClaudeTokens::MAX;
+            }
+            let priced = ledger.stage(render::group_fragments(index, &partition.groups[index]));
+            let Some(cost) = priced.cost() else {
+                overflow.get_or_insert(partition.groups[index].first_fused);
+                costs.push(ClaudeTokens::MAX);
+                return ClaudeTokens::MAX;
+            };
+            costs.push(cost);
+            *staged = Some(priced);
+            cost
+        },
+        |(ledger, staged), _| {
+            if let Some(priced) = staged.take() {
+                ledger.commit(priced);
+            }
+        },
+    );
+    let (mut ledger, _) = state;
+    deadline(&inputs)?;
+    if let Some(at) = overflow {
+        return Err(PreparationRefusal::OptionalCostOverflow { at });
+    }
+    let close = ledger.close().with_headroom();
+    deadline(&inputs)?;
+    let Some(remaining) = scan
+        .remaining
+        .checked_add(close_reserve)
+        .and_then(|budget| budget.checked_sub(close))
+    else {
+        return Err(PreparationRefusal::CloseOverBudget {
+            limit: required
+                .charged
+                .checked_add(required.remaining)
+                .unwrap_or(ClaudeTokens::MAX),
+            charged: ledger.total_with_headroom(),
+        });
+    };
     trace.optional(OptionalEvent::Scanned, None);
+    admit_render(&ledger, accounting).map_err(PreparationRefusal::Accounting)?;
     let (admitted, skipped): (Vec<_>, Vec<_>) = partition
         .groups
         .into_iter()
@@ -609,11 +717,12 @@ pub fn prepare_optional(
         .map(|(index, (group, cost))| (index, CostedGroup { group, cost }))
         .partition(|(index, _)| scan.admitted.binary_search(index).is_ok());
     Ok(OptionalAdmission {
+        ledger,
         admitted: admitted.into_iter().map(|(_, group)| group).collect(),
         skipped: skipped.into_iter().map(|(_, group)| group).collect(),
         excluded,
         ungrouped: partition.refused,
-        remaining: scan.remaining,
+        remaining,
     })
 }
 
@@ -633,11 +742,16 @@ mod tests {
             bytes: secret.to_vec(),
             cost: ClaudeTokens(7),
         };
+        let mut ledger = Ledger::open(AccountingProfile::exact_tokenizer());
+        ledger.append(
+            Charged::Required(item.occurrence),
+            &render::required_fragment(item.occurrence, secret),
+        );
         let materialization = RequiredMaterialization {
-            profile: "test",
             items: vec![item.clone()],
             charged: ClaudeTokens(7),
             remaining: ClaudeTokens(0),
+            ledger,
         };
         for rendered in [format!("{item:?}"), format!("{materialization:?}")] {
             assert!(
@@ -742,9 +856,10 @@ mod tests {
             content: content.clone(),
         });
         assert_eq!(line.matches('x').count(), 64 * 1024);
-        let estimator = TokenizerEstimator;
-        let whole = estimator.cost(content.as_bytes());
-        let cut = estimator.cost(&content.as_bytes()[..64 * 1024]);
+        let profile = AccountingProfile::exact_tokenizer();
+        let whole = profile.charge(&content).tokens();
+        let cut = profile.charge(&content[..64 * 1024]).tokens();
         assert!(cut < whole, "the uncut tail is charged");
+        assert_eq!(profile.authority(), Authority::Exact);
     }
 }

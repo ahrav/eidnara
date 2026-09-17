@@ -47,7 +47,7 @@ None.
 ### Q: Can the production grouper reach a parent buffer?
 
 - Sources examined: `crates/retrieval/src/packing/grouping.rs` `Selected` and
-  `group`; `crates/daemon/src/packing.rs` `prepare_optional`, which builds
+  `group`; `crates/daemon/src/packing/mod.rs` `prepare_optional`, which builds
   each `Selected` from the row and the bytes `fetch_payload` returned for that
   row alone; `grep -rn groups.json crates --include=*.rs`.
 - Findings: `group` takes `&[Selected<'_>]` and nothing else; the only reader

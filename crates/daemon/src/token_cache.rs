@@ -1,16 +1,73 @@
-//! Bounded token-count cache keyed by SHA-256 content digest.
+//! Bounded token-count cache keyed by accounting revision and SHA-256 content
+//! digest.
 //!
-//! `tokenizer::estimate_tokens` is a pure function of its input, so a
-//! digest-keyed count can be reused across passes and sessions without
-//! affecting any rendered byte. Steady transform passes re-measure the same
-//! projected blocks every pass; tail hygiene already computes a per-part
-//! SHA-256, so the lookup key is free on that path.
+//! `tokenizer::estimate_tokens` is a pure function of its input under one
+//! vocabulary, so a count keyed by the accounting revision and the content
+//! digest can be reused across passes and sessions without affecting any
+//! rendered byte. Steady transform passes re-measure the same projected blocks
+//! every pass; tail hygiene already computes a per-part SHA-256, so the lookup
+//! key is nearly free on that path.
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
+
+/// Names the estimator whose counts a cache entry holds; a count cached under
+/// one revision is never served under another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AccountingRevision {
+    text: String,
+    key: [u8; 32],
+}
+
+pub const EXACT_TOKENIZER_IDENTITY: &str = "claude-bpe";
+
+impl AccountingRevision {
+    fn new(text: String) -> Self {
+        let key = Sha256::digest(text.as_bytes()).into();
+        Self { text, key }
+    }
+
+    /// Length-prefixed components, so no component can imitate a boundary.
+    pub fn from_components(components: &[&str]) -> Self {
+        let text = components
+            .iter()
+            .map(|component| format!("{}:{component}", component.len()))
+            .collect::<Vec<_>>()
+            .join(";");
+        Self::new(text)
+    }
+
+    pub fn heuristic(identity: &str, degradation: &str) -> Self {
+        Self::from_components(&["heuristic", identity, degradation])
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// The exact Claude BPE tokenizer this build links against, fingerprinted
+    /// by its vocabulary bytes.
+    pub fn exact_tokenizer() -> &'static Self {
+        static EXACT: OnceLock<AccountingRevision> = OnceLock::new();
+        EXACT.get_or_init(|| {
+            Self::from_components(&[
+                "exact",
+                EXACT_TOKENIZER_IDENTITY,
+                &format!("{:x}", Sha256::digest(tokenizer::vocab_blob())),
+            ])
+        })
+    }
+
+    fn cache_key(&self, content_digest: [u8; 32]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.key);
+        hasher.update(content_digest);
+        hasher.finalize().into()
+    }
+}
 
 /// Maximum entries in each current or previous generation.
 const GENERATION_CAP: usize = 65_536;
@@ -99,15 +156,32 @@ fn insert_current(generations: &mut Generations, digest: [u8; 32], count: u32) {
     generations.current.insert(digest, count);
 }
 
-/// Token count for `content` whose digest the caller already computed.
+/// Exact tokenizer count for `content` whose digest the caller already
+/// computed, keyed under the exact tokenizer revision.
 ///
 /// Callers must hash a domain-separated, injective encoding of `content`.
 /// Tail hygiene hashes `kind_name ‖ NUL ‖ content`; this module's raw path
 /// hashes `NUL ‖ content`, which no kind name can prefix.
-///
-/// Concurrent misses may tokenize the same content more than once. Insertion
-/// remains bounded and later lookups return the stored count.
 pub(crate) fn count_with_digest(digest: [u8; 32], content: &str) -> usize {
+    count_under(
+        AccountingRevision::exact_tokenizer(),
+        digest,
+        content,
+        tokenizer::estimate_tokens,
+    )
+}
+
+/// Count for `content` under `revision`, computed by `count` on a miss.
+///
+/// Concurrent misses may count the same content more than once. Insertion
+/// remains bounded and later lookups return the stored count.
+pub(crate) fn count_under(
+    revision: &AccountingRevision,
+    content_digest: [u8; 32],
+    content: &str,
+    count: impl FnOnce(&str) -> usize,
+) -> usize {
+    let digest = revision.cache_key(content_digest);
     bump_local(|stats| stats.calls += 1);
     // ponytail: one global lock; shard per digest byte if concurrent sessions
     // ever contend here.
@@ -130,7 +204,7 @@ pub(crate) fn count_with_digest(digest: [u8; 32], content: &str) -> usize {
         stats.misses += 1;
         stats.tokenized_bytes += content.len() as u64;
     });
-    let count = tokenizer::estimate_tokens(content);
+    let count = count(content);
     // Return counts that exceed u32 uncached to avoid truncated cache hits.
     let Ok(cached) = u32::try_from(count) else {
         return count;
@@ -163,13 +237,26 @@ pub(crate) fn test_cache_guard() -> std::sync::MutexGuard<'static, ()> {
 /// Drop-in replacement for `tokenizer::estimate_tokens` that hashes and
 /// caches contents long enough to be worth it.
 pub(crate) fn cached_estimate_tokens(content: &str) -> usize {
+    cached_count_under(
+        AccountingRevision::exact_tokenizer(),
+        content,
+        tokenizer::estimate_tokens,
+    )
+}
+
+/// `count` under `revision` for contents long enough to be worth caching.
+pub(crate) fn cached_count_under(
+    revision: &AccountingRevision,
+    content: &str,
+    count: impl FnOnce(&str) -> usize,
+) -> usize {
     if content.len() < MIN_CACHED_LEN {
         bump_local(|stats| {
             stats.calls += 1;
             stats.bypassed += 1;
             stats.tokenized_bytes += content.len() as u64;
         });
-        return tokenizer::estimate_tokens(content);
+        return count(content);
     }
     // The leading NUL keeps this key domain disjoint from tail hygiene's
     // `kind_name ‖ NUL ‖ content` keys, so content that itself starts with
@@ -177,7 +264,7 @@ pub(crate) fn cached_estimate_tokens(content: &str) -> usize {
     let mut hasher = Sha256::new();
     hasher.update([0u8]);
     hasher.update(content.as_bytes());
-    count_with_digest(hasher.finalize().into(), content)
+    count_under(revision, hasher.finalize().into(), content, count)
 }
 
 #[cfg(test)]
@@ -236,6 +323,54 @@ mod tests {
         assert_eq!(after.bypassed - before.bypassed, 1);
         assert_eq!(after.misses - before.misses, 1);
         assert_eq!(after.hits - before.hits, 1);
+    }
+
+    #[test]
+    fn a_count_cached_under_one_revision_is_not_served_under_another() {
+        let _guard = test_cache_guard();
+        clear();
+        let content = "revision isolation fixture: long enough to be cached under both revisions";
+        assert!(content.len() >= MIN_CACHED_LEN);
+        let first = AccountingRevision::heuristic("profile-a", "1");
+        let second = AccountingRevision::heuristic("profile-a", "2");
+        assert_eq!(cached_count_under(&first, content, |_| 7), 7);
+        assert_eq!(
+            cached_count_under(&first, content, |_| 99),
+            7,
+            "same revision hits"
+        );
+        assert_eq!(
+            cached_count_under(&second, content, |_| 11),
+            11,
+            "another revision misses and counts afresh"
+        );
+        assert_eq!(cached_count_under(&first, content, |_| 99), 7);
+        let mut guard = lock_cache();
+        let generations = guard.get_or_insert_with(Generations::default);
+        generations.previous = std::mem::take(&mut generations.current);
+        drop(guard);
+        assert_eq!(
+            cached_count_under(&second, content, |_| 99),
+            11,
+            "rotation keeps the entry"
+        );
+        assert_eq!(cached_count_under(&first, content, |_| 99), 7);
+        let exact = AccountingRevision::exact_tokenizer().as_str();
+        let prefix = format!(
+            "5:exact;{}:{EXACT_TOKENIZER_IDENTITY};64:",
+            EXACT_TOKENIZER_IDENTITY.len()
+        );
+        assert!(exact.starts_with(&prefix), "{exact}");
+        assert_eq!(exact.len(), prefix.len() + 64);
+        assert_ne!(
+            AccountingRevision::from_components(&["a@b", "c"]),
+            AccountingRevision::from_components(&["a", "b@c"])
+        );
+        assert_ne!(
+            AccountingRevision::heuristic("exact", "x"),
+            AccountingRevision::from_components(&["exact", "x"]),
+            "the authority tag is part of the encoding"
+        );
     }
 
     #[test]

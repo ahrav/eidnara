@@ -15,7 +15,7 @@ the seventh, its own variant by the Q3 ruling in `../catalog.md`.
   before examining any request, then maps rows and dispositions to the classes
   in request order before any byte is loaded; `reserve_required` adds `Corrupt`
   for a length mismatch and `OverBudget` for the limit.
-- `crates/daemon/src/packing.rs` `prepare_required` tightens the load bound to
+- `crates/daemon/src/packing/mod.rs` `prepare_required` tightens the load bound to
   the kernel's `MAX_ELIGIBILITY_CANDIDATES`, refuses a request set beyond it
   before any read, reads each row under one connection hold, judges
   eligibility in one kernel batch, admits, fetches payloads through

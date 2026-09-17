@@ -51,7 +51,7 @@ result. Recorded by the RP2.8 owner at the U1 change;
 Type: safety
 Reachability: test-only - `read_selected` and `SelectedOccurrence` are called
 from `crates/retrieval/tests/packing_identity.rs` and, since RP2.8 U2, from
-`crates/daemon/src/packing.rs` `prepare_required`, which itself has only a test
+`crates/daemon/src/packing/mod.rs` `prepare_required`, which itself has only a test
 caller; `grep -rn 'packing::' crates --include=*.rs` outside
 `crates/retrieval/src/packing/mod.rs` finds those files alone, so no route
 reads a selection at this base.

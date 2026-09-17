@@ -22,7 +22,7 @@ grouping and admission are the U3 part.
 The pure decisions are `crates/retrieval/src/packing/required.rs`
 (`admit_required`, `reserve_required`), exercised by
 `crates/retrieval/tests/packing_required.rs`. The daemon entry is
-`crates/daemon/src/packing.rs` `prepare_required`, exercised by
+`crates/daemon/src/packing/mod.rs` `prepare_required`, exercised by
 `crates/daemon/tests/packing_required.rs` against a seeded kernel and a
 search projection; the `PackingTrace` it fills is the observation point for
 stage order, retrieval calls, and payload loads.
@@ -59,7 +59,7 @@ Recorded by the repository owner at the U2 change:
 Type: safety
 Reachability: test-only - `prepare_required` is called from
 `crates/daemon/tests/packing_required.rs` only; `grep -rn 'prepare_required'
-crates --include=*.rs` outside `crates/daemon/src/packing.rs` finds that test
+crates --include=*.rs` outside `crates/daemon/src/packing/mod.rs` finds that test
 file alone, so no route packs a selection at this base.
 Status: active
 Exercised: partial - `crates/daemon/tests/packing_required.rs`
@@ -147,7 +147,7 @@ Type: safety
 Reachability: test-only - `ClaudeTokens::from_budget` has no production
 caller at this base; the route that parses a wire budget lands with U5a.
 Status: active
-Exercised: yes - `crates/daemon/src/packing.rs` tests
+Exercised: yes - `crates/daemon/src/packing/mod.rs` tests
 `budgets_are_integers_and_never_clamped` and
 `the_retained_malformed_budget_clamp_is_not_inherited`; the two
 `compile_fail` doctests on `ClaudeTokens`.
@@ -184,10 +184,11 @@ Exercised: yes - `crates/daemon/tests/packing_required.rs`
 and `a_required_payload_beyond_the_legacy_cut_is_materialized_and_charged_whole`;
 `crates/retrieval/tests/packing_required.rs`
 `reservation_charges_every_byte_and_stops_exactly_at_the_limit`;
-`crates/daemon/src/packing.rs` test
+`crates/daemon/src/packing/mod.rs` test
 `the_sixty_four_kib_silent_cut_is_not_inherited`.
 Guarantee: Every materialized required byte equals the selected payload byte
-and is charged through the named estimator; the required-only cost exactly at
+and is charged through the named accounting profile as the rendered delta of
+its fragment (the `accounting/` part fixes the delta rule); the required-only cost exactly at
 the token limit succeeds and one above fails; no required payload is cut at
 64 KiB or anywhere else.
 Check: `always` - the materialized bytes equal the persisted payload bytes;
