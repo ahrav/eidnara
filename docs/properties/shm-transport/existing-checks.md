@@ -66,13 +66,11 @@ transcribes each test's name; it is a locator, not an audit, and every row is
 | `released_admissions_recompute_active_span_charge` (`:168`) | Released admissions recompute active span charge | unaudited |
 | `host_test_ring_profile_names_one_geometry` (`:202`) | Host test ring profile names one geometry | unaudited |
 
-### `crates/shm-transport/tests/evidence.rs` - 3 tests
+### Retired counter-gate tests
 
-| Test | Claim asserted (from the name) | Status |
-| --- | --- | --- |
-| `purity_gate_rejects_injected_copy_allocation_queue_and_wake` (`:4`) | Purity gate rejects injected copy allocation queue and wake | unaudited |
-| `purity_gate_excuses_wake_operations_only_for_a_qualified_arm_that_parked` (`:33`) | Purity gate excuses wake operations only for a qualified arm that parked | unaudited |
-| `purity_gate_never_excuses_a_syscall_the_doorbell_did_not_issue` (`:78`) | Purity gate never excuses a syscall the doorbell did not issue | unaudited |
+The benchmark cleanup removed `crates/shm-transport/tests/evidence.rs` and
+its three purity-gate tests. None is an existing or exercised check. The
+owning `operation-counters-are-observed-not-declared` record is invalidated.
 
 ### `crates/shm-transport/tests/fuzz_corpus.rs` - 4 tests
 
@@ -329,18 +327,12 @@ Two guards are silent by construction and worth naming: `abort_reservation` is
 infallible and no-ops if the slot pointer computation fails, and
 `enter_quarantine` no-ops if the lifecycle pointer computation fails.
 
-## Benchmark manifests as contracts
+## Retired benchmark manifest
 
-`crates/shm-transport/benches/manifests/v1.json` encodes gates, most of them
-deliberately unfrozen: no designated host, an unset equivalence margin, unset
-failure-hardening status with an empty retained-tuple list, and a selection gate
-that forbids copied arms and requires the injected gate control to be
-disqualified. `no_qualifying_arm_action` is to ship no shared-memory provider.
-
-The matrix validator short-circuits on the unset status and CI runs it with
-`--allow-unresolved`, so the per-tuple body has never executed against real
-data. Its admission floors are restated in prose rather than derived from the
-charge computation, and disagree with it in both directions.
+The benchmark cleanup removed the hardware-envelope benchmark and its
+manifest. They supply no current release gate, transfer-checksum witness,
+or operation-counter evidence. Both owning Group G records are invalidated;
+retained runtime and transport tests do not depend on this manifest.
 
 ## Suspiciously quiet areas
 

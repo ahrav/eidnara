@@ -44,9 +44,8 @@ must reach before any "faster" claim is checkable.
   [`respond_transform`][respond]; none of that is in the bench.
 - The 1_400 and 1_000 points are pinned by
   [`first_hard_pass_meta_respects_the_store_durable_text_bound`][meta-bound]
-  (1_000 commits, 1_400 fails). The test carries
-  `#![cfg(feature = "bench-internals")]` and a `required-features` gate in
-  [Cargo.toml:62-75][cargo-bench].
+  (1_000 commits, 1_400 fails). The retained test now runs as a normal daemon
+  library unit test, without the removed `bench-internals` feature gate.
 - The two production-sized fixtures are `#[ignore]` and print to stderr:
   [`apply_once_stage_timings_large_fixture`][fx-1400] (1_400 messages) and
   [`full_module_pass_timing_fixture`][fx-2500] (2_500 messages, 47_075
@@ -127,18 +126,13 @@ specification enumerates the stages, and no name is built at run time.
 - Missing evidence: A `meta` byte count per message at both points.
 - Conclusion: unresolved, needs a measured `meta` size at 1_000 and 1_400.
 
-## W1 grouping for the typed-wire decode payoff, 2026-09-13
+## Retired W1 grouping for the typed-wire decode payoff
 
-The typed-wire decode plan's payoff evidence is recorded under this record's
-name as its single W1 grouping, at
-`docs/properties/typed-wire-decode/resources/evidence/eg1-decode-projection/`
-(EG1). It times `serde_json::from_slice::<TransformRequest>` alone and with
-`wire::project_messages` on frozen 40- and 200-message bodies in five
-alternating process pairs, with a predeclared noise rule, and reports
-`proceed` on all four cells. It does not reach `Handler::handle`, a
-production-sized steady session, or a build/host/workload manifest of this
-record's shape, so this record stays invalidated; the grouping is a pointer,
-not a reactivation.
+The benchmark cleanup removed the typed-wire payoff receipts, manifests, and
+raw samples. [EG1](../../../typed-wire-decode/resources/evidence-gates.md)
+is retired and its earlier passing verdict is withdrawn. This grouping no
+longer supplies measurement evidence. W1 remains invalidated; the retained
+durable-text bound test is correctness coverage, not a performance claim.
 
 [ci-bench]: ../../../../../.github/workflows/ci.yml#L514-L518
 [nextest]: ../../../../../.config/nextest.toml#L4-L7
@@ -152,7 +146,7 @@ not a reactivation.
 [hp-e2e]: ../../../../../crates/daemon/benches/hot_path.rs#L282-L315
 [hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L352-L354
 [cargo-bench]: ../../../../../crates/daemon/Cargo.toml#L62-L75
-[meta-bound]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
+[meta-bound]: ../../../../../crates/daemon/src/transform_meta_bound.rs#L19-L102
 [fx-1400]: ../../../../../crates/daemon/src/transform.rs#L12434-L12494
 [fx-2500]: ../../../../../crates/daemon/src/transform.rs#L28083-L28292
 [h-pre]: ../../../../../crates/daemon/src/lib.rs#L8189-L8206

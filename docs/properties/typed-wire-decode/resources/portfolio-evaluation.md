@@ -72,7 +72,7 @@ and owner questions do not mean the four-lens review is still pending.
 | How should A1's unqualified charge-before-probe statement be dispositioned for above-cap input? | Needs human input. The ordering discrepancy is verified. Preserve it until an owner resolves the contract; allocation magnitude remains unmeasured. |
 | Which existing reservation covers probe and canonical/projection workspace under the logical budget? | Attribution remains open. This does not authorize a new ownership or RSS model. |
 | How will the 40-message allocation observation isolate messages from native fields, setup, projection, and other threads? | Needs human input on instrumentation. Budget remains `<=640` and strict `<3J`; invalid attribution cannot pass. |
-| Who owns the exact payoff artifact and predeclared noise/uncertainty rule across both sizes? | Needs human input. EG1 retains statistics -> experiment design -> bench compare routing and the whole-plan within-noise stop. |
+| Who owns the exact payoff artifact and predeclared noise/uncertainty rule across both sizes? | EG1 is retired; a future payoff campaign requires a new owner decision and retained evidence. |
 | How should P:L213's requested W1 update coexist with its invalidated status? | Needs human input. EG1 stays plan-local; W1 remains invalidated. |
 
 ## Prospective evidence and gaps
@@ -85,14 +85,14 @@ Those are evidence tasks, not permission to redesign accepted decisions.
 
 All existing tests and production guards remain unaudited. No `Exercised`
 field is promoted by this review. R6 is excluded from runtime implementation
-and coverage counts, while EG1 preserves its entire accepted obligation.
+and coverage counts. EG1 is now retired and its passing verdict is withdrawn.
 
 ## Final portfolio
 
 - Active: six records, comprising five safety `always` records and one
   reachability record specifying twelve independent `sometimes` checks.
 - Invalidated: one record, `decode-projection-payoff-has-comparable-evidence`.
-- Evidence gates: one required gate, EG1; execution pending.
-- Preserved names: twelve resource markers plus one evidence receipt.
+- Evidence gates: EG1 retired; no passing verdict or pending campaign.
+- Preserved names: twelve resource markers; one retired evidence receipt.
 - Liveness records: zero. Fresh portfolio review: complete as supplied;
   source validation and documentation disposition: complete.

@@ -176,82 +176,8 @@ use transform::ReductionDecision;
 #[cfg(test)]
 pub mod test_support;
 
-/// Exposes crate-private stages to `benches/hot_path.rs`.
-#[cfg(feature = "bench-internals")]
-pub mod bench_internals {
-    use std::collections::HashSet;
-    use std::sync::Mutex;
-
-    use crate::canonical_memory::CanonicalMemory;
-    pub use crate::config::CacheTtlProvenance;
-    use crate::transform::{
-        ProducerContext, SerializedOutputCache, TransformError, TransformRequest,
-        TransformWithProjection,
-    };
-
-    use crate::wire::FlatProjection;
-    use cache_stability::CoreState;
-    use memory_store::{MemoryStore, TagRow};
-
-    /// Returns unprotected and total tail-hygiene token estimates.
-    pub fn measure_tail_hygiene(
-        projection: &FlatProjection,
-        core: &CoreState,
-        coverage_ordinal: Option<u64>,
-        tag_rows: &[TagRow],
-        protected_tags: usize,
-        protected_block_ids: &HashSet<String>,
-        memo: &HygieneMemo,
-    ) -> (i64, i64) {
-        let measurement = memo.0.with_session(0, "benchmark", |memo| {
-            crate::tail_hygiene::measure_tail_hygiene(
-                projection,
-                core,
-                coverage_ordinal,
-                tag_rows,
-                protected_tags,
-                protected_block_ids,
-                memo,
-            )
-        });
-        (measurement.u, measurement.t)
-    }
-
-    /// Owns hygiene memos reused across warm benchmark calls.
-    #[derive(Default)]
-    pub struct HygieneMemo(crate::tail_hygiene::HygieneMemos);
-
-    /// Returns how many memories the skip-and-continue scan admits under the
-    /// supplied token budget: a memory that does not fit is skipped and later
-    /// smaller memories are still visited.
-    pub fn trim_memories_to_budget(memories: &[CanonicalMemory], budget_tokens: f64) -> usize {
-        crate::m0_compose::trim_memories_to_budget(
-            memories,
-            budget_tokens,
-            crate::token_cache::cached_estimate_tokens,
-        )
-        .len()
-    }
-
-    /// Serialized transform cache used by benchmark calls.
-    #[derive(Default)]
-    pub struct OutputCache(Mutex<SerializedOutputCache>);
-
-    /// Clears the process-wide benchmark token-estimate cache.
-    pub fn clear_token_cache() {
-        crate::token_cache::clear();
-    }
-
-    /// Runs the cached transform path with a benchmark-owned output cache.
-    pub fn transform_cached(
-        store: &MemoryStore,
-        req: &TransformRequest,
-        ctx: &ProducerContext<'_>,
-        cache: &OutputCache,
-    ) -> Result<TransformWithProjection, TransformError> {
-        crate::transform::transform_with_projection_cached(store, req, ctx, &cache.0, None)
-    }
-}
+#[cfg(test)]
+mod transform_meta_bound;
 
 #[cfg(test)]
 mod differential_goldens;

@@ -43,11 +43,10 @@ authorize implementation or create tickets.
   and history. External plans and incident reports were not supplied. Final
   scope confirmation remains pending; this does not mean none exist.
 - No tests, campaigns, or benchmarks ran as part of the discovery audit.
-  The B4 implementation and local payoff evidence are a separate, dated update
-  in [the B4 evidence](evidence/hygiene-digest-is-kind-prefixed-part-content.md)
-  and [the historical payoff receipt](evidence/tail-hygiene-payoff.md).
-  The [integrated payoff receipt](evidence/tail-hygiene-integrated-payoff.md)
-  supplies the separate measurement for candidate `05c33bf0`.
+  The B4 correctness evidence remains in
+  [the B4 evidence](evidence/hygiene-digest-is-kind-prefixed-part-content.md).
+  The benchmark cleanup removed both payoff receipts and their raw evidence;
+  their passing verdicts and numerical speedup claims are withdrawn.
 - `portfolio-evaluation.md` in this directory records the fresh evaluation
   and, under "Disposition", what was applied from it.
 
@@ -708,26 +707,15 @@ include cold/warm identity, the frozen full-result digest, explicit digest and
 token-key separation, invalidation, and bounded retention; all unaudited.
 Impact: Reported hygiene hashes and cached token counts silently change
 meaning.
-Open questions: None for the ticket-local payoff decision. The
-[integrated three-pair A/A and five-pair A/B run](evidence/tail-hygiene-integrated-payoff.md)
-meets both predeclared retention conditions and reports a 72.5513% reduction
-in warm-call time. This does not establish production, concurrent-session,
-cold-call, or total session latency. The frozen characterization has
-agent-witnessed, transcript-only pre-memo provenance, not an independently
-reexecuted or artifact-hash-verified characterization run.
+Open questions: The local payoff decision is no longer supported by retained
+measurement evidence. Both the pre-integration and integrated payoff receipts,
+manifests, and raw samples were removed. Their passing verdicts and numerical
+speedup claims are withdrawn; new retained evidence is required before any
+future performance claim. This does not invalidate the digest-correctness
+property or its retained executable checks.
 
-The historical [73.1659% measurement](evidence/tail-hygiene-payoff.md) applies
-to candidate `e1a0d06a` before integration with
-`16542f5e`. The merged [hygiene input setup][hyg-bench-input] decodes the
-corpus through JSON and retains original message JSON; the measured candidate
-constructed typed ingress directly. The [memo setup and timed loop][hyg-bench-loop]
-still construct and prime the actual slot pool outside the callback. The old
-result does not establish the same gain for this merged input representation.
-The recorded experiment artifacts, paths, and hashes remain historical evidence.
-The new measurement resolves that gap by comparing archived `16542f5e` plus
-only the required release-accessor repair with `05c33bf0`, using decoded
-ingress on both sides and a newly measured A/A guard. Its conditional paired
-interval does not establish host/build population coverage or allocator RSS.
+The frozen characterization has agent-witnessed, transcript-only pre-memo
+provenance, not an independently reexecuted or artifact-hash-verified run.
 
 ### replayed-synthetic-pair-arrives-unflagged-on-a-delta-turn
 
@@ -2923,7 +2911,7 @@ evaluation of this area and its disposition are recorded in
 [nextest]: ../../../../.config/nextest.toml#L4-L7
 [hp-header]: ../../../../crates/daemon/benches/hot_path.rs#L1-L10
 [hp-e2e]: ../../../../crates/daemon/benches/hot_path.rs#L282-L315
-[meta-bound]: ../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
+[meta-bound]: ../../../../crates/daemon/src/transform_meta_bound.rs#L19-L102
 [he-payload]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223
 [he-designated]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L211-L214
 [he-blocked]: ../../../../crates/shm-transport/benches/hardware_envelope.rs#L283-L286

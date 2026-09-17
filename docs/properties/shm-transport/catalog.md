@@ -300,8 +300,8 @@ and `n/a - invalidated` for an invalidated record.
 | [attach-binds-geometry-to-a-local-profile](#attach-binds-geometry-to-a-local-profile) | safety | high | yes |
 | [one-profile-name-denotes-one-geometry](#one-profile-name-denotes-one-geometry) | safety | high | yes |
 | [native-boundary-not-weaker-than-its-wrapper](#native-boundary-not-weaker-than-its-wrapper) | safety | high | n/a - invalidated |
-| [operation-counters-are-observed-not-declared](#operation-counters-are-observed-not-declared) | safety | high | no |
-| [measured-transfer-is-witnessed-by-the-data](#measured-transfer-is-witnessed-by-the-data) | safety | high | no |
+| [operation-counters-are-observed-not-declared](#operation-counters-are-observed-not-declared) | safety | high | n/a - invalidated |
+| [measured-transfer-is-witnessed-by-the-data](#measured-transfer-is-witnessed-by-the-data) | safety | high | n/a - invalidated |
 | [traceability-pointers-resolve](#traceability-pointers-resolve) | safety | high | n/a - invalidated |
 | [negative-tests-fail-for-their-stated-reason](#negative-tests-fail-for-their-stated-reason) | safety | high | no |
 | [documented-close-order-has-a-production-driver](#documented-close-order-has-a-production-driver) | reachability | high | no |
@@ -1677,23 +1677,18 @@ Open questions:
 
 ## Group G: evidence and measurement integrity
 
-These properties do not guard the transport. They guard the artifacts that would
-be used to decide whether to ship it, and to prove the other properties hold.
-A defect here is live today, regardless of the transport being non-default.
+The first three records describe retired evidence artifacts, not active
+transport checks. The benchmark cleanup removed the counter gate, transfer
+benchmark, and manifests. The negative-test validity record remains active.
 
 ### operation-counters-are-observed-not-declared
 
 Type: safety
-Reachability: test-only - the subject is the bench's gate counters
-(`OperationCounters`, `crates/shm-transport/src/evidence.rs:7-22`), which only
-the bench and `tests/evidence.rs` populate. The transport itself now counts
-its own syscalls (`SyscallCounters`, `ring.rs:675-710`, and `page_removals`,
-`:1016`), but that counting feeds the bench, not a production decision. The gate
-has decided no shipped release: `benches/manifests/v1.json:4` still reads
-`designation_status: UNSET_REQUIRES_DESIGNATED_HOST`.
-Status: active
-Exercised: not yet — needs negative controls that remove a real operation and
-assert the counter drops.
+Reachability: test-only - the subject was the removed benchmark counter gate,
+not a runtime admission decision.
+Status: invalidated
+Exercised: not yet - the gate, benchmark, manifest, and gate tests are removed;
+no retained witness establishes the former gate-counter provenance claim.
 Guarantee: Each gate counter is incremented at the site where the operation
 occurs, by the process that performs it, and cannot be produced by a path that
 did not perform it.
@@ -1703,79 +1698,32 @@ control: remove the receiver's copy and assert `body_copies` drops; remove the
 cold-path sleep and assert `park_wakes` drops.
 Fault/timing angle: none needed; the question is which counters are observed at
 the site of the operation and which are computed by the bench.
-Required faults and enabling state: none. This is a static property of the
-harness. It failed outright in the source tree; at HEAD it is mixed, see
-Confidence.
-Confidence: high — [evidence](evidence/operation-counters-are-observed-not-declared.md).
-At HEAD the counter set is `body_copies`, `native_allocations`,
-`doorbell_syscalls`, `other_syscalls`, `park_wakes`, `generic_queue_hops`, and
-`scheduler_handoffs` (`evidence.rs:7-22`); the source tree's `syscalls` and
-`allocations` fields and its "all six counters" no longer exist. Syscall counting
-is now observed at the site: `Doorbell::record` counts every `send`, `recv`, and
-`poll` (`ring.rs:675-710`, `:762-771`), `page_removals` is incremented at both
-`madvise(MADV_REMOVE)` call sites (`:2195-2196`, `:2299-2300`),
-`syscall_counters()` (`:1169-1177`) exposes the sum, and
-`syscall_counters_track_only_actual_ring_syscalls` (`:3050`) pins it. The
-source tree's claim that no production path incremented any counter and that
-`OperationCounters` was referenced by three non-production files is the finding
-this record was written against; the honest residual at HEAD is which of the
-seven bench counters are observed versus computed. (Source-tree mechanism
-caveat, 2026-08-31: the #131 bench rewrite changed the provenance
-mix this record derives from — `park_wakes` is now observed via a shared
-`AtomicU64` at the wait site (`hardware_envelope.rs:283`, `:354`) and
-copy/allocation counting mixes per-site increments with bulk arithmetic
-(`:302-304`, `:325-326`), while `syscalls` stays a literal zero; the
-SchedulingMode-derived counting and the fork-parent inference described below
-are pre-#131 evidence. This record needs mechanism-level re-derivation.) The
-receiver's copy happened in a forked child while the count was added in the parent
-after `waitpid`; `syscalls` and `allocations` were hardcoded per arm; and the gate
-control overwrites all six counters after running the *same* body as the
-selectable arm (still true at HEAD: `hardware_envelope.rs:346-359`, `:322`).
-Existing check: `purity_gate_rejects_injected_copy_allocation_queue_and_wake`
-(`crates/shm-transport/tests/evidence.rs:4`),
-`purity_gate_excuses_wake_operations_only_for_a_qualified_arm_that_parked`
-(`:33`), and `purity_gate_never_excuses_a_syscall_the_doorbell_did_not_issue`
-(`:78`), which test the gate's arithmetic over values they supply themselves,
-plus `syscall_counters_track_only_actual_ring_syscalls` (`ring.rs:3050`) for the
-observed syscall half. Status unaudited; the purity-gate tests are circular as an
-oracle for provenance. The second anchor is
-gone: the manifest key `injected_gate_control_must_be_disqualified`, formerly
-`benches/manifests/v1.json:155` at `9c1eb4d1`, no longer appears anywhere in the
-tree at
-`e447c927`. The manifest now names the injected arm only as a `gate_controls`
-entry (`benches/manifests/v1.json:92-94`) with no disqualification rule stated
-beside it, so the manifest half of this check was removed rather than moved.
-Impact: for any counter still computed rather than observed, the zero-copy
-selection gate cannot detect the operation it names; a body copy added to a
-nominally zero-copy arm would report `body_copies == 0` and pass. This is the
-gate that decides whether a shared-memory provider may ship.
-Open questions:
-
-- Is `OperationCounters` intended to be wired to real instrumentation, or is it
-  permanently a report-schema type? If the latter, the "counts copies" language
-  in the source document (former `docs/shm-transport.md:25`) overstated what any
-  artifact can prove; the rewritten document lists report fields (`:65-73`)
-  without that language.
-  (needs human input)
+Required faults and enabling state: A benchmark with per-operation observation
+and negative controls would be required to reactivate this claim.
+Confidence: high - [evidence](evidence/operation-counters-are-observed-not-declared.md).
+The benchmark cleanup removed `OperationCounters`, its gate tests, and the
+hardware-envelope benchmark. The former HEAD-specific provenance assertions
+are withdrawn rather than attributed to retained runtime code.
+Existing check: None for this retired benchmark gate.
+Impact: A future measurement gate could misreport unobserved operations. This
+record no longer certifies a current release gate or production behavior.
+Open questions: None for retirement. A future benchmark needs a new evidence
+owner and verified operation counters.
 
 ### measured-transfer-is-witnessed-by-the-data
 
 Type: safety
-Reachability: test-only — the subject is the benchmark's own reporting
-(`crates/shm-transport/benches/hardware_envelope.rs`), which no host or
-addon path executes. It feeds the release gate, but
-`benches/manifests/v1.json:4` still reads `designation_status:
-UNSET_REQUIRES_DESIGNATED_HOST`, so no shipped decision has rested on it.
-Status: active
-Exercised: partial - the bench compares the reported checksum against an
-independently derived expectation and fails the run on mismatch; no test corrupts
-a delivered byte to show the comparison fires.
+Reachability: test-only - the subject was the removed hardware-envelope
+benchmark's reporting, not a host or addon execution path.
+Status: invalidated
+Exercised: not yet - the benchmark and its comparison are removed; the former
+partial exercise status does not describe a retained check.
 Guarantee: Every arm's reported checksum is a function of the bytes actually
 delivered, so a skipped transfer, a short transfer, or a corruption that changes
 the byte sum cannot produce the same value as a correct one. The checksum is a
 wrapping sum of byte values (`LeaseSpan::checksum`,
-`crates/shm-transport/src/lease.rs:96-123`, and the copied-receiver fold), so
-it is order-insensitive and compensating corruptions, one byte raised and
+`crates/shm-transport/src/lease.rs:97-125`; the benchmark's receiver fold is
+removed), so it is order-insensitive and compensating corruptions, one byte raised and
 another lowered by the same amount, keep the sum; the guarantee is therefore
 against dropped, truncated, and additive corruption, not against every
 corruption.
@@ -1787,29 +1735,16 @@ negative case.
 Fault/timing angle: silently dropped or corrupted frames on the selectable arm.
 Required faults and enabling state: none to demonstrate the gap; a byte
 corruption to demonstrate the impact.
-Confidence: high — [evidence](evidence/measured-transfer-is-witnessed-by-the-data.md).
-At HEAD the ring arm's consumer folds the received bytes into the reported
-checksum, either over `lease.to_vec()` or by summing `span.checksum()` per
-segment (`crates/shm-transport/benches/hardware_envelope.rs:756-770`), and the
-driver compares the reported value against
-`iterations * payload_len * BODY_BYTE`, an expectation that never reads the
-delivered bytes, failing the run on mismatch (`:675-681`). The source tree
-computed the ring arm's checksum as a closed form over the parameters and
-discarded the real `span.checksum()` into a black box, which is the defect this
-record was written against; the property now holds by construction and the
-record is the regression contract.
-Existing check: the mismatch check at `hardware_envelope.rs:675-681`, run only
-when the bench runs; no test corrupts a byte. Status unaudited.
-Impact: if the consumer's fold or the driver's comparison were removed, a fully
-corrupted ring transfer would report a bit-identical checksum and the benchmark
-could not distinguish a working transport from a broken one.
-Open questions:
-
-- Should the bench move to an order-sensitive checksum (a CRC or a
-  position-weighted sum) so that swapped or compensating corruptions are
-  detectable, or is the byte sum's witness against dropped and truncated
-  transfers the extent of what the envelope bench is meant to prove?
-  (needs human input)
+Confidence: high - [evidence](evidence/measured-transfer-is-witnessed-by-the-data.md).
+The benchmark cleanup removed the consumer fold, expected-checksum comparison,
+and measurement manifest. No current benchmark result or regression witness
+is inferred from the retained lease checksum helper.
+Existing check: None for the retired transfer-measurement claim.
+Impact: A future benchmark that reports parameters instead of delivered bytes
+could hide corrupt transfers. No current transport guarantee is withdrawn by
+retiring this benchmark-specific record.
+Open questions: None for retirement. A future measurement must define its
+corruption model and retain a check of the delivered bytes.
 
 ### traceability-pointers-resolve
 

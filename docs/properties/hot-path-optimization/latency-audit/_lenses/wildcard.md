@@ -585,7 +585,7 @@ call site.
 [hp-e2e]: ../../../../../crates/daemon/benches/hot_path.rs#L221-L254
 [hp-cliff]: ../../../../../crates/daemon/benches/hot_path.rs#L291-L293
 [cargo-bench]: ../../../../../crates/daemon/Cargo.toml#L62-L75
-[meta-bound]: ../../../../../crates/daemon/tests/transform_meta_bound.rs#L1-L22
+[meta-bound]: ../../../../../crates/daemon/src/transform_meta_bound.rs#L19-L102
 [bi-tc]: ../../../../../crates/daemon/src/lib.rs#L201-L209
 [bi-trim]: ../../../../../crates/daemon/src/lib.rs#L182-L190
 [he-payload]: ../../../../../crates/shm-transport/benches/hardware_envelope.rs#L220-L223

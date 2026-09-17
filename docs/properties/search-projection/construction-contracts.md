@@ -258,8 +258,9 @@ deployment without vector work keeps its other hooks. The `hooks` object may
 also carry `search_projection.vector.compressed_activation`, an enablement
 flag for production use and full-corpus publication of compressed vector
 layers; it is not a projection hook, it defaults to disabled, and enabling it
-admits nothing without the compression campaign evidence
-(`docs/dense-vector-contract.md`, "Vector admission"). A build without that
+admits nothing without the compression campaign evidence checked by
+`EvidenceEvaluator::judge_compressed_activation` in
+`crates/daemon/src/projection_gates.rs`. A build without that
 section refuses these keys as unknown, which closes the gate for every hook,
 so the daemon is deployed before a manifest gains them and a rollback reverts
 the manifest with it.

@@ -69,12 +69,11 @@ rows it does not attempt and cannot claim completion of R7. A missing marker
 means investigate generator coverage versus unreachable preconditions; it
 does not mean assert `sometimes(peak_exceeded)` or relax the safety check.
 
-### Preserved evidence receipt outside R7
+### Retired evidence receipt outside R7
 
-`typed-wire-resources-measurement-pair` retains its original name under EG1.
-It requires raw before and after records for both 40 and 200 messages, with
-all four cell identities present; it requires no speedup. This is manifest
-completeness, not runtime `sometimes` or liveness. No marker name is renamed.
+`typed-wire-resources-measurement-pair` is retired with EG1 after removal of
+its raw records and manifests. It is not an executed check or a runtime
+`sometimes` marker. The twelve runtime marker names above are unchanged.
 
 ## Leverage ranking by cheapest valid oracle
 

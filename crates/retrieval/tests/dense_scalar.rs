@@ -645,8 +645,8 @@ fn scales_and_codes_round_trip_deterministically_and_refuse_malformed_bytes() {
     assert_eq!(ScalarRecipe::from_id(""), None);
 }
 
-/// Pinned bytes for the fixed corpus. A change here is a change to the recipe: it needs a new `ScalarRecipe`
-/// variant and the matching edit to `docs/dense-vector-contract.md`, never a reinterpretation of stored codes.
+/// Pinned bytes for the fixed corpus. A recipe change needs a new `ScalarRecipe`
+/// variant, never a reinterpretation of stored codes.
 #[test]
 fn the_fixed_corpus_produces_pinned_scale_and_code_bytes() {
     let rows = corpus();

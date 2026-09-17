@@ -67,8 +67,7 @@ export function describeQueryBoundsViolation(detail: QueryBoundsDetail): string 
 
 /**
  * Runs of letters, digits, and underscores are operands; every other character separates them.
- * `QUERY_OPERAND_SEPARATOR` is a coarse pre-check, not the daemon's atom rule; see
- * `docs/lexical-analysis-contract.md`.
+ * `QUERY_OPERAND_SEPARATOR` is a coarse pre-check, not the daemon's atom rule.
  */
 const QUERY_OPERAND_SEPARATOR = /[^\p{L}\p{N}_]+/u;
 

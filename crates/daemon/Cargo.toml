@@ -66,38 +66,12 @@ libc = { workspace = true }
 
 [features]
 direct-host-fixture = []
-bench-internals = []
 # Exposes the request dispatcher and kernel lifecycle probes to integration
 # tests in `tests/`; enabled only through the self dev-dependency below.
 test-support = ["host-runtime/test-support"]
 
-[[test]]
-name = "transform_meta_bound"
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "hot_path"
-path = "benches/hot_path.rs"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "kernels"
-harness = false
-
-[[bench]]
-name = "kernel_routes"
-harness = false
-required-features = ["test-support"]
-
-[[bench]]
-name = "claim_validation"
-harness = false
-required-features = ["test-support"]
-
 [dev-dependencies]
 storage = { workspace = true, features = ["test-support"] }
-criterion = { workspace = true }
 proptest = { workspace = true }
 chrono-tz = "0.10"
 tokio = { workspace = true, features = ["signal", "test-util"] }

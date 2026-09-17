@@ -2,10 +2,11 @@
 
 Maps every requirement, decision, and milestone of #524 to the catalog records
 that carry its evidence and to the task that owns any gap. Update the status
-column as each task lands. Status values: `landed` (every named record is
-`yes`), `partial`, `open`.
+column as each task lands or a record retires. Status values: `landed` (every
+named record is `yes`), `partial`, `open`, and `retired` (no longer in scope).
+Unchanged rows retain the introducing snapshot's status.
 
-| Item | Records | Owner of gaps | Status at the tree of this catalog's introducing commit |
+| Item | Records | Owner of gaps | Recorded status |
 | --- | --- | --- | --- |
 | R1 | `descriptor-capacity-independent-of-payload` | - | landed |
 | R2 | `released-block-reuse-preserves-held-bytes`, `payload-identity-authorizes-reuse` | - | landed |
@@ -18,7 +19,7 @@ column as each task lands. Status values: `landed` (every named record is
 | R9 | `native-alias-closure-before-transfer`, `partial-close-token-conservation`, `environment-finalizer-confinement` | late-finalizer witness on a detachment-capable runtime | partial |
 | R10 | `complete-capacity-admission`, `bounded-refusal-and-recovery`, `response-retention-isolation` | - | landed |
 | R11 | `reserved-progress-under-data-exhaustion`, `capacity-wake-progress` | - | landed |
-| R12 | `capacity-model-conservation` | - | landed |
+| R12 | `capacity-model-conservation` (invalidated) | none; research model removed | retired |
 | R13 | `single-replacement-surface` | last task reruns | landed at this revision |
 | KTD1 | `class-allocation-conservation`, `direct-serialization-commit-boundary` | - | landed |
 | KTD2 | `descriptor-private-snapshot`, `payload-identity-authorizes-reuse`, `validated-setup-geometry` | `descriptor-private-snapshot` handoff (unsafe-review, invariant-test-review) | partial |
