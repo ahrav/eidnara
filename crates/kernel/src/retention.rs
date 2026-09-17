@@ -65,10 +65,12 @@ impl KernelStore {
         let mut writer = self.lock_writer()?;
         let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
         let run = load_run_lifecycle(&tx, &run_id)?.ok_or(KernelError::NotFound)?;
+        // A review run's lease is its absolute queue deadline; renewal would let a heartbeat walk it past that bound.
         if run.terminal_state.is_some()
             || run.lease_expires_at <= heartbeat_at
             || run.lease_expires_at <= crate::current_time_ms()
             || run.heartbeat_at > heartbeat_at
+            || crate::review_staging::is_review_witness(&run.provenance_witness)
         {
             return Err(KernelError::Conflict);
         }
@@ -89,11 +91,11 @@ impl KernelStore {
         tx.commit().map_err(map_sqlite)
     }
 
-    /// `terminal_at` starts the run's retention clock, so it is bracketed by the run's own timestamps: at or after `max(started_at, heartbeat_at)`, and inside the lease. A value below the floor lets the next sweep delete a run that just finished, and one past the lease exempts the run from the cutoff indefinitely.
+    /// `terminal_at` starts the run's retention clock, so it is bracketed by the timestamps of every row it stamps: at or after the run's `started_at` and `heartbeat_at` and each active candidate's `heartbeat_at`, and inside the lease. A value below the floor lets the next sweep delete a run that just finished, and one past the lease exempts the run from the cutoff indefinitely.
     ///
     /// # Errors
     ///
-    /// - Returns [`KernelError::InvalidInput`] when the id is empty, `terminal_at` is negative, or `terminal_at` precedes the run's `started_at` or `heartbeat_at`.
+    /// - Returns [`KernelError::InvalidInput`] when the id is empty, `terminal_at` is negative, or `terminal_at` precedes the run's `started_at`, the run's `heartbeat_at`, or an active candidate's `heartbeat_at`.
     /// - Returns [`KernelError::NotFound`] when no run has the id.
     /// - Returns [`KernelError::Conflict`] when the run is already terminal, or its lease has expired at `terminal_at` or on the store clock. The sweep abandons by the store clock, so a producer cannot complete a run the sweep would already have reclaimed by dating the completion inside the lease.
     pub fn finish_staging_run(
@@ -112,7 +114,13 @@ impl KernelStore {
         if run.terminal_state.is_some() {
             return Err(KernelError::Conflict);
         }
-        if terminal_at < run.started_at.max(run.heartbeat_at) {
+        let candidate_heartbeat = latest_active_candidate_heartbeat(&tx, &run_id)?;
+        if terminal_at
+            < run
+                .started_at
+                .max(run.heartbeat_at)
+                .max(candidate_heartbeat)
+        {
             return Err(KernelError::InvalidInput);
         }
         // The lease also caps terminal_at from above, so a clock error cannot park a run
@@ -240,6 +248,7 @@ struct RunLifecycle {
     started_at: i64,
     heartbeat_at: i64,
     lease_expires_at: i64,
+    provenance_witness: Vec<u8>,
 }
 
 fn load_run_lifecycle(
@@ -247,7 +256,7 @@ fn load_run_lifecycle(
     extraction_run_id: &str,
 ) -> Result<Option<RunLifecycle>, KernelError> {
     tx.query_row(
-        "SELECT terminal_state,started_at,heartbeat_at,lease_expires_at
+        "SELECT terminal_state,started_at,heartbeat_at,lease_expires_at,provenance_witness
          FROM extraction_runs WHERE extraction_run_id=?1",
         [extraction_run_id],
         |row| {
@@ -256,10 +265,25 @@ fn load_run_lifecycle(
                 started_at: row.get(1)?,
                 heartbeat_at: row.get(2)?,
                 lease_expires_at: row.get(3)?,
+                provenance_witness: row.get(4)?,
             })
         },
     )
     .optional()
+    .map_err(map_sqlite)
+}
+
+/// Zero when the run has no active candidate, so the run's own timestamps decide the floor.
+fn latest_active_candidate_heartbeat(
+    tx: &Transaction<'_>,
+    extraction_run_id: &str,
+) -> Result<i64, KernelError> {
+    tx.query_row(
+        "SELECT COALESCE(MAX(heartbeat_at),0) FROM candidates
+         WHERE extraction_run_id=?1 AND terminal_state IS NULL",
+        [extraction_run_id],
+        |row| row.get(0),
+    )
     .map_err(map_sqlite)
 }
 

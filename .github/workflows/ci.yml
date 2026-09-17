@@ -199,6 +199,31 @@ jobs:
         # every tracked file.
         run: scripts/forbid-comment-markers.sh
 
+      - name: Invented provenance
+        # Review-staging and Curator paths carry no caller provenance, so no
+        # source or fixture under them may construct `RepositoryProvenance`
+        # or populate a `provenance` field by any means: a literal `Some`, a
+        # forwarded value, a call, or field-init shorthand. The only permitted
+        # population is `provenance: None`. The bracketed character keeps the
+        # pattern from matching this workflow file.
+        run: |
+          set -euo pipefail
+          status=0
+          git grep -n -I -E \
+            -e 'Repositor[y]Provenance|(^[[:space:]]*|[{,][[:space:]]*)provenanc[e][[:space:]]*[,:}]' \
+            --and --not -e 'provenanc[e]:[[:space:]]*None' \
+            -- ':(glob)crates/kernel/src/review_staging.rs' \
+               ':(glob)crates/kernel/tests/kernel_review_staging.rs' \
+               ':(glob)crates/**/curator*' ':(glob)crates/**/curator/**' || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "invented provenance in a Curator or review-staging path"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "git grep failed with exit $status"
+            exit 1
+          fi
+
       - name: Retired memory-plane identifiers
         # The retired second memory plane (its mirror, its intent ledger, its
         # operation contract, its fallback reads, and its two-lane selection) is

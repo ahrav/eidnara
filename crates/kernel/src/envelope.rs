@@ -819,14 +819,31 @@ impl KernelStore {
         spec: StagingCandidateSpec,
     ) -> Result<StagingCandidateRow, KernelError> {
         let spec = RedactedCandidate::new(spec)?;
-        let run_sensitivity = spec.run_sensitivity();
         let candidate_sensitivity = spec.candidate_sensitivity();
         let mut writer = self.lock_writer()?;
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
         check_fence(&tx, self.lease_epoch())?;
-        let provenance = spec.provenance_json()?;
+        self.stage_prepared_candidate(&tx, &spec)?;
+        tx.commit().map_err(map_sqlite)?;
+        Ok(StagingCandidateRow {
+            candidate_id: spec.candidate_id,
+            payload: spec.payload.text,
+            sensitivity: candidate_sensitivity,
+        })
+    }
+
+    /// Shared by the public `StagingCandidateSpec` path and the private review-input path. `stage_prepared_candidate` runs inside the caller's fenced immediate transaction; the caller commits it.
+    pub(super) fn stage_prepared_candidate(
+        &self,
+        tx: &Transaction<'_>,
+        spec: &RedactedCandidate,
+    ) -> Result<(), KernelError> {
+        let run_sensitivity = spec.run_sensitivity();
+        let candidate_sensitivity = spec.candidate_sensitivity();
+        let provenance = spec.witness.clone();
+        let refresh_leases = spec.replay == StagingReplay::RefreshLeases;
         let existing = tx
             .query_row_cached(
                 "SELECT extractor,source_kind,source_id,source_revision,sensitivity_class,
@@ -868,18 +885,20 @@ impl KernelStore {
                 || lease_expires_at <= current_time_ms()
                 // The store clock decides liveness, but an out-of-order producer inside a
                 // live lease could still extend it from behind the heartbeat.
-                || heartbeat_at > spec.recorded_at
+                || (refresh_leases && heartbeat_at > spec.recorded_at)
             {
                 return Err(KernelError::Conflict);
             }
+            // `?4` is false for an immutable replay, so both updates match no row.
             tx.execute_cached(
                 "UPDATE extraction_runs
                  SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
-                 WHERE extraction_run_id=?3",
+                 WHERE extraction_run_id=?3 AND ?4",
                 params![
                     spec.recorded_at,
                     spec.lease_expires_at,
-                    spec.extraction_run_id
+                    spec.extraction_run_id,
+                    refresh_leases
                 ],
             )
             .map_err(map_sqlite)?;
@@ -890,11 +909,12 @@ impl KernelStore {
             tx.execute_cached(
                 "UPDATE candidates
                  SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
-                 WHERE extraction_run_id=?3 AND terminal_state IS NULL",
+                 WHERE extraction_run_id=?3 AND terminal_state IS NULL AND ?4",
                 params![
                     spec.recorded_at,
                     spec.lease_expires_at,
-                    spec.extraction_run_id
+                    spec.extraction_run_id,
+                    refresh_leases
                 ],
             )
             .map_err(map_sqlite)?;
@@ -948,7 +968,7 @@ impl KernelStore {
             candidate_terminal,
         )) = existing_candidate
         {
-            let incoming_redacted = self_detections(&spec);
+            let incoming_redacted = self_detections(spec);
             if run_id != spec.extraction_run_id
                 || stored_class != candidate_sensitivity.as_str()
                 || stored_kind != spec.candidate_kind.text
@@ -962,16 +982,16 @@ impl KernelStore {
             tx.execute_cached(
                 "UPDATE candidates
                  SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
-                 WHERE candidate_id=?3",
-                params![spec.recorded_at, spec.lease_expires_at, spec.candidate_id],
+                 WHERE candidate_id=?3 AND ?4",
+                params![
+                    spec.recorded_at,
+                    spec.lease_expires_at,
+                    spec.candidate_id,
+                    refresh_leases
+                ],
             )
             .map_err(map_sqlite)?;
-            tx.commit().map_err(map_sqlite)?;
-            return Ok(StagingCandidateRow {
-                candidate_id: spec.candidate_id,
-                payload: spec.payload.text,
-                sensitivity: candidate_sensitivity,
-            });
+            return Ok(());
         }
         let candidate_metadata = spec.candidate_detection_json()?;
         tx.execute_cached(
@@ -992,13 +1012,8 @@ impl KernelStore {
             ],
         )
         .map_err(map_sqlite)?;
-        spec.record(&tx)?;
-        tx.commit().map_err(map_sqlite)?;
-        Ok(StagingCandidateRow {
-            candidate_id: spec.candidate_id,
-            payload: spec.payload.text,
-            sensitivity: candidate_sensitivity,
-        })
+        spec.record(tx)?;
+        Ok(())
     }
 
     /// A truncate-then-insert rebuild rather than an upsert. An empty `rows` is rejected so an accidental empty vector cannot erase the projection; `clear_alignment_projection` publishes an intentionally empty rebuild.
@@ -1037,6 +1052,15 @@ impl KernelStore {
         tx.commit().map_err(map_sqlite)?;
         Ok(removed)
     }
+}
+
+/// `StagingReplay` controls whether re-staging updates heartbeat and lease columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StagingReplay {
+    /// Public producers heartbeat a live run by staging into it: the run and its active candidates move their heartbeat and lease forward.
+    RefreshLeases,
+    /// A byte-identical restage is acknowledged without changing stored data or extending the queue deadline.
+    Immutable,
 }
 
 /// `generation` is separate from `rows` because an empty rebuild still has to
@@ -1728,18 +1752,23 @@ fn domain_name_is_redacted(tx: &Transaction<'_>, object_id: &str) -> Result<bool
     .map_err(map_sqlite)
 }
 
-struct RedactedCandidate {
-    extraction_run_id: String,
-    candidate_id: String,
-    extractor: String,
-    source_kind: String,
-    source_id: String,
-    source_revision: i64,
-    candidate_kind: RedactedField,
-    payload: RedactedField,
-    provenance: Option<(String, String)>,
-    recorded_at: i64,
-    lease_expires_at: i64,
+/// A staging request after identity checks, redaction, and provenance encoding.
+pub(super) struct RedactedCandidate {
+    pub(super) extraction_run_id: String,
+    pub(super) candidate_id: String,
+    pub(super) extractor: String,
+    pub(super) source_kind: String,
+    pub(super) source_id: String,
+    pub(super) source_revision: i64,
+    pub(super) candidate_kind: RedactedField,
+    pub(super) payload: RedactedField,
+    /// Verified repository provenance; `None` classifies the run `Sensitive`.
+    pub(super) provenance: Option<(String, String)>,
+    /// Stored on both the run and the candidate row; part of the run's restage identity.
+    pub(super) witness: Vec<u8>,
+    pub(super) replay: StagingReplay,
+    pub(super) recorded_at: i64,
+    pub(super) lease_expires_at: i64,
 }
 
 impl RedactedCandidate {
@@ -1762,10 +1791,22 @@ impl RedactedCandidate {
             || spec.source_kind.trim().is_empty()
             || spec.source_id.trim().is_empty()
             || spec.candidate_kind.trim().is_empty()
+            || crate::review_staging::is_review_kind(&spec.candidate_kind)
         {
             return Err(KernelError::InvalidInput);
         }
+        let provenance = spec
+            .provenance
+            .filter(|value| {
+                !value.repository_id.trim().is_empty() && !value.revision.trim().is_empty()
+            })
+            .map(|value| {
+                Ok::<_, KernelError>((identity(&value.repository_id)?, identity(&value.revision)?))
+            })
+            .transpose()?;
         Ok(Self {
+            witness: provenance_witness(provenance.as_ref())?,
+            replay: StagingReplay::RefreshLeases,
             extraction_run_id: identity(&spec.extraction_run_id)?,
             candidate_id: identity(&spec.candidate_id)?,
             extractor: identity(&spec.extractor)?,
@@ -1774,18 +1815,7 @@ impl RedactedCandidate {
             source_revision: spec.source_revision,
             candidate_kind: redact(&spec.candidate_kind)?,
             payload: redact(&spec.payload)?,
-            provenance: spec
-                .provenance
-                .filter(|value| {
-                    !value.repository_id.trim().is_empty() && !value.revision.trim().is_empty()
-                })
-                .map(|value| {
-                    Ok::<_, KernelError>((
-                        identity(&value.repository_id)?,
-                        identity(&value.revision)?,
-                    ))
-                })
-                .transpose()?,
+            provenance,
             recorded_at: spec.recorded_at,
             lease_expires_at: spec.lease_expires_at,
         })
@@ -1811,18 +1841,6 @@ impl RedactedCandidate {
         } else {
             self.run_sensitivity()
         }
-    }
-
-    fn provenance_json(&self) -> Result<Vec<u8>, KernelError> {
-        match &self.provenance {
-            Some((repository_id, revision)) => serde_json::to_vec(&serde_json::json!({
-                "kind": "repository",
-                "repository_id": repository_id,
-                "revision": revision,
-            })),
-            None => serde_json::to_vec(&serde_json::json!({"kind": "unclassified"})),
-        }
-        .map_err(|_| KernelError::InvalidInput)
     }
 
     fn candidate_fields(&self) -> Vec<(&'static str, &RedactedField)> {
@@ -1877,6 +1895,19 @@ impl RedactedCandidate {
         }
         Ok(())
     }
+}
+
+/// Public witness bytes: verified repository provenance, or the `unclassified` kind admission treats as unverified.
+fn provenance_witness(provenance: Option<&(String, String)>) -> Result<Vec<u8>, KernelError> {
+    match provenance {
+        Some((repository_id, revision)) => serde_json::to_vec(&serde_json::json!({
+            "kind": "repository",
+            "repository_id": repository_id,
+            "revision": revision,
+        })),
+        None => serde_json::to_vec(&serde_json::json!({"kind": "unclassified"})),
+    }
+    .map_err(|_| KernelError::InvalidInput)
 }
 
 struct RedactedProjection {
