@@ -3185,3 +3185,48 @@ fn a_kernel_binding_mismatch_is_refused_before_the_lease_is_spent() {
         "the claim survives a binding mismatch"
     );
 }
+
+#[test]
+fn a_takeover_dated_before_the_ledger_is_refused_as_clock_behind() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0 + 10);
+    assert_eq!(
+        fixture
+            .store
+            .renew_curator_task(
+                PROJECT,
+                &claim,
+                "worker-a",
+                0,
+                fixture.registration,
+                T0 + CURATOR_TASK_LEASE_MS
+            )
+            .unwrap(),
+        memory_store::NoteEvalRenewOutcome::Expired
+    );
+    let successor = fixture
+        .claim("acq-2", "worker-b", T0 + CURATOR_TASK_LEASE_MS + 1)
+        .unwrap();
+    // The successor's clock reads earlier than the receipt it wants to adopt.
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .take_over_curator_receipt(PROJECT, &fixture.identity, 1, &successor, T0 + 5)
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::ClockBehind
+    );
+    assert_eq!(receipt(&fixture).generation, 1);
+}
+
+#[test]
+fn a_job_is_not_leasable_at_a_clock_before_its_activation() {
+    let fixture = Fixture::open();
+    assert!(
+        fixture.claim("acq-1", "worker-a", T0 - 1).is_none(),
+        "a clock behind the job's own timestamps acquires nothing"
+    );
+    assert!(fixture.claim("acq-2", "worker-a", T0).is_some());
+}

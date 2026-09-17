@@ -383,7 +383,7 @@ fn authority_matches(receipt: &CuratorReceipt, current: Option<(String, i64)>) -
     })
 }
 
-/// The newest instant the ledger already holds for the job: every marker commit and terminal, the receipt's creation and latest takeover, and every claim's creation. A write dated before it is a clock that stepped back and is refused as `ClockBehind` rather than judged against a time the ledger has already passed.
+/// The newest instant the ledger already holds for the job: the job row's own timestamps, every marker commit and terminal, the receipt's creation and latest takeover, and every claim's creation and terminal. A write dated before it is a clock that stepped back and is refused as `ClockBehind` rather than judged against a time the ledger has already passed.
 fn ledger_clock_floor(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -391,11 +391,14 @@ fn ledger_clock_floor(
 ) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT MAX(
+             COALESCE((SELECT MAX(created_at_ms, updated_at_ms) FROM curator_jobs
+                        WHERE project = ?1 AND causal_identity = ?2), 0),
              COALESCE((SELECT MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0))
                          FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2), 0),
              COALESCE((SELECT MAX(created_at_ms, updated_at_ms) FROM curator_receipts
                         WHERE project = ?1 AND causal_identity = ?2), 0),
-             COALESCE((SELECT MAX(created_at_ms) FROM note_eval_claims
+             COALESCE((SELECT MAX(MAX(created_at_ms), COALESCE(MAX(terminal_at_ms), 0))
+                         FROM note_eval_claims
                         WHERE project = ?1 AND task_kind = ?3
                           AND note_id = (SELECT job_id FROM curator_jobs
                                           WHERE project = ?1 AND causal_identity = ?2)), 0))",
@@ -528,6 +531,10 @@ pub fn take_over_curator_receipt_in_tx(
     // The claim that already owns the receipt has nothing to take over: the call replays the receipt unchanged rather than fencing its own generation and growing the ledger.
     if receipt.terminal.is_none() && receipt.claim_id == claim_id {
         return Ok(receipt);
+    }
+    // A takeover dated before the ledger's newest instant would move the receipt's own timestamp backwards.
+    if now_ms < ledger_clock_floor(conn, project, causal_identity)? {
+        return Err(refuse(CuratorLedgerRefusal::ClockBehind));
     }
     let changed = conn.execute(
         "UPDATE curator_receipts
@@ -795,7 +802,7 @@ impl MemoryStore {
         }
     }
 
-    /// Leases one Ready job for a worker slot through the shared task-lease ledger; the claim's task id is the job's `job_id`.
+    /// Leases one Ready job for a worker slot through the shared task-lease ledger; the claim's task id is the job's `job_id`. A clock behind the job's own timestamps leases nothing, so no claim or receipt is ever dated before the job it belongs to.
     #[allow(clippy::too_many_arguments)]
     pub fn acquire_curator_task(
         &self,
@@ -827,7 +834,7 @@ impl MemoryStore {
                     .query_row(
                         "SELECT job_id FROM curator_jobs
                           WHERE project = ?1 AND causal_identity = ?2 AND state = 'ready'
-                            AND queue_deadline_ms > ?3
+                            AND queue_deadline_ms > ?3 AND updated_at_ms <= ?3
                             AND NOT EXISTS(SELECT 1 FROM note_eval_claims c
                                             WHERE c.project = ?1 AND c.task_kind = ?4
                                               AND c.note_id = curator_jobs.job_id
