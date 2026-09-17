@@ -17,11 +17,22 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u4-context-edits` at
   same per-entry lengths the recipe application already measured, charges them
   through `estimateTokensFromLength` from `shared/token-estimator.ts` (the one
   `HEURISTIC_CHARS_PER_TOKEN` the estimator's own fallback divides by), adds
-  `headroomPermille`, and labels the result with `harnessProfile()`: identity
-  `opencode-heuristic`, revision `generation:<estimator generation>`, authority
-  `heuristic`. `validateInvocation` admits a charge within the limit, admits a
-  candidate no larger in bytes than the incoming surface, admits everything
-  when the limit is unknown, and refuses the rest.
+  `headroomPermille`, and labels the result with `harnessProfile(identity)`:
+  the budget's identity (`opencode-heuristic` or `pi-heuristic`), revision
+  `generation:<estimator generation>`, authority `heuristic`.
+  `validateInvocation` admits a charge within the limit, admits a candidate no
+  larger in bytes than the incoming surface, admits everything when the limit
+  is unknown, and refuses the rest.
+- `packages/pi-plugin/src/context-application-pi.ts` `validatePiInvocation`
+  charges the whole candidate system prompt as one entry by its UTF-8 byte
+  length against the incoming prompt under `pi-heuristic` with
+  `PI_INVOCATION_HEADROOM_PERMILLE`; `editSystemPrompt` calls it on every
+  candidate and confirms `keep` with the prompt unchanged when it refuses. The
+  limit is Pi's usable window when the host reports one.
+- `packages/pi-plugin/src/context-application-pi.test.ts` checks the one-entry
+  charge and profile, the byte-length charge on a non-ASCII prompt, the
+  limit and limit-minus-one boundary through `editSystemPrompt`, and the
+  revision moving with the estimator generation.
 - `packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts` calls it
   on `application.lengths` against `inputLengths` after every other
   publication guard and before `replaceHostArrayContents`. The bound is
@@ -60,6 +71,9 @@ None: the invocation bound is checked on one assembled request.
   one below the charged total, with a usage sample inverting to the opposite
   verdict.
 - A candidate no larger than the incoming surface under a limit of one token.
+- On Pi, a system prompt whose appended block charges one over the usable
+  window, and a non-ASCII prompt whose code-unit charge fits a limit its byte
+  charge exceeds.
 - A model models.dev cannot name, a usage sample computed against the 128k
   default, and a growing candidate charged over 128k tokens.
 - An estimator swap through `installTokenizerForTest`.
