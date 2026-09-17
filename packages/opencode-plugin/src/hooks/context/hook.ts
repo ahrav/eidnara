@@ -13,7 +13,11 @@ import {
 import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { log } from "../../shared/logger";
-import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
+import {
+    type PromptSurfaceConfig,
+    promptSurfaceConfigIdentity,
+    resolvePromptSurface,
+} from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import { createEidnaraCommandHandler } from "./command-handler";
 import { invalidateToolPermissionDenied } from "./eidnara-reduce-availability";
@@ -35,7 +39,7 @@ import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
 import { resolveSessionDirectory, type SessionDirectoryResolver } from "./session-directory";
-import { createSystemPromptHashHandler } from "./system-prompt-hash";
+import { createSystemPromptHashHandler, type GuidanceFetchArgs } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-content-primitives";
 import { createTextCompleteHandler } from "./text-complete";
 import { readOwnDataProperty } from "./transform-capture";
@@ -282,9 +286,59 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         // No `noteEvaluationAvailable`: conditioned notes require a live `note.evaluation.register` heartbeat.
     };
 
+    // Guidance is fetched only in rust mode: there the daemon is already on the prompt path and
+    // its transform serves the tags and blocks the guidance explains. Bytes are cached per
+    // session and variant; a cache-busting pass refetches because the daemon may advance the
+    // pinned date only on such a pass.
+    const guidanceBySession = new BoundedSessionMap<{ key: string; bytes: string }>(1000);
+    const fetchGuidance = rustMode
+        ? async (args: GuidanceFetchArgs): Promise<string | undefined> => {
+              const key = `${args.toolPresent}|${args.modelKey ?? ""}`;
+              const cached = guidanceBySession.get(args.sessionId);
+              if (cached && cached.key === key && !args.isCacheBusting) return cached.bytes;
+              const projectRoot = await projectRootForLiveSession(args.sessionId);
+              const promptSurfaceGuidance = deps.promptSurfaceRuntime?.resolveGuidance(
+                  deps.config.prompt_surface,
+                  args.modelKey,
+              );
+              const preset =
+                  promptSurfaceGuidance?.preset ??
+                  resolvePromptSurface(deps.config.prompt_surface, args.modelKey).preset;
+              const response = await moduleClient.call({
+                  sessionId: args.sessionId,
+                  projectRoot,
+                  method: "guidance.get",
+                  body: {
+                      method: "guidance.get",
+                      v: 1,
+                      session_id: args.sessionId,
+                      tool_present: args.toolPresent,
+                      serializer_profile: "opencode-aisdk",
+                      prompt_surface_preset: preset,
+                      prompt_surface_model_key: args.modelKey,
+                      prompt_surface_config_identity: promptSurfaceConfigIdentity(
+                          deps.config.prompt_surface,
+                      ),
+                      prompt_surface_guidance_override: promptSurfaceGuidance?.primaryOverride,
+                      language: deps.config.language,
+                  },
+              });
+              const bytes =
+                  typeof response === "object" &&
+                  response !== null &&
+                  typeof (response as { bytes?: unknown }).bytes === "string"
+                      ? (response as { bytes: string }).bytes
+                      : undefined;
+              if (bytes === undefined) throw new Error("guidance.get returned no bytes");
+              guidanceBySession.set(args.sessionId, { key, bytes });
+              return bytes;
+          }
+        : undefined;
+
     const systemPromptHash = createSystemPromptHashHandler({
         promptSurface: deps.config.prompt_surface,
         resolveModel: resolveLiveModel,
+        fetchGuidance,
         isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
         historyRefreshSessions,
         systemPromptRefreshSessions,
@@ -375,6 +429,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             // Memory reads from hooks, tools, and sidebar polls hold kernel routes on the shared transport; host route capacity is finite.
             closeKernelSession(deps.config, sessionId);
             systemPromptHash.clearSession(sessionId);
+            guidanceBySession.delete(sessionId);
             lastHeuristicsTurnId.delete(sessionId);
             variantBySession.delete(sessionId);
             liveModelBySession.delete(sessionId);

@@ -49,10 +49,12 @@ Every Rust-mode test is wrapped in `describe.skipIf(!rustPrereqs.ok)`.
 Linux, `cargo`, the workspace's `direct_host_fixture` example, and a
 shared-memory channel the current runtime can start. The plugin reaches the
 daemon only through that channel, and OpenCode embeds the same Bun release
-the test runner uses, so the probe predicts the plugin. Bun 1.3.14 lacks
-`worker_threads.markAsUntransferable`, which the channel's capability probe
-needs; on that runtime the suite skips and prints
-`shared-memory channel unavailable on this runtime: runtime_mechanism_unavailable`.
+the test runner uses, so the probe predicts the plugin. The probe gates exact
+external-buffer bounds, detachment, and cleanup hooks; transfer prevention is
+reported (`transferPreventionMechanism`), not gated, because Bun 1.3.x has no
+working `worker_threads.markAsUntransferable` and Node refuses to transfer
+external buffers on its own. A runtime that fails a gated mechanism skips the
+suite and prints `shared-memory channel unavailable on this runtime: <reason>`.
 
 `pi-smoke` is wrapped in `describe.skipIf(!piPrereqs.ok)`. `detectPiPrereqs()`
 (`src/pi-runner/spawn.ts`) requires `@earendil-works/pi-coding-agent`

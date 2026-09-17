@@ -192,7 +192,9 @@ function reapRecordedRustProcesses(): void {
                 }
                 try {
                     process.kill(entry.pid, "SIGKILL");
-                } catch {}
+                } catch {
+                    // The process exited between the identity check and the signal.
+                }
             }
         } catch {
             // Malformed or unreadable records provide no usable process identity.
@@ -272,7 +274,7 @@ export function detectRustModePrereqs(): RustModePrereqs {
             skipReason: "direct_host_fixture example is unavailable in this workspace",
         };
     }
-    // The plugin reaches the daemon only through the shared-memory channel, and OpenCode embeds the same Bun release this test runner uses, so a probe here predicts whether the plugin's channel can start inside OpenCode. Bun 1.3.14 lacks `worker_threads.markAsUntransferable`, which the probe requires, so the suite skips on that runtime instead of reporting every pass as unchanged input.
+    // The plugin reaches the daemon only through the shared-memory channel, and OpenCode embeds the same Bun release this test runner uses, so a probe here predicts whether the plugin's channel can start inside OpenCode. A runtime that fails a gated mechanism skips the suite instead of reporting every pass as unchanged input; transfer prevention is reported by the probe, not gated.
     const capability = probeCapabilities();
     if (!capability.available) {
         return {
@@ -793,7 +795,9 @@ export class HermeticHostStack {
             this.resumeBeforeTeardown(child);
             try {
                 await this.control?.gracefulShutdown();
-            } catch {}
+            } catch {
+                // A fixture that cannot answer the control command is stopped by signal below.
+            }
             exited = await waitForChildExit(child, 5_000);
             if (!exited) {
                 child.kill("SIGTERM");
@@ -1020,6 +1024,8 @@ export const __hermeticHostTest = {
         stderr: string;
         retainedLog: string;
     } {
+        // SAFETY: `HermeticHostStack` declares `stdout`, `stderr`, and `logPath` as private
+        // string fields; this test-only view reads them without widening the public type.
         const internal = stack as unknown as {
             stdout: string;
             stderr: string;

@@ -1150,6 +1150,7 @@ export type ModuleMethod =
     | "retrieval.prepare"
     | "retrieval.apply"
     | "retrieval.confirm"
+    | "guidance.get"
     | KernelMethod;
 
 /** The daemon's `kernel.*` routes, issued only through the shared kernel client. */

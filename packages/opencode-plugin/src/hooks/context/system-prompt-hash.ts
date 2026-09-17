@@ -29,6 +29,20 @@ interface SessionTracking {
 /** One entry per tracked session; the LRU bound matches the eidnara_reduce verdict caches. */
 const SYSTEM_PROMPT_STATE_CAPACITY = 1000;
 
+/** The daemon renders the guidance block under this heading; a prompt that already carries it is not injected twice. */
+const GUIDANCE_MARKER = "## Eidnara";
+const SYSTEM_PROMPT_GUIDANCE_SEPARATOR = "\n\n";
+
+/** Inputs the daemon's `guidance.get` route needs to select and pin the guidance block for one call. */
+export interface GuidanceFetchArgs {
+    sessionId: string;
+    /** Whether `eidnara_reduce` is callable in this session; selects the full or no-reduce variant. */
+    toolPresent: boolean;
+    modelKey: string | undefined;
+    /** A cache-busting pass may advance the pinned date, so cached bytes are not reused for it. */
+    isCacheBusting: boolean;
+}
+
 /**
  * The host emits `Today's date: ${new Date().toDateString()}`, e.g. `Today's date: Tue Sep 08 2026`.
  * Matches only complete date lines, excluding prose mentions and date-shaped examples mid-sentence.
@@ -81,6 +95,12 @@ export function createSystemPromptHashHandler(deps: {
     injectionSkipSignatures?: string[];
     /** Prompt signatures identify hidden children before session-created tracking adds them to `internalChildSessions`. */
     internalChildSessions?: Set<string>;
+    /**
+     * Returns the daemon-rendered guidance block (`guidance.get` bytes) for the call, or
+     * `undefined` to inject nothing. A rejection is logged once per session and the call
+     * proceeds without guidance; the prompt hash then covers whatever was injected.
+     */
+    fetchGuidance?: (args: GuidanceFetchArgs) => Promise<string | undefined>;
 }): {
     handler: (
         input: {
@@ -95,6 +115,8 @@ export function createSystemPromptHashHandler(deps: {
     const isSubagentSession = deps.isSubagentSession ?? (() => false);
 
     const trackingBySession = new BoundedSessionMap<SessionTracking>(SYSTEM_PROMPT_STATE_CAPACITY);
+    /** Sessions whose guidance fetch already failed once; later failures stay quiet until the session clears. */
+    const guidanceFailureLogged = new Set<string>();
 
     const handler = async (
         input: {
@@ -147,6 +169,40 @@ export function createSystemPromptHashHandler(deps: {
         const promptSurface = resolvePromptSurface(deps.promptSurface, modelKey);
 
         const isCacheBusting = deps.systemPromptRefreshSessions.has(sessionId);
+
+        // The guidance block explains the tags, `<session-history>`, and memory tools the
+        // transform serves; without it the model meets that structure unannounced. OpenAI-
+        // compatible templates allow one system message, so it is appended to the host entry.
+        if (
+            deps.fetchGuidance &&
+            output.system.length > 0 &&
+            !fullPromptForDetection.includes(GUIDANCE_MARKER)
+        ) {
+            try {
+                const guidance = await deps.fetchGuidance({
+                    sessionId,
+                    toolPresent: availability.callable,
+                    modelKey,
+                    isCacheBusting,
+                });
+                if (guidance && guidance.length > 0) {
+                    output.system[0] = `${output.system[0]}${SYSTEM_PROMPT_GUIDANCE_SEPARATOR}${guidance}`;
+                    sessionLog(
+                        sessionId,
+                        `injected guidance into system prompt (toolPresent=${availability.callable}, bytes=${guidance.length})`,
+                    );
+                }
+            } catch (error) {
+                if (!guidanceFailureLogged.has(sessionId)) {
+                    guidanceFailureLogged.add(sessionId);
+                    sessionLog.warn(
+                        sessionId,
+                        "guidance fetch failed; system prompt continues without the Eidnara block:",
+                        error,
+                    );
+                }
+            }
+        }
 
         const liveSystemContent = output.system.join("\n");
         if (liveSystemContent.length === 0) return;
@@ -272,6 +328,7 @@ export function createSystemPromptHashHandler(deps: {
         promptStateFor: (sessionId: string) => trackingBySession.peek(sessionId)?.prompt,
         clearSession: (sessionId: string) => {
             trackingBySession.delete(sessionId);
+            guidanceFailureLogged.delete(sessionId);
         },
     };
 }

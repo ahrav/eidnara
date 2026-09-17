@@ -58,13 +58,25 @@ export function grantDecodes(hex: string): boolean | null {
     return native.grantDecodes(hex);
 }
 
+/**
+ * How the runtime keeps a leased external `ArrayBuffer` from being transferred to another
+ * thread before the addon detaches it. `intrinsic`: the runtime's structured-clone serializer
+ * refuses external backing stores (Node). `marked`: `worker_threads.markAsUntransferable`
+ * works and leaves native detachment intact. `none`: neither holds; the addon still detaches
+ * every span before commit and before return, and the payload-pool protocol bounds a
+ * transferred alias to torn bytes on a private copy, never to undefined behavior.
+ */
+export type TransferPreventionMechanism = "intrinsic" | "marked" | "none";
+
 export interface NativeCapabilities {
     available: boolean;
     napiVersion: number | null;
     externalArrayBuffer: boolean;
     exactBounds: boolean;
     detachment: boolean;
+    /** Reported, not gated: `available` does not require it. */
     transferPrevention: boolean;
+    transferPreventionMechanism: TransferPreventionMechanism;
     cleanupHooks: boolean;
     reason?: string;
 }
@@ -343,13 +355,68 @@ function addon(): NativeAddon | null {
     }
 }
 
+/**
+ * Set by `probeCapabilities` when marking is the runtime's working prevention mechanism.
+ * Node must never mark: its `markAsUntransferable` installs a V8 detach key, and the addon's
+ * later `napi_detach_arraybuffer` then aborts the whole process (`v8::FromJust` on `Nothing`).
+ * Node refuses to transfer external buffers on its own, so marking is also unnecessary there.
+ */
+let markLeasedBuffers = false;
+
+function isBun(): boolean {
+    return typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+}
+
 function protect(segments: readonly Uint8Array[]): void {
     for (const segment of segments) {
         if (!(segment.buffer instanceof ArrayBuffer)) {
             throw new Error("external segment lacks ArrayBuffer backing");
         }
-        markAsUntransferable(segment.buffer);
+        if (markLeasedBuffers) markAsUntransferable(segment.buffer);
     }
+}
+
+const PROBE_BYTES = 31;
+
+/** True when a transfer attempt throws and leaves the buffer intact. */
+function transferRefused(buffer: ArrayBuffer): boolean {
+    try {
+        structuredClone(buffer, { transfer: [buffer] });
+        return false;
+    } catch {
+        return buffer.byteLength === PROBE_BYTES;
+    }
+}
+
+/**
+ * Probes transfer prevention on fresh external buffers so the detachment probe never runs
+ * on a marked buffer. Every probe buffer that stays intact is detached before return.
+ */
+function probeTransferPrevention(native: NativeAddon): TransferPreventionMechanism {
+    const intrinsic = native.createExternalProbe(PROBE_BYTES).buffer as ArrayBuffer;
+    if (transferRefused(intrinsic)) {
+        native.detachArrayBuffer(intrinsic);
+        return "intrinsic";
+    }
+    // The failed attempt above already detached `intrinsic`. Marking is attempted only on Bun;
+    // see `markLeasedBuffers`.
+    if (!isBun()) return "none";
+    const marked = native.createExternalProbe(PROBE_BYTES).buffer as ArrayBuffer;
+    try {
+        markAsUntransferable(marked);
+    } catch {
+        native.detachArrayBuffer(marked);
+        return "none";
+    }
+    if (!transferRefused(marked)) return "none";
+    // Marking is usable only when it leaves native detachment intact.
+    let detached = false;
+    try {
+        detached = native.detachArrayBuffer(marked) && marked.byteLength === 0;
+    } catch {
+        detached = false;
+    }
+    return detached ? "marked" : "none";
 }
 
 /**
@@ -378,16 +445,13 @@ export function probeCapabilities(): NativeCapabilities {
         exactBounds: false,
         detachment: false,
         transferPrevention: false,
+        transferPreventionMechanism: "none" as TransferPreventionMechanism,
         cleanupHooks: false,
     };
-    // Load the addon before the Bun check so an unavailable addon does not report as a Node
-    // detachment failure.
+    markLeasedBuffers = false;
     const native = addon();
     if (!native)
         return { available: false, ...base, reason: "addon_unavailable" };
-    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
-        return { available: false, ...base, reason: "node_detachment_unavailable" };
-    }
     try {
         const napiVersion = native.napiVersion();
         if (napiVersion < 8) {
@@ -398,13 +462,13 @@ export function probeCapabilities(): NativeCapabilities {
                 reason: "napi_8_unavailable",
             };
         }
-        const view = native.createExternalProbe(31);
+        const view = native.createExternalProbe(PROBE_BYTES);
         const externalArrayBuffer =
-            view instanceof Uint8Array && view.byteLength === 31;
+            view instanceof Uint8Array && view.byteLength === PROBE_BYTES;
         const exactBounds =
             externalArrayBuffer &&
             view.byteOffset === 0 &&
-            view.buffer.byteLength === 31;
+            view.buffer.byteLength === PROBE_BYTES;
         if (!exactBounds) {
             return {
                 available: false,
@@ -418,23 +482,12 @@ export function probeCapabilities(): NativeCapabilities {
         const subarray = view.subarray(1, 30);
         const dataView = new DataView(arrayBuffer, 1, 29);
         const bufferAlias = Buffer.from(arrayBuffer, 0, view.byteLength);
-        markAsUntransferable(arrayBuffer);
-        let transferPrevention = false;
-        try {
-            structuredClone(arrayBuffer, { transfer: [arrayBuffer] });
-        } catch {
-            transferPrevention = arrayBuffer.byteLength === 31;
-        }
-        if (!transferPrevention) {
-            return {
-                available: false,
-                ...base,
-                napiVersion,
-                externalArrayBuffer,
-                exactBounds,
-                reason: "transfer_prevention_unavailable",
-            };
-        }
+        // Transfer prevention is measured on separate buffers and reported, not gated: no
+        // shipped runtime offers both marking and detachment (Node aborts on a marked detach,
+        // Bun 1.3.x has no `markAsUntransferable`), and the detach-before-publish rule plus
+        // private-copy decoding bound an escaped alias to torn bytes.
+        const transferPreventionMechanism = probeTransferPrevention(native);
+        const transferPrevention = transferPreventionMechanism !== "none";
         const detachment = native.detachArrayBuffer(arrayBuffer);
         const aliasesDetached =
             detachment &&
@@ -457,6 +510,7 @@ export function probeCapabilities(): NativeCapabilities {
                 externalArrayBuffer,
                 exactBounds,
                 transferPrevention,
+                transferPreventionMechanism,
                 reason: "detachment_unavailable",
             };
         }
@@ -476,9 +530,11 @@ export function probeCapabilities(): NativeCapabilities {
                 exactBounds,
                 detachment: true,
                 transferPrevention,
+                transferPreventionMechanism,
                 reason: "cleanup_hooks_unavailable",
             };
         }
+        markLeasedBuffers = transferPreventionMechanism === "marked";
         return {
             available: true,
             napiVersion,
@@ -486,6 +542,7 @@ export function probeCapabilities(): NativeCapabilities {
             exactBounds,
             detachment: true,
             transferPrevention,
+            transferPreventionMechanism,
             cleanupHooks: true,
         };
     } catch {
