@@ -13,12 +13,12 @@ use super::backup::release_capture_pin_in_tx;
 use super::cas::ArtifactHandle;
 use super::envelope::{Sensitivity, check_fence};
 use super::redaction::identity;
+use super::review_staging::{check_digest, provisional_result_identity};
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
 pub const CURATOR_EXECUTION_HOLD_KIND: &str = "curator_execution";
 pub const CURATOR_REVIEW_HOLD_KIND: &str = "curator_review";
-/// `evidence_meta.retention_class` of evidence a Curator run captured for itself; such rows must carry a finite `retain_until`.
-pub const CURATOR_CAPTURE_RETENTION_CLASS: &str = "curator_capture";
+pub use super::cas::CURATOR_CAPTURE_RETENTION_CLASS;
 /// Review expiry bound for a selected proposal, measured from result creation.
 pub const REVIEW_EXPIRY_MAX_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 pub const MAX_CURATOR_HELD_BACKING_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024;
@@ -27,7 +27,7 @@ pub const MAX_CURATOR_HELD_BACKING_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
 pub const MAX_RUN_BUFFER_BYTES: u64 = 16 * 1024 * 1024;
 /// Evidence references one hold may carry: the subject, starting references, and every inspected artifact.
 pub const MAX_CURATOR_HOLD_REFERENCES: usize = 512;
-/// Active Curator holds per project and per host, matching the pending-work bounds.
+/// Active Curator holds per project and per host; equal to the pending-work bounds of 64 jobs per project and 256 per host, since each pending job owns at most one hold at a time.
 pub const MAX_ACTIVE_CURATOR_HOLDS_PER_PROJECT: usize = 64;
 pub const MAX_ACTIVE_CURATOR_HOLDS_PER_HOST: usize = 256;
 
@@ -147,8 +147,8 @@ fn corrupt<T>(_: T) -> CuratorHoldError {
 
 impl CuratorHoldBinding {
     fn validate(&self) -> Result<(), CuratorHoldRefusal> {
+        check_digest(&self.project_digest).map_err(|_| CuratorHoldRefusal::InvalidRequest)?;
         for field in [
-            &self.project_digest,
             &self.kernel_incarnation,
             &self.memstore_incarnation,
             &self.subject,
@@ -175,14 +175,9 @@ impl CuratorHoldBinding {
             sep = OWNER_SEPARATOR
         )
     }
-
-    fn project_prefix(&self) -> String {
-        format!("{}{OWNER_SEPARATOR}", self.project_digest)
-    }
 }
 
 struct StoredHold {
-    kind: CuratorHoldKind,
     expires_at: i64,
     released: bool,
     purge_degraded: bool,
@@ -227,14 +222,14 @@ impl KernelStore {
         )
     }
 
-    /// Adds `evidence_ids` to a live hold as the dependency union grows. The expiry never moves; the same bounds apply to the whole hold; a replayed extension adds nothing twice.
-    pub fn extend_curator_hold(
+    /// Adds `evidence_ids` to a live execution hold as the dependency union grows. The expiry never moves; the same bounds apply to the whole hold; a replayed extension adds nothing twice. A review hold is fixed at transfer and cannot grow.
+    pub fn extend_execution_hold(
         &self,
         hold_id: &str,
-        kind: CuratorHoldKind,
         binding: &CuratorHoldBinding,
         evidence_ids: &[String],
     ) -> Result<CuratorHold, CuratorHoldError> {
+        let kind = CuratorHoldKind::Execution;
         binding.validate()?;
         let hold_id = identity(hold_id).map_err(|_| CuratorHoldRefusal::InvalidRequest)?;
         let mut writer = self.lock_writer()?;
@@ -245,26 +240,19 @@ impl KernelStore {
         self.check_incarnation(&tx, binding)?;
         let now = current_time_ms();
         let stored = load_valid_hold(&tx, &hold_id, kind, binding, now)?;
-        add_references(&tx, &hold_id, stored.expires_at, evidence_ids)?;
-        let hold = admit_totals(
-            &tx,
-            &hold_id,
-            kind,
-            binding,
-            stored.expires_at,
-            PRODUCTION_QUOTA,
-        )?;
+        let facts = precharge(&tx, binding, evidence_ids, PRODUCTION_QUOTA)?;
+        add_references(&tx, &hold_id, stored.expires_at, &facts)?;
+        let hold = admit_totals(&tx, &hold_id, kind, stored.expires_at)?;
         tx.commit().map_err(sqlite)?;
         Ok(hold)
     }
 
-    /// In one envelope: acquire the review hold over the execution hold's still-live references, move still-future `retain_until` of Curator-captured evidence to the review expiry, then release the execution hold. `review_expires_at` is at most [`REVIEW_EXPIRY_MAX_MS`] after `result_created_at`. Expired references are never extended and ownership never changes.
+    /// In one envelope: acquire the review hold over the execution hold's still-live references, move the staged proposal's queue deadline and the still-future `retain_until` of Curator-captured evidence forward to the review expiry, then release the execution hold. `review.subject` must be the provisional candidate the execution job's generation staged; `review_expires_at` is at most [`REVIEW_EXPIRY_MAX_MS`] after that candidate's creation. Deadlines only move later; expired references are never extended and ownership never changes.
     pub fn transfer_execution_to_review(
         &self,
         execution_hold_id: &str,
         execution: &CuratorHoldBinding,
         review: &CuratorHoldBinding,
-        result_created_at: i64,
         review_expires_at: i64,
     ) -> Result<CuratorHold, CuratorHoldError> {
         execution.validate()?;
@@ -272,13 +260,9 @@ impl KernelStore {
         let execution_hold_id =
             identity(execution_hold_id).map_err(|_| CuratorHoldRefusal::InvalidRequest)?;
         let now = current_time_ms();
-        let review_ceiling = result_created_at
-            .checked_add(REVIEW_EXPIRY_MAX_MS)
-            .ok_or(CuratorHoldRefusal::InvalidRequest)?;
-        if result_created_at < 0
-            || result_created_at > now
-            || review_expires_at <= now
-            || review_expires_at > review_ceiling
+        let expected = provisional_result_identity(&execution.subject, review.generation);
+        if review_expires_at <= now
+            || review.subject != expected.candidate_id
             || execution.project_digest != review.project_digest
             || execution.kernel_incarnation != review.kernel_incarnation
             || execution.memstore_incarnation != review.memstore_incarnation
@@ -291,6 +275,24 @@ impl KernelStore {
             .map_err(sqlite)?;
         check_fence(&tx, self.lease_epoch())?;
         self.check_incarnation(&tx, review)?;
+        let result_created_at: i64 = tx
+            .query_row_cached(
+                "SELECT c.created_at FROM candidates c JOIN extraction_runs r USING(extraction_run_id)
+                 WHERE c.candidate_id=?1
+                   AND (c.terminal_state IS NULL OR c.terminal_state='completed')
+                   AND (r.terminal_state IS NULL OR r.terminal_state='completed')",
+                [review.subject.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite)?
+            .ok_or(CuratorHoldRefusal::InvalidRequest)?;
+        let review_ceiling = result_created_at
+            .checked_add(REVIEW_EXPIRY_MAX_MS)
+            .ok_or(CuratorHoldRefusal::InvalidRequest)?;
+        if review_expires_at > review_ceiling {
+            return Err(CuratorHoldRefusal::InvalidRequest.into());
+        }
         load_valid_hold(
             &tx,
             &execution_hold_id,
@@ -304,6 +306,7 @@ impl KernelStore {
             review,
             review_expires_at,
             self.lease_epoch(),
+            Some(&execution_hold_id),
         )?;
         // New reference rows: the schema forbids re-parenting an active reference, and the review hold outlives the execution hold.
         tx.execute_cached(
@@ -316,10 +319,11 @@ impl KernelStore {
             params![review_hold_id, review_expires_at, execution_hold_id],
         )
         .map_err(sqlite)?;
-        // Only Curator-captured evidence whose acquisition reference is still live moves to the review expiry.
+        // Only a live Curator acquisition reference moves, and only later.
         tx.execute_cached(
             "UPDATE evidence_meta SET retain_until=?1
-             WHERE retention_class=?2 AND retain_until IS NOT NULL AND retain_until>?3
+             WHERE retention_class=?2 AND retain_until IS NOT NULL
+               AND retain_until>?3 AND retain_until<?1
                AND invalidated_commit_seq IS NULL
                AND evidence_id IN (SELECT evidence_id FROM capture_pin_refs WHERE capture_pin_id=?4)",
             params![
@@ -330,13 +334,35 @@ impl KernelStore {
             ],
         )
         .map_err(sqlite)?;
+        // The selected proposal stays readable through its review window; its run and row deadlines move together and only later.
+        for table in ["candidates", "extraction_runs"] {
+            tx.execute_cached(
+                &format!(
+                    "UPDATE {table} SET lease_expires_at=?1
+                     WHERE {key}=?2 AND lease_expires_at>?3 AND lease_expires_at<?1",
+                    key = if table == "candidates" {
+                        "candidate_id"
+                    } else {
+                        "extraction_run_id"
+                    }
+                ),
+                params![
+                    review_expires_at,
+                    if table == "candidates" {
+                        &review.subject
+                    } else {
+                        &expected.extraction_run_id
+                    },
+                    now
+                ],
+            )
+            .map_err(sqlite)?;
+        }
         let hold = admit_totals(
             &tx,
             &review_hold_id,
             CuratorHoldKind::Review,
-            review,
             review_expires_at,
-            PRODUCTION_QUOTA,
         )?;
         if !release_capture_pin_in_tx(&tx, &execution_hold_id, now)? {
             return Err(CuratorHoldRefusal::Released.into());
@@ -422,9 +448,10 @@ impl KernelStore {
             .map_err(sqlite)?;
         check_fence(&tx, self.lease_epoch())?;
         self.check_incarnation(&tx, binding)?;
-        let hold_id = insert_pin(&tx, kind, binding, expires_at, self.lease_epoch())?;
-        add_references(&tx, &hold_id, expires_at, evidence_ids)?;
-        let hold = admit_totals(&tx, &hold_id, kind, binding, expires_at, quota)?;
+        let facts = precharge(&tx, binding, evidence_ids, quota)?;
+        let hold_id = insert_pin(&tx, kind, binding, expires_at, self.lease_epoch(), None)?;
+        add_references(&tx, &hold_id, expires_at, &facts)?;
+        let hold = admit_totals(&tx, &hold_id, kind, expires_at)?;
         tx.commit().map_err(sqlite)?;
         Ok(hold)
     }
@@ -473,18 +500,21 @@ fn insert_pin(
     binding: &CuratorHoldBinding,
     expires_at: i64,
     lease_epoch: u64,
+    replacing: Option<&str>,
 ) -> Result<String, CuratorHoldError> {
-    let prefix = binding.project_prefix();
+    let (lower, upper) = project_range(&binding.project_digest);
+    let replacing = replacing.unwrap_or("");
     let project_active: i64 = tx
         .query_row_cached(
             "SELECT COUNT(*) FROM capture_pins
              WHERE pin_kind IN (?1,?2) AND released_at IS NULL
-               AND owner_id>=?3 AND owner_id<?4",
+               AND owner_id>=?3 AND owner_id<?4 AND capture_pin_id<>?5",
             params![
                 CURATOR_EXECUTION_HOLD_KIND,
                 CURATOR_REVIEW_HOLD_KIND,
-                prefix,
-                format!("{}{OWNER_SEPARATOR_SUCCESSOR}", binding.project_digest)
+                lower,
+                upper,
+                replacing
             ],
             |row| row.get(0),
         )
@@ -494,8 +524,13 @@ fn insert_pin(
     }
     let host_active: i64 = tx
         .query_row_cached(
-            "SELECT COUNT(*) FROM capture_pins WHERE pin_kind IN (?1,?2) AND released_at IS NULL",
-            params![CURATOR_EXECUTION_HOLD_KIND, CURATOR_REVIEW_HOLD_KIND],
+            "SELECT COUNT(*) FROM capture_pins
+             WHERE pin_kind IN (?1,?2) AND released_at IS NULL AND capture_pin_id<>?3",
+            params![
+                CURATOR_EXECUTION_HOLD_KIND,
+                CURATOR_REVIEW_HOLD_KIND,
+                replacing
+            ],
             |row| row.get(0),
         )
         .map_err(sqlite)?;
@@ -531,23 +566,117 @@ fn insert_pin(
     Ok(hold_id)
 }
 
-/// Every id must name live, untombstoned evidence; `INSERT OR IGNORE` makes a replayed reference a no-op.
+/// Binary-order bounds of one project's owner ids: the unit separator and its successor close the prefix.
+fn project_range(project_digest: &str) -> (String, String) {
+    (
+        format!("{project_digest}{OWNER_SEPARATOR}"),
+        format!("{project_digest}{OWNER_SEPARATOR_SUCCESSOR}"),
+    )
+}
+
+/// Validates every id and charges the distinct backing the project and host would hold after adding them, before any row is written. Returns the validated facts in input order.
+fn precharge(
+    tx: &Transaction<'_>,
+    binding: &CuratorHoldBinding,
+    evidence_ids: &[String],
+    quota: BackingQuota,
+) -> Result<Vec<HeldEvidence>, CuratorHoldError> {
+    if evidence_ids.len() > MAX_CURATOR_HOLD_REFERENCES {
+        return Err(CuratorHoldRefusal::TooManyReferences.into());
+    }
+    let mut facts = Vec::with_capacity(evidence_ids.len());
+    for evidence_id in evidence_ids {
+        let evidence_id = identity(evidence_id).map_err(|_| CuratorHoldRefusal::InvalidRequest)?;
+        facts.push(load_live_evidence(tx, &evidence_id)?);
+    }
+    let (lower, upper) = project_range(&binding.project_digest);
+    let project_held = held_backing(tx, Some((&lower, &upper)))?;
+    let host_held = held_backing(tx, None)?;
+    let mut project_new = 0u64;
+    let mut host_new = 0u64;
+    let mut seen = BTreeMap::new();
+    for fact in &facts {
+        if seen.insert(fact.artifact_digest.as_str(), ()).is_some() {
+            continue;
+        }
+        let (in_project, in_host): (bool, bool) = tx
+            .query_row_cached(
+                "SELECT EXISTS(SELECT 1 FROM capture_pin_refs r
+                     JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
+                     JOIN evidence_meta e ON e.evidence_id=r.evidence_id
+                     WHERE e.artifact_digest=?1 AND p.pin_kind IN (?2,?3)
+                       AND p.released_at IS NULL AND r.released_at IS NULL
+                       AND p.owner_id>=?4 AND p.owner_id<?5),
+                    EXISTS(SELECT 1 FROM capture_pin_refs r
+                     JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
+                     JOIN evidence_meta e ON e.evidence_id=r.evidence_id
+                     WHERE e.artifact_digest=?1 AND p.pin_kind IN (?2,?3)
+                       AND p.released_at IS NULL AND r.released_at IS NULL)",
+                params![
+                    fact.artifact_digest,
+                    CURATOR_EXECUTION_HOLD_KIND,
+                    CURATOR_REVIEW_HOLD_KIND,
+                    lower,
+                    upper
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(sqlite)?;
+        if !in_project {
+            project_new = project_new.saturating_add(fact.byte_length);
+        }
+        if !in_host {
+            host_new = host_new.saturating_add(fact.byte_length);
+        }
+    }
+    if project_held.saturating_add(project_new) > quota.project_bytes {
+        return Err(CuratorHoldRefusal::ProjectBackingExhausted.into());
+    }
+    if host_held.saturating_add(host_new) > quota.host_bytes {
+        return Err(CuratorHoldRefusal::HostBackingExhausted.into());
+    }
+    Ok(facts)
+}
+
+/// Distinct artifact bytes active Curator pins hold, over one project's owner range or the whole host.
+fn held_backing(
+    tx: &Transaction<'_>,
+    project: Option<(&str, &str)>,
+) -> Result<u64, CuratorHoldError> {
+    let (lower, upper) = project.unwrap_or(("", ""));
+    let total: Option<i64> = tx
+        .query_row_cached(
+            "SELECT SUM(byte_length) FROM (
+                 SELECT e.artifact_digest,MAX(e.byte_length) AS byte_length FROM capture_pin_refs r
+                 JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
+                 JOIN evidence_meta e ON e.evidence_id=r.evidence_id
+                 WHERE p.pin_kind IN (?1,?2) AND p.released_at IS NULL AND r.released_at IS NULL
+                   AND (?3='' OR (p.owner_id>=?3 AND p.owner_id<?4))
+                 GROUP BY e.artifact_digest)",
+            params![
+                CURATOR_EXECUTION_HOLD_KIND,
+                CURATOR_REVIEW_HOLD_KIND,
+                lower,
+                upper
+            ],
+            |row| row.get(0),
+        )
+        .map_err(sqlite)?;
+    u64::try_from(total.unwrap_or(0)).map_err(corrupt)
+}
+
+/// `INSERT OR IGNORE` makes a replayed reference a no-op; the facts were validated by `precharge` in the same transaction.
 fn add_references(
     tx: &Transaction<'_>,
     hold_id: &str,
     expires_at: i64,
-    evidence_ids: &[String],
+    facts: &[HeldEvidence],
 ) -> Result<(), CuratorHoldError> {
-    if evidence_ids.len() > MAX_CURATOR_HOLD_REFERENCES {
-        return Err(CuratorHoldRefusal::TooManyReferences.into());
-    }
-    for evidence_id in evidence_ids {
-        let evidence_id = identity(evidence_id).map_err(|_| CuratorHoldRefusal::InvalidRequest)?;
-        load_live_evidence(tx, &evidence_id)?;
+    for fact in facts {
         tx.execute_cached(
             "INSERT OR IGNORE INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at)
              VALUES (?1,?2,?3)",
-            params![hold_id, evidence_id, expires_at],
+            params![hold_id, fact.evidence_id, expires_at],
         )
         .map_err(sqlite)?;
     }
@@ -584,21 +713,20 @@ fn load_live_evidence(
     evidence.ok_or_else(|| CuratorHoldRefusal::UnavailableEvidence.into())
 }
 
-/// Whole-hold reference count and the distinct backing the project and host hold across every active Curator pin, checked after the rows exist and before the transaction commits.
+/// Whole-hold reference count and distinct backing after the rows exist; the reference bound applies to the hold as a whole.
 fn admit_totals(
     tx: &Transaction<'_>,
     hold_id: &str,
     kind: CuratorHoldKind,
-    binding: &CuratorHoldBinding,
     expires_at: i64,
-    quota: BackingQuota,
 ) -> Result<CuratorHold, CuratorHoldError> {
     let (references, backing_bytes): (i64, Option<i64>) = tx
         .query_row_cached(
             "SELECT COUNT(*),(SELECT SUM(byte_length) FROM (
-                 SELECT DISTINCT e.artifact_digest,e.byte_length FROM capture_pin_refs r
+                 SELECT e.artifact_digest,MAX(e.byte_length) AS byte_length FROM capture_pin_refs r
                  JOIN evidence_meta e ON e.evidence_id=r.evidence_id
-                 WHERE r.capture_pin_id=?1 AND r.released_at IS NULL))
+                 WHERE r.capture_pin_id=?1 AND r.released_at IS NULL
+                 GROUP BY e.artifact_digest))
              FROM capture_pin_refs WHERE capture_pin_id=?1 AND released_at IS NULL",
             [hold_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -607,39 +735,6 @@ fn admit_totals(
     let references = usize::try_from(references).map_err(corrupt)?;
     if references > MAX_CURATOR_HOLD_REFERENCES {
         return Err(CuratorHoldRefusal::TooManyReferences.into());
-    }
-    let held = |project: Option<&str>| -> Result<u64, CuratorHoldError> {
-        let (lower, upper) = match project {
-            Some(digest) => (
-                format!("{digest}{OWNER_SEPARATOR}"),
-                format!("{digest}{OWNER_SEPARATOR_SUCCESSOR}"),
-            ),
-            None => (String::new(), char::MAX.to_string()),
-        };
-        let total: Option<i64> = tx
-            .query_row_cached(
-                "SELECT SUM(byte_length) FROM (
-                     SELECT DISTINCT e.artifact_digest,e.byte_length FROM capture_pin_refs r
-                     JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
-                     JOIN evidence_meta e ON e.evidence_id=r.evidence_id
-                     WHERE p.pin_kind IN (?1,?2) AND p.released_at IS NULL AND r.released_at IS NULL
-                       AND p.owner_id>=?3 AND p.owner_id<?4)",
-                params![
-                    CURATOR_EXECUTION_HOLD_KIND,
-                    CURATOR_REVIEW_HOLD_KIND,
-                    lower,
-                    upper
-                ],
-                |row| row.get(0),
-            )
-            .map_err(sqlite)?;
-        u64::try_from(total.unwrap_or(0)).map_err(corrupt)
-    };
-    if held(Some(&binding.project_digest))? > quota.project_bytes {
-        return Err(CuratorHoldRefusal::ProjectBackingExhausted.into());
-    }
-    if held(None)? > quota.host_bytes {
-        return Err(CuratorHoldRefusal::HostBackingExhausted.into());
     }
     Ok(CuratorHold {
         hold_id: hold_id.to_string(),
@@ -662,7 +757,6 @@ fn load_hold(
         params![hold_id, kind.pin_kind(), binding.owner_id()],
         |row| {
             Ok(StoredHold {
-                kind,
                 expires_at: row.get::<_, Option<i64>>(0)?.unwrap_or(i64::MAX),
                 released: row.get::<_, Option<i64>>(1)?.is_some(),
                 purge_degraded: row.get::<_, Option<i64>>(2)?.is_some(),
@@ -690,13 +784,8 @@ fn load_valid_hold(
     if now >= stored.expires_at {
         return Err(CuratorHoldRefusal::Expired.into());
     }
-    debug_assert_eq!(stored.kind, kind);
     Ok(stored)
 }
-
-/// Index of one loaded artifact inside a [`RunBufferMap`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BufferIndex(usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum RunBufferRefusal {
@@ -704,7 +793,7 @@ pub enum RunBufferRefusal {
     CapacityExhausted,
     #[error("the artifact could not be read or failed verification")]
     Unreadable,
-    #[error("the range lies outside the buffer")]
+    #[error("the digest is not loaded or the range lies outside its buffer")]
     RangeOutOfBounds,
 }
 
@@ -713,8 +802,7 @@ pub enum RunBufferRefusal {
 pub struct RunBufferMap {
     capacity: u64,
     used: u64,
-    buffers: Vec<Vec<u8>>,
-    by_digest: BTreeMap<String, BufferIndex>,
+    buffers: BTreeMap<String, Vec<u8>>,
 }
 
 impl RunBufferMap {
@@ -723,27 +811,26 @@ impl RunBufferMap {
         Self {
             capacity: capacity.min(MAX_RUN_BUFFER_BYTES),
             used: 0,
-            buffers: Vec::new(),
-            by_digest: BTreeMap::new(),
+            buffers: BTreeMap::new(),
         }
     }
 
     pub fn remaining(&self) -> u64 {
-        self.capacity - self.used
+        self.capacity.saturating_sub(self.used)
     }
 
     pub fn loaded(&self) -> usize {
         self.buffers.len()
     }
 
-    /// Charges `held.byte_length` before reading; a read whose length disagrees with the evidence row is refused and nothing is retained.
+    /// Charges `held.byte_length` before reading; a read whose length disagrees with the evidence row is refused and nothing is retained. Returns whether the call loaded new bytes.
     pub fn load(
         &mut self,
         store: &KernelStore,
         held: &HeldEvidence,
-    ) -> Result<BufferIndex, RunBufferRefusal> {
-        if let Some(index) = self.by_digest.get(&held.artifact_digest) {
-            return Ok(*index);
+    ) -> Result<bool, RunBufferRefusal> {
+        if self.buffers.contains_key(&held.artifact_digest) {
+            return Ok(false);
         }
         if held.byte_length > self.remaining() {
             return Err(RunBufferRefusal::CapacityExhausted);
@@ -758,17 +845,15 @@ impl RunBufferMap {
             return Err(RunBufferRefusal::Unreadable);
         }
         self.used += held.byte_length;
-        let index = BufferIndex(self.buffers.len());
-        self.buffers.push(bytes);
-        self.by_digest.insert(held.artifact_digest.clone(), index);
-        Ok(index)
+        self.buffers.insert(held.artifact_digest.clone(), bytes);
+        Ok(true)
     }
 
-    /// Borrows `range` of a loaded buffer for rendering; the borrow ends with the caller's use.
-    pub fn slice(&self, index: BufferIndex, range: Range<u64>) -> Result<&[u8], RunBufferRefusal> {
+    /// Borrows `range` of a loaded artifact for rendering; the borrow ends with the caller's use.
+    pub fn slice(&self, digest: &str, range: Range<u64>) -> Result<&[u8], RunBufferRefusal> {
         let buffer = self
             .buffers
-            .get(index.0)
+            .get(digest)
             .ok_or(RunBufferRefusal::RangeOutOfBounds)?;
         let start = usize::try_from(range.start).map_err(|_| RunBufferRefusal::RangeOutOfBounds)?;
         let end = usize::try_from(range.end).map_err(|_| RunBufferRefusal::RangeOutOfBounds)?;

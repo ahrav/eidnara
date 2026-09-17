@@ -58,6 +58,7 @@ pub use backup::{
     RestoreFault, RestorePhase, owner_is_current_for_test, restore_marker_is_valid_for_test,
     sensitivity_bearing_tables_for_test, verify_backup_with_deadline_for_test,
 };
+pub use cas::CURATOR_CAPTURE_RETENTION_CLASS;
 pub use cas::{
     ARTIFACT_DELETION_SOURCE_KIND, ArtifactDeletionIdentity, ArtifactDeletionKind,
     ArtifactDeletionRequest, ArtifactDeletionResult, ArtifactDestination, ArtifactEgressFacts,
@@ -87,12 +88,9 @@ pub use commit_read::{
 };
 pub use consumer_obligations::{ConsumerObligation, ConsumerObligationError};
 pub use curator_hold::{
-    BufferIndex, CURATOR_CAPTURE_RETENTION_CLASS, CURATOR_EXECUTION_HOLD_KIND,
-    CURATOR_REVIEW_HOLD_KIND, CuratorHold, CuratorHoldBinding, CuratorHoldError, CuratorHoldKind,
-    CuratorHoldRefusal, HeldEvidence, MAX_ACTIVE_CURATOR_HOLDS_PER_HOST,
-    MAX_ACTIVE_CURATOR_HOLDS_PER_PROJECT, MAX_CURATOR_HELD_BACKING_BYTES_PER_HOST,
-    MAX_CURATOR_HELD_BACKING_BYTES_PER_PROJECT, MAX_CURATOR_HOLD_REFERENCES, MAX_RUN_BUFFER_BYTES,
-    REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
+    CURATOR_EXECUTION_HOLD_KIND, CURATOR_REVIEW_HOLD_KIND, CuratorHold, CuratorHoldBinding,
+    CuratorHoldError, CuratorHoldKind, CuratorHoldRefusal, HeldEvidence,
+    MAX_CURATOR_HOLD_REFERENCES, REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
 };
 pub use current_input::{
     CurrentInputDescriptor, CurrentInputExpectation, CurrentInputGuard, EligibilityBinding,

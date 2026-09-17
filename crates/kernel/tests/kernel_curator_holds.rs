@@ -7,7 +7,9 @@ use kernel::{
     ArtifactIngestRequest, CURATOR_CAPTURE_RETENTION_CLASS, CURATOR_EXECUTION_HOLD_KIND,
     CURATOR_REVIEW_HOLD_KIND, CommitIntent, CuratorHoldBinding, CuratorHoldError, CuratorHoldKind,
     CuratorHoldRefusal, DomainSpec, HeldEvidence, KernelStore, MAX_CURATOR_HOLD_REFERENCES,
-    ProviderEgress, REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal, Sensitivity,
+    ProviderEgress, REVIEW_EXPIRY_MAX_MS, ReviewBinding, ReviewOwner, ReviewPayload,
+    ReviewProposal, ReviewStagingSpec, RunBufferMap, RunBufferRefusal, Sensitivity,
+    SourceDependency, StagingTerminalState, provisional_result_identity,
 };
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -148,6 +150,84 @@ impl Fixture {
             conn.query_row("SELECT COUNT(*) FROM capture_pins", [], |row| row.get(0))
                 .unwrap()
         })
+    }
+
+    fn review_binding(&self, job_id: &str, generation: u64) -> ReviewBinding {
+        ReviewBinding {
+            project_digest: "0a".repeat(32),
+            domain_id: "domain".to_string(),
+            owner: ReviewOwner::Proposal {
+                job_id: job_id.to_string(),
+                generation,
+            },
+            subject_source: SourceDependency {
+                source_kind: "conversation".to_string(),
+                source_id: "session-1".to_string(),
+                source_revision: 1,
+            },
+            reference_sources: vec![],
+        }
+    }
+
+    fn proposal_payload(&self) -> ReviewPayload {
+        ReviewPayload::Proposal(Box::new(ReviewProposal {
+            action: kernel::ProposalAction::Retain,
+            target: kernel::ProposalTarget::Memory(kernel::CanonicalTarget {
+                object_id: "mem-1".to_string(),
+                source_revision: 1,
+                known_as_of: 1,
+                commit_token: 1,
+            }),
+            new_text: None,
+            support: vec![],
+            contradictions: vec![],
+            limitations: vec![],
+            uncertainty: kernel::Uncertainty::Low,
+            manifest: kernel::ManifestReference {
+                manifest_id: "manifest-1".to_string(),
+                digest: "d".repeat(64),
+            },
+            policy_dependencies: kernel::PolicyDependencies {
+                question_template: kernel::ReviewQuestionTemplate::ExtractedFacts,
+                disclosed_inputs: vec![],
+                uncited_disclosed_inputs: vec![],
+                ancestry: vec![],
+            },
+        }))
+    }
+
+    fn proposal_digest(&self) -> String {
+        self.proposal_payload().digest().unwrap()
+    }
+
+    /// Stages and seals this generation's provisional proposal; returns its `created_at`.
+    fn stage_proposal(
+        &self,
+        job_id: &str,
+        generation: u64,
+        recorded_at: i64,
+        deadline: i64,
+    ) -> i64 {
+        let identity = provisional_result_identity(job_id, generation);
+        self.store
+            .stage_review_input(ReviewStagingSpec {
+                extraction_run_id: identity.extraction_run_id.clone(),
+                candidate_id: identity.candidate_id,
+                producer: "curator".to_string(),
+                binding: self.review_binding(job_id, generation),
+                payload: self.proposal_payload(),
+                recorded_at,
+                queue_deadline_at: deadline,
+            })
+            .unwrap();
+        self.store
+            .finish_staging_run(
+                &identity.extraction_run_id,
+                StagingTerminalState::Completed,
+                recorded_at + 1,
+            )
+            .unwrap();
+        recorded_at
     }
 
     fn retain_until(&self, evidence_id: &str) -> Option<i64> {
@@ -315,9 +395,8 @@ fn extension_grows_the_union_without_moving_the_deadline_or_double_charging() {
         .unwrap();
     let extended = fixture
         .store
-        .extend_curator_hold(
+        .extend_execution_hold(
             &hold.hold_id,
-            CuratorHoldKind::Execution,
             &binding,
             &[shared.clone(), first.clone(), shared.clone()],
         )
@@ -329,12 +408,7 @@ fn extension_grows_the_union_without_moving_the_deadline_or_double_charging() {
     let duplicate_bytes = fixture.ingest("shared-2", b"same bytes as later", None);
     let extended = fixture
         .store
-        .extend_curator_hold(
-            &hold.hold_id,
-            CuratorHoldKind::Execution,
-            &binding,
-            &[duplicate_bytes],
-        )
+        .extend_execution_hold(&hold.hold_id, &binding, &[duplicate_bytes])
         .unwrap();
     assert_eq!(extended.references, 3);
     assert_eq!(extended.backing_bytes, 11 + 19);
@@ -346,7 +420,7 @@ fn extension_grows_the_union_without_moving_the_deadline_or_double_charging() {
         refusal(
             fixture
                 .store
-                .extend_curator_hold(&hold.hold_id, CuratorHoldKind::Execution, &stale, &[first])
+                .extend_execution_hold(&hold.hold_id, &stale, &[first])
                 .unwrap_err()
         ),
         CuratorHoldRefusal::Missing
@@ -461,8 +535,7 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
     let now = now_ms();
     let canonical = fixture.ingest("canonical", b"canonical evidence", None);
     let live_capture = fixture.ingest("capture-live", b"captured live", Some(now + HOUR_MS));
-    let expired_capture =
-        fixture.ingest("capture-expired", b"captured expired", Some(now - HOUR_MS));
+    let long_capture = fixture.ingest("capture-long", b"captured long", Some(now + 20 * DAY_MS));
     let execution = fixture.binding("job-1", 1);
     let hold = fixture
         .store
@@ -471,40 +544,36 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
             &[
                 canonical.clone(),
                 live_capture.clone(),
-                expired_capture.clone(),
+                long_capture.clone(),
             ],
             now + HOUR_MS,
         )
         .unwrap();
-    let review = fixture.binding("review-result:job-1", 1);
-    let created = now - 1_000;
-    // Beyond seven days from result creation is refused and changes nothing.
-    assert_eq!(
-        refusal(
-            fixture
-                .store
-                .transfer_execution_to_review(
-                    &hold.hold_id,
-                    &execution,
-                    &review,
-                    created,
-                    created + REVIEW_EXPIRY_MAX_MS + 1,
-                )
-                .unwrap_err()
-        ),
-        CuratorHoldRefusal::InvalidRequest
-    );
+    // The proposal this job's generation staged: its creation time anchors the review window.
+    let created = fixture.stage_proposal("job-1", 1, now - 1_000, now + DAY_MS - 1_000);
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let wrong_generation = fixture.binding(&identity.candidate_id, 2);
+    // A subject that is not this generation's provisional result, or a window past seven days, is refused whole.
+    for (binding, expires_at) in [
+        (&wrong_generation, created + REVIEW_EXPIRY_MAX_MS),
+        (&review, created + REVIEW_EXPIRY_MAX_MS + 1),
+    ] {
+        assert_eq!(
+            refusal(
+                fixture
+                    .store
+                    .transfer_execution_to_review(&hold.hold_id, &execution, binding, expires_at)
+                    .unwrap_err()
+            ),
+            CuratorHoldRefusal::InvalidRequest
+        );
+    }
     assert!(fixture.pin(&hold.hold_id).3.is_none());
     let review_expires_at = created + REVIEW_EXPIRY_MAX_MS;
     let review_hold = fixture
         .store
-        .transfer_execution_to_review(
-            &hold.hold_id,
-            &execution,
-            &review,
-            created,
-            review_expires_at,
-        )
+        .transfer_execution_to_review(&hold.hold_id, &execution, &review, review_expires_at)
         .unwrap();
     assert_eq!(review_hold.kind, CuratorHoldKind::Review);
     assert_eq!(review_hold.references, 3);
@@ -524,16 +593,52 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
         "a live Curator acquisition reference moves to the review expiry"
     );
     assert_eq!(
-        fixture.retain_until(&expired_capture),
-        Some(now - HOUR_MS),
-        "an expired reference is never extended"
+        fixture.retain_until(&long_capture),
+        Some(now + 20 * DAY_MS),
+        "a reference already retained past the review window is never shortened"
     );
     assert_eq!(
         fixture.retain_until(&canonical),
         None,
         "independently owned evidence keeps its own retention"
     );
-    // The execution binding cannot release the review hold; the review binding can, once.
+    // The staged proposal stays readable through the review window: its queue deadline moved with the hold.
+    let deadline: i64 = inspect(fixture.root(), |conn| {
+        conn.query_row(
+            "SELECT lease_expires_at FROM candidates WHERE candidate_id=?1",
+            [identity.candidate_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(deadline, review_expires_at);
+    let row = fixture
+        .store
+        .read_review_input(
+            &kernel::ReviewStagedReference {
+                database_incarnation_id: incarnation(fixture.root()),
+                candidate_id: identity.candidate_id.clone(),
+                payload_digest: fixture.proposal_digest(),
+            },
+            &fixture.review_binding("job-1", 1),
+            now + 2 * DAY_MS,
+        )
+        .unwrap();
+    assert_eq!(row.lifecycle.queue_deadline_at, review_expires_at);
+    // A review hold cannot grow; the execution binding cannot release it; the review binding can, once.
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .extend_execution_hold(
+                    &review_hold.hold_id,
+                    &review,
+                    std::slice::from_ref(&canonical)
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::Missing
+    );
     assert_eq!(
         refusal(
             fixture
@@ -547,13 +652,7 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
         refusal(
             fixture
                 .store
-                .transfer_execution_to_review(
-                    &hold.hold_id,
-                    &execution,
-                    &review,
-                    created,
-                    review_expires_at
-                )
+                .transfer_execution_to_review(&hold.hold_id, &execution, &review, review_expires_at)
                 .unwrap_err()
         ),
         CuratorHoldRefusal::Released,
@@ -709,6 +808,31 @@ fn curator_captures_must_carry_a_finite_acquisition_reference() {
         })
         .unwrap_err();
     assert_eq!(error.kind(), ArtifactErrorKind::InvalidInput);
+    let stale = fixture
+        .store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent("stale-deadline", b"capture"),
+            payload: b"capture".to_vec(),
+            evidence_id: "evidence-stale-deadline".to_string(),
+            object_id: "evidence-object-stale-deadline".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain".to_string(),
+            source_kind: "local_file".to_string(),
+            source_id: "src/file".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+            retain_until: Some(now_ms() - 1),
+            asserted_sensitivity: Sensitivity::Sensitive,
+            provider_egress: ProviderEgress::LocalOnly,
+            provenance: None,
+        })
+        .unwrap_err();
+    assert_eq!(
+        stale.kind(),
+        ArtifactErrorKind::InvalidInput,
+        "an already-dead reference is refused"
+    );
     fixture.ingest("with-deadline", b"capture", Some(now_ms() + HOUR_MS));
 }
 
@@ -741,10 +865,9 @@ fn run_buffers_load_each_artifact_once_and_refuse_at_the_exact_boundary() {
         .unwrap();
     let mut buffers = RunBufferMap::new(16);
     let reads_before = fixture.store.verified_object_reads_for_test();
-    let first = buffers.load(&fixture.store, &facts[0]).unwrap();
-    let same_bytes = buffers.load(&fixture.store, &facts[1]).unwrap();
-    assert_eq!(
-        first, same_bytes,
+    assert!(buffers.load(&fixture.store, &facts[0]).unwrap());
+    assert!(
+        !buffers.load(&fixture.store, &facts[1]).unwrap(),
         "one artifact behind two evidence rows loads once"
     );
     assert_eq!(buffers.loaded(), 1);
@@ -753,7 +876,7 @@ fn run_buffers_load_each_artifact_once_and_refuse_at_the_exact_boundary() {
         fixture.store.verified_object_reads_for_test() - reads_before,
         1
     );
-    let second = buffers.load(&fixture.store, &facts[2]).unwrap();
+    assert!(buffers.load(&fixture.store, &facts[2]).unwrap());
     assert_eq!(
         buffers.remaining(),
         0,
@@ -768,15 +891,20 @@ fn run_buffers_load_each_artifact_once_and_refuse_at_the_exact_boundary() {
         2,
         "a refused artifact is never loaded or retained"
     );
-    assert_eq!(buffers.slice(second, 1..4).unwrap(), b"bcd");
-    assert_eq!(buffers.slice(first, 0..10).unwrap(), &[b'x'; 10]);
+    let (ten_digest, six_digest) = (&facts[0].artifact_digest, &facts[2].artifact_digest);
+    assert_eq!(buffers.slice(six_digest, 1..4).unwrap(), b"bcd");
+    assert_eq!(buffers.slice(ten_digest, 0..10).unwrap(), &[b'x'; 10]);
     assert_eq!(
-        buffers.slice(second, 0..7).unwrap_err(),
+        buffers.slice(six_digest, 0..7).unwrap_err(),
+        RunBufferRefusal::RangeOutOfBounds
+    );
+    assert_eq!(
+        buffers.slice(&facts[3].artifact_digest, 0..1).unwrap_err(),
         RunBufferRefusal::RangeOutOfBounds
     );
     // Repeated ranges reuse the loaded buffer; no reload happens.
     let reads = fixture.store.verified_object_reads_for_test();
-    assert_eq!(buffers.load(&fixture.store, &facts[2]).unwrap(), second);
+    assert!(!buffers.load(&fixture.store, &facts[2]).unwrap());
     assert_eq!(fixture.store.verified_object_reads_for_test(), reads);
     // An artifact larger than the whole run budget is refused before any read.
     let mut small = RunBufferMap::new(4);

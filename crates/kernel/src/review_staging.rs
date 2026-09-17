@@ -787,7 +787,7 @@ fn check_identity(value: &str) -> Result<(), ReviewStageRefusal> {
     check_secret_free(value)
 }
 
-fn check_digest(value: &str) -> Result<(), ReviewStageRefusal> {
+pub(super) fn check_digest(value: &str) -> Result<(), ReviewStageRefusal> {
     if value.len() != DIGEST_HEX_LEN
         || !value
             .bytes()

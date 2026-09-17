@@ -145,6 +145,9 @@ pub struct ArtifactIngestRequest {
     pub provenance: Option<RepositoryProvenance>,
 }
 
+/// `retention_class` of evidence a Curator run captured for itself; ingestion requires such rows to carry a live, finite `retain_until`.
+pub const CURATOR_CAPTURE_RETENTION_CLASS: &str = "curator_capture";
+
 /// Stable identifiers returned after artifact bytes and evidence are committed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactHandle {
