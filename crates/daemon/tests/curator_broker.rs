@@ -1,16 +1,18 @@
-//! Real-store proofs for the Curator evidence broker: scope and staleness refusal, live-origin revocation, canonical and promoted deduplication, uncited-context lineage, unsupported bound questions (Q24), the render check, hold growth, and the accounting bounds.
+//! Real-store proofs for the Curator evidence broker: scope and staleness refusal, live-origin revocation, canonical and promoted deduplication, native identity sharing across spans, uncited-context lineage, unsupported bound questions (Q24), the render check over small and windowed artifacts, the verdict-before-hold and verdict-after-load order, hold growth, and the accounting bounds.
 
 use daemon::curator::broker::{
-    EvidenceBroker, JudgedAt, MAX_MODEL_VISIBLE_BYTES, MAX_OPERATIONS_PER_BATCH, OriginClass,
-    QuestionTemplate, ReferenceExpectation, RefusalCode, RunBinding,
+    EvidenceBroker, JudgedAt, MAX_ISSUED_INSPECTIONS, MAX_MODEL_VISIBLE_BYTES,
+    MAX_OPERATIONS_PER_BATCH, OriginClass, QuestionTemplate, ReferenceExpectation, RefusalCode,
+    RunBinding,
 };
-use kernel::source_identity::{Occurrence, OccurrenceClass};
+use kernel::source_identity::{Occurrence, OccurrenceClass, Span};
 use kernel::{
     ArtifactIngestRequest, CURATOR_CAPTURE_RETENTION_CLASS, CommitIntent, CuratorHoldBinding,
-    DecisionPayload, DecisionSpec, Dimension, DomainSpec, ExtractedFact, KernelStore, ProjectScope,
-    ProviderEgress, ReviewBinding, ReviewOwner, ReviewPayload, ReviewStagingSpec, ReviewSubject,
-    ScopeSpec, ScopeTermSpec, Sensitivity, SourceDependency, SourceDescriptorPolicy,
-    SourceDescriptorRequest, SourceSpan, StagingTerminalState,
+    DecisionPayload, DecisionSpec, Dimension, DomainSpec, ExtractedFact, KernelStore,
+    MAX_CURATOR_HOLD_REFERENCES, ProjectScope, ProviderEgress, ReviewBinding, ReviewOwner,
+    ReviewPayload, ReviewStagingSpec, ReviewSubject, ScopeSpec, ScopeTermSpec, Sensitivity,
+    SourceDependency, SourceDescriptorPolicy, SourceDescriptorRequest, SourceSpan,
+    StagingTerminalState,
 };
 use kernel::{EligibilityVerdict, SurfaceVisibility};
 use sha2::{Digest, Sha256};
@@ -59,6 +61,17 @@ struct Fixture {
     directory: tempfile::TempDir,
     store: KernelStore,
     now: i64,
+}
+
+/// One descriptor publication over `buffer`, or `span` of it, at revision 1.
+struct Publish<'a> {
+    key: &'a str,
+    class: &'a str,
+    representation: &'a str,
+    identity: &'a [(&'a str, &'a str)],
+    evidence: &'a (String, String),
+    buffer: &'a str,
+    span: Option<Span>,
 }
 
 impl Fixture {
@@ -279,34 +292,26 @@ impl Fixture {
             .unwrap();
     }
 
-    /// Publishes one descriptor over `buffer` and returns its object id and the descriptor's identity tuple bytes.
-    fn descriptor(
-        &self,
-        key: &str,
-        class: &str,
-        representation: &str,
-        identity: &[(&str, &str)],
-        evidence: &(String, String),
-        buffer: &str,
-    ) -> (String, Vec<u8>) {
+    /// Publishes one descriptor and returns its object id and the descriptor's identity tuple bytes.
+    fn descriptor(&self, publish: Publish<'_>) -> (String, Vec<u8>) {
         let mut published = None;
         self.store
-            .commit(intent(&format!("descriptor-{key}")), |envelope| {
+            .commit(intent(&format!("descriptor-{}", publish.key)), |envelope| {
                 let outcome = envelope
                     .publish_source_descriptor(&SourceDescriptorRequest {
                         occurrence: Occurrence {
-                            class,
-                            identity,
+                            class: publish.class,
+                            identity: publish.identity,
                             revision: "1",
-                            representation,
-                            span: None,
+                            representation: publish.representation,
+                            span: publish.span,
                         },
                         source_policy: SourceDescriptorPolicy::Native,
                         domain_id: DOMAIN,
                         scope_id: Some(SCOPE),
-                        evidence_id: &evidence.0,
-                        artifact_digest: &evidence.1,
-                        buffer,
+                        evidence_id: &publish.evidence.0,
+                        artifact_digest: &publish.evidence.1,
+                        buffer: publish.buffer,
                         sensitivity: Sensitivity::Normal,
                         observed_at: 1,
                     })
@@ -600,7 +605,7 @@ fn render_check_refuses_secrets_and_placeholders_without_redacting() {
     let placeholder = format!("x {} y", kernel::OPERATOR_REDACTION_PLACEHOLDER);
     let (placeholder_id, placeholder_digest) =
         fixture.ingest("placeholder", placeholder.as_bytes(), true);
-    let mut broker = fixture.broker(PROJECT, &[secret_id.clone(), placeholder_id.clone()]);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&placeholder_id));
     let stored_len = |evidence_id: &str, digest: &str| {
         fixture
             .store
@@ -616,7 +621,7 @@ fn render_check_refuses_secrets_and_placeholders_without_redacting() {
     // A detected secret makes the artifact Secret at ingest, so the Kernel's egress verdict refuses it for every destination before any render; the operator placeholder passes classification and is refused by the render check itself.
     for (evidence_id, digest, len, code) in [
         (
-            secret_id,
+            secret_id.clone(),
             secret_digest,
             secret_len,
             RefusalCode::PolicyBlocked,
@@ -648,6 +653,19 @@ fn render_check_refuses_secrets_and_placeholders_without_redacting() {
         placeholder_len,
         "bytes are charged before they are loaded, so a render-check refusal keeps its charge while a policy refusal never reaches the charge"
     );
+    assert!(
+        fixture
+            .store
+            .validate_held_evidence(
+                &broker_hold_id(&broker),
+                kernel::CuratorHoldKind::Execution,
+                &fixture.hold_binding(PROJECT),
+                std::slice::from_ref(&secret_id),
+                fixture.now,
+            )
+            .is_err(),
+        "a policy-blocked artifact is refused before the hold grows over it"
+    );
     // A range that stops inside the placeholder cannot slip past the check: the whole buffer is checked when it is first loaded.
     let (split_id, split_digest) = fixture.ingest("split", placeholder.as_bytes(), true);
     let mut split_broker = fixture.broker(PROJECT, std::slice::from_ref(&split_id));
@@ -672,7 +690,32 @@ fn render_check_refuses_secrets_and_placeholders_without_redacting() {
         "the buffer is retained but nothing renders from it"
     );
     assert!(split_broker.ledger.disclosed().next().is_none());
+    // A refused artifact stays refused: the repeat is not charged and the whole buffer is not rescanned.
+    assert_eq!(
+        split_broker
+            .read(&fixture.store, split.as_str(), Some(0..4), fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::RenderCheck
+    );
+    assert_eq!(split_broker.accounting.model_visible_bytes(), 4);
     assert!(broker.ledger.disclosed().next().is_none());
+    // An artifact above the scanner's single-pass input limit is checked in windows, as the Kernel checked it at ingest, so a clean large artifact renders.
+    let large_len = context_core::redaction::MAX_REDACTABLE_BYTES + 4096;
+    let (large_id, large_digest) = fixture.ingest("large", &vec![b'x'; large_len], true);
+    let mut large_broker = fixture.broker(PROJECT, std::slice::from_ref(&large_id));
+    let large = large_broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: large_id,
+            artifact_digest: large_digest,
+            byte_length: large_len as u64,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    let rendered = large_broker
+        .read(&fixture.store, large.as_str(), Some(0..16), fixture.now)
+        .unwrap();
+    assert_eq!(rendered.buffer.bytes, [b'x'; 16]);
     assert!(
         broker
             .render_host_text(&format!("question {AWS_KEY}"))
@@ -685,12 +728,13 @@ fn render_check_refuses_secrets_and_placeholders_without_redacting() {
     assert_eq!(host.tag.charged_bytes, 0);
     assert_eq!(
         QuestionTemplate::parse("extracted_facts"),
-        Some(QuestionTemplate::ExtractedFacts)
+        Ok(QuestionTemplate::ExtractedFacts)
     );
+    let unsupported = QuestionTemplate::parse("Is the deploy key rotated? extracted_facts")
+        .expect_err("source-derived question text is not a supported input");
     assert_eq!(
-        QuestionTemplate::parse("Is the deploy key rotated? extracted_facts"),
-        None,
-        "source-derived question text is not a supported input"
+        (unsupported.alias, unsupported.code),
+        (None, RefusalCode::UnsupportedQuestion)
     );
 }
 
@@ -702,38 +746,42 @@ fn canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_b
     let claim_evidence = fixture.ingest("claim", claim_text.as_bytes(), false);
     let promoted_text = "the claim as a promoted memory";
     let promoted_evidence = fixture.ingest("promoted", promoted_text.as_bytes(), false);
-    let (claim_object, _) = fixture.descriptor(
-        "claim",
-        "canonical_claims",
-        "decision_summary",
-        &[("object_id", "decision-a")],
-        &claim_evidence,
-        claim_text,
-    );
-    let (promoted_object, _) = fixture.descriptor(
-        "promoted",
-        "promoted_memory",
-        "summary",
-        &[("decision_object_id", "decision-a")],
-        &promoted_evidence,
-        promoted_text,
-    );
+    let (claim_object, _) = fixture.descriptor(Publish {
+        key: "claim",
+        class: "canonical_claims",
+        representation: "decision_summary",
+        identity: &[("object_id", "decision-a")],
+        evidence: &claim_evidence,
+        buffer: claim_text,
+        span: None,
+    });
+    let (promoted_object, _) = fixture.descriptor(Publish {
+        key: "promoted",
+        class: "promoted_memory",
+        representation: "summary",
+        identity: &[("decision_object_id", "decision-a")],
+        evidence: &promoted_evidence,
+        buffer: promoted_text,
+        span: None,
+    });
     let native_text = "a native message";
     let native_evidence = fixture.ingest("native", native_text.as_bytes(), false);
-    let (native_object, native_tuple) = fixture.descriptor(
-        "native",
-        "messages",
-        "text",
-        &[
-            ("project_id", "proj-a"),
-            ("harness", "opencode"),
-            ("session_id", "sess-01"),
-            ("message_id", "msg-001"),
-            ("block_index", "0"),
-        ],
-        &native_evidence,
-        native_text,
-    );
+    let native_identity = [
+        ("project_id", "proj-a"),
+        ("harness", "opencode"),
+        ("session_id", "sess-01"),
+        ("message_id", "msg-001"),
+        ("block_index", "0"),
+    ];
+    let (native_object, native_tuple) = fixture.descriptor(Publish {
+        key: "native",
+        class: "messages",
+        representation: "text",
+        identity: &native_identity,
+        evidence: &native_evidence,
+        buffer: native_text,
+        span: None,
+    });
     let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&claim_evidence.0));
     let canonical =
         |object: &str, evidence: &(String, String), class| ReferenceExpectation::CanonicalSource {
@@ -799,11 +847,47 @@ fn canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_b
         "an origin key is identity, not a hash"
     );
     assert_eq!(broker.shared_origin(native_alias.as_str()).unwrap(), None);
+    // Spans of one message share one origin despite distinct descriptors and occurrence tuples.
+    let (span_object, span_tuple) = fixture.descriptor(Publish {
+        key: "native-span",
+        class: "messages",
+        representation: "text",
+        identity: &native_identity,
+        evidence: &native_evidence,
+        buffer: native_text,
+        span: Some(Span { start: 0, end: 8 }),
+    });
+    assert_ne!(
+        span_tuple, native_tuple,
+        "a span changes the occurrence tuple"
+    );
+    let span_alias = broker.aliases.issue(ReferenceExpectation::NativeSource {
+        object_id: span_object,
+        class: OccurrenceClass::Messages,
+        source_revision: 1,
+        artifact_digest: native_evidence.1.clone(),
+        evidence_id: native_evidence.0.clone(),
+        occurrence_tuple: span_tuple,
+    });
+    let span_read = broker
+        .read(&fixture.store, span_alias.as_str(), Some(0..8), fixture.now)
+        .unwrap();
+    assert_eq!(span_read.buffer.bytes, b"a native");
+    assert_eq!(
+        span_read.origin_key, native.origin_key,
+        "two spans of one message are one origin"
+    );
+    assert_eq!(
+        broker.shared_origin(span_alias.as_str()).unwrap(),
+        Some(&native_alias),
+        "the shared-origin lookup must use the key the disclosure recorded"
+    );
+    assert_eq!(broker.shared_origin(native_alias.as_str()).unwrap(), None);
     // A fabricated identity tuple is refused before bytes are read.
     let mut forged = native_tuple.clone();
     forged.push(0);
     let forged_alias = broker.aliases.issue(ReferenceExpectation::NativeSource {
-        object_id: native_object,
+        object_id: native_object.clone(),
         class: OccurrenceClass::Messages,
         source_revision: 1,
         artifact_digest: native_evidence.1.clone(),
@@ -872,7 +956,7 @@ fn canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_b
         RefusalCode::OriginRevoked
     );
     let stale = broker.aliases.issue(ReferenceExpectation::NativeSource {
-        object_id: native_alias.as_str().to_string(),
+        object_id: native_object,
         class: OccurrenceClass::Messages,
         source_revision: 7,
         artifact_digest: native_evidence.1,
@@ -898,8 +982,8 @@ fn accounting_bounds_operations_bytes_and_uncertain_disclosure() {
     let alias = broker
         .aliases
         .issue(ReferenceExpectation::TemporaryCapture {
-            evidence_id: capture_id,
-            artifact_digest: capture_digest,
+            evidence_id: capture_id.clone(),
+            artifact_digest: capture_digest.clone(),
             byte_length: 4096,
             retain_until: fixture.now + HOUR_MS,
         });
@@ -914,6 +998,10 @@ fn accounting_bounds_operations_bytes_and_uncertain_disclosure() {
             .unwrap_err()
             .code,
         RefusalCode::BatchLimit
+    );
+    assert!(
+        broker.ledger.conclusions_usable(),
+        "a batch bound paces the run; it does not truncate the evidence set"
     );
     broker.accounting.end_batch();
     broker
@@ -930,20 +1018,61 @@ fn accounting_bounds_operations_bytes_and_uncertain_disclosure() {
         RefusalCode::InspectionLimit,
         "a lowered ceiling proves the 32-inspection assertion"
     );
-    // Rendered bytes are charged on every render; the bound refuses whole rather than truncating.
-    let (big_id, big_digest) = fixture.ingest("big", &[b'y'; 4096], true);
-    let mut broker = fixture
-        .broker(PROJECT, std::slice::from_ref(&big_id))
+    assert!(
+        !broker.ledger.conclusions_usable(),
+        "the run-level inspection bound truncates the evidence set"
+    );
+    // The test knob only lowers the ceiling: asking for more than the production bound still refuses at the bound.
+    let mut raised = fixture
+        .broker(PROJECT, std::slice::from_ref(&capture_id))
         .with_inspection_limit(1_000);
+    let raised_alias = raised
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: capture_id.clone(),
+            artifact_digest: capture_digest.clone(),
+            byte_length: 4096,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    for inspection in 0..MAX_ISSUED_INSPECTIONS {
+        if inspection % MAX_OPERATIONS_PER_BATCH == 0 {
+            raised.accounting.end_batch();
+        }
+        raised
+            .read(
+                &fixture.store,
+                raised_alias.as_str(),
+                Some(0..1),
+                fixture.now,
+            )
+            .unwrap();
+    }
+    raised.accounting.end_batch();
+    assert_eq!(
+        raised
+            .read(
+                &fixture.store,
+                raised_alias.as_str(),
+                Some(0..1),
+                fixture.now
+            )
+            .unwrap_err()
+            .code,
+        RefusalCode::InspectionLimit,
+        "the ceiling cannot be raised above MAX_ISSUED_INSPECTIONS"
+    );
+    // Rendered bytes are charged on every render; the bound refuses whole rather than truncating.
+    let (big_id, big_digest) = fixture.ingest("big", &[b'y'; 32 * 1024], true);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&big_id));
     let big = broker
         .aliases
         .issue(ReferenceExpectation::TemporaryCapture {
             evidence_id: big_id.clone(),
             artifact_digest: big_digest.clone(),
-            byte_length: 4096,
+            byte_length: 32 * 1024,
             retain_until: fixture.now + HOUR_MS,
         });
-    let renders = MAX_MODEL_VISIBLE_BYTES / 4096;
+    let renders = MAX_MODEL_VISIBLE_BYTES / (32 * 1024);
     for _ in 0..renders {
         broker.accounting.end_batch();
         broker
@@ -989,7 +1118,7 @@ fn accounting_bounds_operations_bytes_and_uncertain_disclosure() {
         .issue(ReferenceExpectation::TemporaryCapture {
             evidence_id: big_id,
             artifact_digest: big_digest,
-            byte_length: 4096,
+            byte_length: 32 * 1024,
             retain_until: fixture.now + HOUR_MS,
         });
     broker
@@ -1012,4 +1141,117 @@ fn accounting_bounds_operations_bytes_and_uncertain_disclosure() {
     let mut uncertain = broker;
     uncertain.ledger.record_uncertain_disclosure();
     assert!(!uncertain.ledger.conclusions_usable());
+}
+
+#[test]
+fn a_hold_capacity_refusal_after_a_disclosure_marks_the_evidence_set_partial() {
+    let fixture = Fixture::open();
+    let held: Vec<(String, String)> = (0..MAX_CURATOR_HOLD_REFERENCES)
+        .map(|index| {
+            fixture.ingest(
+                &format!("held-{index}"),
+                format!("held {index}").as_bytes(),
+                true,
+            )
+        })
+        .collect();
+    let (extra_id, extra_digest) = fixture.ingest("extra", b"one more", true);
+    let held_ids: Vec<String> = held.iter().map(|(id, _)| id.clone()).collect();
+    let mut broker = fixture.broker(PROJECT, &held_ids);
+    let first = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: held[0].0.clone(),
+            artifact_digest: held[0].1.clone(),
+            byte_length: 6,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    broker
+        .read(&fixture.store, first.as_str(), None, fixture.now)
+        .unwrap();
+    assert!(broker.ledger.conclusions_usable());
+    // The hold is full: one more reference is a capacity refusal, and the model asked for evidence it will not see.
+    let extra = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: extra_id,
+            artifact_digest: extra_digest,
+            byte_length: 8,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    assert_eq!(
+        broker
+            .read(&fixture.store, extra.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::HoldLimit
+    );
+    assert_eq!(
+        broker.buffers.loaded(),
+        1,
+        "the refused artifact never loaded"
+    );
+    assert!(
+        !broker.ledger.conclusions_usable(),
+        "a hold capacity refusal truncates the evidence set like every other capacity refusal"
+    );
+}
+
+#[test]
+fn a_classification_tightened_between_the_verdict_and_the_load_is_not_disclosed() {
+    let fixture = Fixture::open();
+    let payload = b"bytes reclassified while loading";
+    let (evidence_id, digest) = fixture.ingest("racy", payload, true);
+    let now = fixture.now;
+    // Ingesting the same bytes under a Secret assertion tightens every row of the digest, the way a concurrent classification change would.
+    let tighten = Box::new(move |store: &KernelStore| {
+        store
+            .ingest_artifact(ArtifactIngestRequest {
+                intent: intent("tighten"),
+                payload: payload.to_vec(),
+                evidence_id: "evidence-tighten".to_string(),
+                object_id: "evidence-object-tighten".to_string(),
+                object_kind: "evidence".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "local_file".to_string(),
+                source_id: "src/tighten".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+                retain_until: Some(now + HOUR_MS),
+                asserted_sensitivity: Sensitivity::Secret,
+                provider_egress: ProviderEgress::RemoteAllowed,
+                provenance: None,
+            })
+            .unwrap();
+    });
+    let mut broker = fixture
+        .broker(PROJECT, std::slice::from_ref(&evidence_id))
+        .with_after_load_hook_for_test(tighten);
+    let alias = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id,
+            artifact_digest: digest,
+            byte_length: payload.len() as u64,
+            retain_until: now + HOUR_MS,
+        });
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, now)
+            .unwrap_err()
+            .code,
+        RefusalCode::PolicyBlocked,
+        "the verdict is re-read on the bytes that were loaded"
+    );
+    assert!(broker.ledger.disclosed().next().is_none());
+    assert!(broker.ledger.conclusions_usable());
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, now)
+            .unwrap_err()
+            .code,
+        RefusalCode::PolicyBlocked,
+        "the tightened class refuses before the hold on every later read"
+    );
 }

@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use context_core::curator_policy_union::{PolicyUnion, PolicyUnionMember};
-use context_core::redaction::{contains_redaction_token, reject_secret_text};
+use context_core::redaction::{
+    contains_redaction_token, detect_windowed_durable_bytes, reject_secret_text,
+};
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDestination, ArtifactEligibility, ArtifactHandle, CURATOR_CAPTURE_RETENTION_CLASS,
@@ -50,9 +52,11 @@ impl QuestionTemplate {
         format!("{:x}", Sha256::digest(self.text().as_bytes()))
     }
 
-    /// Only the fixed identifiers resolve; any other input, including one carrying question text, is refused.
-    pub fn parse(id: &str) -> Option<Self> {
-        (id == Self::ExtractedFacts.id()).then_some(Self::ExtractedFacts)
+    /// Only the fixed identifiers resolve; any other input, including one carrying question text, is refused with [`RefusalCode::UnsupportedQuestion`].
+    pub fn parse(id: &str) -> Result<Self, Refusal> {
+        (id == Self::ExtractedFacts.id())
+            .then_some(Self::ExtractedFacts)
+            .ok_or_else(|| refuse(None, RefusalCode::UnsupportedQuestion))
     }
 }
 
@@ -129,21 +133,6 @@ impl ReferenceExpectation {
             Self::NativeSource { .. } => OriginClass::NativeSource,
             Self::CanonicalSource { .. } => OriginClass::CanonicalSource,
             Self::TemporaryCapture { .. } => OriginClass::TemporaryCapture,
-        }
-    }
-
-    /// The identity two forms of one origin share: the originating decision for canonical and promoted forms, the object or row otherwise. Hashes never stand in for this.
-    fn origin_key(&self) -> String {
-        match self {
-            Self::StagedSubject { reference, .. } => format!("staged:{}", reference.candidate_id),
-            Self::NativeSource {
-                occurrence_tuple, ..
-            } => format!("native:{}", hex(occurrence_tuple)),
-            Self::CanonicalSource {
-                originating_decision_id,
-                ..
-            } => format!("decision:{originating_decision_id}"),
-            Self::TemporaryCapture { evidence_id, .. } => format!("capture:{evidence_id}"),
         }
     }
 
@@ -231,6 +220,16 @@ pub enum RefusalCode {
     Store,
 }
 
+impl RefusalCode {
+    /// Whether the refusal left evidence the run asked for undisclosed for want of capacity, so a conclusion drawn afterwards rests on a truncated set. A batch bound only paces the run and is not counted.
+    pub const fn truncates_evidence(self) -> bool {
+        matches!(
+            self,
+            Self::InspectionLimit | Self::ByteLimit | Self::BufferLimit | Self::HoldLimit
+        )
+    }
+}
+
 /// A refused read: the requesting alias when one exists, and one bounded code. Repeated probing yields nothing more.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{code} ({})", alias.as_ref().map_or("-", Alias::as_str))]
@@ -273,16 +272,28 @@ pub struct RenderedBuffer {
     pub tag: ProvenanceTag,
 }
 
-/// Detection-only render check over materialized bytes: a secret or a redaction placeholder refuses disclosure (Q7). Host-authored text passes through the same check so a template can never carry protected text.
+/// Detection-only render check over bytes about to be rendered: a secret or a redaction placeholder refuses disclosure (Q7). Host-authored text passes through the same check so a template can never carry protected text. Rendered ranges are bounded by [`MAX_MODEL_VISIBLE_BYTES`], well inside the scanner's single-pass input limit.
 pub fn check_render(bytes: &[u8], alias: Option<&Alias>) -> Result<(), Refusal> {
     let text = std::str::from_utf8(bytes).map_err(|_| refuse(alias, RefusalCode::Undecodable))?;
-    if contains_redaction_token(text)
-        || text.contains(OPERATOR_REDACTION_PLACEHOLDER)
-        || reject_secret_text(text).is_err()
-    {
+    if contains_redaction_marker(text) || reject_secret_text(text).is_err() {
         return Err(refuse(alias, RefusalCode::RenderCheck));
     }
     Ok(())
+}
+
+/// The whole-artifact form of [`check_render`]: an artifact may exceed the scanner's single-pass input limit, so secrets are detected in windows, the same way ingest checked the bytes. A scan that cannot prove the buffer secret-free refuses.
+fn check_whole_artifact(bytes: &[u8], alias: &Alias) -> Result<(), Refusal> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| refuse(Some(alias), RefusalCode::Undecodable))?;
+    if contains_redaction_marker(text) || detect_windowed_durable_bytes(bytes) != Ok(false) {
+        return Err(refuse(Some(alias), RefusalCode::RenderCheck));
+    }
+    Ok(())
+}
+
+/// A scanner token or the operator placeholder: text the redactor already rewrote, which must never render as if it were source.
+fn contains_redaction_marker(text: &str) -> bool {
+    contains_redaction_token(text) || text.contains(OPERATOR_REDACTION_PLACEHOLDER)
 }
 
 /// Run-local alias table for one `(job, receipt generation)`; a takeover starts a new one.
@@ -406,11 +417,16 @@ pub struct InvestigationAccounting {
 
 impl InvestigationAccounting {
     pub fn new() -> Self {
-        Self::with_inspection_limit(MAX_ISSUED_INSPECTIONS)
+        Self::bounded(MAX_ISSUED_INSPECTIONS)
     }
 
-    /// A lower inspection ceiling for tests, per Q23; production uses [`MAX_ISSUED_INSPECTIONS`].
+    /// A lower inspection ceiling for tests, per Q23; the production bound is the ceiling of the ceiling.
+    #[cfg(feature = "test-support")]
     pub fn with_inspection_limit(max_inspections: usize) -> Self {
+        Self::bounded(max_inspections.min(MAX_ISSUED_INSPECTIONS))
+    }
+
+    fn bounded(max_inspections: usize) -> Self {
         Self {
             issued_inspections: 0,
             batch_operations: 0,
@@ -488,11 +504,24 @@ pub struct EvidenceBroker {
     pub buffers: RunBufferMap,
     pub ledger: DisclosureLedger,
     binding: RunBinding,
-    /// Origin keys already disclosed, so a second form of one decision is reported as the same origin rather than fresh support.
+    /// First alias disclosed per origin key, so a second form of one decision is reported as the same origin rather than fresh support.
     origins: BTreeMap<String, Alias>,
+    /// The origin key each disclosure recorded; `shared_origin` reads this rather than recomputing a key from the expectation.
+    origin_keys: BTreeMap<Alias, String>,
     /// Artifacts whose whole buffer passed the render check, so a range split cannot hide a marker or secret across two reads.
     checked_artifacts: BTreeSet<String>,
+    /// Artifacts whose whole buffer failed the render check; later reads refuse without a charge or another scan.
+    refused_artifacts: BTreeSet<String>,
+    /// Evidence already added to the execution hold by this run; a re-render skips the writer transaction.
+    extended: BTreeSet<String>,
+    /// Runs between the disk read and the post-load egress verdict, so a test can commit a classification change inside that window.
+    #[cfg(feature = "test-support")]
+    after_load_for_test: Option<AfterLoadHook>,
 }
+
+/// A test hook given the store the broker is reading from.
+#[cfg(feature = "test-support")]
+pub type AfterLoadHook = Box<dyn FnMut(&KernelStore)>;
 
 impl EvidenceBroker {
     pub fn new(binding: RunBinding, question: QuestionTemplate) -> Self {
@@ -503,19 +532,33 @@ impl EvidenceBroker {
             ledger: DisclosureLedger::new(question),
             binding,
             origins: BTreeMap::new(),
+            origin_keys: BTreeMap::new(),
             checked_artifacts: BTreeSet::new(),
+            refused_artifacts: BTreeSet::new(),
+            extended: BTreeSet::new(),
+            #[cfg(feature = "test-support")]
+            after_load_for_test: None,
         }
     }
 
-    /// Lowers the inspection ceiling for tests (Q23); production keeps [`MAX_ISSUED_INSPECTIONS`].
+    /// Lowers the inspection ceiling for tests (Q23); a value above [`MAX_ISSUED_INSPECTIONS`] is clamped to it.
+    #[cfg(feature = "test-support")]
     pub fn with_inspection_limit(mut self, max_inspections: usize) -> Self {
         self.accounting = InvestigationAccounting::with_inspection_limit(max_inspections);
         self
     }
 
-    /// Lowers the run buffer ceiling for tests; production keeps the 16 MiB bound.
+    /// Lowers the run buffer ceiling for tests; [`RunBufferMap::new`] clamps to the 16 MiB bound.
+    #[cfg(feature = "test-support")]
     pub fn with_buffer_limit(mut self, capacity: u64) -> Self {
         self.buffers = RunBufferMap::new(capacity);
+        self
+    }
+
+    /// Installs a hook that runs after an artifact's bytes are read from disk and before the post-load egress verdict.
+    #[cfg(feature = "test-support")]
+    pub fn with_after_load_hook_for_test(mut self, hook: AfterLoadHook) -> Self {
+        self.after_load_for_test = Some(hook);
         self
     }
 
@@ -539,17 +582,34 @@ impl EvidenceBroker {
         })
     }
 
-    /// The alias whose origin `alias` shares, when an earlier disclosure already resolved the same decision or row.
+    /// The alias whose origin `alias` shares, when an earlier disclosure already resolved the same decision, source, or row. An alias that has not been disclosed yet has no recorded origin and shares nothing.
     pub fn shared_origin(&self, alias: &str) -> Result<Option<&Alias>, Refusal> {
-        let (alias, expectation) = self.aliases.resolve(alias)?;
+        let (alias, _) = self.aliases.resolve(alias)?;
         Ok(self
-            .origins
-            .get(&expectation.origin_key())
+            .origin_keys
+            .get(alias)
+            .and_then(|key| self.origins.get(key))
             .filter(|first| *first != alias))
     }
 
-    /// Reads one reference for disclosure: resolves the alias, grows the execution hold over the artifact, revalidates the Kernel expectation at `now`, loads the bytes once, renders the requested range, runs the render check, charges the bytes, and records the disclosure. Any refusal happens before bytes are retained or disclosed.
+    /// Reads one reference for disclosure: resolves the alias, checks the destination verdict, grows the execution hold over the artifact, revalidates the Kernel expectation at `now`, loads the bytes once, renders the requested range, runs the render check, charges the bytes, and records the disclosure. Any refusal happens before bytes are retained or disclosed, and a refusal that truncates the evidence set marks the ledger partial.
     pub fn read(
+        &mut self,
+        store: &KernelStore,
+        alias: &str,
+        range: Option<Range<u64>>,
+        now_ms: i64,
+    ) -> Result<EvidenceRead, Refusal> {
+        let result = self.read_inner(store, alias, range, now_ms);
+        if let Err(refusal) = &result
+            && refusal.code.truncates_evidence()
+        {
+            self.ledger.record_partial_disclosure();
+        }
+        result
+    }
+
+    fn read_inner(
         &mut self,
         store: &KernelStore,
         alias: &str,
@@ -560,11 +620,7 @@ impl EvidenceBroker {
             .aliases
             .resolve(alias)
             .map(|(alias, expectation)| (alias.clone(), expectation.clone()))?;
-        let admitted = self.accounting.admit_operation(Some(&alias));
-        if admitted.is_err() {
-            self.ledger.record_partial_disclosure();
-        }
-        admitted?;
+        self.accounting.admit_operation(Some(&alias))?;
         self.ledger.record_inspection(&alias);
         if range.as_ref().is_some_and(|range| range.end <= range.start) {
             return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
@@ -597,7 +653,7 @@ impl EvidenceBroker {
                     None,
                     row.sensitivity,
                     expectation.policy_member(None),
-                    expectation.origin_key(),
+                    format!("staged:{}", reference.candidate_id),
                 )
             }
             ReferenceExpectation::TemporaryCapture {
@@ -612,7 +668,8 @@ impl EvidenceBroker {
                 if range.as_ref().is_some_and(|range| range.end > *byte_length) {
                     return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
                 }
-                let held = self.hold_evidence(store, &alias, evidence_id, now_ms)?;
+                let held =
+                    self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
                 if held.artifact_digest != *artifact_digest
                     || held.byte_length != *byte_length
                     || held.retention_class != CURATOR_CAPTURE_RETENTION_CLASS
@@ -626,7 +683,7 @@ impl EvidenceBroker {
                     None,
                     held.sensitivity,
                     expectation.policy_member(None),
-                    expectation.origin_key(),
+                    format!("capture:{evidence_id}"),
                 )
             }
             ReferenceExpectation::NativeSource {
@@ -653,25 +710,15 @@ impl EvidenceBroker {
                 {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
-                let held = self.hold_evidence(store, &alias, evidence_id, now_ms)?;
+                let held =
+                    self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
                 let bytes = self.load_range(store, &alias, &held, range.clone())?;
-                // Two excerpts or revisions of one native source are one origin: the key is the identity tuple, without revision, representation, or span.
-                let origin_key = format!(
-                    "native:{}:{}",
-                    class.code(),
-                    detail
-                        .identity
-                        .iter()
-                        .map(|(field, value)| format!("{}={}", field.len(), value))
-                        .collect::<Vec<_>>()
-                        .join("\u{1f}")
-                );
                 (
                     bytes,
                     Some(judged),
                     held.sensitivity,
                     expectation.policy_member(None),
-                    origin_key,
+                    native_origin_key(*class, &detail.identity),
                 )
             }
             ReferenceExpectation::CanonicalSource {
@@ -704,14 +751,15 @@ impl EvidenceBroker {
                 {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
-                let held = self.hold_evidence(store, &alias, evidence_id, now_ms)?;
+                let held =
+                    self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
                 let bytes = self.load_range(store, &alias, &held, range.clone())?;
                 (
                     bytes,
                     Some(judged),
                     held.sensitivity,
                     expectation.policy_member(Some(*decision_source_revision)),
-                    expectation.origin_key(),
+                    format!("decision:{originating_decision_id}"),
                 )
             }
         };
@@ -721,6 +769,7 @@ impl EvidenceBroker {
         self.origins
             .entry(origin_key.clone())
             .or_insert_with(|| alias.clone());
+        self.origin_keys.insert(alias.clone(), origin_key.clone());
         Ok(EvidenceRead {
             buffer: RenderedBuffer {
                 bytes,
@@ -739,21 +788,33 @@ impl EvidenceBroker {
         })
     }
 
-    /// Grows the execution hold over the artifact before any byte is read, then returns the held facts.
+    /// Checks the destination verdict on the expected digest, grows the execution hold over the artifact, and returns the held facts. The verdict comes first so a policy-blocked artifact is never pinned or charged against the hold's backing; an artifact already extended in this run skips the writer transaction and is still validated against the live hold.
     fn hold_evidence(
-        &self,
+        &mut self,
         store: &KernelStore,
         alias: &Alias,
         evidence_id: &str,
+        artifact_digest: &str,
         now_ms: i64,
     ) -> Result<HeldEvidence, Refusal> {
-        store
-            .extend_execution_hold(
-                &self.binding.hold_id,
-                &self.binding.hold,
-                std::slice::from_ref(&evidence_id.to_string()),
-            )
-            .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
+        self.egress_allowed(
+            store,
+            alias,
+            &ArtifactHandle {
+                digest: artifact_digest.to_string(),
+                evidence_id: evidence_id.to_string(),
+            },
+        )?;
+        if !self.extended.contains(evidence_id) {
+            store
+                .extend_execution_hold(
+                    &self.binding.hold_id,
+                    &self.binding.hold,
+                    std::slice::from_ref(&evidence_id.to_string()),
+                )
+                .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
+            self.extended.insert(evidence_id.to_string());
+        }
         let mut held = store
             .validate_held_evidence(
                 &self.binding.hold_id,
@@ -763,48 +824,44 @@ impl EvidenceBroker {
                 now_ms,
             )
             .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
-        let held = held
-            .pop()
-            .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
-        // The Kernel's egress verdict folds every live reference to the digest for this destination; default-Sensitive policy means unproven evidence never reaches a remote model.
+        held.pop()
+            .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))
+    }
+
+    /// The Kernel's egress verdict folds every live reference to the digest for this destination; default-Sensitive policy means unproven evidence never reaches a remote model.
+    fn egress_allowed(
+        &self,
+        store: &KernelStore,
+        alias: &Alias,
+        handle: &ArtifactHandle,
+    ) -> Result<(), Refusal> {
         let facts = store
-            .artifact_egress_facts(
-                &ArtifactHandle {
-                    digest: held.artifact_digest.clone(),
-                    evidence_id: held.evidence_id.clone(),
-                },
-                self.binding.destination,
-            )
+            .artifact_egress_facts(handle, self.binding.destination)
             .map_err(|_| refuse(Some(alias), RefusalCode::ExpectationChanged))?;
         if facts.eligibility != ArtifactEligibility::Allowed {
             return Err(refuse(Some(alias), RefusalCode::PolicyBlocked));
         }
-        Ok(held)
+        Ok(())
     }
 
-    /// Staged subjects are not artifacts; the same destination rule applies to their stored class.
+    /// Staged subjects are not artifacts; the Kernel's class rule for the destination applies to their stored class.
     fn gate_destination(&self, alias: &Alias, sensitivity: Sensitivity) -> Result<(), Refusal> {
-        if sensitivity == Sensitivity::Secret
-            || (self.binding.destination == ArtifactDestination::Remote
-                && sensitivity != Sensitivity::Normal)
+        if sensitivity
+            .denies_destination(self.binding.destination)
+            .is_some()
         {
             return Err(refuse(Some(alias), RefusalCode::PolicyBlocked));
         }
         Ok(())
     }
 
-    /// Charges rendered bytes before any load; a refusal here also marks the disclosure set partial.
+    /// Charges rendered bytes before any load.
     fn charge(&mut self, alias: &Alias, bytes: usize) -> Result<(), Refusal> {
-        let charged = self
-            .accounting
-            .charge_render(Some(alias), u64::try_from(bytes).unwrap_or(u64::MAX));
-        if charged.is_err() {
-            self.ledger.record_partial_disclosure();
-        }
-        charged
+        self.accounting
+            .charge_render(Some(alias), u64::try_from(bytes).unwrap_or(u64::MAX))
     }
 
-    /// Charges the range, loads the artifact once, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret.
+    /// Charges the range, loads the artifact once, re-reads the egress verdict on the bytes that were just loaded, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret; a buffer that failed it stays refused without another charge or scan.
     fn load_range(
         &mut self,
         store: &KernelStore,
@@ -816,6 +873,9 @@ impl EvidenceBroker {
         if range.end > held.byte_length {
             return Err(refuse(Some(alias), RefusalCode::InvalidRange));
         }
+        if self.refused_artifacts.contains(&held.artifact_digest) {
+            return Err(refuse(Some(alias), RefusalCode::RenderCheck));
+        }
         self.charge(
             alias,
             usize::try_from(range.end - range.start).unwrap_or(usize::MAX),
@@ -825,19 +885,36 @@ impl EvidenceBroker {
             .load(store, held)
             .map_err(|error| match error {
                 RunBufferRefusal::CapacityExhausted => {
-                    self.ledger.record_partial_disclosure();
                     refuse(Some(alias), RefusalCode::BufferLimit)
                 }
                 RunBufferRefusal::Unreadable | RunBufferRefusal::RangeOutOfBounds => {
                     refuse(Some(alias), RefusalCode::ExpectationChanged)
                 }
             })?;
+        if loaded {
+            #[cfg(feature = "test-support")]
+            if let Some(hook) = self.after_load_for_test.as_mut() {
+                hook(store);
+            }
+            // The verdict before the hold grew and the disk read are separate snapshots; a classification tightened between them must not reach the model through this load.
+            self.egress_allowed(
+                store,
+                alias,
+                &ArtifactHandle {
+                    digest: held.artifact_digest.clone(),
+                    evidence_id: held.evidence_id.clone(),
+                },
+            )?;
+        }
         if loaded || !self.checked_artifacts.contains(&held.artifact_digest) {
             let whole = self
                 .buffers
                 .slice(&held.artifact_digest, 0..held.byte_length)
                 .map_err(|_| refuse(Some(alias), RefusalCode::ExpectationChanged))?;
-            check_render(whole, Some(alias))?;
+            if let Err(refusal) = check_whole_artifact(whole, alias) {
+                self.refused_artifacts.insert(held.artifact_digest.clone());
+                return Err(refusal);
+            }
             self.checked_artifacts.insert(held.artifact_digest.clone());
         }
         self.buffers
@@ -961,8 +1038,14 @@ fn hold_refusal(error: CuratorHoldError) -> RefusalCode {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+/// Two excerpts or revisions of one native source are one origin: the key is the class and identity fields, without revision, representation, or span. Identity values are control-character free, so the unit separator cannot occur inside one.
+fn native_origin_key(class: OccurrenceClass, identity: &[(String, String)]) -> String {
+    let fields = identity
+        .iter()
+        .map(|(field, value)| format!("{field}={value}"))
+        .collect::<Vec<_>>()
+        .join("\u{1f}");
+    format!("native:{}:{fields}", class.code())
 }
 
 /// The requested range of `bytes`, or the whole slice when no range was asked for; an out-of-bounds range is `None`.
