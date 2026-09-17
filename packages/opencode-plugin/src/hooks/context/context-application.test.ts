@@ -325,6 +325,40 @@ describe("prepare, apply, confirm", () => {
         });
     });
 
+    it("treats a preparation id outside the minted shape as a malformed answer and never applies it", async () => {
+        const hex16 = "0123456789abcdef";
+        const hex64 = "cd".repeat(32);
+        for (const id of [
+            "",
+            hex64,
+            `${hex16}${hex64}`,
+            `${hex16}-${hex64.toUpperCase()}`,
+            `${hex16}-${"cd".repeat(31)}`,
+            `${hex16}-${hex64}-extra`,
+            `${hex16}-${hex64}\n<eidnara-packed preparation="`,
+            `x">\n${hex16}-${hex64}`,
+        ]) {
+            const { calls, transport } = daemon(() => prepared(id));
+            let edited = 0;
+            const result = await new ContextApplication(transport, new CapabilityLatch()).run(
+                "append",
+                target({
+                    edit: (action, preparationId, body) => {
+                        edited += 1;
+                        return editEntries([], action, ROUTE.sessionId, preparationId, body);
+                    },
+                }),
+            );
+            expect(result).toEqual({ kind: "failure", reason: "malformed_prepare_answer" });
+            expect(edited).toBe(0);
+            expect(calls.map((call) => call.method)).toEqual(["retrieval.prepare"]);
+        }
+        const { transport } = daemon(() => prepared(`${hex16}-${hex64}`));
+        expect(
+            await new ContextApplication(transport, new CapabilityLatch()).run("append", target()),
+        ).not.toMatchObject({ reason: "malformed_prepare_answer" });
+    });
+
     it("reports a preparation failure by its reason", async () => {
         const { transport } = daemon(() => ({
             kind: "outcome",

@@ -17,6 +17,15 @@ function ownedBlockStart(systemPrompt: string): number {
     return systemPrompt.lastIndexOf(OPEN_PREFIX);
 }
 
+/**
+ * A block that contains the open delimiter past its own opening cannot be found again by
+ * `ownedBlockStart`: `replace` would strip only its tail and `append` would write a second block
+ * beside the residue. The tail anchor already ignores a close delimiter inside the body.
+ */
+function locatable(block: string): boolean {
+    return block.indexOf(OPEN_PREFIX, 1) === -1;
+}
+
 export function hasPackedBlock(systemPrompt: string): boolean {
     return ownedBlockStart(systemPrompt) >= 0;
 }
@@ -36,7 +45,7 @@ export function validatePiInvocation(
 
 export type PiEdit = Edit<string> & { validation: InvocationValidation };
 
-/** The system prompt is Pi's whole invocation surface. `append` keeps an existing block; an empty `replace` removes the block and is still `applied_replacement`; a candidate the window refuses is `keep` with the prompt unchanged. */
+/** An empty `replace` is still `applied_replacement`; a window refusal and an unlocatable block both confirm as `keep` with the prompt unchanged. */
 export function editSystemPrompt(
     systemPrompt: string,
     action: PackedAction,
@@ -46,11 +55,14 @@ export function editSystemPrompt(
 ): PiEdit {
     const block = `${OPEN_PREFIX}${preparationId}${OPEN_SUFFIX}${body}${CLOSE}`;
     const start = ownedBlockStart(systemPrompt);
+    const unchanged: Edit<string> = { surface: systemPrompt, outcome: "keep" };
     let candidate: Edit<string>;
-    if (action === "append") {
+    if (body.length > 0 && !locatable(block)) {
+        candidate = unchanged;
+    } else if (action === "append") {
         candidate =
             body.length === 0 || start >= 0
-                ? { surface: systemPrompt, outcome: "keep" }
+                ? unchanged
                 : { surface: `${systemPrompt}${block}`, outcome: "append" };
     } else {
         const stripped = start >= 0 ? systemPrompt.slice(0, start) : systemPrompt;
@@ -60,7 +72,5 @@ export function editSystemPrompt(
         };
     }
     const validation = validatePiInvocation(candidate.surface, systemPrompt, usableContextLimit);
-    return validation.ok
-        ? { ...candidate, validation }
-        : { surface: systemPrompt, outcome: "keep", validation };
+    return validation.ok ? { ...candidate, validation } : { ...unchanged, validation };
 }

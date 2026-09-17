@@ -456,7 +456,16 @@ outcome set is `[capability_unsupported x3, preparation_failure
 append_allowance, profile_mismatch, append complete, lost unknown]` under both
 consumer-string sets with the kernel tip and projection counter unchanged; the plugin's `replace` intent on Pi falls back to `append` once,
 latches the denial, and a second run keeps the existing block rather than
-writing a second; the OpenCode allowed set is witnessed at the gate; the
+writing a second; a block whose id or body reproduces the open delimiter is
+never written and confirms as `keep` with the prompt unchanged, so the owned
+block stays the last open delimiter before the trailing close
+(`context-application-pi.test.ts` `never writes a block whose body or id
+reproduces the open delimiter, so the owned block stays locatable`); a prepared
+answer whose `preparation_id` is outside the minted
+`<incarnation>-<identity>` shape is `malformed_prepare_answer` before any
+adapter edit (`context-application.test.ts` `treats a preparation id outside
+the minted shape as a malformed answer and never applies it`); the OpenCode
+allowed set is witnessed at the gate; the
 OpenCode applied-identity witnesses come from the scripted daemon. `always`
 because every enablement claim needs its witness.
 Fault/timing angle: None.

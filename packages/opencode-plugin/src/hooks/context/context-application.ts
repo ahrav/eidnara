@@ -185,6 +185,9 @@ type PrepareAnswer =
     | { kind: "prepared"; preparationId: string; profile: AccountingBinding }
     | { kind: "failure"; reason: string };
 
+/** Adapters interpolate the id into host markup unescaped; only the `retrieval.prepare` minted alphabet is accepted. */
+const PREPARATION_ID = /^[0-9a-f]{16}-[0-9a-f]{64}$/;
+
 function parsePrepared(answer: unknown): PrepareAnswer {
     if (!isRecord(answer)) return { kind: "failure", reason: "malformed_prepare_answer" };
     if (answer.kind === "outcome") {
@@ -196,6 +199,7 @@ function parsePrepared(answer: unknown): PrepareAnswer {
     if (
         answer.kind === "prepared" &&
         typeof answer.preparation_id === "string" &&
+        PREPARATION_ID.test(answer.preparation_id) &&
         isAccountingBinding(answer.accounting_profile)
     ) {
         return {
