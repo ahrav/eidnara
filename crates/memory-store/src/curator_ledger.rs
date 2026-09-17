@@ -324,19 +324,19 @@ fn load_receipt(
     .optional()
 }
 
-/// The `note_id` match binds the claim to this job's rowid, so a claim a worker holds on another job cannot drive this job's receipt.
-fn live_claim_expiry(
+/// The live claim's `(expires_at, created_at_ms)`. The `note_id` match binds the claim to this job's row, so a claim a worker holds on another job cannot drive this job's receipt.
+fn live_claim(
     conn: &GuardedConn<'_>,
     project: &str,
     causal_identity: &str,
     claim_id: &str,
     now_ms: i64,
-) -> rusqlite::Result<Option<i64>> {
+) -> rusqlite::Result<Option<(i64, i64)>> {
     conn.query_row(
-        "SELECT expires_at FROM note_eval_claims
+        "SELECT expires_at, created_at_ms FROM note_eval_claims
           WHERE project = ?1 AND task_kind = ?2 AND claim_id = ?3
             AND terminal_kind IS NULL AND expires_at > ?4
-            AND note_id = (SELECT rowid FROM curator_jobs
+            AND note_id = (SELECT job_id FROM curator_jobs
                             WHERE project = ?1 AND causal_identity = ?5)",
         params![
             project,
@@ -345,9 +345,22 @@ fn live_claim_expiry(
             now_ms,
             causal_identity
         ],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
+}
+
+fn live_claim_expiry(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    causal_identity: &str,
+    claim_id: &str,
+    now_ms: i64,
+) -> rusqlite::Result<Option<i64>> {
+    Ok(
+        live_claim(conn, project, causal_identity, claim_id, now_ms)?
+            .map(|(expires_at, _)| expires_at),
+    )
 }
 
 fn claim_is_live(
@@ -357,7 +370,7 @@ fn claim_is_live(
     claim_id: &str,
     now_ms: i64,
 ) -> rusqlite::Result<bool> {
-    Ok(live_claim_expiry(conn, project, causal_identity, claim_id, now_ms)?.is_some())
+    Ok(live_claim(conn, project, causal_identity, claim_id, now_ms)?.is_some())
 }
 
 /// The `memories` authority row the ledger binds to: the owning context store and its generation. Rows are versioned per context store, so the pair, not the generation alone, identifies an authority.
@@ -399,7 +412,7 @@ fn job_open_deadline(
     .optional()
 }
 
-/// Writes the receipt at generation 1 for a Ready job, or reports the receipt it already has. The store's own incarnation is read inside the transaction; the caller supplies the Kernel incarnation it validated, which must be the one a staged subject was sealed under.
+/// Writes the receipt at generation 1 for a Ready job, or reports the receipt it already has. The run deadline is the claim's creation time plus [`CURATOR_RUN_DEADLINE_MS`]; a begin at or after it is refused. The store's own incarnation is read inside the transaction; the caller supplies the Kernel incarnation it validated, which must be the one a staged subject was sealed under.
 pub fn begin_curator_receipt_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -441,12 +454,15 @@ pub fn begin_curator_receipt_in_tx(
     {
         return Err(refuse(CuratorLedgerRefusal::BindingMismatch));
     }
-    if !claim_is_live(conn, project, causal_identity, claim_id, now_ms)? {
-        return Err(refuse(CuratorLedgerRefusal::ClaimInvalid));
-    }
-    let run_deadline_ms = now_ms
+    let (_, claimed_at_ms) = live_claim(conn, project, causal_identity, claim_id, now_ms)?
+        .ok_or_else(|| refuse(CuratorLedgerRefusal::ClaimInvalid))?;
+    // The budget runs from the claim, not from this call, so a worker that waits before beginning spends its own run, and one that begins with none left gets no receipt.
+    let run_deadline_ms = claimed_at_ms
         .checked_add(CURATOR_RUN_DEADLINE_MS)
         .ok_or_else(|| refuse(CuratorLedgerRefusal::InvalidRequest))?;
+    if now_ms >= run_deadline_ms {
+        return Err(refuse(CuratorLedgerRefusal::Cutoff));
+    }
     conn.execute(
         "INSERT INTO curator_receipts (
              project, causal_identity, database_incarnation_id, kernel_incarnation_id,
@@ -761,7 +777,7 @@ impl MemoryStore {
         }
     }
 
-    /// Leases one Ready job for a worker slot through the shared task-lease ledger; the claim's task id is the job row's rowid.
+    /// Leases one Ready job for a worker slot through the shared task-lease ledger; the claim's task id is the job's `job_id`.
     #[allow(clippy::too_many_arguments)]
     pub fn acquire_curator_task(
         &self,
@@ -774,6 +790,11 @@ impl MemoryStore {
         now_ms: i64,
     ) -> Result<LeaseAcquireOutcome<String>, MemoryStoreError> {
         check_project(project)?;
+        if !is_lower_hex(causal_identity, 64) {
+            return Err(MemoryStoreError::Serde(
+                "a causal identity is a 64-character lowercase hex digest".to_string(),
+            ));
+        }
         let identity = causal_identity.to_string();
         self.acquire_task_lease(
             &CURATOR_REVIEW_TASK,
@@ -786,20 +807,20 @@ impl MemoryStore {
             |tx| {
                 let row: Option<i64> = tx
                     .query_row(
-                        "SELECT rowid FROM curator_jobs
+                        "SELECT job_id FROM curator_jobs
                           WHERE project = ?1 AND causal_identity = ?2 AND state = 'ready'
                             AND queue_deadline_ms > ?3
                             AND NOT EXISTS(SELECT 1 FROM note_eval_claims c
                                             WHERE c.project = ?1 AND c.task_kind = ?4
-                                              AND c.note_id = curator_jobs.rowid
+                                              AND c.note_id = curator_jobs.job_id
                                               AND c.terminal_kind IS NULL)",
                         params![project, identity, now_ms, CURATOR_REVIEW_TASK.task_kind],
                         |row| row.get(0),
                     )
                     .optional()?;
                 Ok(match row {
-                    Some(rowid) => LeaseSelected::Claim {
-                        note_id: rowid,
+                    Some(job_id) => LeaseSelected::Claim {
+                        note_id: job_id,
                         phase: "run".to_string(),
                         task: identity.clone(),
                         source_revision: 0,
@@ -811,10 +832,10 @@ impl MemoryStore {
                     },
                 })
             },
-            |tx, rowid| {
+            |tx, job_id| {
                 tx.query_row(
-                    "SELECT causal_identity FROM curator_jobs WHERE rowid = ?1",
-                    [rowid],
+                    "SELECT causal_identity FROM curator_jobs WHERE job_id = ?1",
+                    [job_id],
                     |row| row.get(0),
                 )
                 .optional()
@@ -889,7 +910,7 @@ impl MemoryStore {
         })
     }
 
-    /// Records the cancellation request; no later attempt commits and the next handoff recheck withholds.
+    /// Records the cancellation request; no later attempt commits and the next handoff recheck withholds. Refused at or after the run deadline, when the receipt is expired whether or not the sweep has said so yet.
     pub fn cancel_curator_receipt(
         &self,
         project: &str,
@@ -904,6 +925,10 @@ impl MemoryStore {
             }
             if receipt.cancelled_at_ms.is_some() {
                 return Ok(WriteDisposition::Replay(()));
+            }
+            // Past the run deadline the run is already over; a late cancellation must not turn its `expired` into `cancelled`.
+            if now_ms >= receipt.run_deadline_ms {
+                return Err(refuse(CuratorLedgerRefusal::Cutoff));
             }
             conn.execute(
                 "UPDATE curator_receipts SET cancelled_at_ms = ?3, updated_at_ms = ?3

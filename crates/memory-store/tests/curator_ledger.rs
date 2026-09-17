@@ -2583,3 +2583,133 @@ fn execution_outcomes_are_written_only_by_receipt_completion() {
         CuratorJobState::Ready(_)
     ));
 }
+
+#[test]
+fn the_run_deadline_is_measured_from_the_claim_not_from_begin() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    // The worker renews while it dawdles, then begins 25 s after acquiring the claim.
+    fixture
+        .store
+        .renew_curator_task(
+            PROJECT,
+            &claim,
+            "worker-a",
+            0,
+            fixture.registration,
+            T0 + 20_000,
+        )
+        .unwrap();
+    let CuratorBeginOutcome::Begun(r) = fixture.begin(&claim, T0 + 25_000) else {
+        panic!("the claim begins")
+    };
+    assert_eq!(r.run_deadline_ms, T0 + CURATOR_RUN_DEADLINE_MS);
+    assert_eq!(
+        r.execution_cutoff_ms,
+        T0 + CURATOR_RUN_DEADLINE_MS - CURATOR_SETTLEMENT_RESERVE_MS
+    );
+    // A claim that only begins once its budget is spent gets no receipt at all.
+    let other = ready_job(&fixture.store, "cand-2");
+    let LeaseAcquireOutcome::Claim { claim: late, .. } = fixture
+        .store
+        .acquire_curator_task(
+            PROJECT,
+            "acq-2",
+            "worker-b",
+            1,
+            fixture.registration,
+            &other,
+            T0,
+        )
+        .unwrap()
+    else {
+        panic!("the second job is leasable")
+    };
+    let mut now = T0;
+    while now + CURATOR_TASK_LEASE_MS <= T0 + CURATOR_RUN_DEADLINE_MS {
+        now += CURATOR_TASK_LEASE_MS / 2;
+        fixture
+            .store
+            .renew_curator_task(
+                PROJECT,
+                &late.claim_id,
+                "worker-b",
+                1,
+                fixture.registration,
+                now,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .begin_curator_receipt(
+                    PROJECT,
+                    &other,
+                    KERNEL,
+                    &late.claim_id,
+                    T0 + CURATOR_RUN_DEADLINE_MS
+                )
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::Cutoff
+    );
+    assert!(
+        fixture
+            .store
+            .lookup_curator_receipt(PROJECT, &other)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_cancellation_at_or_after_the_run_deadline_is_refused() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let CuratorBeginOutcome::Begun(r) = fixture.begin(&claim, T0) else {
+        panic!("first claim begins")
+    };
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .cancel_curator_receipt(PROJECT, &fixture.identity, r.run_deadline_ms)
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::Cutoff
+    );
+    assert_eq!(receipt(&fixture).cancelled_at_ms, None);
+    fixture
+        .store
+        .expire_curator_work(r.run_deadline_ms)
+        .unwrap();
+    assert_eq!(
+        receipt(&fixture).terminal,
+        Some(CuratorReceiptTerminal::Expired)
+    );
+}
+
+#[test]
+fn a_lease_acquisition_needs_a_canonical_causal_identity() {
+    let fixture = Fixture::open();
+    for identity in ["", "zz", &"Z".repeat(64), &"a".repeat(65)] {
+        assert!(
+            fixture
+                .store
+                .acquire_curator_task(
+                    PROJECT,
+                    "acq-x",
+                    "worker-a",
+                    0,
+                    fixture.registration,
+                    identity,
+                    T0
+                )
+                .is_err(),
+            "{identity:?} is not a causal identity"
+        );
+    }
+    assert!(fixture.claim("acq-1", "worker-a", T0).is_some());
+}

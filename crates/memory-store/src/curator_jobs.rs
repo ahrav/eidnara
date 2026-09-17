@@ -38,8 +38,8 @@ const MAX_TARGET_JSON_BYTES: usize = 1024;
 pub const CURATOR_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const MAX_CURATOR_METADATA_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024;
 pub const MAX_CURATOR_METADATA_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
-/// Permanent receipt charge every admitted job keeps for the store incarnation: the job row, its receipt, and up to four attempt markers, all sized at their byte bounds. Worst case: the job row (project 256, firing id 256, target 1024, template 256, digests 128) about 2 KiB; the receipt (project, authority store 256, claim id 200, candidate 256, digest 64, incarnations 64) about 1.3 KiB; four markers (project, provider 128, model 256, credential 256, digests 128) about 1 KiB each; plus the primary-key index entry each row repeats, about 2.5 KiB together. Terminal rows keep it, so it also bounds lifetime admissions per store incarnation: `MAX_CURATOR_METADATA_BYTES_PER_PROJECT / CURATOR_RECEIPT_CHARGE_BYTES` (4,096) jobs per project and four times that per host before reservation refuses for good.
-pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 16 * 1024;
+/// Permanent receipt charge every admitted job keeps for the store incarnation: the job row, its receipt, up to four attempt markers, and the scan-audit rows their caller text leaves, all sized at their byte bounds. Worst case: the job row (project 256, firing id 256, target 1024, template 256, digests 128) about 2 KiB; the receipt (project, authority store 256, claim id 200, candidate 256, digest 64, incarnations 64) about 1.3 KiB; four markers (project, provider 128, model 256, credential 256, digests 128) about 1 KiB each; the primary-key index entry each row repeats, about 2.5 KiB together; and the scan audit, roughly 2.6 KiB per dispatch (one batch, one domain owner, four field scans and owner copies with their indexes), about 1 KiB for the selection, and about 3 KiB for the reservation and activation identities, some 14 KiB in all. Terminal rows keep it, so it also bounds lifetime admissions per store incarnation: `MAX_CURATOR_METADATA_BYTES_PER_PROJECT / CURATOR_RECEIPT_CHARGE_BYTES` (2,048) jobs per project and four times that per host before reservation refuses for good.
+pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 32 * 1024;
 /// Permanent receipt charge each frozen page keeps once terminal: the compact row (project, slot id, and selection attempt at 256 bytes each, plus state and timestamps) and the primary-key index entry that repeats those keys, about 1.7 KiB at the bounds.
 pub const FROZEN_PAGE_RECEIPT_CHARGE_BYTES: u64 = 4096;
 /// Worst-case temporary allowance a reservation prepays for its input, holds, manifest, and attempt metadata; released when the job is terminal.
@@ -1161,7 +1161,7 @@ impl MemoryStore {
                       WHERE task_kind = ?3 AND terminal_kind IS NULL
                         AND EXISTS(SELECT 1 FROM curator_jobs j
                                     WHERE j.project = note_eval_claims.project
-                                      AND j.rowid = note_eval_claims.note_id
+                                      AND j.job_id = note_eval_claims.note_id
                                       AND j.state = 'terminal')",
                     params![
                         now_ms,
