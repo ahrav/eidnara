@@ -96,7 +96,9 @@ describe("capability latch", () => {
         expect(latch.chooseAction("append", ROUTE)).toBe("append");
         expect(latch.chooseAction("replace", { ...ROUTE, routeEpoch: 8 })).toBe("replace");
         expect(latch.chooseAction("replace", { ...ROUTE, sessionId: "ses-2" })).toBe("replace");
-        expect(latch.isDenied("replacement", ROUTE)).toBe(false);
+        // The old epoch keeps its own denial; the rebound route starts clean.
+        expect(latch.isDenied("replacement", ROUTE)).toBe(true);
+        expect(latch.isDenied("replacement", { ...ROUTE, routeEpoch: 8 })).toBe(false);
     });
 
     it("latches only the two capability terminals with a known class", () => {
@@ -116,6 +118,16 @@ describe("capability latch", () => {
             true,
         );
         expect(latch.isDenied("cross_step_reuse", ROUTE)).toBe(true);
+    });
+
+    it("keeps each epoch's denials apart so a late old-epoch observer cannot erase a newer one", () => {
+        const latch = new CapabilityLatch();
+        const rebound = { ...ROUTE, routeEpoch: 8 };
+        latch.observeTerminal("capability_unsupported", "replacement", rebound);
+        // An invocation started under epoch 7 finishes after the rebind and reads its own route.
+        expect(latch.isDenied("replacement", ROUTE)).toBe(false);
+        expect(latch.isDenied("replacement", rebound)).toBe(true);
+        expect(latch.chooseAction("replace", rebound)).toBe("append");
     });
 
     it("retains at most 1000 routes, forgetting the least recently used denial", () => {

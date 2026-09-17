@@ -38,11 +38,9 @@ export interface RouteKey {
     routeEpoch: number;
 }
 
-/** `capability_unsupported` or `capability_undeclared` denies the class on one route until its epoch changes; `append` is never latched. An evicted denial costs one more daemon refusal before it latches again. */
+/** `capability_unsupported` or `capability_undeclared` denies the class on one route until its epoch changes; `append` is never latched. Entries are keyed per epoch, so a late observer from an older epoch never touches a newer one. An evicted denial costs one more daemon refusal before it latches again. */
 export class CapabilityLatch {
-    private readonly routes = new BoundedSessionMap<{ routeEpoch: number; denied: Set<EditClass> }>(
-        1000,
-    );
+    private readonly routes = new BoundedSessionMap<Set<EditClass>>(1000);
 
     chooseAction(intent: PackedAction, route: RouteKey): PackedAction {
         const cls = gatedClass(intent);
@@ -63,12 +61,13 @@ export class CapabilityLatch {
     }
 
     private denied(route: RouteKey): Set<EditClass> {
-        const key = `${route.sessionId}\u0000${route.projectRoot}`;
-        const current = this.routes.get(key);
-        if (current !== undefined && current.routeEpoch === route.routeEpoch) return current.denied;
-        const fresh = { routeEpoch: route.routeEpoch, denied: new Set<EditClass>() };
-        this.routes.set(key, fresh);
-        return fresh.denied;
+        const key = `${route.sessionId}\u0000${route.projectRoot}\u0000${route.routeEpoch}`;
+        let denied = this.routes.get(key);
+        if (denied === undefined) {
+            denied = new Set<EditClass>();
+            this.routes.set(key, denied);
+        }
+        return denied;
     }
 }
 
