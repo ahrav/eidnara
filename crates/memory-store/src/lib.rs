@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod curator_jobs;
+pub mod curator_ledger;
 pub mod memory_classifier_ledger;
 pub(crate) mod task_lease;
 
@@ -3949,7 +3950,11 @@ pub const MEMORY_CLASSIFIER_TASK: TaskLeaseKind = TaskLeaseKind {
 
 /// Every kind on the shared ledger, so an authority transition can fence the
 /// kinds that domain governs.
-const LEASE_KINDS: [&TaskLeaseKind; 2] = [&NOTE_EVALUATION, &MEMORY_CLASSIFIER_TASK];
+const LEASE_KINDS: [&TaskLeaseKind; 3] = [
+    &NOTE_EVALUATION,
+    &MEMORY_CLASSIFIER_TASK,
+    &curator_ledger::CURATOR_REVIEW_TASK,
+];
 
 pub use task_lease::{
     LeaseAbandonOutcome as NoteEvalAbandonOutcome, LeaseAcquireOutcome, LeaseClaim,

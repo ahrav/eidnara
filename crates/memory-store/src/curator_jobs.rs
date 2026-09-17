@@ -484,7 +484,7 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorJob> {
     })
 }
 
-fn load_job(
+pub(crate) fn load_curator_job(
     conn: &GuardedConn<'_>,
     project: &str,
     causal_identity: &str,
@@ -563,7 +563,7 @@ pub fn reserve_curator_job_in_tx(
     let ordinal = producer.validate().map_err(refuse)?;
     let inputs = inputs.clone().normalized().map_err(refuse)?;
     let causal_identity = inputs.causal_identity().map_err(refuse)?;
-    if let Some(existing) = load_job(conn, project, &causal_identity)? {
+    if let Some(existing) = load_curator_job(conn, project, &causal_identity)? {
         return Ok(ReserveOutcome::Existing(existing));
     }
     if pending_jobs(conn, Some(project))? >= MAX_PENDING_CURATOR_JOBS_PER_PROJECT {
@@ -599,7 +599,7 @@ pub fn reserve_curator_job_in_tx(
             now_ms,
         ],
     )?;
-    load_job(conn, project, &causal_identity)?
+    load_curator_job(conn, project, &causal_identity)?
         .map(ReserveOutcome::Reserved)
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
@@ -615,7 +615,7 @@ pub fn activate_curator_job_in_tx(
 ) -> rusqlite::Result<CuratorJob> {
     producer.validate().map_err(refuse)?;
     let input_json = input.encode().map_err(refuse)?;
-    let job = load_job(conn, project, causal_identity)?
+    let job = load_curator_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
     match job.state {
         CuratorJobState::Reserved => {}
@@ -636,7 +636,8 @@ pub fn activate_curator_job_in_tx(
          WHERE project = ?1 AND causal_identity = ?2 AND state = 'reserved'",
         params![project, causal_identity, input_json, now_ms],
     )?;
-    load_job(conn, project, causal_identity)?.ok_or_else(|| refuse(CuratorJobRefusal::Missing))
+    load_curator_job(conn, project, causal_identity)?
+        .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
 /// Records one terminal outcome for a non-terminal row, drops its input, and releases its allowance; the compact receipt and its charge stay. A terminal row is never reopened.
@@ -654,7 +655,7 @@ pub fn finish_curator_job_in_tx(
           WHERE project = ?1 AND causal_identity = ?2 AND state <> 'terminal'",
         params![project, causal_identity, outcome.as_str(), now_ms],
     )?;
-    let job = load_job(conn, project, causal_identity)?
+    let job = load_curator_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
     if changed == 0 {
         return Err(refuse(CuratorJobRefusal::Terminal));
@@ -1066,7 +1067,7 @@ impl MemoryStore {
     ) -> Result<Option<CuratorJob>, MemoryStoreError> {
         check_project(project)?;
         self.inner
-            .with_conn(|conn| load_job(conn, project, causal_identity))
+            .with_conn(|conn| load_curator_job(conn, project, causal_identity))
             .map_err(Into::into)
     }
 
