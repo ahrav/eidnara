@@ -475,6 +475,7 @@ dependencies = [
  "criterion",
  "daemon",
  "filetime",
+ "getrandom 0.2.17",
  "gix",
  "hmac",
  "host-runtime",

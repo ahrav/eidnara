@@ -11,4 +11,5 @@ source inspection establishes its presence and assertions, not adequacy.
 | `crates/kernel/src/envelope.rs`, `operation_identity` | Commit receipt identity length-delimits components. | unaudited | Commit intents, not selections or preparations. |
 
 Suspiciously quiet areas: no check exercised a dense or exact lane declared as
-a ranking before this part, and no check derived a parent identifier.
+a ranking before this part, no check derived a parent identifier, and no
+check fused two lanes.
