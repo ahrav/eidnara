@@ -200,9 +200,25 @@ jobs:
         run: scripts/forbid-comment-markers.sh
 
       - name: Invented provenance
-        # Review-staging and Curator paths carry no caller provenance, so a
-        # fixture cannot upgrade their classification.
-        run: scripts/forbid-invented-provenance.sh
+        # Review-staging and Curator paths carry no caller provenance, so no
+        # source or fixture under them may construct `RepositoryProvenance`
+        # or populate a `provenance` field. The bracketed character keeps the
+        # pattern from matching this workflow file.
+        run: |
+          set -euo pipefail
+          status=0
+          git grep -n -I -E -e 'Repositor[y]Provenance|provenanc[e]:[[:space:]]*Some' \
+            -- ':(glob)crates/kernel/src/review_staging.rs' \
+               ':(glob)crates/kernel/tests/kernel_review_staging.rs' \
+               ':(glob)crates/**/curator*' ':(glob)crates/**/curator/**' || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "invented provenance in a Curator or review-staging path"
+            exit 1
+          fi
+          if [ "$status" -ne 1 ]; then
+            echo "git grep failed with exit $status"
+            exit 1
+          fi
 
       - name: Retired memory-plane identifiers
         # The retired second memory plane (its mirror, its intent ledger, its

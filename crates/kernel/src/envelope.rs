@@ -825,13 +825,195 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
         check_fence(&tx, self.lease_epoch())?;
-        stage_prepared_candidate(&tx, &spec)?;
+        self.stage_prepared_candidate(&tx, &spec)?;
         tx.commit().map_err(map_sqlite)?;
         Ok(StagingCandidateRow {
             candidate_id: spec.candidate_id,
             payload: spec.payload.text,
             sensitivity: candidate_sensitivity,
         })
+    }
+
+    /// Shared by the public `StagingCandidateSpec` path and the private review-input path. `stage_prepared_candidate` runs inside the caller's fenced immediate transaction; the caller commits it.
+    pub(super) fn stage_prepared_candidate(
+        &self,
+        tx: &Transaction<'_>,
+        spec: &RedactedCandidate,
+    ) -> Result<(), KernelError> {
+        let run_sensitivity = spec.run_sensitivity();
+        let candidate_sensitivity = spec.candidate_sensitivity();
+        let provenance = spec.witness.clone();
+        let refresh_leases = spec.replay == StagingReplay::RefreshLeases;
+        let existing = tx
+            .query_row_cached(
+                "SELECT extractor,source_kind,source_id,source_revision,sensitivity_class,
+                        provenance_witness,terminal_state,lease_expires_at,heartbeat_at
+                 FROM extraction_runs WHERE extraction_run_id=?1",
+                [spec.extraction_run_id.as_str()],
+                |row| {
+                    Ok((
+                        (
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Vec<u8>>(5)?,
+                        ),
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        if let Some((stored_identity, terminal_state, lease_expires_at, heartbeat_at)) = existing {
+            let expected = (
+                spec.extractor.clone(),
+                Some(spec.source_kind.clone()),
+                Some(spec.source_id.clone()),
+                Some(spec.source_revision),
+                run_sensitivity.as_str().to_string(),
+                provenance.clone(),
+            );
+            // An out-of-order producer inside the lease but behind the heartbeat would still
+            // extend the run through the MAX assignments below.
+            if stored_identity != expected
+                || terminal_state.is_some()
+                || lease_expires_at <= spec.recorded_at
+                || lease_expires_at <= current_time_ms()
+                // The store clock decides liveness, but an out-of-order producer inside a
+                // live lease could still extend it from behind the heartbeat.
+                || (refresh_leases && heartbeat_at > spec.recorded_at)
+            {
+                return Err(KernelError::Conflict);
+            }
+            // `?4` is false for an immutable replay, so both updates match no row.
+            tx.execute_cached(
+                "UPDATE extraction_runs
+                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
+                 WHERE extraction_run_id=?3 AND ?4",
+                params![
+                    spec.recorded_at,
+                    spec.lease_expires_at,
+                    spec.extraction_run_id,
+                    refresh_leases
+                ],
+            )
+            .map_err(map_sqlite)?;
+            // Staging into a live run is a heartbeat for the run, and the run's
+            // active candidates share its lease exactly as they do under
+            // `renew_staging_run`: a candidate whose own lease lapsed while the
+            // run's kept being extended would otherwise be revived by completion.
+            tx.execute_cached(
+                "UPDATE candidates
+                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
+                 WHERE extraction_run_id=?3 AND terminal_state IS NULL AND ?4",
+                params![
+                    spec.recorded_at,
+                    spec.lease_expires_at,
+                    spec.extraction_run_id,
+                    refresh_leases
+                ],
+            )
+            .map_err(map_sqlite)?;
+        } else {
+            tx.execute_cached(
+                "INSERT INTO extraction_runs(
+                     extraction_run_id,extractor,source_kind,source_id,source_revision,
+                     sensitivity_class,provenance_witness,redaction_metadata,started_at,
+                     heartbeat_at,lease_expires_at
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10)",
+                params![
+                    spec.extraction_run_id,
+                    spec.extractor,
+                    spec.source_kind,
+                    spec.source_id,
+                    spec.source_revision,
+                    run_sensitivity.as_str(),
+                    provenance,
+                    b"[]".to_vec(),
+                    spec.recorded_at,
+                    spec.lease_expires_at,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        }
+        let existing_candidate = tx
+            .query_row_cached(
+                "SELECT extraction_run_id,sensitivity_class,candidate_kind,payload,
+                        redaction_metadata,terminal_state
+                 FROM candidates WHERE candidate_id=?1",
+                [spec.candidate_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        if let Some((
+            run_id,
+            stored_class,
+            stored_kind,
+            stored_payload,
+            stored_metadata,
+            candidate_terminal,
+        )) = existing_candidate
+        {
+            let incoming_redacted = self_detections(spec);
+            if run_id != spec.extraction_run_id
+                || stored_class != candidate_sensitivity.as_str()
+                || stored_kind != spec.candidate_kind.text
+                || candidate_terminal.is_some()
+                || incoming_redacted
+                || stored_had_detections(&stored_metadata)
+                || stored_payload != spec.payload.text.as_bytes()
+            {
+                return Err(KernelError::Conflict);
+            }
+            tx.execute_cached(
+                "UPDATE candidates
+                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
+                 WHERE candidate_id=?3 AND ?4",
+                params![
+                    spec.recorded_at,
+                    spec.lease_expires_at,
+                    spec.candidate_id,
+                    refresh_leases
+                ],
+            )
+            .map_err(map_sqlite)?;
+            return Ok(());
+        }
+        let candidate_metadata = spec.candidate_detection_json()?;
+        tx.execute_cached(
+            "INSERT INTO candidates(
+                 candidate_id,extraction_run_id,candidate_kind,payload,sensitivity_class,
+                 provenance_witness,redaction_metadata,created_at,heartbeat_at,lease_expires_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8,?9)",
+            params![
+                spec.candidate_id,
+                spec.extraction_run_id,
+                spec.candidate_kind.text,
+                spec.payload.text.as_bytes(),
+                candidate_sensitivity.as_str(),
+                provenance,
+                candidate_metadata,
+                spec.recorded_at,
+                spec.lease_expires_at,
+            ],
+        )
+        .map_err(map_sqlite)?;
+        spec.record(tx)?;
+        Ok(())
     }
 
     /// A truncate-then-insert rebuild rather than an upsert. An empty `rows` is rejected so an accidental empty vector cannot erase the projection; `clear_alignment_projection` publishes an intentionally empty rebuild.
@@ -879,183 +1061,6 @@ pub(super) enum StagingReplay {
     RefreshLeases,
     /// A byte-identical restage is acknowledged without changing stored data or extending the queue deadline.
     Immutable,
-}
-
-/// Shared by the public `StagingCandidateSpec` path and the private review-input path. `stage_prepared_candidate` runs inside the caller's fenced immediate transaction; the caller commits it.
-pub(super) fn stage_prepared_candidate(
-    tx: &Transaction<'_>,
-    spec: &RedactedCandidate,
-) -> Result<(), KernelError> {
-    let run_sensitivity = spec.run_sensitivity();
-    let candidate_sensitivity = spec.candidate_sensitivity();
-    let provenance = spec.witness.clone();
-    let refresh_leases = spec.replay == StagingReplay::RefreshLeases;
-    let existing = tx
-        .query_row_cached(
-            "SELECT extractor,source_kind,source_id,source_revision,sensitivity_class,
-                    provenance_witness,terminal_state,lease_expires_at,heartbeat_at
-             FROM extraction_runs WHERE extraction_run_id=?1",
-            [spec.extraction_run_id.as_str()],
-            |row| {
-                Ok((
-                    (
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, Vec<u8>>(5)?,
-                    ),
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, i64>(8)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(map_sqlite)?;
-    if let Some((stored_identity, terminal_state, lease_expires_at, heartbeat_at)) = existing {
-        let expected = (
-            spec.extractor.clone(),
-            Some(spec.source_kind.clone()),
-            Some(spec.source_id.clone()),
-            Some(spec.source_revision),
-            run_sensitivity.as_str().to_string(),
-            provenance.clone(),
-        );
-        // An out-of-order producer inside the lease but behind the heartbeat would still
-        // extend the run through the MAX assignments below.
-        if stored_identity != expected
-            || terminal_state.is_some()
-            || lease_expires_at <= spec.recorded_at
-            || lease_expires_at <= current_time_ms()
-            // The store clock decides liveness, but an out-of-order producer inside a
-            // live lease could still extend it from behind the heartbeat.
-            || (refresh_leases && heartbeat_at > spec.recorded_at)
-        {
-            return Err(KernelError::Conflict);
-        }
-        if refresh_leases {
-            tx.execute_cached(
-                "UPDATE extraction_runs
-                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
-                 WHERE extraction_run_id=?3",
-                params![
-                    spec.recorded_at,
-                    spec.lease_expires_at,
-                    spec.extraction_run_id
-                ],
-            )
-            .map_err(map_sqlite)?;
-            // Staging into a live run is a heartbeat for the run, and the run's
-            // active candidates share its lease exactly as they do under
-            // `renew_staging_run`: a candidate whose own lease lapsed while the
-            // run's kept being extended would otherwise be revived by completion.
-            tx.execute_cached(
-                "UPDATE candidates
-                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
-                 WHERE extraction_run_id=?3 AND terminal_state IS NULL",
-                params![
-                    spec.recorded_at,
-                    spec.lease_expires_at,
-                    spec.extraction_run_id
-                ],
-            )
-            .map_err(map_sqlite)?;
-        }
-    } else {
-        tx.execute_cached(
-            "INSERT INTO extraction_runs(
-                 extraction_run_id,extractor,source_kind,source_id,source_revision,
-                 sensitivity_class,provenance_witness,redaction_metadata,started_at,
-                 heartbeat_at,lease_expires_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10)",
-            params![
-                spec.extraction_run_id,
-                spec.extractor,
-                spec.source_kind,
-                spec.source_id,
-                spec.source_revision,
-                run_sensitivity.as_str(),
-                provenance,
-                b"[]".to_vec(),
-                spec.recorded_at,
-                spec.lease_expires_at,
-            ],
-        )
-        .map_err(map_sqlite)?;
-    }
-    let existing_candidate = tx
-        .query_row_cached(
-            "SELECT extraction_run_id,sensitivity_class,candidate_kind,payload,
-                    redaction_metadata,terminal_state
-             FROM candidates WHERE candidate_id=?1",
-            [spec.candidate_id.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(map_sqlite)?;
-    if let Some((
-        run_id,
-        stored_class,
-        stored_kind,
-        stored_payload,
-        stored_metadata,
-        candidate_terminal,
-    )) = existing_candidate
-    {
-        let incoming_redacted = self_detections(spec);
-        if run_id != spec.extraction_run_id
-            || stored_class != candidate_sensitivity.as_str()
-            || stored_kind != spec.candidate_kind.text
-            || candidate_terminal.is_some()
-            || incoming_redacted
-            || stored_had_detections(&stored_metadata)
-            || stored_payload != spec.payload.text.as_bytes()
-        {
-            return Err(KernelError::Conflict);
-        }
-        if refresh_leases {
-            tx.execute_cached(
-                "UPDATE candidates
-                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
-                 WHERE candidate_id=?3",
-                params![spec.recorded_at, spec.lease_expires_at, spec.candidate_id],
-            )
-            .map_err(map_sqlite)?;
-        }
-        return Ok(());
-    }
-    let candidate_metadata = spec.candidate_detection_json()?;
-    tx.execute_cached(
-        "INSERT INTO candidates(
-             candidate_id,extraction_run_id,candidate_kind,payload,sensitivity_class,
-             provenance_witness,redaction_metadata,created_at,heartbeat_at,lease_expires_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8,?9)",
-        params![
-            spec.candidate_id,
-            spec.extraction_run_id,
-            spec.candidate_kind.text,
-            spec.payload.text.as_bytes(),
-            candidate_sensitivity.as_str(),
-            provenance,
-            candidate_metadata,
-            spec.recorded_at,
-            spec.lease_expires_at,
-        ],
-    )
-    .map_err(map_sqlite)?;
-    spec.record(tx)?;
-    Ok(())
 }
 
 /// `generation` is separate from `rows` because an empty rebuild still has to

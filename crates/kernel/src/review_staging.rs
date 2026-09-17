@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256};
 
 use super::envelope::{
     MAX_STAGING_CLOCK_SKEW_MS, RedactedCandidate, Sensitivity, StagingReplay, check_fence,
-    stage_prepared_candidate,
 };
 use super::redaction::{RedactedField, contains_redaction_placeholder};
 use super::source_identity::identity_digest;
@@ -614,10 +613,11 @@ impl KernelStore {
         let database_incarnation_id =
             super::open::database_incarnation_id_via(&tx).map_err(ReviewStageError::Store)?;
         classify_replay(&tx, &candidate)?;
-        stage_prepared_candidate(&tx, &candidate).map_err(|error| match error {
-            KernelError::Conflict => ReviewStageRefusal::Changed.into(),
-            other => ReviewStageError::Store(other),
-        })?;
+        self.stage_prepared_candidate(&tx, &candidate)
+            .map_err(|error| match error {
+                KernelError::Conflict => ReviewStageRefusal::Changed.into(),
+                other => ReviewStageError::Store(other),
+            })?;
         tx.commit()
             .map_err(|error| ReviewStageError::Store(map_sqlite(error)))?;
         Ok(ReviewStagedReference {
