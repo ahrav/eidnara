@@ -30,13 +30,13 @@ export function hasPackedBlock(systemPrompt: string): boolean {
     return ownedBlockStart(systemPrompt) >= 0;
 }
 
-/** The whole system prompt is charged, not the packed block alone; the limit is Pi's usable window when the host reports one. */
+/** The whole system prompt is charged by its UTF-8 byte length, as the OpenCode surface is; the limit is Pi's usable window when the host reports one. */
 export function validatePiInvocation(
     candidate: string,
     incoming: string,
     usableContextLimit: number | undefined,
 ): InvocationValidation {
-    return validateInvocation([candidate.length], [incoming.length], {
+    return validateInvocation([Buffer.byteLength(candidate)], [Buffer.byteLength(incoming)], {
         maxTokens: usableContextLimit,
         headroomPermille: PI_INVOCATION_HEADROOM_PERMILLE,
         profile: "pi-heuristic",

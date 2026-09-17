@@ -400,7 +400,7 @@ Guarantee: The daemon binds append allowance and replacement capacity before
 preparation, and each plugin charges its whole assembled surface under its own
 heuristic profile, the estimator's heuristic ratio plus headroom: the OpenCode
 plugin every entry of the candidate message-entry surface by its canonical
-length, the Pi plugin the whole system prompt by its length; each declines
+length, the Pi plugin the whole system prompt by its UTF-8 byte length; each declines
 publication when the charge exceeds the limit and the candidate is larger than
 the incoming surface, the OpenCode plugin against the model's reported context
 limit and the Pi plugin against Pi's usable window (the window less its output

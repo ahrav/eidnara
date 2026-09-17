@@ -150,6 +150,17 @@ describe("Pi whole-invocation validation", () => {
         );
     });
 
+    it("charges UTF-8 bytes, so a non-ASCII prompt is not undercharged by its code-unit length", () => {
+        const candidate = `${PROMPT}${"漢".repeat(200)}`;
+        expect(Buffer.byteLength(candidate)).toBeGreaterThan(candidate.length);
+        const codeUnitCharge = Math.ceil(
+            (Math.ceil(candidate.length / 3.5) * (1000 + PI_INVOCATION_HEADROOM_PERMILLE)) / 1000,
+        );
+        const refused = validatePiInvocation(candidate, PROMPT, codeUnitCharge);
+        expect(refused.candidate.bytes).toBe(Buffer.byteLength(candidate));
+        expect(refused.ok).toBe(false);
+    });
+
     it("moves the profile revision with the estimator generation and never labels it exact", () => {
         const before = validatePiInvocation(PROMPT, PROMPT, undefined).candidate.profile;
         installTokenizerForTest({ encode: (text: string) => Array.from(text, (_, i) => i) });
