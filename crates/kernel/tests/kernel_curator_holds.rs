@@ -1298,3 +1298,53 @@ fn deadlines_are_judged_by_the_clock_inside_the_write_transaction() {
         "the execution hold stays live"
     );
 }
+
+#[test]
+fn a_transferred_generation_acquires_no_further_execution_hold() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let evidence = fixture.ingest("held", b"held bytes", None);
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    let created = fixture.stage_proposal("job-1", 1, now - 1_000, now + DAY_MS - 1_000);
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let review_hold = fixture
+        .store
+        .transfer_execution_to_review(
+            &hold.hold_id,
+            &execution,
+            &review,
+            created + REVIEW_EXPIRY_MAX_MS,
+        )
+        .unwrap();
+    // A late acquisition retry for the same generation cannot open a second, replacement execution hold.
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "the generation's bytes are already under its review hold"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    // The successor generation is unaffected.
+    fixture
+        .store
+        .acquire_execution_hold(
+            &fixture.binding("job-1", 2),
+            std::slice::from_ref(&evidence),
+            now + HOUR_MS,
+        )
+        .unwrap();
+    fixture
+        .store
+        .release_review_hold(&review_hold.hold_id, &review)
+        .unwrap();
+}

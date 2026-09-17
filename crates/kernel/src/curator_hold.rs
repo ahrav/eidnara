@@ -468,6 +468,14 @@ impl KernelStore {
         if expires_at <= now {
             return Err(CuratorHoldRefusal::InvalidRequest.into());
         }
+        // Once this generation's proposal is under its review hold, its execution phase is over: a late acquisition retry must not open a replacement execution hold beside it.
+        let review = CuratorHoldBinding {
+            subject: provisional_result_identity(&binding.subject, binding.generation).candidate_id,
+            ..binding.clone()
+        };
+        if live_hold_of(&tx, CuratorHoldKind::Review, &review, now)?.is_some() {
+            return Err(CuratorHoldRefusal::InvalidRequest.into());
+        }
         let facts = precharge(&tx, binding, evidence_ids, quota)?;
         let (hold_id, expires_at) = match live_hold_of(&tx, kind, binding, now)? {
             Some(existing) => existing,
