@@ -216,10 +216,18 @@ pub(crate) fn count_under(
 }
 
 /// Clears both shared generations.
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(any(test, feature = "bench-internals", feature = "test-support"))]
 pub fn clear() {
     let mut guard = lock_cache();
     *guard = Some(Generations::default());
+}
+
+/// Rotates `current` into `previous` without filling it to capacity.
+#[cfg(any(test, feature = "test-support"))]
+pub fn rotate() {
+    let mut guard = lock_cache();
+    let generations = guard.get_or_insert_with(Generations::default);
+    generations.previous = std::mem::take(&mut generations.current);
 }
 
 /// Serializes tests whose assertions depend on shared cache contents.
@@ -345,10 +353,7 @@ mod tests {
             "another revision misses and counts afresh"
         );
         assert_eq!(cached_count_under(&first, content, |_| 99), 7);
-        let mut guard = lock_cache();
-        let generations = guard.get_or_insert_with(Generations::default);
-        generations.previous = std::mem::take(&mut generations.current);
-        drop(guard);
+        rotate();
         assert_eq!(
             cached_count_under(&second, content, |_| 99),
             11,

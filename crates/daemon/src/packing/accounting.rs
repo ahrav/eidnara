@@ -58,6 +58,13 @@ impl AccountingProfile {
 
     /// The revision includes `identity` and `degradation`, so changing either
     /// invalidates cached counts.
+    ///
+    /// `count` must charge a rendered fragment the same whatever follows it:
+    /// `count(a + b) == count(a) + count(b)` at every fragment seam (each
+    /// fragment starts with `<` and ends with `\n`). `finalize` relies on this
+    /// to skip re-checking the accounting bounds after an adjustment rebuild;
+    /// an estimator that charges a shorter render more can emit a body over
+    /// `max_estimated_tokens`.
     pub fn heuristic(
         identity: &'static str,
         degradation: &'static str,

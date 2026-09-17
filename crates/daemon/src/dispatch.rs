@@ -245,6 +245,8 @@ impl PreparedOutput {
     ///
     /// JSON measurement does not retain encoded bytes because it precedes the host's resident-byte reservation.
     pub fn measure(&self) -> Result<MeasuredOutput<'_>, PreparedOutputError> {
+        #[cfg(feature = "test-support")]
+        guard_calls::MEASURED.with(|calls| calls.set(calls.get() + 1));
         let (source, len) = match &self.source {
             PreparedSource::Json(value) => {
                 let len = measure_json(value)?;
@@ -358,6 +360,14 @@ impl MeasuredOutput<'_> {
 
     /// Writes into a caller-reserved destination and verifies exact length.
     pub fn write_to<W: Write>(&self, destination: &mut W) -> Result<usize, PreparedOutputError> {
+        #[cfg(feature = "test-support")]
+        guard_calls::WRITTEN.with(|calls| calls.set(calls.get() + 1));
+        #[cfg(feature = "test-support")]
+        guard_calls::ON_WRITE.with(|hook| {
+            if let Some(hook) = &*hook.borrow() {
+                hook();
+            }
+        });
         let mut destination = BoundedWriter::new(destination, self.len);
         match &self.source {
             MeasuredSource::Json(value) => {
@@ -382,6 +392,36 @@ impl MeasuredOutput<'_> {
             });
         }
         Ok(written)
+    }
+}
+
+/// Per-thread guard call counts; a test reads them to observe how many times
+/// a body was measured and written instead of trusting the caller's structure.
+#[cfg(feature = "test-support")]
+pub mod guard_calls {
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        pub(super) static MEASURED: Cell<usize> = const { Cell::new(0) };
+        pub(super) static WRITTEN: Cell<usize> = const { Cell::new(0) };
+        pub(super) static ON_WRITE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    pub fn reset() {
+        MEASURED.with(|calls| calls.set(0));
+        WRITTEN.with(|calls| calls.set(0));
+        ON_WRITE.with(|hook| hook.borrow_mut().take());
+    }
+
+    /// Runs `hook` on this thread at the start of every write until `reset`,
+    /// so a test can end a budget while a body is being written.
+    pub fn on_write(hook: impl Fn() + 'static) {
+        ON_WRITE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// `(measured, written)` on this thread since the last `reset`.
+    pub fn counts() -> (usize, usize) {
+        (MEASURED.with(Cell::get), WRITTEN.with(Cell::get))
     }
 }
 
