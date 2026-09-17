@@ -1446,3 +1446,123 @@ fn a_capture_past_its_retention_on_the_wall_clock_is_refused_whatever_now_the_ca
     );
     assert!(broker.ledger.disclosed().next().is_none());
 }
+
+#[test]
+fn a_staged_subject_is_not_read_once_the_execution_hold_is_gone() {
+    let fixture = Fixture::open();
+    let subject = fixture.staged_subject("subject after cutoff");
+    let (capture_id, _) = fixture.ingest("capture", b"capture", true);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&capture_id));
+    let alias = broker.aliases.issue(subject);
+    broker
+        .read(&fixture.store, alias.as_str(), None, fixture.now + 2)
+        .unwrap();
+    // The run's cutoff passed: a trusted terminal receipt released its hold while the staged row's queue deadline is still live.
+    fixture
+        .store
+        .release_execution_hold(&broker_hold_id(&broker), &fixture.hold_binding(PROJECT))
+        .unwrap();
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now + 3)
+            .unwrap_err()
+            .code,
+        RefusalCode::HoldInvalid,
+        "a staged read is protected by the live execution hold like every other disclosure"
+    );
+}
+
+#[test]
+fn a_staged_subject_owned_by_another_job_is_out_of_scope() {
+    let fixture = Fixture::open();
+    let (capture_id, _) = fixture.ingest("capture", b"capture", true);
+    let mut other_job = fixture.review_binding();
+    other_job.owner = ReviewOwner::Job {
+        job_id: "job-2".to_string(),
+    };
+    let reference = fixture
+        .store
+        .stage_review_input(ReviewStagingSpec {
+            extraction_run_id: "run-2".to_string(),
+            candidate_id: "subject-2".to_string(),
+            producer: "history-summarizer".to_string(),
+            binding: other_job.clone(),
+            payload: ReviewPayload::Subject(ReviewSubject {
+                facts: vec![ExtractedFact {
+                    text: "another job's subject".to_string(),
+                    span: SourceSpan {
+                        alias: "s1".to_string(),
+                        start: 0,
+                        end: 4,
+                    },
+                }],
+            }),
+            recorded_at: fixture.now,
+            queue_deadline_at: fixture.now + 24 * HOUR_MS,
+        })
+        .unwrap();
+    fixture
+        .store
+        .finish_staging_run("run-2", StagingTerminalState::Completed, fixture.now + 1)
+        .unwrap();
+    // The hold's subject is job-1; the row is owned by job-2 in the same project.
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&capture_id));
+    let alias = broker.aliases.issue(ReferenceExpectation::StagedSubject {
+        reference,
+        binding: other_job,
+    });
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now + 2)
+            .unwrap_err()
+            .code,
+        RefusalCode::Scope
+    );
+    assert!(broker.ledger.disclosed().next().is_none());
+}
+
+#[test]
+fn a_decision_retired_between_the_verdict_and_the_load_is_not_disclosed() {
+    let fixture = Fixture::open();
+    fixture.decision("decision-a");
+    let claim_text = "the claim as canonical text";
+    let claim_evidence = fixture.ingest("claim", claim_text.as_bytes(), false);
+    let (claim_object, _) = fixture.descriptor(Publish {
+        key: "claim",
+        class: "canonical_claims",
+        representation: "decision_summary",
+        identity: &[("object_id", "decision-a")],
+        evidence: &claim_evidence,
+        buffer: claim_text,
+        span: None,
+    });
+    let retire = Box::new(move |store: &KernelStore| {
+        store
+            .commit(intent("retire"), |envelope| {
+                envelope.retire_decision("decision-a")?;
+                Ok(String::new())
+            })
+            .unwrap();
+    });
+    let mut broker = fixture
+        .broker(PROJECT, std::slice::from_ref(&claim_evidence.0))
+        .with_after_load_hook_for_test(retire);
+    let alias = broker.aliases.issue(ReferenceExpectation::CanonicalSource {
+        object_id: claim_object,
+        class: OccurrenceClass::CanonicalClaims,
+        source_revision: 1,
+        artifact_digest: claim_evidence.1,
+        evidence_id: claim_evidence.0,
+        originating_decision_id: "decision-a".to_string(),
+        decision_source_revision: 1,
+    });
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::OriginRevoked,
+        "the object verdict is re-read on the bytes that were loaded, like the artifact verdict"
+    );
+    assert!(broker.ledger.disclosed().next().is_none());
+}

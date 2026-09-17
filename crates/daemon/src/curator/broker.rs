@@ -14,9 +14,9 @@ use kernel::{
     ArtifactDestination, ArtifactEligibility, ArtifactHandle, CURATOR_CAPTURE_RETENTION_CLASS,
     CuratorHoldBinding, CuratorHoldError, CuratorHoldKind, EligibilityCandidate,
     EligibilityVerdict, HeldEvidence, KernelError, KernelStore, MAX_RUN_BUFFER_BYTES,
-    OPERATOR_REDACTION_PLACEHOLDER, ProjectScope, ReviewBinding, ReviewPayload, ReviewReadError,
-    ReviewStagedReference, RunBufferMap, RunBufferRefusal, SOURCE_DESCRIPTOR_KIND, Sensitivity,
-    SourceDescriptorDetail, Surface, SurfaceVisibility,
+    OPERATOR_REDACTION_PLACEHOLDER, ProjectScope, ReviewBinding, ReviewOwner, ReviewPayload,
+    ReviewReadError, ReviewStagedReference, RunBufferMap, RunBufferRefusal, SOURCE_DESCRIPTOR_KIND,
+    Sensitivity, SourceDescriptorDetail, Surface, SurfaceVisibility,
 };
 use sha2::{Digest, Sha256};
 
@@ -630,9 +630,21 @@ impl EvidenceBroker {
         }
         let (bytes, verdict, sensitivity, member, origin_key) = match &expectation {
             ReferenceExpectation::StagedSubject { reference, binding } => {
-                if binding.project_digest != self.binding.hold.project_digest {
+                // A staged row is protected by the run's live execution hold like every artifact, and belongs to the job the hold names.
+                if binding.project_digest != self.binding.hold.project_digest
+                    || !matches!(&binding.owner, ReviewOwner::Job { job_id } if *job_id == self.binding.hold.subject)
+                {
                     return Err(refuse(Some(&alias), RefusalCode::Scope));
                 }
+                store
+                    .validate_held_evidence(
+                        &self.binding.hold_id,
+                        CuratorHoldKind::Execution,
+                        &self.binding.hold,
+                        &[],
+                        now_ms,
+                    )
+                    .map_err(|error| refuse(Some(&alias), hold_refusal(error)))?;
                 let row = store
                     .read_review_input(reference, binding, now_ms)
                     .map_err(|error| refuse(Some(&alias), staged_refusal(error)))?;
@@ -680,7 +692,7 @@ impl EvidenceBroker {
                 {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
-                let bytes = self.load_range(store, &alias, &held, range.clone())?;
+                let bytes = self.load_range(store, &alias, &held, range.clone())?.0;
                 (
                     bytes,
                     None,
@@ -719,7 +731,19 @@ impl EvidenceBroker {
                 }
                 let held =
                     self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
-                let bytes = self.load_range(store, &alias, &held, range.clone())?;
+                let (bytes, loaded) = self.load_range(store, &alias, &held, range.clone())?;
+                let judged = if loaded {
+                    self.judge(
+                        store,
+                        &alias,
+                        object_id,
+                        *source_revision,
+                        artifact_digest,
+                        None,
+                    )?
+                } else {
+                    judged
+                };
                 (
                     bytes,
                     Some(judged),
@@ -763,7 +787,19 @@ impl EvidenceBroker {
                 }
                 let held =
                     self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
-                let bytes = self.load_range(store, &alias, &held, range.clone())?;
+                let (bytes, loaded) = self.load_range(store, &alias, &held, range.clone())?;
+                let judged = if loaded {
+                    self.judge(
+                        store,
+                        &alias,
+                        object_id,
+                        *source_revision,
+                        artifact_digest,
+                        Some((originating_decision_id, *decision_source_revision)),
+                    )?
+                } else {
+                    judged
+                };
                 (
                     bytes,
                     Some(judged),
@@ -871,14 +907,14 @@ impl EvidenceBroker {
             .charge_render(Some(alias), u64::try_from(bytes).unwrap_or(u64::MAX))
     }
 
-    /// Charges the range, loads the artifact once, re-reads the egress verdict on the bytes that were just loaded, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret; a buffer that failed it stays refused without another charge or scan.
+    /// Charges the range, loads the artifact once, re-reads the egress verdict on the bytes that were just loaded, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret; a buffer that failed it stays refused without another charge or scan. Returns whether this call loaded the artifact, so the caller can re-judge object standing over the same window.
     fn load_range(
         &mut self,
         store: &KernelStore,
         alias: &Alias,
         held: &HeldEvidence,
         range: Option<Range<u64>>,
-    ) -> Result<Vec<u8>, Refusal> {
+    ) -> Result<(Vec<u8>, bool), Refusal> {
         let range = range.unwrap_or(0..held.byte_length);
         if range.end > held.byte_length {
             return Err(refuse(Some(alias), RefusalCode::InvalidRange));
@@ -929,7 +965,7 @@ impl EvidenceBroker {
         }
         self.buffers
             .slice(&held.artifact_digest, range)
-            .map(<[u8]>::to_vec)
+            .map(|bytes| (bytes.to_vec(), loaded))
             .map_err(|_| refuse(Some(alias), RefusalCode::InvalidRange))
     }
 
