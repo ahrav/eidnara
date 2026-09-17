@@ -218,10 +218,13 @@ pub struct FrozenSelection {
     pub created_at_ms: i64,
 }
 
-/// Quota headroom for one project, read so operators and producers can refuse before reserving.
+/// Capacity and quota headroom for one project, read so operators and producers can refuse before reserving. Every bound a reservation or freeze checks is reported: project and host pending jobs, project and host frozen pages, and both metadata quotas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CuratorHeadroom {
     pub pending_jobs: usize,
+    pub host_pending_jobs: usize,
+    pub frozen_pages: usize,
+    pub host_frozen_pages: usize,
     pub project_metadata_bytes: u64,
     pub host_metadata_bytes: u64,
     pub project_metadata_remaining: u64,
@@ -420,22 +423,41 @@ impl CausalInputs {
         ))
     }
 
-    /// Every string that only reaches the row as a digest, scanned at the transaction ceiling like the trigger scans stored columns; the target and template are stored verbatim and the trigger covers them.
-    fn reject_fingerprinted_secrets(&self) -> rusqlite::Result<()> {
-        let strings = self
-            .signals
-            .iter()
+    /// Every caller string, scanned raw at the transaction ceiling before any of it is serialized. The trigger scans stored columns too, but a keyed-JSON credential escaped inside `target_json`, `input_json`, or `page_json` is past the detector, and fingerprinted fields never reach a column at all.
+    fn reject_secrets(&self) -> rusqlite::Result<()> {
+        let strings = std::iter::once(self.target.identity())
+            .chain(std::iter::once(&self.question_template))
+            .chain(&self.signals)
             .chain(self.required_evidence.iter().map(|e| &e.evidence_id))
             .chain(self.policy_versions.iter().flat_map(|(n, v)| [n, v]));
-        for text in strings {
-            reject_transaction_secret_text(text)
-                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+        strings.map(String::as_str).try_for_each(reject_secret)
+    }
+}
+
+fn reject_secret(text: &str) -> rusqlite::Result<()> {
+    reject_transaction_secret_text(text)
+        .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+}
+
+impl ReviewTarget {
+    /// The caller-chosen identity in a target; the incarnation, digest, and revision are validated hex or integers.
+    fn identity(&self) -> &String {
+        match self {
+            Self::StagedSubject { candidate_id, .. } => candidate_id,
+            Self::Memory { object_id, .. } => object_id,
         }
-        Ok(())
     }
 }
 
 impl CuratorJobInput {
+    fn reject_secrets(&self) -> rusqlite::Result<()> {
+        std::iter::once(self.subject.identity())
+            .chain(std::iter::once(&self.question_template))
+            .chain(&self.starting_references)
+            .map(String::as_str)
+            .try_for_each(reject_secret)
+    }
+
     fn encode(&self) -> Result<String, CuratorJobRefusal> {
         self.subject.validate()?;
         check_identity(&self.question_template)?;
@@ -600,7 +622,7 @@ pub fn reserve_curator_job_in_tx(
     let ordinal = producer.validate().map_err(refuse)?;
     let inputs = inputs.clone().normalized().map_err(refuse)?;
     let causal_identity = inputs.causal_identity().map_err(refuse)?;
-    inputs.reject_fingerprinted_secrets()?;
+    inputs.reject_secrets()?;
     if let Some(existing) = load_job(conn, project, &causal_identity)? {
         return Ok(ReserveOutcome::Existing(existing));
     }
@@ -654,6 +676,7 @@ pub fn activate_curator_job_in_tx(
     now_ms: i64,
 ) -> rusqlite::Result<CuratorJob> {
     producer.validate().map_err(refuse)?;
+    input.reject_secrets()?;
     let input_json = input.encode().map_err(refuse)?;
     let job = load_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
@@ -725,7 +748,12 @@ pub fn freeze_selection_in_tx(
     }
     let mut normalized = Vec::with_capacity(page.references.len());
     for inputs in &page.references {
-        normalized.push(inputs.clone().normalized().map_err(refuse)?);
+        let inputs = inputs.clone().normalized().map_err(refuse)?;
+        inputs.reject_secrets()?;
+        normalized.push(inputs);
+    }
+    if let Some(cursor) = &page.next_cursor {
+        reject_secret(cursor)?;
     }
     let page = FrozenSelectionPage {
         references: normalized,
@@ -937,8 +965,9 @@ impl MemoryStore {
         }
         self.inner.with_conn_fenced(|conn| {
             conn.execute(
-                "INSERT OR IGNORE INTO curator_store_identity (id, database_incarnation_id, created_at_ms)
-                 VALUES (0, lower(hex(randomblob(16))), ?1)",
+                "INSERT INTO curator_store_identity (id, database_incarnation_id, created_at_ms)
+                 SELECT 0, lower(hex(randomblob(16))), ?1
+                 WHERE NOT EXISTS (SELECT 1 FROM curator_store_identity WHERE id = 0)",
                 [now_ms],
             )?;
             Ok(())
@@ -1111,6 +1140,7 @@ impl MemoryStore {
         )
     }
 
+    /// Standalone terminal transition for `Expired` and `FailedSlot`, which move no cursor. `Enqueued` is refused here: the slot's cursor advance must commit with the transition, which only [`complete_frozen_selection_in_tx`] inside the caller's transaction can do.
     pub fn complete_frozen_selection(
         &self,
         project: &str,
@@ -1119,6 +1149,9 @@ impl MemoryStore {
         state: FrozenSelectionState,
         now_ms: i64,
     ) -> Result<FrozenSelection, CuratorJobError> {
+        if state == FrozenSelectionState::Enqueued {
+            return Err(CuratorJobRefusal::InvalidRequest.into());
+        }
         self.curator_transaction(
             project,
             "complete-selection",
@@ -1190,6 +1223,9 @@ impl MemoryStore {
                 let host_bytes = metadata_bytes(conn, None)?;
                 Ok(CuratorHeadroom {
                     pending_jobs: pending_jobs(conn, Some(project))?,
+                    host_pending_jobs: pending_jobs(conn, None)?,
+                    frozen_pages: frozen_pages(conn, Some(project))?,
+                    host_frozen_pages: frozen_pages(conn, None)?,
                     project_metadata_bytes: project_bytes,
                     host_metadata_bytes: host_bytes,
                     project_metadata_remaining: MAX_CURATOR_METADATA_BYTES_PER_PROJECT

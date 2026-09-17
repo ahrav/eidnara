@@ -11,13 +11,16 @@ use memory_store::curator_jobs::{
     MAX_CURATOR_METADATA_BYTES_PER_PROJECT, MAX_FROZEN_PAGE_BYTES, MAX_FROZEN_SELECTIONS_PER_HOST,
     MAX_PENDING_CURATOR_JOBS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_PROJECT, MAX_REQUIRED_EVIDENCE,
     MAX_SELECTION_REFERENCES, ProducerBinding, ReserveOutcome, ReviewTarget,
-    activate_curator_job_in_tx, freeze_selection_in_tx, reserve_curator_job_in_tx,
+    activate_curator_job_in_tx, complete_frozen_selection_in_tx, freeze_selection_in_tx,
+    reserve_curator_job_in_tx,
 };
 use memory_store::{MemoryStore, MemoryStoreError};
 use storage::StorageDescriptor;
 
 const NOW: i64 = 1_700_000_000_000;
 const AWS_KEY: &str = "AKIAQ7RSTUVWXYZ23456";
+/// A keyed-JSON credential the scanner recognizes only in its raw form; serializing it inside another JSON document escapes the quotes it keys on.
+const KEYED_SECRET: &str = r#"{"clientSecret":"hunter-two"}"#;
 
 fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
     MemoryStore::test_descriptor(dir, "eidnara-curator-jobs-test")
@@ -83,6 +86,17 @@ fn incarnation_survives_reopen_and_changes_on_replacement() {
     };
     assert_eq!(first.len(), 32);
     let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    assert_eq!(store.curator_store_incarnation().unwrap(), first);
+    // REPLACE runs as delete-then-insert, and the connection does not enable recursive triggers, so the delete guard alone would not fire.
+    let replaced: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO curator_store_identity (id, database_incarnation_id, created_at_ms)
+             VALUES (0, ?1, 1)",
+            ["ab".repeat(16)],
+        )
+        .map(drop)
+    });
+    assert!(replaced.is_err(), "the incarnation row cannot be replaced");
     assert_eq!(store.curator_store_incarnation().unwrap(), first);
     drop(store);
     std::fs::remove_file(dir.path().join("memory.sqlite")).unwrap();
@@ -619,6 +633,12 @@ fn capacity_counts_reserved_and_ready_and_refusal_writes_nothing() {
         ),
         CuratorJobRefusal::HostCapacity
     );
+    let host_full = store.curator_headroom("proj-host").unwrap();
+    assert_eq!(host_full.pending_jobs, 0);
+    assert_eq!(
+        host_full.host_pending_jobs, MAX_PENDING_CURATOR_JOBS_PER_HOST,
+        "headroom reports the host bound that refuses an otherwise empty project"
+    );
 }
 
 #[test]
@@ -860,14 +880,33 @@ fn frozen_pages_are_bounded_retained_under_deferral_and_enqueued_once() {
             .state,
         FrozenSelectionState::Frozen
     );
+    // An enqueue must commit with the slot's cursor advance, so only the composable primitive accepts it.
+    assert_eq!(
+        refusal(
+            store
+                .complete_frozen_selection(
+                    "proj",
+                    "slot-1",
+                    "attempt-1",
+                    FrozenSelectionState::Enqueued,
+                    NOW + 10
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::InvalidRequest,
+        "the standalone wrapper cannot enqueue: the cursor would commit without the slot"
+    );
     let enqueued = store
-        .complete_frozen_selection(
-            "proj",
-            "slot-1",
-            "attempt-1",
-            FrozenSelectionState::Enqueued,
-            NOW + 10,
-        )
+        .with_fenced_conn_for_test(|conn| {
+            complete_frozen_selection_in_tx(
+                conn,
+                "proj",
+                "slot-1",
+                "attempt-1",
+                FrozenSelectionState::Enqueued,
+                NOW + 10,
+            )
+        })
         .unwrap();
     assert_eq!(enqueued.state, FrozenSelectionState::Enqueued);
     assert_eq!(
@@ -938,19 +977,22 @@ fn frozen_pages_are_bounded_retained_under_deferral_and_enqueued_once() {
         CuratorJobRefusal::HostSelectionCapacity
     );
     // An expired page cannot be enqueued late.
-    assert_eq!(
-        refusal(
-            store
-                .complete_frozen_selection(
-                    "proj-1",
-                    "slot-1",
-                    "attempt-1",
-                    FrozenSelectionState::Enqueued,
-                    NOW + CURATOR_QUEUE_LIFETIME_MS
-                )
-                .unwrap_err()
-        ),
-        CuratorJobRefusal::Expired
+    let late: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        complete_frozen_selection_in_tx(
+            conn,
+            "proj-1",
+            "slot-1",
+            "attempt-1",
+            FrozenSelectionState::Enqueued,
+            NOW + CURATOR_QUEUE_LIFETIME_MS,
+        )
+        .map(drop)
+    });
+    assert!(
+        late.unwrap_err()
+            .to_string()
+            .contains("deadline has passed"),
+        "a late enqueue is refused as expired"
     );
     let failed = store
         .complete_frozen_selection(
@@ -1064,6 +1106,43 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
         raw.is_err(),
         "a raw reservation whose producer carries a secret is refused by the trigger"
     );
+    // A keyed-JSON credential inside a serialized column is escaped past the detector, so the primitives scan each raw string before encoding.
+    let mut keyed_input = input("cand-1");
+    keyed_input.starting_references = vec![KEYED_SECRET.to_string()];
+    let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        activate_curator_job_in_tx(
+            conn,
+            "proj",
+            &job.causal_identity,
+            &producer("f1"),
+            &keyed_input,
+            NOW,
+        )
+        .map(drop)
+    });
+    assert!(
+        raw.is_err(),
+        "a raw activation whose reference is a keyed-JSON credential is refused"
+    );
+    let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        reserve_curator_job_in_tx(conn, "proj", &producer("f5"), &inputs(KEYED_SECRET), NOW)
+            .map(drop)
+    });
+    assert!(
+        raw.is_err(),
+        "a raw reservation whose candidate id is a keyed-JSON credential is refused"
+    );
+    let keyed_page = FrozenSelectionPage {
+        references: vec![inputs("cand-7")],
+        next_cursor: Some(KEYED_SECRET.to_string()),
+    };
+    let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        freeze_selection_in_tx(conn, "proj", "slot-7", "attempt-1", &keyed_page, NOW).map(drop)
+    });
+    assert!(
+        raw.is_err(),
+        "a raw freeze whose cursor is a keyed-JSON credential is refused"
+    );
     // Fingerprinted causal fields never reach a column, so the primitive scans them itself.
     let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
         reserve_curator_job_in_tx(conn, "proj", &producer("f4"), &secret_signal, NOW).map(drop)
@@ -1111,7 +1190,11 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
         })
         .unwrap();
     assert_eq!(stored.len(), 1, "only the clean reservation exists");
-    assert!(stored.iter().all(|text| !text.contains(AWS_KEY)));
+    assert!(
+        stored
+            .iter()
+            .all(|text| !text.contains(AWS_KEY) && !text.contains("hunter-two"))
+    );
     assert!(stored[0].contains("cand-1"));
 }
 
@@ -1214,13 +1297,16 @@ fn terminal_pages_drop_their_references_and_keep_a_receipt_charge() {
         "a frozen page holds its allowance and its permanent receipt"
     );
     let enqueued = store
-        .complete_frozen_selection(
-            "proj",
-            "slot-1",
-            "attempt-1",
-            FrozenSelectionState::Enqueued,
-            NOW + 1,
-        )
+        .with_fenced_conn_for_test(|conn| {
+            complete_frozen_selection_in_tx(
+                conn,
+                "proj",
+                "slot-1",
+                "attempt-1",
+                FrozenSelectionState::Enqueued,
+                NOW + 1,
+            )
+        })
         .unwrap();
     assert_eq!(
         enqueued

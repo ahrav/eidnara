@@ -403,6 +403,12 @@ BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 CREATE TRIGGER curator_store_identity_no_delete BEFORE DELETE ON curator_store_identity
 BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 
+-- REPLACE runs as delete-then-insert and skips the delete trigger unless
+-- `recursive_triggers` is on, so a second insert is refused outright.
+CREATE TRIGGER curator_store_identity_no_reinsert BEFORE INSERT ON curator_store_identity
+WHEN EXISTS (SELECT 1 FROM curator_store_identity)
+BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
+
 CREATE TABLE curator_jobs (
             project TEXT NOT NULL CHECK (length(project) > 0),
             causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
