@@ -825,6 +825,21 @@ fn payload_bounds_are_enforced_at_the_boundary() {
     }));
     ok(subject(&"x".repeat(MAX_REVIEW_TEXT_BYTES)));
     refused(subject(&"x".repeat(MAX_REVIEW_TEXT_BYTES + 1)));
+    refused(subject(""));
+    refused(subject(" \t\n"));
+    refused(ReviewPayload::Proposal(Box::new(proposal(
+        ProposalAction::Create,
+        staged_target(),
+        Some(""),
+    ))));
+    refused(ReviewPayload::Proposal(Box::new(proposal(
+        ProposalAction::Revise,
+        memory_target(),
+        Some("  "),
+    ))));
+    let mut blank_limitation = proposal(ProposalAction::Retain, memory_target(), None);
+    blank_limitation.limitations.push(" ".to_string());
+    refused(ReviewPayload::Proposal(Box::new(blank_limitation)));
     let mut reversed = fact("f");
     reversed.span.end = 0;
     reversed.span.start = 1;

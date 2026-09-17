@@ -808,7 +808,7 @@ fn check_digest(value: &str) -> Result<(), ReviewStageRefusal> {
 }
 
 fn check_text(value: &str) -> Result<(), ReviewStageRefusal> {
-    if value.len() > MAX_REVIEW_TEXT_BYTES {
+    if value.trim().is_empty() || value.len() > MAX_REVIEW_TEXT_BYTES {
         return Err(ReviewStageRefusal::Invalid);
     }
     check_secret_free(value)
