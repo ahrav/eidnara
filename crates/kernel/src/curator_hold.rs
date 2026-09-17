@@ -806,7 +806,7 @@ pub struct RunBufferMap {
 }
 
 impl RunBufferMap {
-    /// `capacity` is clamped to [`MAX_RUN_BUFFER_BYTES`].
+    /// `capacity` is clamped to the 16 MiB per-run bound.
     pub fn new(capacity: u64) -> Self {
         Self {
             capacity: capacity.min(MAX_RUN_BUFFER_BYTES),
