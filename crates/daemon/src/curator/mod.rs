@@ -9,6 +9,7 @@ pub mod model_response;
 pub mod project_text;
 pub mod related_memories;
 pub mod settlement;
+pub mod steps;
 
 use broker::RefusalCode;
 
