@@ -16,7 +16,7 @@ impl KernelStore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// The stored byte length of the artifact `handle` names, or `None` when no live evidence row pairs that evidence id with that digest. Reads metadata only, so a caller can bound a read before issuing it.
+    /// The stored byte length of the artifact `handle` names, or `None` when [`Self::read_artifact`] would refuse the reference: no live evidence row pairs that evidence id with that digest, or the digest carries a purge tombstone. Reads metadata only, so a caller can bound a read before issuing it.
     ///
     /// Returns `InvalidInput` for malformed digests and `ReferenceUnavailable` when metadata cannot be read.
     pub fn artifact_byte_length(
@@ -30,8 +30,10 @@ impl KernelStore {
         let reader = self.lock_reader().map_err(|_| unavailable())?;
         let length: Option<i64> = reader
             .query_row(
-                "SELECT byte_length FROM evidence_meta
-                 WHERE evidence_id=?1 AND artifact_digest=?2 AND invalidated_commit_seq IS NULL",
+                "SELECT e.byte_length FROM evidence_meta e
+                 WHERE e.evidence_id=?1 AND e.artifact_digest=?2 AND e.invalidated_commit_seq IS NULL
+                   AND NOT EXISTS(SELECT 1 FROM artifact_purge_tombstones t
+                                  WHERE t.artifact_digest=e.artifact_digest)",
                 [&handle.evidence_id, &handle.digest],
                 |row| row.get(0),
             )

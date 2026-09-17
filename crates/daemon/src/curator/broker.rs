@@ -233,6 +233,20 @@ pub enum RefusalCode {
     Store,
 }
 
+impl RefusalCode {
+    /// Whether the refusal came from a run or batch ceiling rather than from the reference itself. A capacity refusal after a disclosure leaves the evidence set truncated; any other refusal is a fact about one reference and leaves the set intact.
+    pub fn is_capacity(self) -> bool {
+        matches!(
+            self,
+            Self::InspectionLimit
+                | Self::BatchLimit
+                | Self::ByteLimit
+                | Self::BufferLimit
+                | Self::HoldLimit
+        )
+    }
+}
+
 /// A refused read: the requesting alias when one exists, and one bounded code. Repeated probing yields nothing more.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{code} ({})", alias.as_ref().map_or("-", Alias::as_str))]
@@ -564,8 +578,25 @@ impl EvidenceBroker {
             .filter(|first| *first != alias))
     }
 
-    /// Reads one reference for disclosure: resolves the alias, grows the execution hold over the artifact, revalidates the Kernel expectation at `now`, loads the bytes once, renders the requested range, runs the render check, charges the bytes, and records the disclosure. Any refusal happens before bytes are retained or disclosed.
+    /// Reads one reference for disclosure. Any refusal happens before bytes are retained or disclosed; a capacity refusal ([`RefusalCode::is_capacity`]) also records a partial disclosure.
     pub fn read(
+        &mut self,
+        store: &KernelStore,
+        alias: &str,
+        range: Option<Range<u64>>,
+        now_ms: i64,
+    ) -> Result<EvidenceRead, Refusal> {
+        let read = self.read_reference(store, alias, range, now_ms);
+        if read
+            .as_ref()
+            .is_err_and(|refusal| refusal.code.is_capacity())
+        {
+            self.ledger.record_partial_disclosure();
+        }
+        read
+    }
+
+    fn read_reference(
         &mut self,
         store: &KernelStore,
         alias: &str,
@@ -576,11 +607,7 @@ impl EvidenceBroker {
             .aliases
             .resolve(alias)
             .map(|(alias, expectation)| (alias.clone(), expectation.clone()))?;
-        let admitted = self.accounting.admit_operation(Some(&alias));
-        if admitted.is_err() {
-            self.ledger.record_partial_disclosure();
-        }
-        admitted?;
+        self.accounting.admit_operation(Some(&alias))?;
         self.ledger.record_inspection(&alias);
         if range.as_ref().is_some_and(|range| range.end <= range.start) {
             return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
@@ -873,15 +900,9 @@ impl EvidenceBroker {
         Ok(())
     }
 
-    /// Charges rendered bytes before any load; a refusal here also marks the disclosure set partial.
     fn charge(&mut self, alias: &Alias, bytes: usize) -> Result<(), Refusal> {
-        let charged = self
-            .accounting
-            .charge_render(Some(alias), u64::try_from(bytes).unwrap_or(u64::MAX));
-        if charged.is_err() {
-            self.ledger.record_partial_disclosure();
-        }
-        charged
+        self.accounting
+            .charge_render(Some(alias), u64::try_from(bytes).unwrap_or(u64::MAX))
     }
 
     /// Charges the range, loads the artifact once, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret.
@@ -905,7 +926,6 @@ impl EvidenceBroker {
             .load(store, held)
             .map_err(|error| match error {
                 RunBufferRefusal::CapacityExhausted => {
-                    self.ledger.record_partial_disclosure();
                     refuse(Some(alias), RefusalCode::BufferLimit)
                 }
                 RunBufferRefusal::Unreadable | RunBufferRefusal::RangeOutOfBounds => {

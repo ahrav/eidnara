@@ -11,8 +11,8 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::Occurrence;
 use kernel::{
     ArtifactIngestRequest, CURATOR_CAPTURE_RETENTION_CLASS, CommitIntent, CuratorHoldBinding,
-    DecisionPayload, DecisionSpec, Dimension, DomainSpec, KernelStore, ProjectScope,
-    ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity, SourceDescriptorPolicy,
+    DecisionPayload, DecisionSpec, Dimension, DomainSpec, KernelStore, MAX_CURATOR_HOLD_REFERENCES,
+    ProjectScope, ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity, SourceDescriptorPolicy,
     SourceDescriptorRequest,
 };
 use sha2::{Digest, Sha256};
@@ -621,6 +621,44 @@ fn batch_headroom_ends_a_page_without_marking_the_run_partial() {
 }
 
 #[test]
+fn hold_reference_limit_after_a_disclosure_marks_the_run_partial() {
+    let fixture = Fixture::open();
+    seed(&fixture, 4);
+    // A hold one reference short of its ceiling: the first hit's extension fills it, the second is refused as a hold limit.
+    let anchors: Vec<String> = (0..MAX_CURATOR_HOLD_REFERENCES - 1)
+        .map(|index| {
+            fixture
+                .ingest(&format!("anchor-{index:03}"), b"anchor", false)
+                .0
+        })
+        .collect();
+    let mut broker = fixture.broker(PROJECT, &anchors);
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let page = fixture.page(&mut discovery, &mut broker, None).unwrap();
+    assert_eq!(page.completeness, Completeness::CapacityBound);
+    assert_eq!(
+        page.hits.len(),
+        1,
+        "the hit disclosed before the limit is delivered"
+    );
+    assert!(page.next_cursor.is_some());
+    assert_eq!(broker.ledger.disclosed().count(), 1);
+    assert!(
+        !broker.ledger.conclusions_usable(),
+        "a hold limit after a disclosure truncates the evidence set like every other capacity refusal"
+    );
+    // With nothing delivered, the same limit is a refusal, not a page.
+    broker.accounting.end_batch();
+    assert_eq!(
+        fixture
+            .page(&mut discovery, &mut broker, page.next_cursor.as_deref())
+            .unwrap_err()
+            .code,
+        RefusalCode::HoldLimit
+    );
+}
+
+#[test]
 fn probe_bound_and_oversized_artifacts_are_reported_not_scanned() {
     let fixture = Fixture::open();
     let artifact = usize::try_from(MAX_PROBE_ARTIFACT_BYTES).unwrap();
@@ -683,6 +721,28 @@ fn probe_bound_and_oversized_artifacts_are_reported_not_scanned() {
         1,
         "probing retains nothing; the disclosed artifact alone is loaded"
     );
+}
+
+#[test]
+fn an_exhausted_budget_refuses_the_page_without_probing_or_disclosing() {
+    let fixture = Fixture::open();
+    seed(&fixture, 4);
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let budget = EvalBudget::unbounded();
+    budget.cancel();
+    let refusal = discovery
+        .page(&fixture.store, &mut broker, None, &budget, fixture.now)
+        .unwrap_err();
+    assert_eq!(refusal.code, RefusalCode::Store);
+    assert_eq!(broker.accounting.issued_inspections(), 0);
+    assert_eq!(broker.buffers.loaded(), 0);
+    assert!(broker.aliases.is_empty(), "no candidate was disclosed");
+    // The same run continues normally once the caller supplies a live budget.
+    let page = fixture.page(&mut discovery, &mut broker, None).unwrap();
+    assert_eq!(page.completeness, Completeness::Complete);
+    assert_eq!(page.hits.len(), 3);
 }
 
 #[test]

@@ -158,14 +158,16 @@ impl RelatedMemoryDiscovery {
             let revisions = decision_revisions(store, &page.rows)?;
             for row in &page.rows {
                 // Every early return below leaves `cursor` before this row, so the next page examines it again; a row is only passed once it is delivered or skipped.
+                // The store honors the budget only while fetching descriptors; probing and disclosing a candidate run on unbudgeted reads, so the deadline and cancellation are polled here, once per candidate.
+                budget.check().map_err(|_| refusal(RefusalCode::Store))?;
                 let step = match expectation(row, &revisions) {
                     None => Step::Skipped,
                     Some(expectation) => {
                         let room = MAX_PAGE_PROBE_BYTES.saturating_sub(probed);
                         match self.render(store, broker, &expectation, room, now_ms) {
                             Ok(step) => step,
-                            // A run bound reached after this page disclosed something ends the page with what it has; the broker has already recorded the partial disclosure.
-                            Err(refusal) if is_capacity(refusal.code) && !hits.is_empty() => {
+                            // A run bound reached after this page disclosed something ends the page with what it has; the broker's `read` has already recorded the partial disclosure for every capacity code.
+                            Err(refusal) if refusal.code.is_capacity() && !hits.is_empty() => {
                                 Step::Stop(Completeness::CapacityBound)
                             }
                             Err(refusal) => return Err(refusal),
@@ -246,7 +248,7 @@ impl RelatedMemoryDiscovery {
                 return Ok(Step::Skipped);
             }
             Ok(Probed::TooLarge { .. }) => return Ok(Step::Stop(Completeness::ProbeBound)),
-            Err(refusal) if is_capacity(refusal.code) => return Err(refusal),
+            Err(refusal) if refusal.code.is_capacity() => return Err(refusal),
             Err(_) => return Ok(Step::Skipped),
         };
         let probed_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -263,7 +265,7 @@ impl RelatedMemoryDiscovery {
         let span = span.start as u64..span.end as u64;
         let read = match broker.read(store, alias.as_str(), Some(span.clone()), now_ms) {
             Ok(read) => read,
-            Err(refusal) if is_capacity(refusal.code) => return Err(refusal),
+            Err(refusal) if refusal.code.is_capacity() => return Err(refusal),
             Err(_) => return Ok(Step::Skipped),
         };
         let shared_origin = broker.shared_origin(alias.as_str())?.cloned();
@@ -312,7 +314,10 @@ fn decision_revisions(
     store: &KernelStore,
     rows: &[LiveDescriptor],
 ) -> Result<BTreeMap<String, i64>, Refusal> {
-    let decisions: Vec<String> = rows.iter().filter_map(originating_decision).collect();
+    let decisions: Vec<String> = rows
+        .iter()
+        .filter_map(|row| originating_decision(OccurrenceClass::from_code(&row.detail.class)?, row))
+        .collect();
     let (_, states) = store
         .object_states(&decisions)
         .map_err(|_| refusal(RefusalCode::Store))?;
@@ -328,11 +333,12 @@ fn expectation(
     row: &LiveDescriptor,
     revisions: &BTreeMap<String, i64>,
 ) -> Option<ReferenceExpectation> {
-    let decision = originating_decision(row)?;
+    let class = OccurrenceClass::from_code(&row.detail.class)?;
+    let decision = originating_decision(class, row)?;
     let decision_source_revision = *revisions.get(&decision)?;
     Some(ReferenceExpectation::CanonicalSource {
         object_id: row.object_id.clone(),
-        class: OccurrenceClass::from_code(&row.detail.class)?,
+        class,
         source_revision: row.detail.revision.parse().ok()?,
         artifact_digest: row.detail.artifact_digest.clone(),
         evidence_id: row.detail.evidence_id.clone(),
@@ -341,24 +347,14 @@ fn expectation(
     })
 }
 
-/// The decision a descriptor row derives from, when its identity tuple names one.
-fn originating_decision(row: &LiveDescriptor) -> Option<String> {
+/// The decision a descriptor row derives from: the value of the class's leading identity field, which is the decision object id for every class in [`CLASSES`]. Reading the field name from the class keeps discovery in step with the Kernel's identity layout.
+fn originating_decision(class: OccurrenceClass, row: &LiveDescriptor) -> Option<String> {
+    let field = *class.identity_fields().first()?;
     row.detail
         .identity
         .iter()
-        .find(|(field, _)| field == "object_id" || field == "decision_object_id")
+        .find(|(name, _)| name == field)
         .map(|(_, value)| value.clone())
-}
-
-fn is_capacity(code: RefusalCode) -> bool {
-    matches!(
-        code,
-        RefusalCode::InspectionLimit
-            | RefusalCode::BatchLimit
-            | RefusalCode::ByteLimit
-            | RefusalCode::BufferLimit
-            | RefusalCode::HoldLimit
-    )
 }
 
 fn refusal(code: RefusalCode) -> Refusal {
