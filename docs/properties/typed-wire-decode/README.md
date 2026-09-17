@@ -1,11 +1,10 @@
 # Typed wire decode property portfolio
 
-This portfolio is reusable input to the
-[typed wire decode specification](../../specifications/typed-wire-decode.md).
-It catalogs obligations for the
-[settled plan](../../plans/2026-09-13-0104-perf-typed-wire-decode-plan.md),
-not evidence that its replacement has passed them. No implementation tickets,
-source changes, benchmarks, or implementation tests are part of this work.
+This portfolio catalogs obligations from the
+[typed wire decode specification](https://github.com/ahrav/eidnara/issues/556).
+The specification lives in the issue tracker; no local copy is maintained.
+Catalog records are claims under test, not evidence that an implementation
+has passed them.
 
 ## Publication receipt
 
@@ -17,8 +16,7 @@ Read-back verification confirms the exact 37,630-byte body and SHA-256
 the approved title, and work-item marker
 `typed-wire-decode-83443140-3a3e-4e03-a486-ce46b1405d3f`.
 No labels, assignees, milestone, or comments were added. No implementation
-tickets were created. The local specification is an exact copy of the
-published body. Open implementation questions remain open.
+tickets were created. Open implementation questions remain open.
 
 ## Scope and evidence
 

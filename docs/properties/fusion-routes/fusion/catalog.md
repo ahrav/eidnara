@@ -114,8 +114,7 @@ Type: safety
 Reachability: test-only - `SelectionDigest::derive`, `PreparationDigest::derive`,
 and `SelectedSpan::new` have no caller outside
 `crates/retrieval/tests/identity.rs` (same grep as the record above); the
-prepare route that would derive them is RP2.7.U4 work
-(`docs/fusion-identity-contract.md:6-7`).
+prepare route that would derive them is RP2.7.U4 work.
 Status: active
 Exercised: yes - `crates/retrieval/tests/identity.rs`
 `selection_digest_tracks_order_and_membership`,
