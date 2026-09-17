@@ -12,7 +12,7 @@ use context_core::redaction::{
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDestination, ArtifactEligibility, ArtifactHandle, CURATOR_CAPTURE_RETENTION_CLASS,
-    CuratorHoldBinding, CuratorHoldError, CuratorHoldKind, EligibilityCandidate,
+    CuratorHoldBinding, CuratorHoldError, CuratorHoldKind, DecisionRow, EligibilityCandidate,
     EligibilityVerdict, HeldEvidence, KernelError, KernelStore, MAX_RUN_BUFFER_BYTES,
     OPERATOR_REDACTION_PLACEHOLDER, ProjectScope, ReviewBinding, ReviewOwner, ReviewPayload,
     ReviewReadError, ReviewStagedReference, RunBufferMap, RunBufferRefusal, SOURCE_DESCRIPTOR_KIND,
@@ -685,8 +685,7 @@ impl EvidenceBroker {
                 }
                 let mut held =
                     self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
-                if held.artifact_digest != *artifact_digest
-                    || held.byte_length != *byte_length
+                if held.byte_length != *byte_length
                     || held.retention_class != CURATOR_CAPTURE_RETENTION_CLASS
                     || held.retain_until != Some(*retain_until)
                 {
@@ -723,7 +722,8 @@ impl EvidenceBroker {
                     artifact_digest,
                     None,
                 )?;
-                let detail = self.descriptor(store, &alias, object_id, judged.tip)?;
+                let (detail, descriptor_class) =
+                    self.descriptor(store, &alias, object_id, judged.tip)?;
                 if detail.class != class.code()
                     || detail.occurrence_tuple != *occurrence_tuple
                     || detail.artifact_digest != *artifact_digest
@@ -750,7 +750,7 @@ impl EvidenceBroker {
                 (
                     bytes,
                     Some(judged),
-                    held.sensitivity,
+                    held.sensitivity.restrictive(descriptor_class),
                     expectation.policy_member(None),
                     native_origin_key(*class, &detail.identity),
                 )
@@ -776,7 +776,10 @@ impl EvidenceBroker {
                     artifact_digest,
                     Some((originating_decision_id, *decision_source_revision)),
                 )?;
-                let detail = self.descriptor(store, &alias, object_id, judged.tip)?;
+                let (detail, descriptor_class) =
+                    self.descriptor(store, &alias, object_id, judged.tip)?;
+                // Eligibility judges any served object; the owner must also be a decision row at that snapshot, or nothing exists whose retraction could revoke this form.
+                let decision = self.decision(store, &alias, originating_decision_id, judged.tip)?;
                 let decision_in_tuple = detail
                     .identity
                     .iter()
@@ -807,7 +810,9 @@ impl EvidenceBroker {
                 (
                     bytes,
                     Some(judged),
-                    held.sensitivity,
+                    held.sensitivity
+                        .restrictive(descriptor_class)
+                        .restrictive(decision.sensitivity),
                     expectation.policy_member(Some(*decision_source_revision)),
                     format!("decision:{originating_decision_id}"),
                 )
@@ -838,7 +843,7 @@ impl EvidenceBroker {
         })
     }
 
-    /// Checks the destination verdict on the expected digest, grows the execution hold over the artifact, and returns the held facts. The verdict comes first so a policy-blocked artifact is never pinned or charged against the hold's backing; an artifact already extended in this run skips the writer transaction and is still validated against the live hold.
+    /// Checks the destination verdict on the expected digest, grows the execution hold over the artifact, and returns the held facts, which must carry that digest. The verdict comes first so a policy-blocked artifact is never pinned or charged against the hold's backing; an artifact already extended in this run skips the writer transaction and is still validated against the live hold.
     fn hold_evidence(
         &mut self,
         store: &KernelStore,
@@ -874,8 +879,14 @@ impl EvidenceBroker {
                 now_ms,
             )
             .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
-        held.pop()
-            .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))
+        let held = held
+            .pop()
+            .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
+        // The verdict above was on the expected digest; the evidence must actually carry it.
+        if held.artifact_digest != artifact_digest {
+            return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
+        }
+        Ok(held)
     }
 
     /// The Kernel's egress verdict folds every live reference to the digest for this destination; default-Sensitive policy means unproven evidence never reaches a remote model.
@@ -947,16 +958,7 @@ impl EvidenceBroker {
             if let Some(hook) = self.after_load_for_test.as_mut() {
                 hook(store);
             }
-            // The verdict before the hold grew and the disk read are separate snapshots; a classification tightened between them must not reach the model through this load.
-            self.egress_allowed(
-                store,
-                alias,
-                &ArtifactHandle {
-                    digest: held.artifact_digest.clone(),
-                    evidence_id: held.evidence_id.clone(),
-                },
-            )?;
-            // Likewise the hold and the evidence facts: a run whose cutoff passed during the read does not disclose what it loaded, a capture whose acquisition reference lapsed meanwhile is refused, and the class reported with the bytes is the one they carry now.
+            // The verdicts before the hold grew and the disk read are separate snapshots. The hold and evidence facts are re-read first: a run whose cutoff passed during the read does not disclose what it loaded, a capture whose acquisition reference lapsed meanwhile is refused, and the class reported with the bytes is the one they carry now. The egress verdict is re-read last, so a classification tightened at any point before it is the one that decides.
             let now_ms = now_ms.max(crate::now_ms());
             *held = store
                 .validate_held_evidence(
@@ -969,9 +971,20 @@ impl EvidenceBroker {
                 .map_err(|error| refuse(Some(alias), hold_refusal(error)))?
                 .pop()
                 .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
-            if held.retain_until.is_some_and(|until| until <= now_ms) {
+            // Only a Curator capture's `retain_until` is an acquisition deadline; on other classes it is a GC retention floor the hold overrides.
+            if held.retention_class == CURATOR_CAPTURE_RETENTION_CLASS
+                && held.retain_until.is_some_and(|until| until <= now_ms)
+            {
                 return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
             }
+            self.egress_allowed(
+                store,
+                alias,
+                &ArtifactHandle {
+                    digest: held.artifact_digest.clone(),
+                    evidence_id: held.evidence_id.clone(),
+                },
+            )?;
         }
         if loaded || !self.checked_artifacts.contains(&held.artifact_digest) {
             let whole = self
@@ -1054,14 +1067,14 @@ impl EvidenceBroker {
         })
     }
 
-    /// The descriptor observation of `object_id` at `tip`; a missing row, another observation kind, an undecodable detail, or a stored identity that does not re-encode to itself refuses.
+    /// The descriptor observation of `object_id` at `tip` and the row's own class; a missing row, another observation kind, an undecodable detail, a stored identity that does not re-encode to itself, or a detail citing evidence other than the row's refuses.
     fn descriptor(
         &self,
         store: &KernelStore,
         alias: &Alias,
         object_id: &str,
         tip: i64,
-    ) -> Result<SourceDescriptorDetail, Refusal> {
+    ) -> Result<(SourceDescriptorDetail, Sensitivity), Refusal> {
         let row = store
             .observation_for_object_as_of(object_id, tip)
             .map_err(|_| refuse(Some(alias), RefusalCode::Store))?
@@ -1072,9 +1085,31 @@ impl EvidenceBroker {
             .as_deref()
             .and_then(|detail| serde_json::from_str::<SourceDescriptorDetail>(detail).ok())
             .filter(|detail| detail.descriptor_version == kernel::SOURCE_DESCRIPTOR_DETAIL_VERSION)
-            // The span and tuple are trusted only after the Kernel's own consistency test; a row that does not re-encode to itself is corruption, not a descriptor.
-            .filter(|detail| detail.is_consistent_with(object_id))
+            // The span and tuple are trusted only after the Kernel's own consistency test, and the detail must cite the evidence the row cites; anything else is corruption, not a descriptor.
+            .filter(|detail| {
+                detail.is_consistent_with(object_id)
+                    && row.evidence_id.as_deref() == Some(detail.evidence_id.as_str())
+            })
+            .map(|detail| (detail, row.sensitivity))
             .ok_or_else(|| refuse(Some(alias), RefusalCode::ExpectationChanged))
+    }
+
+    /// The live decision row whose object is `object_id` at `tip`; a served object that is not a decision refuses.
+    fn decision(
+        &self,
+        store: &KernelStore,
+        alias: &Alias,
+        object_id: &str,
+        tip: i64,
+    ) -> Result<DecisionRow, Refusal> {
+        let mut rows = store
+            .decisions_for_objects_as_of(std::slice::from_ref(&object_id.to_string()), tip)
+            .map_err(|_| refuse(Some(alias), RefusalCode::Store))?;
+        rows.retain(|row| row.object_id == object_id);
+        match (rows.pop(), rows.is_empty()) {
+            (Some(row), true) => Ok(row),
+            _ => Err(refuse(Some(alias), RefusalCode::ExpectationChanged)),
+        }
     }
 }
 

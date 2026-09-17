@@ -1760,3 +1760,202 @@ fn a_descriptor_whose_stored_identity_does_not_reencode_is_refused() {
     );
     assert!(broker.ledger.disclosed().next().is_none());
 }
+
+const NATIVE_IDENTITY: [(&str, &str); 5] = [
+    ("project_id", "proj-a"),
+    ("harness", "opencode"),
+    ("session_id", "sess-01"),
+    ("message_id", "msg-001"),
+    ("block_index", "0"),
+];
+
+/// Rewrites the stored detail of `object_id` in place, keeping the encoded identity as published.
+fn corrupt_detail(fixture: &Fixture, object_id: &str, edit: impl FnOnce(&mut serde_json::Value)) {
+    let connection =
+        rusqlite::Connection::open(fixture.directory.path().join("kernel.sqlite")).unwrap();
+    let payload: Vec<u8> = connection
+        .query_row(
+            "SELECT observation_payload FROM observations WHERE object_id=?1",
+            [object_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut stored: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let mut detail: serde_json::Value =
+        serde_json::from_str(stored["detail"].as_str().unwrap()).unwrap();
+    edit(&mut detail);
+    stored["detail"] = serde_json::Value::String(detail.to_string());
+    connection
+        .execute(
+            "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
+            rusqlite::params![stored.to_string().into_bytes(), object_id],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_descriptor_detail_naming_another_evidence_row_is_refused() {
+    let fixture = Fixture::open();
+    let native_text = "a native message";
+    let native_evidence = fixture.ingest("native", native_text.as_bytes(), false);
+    let other_evidence = fixture.ingest("other", b"an unrelated artifact", false);
+    let (object, tuple) = fixture.descriptor(Publish {
+        key: "native",
+        class: "messages",
+        representation: "text",
+        identity: &NATIVE_IDENTITY,
+        evidence: &native_evidence,
+        buffer: native_text,
+        span: None,
+    });
+    // The identity still re-encodes; only the evidence linkage was redirected at another live artifact.
+    corrupt_detail(&fixture, &object, |detail| {
+        detail["evidence_id"] = serde_json::Value::String(other_evidence.0.clone());
+        detail["artifact_digest"] = serde_json::Value::String(other_evidence.1.clone());
+    });
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&native_evidence.0));
+    let alias = broker.aliases.issue(ReferenceExpectation::NativeSource {
+        object_id: object,
+        class: OccurrenceClass::Messages,
+        source_revision: 1,
+        artifact_digest: other_evidence.1,
+        evidence_id: other_evidence.0,
+        occurrence_tuple: tuple,
+    });
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::ExpectationChanged,
+        "the detail must cite the evidence the observation row cites"
+    );
+    assert!(broker.ledger.disclosed().next().is_none());
+}
+
+#[test]
+fn a_canonical_owner_must_be_a_live_decision() {
+    let fixture = Fixture::open();
+    // A live, scoped, admitted observation: served like a decision on the search surface, but nothing about it is a decision.
+    let owner = "note-object";
+    fixture
+        .store
+        .commit(intent("note"), |envelope| {
+            envelope.insert_observation(kernel::ObservationSpec {
+                observation_id: "note".to_string(),
+                object_id: owner.to_string(),
+                domain_id: DOMAIN.to_string(),
+                proposition_id: None,
+                scope_id: Some(SCOPE.to_string()),
+                anchor_id: None,
+                evidence_id: None,
+                observation_kind: "note".to_string(),
+                payload: kernel::ObservationPayload {
+                    summary: "a note".to_string(),
+                    classification: "note".to_string(),
+                    detail: None,
+                },
+                observed_at: 1,
+                dependencies: Vec::new(),
+                source_kind: "assistant".to_string(),
+                source_id: "note-lineage".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            envelope.record_admission(kernel::AdmissionRequest {
+                candidate_id: None,
+                subject_object_id: Some(owner.to_string()),
+                source_class: Some(kernel::SourceClass::ExplicitUser),
+                taint_class: Some(kernel::TaintClass::UserExplicit),
+                event: kernel::AdmissionEvent {
+                    kind: kernel::EventKind::Other,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: None,
+                    reason: "test".to_string(),
+                },
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let claim_text = "a claim whose owner is not a decision";
+    let claim_evidence = fixture.ingest("claim", claim_text.as_bytes(), false);
+    let (claim_object, _) = fixture.descriptor(Publish {
+        key: "claim",
+        class: "canonical_claims",
+        representation: "decision_summary",
+        identity: &[("object_id", owner)],
+        evidence: &claim_evidence,
+        buffer: claim_text,
+        span: None,
+    });
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&claim_evidence.0));
+    let alias = broker.aliases.issue(ReferenceExpectation::CanonicalSource {
+        object_id: claim_object,
+        class: OccurrenceClass::CanonicalClaims,
+        source_revision: 1,
+        artifact_digest: claim_evidence.1,
+        evidence_id: claim_evidence.0,
+        originating_decision_id: owner.to_string(),
+        decision_source_revision: 1,
+    });
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::ExpectationChanged,
+        "a canonical form resolves only through a decision row"
+    );
+    assert!(broker.ledger.disclosed().next().is_none());
+}
+
+#[test]
+fn an_elapsed_retention_floor_does_not_expire_non_capture_evidence() {
+    let fixture = Fixture::open();
+    let native_text = "a native message";
+    let handle = fixture
+        .store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent("floor"),
+            payload: native_text.as_bytes().to_vec(),
+            evidence_id: "evidence-floor".to_string(),
+            object_id: "evidence-object-floor".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: "conversation".to_string(),
+            source_id: "src/floor".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            // A GC retention floor already in the past; the hold, not this field, decides whether the bytes are readable.
+            retain_until: Some(fixture.now - HOUR_MS),
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap();
+    let evidence = (handle.evidence_id, handle.digest);
+    let (object, tuple) = fixture.descriptor(Publish {
+        key: "floor",
+        class: "messages",
+        representation: "text",
+        identity: &NATIVE_IDENTITY,
+        evidence: &evidence,
+        buffer: native_text,
+        span: None,
+    });
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&evidence.0));
+    let alias = broker.aliases.issue(ReferenceExpectation::NativeSource {
+        object_id: object,
+        class: OccurrenceClass::Messages,
+        source_revision: 1,
+        artifact_digest: evidence.1,
+        evidence_id: evidence.0,
+        occurrence_tuple: tuple,
+    });
+    let read = broker
+        .read(&fixture.store, alias.as_str(), None, fixture.now)
+        .unwrap();
+    assert_eq!(read.buffer.bytes, native_text.as_bytes());
+}
