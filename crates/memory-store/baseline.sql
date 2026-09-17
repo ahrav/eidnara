@@ -397,6 +397,12 @@ CREATE TABLE curator_store_identity (
             created_at_ms INTEGER NOT NULL
         );
 
+CREATE TRIGGER curator_store_identity_no_update BEFORE UPDATE ON curator_store_identity
+BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
+
+CREATE TRIGGER curator_store_identity_no_delete BEFORE DELETE ON curator_store_identity
+BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
+
 CREATE TABLE curator_jobs (
             project TEXT NOT NULL CHECK (length(project) > 0),
             causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
@@ -422,6 +428,23 @@ CREATE TABLE curator_jobs (
 CREATE INDEX idx_curator_jobs_pending
             ON curator_jobs(project, state, queue_deadline_ms);
 
+CREATE INDEX idx_curator_jobs_state
+            ON curator_jobs(state, queue_deadline_ms);
+
+-- Caller text in a job row is identity: a detected secret refuses the row at every
+-- entry point, including transaction-local composition, instead of being redacted.
+CREATE TRIGGER curator_jobs_reject_secret_insert BEFORE INSERT ON curator_jobs
+BEGIN
+    SELECT reject_transaction_text(NEW.firing_id),
+           reject_transaction_text(NEW.target_json),
+           reject_transaction_text(COALESCE(NEW.input_json, ''));
+END;
+
+CREATE TRIGGER curator_jobs_reject_secret_update BEFORE UPDATE OF input_json ON curator_jobs
+BEGIN
+    SELECT reject_transaction_text(COALESCE(NEW.input_json, ''));
+END;
+
 -- One frozen Memory Classifier selection page per project, retained until its
 -- selection deadline. `state` moves frozen -> enqueued | expired | failed_slot; only
 -- `frozen` counts against capacity, and a capacity deferral leaves it frozen. The page keeps its references and the
@@ -442,6 +465,10 @@ CREATE TABLE curator_frozen_selections (
 
 CREATE INDEX idx_curator_frozen_selections_state
             ON curator_frozen_selections(project, state, selection_deadline_ms);
+
+CREATE TRIGGER curator_frozen_selections_reject_secret_insert
+BEFORE INSERT ON curator_frozen_selections
+BEGIN SELECT reject_transaction_text(NEW.page_json); END;
 
 CREATE TABLE transform_session_roots (
             session_id  TEXT NOT NULL,

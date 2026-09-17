@@ -2,15 +2,17 @@
 
 use std::collections::BTreeMap;
 
-use memory_store::MemoryStore;
+use context_core::redaction::RedactionErrorKind;
 use memory_store::curator_jobs::{
     CURATOR_JOB_ALLOWANCE_BYTES, CURATOR_QUEUE_LIFETIME_MS, CURATOR_RECEIPT_CHARGE_BYTES,
     CausalInputs, CuratorJobError, CuratorJobInput, CuratorJobOutcome, CuratorJobRefusal,
     CuratorJobState, EvidenceAvailability, FROZEN_SELECTION_ALLOWANCE_BYTES, FrozenSelectionPage,
-    FrozenSelectionState, MAX_FROZEN_SELECTIONS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_HOST,
-    MAX_PENDING_CURATOR_JOBS_PER_PROJECT, MAX_SELECTION_REFERENCES, ProducerBinding,
-    ReserveOutcome, ReviewTarget, activate_curator_job_in_tx, reserve_curator_job_in_tx,
+    FrozenSelectionState, MAX_CURATOR_METADATA_BYTES_PER_PROJECT, MAX_FROZEN_SELECTIONS_PER_HOST,
+    MAX_PENDING_CURATOR_JOBS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_PROJECT,
+    MAX_SELECTION_REFERENCES, ProducerBinding, ReserveOutcome, ReviewTarget,
+    activate_curator_job_in_tx, reserve_curator_job_in_tx,
 };
+use memory_store::{MemoryStore, MemoryStoreError};
 use storage::StorageDescriptor;
 
 const NOW: i64 = 1_700_000_000_000;
@@ -187,6 +189,161 @@ fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job(
             .state,
         CuratorJobState::Terminal(CuratorJobOutcome::Abstained)
     );
+    // Evidence that becomes available at the unchanged target is a causal change; conflicting availability for one id is a producer error.
+    let mut flipped = inputs("cand-1");
+    flipped.required_evidence[0].available = false;
+    let unavailable = reserved(
+        store
+            .reserve_curator_job("proj", &producer("f7"), &flipped, NOW + 70)
+            .unwrap(),
+    );
+    assert_ne!(unavailable.causal_identity, job.causal_identity);
+    let mut conflicting = inputs("cand-1");
+    conflicting.required_evidence.push(EvidenceAvailability {
+        evidence_id: "ev-1".to_string(),
+        available: false,
+    });
+    assert_eq!(
+        refusal(
+            store
+                .reserve_curator_job("proj", &producer("f8"), &conflicting, NOW + 80)
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::InvalidRequest
+    );
+}
+
+#[test]
+fn a_memory_target_reserves_and_activates_with_the_memory_as_subject() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let memory = ReviewTarget::Memory {
+        object_id: "mem-7".to_string(),
+        source_revision: 3,
+    };
+    let mut causal = inputs("unused");
+    causal.target = memory.clone();
+    let job = reserved(
+        store
+            .reserve_curator_job("proj", &producer("f1"), &causal, NOW)
+            .unwrap(),
+    );
+    let mut memory_input = input("unused");
+    memory_input.subject = memory;
+    let ready = store
+        .activate_curator_job(
+            "proj",
+            &job.causal_identity,
+            &producer("f1"),
+            &memory_input,
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(ready.state, CuratorJobState::Ready(memory_input));
+}
+
+#[test]
+fn metadata_quota_exhaustion_refuses_new_work_and_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let job = reserved(
+        store
+            .reserve_curator_job("proj", &producer("f1"), &inputs("cand-1"), NOW)
+            .unwrap(),
+    );
+    // A receipt charge near the project quota stands in for a long history of admitted work.
+    let near_quota = i64::try_from(
+        MAX_CURATOR_METADATA_BYTES_PER_PROJECT
+            - CURATOR_JOB_ALLOWANCE_BYTES
+            - CURATOR_RECEIPT_CHARGE_BYTES,
+    )
+    .unwrap();
+    store
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "UPDATE curator_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
+                rusqlite::params![near_quota, job.causal_identity],
+            )
+        })
+        .unwrap();
+    let headroom = store.curator_headroom("proj").unwrap();
+    assert_eq!(
+        headroom.project_metadata_remaining,
+        CURATOR_RECEIPT_CHARGE_BYTES
+    );
+    assert_eq!(
+        refusal(
+            store
+                .reserve_curator_job("proj", &producer("f2"), &inputs("cand-2"), NOW)
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::MetadataQuota
+    );
+    assert_eq!(
+        refusal(
+            store
+                .freeze_selection(
+                    "proj",
+                    "slot-1",
+                    "attempt-1",
+                    &FrozenSelectionPage {
+                        references: vec![inputs("cand-3")],
+                        next_cursor: None,
+                    },
+                    NOW
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::MetadataQuota
+    );
+    assert_eq!(store.curator_headroom("proj").unwrap(), headroom);
+    let rows: (i64, i64) = store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM curator_jobs), (SELECT COUNT(*) FROM curator_frozen_selections)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(rows, (1, 0));
+    // Finishing the existing job releases only its allowance; the receipt stays and the quota stays exhausted.
+    store
+        .finish_curator_job(
+            "proj",
+            &job.causal_identity,
+            CuratorJobOutcome::Failed,
+            NOW + 1,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .curator_headroom("proj")
+            .unwrap()
+            .project_metadata_remaining,
+        CURATOR_RECEIPT_CHARGE_BYTES + CURATOR_JOB_ALLOWANCE_BYTES
+    );
+    // Exactly the released allowance admits one more job; the receipt it leaves behind exhausts the quota for good.
+    reserved(
+        store
+            .reserve_curator_job("proj", &producer("f2"), &inputs("cand-2"), NOW)
+            .unwrap(),
+    );
+    assert_eq!(
+        store
+            .curator_headroom("proj")
+            .unwrap()
+            .project_metadata_remaining,
+        0
+    );
+    assert_eq!(
+        refusal(
+            store
+                .reserve_curator_job("proj", &producer("f3"), &inputs("cand-3"), NOW)
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::MetadataQuota
+    );
 }
 
 #[test]
@@ -254,10 +411,6 @@ fn activation_requires_the_reservation_and_takes_no_second_slot() {
         ),
         CuratorJobRefusal::InvalidRequest
     );
-    let mut oversized = input("cand-1");
-    oversized.starting_references = vec!["m".repeat(200); 8];
-    oversized.question_template = "q".repeat(256);
-    let _ = oversized;
     let ready = store
         .activate_curator_job(
             "proj",
@@ -479,7 +632,43 @@ fn expiry_records_terminal_outcomes_without_resurrection_and_receipts_survive_re
 
     let deadline = NOW + CURATOR_QUEUE_LIFETIME_MS;
     assert_eq!(store.expire_curator_work(deadline - 1).unwrap(), (0, 0));
+    // A producer that activates after the deadline but before the sweep is refused without a state change.
+    assert_eq!(
+        refusal(
+            store
+                .activate_curator_job(
+                    "proj",
+                    &reserved_job.causal_identity,
+                    &producer("f1"),
+                    &input("cand-1"),
+                    deadline
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::Expired
+    );
+    assert_eq!(
+        store
+            .lookup_curator_job("proj", &reserved_job.causal_identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        CuratorJobState::Reserved
+    );
     assert_eq!(store.expire_curator_work(deadline).unwrap(), (2, 1));
+    let ready_input: Option<String> = store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT input_json FROM curator_jobs WHERE causal_identity = ?1",
+                [ready_job.causal_identity.as_str()],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        ready_input, None,
+        "a terminal receipt drops its input and stays compact"
+    );
     for identity in [&reserved_job.causal_identity, &ready_job.causal_identity] {
         assert_eq!(
             store
@@ -639,6 +828,15 @@ fn frozen_pages_are_bounded_retained_under_deferral_and_enqueued_once() {
         ),
         CuratorJobRefusal::InvalidRequest
     );
+    assert_eq!(
+        refusal(
+            store
+                .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW + 12)
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::Terminal,
+        "a page that left the frozen state is not re-frozen under its attempt identity"
+    );
     // Once enqueued the project may freeze again; the host bound spans projects.
     store
         .freeze_selection("proj", "slot-1", "attempt-2", &page, NOW + 12)
@@ -688,33 +886,74 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
             .reserve_curator_job("proj", &producer("f1"), &inputs("cand-1"), NOW)
             .unwrap(),
     );
+    let secret_detected = |error: CuratorJobError| {
+        assert!(
+            matches!(
+                error,
+                CuratorJobError::Store(MemoryStoreError::Redaction(
+                    RedactionErrorKind::SecretDetected
+                ))
+            ),
+            "expected a secret refusal, got {error:?}"
+        );
+    };
     // A firing id carrying a secret is refused rather than redacted, and no row is written.
-    let secret_firing = producer(&format!("firing-{AWS_KEY}"));
-    assert!(matches!(
+    secret_detected(
         store
-            .reserve_curator_job("proj", &secret_firing, &inputs("cand-2"), NOW)
+            .reserve_curator_job(
+                "proj",
+                &producer(&format!("firing-{AWS_KEY}")),
+                &inputs("cand-2"),
+                NOW,
+            )
             .unwrap_err(),
-        CuratorJobError::Store(_)
-    ));
-    assert!(
+    );
+    let mut secret_signal = inputs("cand-3");
+    secret_signal.signals.push(format!("signal-{AWS_KEY}"));
+    secret_detected(
         store
-            .lookup_curator_job("proj", &inputs("cand-2").causal_identity().unwrap())
-            .unwrap()
-            .is_none()
+            .reserve_curator_job("proj", &producer("f2"), &secret_signal, NOW)
+            .unwrap_err(),
     );
     // Reference-only input: a starting reference carrying a secret is refused, and the row stays reserved.
     let mut secret_input = input("cand-1");
     secret_input.starting_references = vec![format!("ref-{AWS_KEY}")];
-    assert!(
+    secret_detected(
         store
             .activate_curator_job(
                 "proj",
                 &job.causal_identity,
                 &producer("f1"),
                 &secret_input,
-                NOW
+                NOW,
             )
-            .is_err()
+            .unwrap_err(),
+    );
+    let mut secret_page = FrozenSelectionPage {
+        references: vec![inputs("cand-4")],
+        next_cursor: None,
+    };
+    secret_page.references[0].required_evidence[0].evidence_id = format!("ev-{AWS_KEY}");
+    secret_detected(
+        store
+            .freeze_selection("proj", "slot-1", "attempt-1", &secret_page, NOW)
+            .unwrap_err(),
+    );
+    // The transaction-local primitive is guarded by the same rule through the table triggers.
+    let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        activate_curator_job_in_tx(
+            conn,
+            "proj",
+            &job.causal_identity,
+            &producer("f1"),
+            &secret_input,
+            NOW,
+        )
+        .map(drop)
+    });
+    assert!(
+        raw.is_err(),
+        "a raw insert of secret text is refused by the trigger"
     );
     assert_eq!(
         store
@@ -724,14 +963,19 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
             .state,
         CuratorJobState::Reserved
     );
-    let stored: Vec<Option<String>> = store
+    let stored: Vec<String> = store
         .with_conn_for_test(|conn| {
-            conn.query_row(
-                "SELECT input_json, firing_id FROM curator_jobs WHERE project = 'proj'",
-                [],
-                |row| Ok(vec![row.get(0)?, row.get(1)?]),
-            )
+            let mut rows = Vec::new();
+            let mut jobs = conn.prepare(
+                "SELECT project || firing_id || target_json || COALESCE(input_json, '') || causal_identity FROM curator_jobs",
+            )?;
+            rows.extend(jobs.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
+            let mut pages = conn.prepare("SELECT page_json FROM curator_frozen_selections")?;
+            rows.extend(pages.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
+            Ok(rows)
         })
         .unwrap();
-    assert!(stored.iter().flatten().all(|text| !text.contains(AWS_KEY)));
+    assert_eq!(stored.len(), 1, "only the clean reservation exists");
+    assert!(stored.iter().all(|text| !text.contains(AWS_KEY)));
+    assert!(stored[0].contains("cand-1"));
 }

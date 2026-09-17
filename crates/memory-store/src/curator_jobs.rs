@@ -26,7 +26,13 @@ pub const MAX_FROZEN_SELECTIONS_PER_PROJECT: usize = 1;
 pub const MAX_FROZEN_SELECTIONS_PER_HOST: usize = 32;
 pub const MAX_SELECTION_REFERENCES: usize = 8;
 pub const MAX_CURATOR_STARTING_REFERENCES: usize = 8;
+pub const MAX_CAUSAL_SIGNALS: usize = 8;
+pub const MAX_REQUIRED_EVIDENCE: usize = 16;
+pub const MAX_CAUSAL_POLICY_VERSIONS: usize = 16;
 pub const MAX_CURATOR_JOB_INPUT_BYTES: usize = 8 * 1024;
+/// Serialized bound of one frozen page; eight maximal references fit under it.
+pub const MAX_FROZEN_PAGE_BYTES: usize = 64 * 1024;
+const MAX_TARGET_JSON_BYTES: usize = 1024;
 /// Queue deadline and frozen-selection deadline, measured from reservation.
 pub const CURATOR_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const MAX_CURATOR_METADATA_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024;
@@ -242,10 +248,13 @@ pub enum CuratorJobRefusal {
     Expired,
     #[error("the producer binding differs from the reservation")]
     ProducerMismatch,
+    #[error("the frozen page exceeds its serialized bound")]
+    PageTooLarge,
 }
 
 impl CuratorJobRefusal {
-    const ALL: [Self; 11] = [
+    #[cfg(any(test, feature = "test-support"))]
+    pub const ALL: [Self; 12] = [
         Self::InvalidRequest,
         Self::ProjectCapacity,
         Self::HostCapacity,
@@ -257,6 +266,7 @@ impl CuratorJobRefusal {
         Self::Terminal,
         Self::Expired,
         Self::ProducerMismatch,
+        Self::PageTooLarge,
     ];
 }
 
@@ -280,16 +290,20 @@ fn refuse(refusal: CuratorJobRefusal) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(refusal))
 }
 
-/// Recovers a refusal the transaction body raised through `refuse`.
-fn classify(error: MemoryStoreError) -> CuratorJobError {
-    if let MemoryStoreError::Store(storage::StoreError::Backend(message)) = &error
-        && let Some(refusal) = CuratorJobRefusal::ALL
-            .into_iter()
-            .find(|refusal| message.contains(&refusal.to_string()))
-    {
-        return CuratorJobError::Refused(refusal);
+/// Reads the refusal a transaction body raised through `refuse` before the storage layer flattens the error to text.
+fn refusal_of(error: &rusqlite::Error) -> Option<CuratorJobRefusal> {
+    match error {
+        rusqlite::Error::ToSqlConversionFailure(inner) => {
+            inner.downcast_ref::<CuratorJobRefusal>().copied()
+        }
+        _ => None,
     }
-    CuratorJobError::Store(error)
+}
+
+/// A project must be a non-empty identity: the empty string is the host-wide selector inside the aggregate queries.
+fn check_project(project: &str) -> Result<(), MemoryStoreError> {
+    check_identity(project)
+        .map_err(|_| MemoryStoreError::Serde("curator project must be 1 to 256 bytes".to_string()))
 }
 
 fn check_identity(value: &str) -> Result<(), CuratorJobRefusal> {
@@ -329,7 +343,11 @@ impl ReviewTarget {
     }
 
     fn encode(&self) -> Result<String, CuratorJobRefusal> {
-        serde_json::to_string(self).map_err(|_| CuratorJobRefusal::InvalidRequest)
+        let text = serde_json::to_string(self).map_err(|_| CuratorJobRefusal::InvalidRequest)?;
+        if text.len() > MAX_TARGET_JSON_BYTES {
+            return Err(CuratorJobRefusal::InvalidRequest);
+        }
+        Ok(text)
     }
 }
 
@@ -342,9 +360,17 @@ impl CausalInputs {
         self.signals.dedup();
         self.required_evidence.sort();
         self.required_evidence.dedup();
-        if self.signals.len() > MAX_SELECTION_REFERENCES * 4
-            || self.required_evidence.len() > MAX_CURATOR_STARTING_REFERENCES * 4
-            || self.policy_versions.len() > 32
+        // One availability per evidence id; a producer that reports both is inconsistent, not causally distinct.
+        if self
+            .required_evidence
+            .windows(2)
+            .any(|pair| pair[0].evidence_id == pair[1].evidence_id)
+        {
+            return Err(CuratorJobRefusal::InvalidRequest);
+        }
+        if self.signals.len() > MAX_CAUSAL_SIGNALS
+            || self.required_evidence.len() > MAX_REQUIRED_EVIDENCE
+            || self.policy_versions.len() > MAX_CAUSAL_POLICY_VERSIONS
         {
             return Err(CuratorJobRefusal::InvalidRequest);
         }
@@ -395,9 +421,7 @@ impl CuratorJobInput {
     fn encode(&self) -> Result<String, CuratorJobRefusal> {
         self.subject.validate()?;
         check_identity(&self.question_template)?;
-        if !matches!(self.subject, ReviewTarget::StagedSubject { .. })
-            || self.starting_references.len() > MAX_CURATOR_STARTING_REFERENCES
-        {
+        if self.starting_references.len() > MAX_CURATOR_STARTING_REFERENCES {
             return Err(CuratorJobRefusal::InvalidRequest);
         }
         for reference in &self.starting_references {
@@ -615,7 +639,7 @@ pub fn activate_curator_job_in_tx(
     load_job(conn, project, causal_identity)?.ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
-/// Records one terminal outcome for a non-terminal row and releases its allowance; the receipt charge stays. A terminal row is never reopened.
+/// Records one terminal outcome for a non-terminal row, drops its input, and releases its allowance; the compact receipt and its charge stay. A terminal row is never reopened.
 pub fn finish_curator_job_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -625,7 +649,8 @@ pub fn finish_curator_job_in_tx(
 ) -> rusqlite::Result<CuratorJob> {
     let changed = conn.execute(
         "UPDATE curator_jobs
-            SET state = 'terminal', outcome = ?3, allowance_bytes = 0, updated_at_ms = ?4
+            SET state = 'terminal', outcome = ?3, allowance_bytes = 0, input_json = NULL,
+                updated_at_ms = ?4
           WHERE project = ?1 AND causal_identity = ?2 AND state <> 'terminal'",
         params![project, causal_identity, outcome.as_str(), now_ms],
     )?;
@@ -667,11 +692,15 @@ pub fn freeze_selection_in_tx(
     };
     let page_json =
         serde_json::to_string(&page).map_err(|_| refuse(CuratorJobRefusal::InvalidRequest))?;
-    if page_json.len() > MAX_CURATOR_JOB_INPUT_BYTES {
-        return Err(refuse(CuratorJobRefusal::InvalidRequest));
+    if page_json.len() > MAX_FROZEN_PAGE_BYTES {
+        return Err(refuse(CuratorJobRefusal::PageTooLarge));
     }
     if let Some(existing) = load_selection(conn, project, slot_id, selection_attempt)? {
-        return Ok(existing);
+        return if existing.state == FrozenSelectionState::Frozen {
+            Ok(existing)
+        } else {
+            Err(refuse(CuratorJobRefusal::Terminal))
+        };
     }
     if frozen_pages(conn, Some(project))? >= MAX_FROZEN_SELECTIONS_PER_PROJECT {
         return Err(refuse(CuratorJobRefusal::ProjectSelectionCapacity));
@@ -768,15 +797,22 @@ fn scan_causal_identities(
     write: &mut PreparedWrite,
     inputs: &CausalInputs,
 ) -> Result<(), MemoryStoreError> {
-    scan_target(write, &inputs.target)?;
-    write.identity("question_template", &inputs.question_template)?;
-    for signal in &inputs.signals {
+    let CausalInputs {
+        target,
+        question_template,
+        signals,
+        required_evidence,
+        policy_versions,
+    } = inputs;
+    scan_target(write, target)?;
+    write.identity("question_template", question_template)?;
+    for signal in signals {
         write.identity("signal", signal)?;
     }
-    for evidence in &inputs.required_evidence {
-        write.identity("evidence_id", &evidence.evidence_id)?;
+    for EvidenceAvailability { evidence_id, .. } in required_evidence {
+        write.identity("evidence_id", evidence_id)?;
     }
-    for (name, version) in &inputs.policy_versions {
+    for (name, version) in policy_versions {
         write.identity("policy_name", name)?;
         write.identity("policy_version", version)?;
     }
@@ -785,17 +821,21 @@ fn scan_causal_identities(
 
 fn scan_target(write: &mut PreparedWrite, target: &ReviewTarget) -> Result<(), MemoryStoreError> {
     match target {
-        ReviewTarget::StagedSubject { candidate_id, .. } => {
-            write.identity("candidate_id", candidate_id)?;
-        }
-        ReviewTarget::Memory { object_id, .. } => {
-            write.identity("object_id", object_id)?;
-        }
-    }
+        ReviewTarget::StagedSubject {
+            kernel_incarnation: _,
+            candidate_id,
+            payload_digest: _,
+        } => write.identity("candidate_id", candidate_id)?,
+        ReviewTarget::Memory {
+            object_id,
+            source_revision: _,
+        } => write.identity("object_id", object_id)?,
+    };
     Ok(())
 }
 
 fn curator_write(project: &str, operation: &str) -> Result<PreparedWrite, MemoryStoreError> {
+    check_project(project)?;
     let mut write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
     write.domain_owner(
         "project",
@@ -856,9 +896,15 @@ impl MemoryStore {
     ) -> Result<T, CuratorJobError> {
         let mut write = curator_write(project, operation)?;
         prepare(&mut write)?;
-        write
-            .execute(&self.inner, |coordinated| body(coordinated.tx()))
-            .map_err(classify)
+        let refusal = std::cell::Cell::new(None);
+        let result = write.execute(&self.inner, |coordinated| {
+            body(coordinated.tx()).inspect_err(|error| refusal.set(refusal_of(error)))
+        });
+        match (result, refusal.get()) {
+            (Err(_), Some(refusal)) => Err(CuratorJobError::Refused(refusal)),
+            (Err(error), None) => Err(CuratorJobError::Store(error)),
+            (Ok(value), _) => Ok(value),
+        }
     }
 
     pub fn reserve_curator_job(
@@ -898,9 +944,14 @@ impl MemoryStore {
             project,
             "activate",
             |write| {
-                scan_target(write, &input.subject)?;
-                write.identity("question_template", &input.question_template)?;
-                for reference in &input.starting_references {
+                let CuratorJobInput {
+                    subject,
+                    starting_references,
+                    question_template,
+                } = input;
+                scan_target(write, subject)?;
+                write.identity("question_template", question_template)?;
+                for reference in starting_references {
                     write.identity("starting_reference", reference)?;
                 }
                 Ok(())
@@ -932,13 +983,14 @@ impl MemoryStore {
 
     /// Marks every reserved or ready job and every frozen page whose deadline is at or before `now_ms` as expired. Expiry releases allowances, keeps receipts, and never moves a slot cursor.
     pub fn expire_curator_work(&self, now_ms: i64) -> Result<(usize, usize), CuratorJobError> {
-        let mut write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
-        write.domain_owner("project", "", active_scan_owner_key(&["curator", "expire"]));
+        // The sweep carries no caller text, so it records no scan and needs no owner scope.
+        let write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
         write
             .execute(&self.inner, |coordinated| {
                 let jobs = coordinated.tx().execute(
                     "UPDATE curator_jobs
-                        SET state = 'terminal', outcome = 'expired', allowance_bytes = 0, updated_at_ms = ?1
+                        SET state = 'terminal', outcome = 'expired', allowance_bytes = 0,
+                            input_json = NULL, updated_at_ms = ?1
                       WHERE state IN ('reserved', 'ready') AND queue_deadline_ms <= ?1",
                     [now_ms],
                 )?;
@@ -953,7 +1005,7 @@ impl MemoryStore {
                     WriteDisposition::Applied((jobs, pages))
                 })
             })
-            .map_err(classify)
+            .map_err(CuratorJobError::Store)
     }
 
     pub fn freeze_selection(
@@ -1012,6 +1064,7 @@ impl MemoryStore {
         project: &str,
         causal_identity: &str,
     ) -> Result<Option<CuratorJob>, MemoryStoreError> {
+        check_project(project)?;
         self.inner
             .with_conn(|conn| load_job(conn, project, causal_identity))
             .map_err(Into::into)
@@ -1023,6 +1076,7 @@ impl MemoryStore {
         slot_id: &str,
         selection_attempt: &str,
     ) -> Result<Option<FrozenSelection>, MemoryStoreError> {
+        check_project(project)?;
         self.inner
             .with_conn(|conn| load_selection(conn, project, slot_id, selection_attempt))
             .map_err(Into::into)
@@ -1034,6 +1088,7 @@ impl MemoryStore {
         project: &str,
         limit: usize,
     ) -> Result<Vec<CuratorJob>, MemoryStoreError> {
+        check_project(project)?;
         let limit = i64::try_from(limit.min(MAX_PENDING_CURATOR_JOBS_PER_PROJECT)).unwrap_or(0);
         self.inner
             .with_conn(|conn| {
@@ -1049,6 +1104,7 @@ impl MemoryStore {
     }
 
     pub fn curator_headroom(&self, project: &str) -> Result<CuratorHeadroom, MemoryStoreError> {
+        check_project(project)?;
         self.inner
             .with_conn(|conn| {
                 let project_bytes = metadata_bytes(conn, Some(project))?;
