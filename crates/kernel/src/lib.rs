@@ -65,7 +65,7 @@ pub use cas::{
     ArtifactDeletionRequest, ArtifactDeletionResult, ArtifactDestination, ArtifactEgressFacts,
     ArtifactEligibility, ArtifactError, ArtifactErrorKind, ArtifactGcResult, ArtifactHandle,
     ArtifactIngestRequest, BarrierConsumerStatus, DeletionBarrierStatus, EligibilityDeniedReason,
-    MAX_PAYLOAD_BYTES, ProviderEgress,
+    MAX_PAYLOAD_BYTES, MAX_TEXT_FIELD_BYTES, ProviderEgress,
 };
 #[cfg(feature = "test-support")]
 pub use cas::{

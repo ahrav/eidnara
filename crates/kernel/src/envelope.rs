@@ -268,6 +268,8 @@ pub struct Envelope<'tx> {
     pub(super) descriptor_objects: HashMap<String, String>,
     /// Causality subject to the `claimcauseobj:` row this envelope wrote for it.
     pub(super) causality_objects: HashMap<String, String>,
+    /// Capture evidence id to the `localfileobj:` row this envelope wrote for it.
+    pub(super) local_file_objects: HashMap<String, String>,
     poisoned: Option<KernelError>,
 }
 
@@ -750,6 +752,7 @@ impl KernelStore {
                     admission_latest: HashMap::new(),
                     descriptor_objects: HashMap::new(),
                     causality_objects: HashMap::new(),
+                    local_file_objects: HashMap::new(),
                     poisoned: None,
                 },
             })
@@ -1224,6 +1227,7 @@ fn commit_prepared_with_writer(
         admission_latest: HashMap::new(),
         descriptor_objects: HashMap::new(),
         causality_objects: HashMap::new(),
+        local_file_objects: HashMap::new(),
         poisoned: None,
     };
     let result = operation(&mut envelope)?;
@@ -1232,6 +1236,7 @@ fn commit_prepared_with_writer(
     }
     envelope.check_descriptor_ownership()?;
     envelope.check_causality_ownership()?;
+    envelope.check_local_file_ownership()?;
     let unconditional_changes = envelope
         .changes
         .iter()

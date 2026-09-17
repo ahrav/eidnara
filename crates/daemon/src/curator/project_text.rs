@@ -30,6 +30,8 @@ pub const MAX_SCAN_BYTES: u64 = 16 * 1024 * 1024;
 /// Directory entries one search may list; a hit is a disclosed capture, so the broker's batch and inspection bounds cap hits well below this.
 pub const MAX_VISITED_ENTRIES: usize = 4096;
 pub const MAX_DEPTH: usize = 16;
+/// Longest relative path, in bytes. The path is stored as the capture's artifact source id, and the Kernel refuses a longer one; bounding it here reports a long path as a path property rather than as a store failure.
+pub const MAX_PATH_BYTES: usize = kernel::MAX_TEXT_FIELD_BYTES;
 pub const MAX_QUERY_BYTES: usize = 256;
 /// Path components refused wherever they appear: the project's own configuration and its Git store.
 const REFUSED_COMPONENTS: [&str; 2] = [".eidnara", ".git"];
@@ -117,7 +119,7 @@ struct Captured {
     retain_until: i64,
 }
 
-/// A file read under confinement: its bytes and the relative path it was named by.
+/// A file read under confinement: its bytes and the relative path it was named by, both already render-checked.
 struct ReadFile {
     relative: String,
     bytes: Vec<u8>,
@@ -177,7 +179,7 @@ impl ProjectText {
         broker.read(store, alias.as_str(), range, now_ms)
     }
 
-    /// Walks the root in name order and discloses one excerpt per matching file. Every bound is reported as explicit incompleteness; zero hits never prove absence. Every file the walk reaches is read and render-checked before the literal is applied, so what the outcome reveals does not depend on the literal.
+    /// Walks the root in name order and discloses one excerpt per matching file. Every bound is reported as explicit incompleteness; zero hits never prove absence. Every regular file the walk reaches is read and render-checked before the literal is applied, whichever part of the file the query names, so what the outcome reveals does not depend on the literal.
     pub fn search(
         &mut self,
         store: &KernelStore,
@@ -227,17 +229,6 @@ impl ProjectText {
                 outcome.withheld = true;
                 continue;
             }
-            let name_matches = match query {
-                SearchQuery::Path(text) => relative.contains(text),
-                SearchQuery::Name(text) => relative
-                    .rsplit('/')
-                    .next()
-                    .is_some_and(|name| name.contains(text)),
-                SearchQuery::Content(_) => true,
-            };
-            if !name_matches {
-                continue;
-            }
             if probed.len() > MAX_CAPTURE_BYTES {
                 outcome.withheld = true;
                 continue;
@@ -245,23 +236,24 @@ impl ProjectText {
             if scanned.saturating_add(probed.len()) > MAX_SCAN_BYTES {
                 return Ok(finish(outcome, Completeness::ProbeBound));
             }
+            // Deliverability is decided before any literal is applied, for every query kind: a file that cannot be read or rendered is withheld whether or not its path, name, or text would have matched.
             let Ok(file) = self.read_file(&relative, &probed) else {
                 outcome.withheld = true;
                 continue;
             };
             scanned += u64::try_from(file.bytes.len()).unwrap_or(u64::MAX);
-            // Deliverability is decided before the literal is applied: a refused file is withheld whether or not it would have matched.
-            if check_render(&file.bytes, None).is_err() {
-                outcome.withheld = true;
-                continue;
-            }
             let text = String::from_utf8_lossy(&file.bytes);
             let position = match query {
-                SearchQuery::Content(needle) => match text.find(needle) {
-                    Some(position) => position,
-                    None => continue,
-                },
-                SearchQuery::Path(_) | SearchQuery::Name(_) => 0,
+                SearchQuery::Path(needle) => relative.contains(needle).then_some(0),
+                SearchQuery::Name(needle) => relative
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|name| name.contains(needle))
+                    .then_some(0),
+                SearchQuery::Content(needle) => text.find(needle),
+            };
+            let Some(position) = position else {
+                continue;
             };
             let window = excerpt_window(&text, position);
             // Disclosing consumes one batch operation; stopping here instead of provoking the refusal keeps the run's conclusions usable.
@@ -278,7 +270,9 @@ impl ProjectText {
             };
             let span = u64::try_from(window.start).unwrap_or(u64::MAX)
                 ..u64::try_from(window.end).unwrap_or(u64::MAX);
-            match broker.read(store, alias.as_str(), Some(span.clone()), now_ms) {
+            // An empty file has an empty excerpt; the broker refuses an empty range, so the whole (empty) file is asked for instead.
+            let range = (!span.is_empty()).then(|| span.clone());
+            match broker.read(store, alias.as_str(), range, now_ms) {
                 Ok(read) => outcome.hits.push(TextHit {
                     alias,
                     span,
@@ -291,7 +285,7 @@ impl ProjectText {
         Ok(outcome)
     }
 
-    /// The relative paths of the entries under `directory` (the root when `None`), in name order. Every name read counts against [`MAX_VISITED_ENTRIES`]; a listing cut short by that bound marks the outcome incomplete and withheld. Refused components and names that are not UTF-8 are withheld.
+    /// The relative paths of the entries under `directory` (the root when `None`), in name order. Every name read other than `.` and `..` counts against [`MAX_VISITED_ENTRIES`], whether or not it is UTF-8; a listing cut short by that bound marks the outcome incomplete and withheld. Refused components and names that are not UTF-8 are withheld.
     fn children(
         &self,
         directory: Option<&str>,
@@ -310,11 +304,8 @@ impl ProjectText {
             .map_err(|_| refusal(RefusalCode::Unavailable))?
         {
             let entry = entry.map_err(|_| refusal(RefusalCode::Unavailable))?;
-            let Ok(name) = entry.file_name().to_str() else {
-                outcome.withheld = true;
-                continue;
-            };
-            if name == "." || name == ".." {
+            let file_name = entry.file_name();
+            if file_name == c"." || file_name == c".." {
                 continue;
             }
             if *listed >= MAX_VISITED_ENTRIES {
@@ -323,6 +314,10 @@ impl ProjectText {
                 break;
             }
             *listed += 1;
+            let Ok(name) = file_name.to_str() else {
+                outcome.withheld = true;
+                continue;
+            };
             if REFUSED_COMPONENTS.contains(&name) {
                 outcome.withheld = true;
                 continue;
@@ -342,7 +337,7 @@ impl ProjectText {
         metadata(&handle)
     }
 
-    /// Reads one ordinary file under confinement. `probed` comes from [`Self::probe`]; the file is opened again for reading and must be the same object, so a swap between the two opens is refused rather than read. A file with more than one hard link is not ordinary: a link can name a protected file the identity set does not list.
+    /// Reads one ordinary file under confinement. `probed` comes from [`Self::probe`]; the file is opened again for reading and must be the same object, so a swap between the two opens is refused rather than read. A file with more than one hard link is not ordinary: a link can name a protected file the identity set does not list. Only UTF-8 bytes of at most [`MAX_CAPTURE_BYTES`] that pass the render check, under a path that passes it too, are returned.
     fn read_file(&self, relative: &str, probed: &std::fs::Metadata) -> Result<ReadFile, Refusal> {
         if !probed.file_type().is_file() {
             return Err(refusal(RefusalCode::NotRegularFile));
@@ -370,6 +365,9 @@ impl ProjectText {
             return Err(refusal(RefusalCode::TooLarge));
         }
         std::str::from_utf8(&bytes).map_err(|_| refusal(RefusalCode::Undecodable))?;
+        // The bytes must survive ingestion unchanged and the path is stored in the typed detail, so a buffer or a path the scanner would rewrite is refused here, before any literal is applied and before anything is stored.
+        check_render(&bytes, None)?;
+        check_render(relative.as_bytes(), None)?;
         Ok(ReadFile {
             relative: relative.to_string(),
             bytes,
@@ -394,7 +392,7 @@ impl ProjectText {
         Ok(handle)
     }
 
-    /// Records `file` as owned evidence once per run and issues its alias. The bytes must survive ingestion unchanged, so a buffer the scanner would rewrite is refused before anything is stored and ingestion itself is exact; the path is checked the same way because it is stored in the typed detail.
+    /// Records `file` as owned evidence once per run and issues its alias. Ingestion is exact: a [`ReadFile`] is render-checked when it is read, and the store refuses rather than rewrites a buffer the scanner would change.
     fn capture(
         &mut self,
         store: &KernelStore,
@@ -402,8 +400,6 @@ impl ProjectText {
         file: &ReadFile,
         now_ms: i64,
     ) -> Result<Alias, Refusal> {
-        check_render(&file.bytes, None)?;
-        check_render(file.relative.as_bytes(), None)?;
         let digest = format!("{:x}", Sha256::digest(&file.bytes));
         let byte_length = u64::try_from(file.bytes.len()).unwrap_or(u64::MAX);
         let captured = match self.captured.get(&digest) {
@@ -517,9 +513,13 @@ fn admit_destination(broker: &EvidenceBroker) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// A relative path of at most [`MAX_DEPTH`] ordinary components: no root, no `.` or `..`, no empty component, no NUL, and no refused component.
+/// A relative path of at most [`MAX_PATH_BYTES`] bytes and [`MAX_DEPTH`] ordinary components: no root, no `.` or `..`, no empty component, no NUL, and no refused component.
 fn validate_relative(relative: &str) -> Result<(), Refusal> {
-    if relative.is_empty() || relative.starts_with('/') || relative.contains('\0') {
+    if relative.is_empty()
+        || relative.len() > MAX_PATH_BYTES
+        || relative.starts_with('/')
+        || relative.contains('\0')
+    {
         return Err(refusal(RefusalCode::InvalidPath));
     }
     let mut depth = 0;
@@ -591,6 +591,12 @@ mod tests {
         let deep = vec!["d"; MAX_DEPTH + 1].join("/");
         assert_eq!(
             validate_relative(&deep).unwrap_err().code,
+            RefusalCode::InvalidPath
+        );
+        let longest = format!("{}/{}", "a".repeat(255), "b".repeat(MAX_PATH_BYTES - 256));
+        validate_relative(&longest).unwrap();
+        assert_eq!(
+            validate_relative(&format!("{longest}c")).unwrap_err().code,
             RefusalCode::InvalidPath
         );
     }

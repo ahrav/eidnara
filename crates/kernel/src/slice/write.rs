@@ -37,6 +37,21 @@ pub const DECISION_CHANGE_KINDS: [&str; 5] = [
     APPROVAL_REVOKE_KIND,
 ];
 
+/// SQL predicate over an `evidence_meta` row aliased `e`: a live observation, decision, decision event, or asserted edge cites it. `retire_evidence` refuses while this holds, so every sweep that decides whether a retirement will be accepted evaluates this same text instead of its own copy.
+pub(crate) const EVIDENCE_CITED_SQL: &str = "(EXISTS(SELECT 1 FROM observations o
+                            WHERE o.evidence_id=e.evidence_id
+                              AND o.invalidated_commit_seq IS NULL)
+                  OR EXISTS(SELECT 1 FROM decisions d
+                            WHERE d.evidence_id=e.evidence_id
+                              AND d.invalidated_commit_seq IS NULL)
+                  OR EXISTS(SELECT 1 FROM decision_events de
+                            JOIN decisions d ON d.decision_id=de.decision_id
+                            WHERE de.evidence_id=e.evidence_id
+                              AND d.invalidated_commit_seq IS NULL)
+                  OR EXISTS(SELECT 1 FROM asserted_edges a
+                            WHERE a.evidence_id=e.evidence_id
+                              AND a.invalidated_commit_seq IS NULL))";
+
 struct RedactedDecision {
     decision_id: RedactedField,
     object_id: RedactedField,
@@ -390,6 +405,7 @@ impl Envelope<'_> {
         self.guarded(|envelope| {
             if crate::source_descriptor::uses_descriptor_namespace(&replacement)
                 || crate::claim_causality::uses_causality_namespace(&replacement)
+                || crate::local_file::uses_local_file_namespace(&replacement)
             {
                 return Err(KernelError::InvalidInput);
             }
@@ -493,22 +509,11 @@ impl Envelope<'_> {
         let (sensitivity, cited): (String, bool) = self
             .tx
             .query_row_cached(
-                "SELECT e.sensitivity_class,
-                        (EXISTS(SELECT 1 FROM observations o
-                                   WHERE o.evidence_id=e.evidence_id
-                                     AND o.invalidated_commit_seq IS NULL)
-                         OR EXISTS(SELECT 1 FROM decisions d
-                                   WHERE d.evidence_id=e.evidence_id
-                                     AND d.invalidated_commit_seq IS NULL)
-                         OR EXISTS(SELECT 1 FROM decision_events de
-                                   JOIN decisions d ON d.decision_id=de.decision_id
-                                   WHERE de.evidence_id=e.evidence_id
-                                     AND d.invalidated_commit_seq IS NULL)
-                         OR EXISTS(SELECT 1 FROM asserted_edges a
-                                   WHERE a.evidence_id=e.evidence_id
-                                     AND a.invalidated_commit_seq IS NULL))
-                 FROM evidence_meta e
-                 WHERE e.object_id=?1 AND e.invalidated_commit_seq IS NULL",
+                &format!(
+                    "SELECT e.sensitivity_class,{EVIDENCE_CITED_SQL}
+                     FROM evidence_meta e
+                     WHERE e.object_id=?1 AND e.invalidated_commit_seq IS NULL"
+                ),
                 [&object_id.text],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )

@@ -4,7 +4,8 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use daemon::curator::broker::{
-    EvidenceBroker, MAX_OPERATIONS_PER_BATCH, QuestionTemplate, RefusalCode, RunBinding,
+    EvidenceBroker, MAX_ISSUED_INSPECTIONS, MAX_OPERATIONS_PER_BATCH, QuestionTemplate,
+    RefusalCode, RunBinding,
 };
 use daemon::curator::project_text::{
     InspectionBinding, MAX_CAPTURE_BYTES, MAX_DEPTH, MAX_SCAN_BYTES, MAX_VISITED_ENTRIES,
@@ -654,34 +655,143 @@ fn a_matching_refused_file_is_indistinguishable_from_no_match() {
     let fixture = Fixture::open();
     fixture.write("keys.env", b"AWS_ACCESS_KEY_ID=AKIAQ7RSTUVWXYZ23456\n");
     fixture.write("notes.txt", b"nothing secret here");
+    // The path, not the content, trips the render check.
+    fixture.write(
+        &format!("tagged {}.txt", kernel::OPERATOR_REDACTION_PLACEHOLDER),
+        b"tagged body",
+    );
     let protected = fixture.protected();
     let mut text = fixture.text(&protected);
     let mut broker = fixture.broker(ArtifactDestination::Local);
     let tip = fixture.store.tip().unwrap();
-    let matching = text
-        .search(
-            &fixture.store,
-            &mut broker,
+    // Each pair names one literal that only a refused file satisfies and one that nothing satisfies.
+    let pairs: [(SearchQuery<'_>, SearchQuery<'_>); 4] = [
+        (
             SearchQuery::Content("AKIAQ7"),
-            fixture.now,
-        )
-        .unwrap();
-    let absent = text
-        .search(
-            &fixture.store,
-            &mut broker,
             SearchQuery::Content("no such literal"),
-            fixture.now,
-        )
-        .unwrap();
-    assert!(matching.hits.is_empty() && absent.hits.is_empty());
-    assert_eq!(
-        matching.withheld, absent.withheld,
-        "withholding does not depend on the literal"
-    );
-    assert_eq!(matching.completeness, absent.completeness);
+        ),
+        (
+            SearchQuery::Content("tagged body"),
+            SearchQuery::Content("no such literal"),
+        ),
+        (SearchQuery::Name(".env"), SearchQuery::Name(".zzz")),
+        (SearchQuery::Path("keys"), SearchQuery::Path("locks")),
+    ];
+    for (probe, absent) in pairs {
+        let matching = text
+            .search(&fixture.store, &mut broker, probe, fixture.now)
+            .unwrap();
+        let absent = text
+            .search(&fixture.store, &mut broker, absent, fixture.now)
+            .unwrap();
+        assert!(
+            matching.hits.is_empty() && absent.hits.is_empty(),
+            "{probe:?}"
+        );
+        assert_eq!(
+            matching.withheld, absent.withheld,
+            "withholding does not depend on the literal: {probe:?}"
+        );
+        assert_eq!(matching.completeness, absent.completeness, "{probe:?}");
+    }
     assert_eq!(fixture.store.tip().unwrap(), tip);
     assert_eq!(broker.ledger.disclosed().count(), 0);
+}
+
+#[test]
+fn every_listed_name_counts_against_the_visited_bound() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let fixture = Fixture::open();
+    std::fs::create_dir(fixture.project.path().join("names")).unwrap();
+    for index in 0..MAX_VISITED_ENTRIES {
+        // A trailing 0xff byte makes the name invalid UTF-8.
+        let name = [format!("n{index:05}").as_bytes(), b"\xff"].concat();
+        std::fs::write(
+            fixture
+                .project
+                .path()
+                .join("names")
+                .join(OsStr::from_bytes(&name)),
+            b"filler",
+        )
+        .unwrap();
+    }
+    fixture.write("zz-last.txt", b"bun at the end");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    let outcome = text
+        .search(
+            &fixture.store,
+            &mut broker,
+            SearchQuery::Content("bun"),
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(
+        outcome.completeness,
+        Completeness::CandidateBound,
+        "names that are not UTF-8 still count as listed entries"
+    );
+    assert!(outcome.withheld);
+}
+
+#[test]
+fn an_empty_file_that_matches_by_name_is_a_hit_with_an_empty_excerpt() {
+    let fixture = Fixture::open();
+    fixture.write("pkg/__init__.py", b"");
+    fixture.write("pkg/module.py", b"def bun():\n    pass\n");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    let outcome = text
+        .search(
+            &fixture.store,
+            &mut broker,
+            SearchQuery::Name("__init__"),
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(
+        outcome.hits.len(),
+        1,
+        "an empty match is a hit, not a refusal"
+    );
+    assert_eq!(outcome.hits[0].span, 0..0);
+    assert!(outcome.hits[0].excerpt.is_empty());
+    assert!(!outcome.withheld);
+    assert_eq!(outcome.completeness, Completeness::Complete);
+    assert_eq!(
+        broker.accounting.issued_inspections(),
+        1,
+        "the hit costs one operation and nothing is spent on a refusal"
+    );
+    let read = broker
+        .read(
+            &fixture.store,
+            outcome.hits[0].alias.as_str(),
+            None,
+            fixture.now,
+        )
+        .unwrap();
+    assert!(read.buffer.bytes.is_empty());
+    let direct = text
+        .read(
+            &fixture.store,
+            &mut broker,
+            "pkg/__init__.py",
+            None,
+            fixture.now,
+        )
+        .unwrap();
+    assert!(direct.buffer.bytes.is_empty());
+    assert_eq!(
+        fixture.capture_rows().len(),
+        1,
+        "one capture backs every read"
+    );
 }
 
 #[test]
@@ -813,27 +923,7 @@ fn expiry_retires_the_capture_and_its_detail_but_keeps_independent_support() {
     fixture
         .store
         .commit(intent("foreign"), |envelope| {
-            envelope.insert_observation(kernel::ObservationSpec {
-                observation_id: "foreign-1".to_string(),
-                object_id: "foreign-object-1".to_string(),
-                domain_id: DOMAIN.to_string(),
-                proposition_id: None,
-                scope_id: None,
-                anchor_id: None,
-                evidence_id: Some(cited.clone()),
-                observation_kind: "note".to_string(),
-                payload: kernel::ObservationPayload {
-                    summary: "independent support".to_string(),
-                    classification: "note".to_string(),
-                    detail: None,
-                },
-                observed_at: fixture.now,
-                dependencies: Vec::new(),
-                source_kind: "test".to_string(),
-                source_id: "foreign".to_string(),
-                source_revision: 1,
-                sensitivity: Sensitivity::Sensitive,
-            })?;
+            envelope.insert_observation(note_observation("foreign-1", &cited, "note"))?;
             Ok(String::new())
         })
         .unwrap();
@@ -853,4 +943,208 @@ fn expiry_retires_the_capture_and_its_detail_but_keeps_independent_support() {
         fixture.store.local_file_capture(&cited).unwrap().is_none(),
         "the capture's own detail is retired"
     );
+    // A retained capture leaves the sweep: a later call neither revisits it nor commits anything for it, and once the citation is gone the evidence is retired.
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .expire_local_file_captures(after_hold + 3)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture.store.tip().unwrap(),
+        tip,
+        "a retained capture is not re-processed on every sweep"
+    );
+    fixture
+        .store
+        .commit(intent("release-foreign"), |envelope| {
+            envelope.retire_observation("foreign-1-object")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .expire_local_file_captures(after_hold + 4)
+            .unwrap(),
+        1,
+        "the evidence is retired once nothing else cites it"
+    );
+    assert!(fixture.capture_rows().is_empty());
+}
+
+fn note_observation(id: &str, evidence_id: &str, kind: &str) -> kernel::ObservationSpec {
+    kernel::ObservationSpec {
+        observation_id: id.to_string(),
+        object_id: format!("{id}-object"),
+        domain_id: DOMAIN.to_string(),
+        proposition_id: None,
+        scope_id: None,
+        anchor_id: None,
+        evidence_id: Some(evidence_id.to_string()),
+        observation_kind: kind.to_string(),
+        payload: kernel::ObservationPayload {
+            summary: "independent support".to_string(),
+            classification: kind.to_string(),
+            detail: None,
+        },
+        observed_at: 1,
+        dependencies: Vec::new(),
+        source_kind: "test".to_string(),
+        source_id: "foreign".to_string(),
+        source_revision: 1,
+        sensitivity: Sensitivity::Sensitive,
+    }
+}
+
+#[test]
+fn retained_captures_do_not_starve_newer_expired_captures() {
+    let fixture = Fixture::open();
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    // One more expired, unpinned capture than one sweep page; live observations cite all but the newest capture. Each broker is a run with its own inspection ceiling.
+    for index in 0..=kernel::MAX_EXPIRED_CAPTURES_PER_CALL {
+        if index > 0 && index % MAX_ISSUED_INSPECTIONS == 0 {
+            broker = fixture.broker(ArtifactDestination::Local);
+        }
+        if index % MAX_OPERATIONS_PER_BATCH == 0 {
+            broker.accounting.end_batch();
+        }
+        let relative = format!("f{index:03}.txt");
+        fixture.write(&relative, format!("capture {index}").as_bytes());
+        text.read(&fixture.store, &mut broker, &relative, None, fixture.now)
+            .unwrap();
+    }
+    let rows = fixture.capture_rows();
+    assert_eq!(rows.len(), kernel::MAX_EXPIRED_CAPTURES_PER_CALL + 1);
+    fixture
+        .store
+        .commit(intent("cite-all-but-one"), |envelope| {
+            for (index, (evidence_id, ..)) in rows.iter().enumerate() {
+                if evidence_id != &rows[rows.len() - 1].0 {
+                    envelope.insert_observation(note_observation(
+                        &format!("cite-{index}"),
+                        evidence_id,
+                        "note",
+                    ))?;
+                }
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    let after_hold = fixture.now + 3 * HOUR_MS;
+    let first = fixture
+        .store
+        .expire_local_file_captures(after_hold)
+        .unwrap();
+    let second = fixture
+        .store
+        .expire_local_file_captures(after_hold + 1)
+        .unwrap();
+    assert_eq!(
+        first + second,
+        1,
+        "the one uncited capture is retired even though a full page of captures is retained"
+    );
+    assert_eq!(
+        fixture.capture_rows().len(),
+        kernel::MAX_EXPIRED_CAPTURES_PER_CALL,
+        "retained captures stay live"
+    );
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .expire_local_file_captures(after_hold + 2)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture.store.tip().unwrap(),
+        tip,
+        "a sweep with nothing to retire commits nothing"
+    );
+}
+
+#[test]
+fn a_capture_the_store_refuses_to_retire_does_not_stall_the_sweep() {
+    let fixture = Fixture::open();
+    // A Curator-capture row whose registry object is not an evidence object: retiring it is refused as NotFound on every sweep. Its acquisition reference sorts ahead of the run's captures.
+    fixture
+        .store
+        .ingest_exact_artifact(ArtifactIngestRequest {
+            intent: intent("unretirable"),
+            payload: b"not an evidence object".to_vec(),
+            evidence_id: "unretirable".to_string(),
+            object_id: "unretirable-object".to_string(),
+            object_kind: "artifact".to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: "local_file".to_string(),
+            source_id: "unretirable.txt".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+            retain_until: Some(fixture.now + HOUR_MS - 1),
+            asserted_sensitivity: Sensitivity::Sensitive,
+            provider_egress: ProviderEgress::LocalOnly,
+            provenance: None,
+        })
+        .unwrap();
+    fixture.write("a.txt", b"captured behind the refused row");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+        .unwrap();
+    assert_eq!(fixture.capture_rows().len(), 2);
+    let after_hold = fixture.now + 3 * HOUR_MS;
+    assert_eq!(
+        fixture
+            .store
+            .expire_local_file_captures(after_hold)
+            .unwrap(),
+        1,
+        "the capture behind the refused row is retired in the same sweep"
+    );
+    let rows = fixture.capture_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "unretirable");
+}
+
+#[test]
+fn a_generic_correction_cannot_forge_a_capture_observation() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"captured");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+        .unwrap();
+    let capture = fixture.capture_rows()[0].0.clone();
+    fixture
+        .store
+        .commit(intent("ordinary"), |envelope| {
+            envelope.insert_observation(note_observation("ordinary", &capture, "note"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    for (key, kind, id) in [
+        ("kind", kernel::LOCAL_FILE_KIND, "corrected"),
+        ("observation-id", "note", "localfile:forged"),
+        ("object-id", "note", "forged"),
+    ] {
+        let mut replacement = note_observation(id, &capture, kind);
+        if key == "object-id" {
+            replacement.object_id = "localfileobj:forged".to_string();
+        }
+        replacement.source_revision = 2;
+        let refused = fixture.store.commit(intent(key), |envelope| {
+            envelope.correct_observation("ordinary-object", replacement.clone())?;
+            Ok(String::new())
+        });
+        assert_eq!(refused, Err(kernel::KernelError::InvalidInput), "{key}");
+    }
 }
