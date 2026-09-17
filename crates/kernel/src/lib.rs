@@ -15,6 +15,7 @@ mod claim_causality;
 mod claim_facts;
 mod commit_read;
 mod consumer_obligations;
+mod curator_hold;
 mod current_input;
 mod durable_fs;
 mod eligibility;
@@ -85,6 +86,14 @@ pub use commit_read::{
     CommitReadTarget, CommitSpan, CompleteCommit, PageEnd,
 };
 pub use consumer_obligations::{ConsumerObligation, ConsumerObligationError};
+pub use curator_hold::{
+    BufferIndex, CURATOR_CAPTURE_RETENTION_CLASS, CURATOR_EXECUTION_HOLD_KIND,
+    CURATOR_REVIEW_HOLD_KIND, CuratorHold, CuratorHoldBinding, CuratorHoldError, CuratorHoldKind,
+    CuratorHoldRefusal, HeldEvidence, MAX_ACTIVE_CURATOR_HOLDS_PER_HOST,
+    MAX_ACTIVE_CURATOR_HOLDS_PER_PROJECT, MAX_CURATOR_HELD_BACKING_BYTES_PER_HOST,
+    MAX_CURATOR_HELD_BACKING_BYTES_PER_PROJECT, MAX_CURATOR_HOLD_REFERENCES, MAX_RUN_BUFFER_BYTES,
+    REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
+};
 pub use current_input::{
     CurrentInputDescriptor, CurrentInputExpectation, CurrentInputGuard, EligibilityBinding,
     StaleCurrentInput, StaleInput,

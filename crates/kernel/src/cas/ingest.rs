@@ -131,6 +131,9 @@ impl PreparedArtifact {
             || request.retention_class.trim().is_empty()
             || request.source_revision < 0
             || request.retain_until.is_some_and(|value| value < 0)
+            // A Curator capture carries its finite acquisition reference from creation.
+            || (request.retention_class == crate::curator_hold::CURATOR_CAPTURE_RETENTION_CLASS
+                && request.retain_until.is_none())
         {
             return Err(ArtifactError::new(ArtifactErrorKind::InvalidInput));
         }

@@ -1,0 +1,788 @@
+#![cfg(feature = "test-support")]
+
+//! Real-store proofs for Curator execution and review holds: atomic bounded acquisition, quota refusal that writes nothing, review transfer that acquires before releasing, kind-specific release authority, stale-worker refusal, reopen, purge and GC interplay, and the append-only run buffer map at its capacity boundary.
+
+use kernel::{
+    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactErrorKind,
+    ArtifactIngestRequest, CURATOR_CAPTURE_RETENTION_CLASS, CURATOR_EXECUTION_HOLD_KIND,
+    CURATOR_REVIEW_HOLD_KIND, CommitIntent, CuratorHoldBinding, CuratorHoldError, CuratorHoldKind,
+    CuratorHoldRefusal, DomainSpec, HeldEvidence, KernelStore, MAX_CURATOR_HOLD_REFERENCES,
+    ProviderEgress, REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal, Sensitivity,
+};
+use rusqlite::{Connection, OpenFlags};
+use sha2::{Digest, Sha256};
+
+const HOUR_MS: i64 = 60 * 60 * 1_000;
+const DAY_MS: i64 = 24 * HOUR_MS;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap()
+}
+
+fn intent(key: &str, payload: &[u8]) -> CommitIntent {
+    CommitIntent {
+        producer: "kernel-curator-hold-test".to_string(),
+        operation_key: key.to_string(),
+        request_digest: format!("{:x}", Sha256::digest(payload)),
+        actor: "test".to_string(),
+        cause: "proof".to_string(),
+    }
+}
+
+fn inspect<T>(root: &std::path::Path, read: impl FnOnce(&Connection) -> T) -> T {
+    let conn =
+        Connection::open_with_flags(root.join("kernel.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    read(&conn)
+}
+
+fn incarnation(root: &std::path::Path) -> String {
+    inspect(root, |conn| {
+        conn.query_row(
+            "SELECT database_incarnation_id FROM kernel_format_marker",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    })
+}
+
+struct Fixture {
+    directory: tempfile::TempDir,
+    store: KernelStore,
+}
+
+impl Fixture {
+    fn open() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+        store
+            .commit(intent("domain", b"domain"), |envelope| {
+                envelope.insert_domain(DomainSpec {
+                    domain_id: "domain".to_string(),
+                    object_id: "domain-object".to_string(),
+                    name: "fixture".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: "domain".to_string(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                Ok("domain".to_string())
+            })
+            .unwrap();
+        Self { directory, store }
+    }
+
+    fn root(&self) -> &std::path::Path {
+        self.directory.path()
+    }
+
+    fn binding(&self, subject: &str, generation: u64) -> CuratorHoldBinding {
+        CuratorHoldBinding {
+            project_digest: "0a".repeat(32),
+            kernel_incarnation: incarnation(self.root()),
+            memstore_incarnation: "m".repeat(32),
+            subject: subject.to_string(),
+            generation,
+        }
+    }
+
+    /// Ingests `payload` as canonical evidence, or as a Curator capture with `retain_until` when given.
+    fn ingest(&self, key: &str, payload: &[u8], retain_until: Option<i64>) -> String {
+        let curator = retain_until.is_some();
+        self.store
+            .ingest_artifact(ArtifactIngestRequest {
+                intent: intent(key, payload),
+                payload: payload.to_vec(),
+                evidence_id: format!("evidence-{key}"),
+                object_id: format!("evidence-object-{key}"),
+                object_kind: "evidence".to_string(),
+                domain_id: "domain".to_string(),
+                source_kind: if curator { "local_file" } else { "repository" }.to_string(),
+                source_id: format!("src/{key}"),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: if curator {
+                    CURATOR_CAPTURE_RETENTION_CLASS.to_string()
+                } else {
+                    "canonical".to_string()
+                },
+                retain_until,
+                asserted_sensitivity: Sensitivity::Sensitive,
+                provider_egress: ProviderEgress::LocalOnly,
+                provenance: None,
+            })
+            .unwrap()
+            .evidence_id
+    }
+
+    fn pin(&self, hold_id: &str) -> (String, String, Option<i64>, Option<i64>, i64) {
+        inspect(self.root(), |conn| {
+            conn.query_row(
+                "SELECT pin_kind,owner_id,expires_at,released_at,
+                        (SELECT COUNT(*) FROM capture_pin_refs r
+                         WHERE r.capture_pin_id=p.capture_pin_id AND r.released_at IS NULL)
+                 FROM capture_pins p WHERE capture_pin_id=?1",
+                [hold_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap()
+        })
+    }
+
+    fn pins(&self) -> i64 {
+        inspect(self.root(), |conn| {
+            conn.query_row("SELECT COUNT(*) FROM capture_pins", [], |row| row.get(0))
+                .unwrap()
+        })
+    }
+
+    fn retain_until(&self, evidence_id: &str) -> Option<i64> {
+        inspect(self.root(), |conn| {
+            conn.query_row(
+                "SELECT retain_until FROM evidence_meta WHERE evidence_id=?1",
+                [evidence_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        })
+    }
+}
+
+fn refusal(error: CuratorHoldError) -> CuratorHoldRefusal {
+    match error {
+        CuratorHoldError::Refused(refusal) => refusal,
+        CuratorHoldError::Store(error) => panic!("store error instead of refusal: {error:?}"),
+    }
+}
+
+#[test]
+fn acquisition_is_atomic_and_bounded_and_reads_back_after_reopen() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let first = fixture.ingest("a", b"alpha bytes", None);
+    let second = fixture.ingest("b", b"beta bytes!!", None);
+    let binding = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(
+            &binding,
+            &[first.clone(), second.clone()],
+            now + 2 * HOUR_MS,
+        )
+        .unwrap();
+    assert_eq!(hold.kind, CuratorHoldKind::Execution);
+    assert_eq!(hold.references, 2);
+    assert_eq!(hold.backing_bytes, 23);
+    let (kind, owner, expires_at, released_at, refs) = fixture.pin(&hold.hold_id);
+    assert_eq!(kind, CURATOR_EXECUTION_HOLD_KIND);
+    assert_eq!(
+        owner,
+        format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}job-1\u{1f}1",
+            "0a".repeat(32),
+            incarnation(fixture.root()),
+            "m".repeat(32)
+        ),
+        "the project digest leads so a project's holds are one prefix range"
+    );
+    assert_eq!(
+        (expires_at, released_at, refs),
+        (Some(now + 2 * HOUR_MS), None, 2)
+    );
+
+    // One unknown id refuses the whole batch and writes no pin.
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(
+                    &fixture.binding("job-2", 1),
+                    &[first.clone(), "evidence-missing".to_string()],
+                    now + HOUR_MS
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::UnavailableEvidence
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    let too_many: Vec<String> = (0..=MAX_CURATOR_HOLD_REFERENCES)
+        .map(|index| format!("evidence-{index}"))
+        .collect();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(&fixture.binding("job-2", 1), &too_many, now + HOUR_MS)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::TooManyReferences
+    );
+    assert_eq!(fixture.pins(), pins_before);
+
+    // The hold survives a process restart and validates its evidence set.
+    let Fixture { directory, store } = fixture;
+    drop(store);
+    let store = KernelStore::open(directory.path()).unwrap();
+    let fixture = Fixture { directory, store };
+    let facts = fixture
+        .store
+        .validate_held_evidence(
+            &hold.hold_id,
+            CuratorHoldKind::Execution,
+            &binding,
+            &[second.clone(), first.clone()],
+            now,
+        )
+        .unwrap();
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0].evidence_id, second);
+    assert_eq!(facts[0].byte_length, 12);
+    assert_eq!(facts[0].sensitivity, Sensitivity::Sensitive);
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .validate_held_evidence(
+                    &hold.hold_id,
+                    CuratorHoldKind::Execution,
+                    &binding,
+                    &[fixture.ingest("c", b"gamma", None)],
+                    now,
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::NotCovered
+    );
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .validate_held_evidence(
+                    &hold.hold_id,
+                    CuratorHoldKind::Execution,
+                    &binding,
+                    std::slice::from_ref(&first),
+                    now + 2 * HOUR_MS,
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::Expired
+    );
+    let mut foreign = binding.clone();
+    foreign.kernel_incarnation = "f".repeat(32);
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .validate_held_evidence(
+                    &hold.hold_id,
+                    CuratorHoldKind::Execution,
+                    &foreign,
+                    &[first],
+                    now
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::IncarnationMismatch
+    );
+}
+
+#[test]
+fn extension_grows_the_union_without_moving_the_deadline_or_double_charging() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let first = fixture.ingest("a", b"alpha bytes", None);
+    let shared = fixture.ingest("shared", b"same bytes as later", None);
+    let binding = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, std::slice::from_ref(&first), now + HOUR_MS)
+        .unwrap();
+    let extended = fixture
+        .store
+        .extend_curator_hold(
+            &hold.hold_id,
+            CuratorHoldKind::Execution,
+            &binding,
+            &[shared.clone(), first.clone(), shared.clone()],
+        )
+        .unwrap();
+    assert_eq!(extended.references, 2);
+    assert_eq!(extended.expires_at, hold.expires_at);
+    assert_eq!(extended.backing_bytes, 11 + 19);
+    // A second evidence row over identical bytes shares the artifact and is charged once.
+    let duplicate_bytes = fixture.ingest("shared-2", b"same bytes as later", None);
+    let extended = fixture
+        .store
+        .extend_curator_hold(
+            &hold.hold_id,
+            CuratorHoldKind::Execution,
+            &binding,
+            &[duplicate_bytes],
+        )
+        .unwrap();
+    assert_eq!(extended.references, 3);
+    assert_eq!(extended.backing_bytes, 11 + 19);
+    let (_, _, expires_at, _, refs) = fixture.pin(&hold.hold_id);
+    assert_eq!((expires_at, refs), (Some(now + HOUR_MS), 3));
+    // A stale generation cannot extend or release the hold.
+    let stale = fixture.binding("job-1", 0);
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .extend_curator_hold(&hold.hold_id, CuratorHoldKind::Execution, &stale, &[first])
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::Missing
+    );
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .release_execution_hold(&hold.hold_id, &stale)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::Missing
+    );
+    fixture
+        .store
+        .release_execution_hold(&hold.hold_id, &binding)
+        .unwrap();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .release_execution_hold(&hold.hold_id, &binding)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::Released
+    );
+    assert!(fixture.pin(&hold.hold_id).3.is_some());
+}
+
+#[test]
+fn quota_refusal_retains_nothing_and_admits_exactly_at_the_bound() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let ten = fixture.ingest("ten", &[b'x'; 10], None);
+    let six = fixture.ingest("six", &[b'y'; 6], None);
+    let five = fixture.ingest("five", &[b'z'; 5], None);
+    let binding = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold_with_quota_for_test(
+            &binding,
+            std::slice::from_ref(&ten),
+            now + HOUR_MS,
+            16,
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(hold.backing_bytes, 10);
+    // Another job in the same project: exactly at the project bound is admitted, one byte over is refused whole.
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold_with_quota_for_test(
+                    &fixture.binding("job-2", 1),
+                    &[six.clone(), five.clone()],
+                    now + HOUR_MS,
+                    16,
+                    1_000,
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::ProjectBackingExhausted
+    );
+    assert_eq!(
+        fixture.pins(),
+        pins_before,
+        "a refused acquisition leaves no pin or reference"
+    );
+    let at_bound = fixture
+        .store
+        .acquire_execution_hold_with_quota_for_test(
+            &fixture.binding("job-2", 1),
+            std::slice::from_ref(&six),
+            now + HOUR_MS,
+            16,
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(at_bound.backing_bytes, 6);
+    // Another project is charged separately, and the host bound applies across projects.
+    let mut other_project = fixture.binding("job-3", 1);
+    other_project.project_digest = "0b".repeat(32);
+    fixture
+        .store
+        .acquire_execution_hold_with_quota_for_test(
+            &other_project,
+            std::slice::from_ref(&five),
+            now + HOUR_MS,
+            16,
+            21,
+        )
+        .unwrap();
+    let mut fourth = fixture.binding("job-4", 1);
+    fourth.project_digest = "0c".repeat(32);
+    let one = fixture.ingest("one", b"q", None);
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold_with_quota_for_test(&fourth, &[one], now + HOUR_MS, 16, 21)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::HostBackingExhausted
+    );
+}
+
+#[test]
+fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_references() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let canonical = fixture.ingest("canonical", b"canonical evidence", None);
+    let live_capture = fixture.ingest("capture-live", b"captured live", Some(now + HOUR_MS));
+    let expired_capture =
+        fixture.ingest("capture-expired", b"captured expired", Some(now - HOUR_MS));
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(
+            &execution,
+            &[
+                canonical.clone(),
+                live_capture.clone(),
+                expired_capture.clone(),
+            ],
+            now + HOUR_MS,
+        )
+        .unwrap();
+    let review = fixture.binding("review-result:job-1", 1);
+    let created = now - 1_000;
+    // Beyond seven days from result creation is refused and changes nothing.
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(
+                    &hold.hold_id,
+                    &execution,
+                    &review,
+                    created,
+                    created + REVIEW_EXPIRY_MAX_MS + 1,
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest
+    );
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
+    let review_expires_at = created + REVIEW_EXPIRY_MAX_MS;
+    let review_hold = fixture
+        .store
+        .transfer_execution_to_review(
+            &hold.hold_id,
+            &execution,
+            &review,
+            created,
+            review_expires_at,
+        )
+        .unwrap();
+    assert_eq!(review_hold.kind, CuratorHoldKind::Review);
+    assert_eq!(review_hold.references, 3);
+    assert_eq!(review_hold.expires_at, review_expires_at);
+    let (kind, _, expires_at, released_at, refs) = fixture.pin(&review_hold.hold_id);
+    assert_eq!(kind, CURATOR_REVIEW_HOLD_KIND);
+    assert_eq!(
+        (expires_at, released_at, refs),
+        (Some(review_expires_at), None, 3)
+    );
+    let (_, _, _, execution_released, execution_refs) = fixture.pin(&hold.hold_id);
+    assert!(execution_released.is_some());
+    assert_eq!(execution_refs, 0);
+    assert_eq!(
+        fixture.retain_until(&live_capture),
+        Some(review_expires_at),
+        "a live Curator acquisition reference moves to the review expiry"
+    );
+    assert_eq!(
+        fixture.retain_until(&expired_capture),
+        Some(now - HOUR_MS),
+        "an expired reference is never extended"
+    );
+    assert_eq!(
+        fixture.retain_until(&canonical),
+        None,
+        "independently owned evidence keeps its own retention"
+    );
+    // The execution binding cannot release the review hold; the review binding can, once.
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .release_review_hold(&review_hold.hold_id, &execution)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::Missing
+    );
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(
+                    &hold.hold_id,
+                    &execution,
+                    &review,
+                    created,
+                    review_expires_at
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::Released,
+        "a released execution hold cannot be transferred twice"
+    );
+    fixture
+        .store
+        .release_review_hold(&review_hold.hold_id, &review)
+        .unwrap();
+    assert!(fixture.pin(&review_hold.hold_id).3.is_some());
+}
+
+#[test]
+fn expiry_purge_and_reclamation_follow_the_capture_pin_contract() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let payload = b"reclaimable evidence bytes";
+    let digest = format!("{:x}", Sha256::digest(payload));
+    let evidence = fixture.ingest("gc", payload, None);
+    let binding = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, std::slice::from_ref(&evidence), now + 30 * DAY_MS)
+        .unwrap();
+    // Retire the evidence so only the hold keeps the bytes past the invalidation grace.
+    fixture
+        .store
+        .commit(intent("retire", b"retire"), |envelope| {
+            envelope.retire_evidence("evidence-object-gc")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let past_grace = now + 15 * DAY_MS;
+    let swept = fixture.store.run_staging_maintenance(past_grace).unwrap();
+    assert_eq!(
+        swept.artifact_gc.reclaimed_objects, 0,
+        "an active hold retains bytes whose evidence is already invalidated"
+    );
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .validate_held_evidence(
+                    &hold.hold_id,
+                    CuratorHoldKind::Execution,
+                    &binding,
+                    std::slice::from_ref(&evidence),
+                    now
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::UnavailableEvidence,
+        "protecting bytes is not evidence liveness"
+    );
+    fixture
+        .store
+        .release_execution_hold(&hold.hold_id, &binding)
+        .unwrap();
+    let swept = fixture.store.run_staging_maintenance(past_grace).unwrap();
+    assert_eq!(
+        swept.artifact_gc.reclaimed_objects, 1,
+        "release starts the reclaim grace"
+    );
+    assert!(
+        !fixture
+            .root()
+            .join("artifacts/objects")
+            .join(&digest[..2])
+            .join(&digest[2..])
+            .exists()
+    );
+
+    // Fixed expiry releases a hold through capture-pin maintenance without a caller.
+    let short = fixture.ingest("short", b"short-lived hold", None);
+    let binding = fixture.binding("job-2", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, &[short], now + HOUR_MS)
+        .unwrap();
+    fixture
+        .store
+        .run_capture_pin_maintenance(now + HOUR_MS)
+        .unwrap();
+    assert_eq!(fixture.pin(&hold.hold_id).3, Some(now + HOUR_MS));
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .release_execution_hold(&hold.hold_id, &binding)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::Released
+    );
+
+    // Purge degrades a live hold and wins over it.
+    let payload = b"purged evidence bytes";
+    let purged = fixture.ingest("purge", payload, None);
+    let binding = fixture.binding("job-3", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, std::slice::from_ref(&purged), now + HOUR_MS)
+        .unwrap();
+    fixture
+        .store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge", payload),
+            identity: ArtifactDeletionIdentity::Digest(format!("{:x}", Sha256::digest(payload))),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator".to_string()),
+            target_locator: Some("incident://purge".to_string()),
+            reason: Some("retired".to_string()),
+            deleted_at: now,
+        })
+        .unwrap();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .validate_held_evidence(
+                    &hold.hold_id,
+                    CuratorHoldKind::Execution,
+                    &binding,
+                    &[purged],
+                    now
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::PurgeDegraded
+    );
+}
+
+#[test]
+fn curator_captures_must_carry_a_finite_acquisition_reference() {
+    let fixture = Fixture::open();
+    let error = fixture
+        .store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent("no-deadline", b"capture"),
+            payload: b"capture".to_vec(),
+            evidence_id: "evidence-no-deadline".to_string(),
+            object_id: "evidence-object-no-deadline".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "domain".to_string(),
+            source_kind: "local_file".to_string(),
+            source_id: "src/file".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Sensitive,
+            provider_egress: ProviderEgress::LocalOnly,
+            provenance: None,
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::InvalidInput);
+    fixture.ingest("with-deadline", b"capture", Some(now_ms() + HOUR_MS));
+}
+
+#[test]
+fn run_buffers_load_each_artifact_once_and_refuse_at_the_exact_boundary() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let ten = fixture.ingest("ten", &[b'x'; 10], None);
+    let ten_again = fixture.ingest("ten-again", &[b'x'; 10], None);
+    let six = fixture.ingest("six", b"abcdef", None);
+    let five = fixture.ingest("five", b"vwxyz", None);
+    let binding = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(
+            &binding,
+            &[ten.clone(), ten_again.clone(), six.clone(), five.clone()],
+            now + HOUR_MS,
+        )
+        .unwrap();
+    let facts: Vec<HeldEvidence> = fixture
+        .store
+        .validate_held_evidence(
+            &hold.hold_id,
+            CuratorHoldKind::Execution,
+            &binding,
+            &[ten, ten_again, six, five],
+            now,
+        )
+        .unwrap();
+    let mut buffers = RunBufferMap::new(16);
+    let reads_before = fixture.store.verified_object_reads_for_test();
+    let first = buffers.load(&fixture.store, &facts[0]).unwrap();
+    let same_bytes = buffers.load(&fixture.store, &facts[1]).unwrap();
+    assert_eq!(
+        first, same_bytes,
+        "one artifact behind two evidence rows loads once"
+    );
+    assert_eq!(buffers.loaded(), 1);
+    assert_eq!(buffers.remaining(), 6);
+    assert_eq!(
+        fixture.store.verified_object_reads_for_test() - reads_before,
+        1
+    );
+    let second = buffers.load(&fixture.store, &facts[2]).unwrap();
+    assert_eq!(
+        buffers.remaining(),
+        0,
+        "exactly the remaining capacity is admitted"
+    );
+    assert_eq!(
+        buffers.load(&fixture.store, &facts[3]).unwrap_err(),
+        RunBufferRefusal::CapacityExhausted
+    );
+    assert_eq!(
+        buffers.loaded(),
+        2,
+        "a refused artifact is never loaded or retained"
+    );
+    assert_eq!(buffers.slice(second, 1..4).unwrap(), b"bcd");
+    assert_eq!(buffers.slice(first, 0..10).unwrap(), &[b'x'; 10]);
+    assert_eq!(
+        buffers.slice(second, 0..7).unwrap_err(),
+        RunBufferRefusal::RangeOutOfBounds
+    );
+    // Repeated ranges reuse the loaded buffer; no reload happens.
+    let reads = fixture.store.verified_object_reads_for_test();
+    assert_eq!(buffers.load(&fixture.store, &facts[2]).unwrap(), second);
+    assert_eq!(fixture.store.verified_object_reads_for_test(), reads);
+    // An artifact larger than the whole run budget is refused before any read.
+    let mut small = RunBufferMap::new(4);
+    assert_eq!(
+        small.load(&fixture.store, &facts[0]).unwrap_err(),
+        RunBufferRefusal::CapacityExhausted
+    );
+    assert_eq!(fixture.store.verified_object_reads_for_test(), reads);
+}
