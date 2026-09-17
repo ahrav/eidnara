@@ -653,6 +653,20 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
         ),
         CuratorHoldRefusal::Missing
     );
+    // A retried transfer whose first result was lost gets the committed review hold back, and writes nothing.
+    let pins_before = fixture.pins();
+    let retried = fixture
+        .store
+        .transfer_execution_to_review(&hold.hold_id, &execution, &review, review_expires_at)
+        .unwrap();
+    assert_eq!(retried.hold_id, review_hold.hold_id);
+    assert_eq!(retried.expires_at, review_expires_at);
+    assert_eq!(fixture.pins(), pins_before);
+    fixture
+        .store
+        .release_review_hold(&review_hold.hold_id, &review)
+        .unwrap();
+    assert!(fixture.pin(&review_hold.hold_id).3.is_some());
     assert_eq!(
         refusal(
             fixture
@@ -661,13 +675,8 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
                 .unwrap_err()
         ),
         CuratorHoldRefusal::Released,
-        "a released execution hold cannot be transferred twice"
+        "once the review hold is gone too, the released execution hold cannot be transferred again"
     );
-    fixture
-        .store
-        .release_review_hold(&review_hold.hold_id, &review)
-        .unwrap();
-    assert!(fixture.pin(&review_hold.hold_id).3.is_some());
 }
 
 #[test]
@@ -1217,4 +1226,75 @@ fn purged_bytes_stop_charging_the_backing_quota() {
         )
         .unwrap();
     assert_eq!(admitted.backing_bytes, 10);
+}
+
+/// Holds an `IMMEDIATE` transaction on the store file for `hold_ms` while `work` runs, so the store's next write waits on the busy handler.
+fn with_writer_blocked<T>(root: &std::path::Path, hold_ms: u64, work: impl FnOnce() -> T) -> T {
+    let path = root.join("kernel.sqlite");
+    let (ready, wait) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        ready.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(hold_ms));
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    wait.recv().unwrap();
+    let result = work();
+    holder.join().unwrap();
+    result
+}
+
+#[test]
+fn deadlines_are_judged_by_the_clock_inside_the_write_transaction() {
+    let fixture = Fixture::open();
+    let evidence = fixture.ingest("held", b"held bytes", None);
+
+    // Acquisition: the expiry passes while the call waits for the writer.
+    let binding = fixture.binding("job-1", 1);
+    let pins_before = fixture.pins();
+    let result = with_writer_blocked(fixture.root(), 400, || {
+        fixture.store.acquire_execution_hold(
+            &binding,
+            std::slice::from_ref(&evidence),
+            now_ms() + 100,
+        )
+    });
+    assert_eq!(
+        refusal(result.unwrap_err()),
+        CuratorHoldRefusal::InvalidRequest,
+        "an expiry that has passed by the time the writer is held is refused"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+
+    // Transfer: the review expiry passes while the call waits for the writer.
+    let execution = fixture.binding("job-2", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(
+            &execution,
+            std::slice::from_ref(&evidence),
+            now_ms() + HOUR_MS,
+        )
+        .unwrap();
+    let now = now_ms();
+    fixture.stage_proposal("job-2", 1, now - 1_000, now + 150);
+    let identity = provisional_result_identity("job-2", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let pins_before = fixture.pins();
+    let result = with_writer_blocked(fixture.root(), 400, || {
+        fixture
+            .store
+            .transfer_execution_to_review(&hold.hold_id, &execution, &review, now + 150)
+    });
+    assert_eq!(
+        refusal(result.unwrap_err()),
+        CuratorHoldRefusal::InvalidRequest,
+        "a review window that has closed by the time the writer is held is refused"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    assert!(
+        fixture.pin(&hold.hold_id).3.is_none(),
+        "the execution hold stays live"
+    );
 }

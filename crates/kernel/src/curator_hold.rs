@@ -259,10 +259,8 @@ impl KernelStore {
         review.validate()?;
         let execution_hold_id =
             identity(execution_hold_id).map_err(|_| CuratorHoldRefusal::InvalidRequest)?;
-        let now = current_time_ms();
         let expected = provisional_result_identity(&execution.subject, execution.generation);
-        if review_expires_at <= now
-            || review.generation != execution.generation
+        if review.generation != execution.generation
             || review.subject != expected.candidate_id
             || execution.project_digest != review.project_digest
             || execution.kernel_incarnation != review.kernel_incarnation
@@ -276,6 +274,17 @@ impl KernelStore {
             .map_err(sqlite)?;
         check_fence(&tx, self.lease_epoch())?;
         self.check_incarnation(&tx, review)?;
+        // The clock is read under the writer: a wait behind another writer must not let a lapsed deadline through.
+        let now = current_time_ms();
+        if review_expires_at <= now {
+            return Err(CuratorHoldRefusal::InvalidRequest.into());
+        }
+        // A transfer whose result was lost is retried: the binding's live review hold is the committed answer, and nothing is written again.
+        if let Some((review_hold_id, expires_at)) =
+            live_hold_of(&tx, CuratorHoldKind::Review, review, now)?
+        {
+            return admit_totals(&tx, &review_hold_id, CuratorHoldKind::Review, expires_at);
+        }
         let result_created_at: i64 = tx
             .query_row_cached(
                 "SELECT c.created_at FROM candidates c JOIN extraction_runs r USING(extraction_run_id)
@@ -446,8 +455,7 @@ impl KernelStore {
         quota: BackingQuota,
     ) -> Result<CuratorHold, CuratorHoldError> {
         binding.validate()?;
-        let now = current_time_ms();
-        if expires_at <= now || evidence_ids.is_empty() {
+        if evidence_ids.is_empty() {
             return Err(CuratorHoldRefusal::InvalidRequest.into());
         }
         let mut writer = self.lock_writer()?;
@@ -456,6 +464,10 @@ impl KernelStore {
             .map_err(sqlite)?;
         check_fence(&tx, self.lease_epoch())?;
         self.check_incarnation(&tx, binding)?;
+        let now = current_time_ms();
+        if expires_at <= now {
+            return Err(CuratorHoldRefusal::InvalidRequest.into());
+        }
         let facts = precharge(&tx, binding, evidence_ids, quota)?;
         let (hold_id, expires_at) = match live_hold_of(&tx, kind, binding, now)? {
             Some(existing) => existing,
