@@ -5,9 +5,10 @@ HEAD `2e4433e6b511ae74944df8a9669c428e73915d29`, 2026-09-13.
 [Source register](../source-register.md) defines P and B. No benchmark runs.
 
 Record status: invalidated for category mismatch after independent portfolio
-review. The exact accepted obligation lives in
-[EG1](../evidence-gates.md#eg1-decode-projection-payoff). This evidence file
-retains the discovery trail; invalidation does not remove the plan's stop.
+review. [EG1](../evidence-gates.md#eg1-decode-projection-payoff) is now retired:
+the benchmark cleanup removed its measurement artifacts and withdrew its
+passing verdict. The discovery trail below describes the pinned historical
+plan, not a current benchmark, passing payoff claim, or pending campaign.
 
 ## Discovery trigger
 

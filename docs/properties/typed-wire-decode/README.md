@@ -55,15 +55,16 @@ check status, impact, and open questions. Each has a named test/verification
 handoff. Same-source rediscovery is not independent corroboration.
 
 The portfolio has **24 active properties**, **one invalidated category record**,
-and **one required performance evidence gate**. The invalidated record is
-retained rather than deleted. Its obligation lives in
-[EG1: decode-projection payoff](resources/evidence-gates.md); this does not
-reactivate the separately invalidated latency-audit W1 record.
+and **one retired performance evidence gate**. The invalidated record is
+retained rather than deleted. [EG1: decode-projection payoff](resources/evidence-gates.md)
+withdraws its passing verdict because the benchmark cleanup removed its
+receipts and raw evidence. W1 remains invalidated.
 
 The typed-wire U1 branch (`perf/typed-wire-u1-owned-decode`) exercised the
 portfolio: each catalog's `Exercised:` line names the tests that ran, and the
 per-record evidence files carry a "Typed-wire U1 execution, 2026-09-13" section
-with the measured values. EG1 holds both legs and a `proceed` verdict. Records
+with the measured values for correctness and resource checks. EG1 no longer
+has retained measurement evidence or a passing payoff verdict. Records
 marked partial name what remains unconstructed. Existing checks beyond the
 named tests are unaudited.
 No new liveness deadline is justified by this synchronous decode and
@@ -72,8 +73,8 @@ aggregate reports are summaries only. The evidence receipt for four benchmark
 cells is not a runtime reachability property.
 Marker names retain their part-specific spelling. Treat each exact name as
 an identifier; never infer the portfolio's membership from a naming pattern.
-The fault maps enumerate all 26 independent situation markers and the separate
-EG1 evidence receipt.
+The fault maps enumerate all 26 independent situation markers. The separate
+EG1 evidence receipt is retired, not counted as runtime coverage.
 
 ## Specification traceability
 
@@ -89,9 +90,9 @@ EG1 evidence receipt.
 | R8, KTD4, U1/U4 | `decode-footprint-covers-both-lanes-combined-peak`; `frozen-admission-outcomes-and-boundaries-stay-stable`; `decode-and-projection-stay-within-resident-pool` in resources |
 | R9, KTD4, U1 | `retained-accounting-follows-typed-ownership` in resources |
 | R10, U4 | `message-decode-allocation-gate-has-isolated-scope` in resources |
-| R11, U4 | EG1 in resources; W1 status reconciliation remains an owner question |
+| R11, U4 | EG1 retired; payoff verdict blocked without retained evidence; W1 stays invalidated |
 | Nonvacuity across units | `nested-duplicate-fallback-is-exercised`, `identity-edge-states-are-exercised`, `resource-witnesses-reach-independent-preconditions` |
-| Stop conditions | Plugin byte preservation; original A1-A3 outcomes; EG1's whole-plan stop within noise; unchanged normative wire surface |
+| Stop conditions | Plugin byte preservation; original A1-A3 outcomes; unchanged normative wire surface. EG1's historical payoff stop is not an active campaign. |
 
 ## Review and disposition
 
