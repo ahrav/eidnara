@@ -692,7 +692,9 @@ impl EvidenceBroker {
                 {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
-                let bytes = self.load_range(store, &alias, &held, range.clone())?.0;
+                let bytes = self
+                    .load_range(store, &alias, &held, range.clone(), now_ms)?
+                    .0;
                 (
                     bytes,
                     None,
@@ -729,9 +731,10 @@ impl EvidenceBroker {
                 {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
+                let range = span_range(&alias, detail.span, range)?;
                 let held =
                     self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
-                let (bytes, loaded) = self.load_range(store, &alias, &held, range.clone())?;
+                let (bytes, loaded) = self.load_range(store, &alias, &held, range, now_ms)?;
                 let judged = if loaded {
                     self.judge(
                         store,
@@ -785,9 +788,10 @@ impl EvidenceBroker {
                 {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
+                let range = span_range(&alias, detail.span, range)?;
                 let held =
                     self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
-                let (bytes, loaded) = self.load_range(store, &alias, &held, range.clone())?;
+                let (bytes, loaded) = self.load_range(store, &alias, &held, range, now_ms)?;
                 let judged = if loaded {
                     self.judge(
                         store,
@@ -907,13 +911,14 @@ impl EvidenceBroker {
             .charge_render(Some(alias), u64::try_from(bytes).unwrap_or(u64::MAX))
     }
 
-    /// Charges the range, loads the artifact once, re-reads the egress verdict on the bytes that were just loaded, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret; a buffer that failed it stays refused without another charge or scan. Returns whether this call loaded the artifact, so the caller can re-judge object standing over the same window.
+    /// Charges the range, loads the artifact once, re-reads the egress verdict and the execution hold on the bytes that were just loaded, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret; a buffer that failed it stays refused without another charge or scan. Returns whether this call loaded the artifact, so the caller can re-judge object standing over the same window.
     fn load_range(
         &mut self,
         store: &KernelStore,
         alias: &Alias,
         held: &HeldEvidence,
         range: Option<Range<u64>>,
+        now_ms: i64,
     ) -> Result<(Vec<u8>, bool), Refusal> {
         let range = range.unwrap_or(0..held.byte_length);
         if range.end > held.byte_length {
@@ -951,6 +956,16 @@ impl EvidenceBroker {
                     evidence_id: held.evidence_id.clone(),
                 },
             )?;
+            // Likewise the hold: a run whose cutoff passed during the read does not disclose what it loaded.
+            store
+                .validate_held_evidence(
+                    &self.binding.hold_id,
+                    CuratorHoldKind::Execution,
+                    &self.binding.hold,
+                    std::slice::from_ref(&held.evidence_id),
+                    now_ms,
+                )
+                .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
         }
         if loaded || !self.checked_artifacts.contains(&held.artifact_digest) {
             let whole = self
@@ -1081,6 +1096,22 @@ fn hold_refusal(error: CuratorHoldError) -> RefusalCode {
         CuratorHoldError::Store(KernelError::Deadline) | CuratorHoldError::Store(_) => {
             RefusalCode::Store
         }
+    }
+}
+
+/// A span descriptor names one selection of its backing artifact, and only those bytes carry its provenance: no range means the span, and a range outside it is refused rather than translated.
+fn span_range(
+    alias: &Alias,
+    span: Option<(u64, u64)>,
+    range: Option<Range<u64>>,
+) -> Result<Option<Range<u64>>, Refusal> {
+    match (span, range) {
+        (None, range) => Ok(range),
+        (Some((start, end)), None) => Ok(Some(start..end)),
+        (Some((start, end)), Some(range)) if range.start >= start && range.end <= end => {
+            Ok(Some(range))
+        }
+        (Some(_), Some(_)) => Err(refuse(Some(alias), RefusalCode::InvalidRange)),
     }
 }
 

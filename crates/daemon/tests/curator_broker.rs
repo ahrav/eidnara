@@ -1566,3 +1566,84 @@ fn a_decision_retired_between_the_verdict_and_the_load_is_not_disclosed() {
     );
     assert!(broker.ledger.disclosed().next().is_none());
 }
+
+#[test]
+fn a_span_descriptor_discloses_only_its_span() {
+    let fixture = Fixture::open();
+    let native_text = "a native message";
+    let native_evidence = fixture.ingest("native", native_text.as_bytes(), false);
+    let (span_object, span_tuple) = fixture.descriptor(Publish {
+        key: "native-span",
+        class: "messages",
+        representation: "text",
+        identity: &[
+            ("project_id", "proj-a"),
+            ("harness", "opencode"),
+            ("session_id", "sess-01"),
+            ("message_id", "msg-001"),
+            ("block_index", "0"),
+        ],
+        evidence: &native_evidence,
+        buffer: native_text,
+        span: Some(Span { start: 0, end: 8 }),
+    });
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&native_evidence.0));
+    let alias = broker.aliases.issue(ReferenceExpectation::NativeSource {
+        object_id: span_object,
+        class: OccurrenceClass::Messages,
+        source_revision: 1,
+        artifact_digest: native_evidence.1,
+        evidence_id: native_evidence.0,
+        occurrence_tuple: span_tuple,
+    });
+    // No range means the descriptor's span, not the whole backing artifact.
+    let whole = broker
+        .read(&fixture.store, alias.as_str(), None, fixture.now)
+        .unwrap();
+    assert_eq!(whole.buffer.bytes, b"a native");
+    assert_eq!(whole.buffer.tag.charged_bytes, 8);
+    // Bytes outside the span belong to other occurrences; the request is refused rather than translated.
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), Some(8..16), fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::InvalidRange
+    );
+    let inside = broker
+        .read(&fixture.store, alias.as_str(), Some(2..8), fixture.now)
+        .unwrap();
+    assert_eq!(inside.buffer.bytes, b"native");
+}
+
+#[test]
+fn a_hold_released_between_the_verdict_and_the_load_is_not_disclosed() {
+    let fixture = Fixture::open();
+    let (capture_id, digest) = fixture.ingest("racy", b"released while loading", true);
+    let hold_binding = fixture.hold_binding(PROJECT);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&capture_id));
+    let hold_id = broker_hold_id(&broker);
+    let release = Box::new(move |store: &KernelStore| {
+        store
+            .release_execution_hold(&hold_id, &hold_binding)
+            .unwrap();
+    });
+    broker = broker.with_after_load_hook_for_test(release);
+    let alias = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: capture_id,
+            artifact_digest: digest,
+            byte_length: 22,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::HoldInvalid,
+        "the hold is re-read on the bytes that were loaded, like the artifact verdict"
+    );
+    assert!(broker.ledger.disclosed().next().is_none());
+}
