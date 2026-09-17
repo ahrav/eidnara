@@ -9,17 +9,18 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use daemon::packing::{
-    ClaudeTokens, PackingTrace, PreparationRefusal, RequiredEvent, RequiredMaterialization,
-    StageEvent,
+    AccountingProfile, ClaudeTokens, PackingTrace, PreparationRefusal, RequiredEvent,
+    RequiredInputs, RequiredMaterialization, StageEvent, prepare_required,
 };
-use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::encode;
+use kernel::{ArtifactDestination, EligibilityVerdict};
 use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{RequiredBound, RequiredBounds, RequiredContextFailure, RequiredRequest};
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
 use support::packing::{
-    Fixture, ToolSpan, bounds, required_render_total, tool_span, while_connection_is_held,
+    Fixture, ToolSpan, accounting_bounds, bounds, required_render_total, tool_span,
+    while_connection_is_held,
 };
 
 fn required_failure(
@@ -276,14 +277,20 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
         required_failure(&result),
         &RequiredContextFailure::Corrupt(FIRST.id())
     );
-    assert_eq!(trace.payload_loads(), 0, "the load is refused, not charged");
+    assert_eq!(
+        trace.payload_loads(),
+        2,
+        "both rows returned bytes before the first digest refused"
+    );
     assert_eq!(
         required_events(&trace),
         [
             RequiredEvent::Read,
             RequiredEvent::Read,
             RequiredEvent::Judged,
-            RequiredEvent::Admitted
+            RequiredEvent::Admitted,
+            RequiredEvent::Loaded,
+            RequiredEvent::Loaded,
         ]
     );
     assert_no_optional_work(&trace);
@@ -310,8 +317,8 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
     );
     assert_eq!(
         trace.payload_loads(),
-        1,
-        "the payload before the fault verified first"
+        2,
+        "both rows returned bytes; the second's digest refused them"
     );
     assert_no_optional_work(&trace);
     damage(
@@ -341,6 +348,65 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
         &RequiredContextFailure::Corrupt(FIRST.id())
     );
     assert_no_optional_work(&trace);
+    damage(
+        "UPDATE occurrences SET tuple=?2 WHERE occurrence_id=?1",
+        &[
+            &FIRST.id().to_string(),
+            &encode(&FIRST.occurrence(&FIRST.identity()), FIRST.payload)
+                .unwrap()
+                .tuple,
+        ],
+    );
+
+    // Eligibility metadata the kernel would refuse is this row's corruption,
+    // not an untyped kernel fault over the whole batch.
+    damage(
+        "UPDATE occurrences SET source_artifact_digest='not-a-digest' WHERE occurrence_id=?1",
+        &[&FIRST.id().to_string()],
+    );
+    let (result, trace) = fixture.prepare(
+        &[FIRST.request(), SECOND.request()],
+        &bounds(1 << 20),
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        required_failure(&result),
+        &RequiredContextFailure::Corrupt(FIRST.id())
+    );
+    assert!(trace.events().is_empty(), "{:?}", trace.events());
+    assert_no_optional_work(&trace);
+}
+
+/// The profile prices after the last projection hold; a budget that ends
+/// there still refuses the phase rather than returning a materialization.
+#[test]
+fn a_budget_that_ends_during_reservation_refuses_the_materialization() {
+    let fixture = Fixture::new(&[FIRST]);
+    let budget = EvalBudget::unbounded();
+    let cancelling = budget.clone();
+    let profile =
+        AccountingProfile::heuristic("cancels-on-first-cost", "cancels", 0, move |text| {
+            cancelling.cancel();
+            text.len()
+        });
+    let mut trace = PackingTrace::default();
+    let result = prepare_required(
+        &fixture.store,
+        RequiredInputs {
+            kernel: &fixture.kernel,
+            project: &fixture.project,
+            destination: ArtifactDestination::Local,
+            budget: &budget,
+            profile: &profile,
+        },
+        &[FIRST.request()],
+        &bounds(1 << 20),
+        &accounting_bounds(),
+        &mut trace,
+    );
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+    assert_eq!(trace.payload_loads(), 1);
+    assert_eq!(trace.optional_events(), 0);
 }
 
 #[test]

@@ -37,3 +37,17 @@ None.
 
 - Two payloads whose lengths sum to the limit, then a limit one below.
 - A payload longer than 64 KiB.
+
+## Investigation log
+
+### Q: Does the estimator see the bytes the caller will receive?
+
+- Sources examined: `crates/daemon/src/packing/mod.rs` `prepare_required`, where
+  `reserve_required` is given `bytes.iter().map(Vec::as_slice)` and the same
+  `bytes` are moved into `MaterializedRequired`;
+  `crates/retrieval/src/packing/required.rs` `reserve_required`, which refuses
+  a length that disagrees with the row's `byte_length`.
+- Findings: one `Vec<u8>` per item is charged and then returned; no copy or
+  cut sits between the two uses.
+- Missing evidence: none.
+- Conclusion: resolved with answer - the charged bytes are the returned bytes.

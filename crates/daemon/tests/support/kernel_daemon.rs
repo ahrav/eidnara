@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use daemon::context_capabilities::CapabilitySource;
 use daemon::dispatch::PreparedOutcome;
 use daemon::kernel_routes::KernelState;
 use daemon::{Handler, dev_descriptor_at};
@@ -18,8 +19,30 @@ use storage::StorageDescriptor;
 pub const SESSION: &str = "stage1-session";
 pub const DOMAIN: &str = "stage1-domain";
 
+pub struct StartOptions {
+    pub data: Option<tempfile::TempDir>,
+    pub project_config: Option<Value>,
+    pub harness: String,
+    pub consumer_capabilities: Vec<String>,
+    pub capability_source: Option<Arc<dyn CapabilitySource>>,
+}
+
+impl Default for StartOptions {
+    fn default() -> Self {
+        Self {
+            data: None,
+            project_config: None,
+            harness: "test".to_owned(),
+            consumer_capabilities: Vec::new(),
+            capability_source: None,
+        }
+    }
+}
+
 pub struct KernelDaemon {
     handler: Handler,
+    /// The engine behind the handler's embedding lane, so a test can script one inference outcome.
+    engine: Arc<super::embedding_fixtures::TestEngine>,
     route: RouteHandle,
     project: PathBuf,
     // Fields drop in declaration order; the directory must outlive the handler
@@ -40,11 +63,27 @@ impl KernelDaemon {
 
     /// Starts the daemon over `data`, so records written there before the start are found by it.
     pub async fn start_in(data: tempfile::TempDir, project_config: Option<Value>) -> Self {
+        Self::start_with(StartOptions {
+            data: Some(data),
+            project_config,
+            ..StartOptions::default()
+        })
+        .await
+    }
+
+    pub async fn start_with(options: StartOptions) -> Self {
+        let data = options.data.unwrap_or_else(|| tempfile::tempdir().unwrap());
+        let project_config = options.project_config;
         let descriptor: StorageDescriptor = dev_descriptor_at(data.path().to_str().unwrap());
-        let handler = Handler::new().with_local_embeddings(super::embedding_fixtures::component(
-            &super::embedding_fixtures::TestEngine::new(),
-            host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
-        ));
+        let engine = super::embedding_fixtures::TestEngine::new();
+        let mut handler =
+            Handler::new().with_local_embeddings(super::embedding_fixtures::component(
+                &engine,
+                host_runtime::local_embeddings::LocalEmbeddingsLimits::default(),
+            ));
+        if let Some(source) = options.capability_source {
+            handler = handler.with_capability_source(source);
+        }
         handler.disable_kernel_sampler_for_test();
         let init = HostInit {
             host_capabilities: Vec::new(),
@@ -84,11 +123,11 @@ impl KernelDaemon {
         };
         let identity = RouteIdentity {
             project_root: project.clone(),
-            harness: "test".to_owned(),
+            harness: options.harness,
             session: SESSION.to_owned(),
             consumer_module_id: None,
             consumer_launch_nonce: None,
-            consumer_capabilities: Vec::new(),
+            consumer_capabilities: options.consumer_capabilities,
             admission_facts: None,
             credential_fingerprints: std::collections::BTreeMap::new(),
         };
@@ -98,18 +137,57 @@ impl KernelDaemon {
         ));
         Self {
             handler,
+            engine,
             route,
             project,
             _data: data,
         }
     }
 
-    pub async fn call(&self, request: Value) -> Value {
-        match self
-            .handler
-            .dispatch_value_for_test(self.route, request)
+    pub fn engine(&self) -> &super::embedding_fixtures::TestEngine {
+        &self.engine
+    }
+
+    pub async fn outcome(&self, request: Value) -> PreparedOutcome {
+        self.outcome_on(self.route, request).await
+    }
+
+    pub async fn outcome_on(&self, route: RouteHandle, request: Value) -> PreparedOutcome {
+        self.handler.dispatch_value_for_test(route, request).await
+    }
+
+    /// Binds a second route on the same handler and project, so two bindings can be observed side by side.
+    pub async fn bind_another(&self, channel: u16, harness: &str) -> RouteHandle {
+        let route = RouteHandle { channel, epoch: 1 };
+        let identity = RouteIdentity {
+            project_root: self.project.clone(),
+            harness: harness.to_owned(),
+            session: SESSION.to_owned(),
+            consumer_module_id: None,
+            consumer_launch_nonce: None,
+            consumer_capabilities: Vec::new(),
+            admission_facts: None,
+            credential_fingerprints: std::collections::BTreeMap::new(),
+        };
+        assert!(matches!(
+            self.handler.bind(route, identity).await,
+            BindOutcome::Accept
+        ));
+        route
+    }
+
+    pub async fn outcome_observed(
+        &self,
+        request: Value,
+        cancel_before_step: bool,
+    ) -> (PreparedOutcome, usize) {
+        self.handler
+            .dispatch_value_for_test_observed(self.route, request, cancel_before_step)
             .await
-        {
+    }
+
+    pub async fn call(&self, request: Value) -> Value {
+        match self.outcome(request).await {
             PreparedOutcome::Response(output) => {
                 let mut bytes = Vec::new();
                 output.measure().unwrap().write_to(&mut bytes).unwrap();
@@ -173,6 +251,10 @@ impl KernelDaemon {
 
     pub fn handler(&self) -> &Handler {
         &self.handler
+    }
+
+    pub fn project(&self) -> &Path {
+        &self.project
     }
 
     /// Root path the store descriptor was composed from.

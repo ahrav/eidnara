@@ -286,14 +286,25 @@ probe that ranked it best, and that probe's ordinal. It reads no payload bytes.
 A contribution is a recall candidate for the caller's fusion or rendering step;
 it carries no authorization and its rank is comparable only within one request.
 
-Each probe runs as one `MATCH ?` bound through `ToSql`, joined to `occurrences`
-with tombstoned rows excluded, ordered by `rank` then `occurrence_id`, and
-limited to `scan_rows`. Zero probes issue no `MATCH` and return
-`Completion::Empty`. An occurrence hit by several probes keeps its lowest rank;
-among equal ranks it keeps the lowest ordinal. The comparator throughout is
-rank ascending, then occurrence identifier bytes ascending, so the result of a
-permuted or duplicated probe list is the same set of `(occurrence_id, rank)`
-pairs in the same order.
+Each distinct probe runs as one `MATCH ?` bound through `ToSql`. The engine
+orders its match set by `rank` then `occurrence_id` and cuts it to one row past
+`scan_rows` before the join to `occurrences` and the tombstone lookup, so in a
+consistent projection those two lookups cost `scan_rows + 1` seeks per probe
+regardless of how many rows the probe matched. Neither lookup filters inside
+the engine: a lexical row whose occurrence is missing or tombstoned comes back
+flagged dead and is dropped without taking a scanned slot, and the next page of
+the same ordered match set is read until `scan_rows + 1` live rows are seen or
+the match set ends. A dead row can only exist in an inconsistent projection,
+because tombstoning deletes the lexical row in the same transaction. Zero
+probes issue no `MATCH` and return `Completion::Empty`. A probe that repeats an
+earlier probe of the same request is not run again: under the request's single
+read snapshot it would return the same rows at the same ranks, and among equal
+ranks the lower ordinal wins, so the repeat cannot change the ranking; it
+contributes its first run's row count to `scanned_rows` and one to `probes`. An
+occurrence hit by several probes keeps its lowest rank; among equal ranks it
+keeps the lowest ordinal. The comparator throughout is rank ascending, then
+occurrence identifier bytes ascending, so the result of a permuted or duplicated
+probe list is the same set of `(occurrence_id, rank)` pairs in the same order.
 
 Candidates are judged in that order through `eligibility::judge_occurrences`
 in batches of `batch_rows`. An ineligible candidate counts toward `judged` and
@@ -326,7 +337,10 @@ the progress handler `SqliteStore::with_conn_interruptible` installs) ends the
 request the same way regardless of the budget's own state. The host-side query
 limits that feed these bounds are not defined in this repository.
 
-`scan_rows` bounds returned rows, not rows visited or sorted by SQLite. The
+`scan_rows` bounds returned rows and the per-probe join and tombstone lookups,
+not the rows FTS5 visits, ranks, or sorts: every row a probe matches is still
+enumerated, ranked, and offered to the bounded sorter, so a probe's engine cost
+grows with the size of its match set. The
 [progress handler](https://www.sqlite.org/c3ref/progress_handler.html) polls at
 approximate VM-instruction intervals, not wall-clock intervals. Lock waits, I/O,
 and work inside a VM instruction can delay cancellation. The storage method's

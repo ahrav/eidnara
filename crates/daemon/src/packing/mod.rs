@@ -58,9 +58,11 @@ impl ClaudeTokens {
 
     /// A fractional, negative, non-finite, over-range, or absent budget is
     /// refused, never rounded, saturated, or clamped. Negative zero is
-    /// refused as negative.
+    /// refused as negative. Values of 2^53 and above are over-range: 2^53 is
+    /// also what 2^53 + 1 rounds to on its way into the `f64`, so only
+    /// values below it are known to have arrived unrounded.
     pub fn from_budget(value: Option<f64>) -> Result<Self, BudgetRefusal> {
-        const TWO_TO_THE_64: f64 = 18_446_744_073_709_551_616.0;
+        const TWO_TO_THE_53: f64 = 9_007_199_254_740_992.0;
         let value = value.ok_or(BudgetRefusal::Absent)?;
         if value.is_nan() {
             return Err(BudgetRefusal::NotANumber);
@@ -68,7 +70,7 @@ impl ClaudeTokens {
         if value.is_sign_negative() {
             return Err(BudgetRefusal::Negative);
         }
-        if !value.is_finite() || value >= TWO_TO_THE_64 {
+        if value >= TWO_TO_THE_53 {
             return Err(BudgetRefusal::TooLarge);
         }
         if value.fract() != 0.0 {
@@ -405,17 +407,18 @@ pub fn prepare_required(
             fetch_payload(conn, &item.row().payload).map_err(|error| (item.row().occurrence, error))
         })))
     })?;
-    // Payload verification runs after `hold` releases the connection; a fetch
-    // fault is returned only after verifying earlier payloads, preserving
-    // request order.
+    // Every payload that came back is a load, whatever its digest says.
+    // Verification runs after `hold` releases the connection; a fetch fault is
+    // returned only after verifying earlier payloads, preserving request order.
+    for (item, _) in admitted.iter().zip(&bytes) {
+        trace.payload_loads += 1;
+        trace.required(RequiredEvent::Loaded, Some(item.row().occurrence));
+    }
     for (item, payload) in admitted.iter().zip(&bytes) {
-        let occurrence = item.row().occurrence;
         item.row()
             .payload
             .verify(payload)
-            .map_err(|_| RequiredContextFailure::Corrupt(occurrence))?;
-        trace.payload_loads += 1;
-        trace.required(RequiredEvent::Loaded, Some(occurrence));
+            .map_err(|_| RequiredContextFailure::Corrupt(item.row().occurrence))?;
     }
     if let Some((occurrence, error)) = fault {
         return Err(match error {
@@ -424,6 +427,7 @@ pub fn prepare_required(
         });
     }
     let borrowed: Vec<&[u8]> = bytes.iter().map(Vec::as_slice).collect();
+    deadline(&inputs)?;
     let mut ledger = Ledger::open(inputs.profile.clone());
     let block_open = ledger.total_with_headroom();
     let Some(items_limit) = bounds.token_limit.checked_sub(block_open) else {
@@ -449,6 +453,7 @@ pub fn prepare_required(
         },
         other => other,
     })?;
+    deadline(&inputs)?;
     trace.required(RequiredEvent::Reserved, None);
     admit_render(&ledger, accounting).map_err(PreparationRefusal::Accounting)?;
     let charged = ledger.total_with_headroom();
@@ -791,8 +796,8 @@ mod tests {
         assert_eq!(ClaudeTokens::from_budget(Some(0.0)), Ok(ClaudeTokens(0)));
         assert_eq!(ClaudeTokens::from_budget(Some(10.0)), Ok(ClaudeTokens(10)));
         assert_eq!(
-            ClaudeTokens::from_budget(Some(18_446_744_073_709_549_568.0)),
-            Ok(ClaudeTokens(18_446_744_073_709_549_568))
+            ClaudeTokens::from_budget(Some(9_007_199_254_740_991.0)),
+            Ok(ClaudeTokens((1 << 53) - 1))
         );
         assert_eq!(ClaudeTokens::from_budget(None), Err(BudgetRefusal::Absent));
         assert_eq!(
@@ -816,9 +821,13 @@ mod tests {
             Err(BudgetRefusal::TooLarge)
         );
         assert_eq!(
-            ClaudeTokens::from_budget(Some(18_446_744_073_709_551_616.0)),
+            ClaudeTokens::from_budget(Some(9_007_199_254_740_992.0)),
             Err(BudgetRefusal::TooLarge),
-            "2^64 would saturate `as u64` to u64::MAX"
+            "2^53 is also what 2^53 + 1 rounds to, so it cannot be told from a rounded value"
+        );
+        assert_eq!(
+            ClaudeTokens::from_budget(Some(18_446_744_073_709_551_616.0)),
+            Err(BudgetRefusal::TooLarge)
         );
         assert_eq!(ClaudeTokens(u64::MAX).checked_add(ClaudeTokens(1)), None);
     }

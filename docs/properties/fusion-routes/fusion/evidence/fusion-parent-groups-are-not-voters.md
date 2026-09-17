@@ -28,16 +28,16 @@ from two versions of one message.
 
 ## Timing windows and dependencies
 
-None for the identity clauses. The fusion clause depends on RP2.7.U2's fused
-scoring never reading a parent key.
+None. `retrieval::fusion::fuse` accepts only `DeclaredLanes` of occurrence
+entries, so a parent key has no path into a score.
 
 ## What a test must construct
 
 - One canonical claim at a whole-buffer span and two ranges, at one revision.
 - The same ranges at a later revision and at another representation.
 - A tuple presented with an altered revision, representation, or span.
-- After U2: a fused ranking whose input includes parent keys and whose scores
-  are unchanged by them.
+- A fused ranking whose entry count equals the distinct occurrence count of
+  its input, so no grouping unit was counted.
 
 ## Investigation log
 

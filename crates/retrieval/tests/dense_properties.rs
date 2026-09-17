@@ -6,10 +6,10 @@ use std::num::NonZeroUsize;
 use kernel::source_identity::OccurrenceClass;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-use retrieval::dense::Ranked;
 use retrieval::dense::codec::{self, Metric, RowLayout};
 use retrieval::dense::scalar::{Scales, encode, weighted_dot};
 use retrieval::dense::score::TopK;
+use retrieval::dense::{BLOCK_ROWS, Ranked, inner_product, inner_product_block};
 
 const SEED: [u8; 32] = *b"dense-ranking-laws-seed-00000001";
 
@@ -70,16 +70,21 @@ fn top_k_equals_sort_then_truncate_for_every_offer_order() {
             }),
             |(rows, k, order)| {
                 let mut top: TopK<()> = TopK::new(NonZeroUsize::new(k).unwrap());
+                let mut offered: Vec<(f64, String)> = Vec::new();
                 for index in order {
                     let (score, id) = &rows[index];
-                    top.offer(
-                        Ranked {
-                            occurrence_id: id.clone(),
-                            class: OccurrenceClass::Messages,
-                            score: *score,
-                        },
-                        (),
-                    );
+                    let ranked = Ranked {
+                        occurrence_id: id.clone(),
+                        class: OccurrenceClass::Messages,
+                        score: *score,
+                    };
+                    // `admits` must say exactly whether the row belongs to the top-K of everything offered so far plus itself.
+                    let mut with_row = offered.clone();
+                    with_row.push((*score, id.clone()));
+                    let belongs = model(with_row, k).iter().any(|(_, member)| member == id);
+                    prop_assert_eq!(top.admits(*score, id), belongs, "row {} at k={}", id, k);
+                    top.offer(ranked, ());
+                    offered.push((*score, id.clone()));
                 }
                 let ranked: Vec<(u64, String)> = top
                     .into_ranked()
@@ -221,6 +226,96 @@ fn encoding_codes_are_clamped_counted_and_rounded_to_even() {
                     }
                 }
                 prop_assert_eq!(encoded.clipped, clipped);
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+/// Any f32 bit pattern except the non-finite ones: both signs of zero, subnormals, and every exponent.
+fn finite_f32() -> impl Strategy<Value = f32> {
+    any::<u32>().prop_filter_map("finite", |bits| {
+        let value = f32::from_bits(bits);
+        value.is_finite().then_some(value)
+    })
+}
+
+/// Blocks of eight rows against one query, all with the same length.
+fn block_rows() -> impl Strategy<Value = (Vec<f32>, Vec<Vec<f32>>)> {
+    (1usize..=40).prop_flat_map(|dimension| {
+        (
+            prop::collection::vec(finite_f32(), dimension),
+            prop::collection::vec(prop::collection::vec(finite_f32(), dimension), BLOCK_ROWS),
+        )
+    })
+}
+
+/// Each lane of the block must equal the single-row functions bit for bit, over every f32 exponent and both signed zeros, so any lane crossing, reassociation, or fusion in the tiled loop fails here.
+#[test]
+fn inner_product_block_matches_the_single_row_functions_bit_for_bit() {
+    runner()
+        .run(&block_rows(), |(query, rows)| {
+            let lanes: [&[f32]; BLOCK_ROWS] = std::array::from_fn(|lane| rows[lane].as_slice());
+            let sums = inner_product_block(&query, &lanes);
+            for (lane, row) in rows.iter().enumerate() {
+                prop_assert_eq!(
+                    sums.scores[lane].to_bits(),
+                    inner_product(&query, row).to_bits(),
+                    "score of lane {}",
+                    lane
+                );
+                let mut squares = 0.0f64;
+                for value in row {
+                    let widened = f64::from(*value);
+                    squares += widened * widened;
+                }
+                prop_assert_eq!(
+                    sums.sums_of_squares[lane].to_bits(),
+                    squares.to_bits(),
+                    "sum of squares of lane {}",
+                    lane
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Validation from a block's sum of squares decides and names rejections exactly as the scalar validator does, including a non-finite coordinate anywhere in the row, a zero norm, and a norm outside the tolerance.
+#[test]
+fn validate_from_sum_agrees_with_validate_on_every_row() {
+    runner()
+        .run(
+            &(
+                block_rows(),
+                0usize..BLOCK_ROWS,
+                any::<usize>(),
+                0u8..4,
+                0.0f64..2.0,
+            ),
+            |((query, mut rows), lane, seed, poison, tolerance)| {
+                let dimension = query.len();
+                match poison {
+                    1 => rows[lane][seed % dimension] = f32::NAN,
+                    2 => rows[lane][seed % dimension] = f32::NEG_INFINITY,
+                    3 => rows[lane].iter_mut().for_each(|value| *value = 0.0),
+                    _ => {}
+                }
+                let layout = RowLayout {
+                    dimension: dimension as u32,
+                    metric: Metric::InnerProduct,
+                    unit_norm_tolerance: tolerance,
+                };
+                let lanes: [&[f32]; BLOCK_ROWS] = std::array::from_fn(|lane| rows[lane].as_slice());
+                let sums = inner_product_block(&query, &lanes);
+                for (lane, row) in rows.iter().enumerate() {
+                    prop_assert_eq!(
+                        codec::validate_from_sum(row, &layout, sums.sums_of_squares[lane]),
+                        codec::validate(row, &layout),
+                        "lane {}",
+                        lane
+                    );
+                }
                 Ok(())
             },
         )
