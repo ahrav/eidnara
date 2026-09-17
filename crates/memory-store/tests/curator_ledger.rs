@@ -488,9 +488,9 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
         ),
         CuratorLedgerRefusal::AttemptTerminal
     );
-    // A commit that fails after the insert statement hands nothing off and charges nothing: the model exceeds the column bound the Rust pre-check does not know.
+    // A commit that fails inside the insert statement hands nothing off and charges nothing: the credential carries a secret the table trigger refuses and the Rust pre-check does not scan.
     let mut long_model = marker(1);
-    long_model.model = "m".repeat(257);
+    long_model.credential_id = format!("cred-{AWS_KEY}");
     let counter = Rc::clone(&never);
     assert!(matches!(
         fixture
@@ -1987,4 +1987,96 @@ fn the_sweep_closes_a_receipt_whose_job_another_owner_already_closed() {
         receipt(&fixture).terminal,
         Some(CuratorReceiptTerminal::Expired)
     );
+}
+
+#[test]
+fn marker_text_is_bounded_in_bytes_not_characters() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    // 128 two-byte characters pass the schema's character bound but hold twice the bytes the charge accounts for.
+    let mut wide = marker(1);
+    wide.provider = "é".repeat(128);
+    let error = fixture
+        .store
+        .dispatch_curator_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &claim,
+            KERNEL,
+            &wide,
+            "prepared",
+            || T0 + 1,
+            |prepared| prepared,
+        )
+        .unwrap_err();
+    assert_eq!(refusal(error), CuratorLedgerRefusal::InvalidRequest);
+    assert_eq!(fixture.attempts(), 0);
+}
+
+#[test]
+fn a_receipt_binds_only_a_well_formed_kernel_incarnation_that_matches_its_staged_subject() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let begin = |kernel: &str| {
+        fixture
+            .store
+            .begin_curator_receipt(PROJECT, &fixture.identity, kernel, &claim, T0)
+    };
+    assert_eq!(
+        refusal(begin(&"z".repeat(32)).unwrap_err()),
+        CuratorLedgerRefusal::InvalidRequest
+    );
+    // Well formed, but not the incarnation the staged subject was sealed under.
+    assert_eq!(
+        refusal(begin(&"1b".repeat(16)).unwrap_err()),
+        CuratorLedgerRefusal::BindingMismatch
+    );
+    assert!(
+        fixture
+            .store
+            .lookup_curator_receipt(PROJECT, &fixture.identity)
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        begin(KERNEL).unwrap(),
+        CuratorBeginOutcome::Begun(_)
+    ));
+}
+
+#[test]
+fn an_attempt_never_outlives_the_job_queue_deadline() {
+    let fixture = Fixture::open();
+    let queue_deadline = T0 + CURATOR_QUEUE_LIFETIME_MS;
+    let late = queue_deadline - 10_000;
+    let claim = fixture.claim("acq-1", "worker-a", late).unwrap();
+    fixture.begin(&claim, late);
+    assert!(matches!(
+        fixture.dispatch(1, &claim, late).unwrap(),
+        DispatchOutcome::Handed { .. }
+    ));
+    let attempt = &fixture
+        .store
+        .list_curator_attempts(PROJECT, &fixture.identity)
+        .unwrap()[0];
+    assert_eq!(attempt.attempt_deadline_ms, queue_deadline);
+    // A completion once the queue deadline has passed writes nothing: the job expired underneath the claim.
+    assert_eq!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Failed,
+            None,
+            queue_deadline,
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Conflict { kind: "stale" }
+    );
+    assert_eq!(receipt(&fixture).terminal, None);
 }

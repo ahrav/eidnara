@@ -38,8 +38,10 @@ const MAX_TARGET_JSON_BYTES: usize = 1024;
 pub const CURATOR_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const MAX_CURATOR_METADATA_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024;
 pub const MAX_CURATOR_METADATA_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
-/// Permanent receipt charge every admitted job and frozen page keeps for the store incarnation: for a job, the row, its receipt, and up to four attempt markers; for a page, its compact terminal receipt. Terminal rows keep it, so it also bounds lifetime admissions per store incarnation: `MAX_CURATOR_METADATA_BYTES_PER_PROJECT / CURATOR_RECEIPT_CHARGE_BYTES` (16,384) jobs and pages per project and four times that per host before reservation refuses for good.
-pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 4096;
+/// Permanent receipt charge every admitted job keeps for the store incarnation: the job row, its receipt, and up to four attempt markers, all sized at their byte bounds. Worst case: the job row (project 256, firing id 256, target 1024, template 256, digests 128) about 2 KiB; the receipt (project, claim id 200, candidate 256, digest 64, incarnations 64) about 1 KiB; four markers (project, provider 128, model 256, credential 256, digests 128) about 1 KiB each; plus the primary-key index entry each row repeats, about 2.5 KiB together. Terminal rows keep it, so it also bounds lifetime admissions per store incarnation: `MAX_CURATOR_METADATA_BYTES_PER_PROJECT / CURATOR_RECEIPT_CHARGE_BYTES` (4,096) jobs per project and four times that per host before reservation refuses for good.
+pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 16 * 1024;
+/// Permanent receipt charge each frozen page keeps once terminal: its compact row without references or cursor.
+pub const FROZEN_PAGE_RECEIPT_CHARGE_BYTES: u64 = 1024;
 /// Worst-case temporary allowance a reservation prepays for its input, holds, manifest, and attempt metadata; released when the job is terminal.
 pub const CURATOR_JOB_ALLOWANCE_BYTES: u64 = 32 * 1024;
 /// Allowance a `frozen` page holds for its serialized references, sized to [`MAX_FROZEN_PAGE_BYTES`]; terminal pages hold none.
@@ -790,7 +792,7 @@ pub fn freeze_selection_in_tx(
     check_quota(
         conn,
         project,
-        CURATOR_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
+        FROZEN_PAGE_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
     )?;
     let deadline = now_ms
         .checked_add(CURATOR_QUEUE_LIFETIME_MS)
@@ -809,7 +811,7 @@ pub fn freeze_selection_in_tx(
             page.next_cursor,
             deadline,
             i64::try_from(FROZEN_SELECTION_ALLOWANCE_BYTES).unwrap_or(i64::MAX),
-            i64::try_from(CURATOR_RECEIPT_CHARGE_BYTES).unwrap_or(i64::MAX),
+            i64::try_from(FROZEN_PAGE_RECEIPT_CHARGE_BYTES).unwrap_or(i64::MAX),
             now_ms,
         ],
     )?;

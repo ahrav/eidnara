@@ -11,8 +11,8 @@ use rusqlite::{OptionalExtension, params};
 use storage::{GuardedConn, HandoffOutcome};
 
 use crate::curator_jobs::{
-    CuratorJobOutcome, CuratorJobState, check_project, curator_write, finish_curator_job_in_tx,
-    load_curator_job, store_incarnation_in_tx,
+    CuratorJobOutcome, CuratorJobState, ReviewTarget, check_project, curator_write,
+    finish_curator_job_in_tx, load_curator_job, store_incarnation_in_tx,
 };
 use crate::task_lease::{
     LeaseAcquireOutcome, LeaseCompleteOutcome, LeaseCompletion, LeaseSelected, TaskLeaseKind,
@@ -32,6 +32,10 @@ pub const CURATOR_ATTEMPT_MAX_MS: i64 = 30_000;
 /// Committed attempts per job across every generation.
 pub const CURATOR_MAX_ATTEMPTS: i64 = 4;
 pub const CURATOR_MAX_REQUEST_BYTES: u64 = 256 * 1024;
+/// Byte bounds of the marker's caller text. The schema bounds the same columns in characters; these keep every permanent marker inside the receipt charge whatever the encoding.
+pub const MAX_PROVIDER_BYTES: usize = 128;
+pub const MAX_MODEL_BYTES: usize = 256;
+pub const MAX_CREDENTIAL_ID_BYTES: usize = 256;
 /// One attempt bound plus the settlement reserve, so an attempt that runs to its bound still has a live claim to record its result under, while a crashed worker's claim frees inside the run so a takeover can still finish before the cutoff. A live worker renews between attempts.
 pub const CURATOR_TASK_LEASE_MS: i64 = CURATOR_ATTEMPT_MAX_MS + CURATOR_SETTLEMENT_RESERVE_MS;
 
@@ -351,22 +355,23 @@ fn claim_is_live(
     Ok(live_claim_expiry(conn, project, causal_identity, claim_id, now_ms)?.is_some())
 }
 
-/// The job must still be Ready and inside its queue deadline for any attempt or handoff.
-fn job_is_open(
+/// The job's queue deadline while it is still Ready and inside that deadline; `None` once it is not open for any attempt or handoff.
+fn job_open_deadline(
     conn: &GuardedConn<'_>,
     project: &str,
     causal_identity: &str,
     now_ms: i64,
-) -> rusqlite::Result<bool> {
+) -> rusqlite::Result<Option<i64>> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM curator_jobs
-          WHERE project = ?1 AND causal_identity = ?2 AND state = 'ready' AND queue_deadline_ms > ?3)",
+        "SELECT queue_deadline_ms FROM curator_jobs
+          WHERE project = ?1 AND causal_identity = ?2 AND state = 'ready' AND queue_deadline_ms > ?3",
         params![project, causal_identity, now_ms],
         |row| row.get(0),
     )
+    .optional()
 }
 
-/// Writes the receipt at generation 1 for a Ready job, or reports the receipt it already has. The store's own incarnation is read inside the transaction; the caller supplies only the Kernel incarnation it validated.
+/// Writes the receipt at generation 1 for a Ready job, or reports the receipt it already has. The store's own incarnation is read inside the transaction; the caller supplies the Kernel incarnation it validated, which must be the one a staged subject was sealed under.
 pub fn begin_curator_receipt_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -375,7 +380,7 @@ pub fn begin_curator_receipt_in_tx(
     claim_id: &str,
     now_ms: i64,
 ) -> rusqlite::Result<CuratorBeginOutcome> {
-    if kernel_incarnation_id.len() != 32 || claim_id.is_empty() || claim_id.len() > 200 {
+    if !is_lower_hex(kernel_incarnation_id, 32) || claim_id.is_empty() || claim_id.len() > 200 {
         return Err(refuse(CuratorLedgerRefusal::InvalidRequest));
     }
     let incarnation = store_incarnation_in_tx(conn)?;
@@ -399,6 +404,14 @@ pub fn begin_curator_receipt_in_tx(
         .ok_or_else(|| refuse(CuratorLedgerRefusal::JobUnavailable))?;
     if !matches!(job.state, CuratorJobState::Ready(_)) || job.queue_deadline_ms <= now_ms {
         return Err(refuse(CuratorLedgerRefusal::JobUnavailable));
+    }
+    // A staged subject belongs to one Kernel incarnation; a receipt bound to another would let it proceed under a replaced store.
+    if let ReviewTarget::StagedSubject {
+        kernel_incarnation, ..
+    } = &job.target
+        && kernel_incarnation != kernel_incarnation_id
+    {
+        return Err(refuse(CuratorLedgerRefusal::BindingMismatch));
     }
     if !claim_is_live(conn, project, causal_identity, claim_id, now_ms)? {
         return Err(refuse(CuratorLedgerRefusal::ClaimInvalid));
@@ -480,8 +493,11 @@ pub fn commit_curator_attempt_in_tx(
         || marker.request_bytes == 0
         || marker.request_bytes > CURATOR_MAX_REQUEST_BYTES
         || marker.provider.is_empty()
+        || marker.provider.len() > MAX_PROVIDER_BYTES
         || marker.model.is_empty()
+        || marker.model.len() > MAX_MODEL_BYTES
         || marker.credential_id.is_empty()
+        || marker.credential_id.len() > MAX_CREDENTIAL_ID_BYTES
     {
         return Err(refuse(CuratorLedgerRefusal::InvalidRequest));
     }
@@ -511,12 +527,12 @@ pub fn commit_curator_attempt_in_tx(
     if now_ms >= receipt.execution_cutoff_ms {
         return Err(refuse(CuratorLedgerRefusal::Cutoff));
     }
-    if !job_is_open(conn, project, causal_identity, now_ms)? {
-        return Err(refuse(CuratorLedgerRefusal::JobDeadline));
-    }
-    // An attempt never outlives the cutoff or the claim that must record its result.
+    let job_deadline_ms = job_open_deadline(conn, project, causal_identity, now_ms)?
+        .ok_or_else(|| refuse(CuratorLedgerRefusal::JobDeadline))?;
+    // An attempt never outlives the cutoff, the job's queue deadline, or the claim that must record its result.
     let attempt_deadline_ms = (now_ms + CURATOR_ATTEMPT_MAX_MS)
         .min(receipt.execution_cutoff_ms)
+        .min(job_deadline_ms)
         .min(claim_expires_at);
     let request_bytes = i64::try_from(marker.request_bytes)
         .map_err(|_| refuse(CuratorLedgerRefusal::InvalidRequest))?;
@@ -925,7 +941,10 @@ impl MemoryStore {
                         {
                             Some(CuratorLedgerRefusal::Cutoff)
                         }
-                        Some(_) if !job_is_open(conn, project, causal_identity, live)? => {
+                        Some(_)
+                            if job_open_deadline(conn, project, causal_identity, live)?
+                                .is_none() =>
+                        {
                             Some(CuratorLedgerRefusal::JobDeadline)
                         }
                         Some(_) => None,
@@ -1021,7 +1040,7 @@ impl MemoryStore {
         })
     }
 
-    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` terminal selects exactly one Kernel result for that generation, and the job row records the matching outcome. A predecessor generation, a stale claim, another incarnation, or a job another owner already closed writes nothing. A cancelled receipt records `cancelled`, and one at or after its run deadline records `expired`, whatever the worker reports: a durable cancellation is never overridden and a renewed claim never extends the fixed run budget.
+    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` terminal selects exactly one Kernel result for that generation, and the job row records the matching outcome. A predecessor generation, a stale claim, another incarnation, or a job another owner already closed or that has passed its queue deadline writes nothing. A cancelled receipt records `cancelled`, and one at or after its run deadline records `expired`, whatever the worker reports: a durable cancellation is never overridden and a renewed claim never extends the fixed run budget.
     #[allow(clippy::too_many_arguments)]
     pub fn complete_curator_receipt(
         &self,
@@ -1101,7 +1120,7 @@ impl MemoryStore {
                                                        FROM curator_store_identity WHERE id = 0)
                         AND EXISTS(SELECT 1 FROM curator_jobs j
                                     WHERE j.project = ?1 AND j.causal_identity = ?2
-                                      AND j.state <> 'terminal')",
+                                      AND j.state <> 'terminal' AND j.queue_deadline_ms > ?9)",
                     params![
                         project,
                         causal_identity,
@@ -1115,7 +1134,7 @@ impl MemoryStore {
                         kernel_incarnation_id,
                     ],
                 )?;
-                // A job already closed by another owner leaves this completion stale with the receipt untouched; the update above requires the job to be open, so the job finish below cannot find it terminal.
+                // A job already closed by another owner, or past its queue deadline, leaves this completion stale with the receipt untouched; the update above requires the job to be open, so the job finish below cannot refuse it as terminal or expired.
                 if changed == 0 {
                     return Ok(LeaseCompletion::Stale);
                 }

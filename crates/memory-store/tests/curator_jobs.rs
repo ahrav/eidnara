@@ -6,13 +6,13 @@ use context_core::redaction::RedactionErrorKind;
 use memory_store::curator_jobs::{
     CURATOR_JOB_ALLOWANCE_BYTES, CURATOR_QUEUE_LIFETIME_MS, CURATOR_RECEIPT_CHARGE_BYTES,
     CausalInputs, CuratorJobError, CuratorJobInput, CuratorJobOutcome, CuratorJobRefusal,
-    CuratorJobState, EvidenceAvailability, FROZEN_SELECTION_ALLOWANCE_BYTES, FrozenSelectionPage,
-    FrozenSelectionState, MAX_CAUSAL_POLICY_VERSIONS, MAX_CAUSAL_SIGNALS,
-    MAX_CURATOR_METADATA_BYTES_PER_PROJECT, MAX_FROZEN_PAGE_BYTES, MAX_FROZEN_SELECTIONS_PER_HOST,
-    MAX_PENDING_CURATOR_JOBS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_PROJECT, MAX_REQUIRED_EVIDENCE,
-    MAX_SELECTION_REFERENCES, ProducerBinding, ReserveOutcome, ReviewTarget,
-    activate_curator_job_in_tx, complete_frozen_selection_in_tx, freeze_selection_in_tx,
-    reserve_curator_job_in_tx,
+    CuratorJobState, EvidenceAvailability, FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+    FROZEN_SELECTION_ALLOWANCE_BYTES, FrozenSelectionPage, FrozenSelectionState,
+    MAX_CAUSAL_POLICY_VERSIONS, MAX_CAUSAL_SIGNALS, MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+    MAX_FROZEN_PAGE_BYTES, MAX_FROZEN_SELECTIONS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_HOST,
+    MAX_PENDING_CURATOR_JOBS_PER_PROJECT, MAX_REQUIRED_EVIDENCE, MAX_SELECTION_REFERENCES,
+    ProducerBinding, ReserveOutcome, ReviewTarget, activate_curator_job_in_tx,
+    complete_frozen_selection_in_tx, freeze_selection_in_tx, reserve_curator_job_in_tx,
 };
 use memory_store::{MemoryStore, MemoryStoreError};
 use storage::StorageDescriptor;
@@ -799,7 +799,9 @@ fn expiry_records_terminal_outcomes_without_resurrection_and_receipts_survive_re
     );
     assert_eq!(
         after.project_metadata_bytes,
-        4 * CURATOR_RECEIPT_CHARGE_BYTES + CURATOR_JOB_ALLOWANCE_BYTES,
+        3 * CURATOR_RECEIPT_CHARGE_BYTES
+            + FROZEN_PAGE_RECEIPT_CHARGE_BYTES
+            + CURATOR_JOB_ALLOWANCE_BYTES,
         "every admitted job and every frozen page keeps its permanent receipt charge"
     );
     drop(store);
@@ -1330,7 +1332,7 @@ fn terminal_pages_drop_their_references_and_keep_a_receipt_charge() {
             .curator_headroom("proj")
             .unwrap()
             .project_metadata_bytes,
-        CURATOR_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
+        FROZEN_PAGE_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
         "a frozen page holds its allowance and its permanent receipt"
     );
     let enqueued = store
@@ -1375,7 +1377,7 @@ fn terminal_pages_drop_their_references_and_keep_a_receipt_charge() {
             .curator_headroom("proj")
             .unwrap()
             .project_metadata_bytes,
-        CURATOR_RECEIPT_CHARGE_BYTES,
+        FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
         "the allowance is released; the receipt charge stays for the incarnation"
     );
     // A failed slot also drops its page, and every attempt leaves one receipt behind.
@@ -1396,7 +1398,7 @@ fn terminal_pages_drop_their_references_and_keep_a_receipt_charge() {
             .curator_headroom("proj")
             .unwrap()
             .project_metadata_bytes,
-        2 * CURATOR_RECEIPT_CHARGE_BYTES
+        2 * FROZEN_PAGE_RECEIPT_CHARGE_BYTES
     );
     let retained: i64 = store
         .with_conn_for_test(|conn| {
