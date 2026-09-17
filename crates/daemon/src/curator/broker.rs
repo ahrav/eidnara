@@ -683,7 +683,7 @@ impl EvidenceBroker {
                 if range.as_ref().is_some_and(|range| range.end > *byte_length) {
                     return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
                 }
-                let held =
+                let mut held =
                     self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
                 if held.artifact_digest != *artifact_digest
                     || held.byte_length != *byte_length
@@ -693,7 +693,7 @@ impl EvidenceBroker {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
                 let bytes = self
-                    .load_range(store, &alias, &held, range.clone(), now_ms)?
+                    .load_range(store, &alias, &mut held, range.clone(), now_ms)?
                     .0;
                 (
                     bytes,
@@ -732,9 +732,9 @@ impl EvidenceBroker {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
                 let range = span_range(&alias, detail.span, range)?;
-                let held =
+                let mut held =
                     self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
-                let (bytes, loaded) = self.load_range(store, &alias, &held, range, now_ms)?;
+                let (bytes, loaded) = self.load_range(store, &alias, &mut held, range, now_ms)?;
                 let judged = if loaded {
                     self.judge(
                         store,
@@ -789,9 +789,9 @@ impl EvidenceBroker {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
                 let range = span_range(&alias, detail.span, range)?;
-                let held =
+                let mut held =
                     self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
-                let (bytes, loaded) = self.load_range(store, &alias, &held, range, now_ms)?;
+                let (bytes, loaded) = self.load_range(store, &alias, &mut held, range, now_ms)?;
                 let judged = if loaded {
                     self.judge(
                         store,
@@ -911,12 +911,12 @@ impl EvidenceBroker {
             .charge_render(Some(alias), u64::try_from(bytes).unwrap_or(u64::MAX))
     }
 
-    /// Charges the range, loads the artifact once, re-reads the egress verdict and the execution hold on the bytes that were just loaded, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret; a buffer that failed it stays refused without another charge or scan. Returns whether this call loaded the artifact, so the caller can re-judge object standing over the same window.
+    /// Charges the range, loads the artifact once, re-reads the egress verdict, the execution hold, and the held facts (refreshing `held`) on the bytes that were just loaded, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret; a buffer that failed it stays refused without another charge or scan. Returns whether this call loaded the artifact, so the caller can re-judge object standing over the same window.
     fn load_range(
         &mut self,
         store: &KernelStore,
         alias: &Alias,
-        held: &HeldEvidence,
+        held: &mut HeldEvidence,
         range: Option<Range<u64>>,
         now_ms: i64,
     ) -> Result<(Vec<u8>, bool), Refusal> {
@@ -956,8 +956,9 @@ impl EvidenceBroker {
                     evidence_id: held.evidence_id.clone(),
                 },
             )?;
-            // Likewise the hold: a run whose cutoff passed during the read does not disclose what it loaded.
-            store
+            // Likewise the hold and the evidence facts: a run whose cutoff passed during the read does not disclose what it loaded, a capture whose acquisition reference lapsed meanwhile is refused, and the class reported with the bytes is the one they carry now.
+            let now_ms = now_ms.max(crate::now_ms());
+            *held = store
                 .validate_held_evidence(
                     &self.binding.hold_id,
                     CuratorHoldKind::Execution,
@@ -965,7 +966,12 @@ impl EvidenceBroker {
                     std::slice::from_ref(&held.evidence_id),
                     now_ms,
                 )
-                .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
+                .map_err(|error| refuse(Some(alias), hold_refusal(error)))?
+                .pop()
+                .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
+            if held.retain_until.is_some_and(|until| until <= now_ms) {
+                return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
+            }
         }
         if loaded || !self.checked_artifacts.contains(&held.artifact_digest) {
             let whole = self
@@ -1048,7 +1054,7 @@ impl EvidenceBroker {
         })
     }
 
-    /// The descriptor observation of `object_id` at `tip`; a missing row, another observation kind, or an undecodable detail refuses.
+    /// The descriptor observation of `object_id` at `tip`; a missing row, another observation kind, an undecodable detail, or a stored identity that does not re-encode to itself refuses.
     fn descriptor(
         &self,
         store: &KernelStore,
@@ -1066,6 +1072,8 @@ impl EvidenceBroker {
             .as_deref()
             .and_then(|detail| serde_json::from_str::<SourceDescriptorDetail>(detail).ok())
             .filter(|detail| detail.descriptor_version == kernel::SOURCE_DESCRIPTOR_DETAIL_VERSION)
+            // The span and tuple are trusted only after the Kernel's own consistency test; a row that does not re-encode to itself is corruption, not a descriptor.
+            .filter(|detail| detail.is_consistent_with(object_id))
             .ok_or_else(|| refuse(Some(alias), RefusalCode::ExpectationChanged))
     }
 }

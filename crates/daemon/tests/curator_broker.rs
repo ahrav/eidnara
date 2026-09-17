@@ -1647,3 +1647,116 @@ fn a_hold_released_between_the_verdict_and_the_load_is_not_disclosed() {
     );
     assert!(broker.ledger.disclosed().next().is_none());
 }
+
+#[test]
+fn a_capture_expiring_during_the_load_is_not_disclosed() {
+    let fixture = Fixture::open();
+    let retain_until = now_ms() + 300;
+    let handle = fixture
+        .store
+        .ingest_artifact(ArtifactIngestRequest {
+            intent: intent("short"),
+            payload: b"expires while loading".to_vec(),
+            evidence_id: "evidence-short".to_string(),
+            object_id: "evidence-object-short".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: "local_file".to_string(),
+            source_id: "src/short".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+            retain_until: Some(retain_until),
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap();
+    let wait = Box::new(move |_: &KernelStore| {
+        while now_ms() <= retain_until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    });
+    let mut broker = fixture
+        .broker(PROJECT, std::slice::from_ref(&handle.evidence_id))
+        .with_after_load_hook_for_test(wait);
+    let alias = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: handle.evidence_id,
+            artifact_digest: handle.digest,
+            byte_length: 21,
+            retain_until,
+        });
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, now_ms())
+            .unwrap_err()
+            .code,
+        RefusalCode::ExpectationChanged,
+        "the acquisition deadline is re-read on the bytes that were loaded"
+    );
+    assert!(broker.ledger.disclosed().next().is_none());
+}
+
+#[test]
+fn a_descriptor_whose_stored_identity_does_not_reencode_is_refused() {
+    let fixture = Fixture::open();
+    let native_text = "a native message";
+    let native_evidence = fixture.ingest("native", native_text.as_bytes(), false);
+    let (span_object, span_tuple) = fixture.descriptor(Publish {
+        key: "native-span",
+        class: "messages",
+        representation: "text",
+        identity: &[
+            ("project_id", "proj-a"),
+            ("harness", "opencode"),
+            ("session_id", "sess-01"),
+            ("message_id", "msg-001"),
+            ("block_index", "0"),
+        ],
+        evidence: &native_evidence,
+        buffer: native_text,
+        span: Some(Span { start: 0, end: 8 }),
+    });
+    // Widen the stored span while leaving the encoded tuple as it was: valid JSON, expected version, inconsistent identity.
+    let connection =
+        rusqlite::Connection::open(fixture.directory.path().join("kernel.sqlite")).unwrap();
+    let payload: Vec<u8> = connection
+        .query_row(
+            "SELECT observation_payload FROM observations WHERE object_id=?1",
+            [span_object.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut stored: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let mut detail: serde_json::Value =
+        serde_json::from_str(stored["detail"].as_str().unwrap()).unwrap();
+    detail["span"] = serde_json::json!([0, 16]);
+    stored["detail"] = serde_json::Value::String(detail.to_string());
+    connection
+        .execute(
+            "UPDATE observations SET observation_payload=?1 WHERE object_id=?2",
+            rusqlite::params![stored.to_string().into_bytes(), span_object.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&native_evidence.0));
+    let alias = broker.aliases.issue(ReferenceExpectation::NativeSource {
+        object_id: span_object,
+        class: OccurrenceClass::Messages,
+        source_revision: 1,
+        artifact_digest: native_evidence.1,
+        evidence_id: native_evidence.0,
+        occurrence_tuple: span_tuple,
+    });
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::ExpectationChanged,
+        "a stored identity that does not re-encode to itself is corruption, as every Kernel read treats it"
+    );
+    assert!(broker.ledger.disclosed().next().is_none());
+}
