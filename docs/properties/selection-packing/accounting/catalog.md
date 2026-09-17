@@ -221,3 +221,31 @@ Open questions:
 
 - The approved numeric values belong to RP2.9; tests use fixture values and
   claim no production approval. (needs human input)
+
+## Relationship map
+
+- `required/` charges the block open and each required fragment through this
+  part's `Ledger` and reserves them against the integer budget; its
+  `OverBudget` refusal reports `charged` as the headroom-adjusted ledger
+  total, the quantity the delta record fixes. The `remaining` it hands the
+  optional phase is the budget less that total.
+- `grouping/` decides which groups the scan visits; this part prices each
+  group as its wrapper and range entries (the delta record's wrapper clause)
+  and commits exactly the priced entries, so the scan's deducted cost equals
+  the ledger's charge. A group whose priced sum is unrepresentable refuses the
+  phase with `OptionalCostOverflow`, which `grouping/` maps and this part does
+  not own.
+- Within this part, the revision record keys the shared cache the exact
+  profile's `charge` reads; the delta record's ledger bypasses that cache by
+  design. The authority record keeps a heuristic's charge, headroom, and
+  revision distinct from the exact profile's, and the bounds record compares
+  the headroom-adjusted total those charges produce.
+- The block close is reserved at optional entry and re-priced after the
+  admitted groups; a required render that cannot cover the reserve refuses
+  as `OverBudget`, and a close priced above its reserve refuses as
+  `CloseOverBudget`. Both are exercised by
+  `crates/daemon/tests/packing_optional.rs` and carry no record here; the
+  exact profile's delta is local to the tail, so only a heuristic whose count
+  depends on the whole prefix can drift.
+- `identity/` is not consumed directly: the ledger charges bytes the grouping
+  already attributed and never re-derives a key.

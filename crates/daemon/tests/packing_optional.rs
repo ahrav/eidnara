@@ -362,6 +362,55 @@ fn a_required_render_that_leaves_no_room_for_the_close_refuses_the_optional_phas
     }
 }
 
+/// A heuristic whose count scales with the rendered prefix prices the close
+/// higher after a group is admitted than the reserve taken before the scan.
+/// The budget is set so the group fits the scan exactly; the closed render
+/// then exceeds the limit by the drift, and the phase refuses rather than
+/// returning it.
+#[test]
+fn a_close_priced_above_its_reserve_after_admission_refuses_the_optional_phase() {
+    let a = tool_span("opt-a", "1", "aaaa");
+    let fixture = Fixture::new(&[REQUIRED, a]);
+    let prefix_scaled =
+        AccountingProfile::heuristic("prefix-scaled", "len*(1+groups)", 0, |text| {
+            text.len() * (1 + text.matches("</group>").count())
+        });
+    let (probe, _) = run_with_profile(&fixture, &[optional(&a)], &wide(), 1 << 20, &prefix_scaled);
+    let probe = probe.unwrap();
+    assert_eq!(probe.admitted.len(), 1);
+    let closed = probe.ledger.total_with_headroom().get();
+    let close_entry = probe
+        .ledger
+        .entries()
+        .iter()
+        .find(|entry| entry.item == Charged::BlockClose)
+        .unwrap()
+        .charge
+        .with_headroom()
+        .get();
+    let reserve = BLOCK_CLOSE_FRAGMENT.len() as u64;
+    assert!(
+        close_entry > reserve,
+        "the profile must drift: {close_entry} vs {reserve}"
+    );
+    let limit = closed - (close_entry - reserve);
+    let (result, _) = run_with_profile(&fixture, &[optional(&a)], &wide(), limit, &prefix_scaled);
+    match result {
+        Err(PreparationRefusal::CloseOverBudget {
+            limit: reported,
+            charged,
+        }) => {
+            assert_eq!(reported, ClaudeTokens::new(limit));
+            assert_eq!(charged, ClaudeTokens::new(closed));
+        }
+        Ok(admission) => panic!(
+            "the closed render is {} tokens over a {limit} limit: {admission:?}",
+            admission.ledger.total_with_headroom().get()
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation() {
     let live = tool_span("opt-live", "1", "live");

@@ -174,6 +174,13 @@ pub enum PreparationRefusal {
     /// The optional phase was offered a profile other than the one the
     /// required ledger was charged under.
     ProfileMismatch,
+    /// The block close, priced after the admitted groups, cost more than the
+    /// reserve taken before the scan, so the closed render exceeds the token
+    /// limit. A profile whose count is local to the tail never drifts.
+    CloseOverBudget {
+        limit: ClaudeTokens,
+        charged: ClaudeTokens,
+    },
     /// An optional group's summed fragment charges are not representable;
     /// `at` is the group's fused position. Nothing is saturated into an
     /// admissible cost.
@@ -680,11 +687,19 @@ pub fn prepare_optional(
         return Err(PreparationRefusal::OptionalCostOverflow { at });
     }
     let close = ledger.close().with_headroom();
-    let remaining = scan
+    let Some(remaining) = scan
         .remaining
         .checked_add(close_reserve)
         .and_then(|budget| budget.checked_sub(close))
-        .unwrap_or(ClaudeTokens::ZERO);
+    else {
+        return Err(PreparationRefusal::CloseOverBudget {
+            limit: required
+                .charged
+                .checked_add(required.remaining)
+                .unwrap_or(ClaudeTokens::MAX),
+            charged: ledger.total_with_headroom(),
+        });
+    };
     trace.optional(OptionalEvent::Scanned, None);
     admit_render(&ledger, accounting).map_err(PreparationRefusal::Accounting)?;
     let (admitted, skipped): (Vec<_>, Vec<_>) = partition
