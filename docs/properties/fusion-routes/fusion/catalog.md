@@ -155,7 +155,6 @@ Open questions: None. RP2.8 Q5 (#636) decided that the daemon owns the
 accounting profile and binds its identity and revision into the preparation
 digest under the domain tag `eidnara-retrieval-prepared-context-v1`
 (`crates/retrieval/src/fusion/identity.rs:290`, `:309-310`).
-  (needs human input)
 
 ### fusion-parent-groups-are-not-voters
 
