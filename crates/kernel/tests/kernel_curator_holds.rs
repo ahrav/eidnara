@@ -1482,3 +1482,118 @@ fn acquisition_retry_recovers_the_hold_after_a_covered_row_is_invalidated() {
         CuratorHoldRefusal::UnavailableEvidence
     );
 }
+
+#[test]
+fn a_transfer_retry_recovers_a_purge_degraded_review_hold() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let payload = b"purged during review";
+    let purged = fixture.ingest("purge", payload, None);
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&purged), now + HOUR_MS)
+        .unwrap();
+    let created = fixture.stage_proposal("job-1", 1, now - 1_000, now + DAY_MS - 1_000);
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let review_expires_at = created + REVIEW_EXPIRY_MAX_MS;
+    let review_hold = fixture
+        .store
+        .transfer_execution_to_review(&hold.hold_id, &execution, &review, review_expires_at)
+        .unwrap();
+    fixture
+        .store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge", payload),
+            identity: ArtifactDeletionIdentity::Digest(format!("{:x}", Sha256::digest(payload))),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator".to_string()),
+            target_locator: Some("incident://purge".to_string()),
+            reason: Some("retired".to_string()),
+            deleted_at: now,
+        })
+        .unwrap();
+    // The retry still learns the committed hold's id, so the degraded pin can be released rather than left to expire.
+    let retried = fixture
+        .store
+        .transfer_execution_to_review(&hold.hold_id, &execution, &review, review_expires_at)
+        .unwrap();
+    assert_eq!(retried.hold_id, review_hold.hold_id);
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .validate_held_evidence(
+                    &retried.hold_id,
+                    CuratorHoldKind::Review,
+                    &review,
+                    &[purged],
+                    now
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::PurgeDegraded
+    );
+    fixture
+        .store
+        .release_review_hold(&retried.hold_id, &review)
+        .unwrap();
+}
+
+#[test]
+fn acquisition_bounds_its_input_before_scanning_covered_ids() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let evidence = fixture.ingest("a", b"alpha bytes", None);
+    let binding = fixture.binding("job-1", 1);
+    fixture
+        .store
+        .acquire_execution_hold(&binding, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    let repeated = vec![evidence; MAX_CURATOR_HOLD_REFERENCES + 1];
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(&binding, &repeated, now + HOUR_MS)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::TooManyReferences,
+        "an over-long retry is refused before any per-id work"
+    );
+}
+
+#[test]
+fn a_committed_capture_replays_after_its_retention_deadline() {
+    let fixture = Fixture::open();
+    let request = |retain_until: i64| ArtifactIngestRequest {
+        intent: intent("capture-replay", b"capture"),
+        payload: b"capture".to_vec(),
+        evidence_id: "evidence-capture-replay".to_string(),
+        object_id: "evidence-object-capture-replay".to_string(),
+        object_kind: "evidence".to_string(),
+        domain_id: "domain".to_string(),
+        source_kind: "local_file".to_string(),
+        source_id: "src/file".to_string(),
+        source_revision: 1,
+        media_type: "text/plain".to_string(),
+        retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+        retain_until: Some(retain_until),
+        asserted_sensitivity: Sensitivity::Sensitive,
+        provider_egress: ProviderEgress::LocalOnly,
+        provenance: None,
+    };
+    let retain_until = now_ms() + 200;
+    let first = fixture
+        .store
+        .ingest_artifact(request(retain_until))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // The identical intent replays its committed receipt even though the reference is now dead; only a new reference needs a live deadline.
+    let replayed = fixture
+        .store
+        .ingest_artifact(request(retain_until))
+        .unwrap();
+    assert_eq!(replayed, first);
+}

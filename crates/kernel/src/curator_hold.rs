@@ -463,6 +463,9 @@ impl KernelStore {
         if evidence_ids.is_empty() {
             return Err(CuratorHoldRefusal::InvalidRequest.into());
         }
+        if evidence_ids.len() > MAX_CURATOR_HOLD_REFERENCES {
+            return Err(CuratorHoldRefusal::TooManyReferences.into());
+        }
         let mut writer = self.lock_writer()?;
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -567,7 +570,7 @@ fn is_covered(
     .map_err(sqlite)
 }
 
-/// The newest unreleased, undegraded, unexpired hold of `kind` for `binding`, with its expiry.
+/// The newest unreleased, unexpired hold of `kind` for `binding`, with its expiry. A purge-degraded hold still counts: it is the binding's committed hold, and returning it is how a retrying caller learns the id it must release.
 fn live_hold_of(
     tx: &Transaction<'_>,
     kind: CuratorHoldKind,
@@ -576,8 +579,7 @@ fn live_hold_of(
 ) -> Result<Option<(String, i64)>, CuratorHoldError> {
     tx.query_row_cached(
         "SELECT capture_pin_id,expires_at FROM capture_pins
-         WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL
-           AND purge_degraded_at IS NULL AND expires_at>?3
+         WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL AND expires_at>?3
          ORDER BY created_at DESC LIMIT 1",
         params![kind.pin_kind(), binding.owner_id(), now],
         |row| Ok((row.get(0)?, row.get(1)?)),
