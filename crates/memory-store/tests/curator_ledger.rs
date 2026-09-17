@@ -2869,3 +2869,49 @@ fn the_marker_clock_floor_includes_recorded_terminals() {
     assert_eq!(refusal(error), CuratorLedgerRefusal::ClockBehind);
     assert_eq!(fixture.attempts(), 1);
 }
+
+#[test]
+fn a_completion_dated_before_any_later_attempt_event_is_refused() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    fixture.completed_attempt(1, &claim, T0 + 10);
+    // A second marker commits at T0 + 30; a completion stamped T0 + 20 predates an event the ledger already holds.
+    let mut next = marker(1);
+    next.body_digest = "b".repeat(64);
+    assert!(matches!(
+        fixture
+            .store
+            .dispatch_curator_attempt(
+                PROJECT,
+                &fixture.identity,
+                1,
+                &claim,
+                KERNEL,
+                &next,
+                "prepared",
+                || T0 + 30,
+                |prepared| prepared,
+            )
+            .unwrap(),
+        DispatchOutcome::Handed { .. }
+    ));
+    assert_eq!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Complete,
+            Some(&selection()),
+            T0 + 20,
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Conflict {
+            kind: "clock_behind"
+        }
+    );
+    assert_eq!(receipt(&fixture).terminal, None);
+}

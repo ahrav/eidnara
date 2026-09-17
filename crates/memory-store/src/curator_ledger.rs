@@ -1145,23 +1145,29 @@ impl MemoryStore {
             && receipt.cancelled_at_ms.is_none()
             && now_ms < receipt.run_deadline_ms;
         if publishing {
-            let evidence = self
-                .list_curator_attempts(project, causal_identity)?
-                .into_iter()
-                .filter(|attempt| i64::try_from(attempt.generation).ok() == Some(generation))
-                .find_map(|attempt| match attempt.terminal {
-                    Some((CuratorAttemptTerminal::Complete, at_ms)) => Some(at_ms),
-                    _ => None,
+            let attempts = self.list_curator_attempts(project, causal_identity)?;
+            let backed = attempts.iter().any(|attempt| {
+                i64::try_from(attempt.generation).ok() == Some(generation)
+                    && matches!(
+                        attempt.terminal,
+                        Some((CuratorAttemptTerminal::Complete, _))
+                    )
+            });
+            if !backed {
+                return Ok(LeaseCompleteOutcome::Conflict { kind: "invalid" });
+            }
+            // A completion dated before any event the ledger already holds for the job, a marker commit or a terminal in any generation, is a clock that stepped back; the claim survives so the worker can retry once it catches up.
+            let newest_event_ms = attempts
+                .iter()
+                .flat_map(|attempt| {
+                    std::iter::once(attempt.committed_at_ms)
+                        .chain(attempt.terminal.map(|(_, at_ms)| at_ms))
+                })
+                .max();
+            if newest_event_ms.is_some_and(|newest| now_ms < newest) {
+                return Ok(LeaseCompleteOutcome::Conflict {
+                    kind: "clock_behind",
                 });
-            match evidence {
-                None => return Ok(LeaseCompleteOutcome::Conflict { kind: "invalid" }),
-                // A completion dated before the result it publishes is a clock that stepped back; the claim survives so the worker can retry once it catches up.
-                Some(at_ms) if now_ms < at_ms => {
-                    return Ok(LeaseCompleteOutcome::Conflict {
-                        kind: "clock_behind",
-                    });
-                }
-                Some(_) => {}
             }
         }
         self.complete_task_lease(
