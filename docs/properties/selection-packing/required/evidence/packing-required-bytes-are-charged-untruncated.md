@@ -42,7 +42,7 @@ None.
 
 ### Q: Does the estimator see the bytes the caller will receive?
 
-- Sources examined: `crates/daemon/src/packing/mod.rs` `prepare_required`, where
+- Sources examined: `crates/daemon/src/packing.rs` `prepare_required`, where
   `reserve_required` is given `bytes.iter().map(Vec::as_slice)` and the same
   `bytes` are moved into `MaterializedRequired`;
   `crates/retrieval/src/packing/required.rs` `reserve_required`, which refuses

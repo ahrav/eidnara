@@ -5,13 +5,13 @@ run at RP2.8 U3 by an evaluator that had not taken part in the discovery. It
 was given `../../METHOD.md`, `../README.md`, `catalog.md`,
 `existing-checks.md`, `fault-map.md`, `../marker-ledger.md`, the sibling
 `identity/` and `required/` catalogs, `crates/retrieval/src/packing/`,
-`crates/daemon/src/packing/mod.rs`, `crates/daemon/src/m0_compose.rs`,
+`crates/daemon/src/packing.rs`, `crates/daemon/src/m0_compose.rs`,
 `crates/daemon/src/canonical_memory.rs`, the two test files, the frozen
 reference, the fixture, and `crates/daemon/tests/support/packing.rs`. It did
 not open `evidence/`. It ran `cargo test --locked -p retrieval --test
 packing_grouping` (9 tests, pass), `cargo test --locked -p daemon --test
 packing_optional` (6 tests, pass), `grep -rn 'prepare_optional' crates
---include=*.rs` (`crates/daemon/src/packing/mod.rs` and
+--include=*.rs` (`crates/daemon/src/packing.rs` and
 `crates/daemon/tests/packing_optional.rs` only), and `grep -rn
 'skip_and_continue' crates --include=*.rs` (`crates/daemon/src/m0_compose.rs`
 is the one non-packing, non-test caller). The disposition is ours.

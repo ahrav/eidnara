@@ -37,7 +37,7 @@ None.
 
 ### Q: Where does over-range begin for a budget that arrives as an `f64`?
 
-- Sources examined: `crates/daemon/src/packing/mod.rs` `from_budget`; the
+- Sources examined: `crates/daemon/src/packing.rs` `from_budget`; the
   `budgets_are_integers_and_never_clamped` test; review thread
   [#668 r4030901776](https://github.com/ahrav/eidnara/pull/668#discussion_r4030901776).
 - Findings: every integer below 2^53 is exact in an `f64`; 2^53 + 1 rounds

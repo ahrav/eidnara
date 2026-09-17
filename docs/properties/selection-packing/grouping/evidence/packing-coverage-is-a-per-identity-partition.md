@@ -67,7 +67,7 @@ None.
 
 ### Q: Where do the optional exclusions found before grouping belong?
 
-- Sources examined: `crates/daemon/src/packing/mod.rs` `prepare_optional`
+- Sources examined: `crates/daemon/src/packing.rs` `prepare_optional`
   (`Duplicate` before any read; `Missing` and `Corrupt` from the read hold;
   `Stale` and `Excluded` after judgment; `Corrupt` again from the load hold or
   verification) and `excludable`, which lets only a missing or corrupt row

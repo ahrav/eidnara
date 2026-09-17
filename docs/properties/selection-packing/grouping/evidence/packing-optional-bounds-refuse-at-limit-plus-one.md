@@ -43,7 +43,7 @@ None.
 
 ### Q: Which bounds are checked before any read, and which before any load?
 
-- Sources examined: `crates/daemon/src/packing/mod.rs` `prepare_optional`:
+- Sources examined: `crates/daemon/src/packing.rs` `prepare_optional`:
   `admit_fused_candidates` on the request count before the duplicate filter
   and the read hold; `admit_optional_set` on the rows that survived exclusion
   after judgment and before the load hold;

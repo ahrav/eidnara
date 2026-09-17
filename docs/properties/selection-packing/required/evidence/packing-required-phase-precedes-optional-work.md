@@ -84,7 +84,7 @@ deadline is bounded only by the polls between stages.
 
 ### Q: Can a budget without a deadline stop a projection hold?
 
-- Sources examined: `crates/daemon/src/packing/mod.rs` `hold`;
+- Sources examined: `crates/daemon/src/packing.rs` `hold`;
   `crates/storage/src/lib.rs` `with_conn_interruptible`, which takes an
   `Instant`; `crates/daemon/src/request_budget.rs` `SharedBudget::deadline`,
   which returns an `Instant`; review thread
