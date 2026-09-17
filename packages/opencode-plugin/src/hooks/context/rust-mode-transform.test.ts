@@ -10,6 +10,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { deriveWindowGeometry } from "../../shared/window-geometry";
 import * as editRecipe from "./edit-recipe";
+import { chargeInvocation } from "./invocation-budget";
 import {
     MODULE_ORDINAL_PAGE_SIZE,
     MODULE_PAGE_MAX_BYTES,
@@ -521,6 +522,77 @@ describe("Rust mode transform request", () => {
             current_total_input_tokens: 64_000,
             context_limit_tokens: 128_000,
         });
+    });
+
+    for (const fits of [true, false]) {
+        it(`${fits ? "publishes when the whole invocation fits the context limit with headroom" : "declines the pass when the whole invocation exceeds the context limit"} and leaves the host array intact`, async () => {
+            const sessionId = `rust-invocation-budget-${fits}-${Date.now()}`;
+            installAvailabilityDb(sessionId, {});
+            installRawRows(sessionId, rawRows(1));
+            const candidate = [...makeMessages(sessionId), ...makeMessages(sessionId)];
+            const charged = chargeInvocation(
+                candidate.map((entry) => editRecipe.canonicalJsonLength(entry)),
+                250,
+            ).chargedTokens;
+            const { client, calls } = recordingClient((request) =>
+                recipeResponse(request, candidate),
+            );
+            const deps = makeDeps();
+            // The context limit derives from the usage sample: inputTokens / (percentage / 100).
+            const limit = fits ? charged : charged - 1;
+            deps.contextUsageMap.set(sessionId, {
+                usage: { percentage: 50, inputTokens: limit / 2 },
+                updatedAt: Date.now(),
+                lastResponseTime: Date.now(),
+                hasUsageTokens: true,
+            });
+            const transform = createRustModeTransform(deps, { moduleClient: client });
+            const messages = makeMessages(sessionId);
+            const member = messages[0];
+            const output = { messages: [...messages] as unknown[] };
+            const array = output.messages;
+            const logSpy = spyOn(logger.sessionLog, "warn");
+            try {
+                await transform.run(sessionId, output);
+                expect(output.messages).toBe(array);
+                expect(calls).toHaveLength(1);
+                if (fits) {
+                    expect(output.messages).toEqual(candidate);
+                } else {
+                    expect(output.messages).toHaveLength(1);
+                    expect(output.messages[0]).toBe(member);
+                    expect(
+                        sessionLogs(logSpy, sessionId).some((line) =>
+                            line.includes(
+                                `pass declined: invocation_budget (${charged} charged tokens over ${limit}, growing from`,
+                            ),
+                        ),
+                    ).toBe(true);
+                }
+                expect(transform.getState(sessionId).failureCount).toBe(0);
+            } finally {
+                logSpy.mockRestore();
+            }
+        });
+    }
+
+    it("publishes a candidate over the context limit when it is no larger than the incoming surface", async () => {
+        const sessionId = `rust-invocation-shrinks-${Date.now()}`;
+        installAvailabilityDb(sessionId, {});
+        installRawRows(sessionId, rawRows(1));
+        const candidate = makeMessages(sessionId);
+        const { client } = recordingClient((request) => recipeResponse(request, candidate));
+        const deps = makeDeps();
+        deps.contextUsageMap.set(sessionId, {
+            usage: { percentage: 50, inputTokens: 1 },
+            updatedAt: Date.now(),
+            lastResponseTime: Date.now(),
+            hasUsageTokens: true,
+        });
+        const transform = createRustModeTransform(deps, { moduleClient: client });
+        const output = { messages: [...makeMessages(sessionId)] as unknown[] };
+        await transform.run(sessionId, output);
+        expect(output.messages).toEqual(candidate);
     });
 
     it("sends the combined todowrite map and live-permission verdict", async () => {

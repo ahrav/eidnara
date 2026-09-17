@@ -1325,6 +1325,7 @@ fn commit_prepared_with_writer(
         super::slice::rebuild_alignment_tx(&tx)?;
     }
     tx.commit().map_err(map_sqlite)?;
+    super::write_observer::record(super::write_observer::Boundary::Kernel, &intent.cause.text);
     Ok(CommitReceipt {
         commit_seq,
         result: result.text,

@@ -1147,6 +1147,9 @@ export type ModuleMethod =
     | "note.evaluation.abandon"
     | "transform.ack"
     | "transform.nack"
+    | "retrieval.prepare"
+    | "retrieval.apply"
+    | "retrieval.confirm"
     | KernelMethod;
 
 /** The daemon's `kernel.*` routes, issued only through the shared kernel client. */

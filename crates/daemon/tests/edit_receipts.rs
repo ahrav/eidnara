@@ -8,7 +8,10 @@ use daemon::dispatch::PreparedOutcome;
 use std::sync::Arc;
 
 use daemon::context_capabilities::StaticDeclarations;
-use daemon::edit_receipts::{RETENTION_FLOOR, ReceiptLimits, ReceiptLimitsRefusal};
+use daemon::edit_receipts::{
+    AccountingBinding, RETENTION_FLOOR, ReceiptLimits, ReceiptLimitsRefusal,
+};
+use daemon::packing::AccountingProfile;
 use host_runtime::model_execution::backend::ContextCapabilities;
 use host_runtime::{BindOutcome, CompositeComponent, RouteHandle, RouteIdentity};
 use serde_json::{Value, json};
@@ -70,14 +73,22 @@ fn envelope(method: &str, project: &Path, body: Value) -> Value {
 fn prepare(project: &Path, ctx: Value, action: &str, edit_bytes: u64) -> Value {
     let mut body = ctx;
     body["action"] = json!(action);
-    body["accounting_profile"] = json!("profile-a");
     body["edit_bytes"] = json!(edit_bytes);
     envelope("retrieval.prepare", project, body)
 }
 
+fn exact_profile() -> Value {
+    serde_json::to_value(AccountingBinding::of(&AccountingProfile::exact_tokenizer())).unwrap()
+}
+
 fn apply(project: &Path, preparation_id: &str, ctx: Value) -> Value {
+    apply_under(project, preparation_id, exact_profile(), ctx)
+}
+
+fn apply_under(project: &Path, preparation_id: &str, profile: Value, ctx: Value) -> Value {
     let mut body = ctx;
     body["preparation_id"] = json!(preparation_id);
+    body["accounting_profile"] = profile;
     envelope("retrieval.apply", project, body)
 }
 
@@ -411,6 +422,97 @@ async fn a_changed_context_between_prepare_and_apply_is_stale_and_forwards_nothi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_daemon_binds_its_profile_at_prepare_and_an_apply_must_echo_it_exactly() {
+    let daemon = permissive_daemon().await;
+    daemon
+        .handler()
+        .set_edit_receipt_limits(Some(limits()))
+        .unwrap();
+    let consumer = Consumer::new(&daemon);
+    let ctx = context("rev-1", "repr-1", 10);
+    let exact = AccountingProfile::exact_tokenizer();
+
+    let prepared = consumer.prepare(ctx.clone(), "append", 10).await;
+    assert_eq!(prepared["kind"], "prepared", "{prepared}");
+    assert_eq!(prepared["accounting_profile"]["identity"], "claude-bpe");
+    assert_eq!(
+        prepared["accounting_profile"]["revision"],
+        exact.revision().as_str()
+    );
+    let key = id(&prepared);
+
+    let mut other_revision = exact_profile();
+    other_revision["revision"] = json!("10:claude-bpe;4:dead");
+    let mut other_identity = exact_profile();
+    other_identity["identity"] = json!("opencode-heuristic");
+    for foreign in [other_revision, other_identity] {
+        for current in [ctx.clone(), context("rev-2", "repr-1", 10)] {
+            let refused = consumer
+                .call(apply_under(
+                    &consumer.project,
+                    &key,
+                    foreign.clone(),
+                    current,
+                ))
+                .await;
+            assert_eq!(
+                terminal(&refused),
+                "profile_mismatch",
+                "the profile is judged before the context: {refused}"
+            );
+        }
+    }
+    let malformed = consumer
+        .call(apply_under(
+            &consumer.project,
+            &key,
+            json!({"identity": "claude-bpe"}),
+            ctx.clone(),
+        ))
+        .await;
+    assert_eq!(malformed["error"], "invalid_params", "{malformed}");
+    let untyped = consumer
+        .call(apply_under(
+            &consumer.project,
+            &key,
+            json!("claude-bpe"),
+            ctx.clone(),
+        ))
+        .await;
+    assert_eq!(untyped["error"], "invalid_params", "{untyped}");
+    let empty_member = consumer
+        .call(apply_under(
+            &consumer.project,
+            &key,
+            json!({"identity": "", "revision": "x"}),
+            ctx.clone(),
+        ))
+        .await;
+    assert_eq!(empty_member["error"], "invalid_params", "{empty_member}");
+    assert!(consumer.effects().is_empty());
+
+    let forwarded = consumer.apply(&key, ctx.clone()).await;
+    assert_eq!(forwarded["kind"], "forwarded", "{forwarded}");
+    assert_eq!(consumer.effects().len(), 1);
+
+    let pending = id(&consumer.prepare(ctx.clone(), "append", 10).await);
+    daemon.handler().withdraw_accounting_profile();
+    assert_eq!(
+        terminal(&consumer.prepare(ctx.clone(), "append", 10).await),
+        "profile_unavailable"
+    );
+    for current in [ctx.clone(), context("rev-2", "repr-1", 10)] {
+        assert_eq!(
+            terminal(&consumer.apply(&pending, current).await),
+            "profile_unavailable",
+            "a receipt prepared under a profile the daemon no longer holds is not forwarded"
+        );
+    }
+    assert_eq!(consumer.effects().len(), 1);
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back() {
     let ctx = context("rev-1", "repr-1", 10);
     let (forwarded_key, forwarded_effect, prepared_key) = {
@@ -585,6 +687,84 @@ async fn a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_confl
         "conflict",
         "a receipt alone never marks applied"
     );
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_application_outcome_leaves_the_kernel_tip_and_write_counters_unchanged() {
+    use kernel::write_observer::{Boundary, PROJECTION_CAUSE, Snapshot};
+    const CONTROL_CAUSE: &str = "write-observer-control";
+
+    let daemon = permissive_daemon().await;
+    let consumer = Consumer::new(&daemon);
+    let ctx = context("rev-1", "repr-1", 10);
+    let tip = daemon.tip();
+    let before = Snapshot::take();
+
+    assert_eq!(
+        terminal(&consumer.prepare(ctx.clone(), "append", 10).await),
+        "disabled"
+    );
+    daemon
+        .handler()
+        .set_edit_receipt_limits(Some(limits()))
+        .unwrap();
+    let failed = consumer.prepare(ctx.clone(), "append", 1 << 20).await;
+    assert_eq!(failed["outcome"], "preparation_failure");
+    let key = id(&consumer.prepare(ctx.clone(), "append", 10).await);
+    assert_eq!(
+        terminal(&consumer.apply(&key, context("rev-2", "repr-1", 10)).await),
+        "stale_preparation"
+    );
+    let effect = consumer.apply(&key, ctx.clone()).await["forwarded_identity"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        consumer.confirm(&key, &effect, None, "append").await["state"],
+        "unknown"
+    );
+    let declined = id(&consumer.prepare(ctx.clone(), "append", 10).await);
+    let declined_effect = consumer.apply(&declined, ctx.clone()).await["forwarded_identity"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        consumer
+            .confirm(&declined, &declined_effect, Some(&declined_effect), "keep")
+            .await["outcome"],
+        "keep"
+    );
+    daemon.handler().set_edit_receipt_limits(None).unwrap();
+    assert_eq!(
+        terminal(&consumer.prepare(ctx.clone(), "append", 10).await),
+        "disabled"
+    );
+    assert_eq!(consumer.effects(), vec![effect, declined_effect]);
+
+    assert_eq!(daemon.tip(), tip);
+    let after = Snapshot::take();
+    assert_eq!(
+        after.count(Boundary::Projection, PROJECTION_CAUSE),
+        before.count(Boundary::Projection, PROJECTION_CAUSE)
+    );
+    assert_eq!(after.count(Boundary::Kernel, CONTROL_CAUSE), 0);
+
+    daemon
+        .store()
+        .commit(
+            kernel::CommitIntent {
+                producer: CONTROL_CAUSE.to_string(),
+                operation_key: "control".to_string(),
+                request_digest: "00".repeat(32),
+                actor: "test".to_string(),
+                cause: CONTROL_CAUSE.to_string(),
+            },
+            |_| Ok("noop".to_string()),
+        )
+        .unwrap();
+    assert_eq!(Snapshot::take().count(Boundary::Kernel, CONTROL_CAUSE), 1);
+    assert_eq!(daemon.tip(), tip + 1);
     daemon.shutdown().await;
 }
 

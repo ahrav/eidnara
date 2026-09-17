@@ -23,6 +23,11 @@ System: `/local/home/ahrav/scratch/eidnara`. Base: `rp27/u3c-dense-lane` at
 | No declaration | A `KernelDaemon` started without a capability source. | apply-context-capabilities-default-closed-per-harness |
 | Advertising consumer strings | `StartOptions::consumer_capabilities` on a `pi` route. | apply-consumer-capability-strings-never-authorize-edits |
 | Partial or span-level survivors | `survivors` sets on `retrieval.prepare` with action `suppress`. | apply-suppression-requires-confirmed-surviving-span |
+| Foreign, malformed, or withdrawn accounting profile | An `accounting_profile` on `retrieval.apply` with another revision or identity, a missing member, or a bare string; `withdraw_accounting_profile` on the handler. | apply-stale-preparation-is-rejected-before-edit |
+| Invocation over the context limit | A usage sample whose derived limit is one below the charged total, with the candidate larger than the incoming surface; a shrinking candidate under a one-token limit; no usage sample at all. | apply-adapter-validates-entire-assembled-invocation |
+| Lost acknowledgment at the plugin | `publish` resolving `undefined` while the daemon answers `unknown` or `complete`; a daemon answering a complete receipt without a forward; a confirm whose transport throws after publication. | apply-daemon-receipt-does-not-mark-harness-edit-applied |
+| Capability terminal at the plugin | A scripted `capability_unsupported` for `replacement`, then a rebind epoch and another session on the same latch. | apply-context-capabilities-default-closed-per-harness |
+| Disable, decline, failure, unknown, uninstall | The receipt lifecycle driven through every outcome with the kernel tip and the write observer read before and after. | apply-unknown-outcome-never-replays-blindly |
 
 The store takes `now: Instant` on every operation, so the module tests drive
 the time bound with synthetic instants and no sleep.

@@ -150,6 +150,16 @@ token_identity! {
 }
 
 token_identity! {
+    /// The accounting profile's name, `claude-bpe` for the exact tokenizer.
+    AccountingProfileIdentity
+}
+
+token_identity! {
+    /// The accounting profile's revision text, the cost cache's key.
+    AccountingProfileRevision
+}
+
+token_identity! {
     GenerationId
 }
 
@@ -235,6 +245,8 @@ pub struct PreparationInputs<'a> {
     pub representation: &'a ContextRepresentation,
     pub spans: &'a [SelectedSpan],
     pub selection: &'a SelectionDigest,
+    pub profile_identity: &'a AccountingProfileIdentity,
+    pub profile_revision: &'a AccountingProfileRevision,
 }
 
 /// The count of a sequence and the length of every component are hashed before their bytes, so no component can imitate a boundary.
@@ -275,7 +287,7 @@ impl SelectionDigest {
 
 impl PreparationDigest {
     pub fn derive(inputs: PreparationInputs<'_>) -> Self {
-        let mut derivation = Derivation::new("eidnara-retrieval-preparation-v1");
+        let mut derivation = Derivation::new("eidnara-retrieval-prepared-context-v1");
         derivation.component(inputs.context.as_str().as_bytes());
         derivation.component(inputs.representation.as_str().as_bytes());
         derivation.count(inputs.spans.len());
@@ -294,6 +306,8 @@ impl PreparationDigest {
             }
         }
         derivation.component(inputs.selection.as_bytes());
+        derivation.component(inputs.profile_identity.as_str().as_bytes());
+        derivation.component(inputs.profile_revision.as_str().as_bytes());
         Self(derivation.finish())
     }
 }

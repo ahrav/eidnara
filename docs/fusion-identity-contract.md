@@ -269,20 +269,26 @@ refuses a reversed range or one that exceeds the buffer.
 `PreparationDigest::derive(inputs)` is SHA-256 over:
 
 ```text
-"eidnara-retrieval-preparation-v1" 0x00
+"eidnara-retrieval-prepared-context-v1" 0x00
 len64(context_revision) context_revision
 len64(context_representation) context_representation
 count64(spans)
   len64(occurrence_bytes) occurrence_bytes
   len64(span) span            0x00, or 0x01 start64 end64
 len64(selection_digest) selection_digest
+len64(profile_identity) profile_identity
+len64(profile_revision) profile_revision
 ```
 
 `ContextRevision` is the harness context's revision token.
-`ContextRepresentation` is the surface the invocation is assembled on. The
-digest changes when the context revision, the representation, any selected
-span, span order, span count, or the selection changes, and two inputs that
-split their text into components differently never derive one digest.
+`ContextRepresentation` is the surface the invocation is assembled on.
+`AccountingProfileIdentity` and `AccountingProfileRevision` are the daemon's
+accounting profile as the daemon binds it at prepare: for the exact
+tokenizer, `claude-bpe` and the revision text the cost cache keys on. All
+four are validated by the identity-value rule below. The digest changes when
+the context revision, the representation, any selected span, span order,
+span count, the selection, or the accounting profile changes, and two inputs
+that split their text into components differently never derive one digest.
 
 ## Invocation identity
 
