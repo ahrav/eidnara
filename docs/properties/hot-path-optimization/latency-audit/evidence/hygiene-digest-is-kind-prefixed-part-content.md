@@ -190,55 +190,28 @@ anchors above identify each branch.
   the accounting-model limitation above.
   Daemon all-target/all-feature clippy and rustfmt checks pass.
   Checks remain unaudited.
-- Historical payoff evidence: The implementation pass did not execute
-  benchmarks; the subsequent [frozen local payoff run](tail-hygiene-payoff.md)
-  is complete.
-  Measured B uses the fixed-slot memo, created and primed before the callback
-  and timed loop. Slot selection, memo locking, validity checks, bookkeeping,
-  and full-result construction/drop remain timed. The linked benchmark and
-  wrapper show the current session-table source; this run does not measure
-  its table lookup or `Arc` clone. The timed loop measures the fully warm path
-  only; cold walks, edits, and refusals are not timed, and the 2,500-message
-  cell is not reported. The empty-core, empty-tag cell does not exercise
-  terse_text_compression invalidation or populated attribution, and U is zero.
-- Missing evidence: No independently replayable pre-memo characterization
-  artifact, allocator/RSS validation, production workload, concurrent-session
-  timing, or cold-call timing is established here.
-- Historical conclusion: The recorded correctness and retained-accounting checks pass.
-  The fixed three-pair A/A and five-pair A/B evidence meets both predeclared
-  ticket-local payoff conditions, with a 73.1659% reduction in warm-call time.
-  Retention is justified for that local payoff, not as a general latency or
-  merge-readiness claim. The controller reports all 14 recent local gates
-  passed; logs remain at `/tmp/opencode/hygiene-memo-*.log`. This documentation
-  pass inspects logs and receipts without rerunning tests or benchmarks.
+- Payoff evidence retirement: The benchmark cleanup removed both local payoff
+  receipts, manifests, and raw samples. Their passing verdicts and numerical
+  speedup claims are withdrawn. The correctness and retained-accounting
+  observations above remain separate from performance evidence.
+- Missing evidence: No retained, replayable payoff experiment remains. No
+  independently replayable pre-memo characterization artifact, allocator/RSS
+  validation, production workload, concurrent-session timing, or cold-call
+  timing is established here.
+- Conclusion: unresolved, needs new retained evidence before any payoff claim.
+  Retirement does not invalidate the digest-correctness property or its tests.
 
 ### Q: Does the integrated decoded-ingress workload retain a local payoff?
 
-- Sources examined: The [integrated payoff evidence](tail-hygiene-integrated-payoff.md)
-  and its [compact manifest](tail-hygiene-integrated-payoff.json), the safe
-  experiment's plan, results, A/A and A/B summaries, source identities,
-  checksums, raw samples, and recorded build/process receipts.
-- Findings: The new experiment compares archived parent `16542f5e` plus only
-  the required six-addition/six-deletion release-accessor repair with candidate
-  `05c33bf0`. Both use the same decoded-ingress helper and retain original JSON.
-  Three A/A pairs establish a new guard before five A/B pairs run under the
-  same fixed rule. All 16 processes are valid. The warm-call time reduction is
-  72.5513%; every paired log gain exceeds the new A/A guard, and the mean
-  exceeds twice the sample SD. Both 477-input source maps and both binaries
-  still match their measurement hashes during this documentation pass.
-- Verification provenance: The controller reports all 14 local gates passed
-  on `05c33bf0`; `/tmp/opencode/memo-integrated-*.log` contains the recorded
-  outputs. Empty gate logs do not independently establish exit status or
-  source revision. No test, build, or benchmark runs for this docs-only update.
-- Missing evidence: Production, concurrent-session, cold-call, total-turn or
-  session latency, and allocator/RSS validation remain outside the experiment.
-  The paired interval is conditional on the exact artifacts and host window.
-  The pre-memo characterization remains agent-witnessed and transcript-only.
-- Conclusion: resolved with answer - the new measurement closes the integrated
-  workload's payoff gap for this local warm-call boundary. The historical
-  73.1659% result remains valid only for its earlier fixture and artifacts; it
-  is not reinterpreted as an integrated result. Only the new safe experiment
-  bundle is read for this update; the older secret-bearing raw bundle is not.
+- Sources examined: The benchmark cleanup's deleted-file inventory and the
+  retained correctness record above.
+- Findings: The integrated measurement receipt, compact manifest, and raw
+  samples are removed. The earlier passing verdict is withdrawn rather than
+  treated as verifiable evidence in this checkout.
+- Missing evidence: A retained comparable before/after experiment with source
+  identities, raw samples, and a noise rule declared before collection.
+- Conclusion: unresolved, needs new retained evidence. No numerical speedup
+  or closed payoff gap is claimed for the integrated workload.
 
 [flatten]: ../../../../../crates/daemon/src/wire.rs#L731-L796
 [token-count]: ../../../../../crates/daemon/src/lib.rs#L2050-L2074

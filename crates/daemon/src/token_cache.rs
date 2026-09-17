@@ -216,7 +216,7 @@ pub(crate) fn count_under(
 }
 
 /// Clears both shared generations.
-#[cfg(any(test, feature = "bench-internals", feature = "test-support"))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn clear() {
     let mut guard = lock_cache();
     *guard = Some(Generations::default());

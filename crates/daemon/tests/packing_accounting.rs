@@ -519,13 +519,13 @@ fn consumed_budget_plus_remaining_is_the_token_limit_under_every_profile() {
             ) else {
                 continue;
             };
-            admitted_counts.insert(closed.admitted.len());
+            admitted_counts.insert(closed.admitted().len());
             assert_eq!(
-                closed.ledger.total_with_headroom().get() + closed.remaining.get(),
+                closed.ledger().total_with_headroom().get() + closed.remaining().get(),
                 token_limit,
                 "{} at {token_limit}: {} admitted",
                 profile.identity(),
-                closed.admitted.len()
+                closed.admitted().len()
             );
         }
         assert_eq!(

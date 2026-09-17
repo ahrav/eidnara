@@ -33,13 +33,7 @@ shm-transport = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "signal"] }
 rustix = { workspace = true, features = ["stdio"] }
-criterion = { workspace = true }
-hdrhistogram = "=7.6.0"
 
 [[test]]
 name = "model_execution_subprocess"
-harness = false
-
-[[bench]]
-name = "ipc_budget"
 harness = false

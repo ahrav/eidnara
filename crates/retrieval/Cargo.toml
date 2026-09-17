@@ -25,25 +25,4 @@ test-support = []
 retrieval = { path = ".", features = ["test-support"] }
 kernel = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
-criterion = { workspace = true }
 proptest = { workspace = true }
-
-[[bench]]
-name = "exact_lookup"
-harness = false
-
-[[bench]]
-name = "lexical_analysis"
-harness = false
-
-[[bench]]
-name = "lexical_index"
-harness = false
-
-[[bench]]
-name = "dense_scalar"
-harness = false
-
-[[bench]]
-name = "dense_resolve"
-harness = false

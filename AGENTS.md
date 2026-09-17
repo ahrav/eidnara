@@ -8,6 +8,13 @@ Rust 1.98 workspace with a thin Bun/TypeScript layer.
 - Before changing `crates/storage/`, `crates/shm-transport/`, `crates/host-runtime/`, `packages/shm-native/`, `packages/opencode-plugin/`, or `docs/properties/`, read that directory's scoped `AGENTS.md`.
 - TypeScript packages live under `packages/` with `@eidnara` names at version `0.1.0`. The package set is `@eidnara/shm-native`, `@eidnara/fs-observer`, `@eidnara/opencode` (`opencode-plugin/`), `@eidnara/pi` (`pi-plugin/`), `@eidnara/cli`, `@eidnara/host-linux-x64-gnu`, and `@eidnara/e2e-tests`; `ls packages/` shows which of them exist, and only those have manifests and scripts. Each package owns its `tsconfig`, lint configuration, and test preload. The root `package.json` scripts `typecheck`, `lint`, `test`, and `build` name each existing package explicitly, and `bun run check:repo` runs those four in order; root `build` carries only Bun and `tsc` steps, and cargo-backed builds such as the `shm-native` addon stay in the CI `native-addon` job.
 
+## Documentation
+
+Keep one current system document per boundary directly in `docs/`.
+Keep agent guidance in `docs/agents/` and property catalogs in `docs/properties/`.
+Specs and implementation plans belong in the issue tracker, not local copies.
+Do not commit research, benchmark reports, or planning artifacts.
+
 ## Agent skills
 
 ### Work tracking

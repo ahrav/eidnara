@@ -310,30 +310,28 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: invalidated
-Exercised: n/a (invalidated) - EG1 holds the executed obligation: both legs,
-raw samples, and the predeclared rule are in
-[`evidence/eg1-decode-projection/`](evidence/eg1-decode-projection/README.md)
-with a `proceed` verdict; W1 remains invalidated.
+Exercised: not yet - EG1 is retired and its passing verdict is withdrawn;
+the benchmark cleanup removed its manifests, raw samples, and receipt.
+W1 remains invalidated.
 Guarantee: A typed-wire decode payoff claim requires comparable evidence for
 the complete decode-plus-projection operation and stops when the gain is noise.
 Check: `always` - The historical record checked whether a payoff verdict had
 complete comparable 40/200 before/after evidence and stopped within noise.
 That is an evidence-gate predicate, not a runtime property; this classification
-is invalidated. [EG1](evidence-gates.md#eg1-decode-projection-payoff) retains the
-exact obligation and owns its execution handoff.
+is invalidated. [EG1](evidence-gates.md#eg1-decode-projection-payoff) records
+retirement, not an active execution handoff.
 Fault/timing angle: Wrong baseline branch, mirror decoder, untimed decode,
 different drop timing, missing feature, pooled iterations, or cherry-picked cell.
 Required faults and enabling state: Immutable before and candidate artifacts,
 both corpus sizes, production message types, declared timing interval, and
 process-level repeated measurements with a noise rule set before results.
 Confidence: high - [evidence](evidence/decode-projection-payoff-has-comparable-evidence.md).
-P:L18 and P:L213 require payoff evidence; benchmark identity is test-only at
-`crates/daemon/Cargo.toml:77-81`. No performance result is inferred.
-Existing check: `crates/daemon/benches/hot_path.rs:1-10,99-115` measures projection
-from predecoded input; unaudited. No 40/200 combined decode group is found.
+P:L18 and P:L213 historically required payoff evidence. The benchmark and
+its evidence are removed; no current performance result is inferred.
+Existing check: None. The benchmark and its measurement receipts are retired.
 Impact: Treating a manifest requirement as a system invariant mixes acceptance
-evidence with behavior coverage. Invalidation changes category, not the plan's
-payoff requirement, and does not reactivate W1.
+evidence with behavior coverage. Retiring the campaign withdraws its payoff
+verdict and does not reactivate W1.
 Open questions:
 - What predeclared uncertainty/noise rule governs stop versus proceed for both
   sizes, and who owns its evidence artifact? (needs human input)
@@ -356,7 +354,7 @@ and occurrence result. Their conjunction is only a completion rollup, never
 one aggregate `sometimes`. Inputs, holder charges, allocation lifetimes, and
 stage entries establish each predicate; neither `queue_full` nor
 `peak <= charge` is a witness. Each must fire on a correct implementation.
-The preserved measurement-pair name is an EG1 receipt, outside this property.
+The retired measurement-pair name belongs to EG1, outside this property.
 Fault/timing angle: A safety suite stays green while never taking fallback,
 experiencing pressure, holding both decode stages, or retaining a shared owner.
 Required faults and enabling state: The fixed marker matrix includes direct
@@ -381,7 +379,8 @@ R1 checks the selected decode estimate; R2 inventories retained ownership;
 neither dominates R4's complete logical pool bound. R5's narrow resource
 budget cannot replace them. R3 protects original cases and fixed rules while
 allowing KTD4's wider string ceiling. R6 is invalidated and replaced in
-category by EG1. R7 supplies independent situation checks, not timing evidence.
+category by EG1, which is now retired. R7 supplies independent situation
+checks, not timing evidence.
 
 Architecture, failure, resource, and wildcard lenses feed R1/R4. State,
 replay, lifecycle, and data-integrity lenses feed R2. Protocol, safety, and
@@ -390,10 +389,10 @@ dependencies, and unproven-assumption lenses feed R6. Repeated discovery from
 the same source is not independent corroboration.
 
 Five `always` safety records and one `sometimes` reachability record are active.
-One historical `always` record is invalidated. EG1 is the single evidence gate,
-with execution pending. No liveness deadline is justified for this synchronous
-slice; measurement is not runtime liveness. Distributed coordination is
-narrowly N/A; lifecycle and concurrency remain relevant to ownership.
+One historical `always` record is invalidated. EG1 is retired, with no current
+passing payoff verdict or pending campaign. No liveness deadline is justified
+for this synchronous slice; measurement is not runtime liveness. Distributed
+coordination is narrowly N/A; lifecycle and concurrency remain relevant to ownership.
 
 [Portfolio evaluation](portfolio-evaluation.md) records four completed lenses
 from independent analyst `ses_f6756093fffeVjNp36S3E8pKrM`, local validation,
