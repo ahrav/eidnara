@@ -57,6 +57,9 @@ pub enum SendError {
     RequestTooLarge,
     #[error("output_tokens")]
     OutputTokens,
+    /// The temperature is non-finite or outside the provider's `0.0..=1.0`.
+    #[error("temperature")]
+    Temperature,
     /// The credential is not a valid header value.
     #[error("credential")]
     Credential,
@@ -179,13 +182,14 @@ pub struct Message {
     pub content: String,
 }
 
-/// One Messages request. It is serialized with `stream: false` and no `tools`; nothing else about the wire shape is configurable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One Messages request. It is serialized with `stream: false` and no `tools`; the model, the token cap, and the one sampling value are the whole configurable profile, and an omitted `temperature` is serialized as an omission.
+#[derive(Debug, Clone, PartialEq)]
 pub struct MessagesRequest {
     pub model: String,
     pub system: Option<String>,
     pub messages: Vec<Message>,
     pub max_tokens: u32,
+    pub temperature: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -195,27 +199,54 @@ struct WireRequest<'a> {
     system: Option<&'a str>,
     messages: &'a [Message],
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
     stream: bool,
 }
 
+/// Serialized request bytes that passed [`MessagesRequest::body`]'s shape, token, and size bounds. Only that constructor produces one, so a handoff cannot carry bytes the bounds never saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestBody(Vec<u8>);
+
+impl RequestBody {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 impl MessagesRequest {
-    /// The serialized body, refused when it asks for more output than [`MAX_OUTPUT_TOKENS`] or exceeds [`MAX_REQUEST_BYTES`].
-    pub fn body(&self) -> Result<Vec<u8>, SendError> {
+    /// The serialized body, refused when it asks for more output than [`MAX_OUTPUT_TOKENS`], exceeds [`MAX_REQUEST_BYTES`], or carries a temperature JSON cannot represent exactly (non-finite) or the provider does not accept (outside `0.0..=1.0`).
+    pub fn body(&self) -> Result<RequestBody, SendError> {
         if self.max_tokens == 0 || self.max_tokens > MAX_OUTPUT_TOKENS {
             return Err(SendError::OutputTokens);
+        }
+        if self
+            .temperature
+            .is_some_and(|temperature| !(0.0..=1.0).contains(&temperature))
+        {
+            return Err(SendError::Temperature);
         }
         let body = serde_json::to_vec(&WireRequest {
             model: &self.model,
             system: self.system.as_deref(),
             messages: &self.messages,
             max_tokens: self.max_tokens,
+            temperature: self.temperature,
             stream: false,
         })
         .map_err(|_| SendError::RequestTooLarge)?;
         if body.len() > MAX_REQUEST_BYTES {
             return Err(SendError::RequestTooLarge);
         }
-        Ok(body)
+        Ok(RequestBody(body))
     }
 }
 
@@ -224,6 +255,8 @@ impl MessagesRequest {
 pub struct AssistantText {
     pub text: String,
     pub stop_reason: Option<StopReason>,
+    /// The model the provider reports having answered with; the caller compares it with the one it requested.
+    pub model: Option<String>,
     pub accounting: ResponseAccounting,
 }
 
@@ -242,6 +275,11 @@ pub struct Sender {
 }
 
 impl Sender {
+    /// The provider identity a disclosure marker records: the host this sender actually dials, the API surface, and the API version it speaks.
+    pub fn provider_identity(&self) -> String {
+        format!("{}{MESSAGES_PATH}@{ANTHROPIC_VERSION}", self.endpoint.host)
+    }
+
     pub fn new(endpoint: Endpoint, credential: Credential) -> Self {
         Self {
             endpoint,
@@ -298,9 +336,8 @@ impl std::fmt::Debug for Connected {
 }
 
 impl Connected {
-    /// The one-shot handoff: synchronously moves the owned request into the connection's dispatch queue and returns the in-flight send. Nothing is written to the peer until [`InFlight::complete`] polls the connection; a connection that turns out unable to take the request reports `NotReady` there, with nothing sent.
-    pub fn handoff(mut self, request: &MessagesRequest) -> Result<InFlight, SendError> {
-        let body = request.body()?;
+    /// The one-shot handoff: synchronously moves the already serialized `body` into the connection's dispatch queue and returns the in-flight send. The caller serializes and bounds the body beforehand ([`MessagesRequest::body`]), so the bytes it hashed are the bytes sent and nothing is encoded here. Nothing is written to the peer until [`InFlight::complete`] polls the connection; a connection that turns out unable to take the request reports `NotReady` there, with nothing sent.
+    pub fn handoff(mut self, body: RequestBody) -> Result<InFlight, SendError> {
         let wire = Request::post(MESSAGES_PATH)
             .header(header::HOST, self.host.as_str())
             .header(header::CONTENT_TYPE, "application/json")
@@ -309,7 +346,7 @@ impl Connected {
             .header(header::CONNECTION, "close")
             .header("x-api-key", self.credential.header())
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .body(Full::new(Bytes::from(body)))
+            .body(Full::new(Bytes::from(body.0)))
             .map_err(|_| SendError::RequestTooLarge)?;
         // `try_send_request` moves the request into the dispatch queue before it returns its future; a fresh connection admits exactly one request before it is polled.
         let response = Box::pin(self.send.try_send_request(wire));
@@ -426,6 +463,7 @@ impl InFlight {
             Ok(AssistantText {
                 text: decoded.text,
                 stop_reason: decoded.stop_reason,
+                model: decoded.model,
                 accounting,
             })
         };

@@ -353,9 +353,9 @@ fn staged_subjects_and_captures_read_through_kernel_expectations_and_grow_the_ho
             fixture.now + 2,
         )
         .unwrap();
-    assert_eq!(read.buffer.bytes, b"bun builds the workspace");
-    assert_eq!(read.buffer.tag.origin, OriginClass::StagedSubject);
-    assert_eq!(read.buffer.tag.charged_bytes, 24);
+    assert_eq!(read.buffer.bytes(), b"bun builds the workspace");
+    assert_eq!(read.buffer.tag().origin, OriginClass::StagedSubject);
+    assert_eq!(read.buffer.tag().charged_bytes, 24);
     assert_eq!(
         read.sensitivity,
         Sensitivity::Sensitive,
@@ -372,7 +372,7 @@ fn staged_subjects_and_captures_read_through_kernel_expectations_and_grow_the_ho
             fixture.now + 2,
         )
         .unwrap();
-    assert_eq!(ranged.buffer.bytes, b"bun");
+    assert_eq!(ranged.buffer.bytes(), b"bun");
     assert_eq!(
         broker
             .read(
@@ -422,8 +422,8 @@ fn staged_subjects_and_captures_read_through_kernel_expectations_and_grow_the_ho
             fixture.now + 2,
         )
         .unwrap();
-    assert_eq!(read.buffer.bytes, b"file");
-    assert_eq!(read.buffer.tag.origin, OriginClass::TemporaryCapture);
+    assert_eq!(read.buffer.bytes(), b"file");
+    assert_eq!(read.buffer.tag().origin, OriginClass::TemporaryCapture);
     assert_eq!(broker.buffers.loaded(), 1);
     fixture
         .store
@@ -681,8 +681,8 @@ fn render_check_refuses_secrets_and_placeholders_without_redacting() {
     let host = broker
         .render_host_text(QuestionTemplate::ExtractedFacts.text())
         .unwrap();
-    assert_eq!(host.tag.origin, OriginClass::HostAuthored);
-    assert_eq!(host.tag.charged_bytes, 0);
+    assert_eq!(host.tag().origin, OriginClass::HostAuthored);
+    assert_eq!(host.tag().charged_bytes, 0);
     assert_eq!(
         QuestionTemplate::parse("extracted_facts"),
         Some(QuestionTemplate::ExtractedFacts)
@@ -766,10 +766,10 @@ fn canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_b
     let first = broker
         .read(&fixture.store, claim_alias.as_str(), None, fixture.now)
         .unwrap();
-    assert_eq!(first.buffer.bytes, claim_text.as_bytes());
+    assert_eq!(first.buffer.bytes(), claim_text.as_bytes());
     assert_eq!(first.origin_key, "decision:decision-a");
     assert_eq!(
-        first.buffer.tag.verdict,
+        first.buffer.tag().verdict,
         Some(JudgedAt {
             verdict: EligibilityVerdict::Hidden,
             visibility: SurfaceVisibility::Hidden,
