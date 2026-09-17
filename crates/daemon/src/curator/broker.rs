@@ -482,6 +482,7 @@ pub struct EvidenceRead {
     pub buffer: RenderedBuffer,
     pub origin_key: String,
     pub member: PolicyUnionMember,
+    /// The restrictive fold of the stored classes behind the bytes: the artifact's, the descriptor row's, and the originating decision's. The serving-view class eligibility judged against (which folds admission history and can be stricter) is not exposed by the Kernel's verdict; the verdict decided whether the bytes may reach this destination, this field labels them.
     pub sensitivity: Sensitivity,
 }
 
@@ -922,7 +923,7 @@ impl EvidenceBroker {
             .charge_render(Some(alias), u64::try_from(bytes).unwrap_or(u64::MAX))
     }
 
-    /// Charges the range, loads the artifact once, re-reads the egress verdict, the execution hold, and the held facts (refreshing `held`) on the bytes that were just loaded, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret; a buffer that failed it stays refused without another charge or scan. Returns whether this call loaded the artifact, so the caller can re-judge object standing over the same window.
+    /// Charges the range, loads the artifact once, re-reads the execution hold and the held facts (refreshing `held`) on the bytes that were just loaded, re-reads the egress verdict on every render, checks the whole buffer on first load, and copies the requested range out of the retained buffer. The whole-buffer check means a range split can never hide a marker or secret; a buffer that failed it stays refused without another charge or scan. Returns whether this call loaded the artifact, so the caller can re-judge object standing over the same window.
     fn load_range(
         &mut self,
         store: &KernelStore,
@@ -958,7 +959,7 @@ impl EvidenceBroker {
             if let Some(hook) = self.after_load_for_test.as_mut() {
                 hook(store);
             }
-            // The verdicts before the hold grew and the disk read are separate snapshots. The hold and evidence facts are re-read first: a run whose cutoff passed during the read does not disclose what it loaded, a capture whose acquisition reference lapsed meanwhile is refused, and the class reported with the bytes is the one they carry now. The egress verdict is re-read last, so a classification tightened at any point before it is the one that decides.
+            // The verdicts before the hold grew and the disk read are separate snapshots. The hold and evidence facts are re-read first: a run whose cutoff passed during the read does not disclose what it loaded, a capture whose acquisition reference lapsed meanwhile is refused, and the class reported with the bytes is the one they carry now. The egress verdict is re-read last, on every render, so a classification tightened at any point before it is the one that decides.
             let now_ms = now_ms.max(crate::now_ms());
             *held = store
                 .validate_held_evidence(
@@ -977,15 +978,16 @@ impl EvidenceBroker {
             {
                 return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
             }
-            self.egress_allowed(
-                store,
-                alias,
-                &ArtifactHandle {
-                    digest: held.artifact_digest.clone(),
-                    evidence_id: held.evidence_id.clone(),
-                },
-            )?;
         }
+        // Every render, cached or not, ends on the egress verdict: the check before the hold grew and this one are separate snapshots, and a classification tightened between them decides here.
+        self.egress_allowed(
+            store,
+            alias,
+            &ArtifactHandle {
+                digest: held.artifact_digest.clone(),
+                evidence_id: held.evidence_id.clone(),
+            },
+        )?;
         if loaded || !self.checked_artifacts.contains(&held.artifact_digest) {
             let whole = self
                 .buffers
