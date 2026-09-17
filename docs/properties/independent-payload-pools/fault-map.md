@@ -72,7 +72,7 @@ whether the harness can produce it at the tree of this catalog's introducing com
 | `real-process-current-layout-witness` | none (CI) | `gate.supported_runtime_present` |
 | `malformed-fixture-valid-baseline` | F6 | `gate.fixture_baseline_checked` |
 | `fuzz-adapter-current-contract` | none (corpus) | `gate.fuzz_corpus_replayed` |
-| `capacity-model-conservation` | none (model) | `model.self_checks_run` |
+| `capacity-model-conservation` (invalidated) | none (model removed) | none; `model.self_checks_run` is retired |
 
 ## Leverage ranking
 
