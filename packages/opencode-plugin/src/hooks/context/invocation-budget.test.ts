@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { installTokenizerForTest, resetTokenEstimatorForTest } from "../../shared/token-estimator";
+import {
+    estimateTokens,
+    HEURISTIC_CHARS_PER_TOKEN,
+    installTokenizerForTest,
+    resetTokenEstimatorForTest,
+} from "../../shared/token-estimator";
 import { chargeInvocation, harnessProfile, validateInvocation } from "./invocation-budget";
 
 const BUDGET = { headroomPermille: 250, profile: "opencode-heuristic" } as const;
@@ -14,7 +19,7 @@ describe("invocation budget", () => {
         const charge = chargeInvocation(lengths, BUDGET);
         expect(charge.entries).toBe(3);
         expect(charge.bytes).toBe(167);
-        expect(charge.estimatedTokens).toBe(Math.ceil(167 / 3.5));
+        expect(charge.estimatedTokens).toBe(Math.ceil(167 / HEURISTIC_CHARS_PER_TOKEN));
         expect(charge.chargedTokens).toBe(Math.ceil((charge.estimatedTokens * 1250) / 1000));
         expect(charge.profile.identity).toBe("opencode-heuristic");
         expect(charge.profile.authority).toBe("heuristic");
@@ -64,5 +69,14 @@ describe("invocation budget", () => {
             identity: "pi-heuristic",
             authority: "heuristic",
         });
+    });
+
+    it("charges by the same heuristic the estimator falls back to", () => {
+        installTokenizerForTest(null);
+        for (const length of [1, 3, 4, 167, 4_096, 358_401]) {
+            expect(chargeInvocation([length], BUDGET).estimatedTokens).toBe(
+                estimateTokens("x".repeat(length)),
+            );
+        }
     });
 });

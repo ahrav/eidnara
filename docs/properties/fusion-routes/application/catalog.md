@@ -173,9 +173,9 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`; `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`.
-Guarantee: The daemon records the attempt and the forwarded identity before answering `forwarded`, and marks the receipt complete only on a confirm carrying an applied identity equal to that forwarded identity; a receipt alone, a confirm without an applied identity, or a confirm naming another forward never completes it.
-Check: `always` - a confirm for a never-forwarded preparation is `conflict`; a confirm with a forwarded identity other than the recorded one is `conflict`; a confirm without an applied identity is `unknown`; only the exact identity completes. `always` because the acknowledgment is the only path to `complete`.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`; `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`; `packages/opencode-plugin/src/hooks/context/context-application.test.ts` `never reports applied when the acknowledgment is lost, whatever the daemon answers`, `never reports applied from a daemon receipt alone`, `reports unknown, not an error, when the confirm cannot reach the daemon after publication`, and `reports unknown, never refused, when the daemon answers the confirm with a terminal after publication`.
+Guarantee: The daemon records the attempt and the forwarded identity before answering `forwarded`, and marks the receipt complete only on a confirm carrying an applied identity equal to that forwarded identity; a receipt alone, a confirm without an applied identity, or a confirm naming another forward never completes it. On the plugin side, `refused` is answered only before publication; once `publish` has run, a confirm the daemon refuses (`receipt_unavailable`, `conflict`, `disabled`, or a capability terminal) or cannot receive is `unknown` carrying the preparation, forwarded, and applied identities and the daemon's terminal, because the host may hold the edit whatever the daemon says.
+Check: `always` - a confirm for a never-forwarded preparation is `conflict`; a confirm with a forwarded identity other than the recorded one is `conflict`; a confirm without an applied identity is `unknown`; only the exact identity completes; the plugin publishes exactly once and answers `unknown` with the identities and the terminal for each of `receipt_unavailable`, `conflict`, and `disabled` on confirm. `always` because the acknowledgment is the only path to `complete` and the plugin's result kinds are decided after publication by whether the daemon confirmed the applied identity, never by the refusal shape.
 Fault/timing angle: A stale apply acknowledging after a newer forward.
 Required faults and enabling state: A forwarded receipt and confirms with wrong or absent identities.
 Confidence: high - [evidence](evidence/apply-daemon-receipt-does-not-mark-harness-edit-applied.md).
@@ -392,30 +392,39 @@ candidate the usable window refuses is `keep` with the prompt unchanged; and,
 through the OpenCode transform's publication step,
 `packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts`
 `publishes when the whole invocation fits the context limit with headroom`,
-`declines the pass when the whole invocation exceeds the context limit`, and
+`declines the pass when the whole invocation exceeds the context limit`,
 `publishes a candidate over the context limit when it is no larger than the
-incoming surface`.
+incoming surface`, and `gates nothing for a model models.dev cannot name,
+although its usage sample inverts to the 128k default`.
 Guarantee: The daemon binds append allowance and replacement capacity before
 preparation, and each plugin charges its whole assembled surface under its own
-heuristic profile plus headroom: the OpenCode plugin every entry of the
-candidate message-entry surface by its canonical length, the Pi plugin the
-whole system prompt by its length; each declines publication when the charge
-exceeds the limit and the candidate is larger than the incoming surface, the
-OpenCode plugin against the model's reported context limit and the Pi plugin
-against Pi's usable window (the window less its output reserve); a payload that fits alone but not in the invocation is
+heuristic profile, the estimator's heuristic ratio plus headroom: the OpenCode
+plugin every entry of the candidate message-entry surface by its canonical
+length, the Pi plugin the whole system prompt by its length; each declines
+publication when the charge exceeds the limit and the candidate is larger than
+the incoming surface, the OpenCode plugin against the model's reported context
+limit and the Pi plugin against Pi's usable window (the window less its output
+reserve); a payload that fits alone but not in the invocation is
 refused by the adapter, never applied; a candidate no larger than the incoming
 surface is never refused for the window's own size; a limit the host has not
-reported gates nothing; and the local estimate is labeled heuristic under the
+reported gates nothing, and the usage sample's percentage is not a report,
+because the producers compute it against the 128k default for a model
+models.dev cannot name; and the local estimate is labeled heuristic under the
 estimator generation, never exact.
 Check: `always` - the charge equals the ceiling of the summed lengths over the
-heuristic ratio, then times one plus the headroom; the transform admits at the
-limit, refuses one below it with the host array unchanged, and publishes a
-shrinking candidate under a one-token limit; the profile carries the heuristic
-authority and the estimator generation as its revision. `always` because every
-application crosses both bounds.
+heuristic ratio, then times one plus the headroom, and equals `estimateTokens`
+under the forced heuristic for the same length; the transform reads the bound
+from `resolveTrustedContextLimit` alone, admits at the limit, refuses one below
+it with the host array unchanged, and publishes a shrinking candidate under a
+one-token limit; a growing candidate charged over 128k tokens publishes for an
+unknown model whose usage sample inverts to the default; the profile carries
+the heuristic authority and the estimator generation as its revision. `always`
+because every application crosses both bounds.
 Fault/timing angle: None.
-Required faults and enabling state: A usage sample whose derived limit is one
-below the charged total; an estimator swap that moves the generation.
+Required faults and enabling state: A models.dev limit one below the charged
+total while the usage sample inverts to the opposite verdict; a model
+models.dev cannot name with a usage sample computed against the default; an
+estimator swap that moves the generation.
 Confidence: high - [evidence](evidence/apply-adapter-validates-entire-assembled-invocation.md).
 Existing check: None found.
 Impact: An edit that fits its own bound could overflow the invocation.

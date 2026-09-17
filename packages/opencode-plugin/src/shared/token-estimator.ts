@@ -225,8 +225,15 @@ function getTokenizer(): TokenizerLike | undefined {
     return tokenizer;
 }
 
+export const HEURISTIC_CHARS_PER_TOKEN = 3.5;
+
+/** Callers with a measured length avoid retaining the full text solely for token estimation. */
+export function estimateTokensFromLength(length: number): number {
+    return Math.ceil(length / HEURISTIC_CHARS_PER_TOKEN);
+}
+
 function estimateTokensHeuristically(text: string): number {
-    return Math.ceil(text.length / 3.5);
+    return estimateTokensFromLength(text.length);
 }
 
 /** Callers that retain token counts across calls key or clear their caches on this value. */

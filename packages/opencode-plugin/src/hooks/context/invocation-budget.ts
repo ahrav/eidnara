@@ -1,9 +1,7 @@
-import { tokenEstimatorGeneration } from "../../shared/token-estimator";
+import { estimateTokensFromLength, tokenEstimatorGeneration } from "../../shared/token-estimator";
 
 /** A harness's own estimator validates the invocation locally; it is never the daemon's bound profile and never labeled exact. */
 export type HarnessProfileIdentity = "opencode-heuristic" | "pi-heuristic";
-
-const CHARS_PER_TOKEN = 3.5;
 
 export interface HarnessProfile {
     identity: HarnessProfileIdentity;
@@ -44,7 +42,7 @@ export function chargeInvocation(
 ): InvocationCharge {
     let bytes = 0;
     for (const length of entryLengths) bytes += length;
-    const estimatedTokens = Math.ceil(bytes / CHARS_PER_TOKEN);
+    const estimatedTokens = estimateTokensFromLength(bytes);
     return {
         profile: harnessProfile(budget.profile),
         entries: entryLengths.length,

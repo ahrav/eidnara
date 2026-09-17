@@ -259,6 +259,36 @@ describe("prepare, apply, confirm", () => {
         expect(calls).toHaveLength(3);
     });
 
+    it("reports unknown, never refused, when the daemon answers the confirm with a terminal after publication", async () => {
+        for (const terminal of ["receipt_unavailable", "conflict", "disabled"] as const) {
+            const { calls, transport } = daemon((call) => {
+                if (call.method === "retrieval.prepare") return prepared();
+                if (call.method === "retrieval.apply") return forwarded(call.body);
+                return { kind: "terminal", terminal };
+            });
+            let published = 0;
+            const app = new ContextApplication(transport, new CapabilityLatch());
+            const result = await app.run(
+                "append",
+                target({
+                    publish: async (_edit, forwardedIdentity) => {
+                        published += 1;
+                        return forwardedIdentity;
+                    },
+                }),
+            );
+            expect(published).toBe(1);
+            expect(calls).toHaveLength(3);
+            expect(result).toEqual({
+                kind: "unknown",
+                preparationId: prepared().preparation_id,
+                forwardedIdentity: "fe".repeat(32),
+                appliedIdentity: "fe".repeat(32),
+                terminal,
+            });
+        }
+    });
+
     it("falls back to append once when the class is unsupported and latches it for the route", async () => {
         const seen: PackedAction[] = [];
         const { calls, transport } = daemon((call) => {

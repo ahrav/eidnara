@@ -1,7 +1,6 @@
 import type { HostModuleTransport } from "./module-transport";
 
 export type EditClass = "suppression" | "replacement" | "cross_step_reuse";
-export type EditAction = "append" | "replace" | "suppress" | "reuse";
 export type Outcome = "keep" | "append" | "applied_replacement" | "preparation_failure";
 
 /** The two actions this client can carry; suppression and reuse need survivor proof it does not assemble. */
@@ -19,14 +18,9 @@ export const TERMINALS = [
 ] as const;
 export type Terminal = (typeof TERMINALS)[number];
 
-const GATED_CLASS: Record<Exclude<EditAction, "append">, EditClass> = {
-    replace: "replacement",
-    suppress: "suppression",
-    reuse: "cross_step_reuse",
-};
-
-export function gatedClass(action: EditAction): EditClass | undefined {
-    return action === "append" ? undefined : GATED_CLASS[action];
+/** `append` is not a gated class, so only `replace` has a class the daemon can deny. */
+export function gatedClass(action: PackedAction): EditClass | undefined {
+    return action === "replace" ? "replacement" : undefined;
 }
 
 function isEditClass(value: unknown): value is EditClass {
@@ -153,6 +147,7 @@ export interface WireContext {
     selection: string[];
 }
 
+/** A refusal is answered before publication; the host surface is untouched. */
 export type Refused = { kind: "refused"; terminal: Terminal; cls?: EditClass; reason?: string };
 
 export type ApplicationResult =
@@ -162,6 +157,8 @@ export type ApplicationResult =
           preparationId: string;
           forwardedIdentity?: string;
           appliedIdentity?: string;
+          /** The daemon's answer to a confirm sent after publication; the host may hold the edit whatever the daemon says. */
+          terminal?: Terminal;
       }
     | Refused
     | { kind: "failure"; reason: string };
@@ -302,7 +299,15 @@ export class ContextApplication {
             return { kind: "unknown", preparationId, forwardedIdentity, appliedIdentity };
         }
         const refusedConfirm = this.refusal(confirmed);
-        if (refusedConfirm) return refusedConfirm;
+        if (refusedConfirm) {
+            return {
+                kind: "unknown",
+                preparationId,
+                forwardedIdentity,
+                appliedIdentity,
+                terminal: refusedConfirm.terminal,
+            };
+        }
         if (appliedIdentity !== undefined && confirmedComplete(confirmed)) {
             return { kind: "applied", outcome: edit.outcome, preparationId, appliedIdentity };
         }
