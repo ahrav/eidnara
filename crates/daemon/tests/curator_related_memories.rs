@@ -724,6 +724,102 @@ fn probe_bound_and_oversized_artifacts_are_reported_not_scanned() {
 }
 
 #[test]
+fn refused_probes_count_against_the_page_probe_budget() {
+    let fixture = Fixture::open();
+    let artifact = usize::try_from(MAX_PROBE_ARTIFACT_BYTES).unwrap();
+    let page_budget = usize::try_from(MAX_PAGE_PROBE_BYTES).unwrap();
+    // Near-maximal artifacts that pass ingest but fail the render check: each is read in full before it is refused, so one more than a page's budget holds must spill onto a second page.
+    let refused = page_budget / artifact + 1;
+    let marker = kernel::OPERATOR_REDACTION_PLACEHOLDER;
+    let filler = "filler words ".repeat((artifact - 64 - marker.len()) / 13);
+    for index in 0..refused {
+        let object = format!("decision-m{index}");
+        fixture.decision(&object);
+        fixture.claim(&format!("m{index}"), &object, &format!("{filler}{marker}"));
+    }
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let page = fixture.page(&mut discovery, &mut broker, None).unwrap();
+    assert_eq!(
+        page.completeness,
+        Completeness::ProbeBound,
+        "bytes read for an artifact the render check refuses are probe bytes"
+    );
+    assert!(page.hits.is_empty() && page.withheld);
+    let rest = fixture
+        .page(&mut discovery, &mut broker, page.next_cursor.as_deref())
+        .unwrap();
+    assert_eq!(rest.completeness, Completeness::Complete);
+    assert!(rest.hits.is_empty() && rest.withheld);
+    assert!(broker.aliases.is_empty(), "nothing was disclosed");
+}
+
+#[test]
+fn a_page_waits_for_its_first_reader_no_longer_than_the_budget_allows() {
+    let fixture = Fixture::open();
+    seed(&fixture, 2);
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let (done, wait) = std::sync::mpsc::channel();
+    let observed = std::thread::scope(|scope| {
+        fixture.store.with_readers_held_for_test(|| {
+            scope.spawn(|| {
+                let budget = EvalBudget::new(
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(40)),
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                );
+                let outcome =
+                    discovery.page(&fixture.store, &mut broker, None, &budget, fixture.now);
+                done.send(outcome.map(|_| ()).unwrap_err().code).unwrap();
+            });
+            wait.recv_timeout(std::time::Duration::from_secs(3))
+        })
+    });
+    assert_eq!(
+        observed.expect("the page refuses while every reader is still held"),
+        RefusalCode::Store
+    );
+}
+
+#[test]
+fn skipped_reads_that_spend_the_batch_still_advance_the_cursor() {
+    let fixture = Fixture::open();
+    // Nine related canonical claims and one related promoted memory.
+    seed(&fixture, 11);
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    // Past the hold's expiry every probe still passes but every disclosure read is refused after it was admitted to the batch, so eight matching candidates spend the batch without a hit.
+    let expired = fixture.now + 3 * HOUR_MS;
+    let budget = EvalBudget::unbounded();
+    let page = discovery
+        .page(&fixture.store, &mut broker, None, &budget, expired)
+        .unwrap();
+    assert_eq!(page.completeness, Completeness::CapacityBound);
+    assert!(page.hits.is_empty() && page.withheld);
+    assert!(
+        page.next_cursor.is_some(),
+        "candidates the page passed are not examined again"
+    );
+    assert_eq!(broker.accounting.batch_headroom(), 0);
+    broker.accounting.end_batch();
+    let rest = discovery
+        .page(
+            &fixture.store,
+            &mut broker,
+            page.next_cursor.as_deref(),
+            &budget,
+            expired,
+        )
+        .unwrap();
+    assert_eq!(rest.completeness, Completeness::Complete);
+    assert!(rest.hits.is_empty() && rest.withheld);
+    assert!(broker.ledger.conclusions_usable());
+}
+
+#[test]
 fn an_exhausted_budget_refuses_the_page_without_probing_or_disclosing() {
     let fixture = Fixture::open();
     seed(&fixture, 4);

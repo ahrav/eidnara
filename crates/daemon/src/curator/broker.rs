@@ -489,6 +489,8 @@ pub(crate) enum Probed {
     Bytes(Vec<u8>),
     /// The artifact is longer than the caller's bound; nothing was read.
     TooLarge { byte_length: u64 },
+    /// The artifact was read but cannot be disclosed: it is unreadable or fails the render check. The bytes it cost are reported so a caller can charge them.
+    Refused { byte_length: u64 },
 }
 
 /// What one successful read returns to the coordinator: the rendered buffer, the origin key two forms of one decision share, and the lineage member the disclosure added.
@@ -758,7 +760,7 @@ impl EvidenceBroker {
         })
     }
 
-    /// Reads a canonical source's whole artifact without disclosing it: the same Kernel judgement, descriptor check, egress verdict, and render check as [`Self::read`], but no alias, hold, retained buffer, charge, or ledger entry. Related-memory discovery uses it to test relatedness; a candidate that passes is then disclosed through `read`, which revalidates. `Probed::TooLarge` reports an artifact longer than `max_bytes` before any byte is read. Only canonical sources are probed; any other expectation is refused as unsupported.
+    /// Reads a canonical source's whole artifact without disclosing it: the same Kernel judgement, descriptor check, egress verdict, and render check as [`Self::read`], but no alias, hold, retained buffer, charge, or ledger entry. Related-memory discovery uses it to test relatedness; a candidate that passes is then disclosed through `read`, which revalidates. `Probed::TooLarge` reports an artifact longer than `max_bytes` before any byte is read; `Probed::Refused` reports one that was read and then refused, with the bytes it cost. Only canonical sources are probed; any other expectation is refused as unsupported.
     pub(crate) fn probe_canonical_source(
         &self,
         store: &KernelStore,
@@ -786,10 +788,12 @@ impl EvidenceBroker {
         if byte_length > max_bytes {
             return Ok(Probed::TooLarge { byte_length });
         }
-        let bytes = store
-            .read_artifact(&handle)
-            .map_err(|_| refuse(None, RefusalCode::ExpectationChanged))?;
-        check_render(&bytes, None)?;
+        let Ok(bytes) = store.read_artifact(&handle) else {
+            return Ok(Probed::Refused { byte_length });
+        };
+        if check_render(&bytes, None).is_err() {
+            return Ok(Probed::Refused { byte_length });
+        }
         Ok(Probed::Bytes(bytes))
     }
 
