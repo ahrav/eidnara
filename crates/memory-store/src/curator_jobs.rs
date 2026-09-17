@@ -37,7 +37,7 @@ const MAX_TARGET_JSON_BYTES: usize = 1024;
 pub const CURATOR_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const MAX_CURATOR_METADATA_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024;
 pub const MAX_CURATOR_METADATA_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
-/// Permanent receipt charge every admitted job keeps for the store incarnation: the job row, its receipt, and up to four attempt markers.
+/// Permanent receipt charge every admitted job keeps for the store incarnation: the job row, its receipt, and up to four attempt markers. Terminal rows keep it, so it also bounds lifetime admissions per store incarnation: `MAX_CURATOR_METADATA_BYTES_PER_PROJECT / CURATOR_RECEIPT_CHARGE_BYTES` (16,384) jobs per project and four times that per host before reservation refuses for good.
 pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 4096;
 /// Worst-case temporary allowance a reservation prepays for its input, holds, manifest, and attempt metadata; released when the job is terminal.
 pub const CURATOR_JOB_ALLOWANCE_BYTES: u64 = 32 * 1024;
@@ -291,7 +291,7 @@ fn refuse(refusal: CuratorJobRefusal) -> rusqlite::Error {
 }
 
 /// Reads the refusal a transaction body raised through `refuse` before the storage layer flattens the error to text.
-fn refusal_of(error: &rusqlite::Error) -> Option<CuratorJobRefusal> {
+pub(crate) fn refusal_of(error: &rusqlite::Error) -> Option<CuratorJobRefusal> {
     match error {
         rusqlite::Error::ToSqlConversionFailure(inner) => {
             inner.downcast_ref::<CuratorJobRefusal>().copied()
@@ -835,14 +835,14 @@ fn scan_target(write: &mut PreparedWrite, target: &ReviewTarget) -> Result<(), M
     Ok(())
 }
 
-fn curator_write(project: &str, operation: &str) -> Result<PreparedWrite, MemoryStoreError> {
+/// The prepared write every Curator family operation runs under: the project is bounded and scanned as an existing identity, and the scan audit is owned by `owner_parts`.
+pub(crate) fn curator_write(
+    project: &str,
+    owner_parts: &[&str],
+) -> Result<PreparedWrite, MemoryStoreError> {
     check_project(project)?;
     let mut write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
-    write.domain_owner(
-        "project",
-        project,
-        active_scan_owner_key(&["curator", operation]),
-    );
+    write.domain_owner("project", project, active_scan_owner_key(owner_parts));
     write.existing_identity("project", project)?;
     Ok(write)
 }
@@ -898,7 +898,7 @@ impl MemoryStore {
         prepare: impl FnOnce(&mut PreparedWrite) -> Result<(), MemoryStoreError>,
         body: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<WriteDisposition<T>>,
     ) -> Result<T, CuratorJobError> {
-        let mut write = curator_write(project, operation)?;
+        let mut write = curator_write(project, &["curator", operation])?;
         prepare(&mut write)?;
         let refusal = std::cell::Cell::new(None);
         let result = write.execute(&self.inner, |coordinated| {
@@ -985,16 +985,39 @@ impl MemoryStore {
         )
     }
 
-    /// Marks every reserved or ready job and every frozen page whose deadline is at or before `now_ms` as expired. A job whose receipt is still in progress is left to its own completion. Expiry releases allowances, keeps receipts, and never moves a slot cursor.
+    /// Expires reserved or ready jobs and frozen selections at their deadlines. In-progress receipts block job expiry until their run deadline passes; expired receipts become `unknown` when they have an unterminated attempt, otherwise `expired`. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts.
     pub fn expire_curator_work(&self, now_ms: i64) -> Result<(usize, usize), CuratorJobError> {
         // The sweep carries no caller text, so it records no scan and needs no owner scope.
         let write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
         write
             .execute(&self.inner, |coordinated| {
+                // Orphaned receipts close before their jobs are terminalized in the same transaction.
+                coordinated.tx().execute(
+                    "UPDATE curator_receipts
+                        SET state = 'complete', updated_at_ms = ?1,
+                            terminal_kind = CASE WHEN EXISTS(
+                                SELECT 1 FROM curator_attempts a
+                                 WHERE a.project = curator_receipts.project
+                                   AND a.causal_identity = curator_receipts.causal_identity
+                                   AND a.terminal_kind IS NULL)
+                              THEN 'unknown' ELSE 'expired' END
+                      WHERE state = 'in_progress' AND run_deadline_ms <= ?1
+                        AND EXISTS(SELECT 1 FROM curator_jobs j
+                                    WHERE j.project = curator_receipts.project
+                                      AND j.causal_identity = curator_receipts.causal_identity
+                                      AND j.state IN ('reserved', 'ready')
+                                      AND j.queue_deadline_ms <= ?1)",
+                    [now_ms],
+                )?;
                 let jobs = coordinated.tx().execute(
                     "UPDATE curator_jobs
-                        SET state = 'terminal', outcome = 'expired', allowance_bytes = 0,
-                            input_json = NULL, updated_at_ms = ?1
+                        SET state = 'terminal', allowance_bytes = 0, input_json = NULL, updated_at_ms = ?1,
+                            outcome = CASE WHEN EXISTS(
+                                SELECT 1 FROM curator_receipts r
+                                 WHERE r.project = curator_jobs.project
+                                   AND r.causal_identity = curator_jobs.causal_identity
+                                   AND r.terminal_kind = 'unknown')
+                              THEN 'unknown' ELSE 'expired' END
                       WHERE state IN ('reserved', 'ready') AND queue_deadline_ms <= ?1
                         AND NOT EXISTS(SELECT 1 FROM curator_receipts r
                                         WHERE r.project = curator_jobs.project

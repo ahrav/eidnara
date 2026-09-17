@@ -7,20 +7,19 @@
 //! [`MemoryStore::dispatch_curator_attempt`] is the disclosure ordering point: the marker commits, then live time, cancellation, and the claim are rechecked and one synchronous handoff consumes the prepared request while this store still owns its connection. Commit failure hands nothing off; a recheck failure after commit leaves a charged marker and sends nothing. Both stores are released before any network await, and the Kernel guard is taken before this store by the caller.
 
 use rusqlite::{OptionalExtension, params};
-use storage::GuardedConn;
+use storage::{GuardedConn, HandoffOutcome};
 
 use crate::curator_jobs::{
-    CuratorJobOutcome, CuratorJobRefusal, CuratorJobState, finish_curator_job_in_tx,
-    load_curator_job, store_incarnation_in_tx,
+    CuratorJobOutcome, CuratorJobRefusal, CuratorJobState, curator_write, finish_curator_job_in_tx,
+    load_curator_job, refusal_of as job_refusal_of, store_incarnation_in_tx,
 };
 use crate::task_lease::{
     LeaseAcquireOutcome, LeaseCompleteOutcome, LeaseCompletion, LeaseSelected, TaskLeaseKind,
     module_authority_tx,
 };
 use crate::{
-    DurableWriteFamily, MemoryStore, MemoryStoreError, NOTE_EVAL_NO_WORK_RETENTION_MS,
-    NOTE_EVAL_RESPONSE_REDACT_MS, NOTE_EVAL_TERMINAL_RETENTION_MS, PreparedWrite, WriteDisposition,
-    active_scan_owner_key,
+    MemoryStore, MemoryStoreError, NOTE_EVAL_NO_WORK_RETENTION_MS, NOTE_EVAL_RESPONSE_REDACT_MS,
+    NOTE_EVAL_TERMINAL_RETENTION_MS, WriteDisposition,
 };
 
 /// Run deadline measured from the first claim.
@@ -202,6 +201,9 @@ pub enum CuratorLedgerRefusal {
     Cutoff,
     #[error("all committed attempts are consumed")]
     AttemptsExhausted,
+    /// The caller's clock reads earlier than the newest committed marker, so the attempt allowance is untouched and a retry after the clock catches up can succeed.
+    #[error("the caller's clock is behind the newest committed attempt")]
+    ClockBehind,
     #[error("the attempt is unknown or already terminal")]
     AttemptTerminal,
     #[error("the job is not ready or has passed its queue deadline")]
@@ -308,18 +310,27 @@ fn load_receipt(
     .optional()
 }
 
-/// Expiry of a live claim of this kind, or `None` when the claim is unknown, terminal, or already expired at `now_ms`.
+/// The `note_id` match binds the claim to this job's rowid, so a claim a worker holds on another job cannot drive this job's receipt.
 fn live_claim_expiry(
     conn: &GuardedConn<'_>,
     project: &str,
+    causal_identity: &str,
     claim_id: &str,
     now_ms: i64,
 ) -> rusqlite::Result<Option<i64>> {
     conn.query_row(
         "SELECT expires_at FROM note_eval_claims
           WHERE project = ?1 AND task_kind = ?2 AND claim_id = ?3
-            AND terminal_kind IS NULL AND expires_at > ?4",
-        params![project, CURATOR_REVIEW_TASK.task_kind, claim_id, now_ms],
+            AND terminal_kind IS NULL AND expires_at > ?4
+            AND note_id = (SELECT rowid FROM curator_jobs
+                            WHERE project = ?1 AND causal_identity = ?5)",
+        params![
+            project,
+            CURATOR_REVIEW_TASK.task_kind,
+            claim_id,
+            now_ms,
+            causal_identity
+        ],
         |row| row.get(0),
     )
     .optional()
@@ -328,10 +339,11 @@ fn live_claim_expiry(
 fn claim_is_live(
     conn: &GuardedConn<'_>,
     project: &str,
+    causal_identity: &str,
     claim_id: &str,
     now_ms: i64,
 ) -> rusqlite::Result<bool> {
-    Ok(live_claim_expiry(conn, project, claim_id, now_ms)?.is_some())
+    Ok(live_claim_expiry(conn, project, causal_identity, claim_id, now_ms)?.is_some())
 }
 
 /// The job must still be Ready and inside its queue deadline for any attempt or handoff.
@@ -383,7 +395,7 @@ pub fn begin_curator_receipt_in_tx(
     if !matches!(job.state, CuratorJobState::Ready(_)) || job.queue_deadline_ms <= now_ms {
         return Err(refuse(CuratorLedgerRefusal::JobUnavailable));
     }
-    if !claim_is_live(conn, project, claim_id, now_ms)? {
+    if !claim_is_live(conn, project, causal_identity, claim_id, now_ms)? {
         return Err(refuse(CuratorLedgerRefusal::ClaimInvalid));
     }
     let run_deadline_ms = now_ms
@@ -422,7 +434,7 @@ pub fn take_over_curator_receipt_in_tx(
     now_ms: i64,
 ) -> rusqlite::Result<CuratorReceipt> {
     let predecessor = generation_param(predecessor_generation).map_err(refuse)?;
-    if !claim_is_live(conn, project, claim_id, now_ms)? {
+    if !claim_is_live(conn, project, causal_identity, claim_id, now_ms)? {
         return Err(refuse(CuratorLedgerRefusal::ClaimInvalid));
     }
     let changed = conn.execute(
@@ -469,7 +481,7 @@ pub fn commit_curator_attempt_in_tx(
     if receipt.claim_id != claim_id {
         return Err(refuse(CuratorLedgerRefusal::ClaimInvalid));
     }
-    let claim_expires_at = live_claim_expiry(conn, project, claim_id, now_ms)?
+    let claim_expires_at = live_claim_expiry(conn, project, causal_identity, claim_id, now_ms)?
         .ok_or_else(|| refuse(CuratorLedgerRefusal::ClaimInvalid))?;
     if receipt.database_incarnation_id != store_incarnation_in_tx(conn)?
         || receipt.kernel_incarnation_id != kernel_incarnation_id
@@ -496,6 +508,16 @@ pub fn commit_curator_attempt_in_tx(
         .min(claim_expires_at);
     let request_bytes = i64::try_from(marker.request_bytes)
         .map_err(|_| refuse(CuratorLedgerRefusal::InvalidRequest))?;
+    // A lagging clock is refused by name: it leaves the allowance untouched, unlike exhaustion.
+    let newest_committed_ms: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(committed_at_ms), 0) FROM curator_attempts
+          WHERE project = ?1 AND causal_identity = ?2",
+        params![project, causal_identity],
+        |row| row.get(0),
+    )?;
+    if now_ms < newest_committed_ms {
+        return Err(refuse(CuratorLedgerRefusal::ClockBehind));
+    }
     // The allowance and the clock floor are evaluated inside the statement: at most four markers across every generation, and no marker dated before an earlier one.
     let attempt_index: Option<i64> = conn
         .query_row(
@@ -616,16 +638,6 @@ pub fn list_curator_attempts_in_tx(
     rows.collect()
 }
 
-fn ledger_write(project: &str, operation: &str, causal_identity: &str) -> PreparedWrite {
-    let mut write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
-    write.domain_owner(
-        "project",
-        project,
-        active_scan_owner_key(&["curator-ledger", operation, causal_identity]),
-    );
-    write
-}
-
 impl MemoryStore {
     fn ledger_transaction<T>(
         &self,
@@ -634,11 +646,11 @@ impl MemoryStore {
         causal_identity: &str,
         body: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<WriteDisposition<T>>,
     ) -> Result<T, CuratorLedgerError> {
+        let write = curator_write(project, &["curator-ledger", operation, causal_identity])?;
         let refusal = std::cell::Cell::new(None);
-        let result =
-            ledger_write(project, operation, causal_identity).execute(&self.inner, |coordinated| {
-                body(coordinated.tx()).inspect_err(|error| refusal.set(refusal_of(error)))
-            });
+        let result = write.execute(&self.inner, |coordinated| {
+            body(coordinated.tx()).inspect_err(|error| refusal.set(refusal_of(error)))
+        });
         match (result, refusal.get()) {
             (Err(_), Some(refusal)) => Err(CuratorLedgerError::Refused(refusal)),
             (Err(error), None) => Err(CuratorLedgerError::Store(error)),
@@ -797,7 +809,7 @@ impl MemoryStore {
         })
     }
 
-    /// Commits the marker and, in the same connection ownership, hands the prepared request off once. `now` is read again after the commit: a claim, attempt deadline, cutoff, job deadline, or cancellation that lapsed in between leaves the charged marker, sends nothing, and finishes the marker `not_dispatched`. The caller has already taken the Kernel guard and must not call either store from `handoff`.
+    /// Commits the marker and, in the same connection ownership, hands the prepared request off once. `now` is read again after the commit: a claim, attempt deadline, cutoff, job deadline, or cancellation that lapsed in between leaves the charged marker, sends nothing, and finishes the marker `not_dispatched`. An `Err` means the marker did not commit; a failure after the commit that keeps the recheck or the handoff from running is a charged unsent attempt. The caller has already taken the Kernel guard and must not call either store from `handoff`.
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch_curator_attempt<P, H>(
         &self,
@@ -812,7 +824,6 @@ impl MemoryStore {
         handoff: impl FnOnce(P) -> H,
     ) -> Result<DispatchOutcome<H>, CuratorLedgerError> {
         let refusal = std::cell::Cell::new(None);
-        let prepared = std::cell::Cell::new(Some(prepared));
         let result = self.inner.with_conn_fenced_then_handoff(
             |conn| {
                 commit_curator_attempt_in_tx(
@@ -837,7 +848,9 @@ impl MemoryStore {
                         Some(receipt) if receipt.cancelled_at_ms.is_some() => {
                             Some(CuratorLedgerRefusal::Cancelled)
                         }
-                        Some(_) if !claim_is_live(conn, project, claim_id, live)? => {
+                        Some(_)
+                            if !claim_is_live(conn, project, causal_identity, claim_id, live)? =>
+                        {
                             Some(CuratorLedgerRefusal::ClaimInvalid)
                         }
                         Some(receipt)
@@ -853,39 +866,61 @@ impl MemoryStore {
                     })
                 })()
                 .unwrap_or(Some(CuratorLedgerRefusal::RecheckUnavailable));
-                Ok(match (recheck, prepared.take()) {
-                    (None, Some(prepared)) => Ok(handoff(prepared)),
-                    (Some(reason), _) => Err(reason),
-                    (None, None) => Err(CuratorLedgerRefusal::RecheckUnavailable),
-                })
+                match recheck {
+                    None => Ok(handoff(prepared)),
+                    Some(reason) => Err(reason),
+                }
             },
         );
-        match (result, refusal.get()) {
-            (Err(_), Some(refusal)) => Err(CuratorLedgerError::Refused(refusal)),
-            (Err(error), None) => Err(CuratorLedgerError::Store(error.into())),
-            (Ok((attempt, Ok(handoff))), _) => Ok(DispatchOutcome::Handed {
-                attempt_index: attempt.attempt_index,
-                handoff,
-            }),
-            (Ok((attempt, Err(reason))), _) => {
-                let finished = self
-                    .finish_curator_attempt(
-                        project,
-                        causal_identity,
-                        generation,
-                        claim_id,
-                        attempt.attempt_index,
-                        CuratorAttemptTerminal::NotDispatched,
-                        now(),
-                    )
-                    .is_ok();
-                Ok(DispatchOutcome::ChargedNotDispatched {
+        // A committed marker is reported as charged whatever happened afterward; only a failure before the commit is an error, so the caller never re-charges a marker it already holds.
+        let (attempt, reason) = match (result, refusal.get()) {
+            (Err(_), Some(refusal)) => return Err(CuratorLedgerError::Refused(refusal)),
+            (Err(error), None) => return Err(CuratorLedgerError::Store(error.into())),
+            (
+                Ok((
+                    attempt,
+                    HandoffOutcome::Handed {
+                        handed: Ok(handoff),
+                        ..
+                    },
+                )),
+                _,
+            ) => {
+                return Ok(DispatchOutcome::Handed {
                     attempt_index: attempt.attempt_index,
-                    reason,
-                    finished,
-                })
+                    handoff,
+                });
             }
-        }
+            (
+                Ok((
+                    attempt,
+                    HandoffOutcome::Handed {
+                        handed: Err(reason),
+                        ..
+                    },
+                )),
+                _,
+            ) => (attempt, reason),
+            (Ok((attempt, HandoffOutcome::NotRun(_))), _) => {
+                (attempt, CuratorLedgerRefusal::RecheckUnavailable)
+            }
+        };
+        let finished = self
+            .finish_curator_attempt(
+                project,
+                causal_identity,
+                generation,
+                claim_id,
+                attempt.attempt_index,
+                CuratorAttemptTerminal::NotDispatched,
+                now(),
+            )
+            .is_ok();
+        Ok(DispatchOutcome::ChargedNotDispatched {
+            attempt_index: attempt.attempt_index,
+            reason,
+            finished,
+        })
     }
 
     /// Records a dispatched attempt's terminal under the claim holding the current generation. `NotDispatched` is reserved for the dispatch path, which alone knows nothing was sent.
@@ -993,12 +1028,7 @@ impl MemoryStore {
                 if let Err(error) =
                     finish_curator_job_in_tx(tx, project, causal_identity, terminal.job_outcome(), now_ms)
                 {
-                    let terminal_job = matches!(
-                        &error,
-                        rusqlite::Error::ToSqlConversionFailure(inner)
-                            if inner.downcast_ref::<CuratorJobRefusal>() == Some(&CuratorJobRefusal::Terminal)
-                    );
-                    if terminal_job {
+                    if job_refusal_of(&error) == Some(CuratorJobRefusal::Terminal) {
                         return Ok(LeaseCompletion::Stale);
                     }
                     return Err(error);
