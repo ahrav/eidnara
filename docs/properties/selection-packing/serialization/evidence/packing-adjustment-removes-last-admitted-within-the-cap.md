@@ -26,7 +26,7 @@ fixed the pass unit as a group and the order as last-admitted first.
   only) runs a hook at the start of every guard write, so a test can end the
   budget inside the second window.
 - Only the serialized-bytes bound (and the guard's transport maximum) can
-  start a pass. `prepare_optional` (`crates/daemon/src/packing/mod.rs:613`)
+  start a pass. `prepare_optional` (`crates/daemon/src/packing/mod.rs:746`)
   refuses a closed render past a rendered-bytes or estimated-tokens bound as
   `PreparationRefusal::Accounting`, so `finalize` never sees one; the test
   `an_accounting_overflow_is_refused_by_the_optional_phase_before_any_measurement`

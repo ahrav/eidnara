@@ -57,8 +57,15 @@ fn every_charge_equals_the_whole_render_delta_and_every_byte_is_charged() {
         TestRng::from_seed(RngAlgorithm::ChaCha, &SEED),
     );
     let windowed_cases = std::cell::Cell::new(0usize);
+    let escaped_cases = std::cell::Cell::new(0usize);
     runner
         .run(&fragments, |fragments| {
+            if fragments
+                .iter()
+                .any(|fragment| fragment.contains(['<', '>', '&', '"', '\'']))
+            {
+                escaped_cases.set(escaped_cases.get() + 1);
+            }
             for profile in profiles() {
                 let mut ledger = Ledger::open(profile.clone());
                 let mut expected_total = profile
@@ -116,6 +123,10 @@ fn every_charge_equals_the_whole_render_delta_and_every_byte_is_charged() {
         windowed_cases.get() > 0,
         "some renders must exceed the lookback so the anchored path is exercised"
     );
+    assert!(
+        escaped_cases.get() > 0,
+        "some fragments must carry XML-significant bytes so escaping is charged"
+    );
 }
 
 /// A tail run of one character class longer than the lookback is the one
@@ -163,6 +174,20 @@ fn a_heuristic_count_carries_its_authority_and_headroom_and_never_the_exact_labe
     assert_eq!(charge.tokens(), ClaudeTokens::new(3));
     assert_eq!(charge.with_headroom(), ClaudeTokens::new(4));
     assert_ne!(charge.authority(), Authority::Exact);
+    // The headroom product exceeds `u64`; the adjusted count still fits and
+    // is charged at the requested ratio, not at a saturated product.
+    let wide =
+        AccountingProfile::heuristic("wide", "wide headroom", 4_000_000_000, |_| 10_000_000_000);
+    assert_eq!(
+        wide.charge_uncached("x").with_headroom(),
+        ClaudeTokens::new(10_000_000_000 + 40_000_000_000_000_000)
+    );
+    let saturated =
+        AccountingProfile::heuristic("saturated", "saturated", u32::MAX, |_| usize::MAX);
+    assert_eq!(
+        saturated.charge_uncached("x").with_headroom(),
+        ClaudeTokens::new(u64::MAX)
+    );
 
     let exact = AccountingProfile::exact_tokenizer();
     assert_eq!(exact.charge("twelve bytes").authority(), Authority::Exact);
@@ -170,11 +195,50 @@ fn a_heuristic_count_carries_its_authority_and_headroom_and_never_the_exact_labe
         exact.charge("twelve bytes").with_headroom(),
         exact.charge("twelve bytes").tokens()
     );
-    assert!(exact.revision().as_str().starts_with("10:claude-bpe;64:"));
+    let identity = exact.identity();
+    assert!(
+        exact
+            .revision()
+            .as_str()
+            .starts_with(&format!("5:exact;{}:{identity};64:", identity.len())),
+        "the exact revision names its own identity: {}",
+        exact.revision().as_str()
+    );
     assert_ne!(exact.revision(), heuristic.revision());
     let other_degradation =
         AccountingProfile::heuristic("bytes-over-four", "bytes/3", 250, |text| text.len() / 3);
     assert_ne!(heuristic.revision(), other_degradation.revision());
+    for profile in profiles() {
+        assert_eq!(
+            profile.declared_uncharged(),
+            daemon::packing::DECLARED_UNCHARGED,
+            "{}: the declared exclusions do not vary by profile",
+            profile.identity()
+        );
+    }
+    assert_eq!(
+        daemon::packing::DECLARED_UNCHARGED,
+        &["separator-before-memory-block"]
+    );
+}
+
+#[test]
+fn a_heuristic_impersonating_the_exact_revision_shares_neither_revision_nor_cache_entry() {
+    use sha2::Digest;
+    let exact = AccountingProfile::exact_tokenizer();
+    let digest: &'static str =
+        Box::leak(format!("{:x}", sha2::Sha256::digest(tokenizer::vocab_blob())).into_boxed_str());
+    let impostor = AccountingProfile::heuristic(exact.identity(), digest, 0, |_| 1);
+    assert_ne!(impostor.revision(), exact.revision());
+
+    let content = "content long enough to enter the shared cache under either revision ".repeat(2);
+    let expected = tokenizer::estimate_tokens(&content) as u64;
+    assert_ne!(expected, 1, "the fixture must discriminate the two counts");
+    assert_eq!(impostor.charge(&content).tokens(), ClaudeTokens::new(1));
+    let charge = exact.charge(&content);
+    assert_eq!(charge.tokens(), ClaudeTokens::new(expected));
+    assert_eq!(charge.authority(), Authority::Exact);
+    assert_eq!(impostor.charge(&content).tokens(), ClaudeTokens::new(1));
 }
 
 #[test]

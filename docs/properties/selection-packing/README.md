@@ -12,7 +12,7 @@ proposed.
 | Part | Owns | Landed by |
 | --- | --- | --- |
 | `identity/` | Per-occurrence attribution on shared payloads, the grouping key, and the non-grouping classes. | RP2.8 U1 ([#631](https://github.com/ahrav/eidnara/issues/631)). |
-| `required/` | The required phase: failure classes, the integer budget, and the trace that witnesses no optional event or retrieval call precedes completion. | RP2.8 U2 ([#632](https://github.com/ahrav/eidnara/issues/632)). |
+| `required/` | The required phase: failure classes, the integer budget, and the trace that witnesses no optional event or retrieval call happens inside it. | RP2.8 U2 ([#632](https://github.com/ahrav/eidnara/issues/632)). |
 | `grouping/` | Grouping as a pure function of the selected set, the per-identity coverage partition, the optional skip-and-continue scan, and the optional-phase bounds. | RP2.8 U3 ([#633](https://github.com/ahrav/eidnara/issues/633)). |
 | `accounting/` | The accounting profile and its revision, the revision-keyed cost cache, rendered-delta charging with the group wrapper charged once, and the rendered-bytes and estimated-tokens bounds. | RP2.8 U4a ([#634](https://github.com/ahrav/eidnara/issues/634)). |
 | `serialization/` | One serialization through the measure-then-write guard, adjustment by last-admitted group within the pass cap, the manifest's packing group, and byte-identical output across cache states, threads, and processes. | RP2.8 U4b ([#635](https://github.com/ahrav/eidnara/issues/635)). |

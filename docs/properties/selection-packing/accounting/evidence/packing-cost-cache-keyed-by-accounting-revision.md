@@ -9,9 +9,13 @@ two-generation cache key rather than adding a second cache.
 ## Evidence trail
 
 - `crates/daemon/src/token_cache.rs` `AccountingRevision::from_components`
-  length-prefixes each component so no pair can imitate another; the revision
-  digests its text once and `cache_key` hashes that digest with the content
-  digest, so the same content under two revisions has two keys. `count_with_digest` and
+  length-prefixes each component so no pair can imitate another; the first
+  component is the constructing authority (`exact` for
+  `AccountingRevision::exact_tokenizer`, `heuristic` for
+  `AccountingRevision::heuristic`), so a heuristic that repeats the exact
+  identity and digest derives another key; the revision digests its text once
+  and `cache_key` hashes that digest with the content digest, so the same
+  content under two revisions has two keys. `count_with_digest` and
   `cached_estimate_tokens` key every existing caller under the exact tokenizer
   revision, which fingerprints the embedded vocabulary blob exposed by
   `tokenizer::vocab_blob`.
@@ -34,4 +38,5 @@ the same value.
 ## What a test must construct
 
 - Two revisions with counting functions that disagree on one content.
+- A heuristic profile built from the exact identity and vocabulary digest.
 - A forced rotation of `current` into `previous`.

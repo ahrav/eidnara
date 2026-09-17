@@ -21,7 +21,7 @@ pub use index::{
 };
 pub use retrieve::{
     Authority, Completion, Consumed, Contribution, IncompleteReason, Retrieval, RetrievalBounds,
-    RetrievalRefusal, retrieve,
+    RetrievalRefusal, Scan, admit, retrieve, scan,
 };
 #[cfg(feature = "test-support")]
 pub use retrieve::{Window, retrieve_with_hook_for_test};

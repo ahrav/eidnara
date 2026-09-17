@@ -11,7 +11,8 @@ use kernel::source_identity::OccurrenceClass;
 use retrieval::dense::layered::rank_layers_with_hook_for_test;
 use retrieval::dense::{
     Completion, DenseCoverage, IncompleteReason, Layer, LayerAccount, LayeredQuery, LayeredRanking,
-    LayeredRefusal, Metric, OracleBounds, OracleRefusal, ResolveRefusal, RowRejection, Window,
+    LayeredRefusal, Metric, OracleBounds, OracleRefusal, ResolveRefusal, RowAccess, RowFault,
+    RowRejection, Window,
 };
 
 use support::dense::*;
@@ -430,6 +431,64 @@ fn layers_that_do_not_resolve_or_carry_an_invalid_row_refuse_before_any_row_is_r
         }
     );
     assert_eq!(visited, 0);
+}
+
+struct OneUnreadable {
+    rows: Vec<Vec<f32>>,
+    unreadable: usize,
+}
+
+impl RowAccess for OneUnreadable {
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn row(&self, index: usize) -> Result<Vec<f32>, RowFault> {
+        if index == self.unreadable {
+            return Err(RowFault::Unavailable("torn".to_owned()));
+        }
+        self.rows.row(index)
+    }
+}
+
+#[test]
+fn an_earlier_row_that_fails_at_scoring_outranks_a_later_row_that_cannot_be_read() {
+    let fixture = Fixture::all_admitted();
+    let base = full_base(&fixture);
+    let ids: Vec<String> = fixture.dense_ids().into_iter().collect();
+    let position = |id: &str| base.ids.iter().position(|held| held == id).unwrap();
+    let mut rows = OneUnreadable {
+        rows: base.rows.clone(),
+        unreadable: position(&ids[2]),
+    };
+    rows.rows[position(&ids[1])] = vec![f32::NAN; 8];
+    let layer = Layer {
+        precedence: base.precedence,
+        checkpoint: &base.checkpoint,
+        occurrence_ids: &base.ids,
+        rows: &rows,
+        tombstones: &base.tombstones,
+    };
+    let refusal = rank(
+        &fixture,
+        &[layer],
+        &axis(0),
+        OracleBounds {
+            page_rows: NonZeroUsize::new(9).unwrap(),
+            ..bounds(3)
+        },
+        &EvalBudget::unbounded(),
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        refusal,
+        LayeredRefusal::Oracle(OracleRefusal::StoredRow {
+            occurrence_id: ids[1].clone(),
+            rejection: RowRejection::NonFinite { coordinate: 0 }
+        }),
+        "the second row is not a member of the generation; the third row's fault comes later"
+    );
 }
 
 #[test]

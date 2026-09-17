@@ -67,8 +67,13 @@ fn a_population_larger_than_k_yields_the_reference_prefix_and_visits_every_requi
         }
     );
     assert!(ranking.consumed.pages >= 4, "{:?}", ranking.consumed);
-    assert_eq!(ranking.consumed.judged, 8 + 3);
-    assert_eq!(ranking.consumed.batches, ranking.consumed.pages + 1);
+    // Every row is scored, but only a row that could enter the top-3 when visited is judged, then the 3 held rows are re-judged.
+    assert!(
+        (3 + 3..8 + 3).contains(&ranking.consumed.judged),
+        "{:?}",
+        ranking.consumed
+    );
+    assert!(ranking.consumed.batches <= ranking.consumed.pages + 1);
     assert!(ranking.consumed.excluded.is_empty());
     assert!(ranking.snapshot.is_some());
     for row in &ranking.ranked {
@@ -211,6 +216,110 @@ fn a_higher_scoring_excluded_row_never_displaces_an_eligible_one_and_stays_a_pol
         "exclusion is not a coverage shortfall"
     );
     assert_eq!(ranking.coverage.missing(), 0);
+}
+
+#[test]
+fn a_row_that_cannot_enter_the_top_k_when_visited_is_scored_but_never_judged() {
+    // `theta` scores lowest against the axis; the kernel hides it.
+    let admitted: Vec<&str> = OBJECTS
+        .iter()
+        .copied()
+        .filter(|object| *object != "theta")
+        .collect();
+    let fixture = Fixture::new(&admitted, corpus());
+    let query = axis(0);
+    let reference = fixture.reference(&query, &admitted);
+    let theta = fixture.id("theta");
+    let before_theta = fixture
+        .dense_ids()
+        .iter()
+        .take_while(|id| **id != theta)
+        .count();
+    assert!(
+        before_theta >= 1,
+        "the visit order must reach theta after another row"
+    );
+
+    // One row per page: the top-K is full of better rows before theta is visited, so theta is not judged.
+    let lazy = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(1).unwrap(),
+                ..bounds(before_theta)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(lazy.completion, Completion::Complete);
+    assert_eq!(keyed(&lazy), reference[..before_theta]);
+    assert_eq!(
+        lazy.coverage.with_vector, 8,
+        "theta is still visited and scored"
+    );
+    assert!(
+        lazy.consumed.excluded.is_empty(),
+        "a row that could not enter the top-K is not judged: {:?}",
+        lazy.consumed
+    );
+    assert!(
+        lazy.consumed.judged < 8 + before_theta,
+        "{:?}",
+        lazy.consumed
+    );
+
+    // One page holding every row: theta is selected against an empty top-K and judged.
+    let eager = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(8).unwrap(),
+                ..bounds(before_theta)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(keyed(&eager), keyed(&lazy));
+    assert_eq!(
+        eager.consumed.excluded,
+        vec![(EligibilityVerdict::Hidden, 1)]
+    );
+    assert_eq!(eager.consumed.judged, 8 + before_theta);
+}
+
+#[test]
+fn a_corrupt_identity_field_is_refused_whether_or_not_its_row_could_enter_the_top_k() {
+    // `theta` scores lowest against the axis, so with one row per page it is visited after the top-K is full.
+    let fixture = Fixture::all_admitted();
+    let theta = fixture.id("theta");
+    let before_theta = fixture
+        .dense_ids()
+        .iter()
+        .take_while(|id| **id != theta)
+        .count();
+    assert!(before_theta >= 1);
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrences SET source_object_id='' WHERE occurrence_id=?1",
+            rusqlite::params![theta],
+        )
+        .unwrap();
+    for page_rows in [1, 8] {
+        let outcome = fixture.rank(
+            &axis(0),
+            OracleBounds {
+                page_rows: NonZeroUsize::new(page_rows).unwrap(),
+                ..bounds(before_theta)
+            },
+            &EvalBudget::unbounded(),
+        );
+        assert_eq!(
+            outcome,
+            Err(OracleRefusal::Kernel(kernel::KernelError::InvalidInput)),
+            "page_rows={page_rows}: paging must not decide whether a corrupt identity field is detected"
+        );
+    }
 }
 
 #[test]
@@ -485,6 +594,167 @@ fn an_infinite_stored_coordinate_is_refused() {
             occurrence_id: fixture.id("zeta"),
             rejection: RowRejection::NonFinite { coordinate: 0 }
         })
+    );
+}
+
+/// A page wide enough for every dense row fills one scoring block, so every lane carries a real row.
+fn one_page_bounds(k: usize) -> OracleBounds {
+    OracleBounds {
+        page_rows: NonZeroUsize::new(9).unwrap(),
+        ..bounds(k)
+    }
+}
+
+#[test]
+fn a_page_that_fills_a_scoring_block_yields_the_reference_prefix() {
+    let fixture = Fixture::all_admitted();
+    for query in [
+        axis(0),
+        axis(6),
+        unit([0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3]),
+    ] {
+        let reference = fixture.reference(&query, &OBJECTS);
+        let ranking = fixture
+            .rank(&query, one_page_bounds(8), &EvalBudget::unbounded())
+            .unwrap();
+        assert_eq!(ranking.completion, Completion::Complete);
+        assert_eq!(ranking.consumed.pages, 1);
+        assert_eq!(keyed(&ranking), reference);
+        for (row, (_, score)) in ranking.ranked.iter().zip(&reference) {
+            assert_eq!(row.score.to_bits(), score.to_bits());
+        }
+        let narrow = fixture
+            .rank(&query, bounds(8), &EvalBudget::unbounded())
+            .unwrap();
+        assert_eq!(
+            keyed(&narrow),
+            keyed(&ranking),
+            "page width never changes a score"
+        );
+    }
+}
+
+#[test]
+fn a_corrupt_row_inside_a_scoring_block_refuses_with_its_own_rejection() {
+    let ids: Vec<String> = Fixture::all_admitted().dense_ids().into_iter().collect();
+    let cases: [(usize, Vec<f32>, RowRejection); 3] = [
+        (
+            2,
+            vec![0.0, 0.0, f32::NAN, 0.0, 0.0, 0.0, 0.0, 1.0],
+            RowRejection::NonFinite { coordinate: 2 },
+        ),
+        (4, vec![0.0; 8], RowRejection::ZeroNorm),
+        (
+            6,
+            vec![0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            RowRejection::Normalization {
+                norm: 0.5f64.hypot(0.5),
+            },
+        ),
+    ];
+    for (position, vector, expected) in cases {
+        let fixture = Fixture::all_admitted();
+        let victim = ids[position].clone();
+        fixture
+            .raw()
+            .execute(
+                "UPDATE occurrence_vectors SET vector=?2 WHERE occurrence_id=?1",
+                rusqlite::params![victim, codec::encode(&vector)],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.rank(&axis(0), one_page_bounds(3), &EvalBudget::unbounded()),
+            Err(OracleRefusal::StoredRow {
+                occurrence_id: victim,
+                rejection: expected
+            }),
+            "row {position}"
+        );
+    }
+}
+
+#[test]
+fn a_corrupt_row_visited_before_the_budget_ends_still_refuses() {
+    let fixture = Fixture::all_admitted();
+    let ids: Vec<String> = fixture.dense_ids().into_iter().collect();
+    let victim = ids[1].clone();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2 WHERE occurrence_id=?1",
+            rusqlite::params![victim, codec::encode(&[f32::NAN; 8])],
+        )
+        .unwrap();
+    let budget = EvalBudget::unbounded();
+    let mut visited = 0;
+    let outcome = fixture.rank_with_hook(&axis(0), one_page_bounds(3), &budget, |window| {
+        if let Window::Visited(_) = window {
+            visited += 1;
+            if visited == 5 {
+                budget.cancel();
+            }
+        }
+    });
+    assert_eq!(
+        outcome,
+        Err(OracleRefusal::StoredRow {
+            occurrence_id: victim,
+            rejection: RowRejection::NonFinite { coordinate: 0 }
+        }),
+        "the second row was visited before the fifth ended the budget, so its rejection stands"
+    );
+}
+
+#[test]
+fn an_earlier_row_that_fails_at_scoring_outranks_a_later_row_that_fails_at_decoding() {
+    let ids: Vec<String> = Fixture::all_admitted().dense_ids().into_iter().collect();
+    let short = codec::encode(&unit([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])[..7]);
+
+    // A non-finite coordinate is found at scoring; the dimension of the next row is found at decoding.
+    let fixture = Fixture::all_admitted();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2 WHERE occurrence_id=?1",
+            rusqlite::params![ids[1], codec::encode(&[f32::NAN; 8])],
+        )
+        .unwrap();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2, vector_dimension=7 WHERE occurrence_id=?1",
+            rusqlite::params![ids[2], short],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.rank(&axis(0), one_page_bounds(3), &EvalBudget::unbounded()),
+        Err(OracleRefusal::StoredRow {
+            occurrence_id: ids[1].clone(),
+            rejection: RowRejection::NonFinite { coordinate: 0 }
+        }),
+        "the second row fails the layout first, whatever check finds it"
+    );
+
+    // The kernel refuses a corrupt identity field at scoring.
+    let fixture = Fixture::all_admitted();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrences SET source_object_id='' WHERE occurrence_id=?1",
+            rusqlite::params![ids[1]],
+        )
+        .unwrap();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2, vector_dimension=7 WHERE occurrence_id=?1",
+            rusqlite::params![ids[2], short],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.rank(&axis(0), one_page_bounds(3), &EvalBudget::unbounded()),
+        Err(OracleRefusal::Kernel(kernel::KernelError::InvalidInput)),
+        "the second row's identity fails before the third row's dimension"
     );
 }
 
@@ -1016,7 +1286,11 @@ fn page_size_changes_the_batch_count_but_not_the_ranking() {
         );
         assert_eq!(keyed(&ranking), reference[..4], "page_rows={page_rows}");
         assert_visited_once(&fixture, &visited);
-        assert_eq!(ranking.consumed.batches, ranking.consumed.pages + 1);
+        assert!(
+            ranking.consumed.batches <= ranking.consumed.pages + 1,
+            "a page with no row that could enter the top-K runs no batch: {:?}",
+            ranking.consumed
+        );
         if let Some(previous) = &previous {
             assert_eq!(&keyed(&ranking), previous);
         }

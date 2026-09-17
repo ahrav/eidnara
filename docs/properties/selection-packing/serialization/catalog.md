@@ -19,7 +19,7 @@ and processes. Binding the profile through apply is the U5a part.
 
 The rendered-bytes and estimated-tokens bounds belong to the accounting part:
 `prepare_optional` refuses a closed render past either
-(`crates/daemon/src/packing/mod.rs:613`, recorded in
+(`crates/daemon/src/packing/mod.rs:746`, recorded in
 `../accounting/catalog.md` as
 `packing-accounting-bounds-refuse-at-limit-plus-one`), so `finalize` receives
 no admission over them and re-checks neither. `SerializationBounds` carries the

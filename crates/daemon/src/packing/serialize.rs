@@ -6,7 +6,7 @@ use kernel::applicability::EvalBudget;
 use retrieval::packing::{OptionalBounds, RequiredBounds};
 use sha2::{Digest, Sha256};
 
-use super::render::{AccountingBounds, Ledger};
+use super::render::{self, AccountingBounds, Ledger};
 use super::{ClaudeTokens, CostedGroup, OptionalAdmission};
 use crate::dispatch::{MAX_WIRE_BODY_BYTES, PreparedOutput, PreparedOutputError};
 use crate::projection_gates::{PackingManifest, RuntimeManifest};
@@ -247,7 +247,8 @@ fn serialize(ledger: &Ledger, bounds: &SerializationBounds) -> Result<Vec<u8>, S
 fn rebuild(base: &Ledger, admitted: &[CostedGroup]) -> Ledger {
     let mut ledger = base.clone();
     for group in admitted {
-        super::render_group(&mut ledger, group.index, &group.group);
+        let staged = ledger.stage(render::group_fragments(group.index, &group.group));
+        ledger.commit(staged);
     }
     ledger.close();
     ledger

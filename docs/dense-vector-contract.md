@@ -59,7 +59,8 @@ row or a query row that fails the predicate is refused before scoring. The
 oracle refuses the whole request when a stored row of the generation fails,
 because a generation with an invalid member is not the generation the caller
 asked about; rows of earlier pages have already been scored and discarded at
-that point, and no row of the refusing page is scored.
+that point, as have the rows of the refusing page visited before the failing
+one; no row of the refusing page is judged or returned.
 
 ## Scoring arithmetic
 
@@ -75,6 +76,20 @@ that point, and no row of the refusing page is scored.
 
 Every dense scoring path uses this function or reproduces it exactly, so the
 same query and row yield the same f64 everywhere.
+
+`dense::score::score_block` reproduces it for eight rows at once, one lane per
+row (`BLOCK_ROWS`). Each lane forms the same f64 products from its own row and
+adds them in increasing coordinate order from `+0.0`; no lane is ever combined
+with another, and the same holds for the sum of squares each lane accumulates
+for the generation predicate. A row of finite coordinates therefore scores to
+the same f64 bits through `score_block` as through `inner_product`, and its
+sum of squares equals the one `N_gen` accumulates. Only the NaN payload of a
+row with a non-finite coordinate may differ between the two, because IEEE 754
+leaves payload propagation to operand order; such a row is refused before its
+score is consulted, and the scalar scan names its first non-finite coordinate.
+`tests/dense_properties.rs` pins the bit equality over every f32 exponent and
+both signed zeros. The exhaustive oracle scores through `score_block`;
+`rescore` and every single-row path use `inner_product`.
 
 ## Ordering
 
@@ -92,9 +107,25 @@ generation inside the caller's read transaction:
   (`batch::dense_eligible`), visited in occurrence identifier byte order
   regardless of class, through bounded keyset pages of `page_rows` rows over
   the `occurrences` primary key. Visit order therefore equals tie order.
-- Each page is decoded and validated, then judged for canonical eligibility
-  in one kernel batch, then scored, then offered to a top-`k` set. Eligibility
-  precedes admission; enumeration order and score never decide eligibility.
+- Each page is decoded, validated, and scored in blocks of up to eight rows
+  in visit order; a block is scored when it is full, when the page ends, and
+  before an ended budget is acted on, so the rows visited before the budget
+  ended are validated exactly as they would have been one row at a time. The
+  first row of the page that fails the layout refuses the request, whatever
+  block it sits in. Every row with a vector has
+  its identity fields validated as a kernel candidate before its score is
+  consulted, so a corrupt row is refused (`Kernel`) whatever `page_rows` is.
+  Only the rows that would enter the top-`k` set as it stood before the page
+  are judged for canonical eligibility, in one kernel batch; the eligible
+  ones are then offered to the set. A page with no such row runs no batch.
+  Eligibility precedes admission;
+  enumeration order and score never decide eligibility, only whether a row is
+  judged at all. The returned set equals the one a walk judging every row
+  would return: a member of the final top-`k` outranks the worst held member
+  at every earlier point of the walk. `Consumed.judged`, `batches`, and
+  `excluded` describe the judged rows, not the population; `Complete` means
+  every live required row was visited with a valid vector and every judged
+  row was judged under one snapshot, not that every row was judged.
   A row without a vector is counted and neither judged nor scored.
 - The top-`k` set is re-judged in one batch before it is returned. A row the
   kernel no longer admits is dropped and counted as an exclusion.

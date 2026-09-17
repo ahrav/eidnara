@@ -22,8 +22,10 @@ pub struct AccountingRevision {
     key: [u8; 32],
 }
 
+pub const EXACT_TOKENIZER_IDENTITY: &str = "claude-bpe";
+
 impl AccountingRevision {
-    pub fn new(text: String) -> Self {
+    fn new(text: String) -> Self {
         let key = Sha256::digest(text.as_bytes()).into();
         Self { text, key }
     }
@@ -38,6 +40,10 @@ impl AccountingRevision {
         Self::new(text)
     }
 
+    pub fn heuristic(identity: &str, degradation: &str) -> Self {
+        Self::from_components(&["heuristic", identity, degradation])
+    }
+
     pub fn as_str(&self) -> &str {
         &self.text
     }
@@ -48,7 +54,8 @@ impl AccountingRevision {
         static EXACT: OnceLock<AccountingRevision> = OnceLock::new();
         EXACT.get_or_init(|| {
             Self::from_components(&[
-                "claude-bpe",
+                "exact",
+                EXACT_TOKENIZER_IDENTITY,
                 &format!("{:x}", Sha256::digest(tokenizer::vocab_blob())),
             ])
         })
@@ -332,8 +339,8 @@ mod tests {
         clear();
         let content = "revision isolation fixture: long enough to be cached under both revisions";
         assert!(content.len() >= MIN_CACHED_LEN);
-        let first = AccountingRevision::new("profile-a@1".to_owned());
-        let second = AccountingRevision::new("profile-a@2".to_owned());
+        let first = AccountingRevision::heuristic("profile-a", "1");
+        let second = AccountingRevision::heuristic("profile-a", "2");
         assert_eq!(cached_count_under(&first, content, |_| 7), 7);
         assert_eq!(
             cached_count_under(&first, content, |_| 99),
@@ -354,11 +361,20 @@ mod tests {
         );
         assert_eq!(cached_count_under(&first, content, |_| 99), 7);
         let exact = AccountingRevision::exact_tokenizer().as_str();
-        assert!(exact.starts_with("10:claude-bpe;64:"), "{exact}");
-        assert_eq!(exact.len(), "10:claude-bpe;64:".len() + 64);
+        let prefix = format!(
+            "5:exact;{}:{EXACT_TOKENIZER_IDENTITY};64:",
+            EXACT_TOKENIZER_IDENTITY.len()
+        );
+        assert!(exact.starts_with(&prefix), "{exact}");
+        assert_eq!(exact.len(), prefix.len() + 64);
         assert_ne!(
             AccountingRevision::from_components(&["a@b", "c"]),
             AccountingRevision::from_components(&["a", "b@c"])
+        );
+        assert_ne!(
+            AccountingRevision::heuristic("exact", "x"),
+            AccountingRevision::from_components(&["exact", "x"]),
+            "the authority tag is part of the encoding"
         );
     }
 

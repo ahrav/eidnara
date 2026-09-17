@@ -14,7 +14,7 @@ guard as the only write path.
   measured length with the serialized-bytes limit, reserves a buffer of that
   length, and writes once through `MeasuredOutput::write_to`; `finalize` calls
   it once per pass and returns the first body it yields. It re-checks no
-  accounting bound: `prepare_optional` (`crates/daemon/src/packing/mod.rs:613`)
+  accounting bound: `prepare_optional` (`crates/daemon/src/packing/mod.rs:746`)
   refuses a closed render past one before an admission exists, and a rebuilt
   ledger is a shorter prefix of an admitted render.
 - `crates/daemon/src/dispatch.rs` `PreparedOutput::measure` refuses a body past

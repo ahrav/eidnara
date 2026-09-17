@@ -15,7 +15,9 @@ and headroom and never an exact label.
 - The `compile_fail` doctest on `Charge` shows the struct literal rejected
   with the private-field error.
 - `crates/daemon/tests/packing_accounting.rs` builds a heuristic profile and
-  reads its charges' authority and headroom.
+  reads its charges' authority and headroom, and shows a heuristic that names
+  the exact identity and vocabulary digest cannot obtain an exact-labelled
+  count through the shared cache.
 
 ## Failure scenario
 

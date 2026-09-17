@@ -93,7 +93,7 @@ fn records(home: &Path) {
 }
 
 fn control(home: &Path) -> ControlState {
-    ProjectionLifecycle::open(home).unwrap().read()
+    support::flock::open_lifecycle(home).read()
 }
 
 /// The identity constants agree with the frozen construction contract and the source policy the fixtures were built under.
@@ -377,8 +377,7 @@ async fn the_running_daemon_converges_a_recorded_rebuild_and_pins_it() {
     );
     let mut request = rebuild(&kernel_root);
     request.kernel_incarnation_id = incarnation;
-    ProjectionLifecycle::open(home)
-        .unwrap()
+    support::flock::open_lifecycle(home)
         .record(&support::projection_gate::open_gate(), &request, now())
         .unwrap();
 
@@ -3359,7 +3358,7 @@ async fn a_replay_after_the_deadline_still_reconciles_the_record() {
     owner.disable(&slice_budget(), &mut |_| {}).await.unwrap();
     assert!(matches!(control(home), ControlState::Disabled(_)));
     // Observed through one handle opened now: opening syncs the directory, and a later open would repair the injected failure before the replay reaches it.
-    let lifecycle = ProjectionLifecycle::open(home).unwrap();
+    let lifecycle = support::flock::open_lifecycle(home);
 
     // The recovery's record is renamed into place, then its directory sync fails once: durability is unknown.
     owner.fail_next_recovery_directory_sync_for_test();
