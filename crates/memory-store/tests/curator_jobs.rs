@@ -1451,3 +1451,45 @@ fn transaction_local_primitives_validate_the_project_identity() {
         .unwrap();
     assert_eq!(rows, (0, 0), "an invalid project writes nothing");
 }
+
+/// A frozen page's reference identities are scanned at freeze and the audit rows stay while the page holds its references; a terminal page drops them with the references, keeping only the slot and attempt identities the compact row retains.
+#[test]
+fn a_terminal_page_releases_the_scan_audit_of_its_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1"), inputs("cand-2")],
+        next_cursor: Some("cursor-1".to_string()),
+    };
+    store
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    let scans = |store: &MemoryStore| -> Vec<String> {
+        store
+            .with_conn_for_test(|conn| {
+                conn.prepare("SELECT DISTINCT field_id FROM scan_owner_copies ORDER BY field_id")?
+                    .query_map([], |row| row.get(0))?
+                    .collect()
+            })
+            .unwrap()
+    };
+    let frozen = scans(&store);
+    assert!(
+        frozen.iter().any(|field| field == "candidate_id"),
+        "{frozen:?}"
+    );
+    store
+        .complete_frozen_selection(
+            "proj",
+            "slot-1",
+            "attempt-1",
+            FrozenSelectionState::FailedSlot,
+            NOW + 1,
+        )
+        .unwrap();
+    assert_eq!(
+        scans(&store),
+        ["project", "selection_attempt", "slot_id"],
+        "only the identities the compact row still retains keep their audit"
+    );
+}

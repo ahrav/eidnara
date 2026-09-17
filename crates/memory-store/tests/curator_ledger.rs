@@ -957,6 +957,8 @@ fn bounded_transition_sequences_preserve_allowance_deadlines_and_generation_fenc
                                 CuratorLedgerRefusal::Cutoff | CuratorLedgerRefusal::ClaimInvalid
                             ));
                             assert!(finished, "the withheld marker is finished not_dispatched");
+                            // The worker's clock really did move to the recheck time; a later marker dated before that recorded terminal would be a clock behind the ledger.
+                            now += CURATOR_ATTEMPT_MAX_MS;
                         }
                         Err(error) => {
                             let reason = refusal(error);
@@ -964,7 +966,8 @@ fn bounded_transition_sequences_preserve_allowance_deadlines_and_generation_fenc
                                 completed && reason == CuratorLedgerRefusal::Fenced
                                     || before >= 4
                                         && reason == CuratorLedgerRefusal::AttemptsExhausted
-                                    || charged_unsent && reason == CuratorLedgerRefusal::Cutoff,
+                                    || (charged_unsent || now >= first.execution_cutoff_ms)
+                                        && reason == CuratorLedgerRefusal::Cutoff,
                                 "sequence {index}: unexpected refusal {reason:?} at {step:?}"
                             );
                             assert_eq!(
@@ -2528,23 +2531,28 @@ fn a_complete_attempt_terminal_dated_before_its_marker_is_refused_as_clock_behin
     else {
         panic!("first attempt hands off")
     };
-    assert_eq!(
-        refusal(
-            fixture
-                .store
-                .finish_curator_attempt(
-                    PROJECT,
-                    &fixture.identity,
-                    1,
-                    &claim,
-                    attempt_index,
-                    CuratorAttemptTerminal::Complete,
-                    T0 + 9,
-                )
-                .unwrap_err()
-        ),
-        CuratorLedgerRefusal::ClockBehind
-    );
+    for terminal in [
+        CuratorAttemptTerminal::Complete,
+        CuratorAttemptTerminal::Failed,
+    ] {
+        assert_eq!(
+            refusal(
+                fixture
+                    .store
+                    .finish_curator_attempt(
+                        PROJECT,
+                        &fixture.identity,
+                        1,
+                        &claim,
+                        attempt_index,
+                        terminal,
+                        T0 + 9,
+                    )
+                    .unwrap_err()
+            ),
+            CuratorLedgerRefusal::ClockBehind
+        );
+    }
     assert_eq!(
         fixture
             .store
@@ -2748,7 +2756,16 @@ fn a_clock_that_steps_back_between_commit_and_handoff_withholds_the_request() {
         ),
         "{outcome:?}"
     );
-    assert_eq!(fixture.attempts(), 1, "the marker stays charged");
+    let attempts = fixture
+        .store
+        .list_curator_attempts(PROJECT, &fixture.identity)
+        .unwrap();
+    assert_eq!(attempts.len(), 1, "the marker stays charged");
+    assert_eq!(
+        attempts[0].terminal,
+        Some((CuratorAttemptTerminal::NotDispatched, T0 + 10)),
+        "the no-disclosure proof is never dated before the marker it closes"
+    );
 }
 
 #[test]
@@ -2808,4 +2825,47 @@ fn the_run_deadline_is_measured_from_the_first_claim_on_the_job_even_after_a_pre
         T0 + CURATOR_RUN_DEADLINE_MS,
         "the budget runs from the first claim on the job"
     );
+}
+
+#[test]
+fn the_marker_clock_floor_includes_recorded_terminals() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let DispatchOutcome::Handed { attempt_index, .. } =
+        fixture.dispatch(1, &claim, T0 + 1).unwrap()
+    else {
+        panic!("first attempt hands off")
+    };
+    fixture
+        .store
+        .finish_curator_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &claim,
+            attempt_index,
+            CuratorAttemptTerminal::Failed,
+            T0 + 20,
+        )
+        .unwrap();
+    // The worker already recorded an event at T0 + 20; a marker dated T0 + 10 would predate it.
+    let mut next = marker(1);
+    next.body_digest = "b".repeat(64);
+    let error = fixture
+        .store
+        .dispatch_curator_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &claim,
+            KERNEL,
+            &next,
+            "prepared",
+            || T0 + 10,
+            |prepared| prepared,
+        )
+        .unwrap_err();
+    assert_eq!(refusal(error), CuratorLedgerRefusal::ClockBehind);
+    assert_eq!(fixture.attempts(), 1);
 }

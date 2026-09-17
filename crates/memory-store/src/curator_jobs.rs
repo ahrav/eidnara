@@ -18,7 +18,7 @@ use context_core::redaction::reject_transaction_secret_text;
 
 use crate::{
     DurableWriteFamily, MemoryStore, MemoryStoreError, PreparedWrite, WriteDisposition,
-    active_scan_owner_key,
+    active_scan_owner_key, retire_active_scan_domain_owner,
 };
 
 pub const MAX_PENDING_CURATOR_JOBS_PER_PROJECT: usize = 64;
@@ -846,6 +846,7 @@ pub fn complete_frozen_selection_in_tx(
           WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
         params![project, slot_id, selection_attempt, state.as_str(), now_ms],
     )?;
+    release_frozen_page_scans(conn, project, slot_id, selection_attempt)?;
     Ok(FrozenSelection {
         state,
         page: existing
@@ -853,6 +854,26 @@ pub fn complete_frozen_selection_in_tx(
             .filter(|_| state == FrozenSelectionState::Enqueued),
         ..existing
     })
+}
+
+/// The scan owner of one page's reference and cursor text; retired when the page goes terminal and that text leaves the row.
+fn frozen_page_owner_key(slot_id: &str, selection_attempt: &str) -> String {
+    active_scan_owner_key(&["curator", "freeze", slot_id, selection_attempt])
+}
+
+fn release_frozen_page_scans(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    slot_id: &str,
+    selection_attempt: &str,
+) -> rusqlite::Result<()> {
+    retire_active_scan_domain_owner(
+        conn,
+        "project",
+        project,
+        DurableWriteFamily::CuratorJobs.owner_kind(),
+        &frozen_page_owner_key(slot_id, selection_attempt),
+    )
 }
 
 fn load_selection(
@@ -1147,6 +1168,14 @@ impl MemoryStore {
                                           AND r.state = 'in_progress')",
                     [now_ms],
                 )?;
+                let expiring_pages: Vec<(String, String, String)> = coordinated
+                    .tx()
+                    .prepare(
+                        "SELECT project, slot_id, selection_attempt FROM curator_frozen_selections
+                          WHERE state = 'frozen' AND selection_deadline_ms <= ?1",
+                    )?
+                    .query_map([now_ms], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
                 let pages = coordinated.tx().execute(
                     "UPDATE curator_frozen_selections
                         SET state = 'expired', page_json = NULL, next_cursor = NULL,
@@ -1154,6 +1183,9 @@ impl MemoryStore {
                       WHERE state = 'frozen' AND selection_deadline_ms <= ?1",
                     [now_ms],
                 )?;
+                for (project, slot_id, selection_attempt) in &expiring_pages {
+                    release_frozen_page_scans(coordinated.tx(), project, slot_id, selection_attempt)?;
+                }
                 // Renewal checks the claim, not the job, so a claim on a terminal job would otherwise live as long as its worker heartbeats.
                 coordinated.tx().execute(
                     "UPDATE note_eval_claims
@@ -1192,12 +1224,21 @@ impl MemoryStore {
             |write| {
                 write.identity("slot_id", slot_id)?;
                 write.identity("selection_attempt", selection_attempt)?;
+                // The references and cursor leave the row when the page goes terminal; their scans are owned by this page alone so they can be retired with them, while the slot and attempt identities the compact row keeps stay under the shared freeze owner.
+                let first_reference_scan = write.scans.len();
                 if let Some(cursor) = &page.next_cursor {
                     write.identity("next_cursor", cursor)?;
                 }
                 page.references
                     .iter()
-                    .try_for_each(|inputs| scan_causal_identities(write, inputs))
+                    .try_for_each(|inputs| scan_causal_identities(write, inputs))?;
+                write.reassign_scans_in(
+                    first_reference_scan..write.scans.len(),
+                    "project",
+                    project,
+                    frozen_page_owner_key(slot_id, selection_attempt),
+                );
+                Ok(())
             },
             |conn| {
                 // An identical page under an existing attempt replays the row; only a new row records its scan audit.

@@ -572,17 +572,17 @@ pub fn commit_curator_attempt_in_tx(
         .min(claim_expires_at);
     let request_bytes = i64::try_from(marker.request_bytes)
         .map_err(|_| refuse(CuratorLedgerRefusal::InvalidRequest))?;
-    // A lagging clock is refused by name: it leaves the allowance untouched, unlike exhaustion.
-    let newest_committed_ms: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(committed_at_ms), 0) FROM curator_attempts
-          WHERE project = ?1 AND causal_identity = ?2",
+    // A lagging clock is refused by name: it leaves the allowance untouched, unlike exhaustion. The floor is the newest event the ledger holds for the job, a marker commit or a recorded terminal.
+    let newest_event_ms: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0)), 0)
+           FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2",
         params![project, causal_identity],
         |row| row.get(0),
     )?;
-    if now_ms < newest_committed_ms {
+    if now_ms < newest_event_ms {
         return Err(refuse(CuratorLedgerRefusal::ClockBehind));
     }
-    // The allowance and the clock floor are evaluated inside the statement: at most four markers across every generation, and no marker dated before an earlier one.
+    // The allowance and the clock floor are evaluated inside the statement: at most four markers across every generation, and no marker dated before an earlier commit or terminal.
     let attempt_index: Option<i64> = conn
         .query_row(
             "INSERT INTO curator_attempts (
@@ -593,7 +593,8 @@ pub fn commit_curator_attempt_in_tx(
                FROM curator_attempts WHERE project = ?1 AND causal_identity = ?2 AND generation = ?3
               HAVING (SELECT COUNT(*) FROM curator_attempts
                        WHERE project = ?1 AND causal_identity = ?2) < ?12
-                 AND ?11 >= COALESCE((SELECT MAX(committed_at_ms) FROM curator_attempts
+                 AND ?11 >= COALESCE((SELECT MAX(MAX(committed_at_ms), COALESCE(MAX(terminal_at_ms), 0))
+                                        FROM curator_attempts
                                        WHERE project = ?1 AND causal_identity = ?2), 0)
              RETURNING attempt_index",
             params![
@@ -640,28 +641,26 @@ pub fn finish_curator_attempt_in_tx(
     if terminal == CuratorAttemptTerminal::NotDispatched {
         return Err(refuse(CuratorLedgerRefusal::InvalidRequest));
     }
-    // A result that arrives at or after the attempt's own deadline is over budget: it cannot close the marker as complete, only as failed, cancelled, or unknown. A result dated before the marker it answers is a clock that stepped back, refused by name like a lagging commit.
-    if terminal == CuratorAttemptTerminal::Complete {
-        let window: Option<(i64, i64)> = conn
-            .query_row(
-                "SELECT committed_at_ms, attempt_deadline_ms FROM curator_attempts
-                  WHERE project = ?1 AND causal_identity = ?2 AND generation = ?3 AND attempt_index = ?4",
-                params![
-                    project,
-                    causal_identity,
-                    generation_param(generation).map_err(refuse)?,
-                    i64::from(attempt_index)
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((committed_at_ms, deadline)) = window {
-            if now_ms < committed_at_ms {
-                return Err(refuse(CuratorLedgerRefusal::ClockBehind));
-            }
-            if now_ms >= deadline {
-                return Err(refuse(CuratorLedgerRefusal::Cutoff));
-            }
+    // A terminal dated before the marker it closes is a clock that stepped back, refused by name like a lagging commit. A result that arrives at or after the attempt's own deadline is over budget: it cannot close the marker as complete, only as failed, cancelled, or unknown.
+    let window: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT committed_at_ms, attempt_deadline_ms FROM curator_attempts
+              WHERE project = ?1 AND causal_identity = ?2 AND generation = ?3 AND attempt_index = ?4",
+            params![
+                project,
+                causal_identity,
+                generation_param(generation).map_err(refuse)?,
+                i64::from(attempt_index)
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((committed_at_ms, deadline)) = window {
+        if now_ms < committed_at_ms {
+            return Err(refuse(CuratorLedgerRefusal::ClockBehind));
+        }
+        if terminal == CuratorAttemptTerminal::Complete && now_ms >= deadline {
+            return Err(refuse(CuratorLedgerRefusal::Cutoff));
         }
     }
     record_attempt_terminal_in_tx(
@@ -1055,6 +1054,7 @@ impl MemoryStore {
         };
         let finished = self
             .ledger_transaction(project, "finish-attempt", causal_identity, |conn| {
+                // The proof is never dated before the marker it closes, whatever the clock did in between.
                 record_attempt_terminal_in_tx(
                     conn,
                     project,
@@ -1063,7 +1063,7 @@ impl MemoryStore {
                     claim_id,
                     attempt.attempt_index,
                     CuratorAttemptTerminal::NotDispatched,
-                    now(),
+                    now().max(attempt.committed_at_ms),
                 )
                 .map(WriteDisposition::Applied)
             })
