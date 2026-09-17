@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use context_core::curator_policy_union::{PolicyUnion, PolicyUnionMember};
-use context_core::redaction::{contains_redaction_token, reject_secret_text};
+use context_core::redaction::{contains_redaction_token, detect_windowed_durable_bytes};
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDestination, ArtifactEligibility, ArtifactHandle, CURATOR_CAPTURE_RETENTION_CLASS,
@@ -227,6 +227,22 @@ pub enum RefusalCode {
     Undecodable,
     #[error("invalid_cursor")]
     InvalidCursor,
+    #[error("invalid_path")]
+    InvalidPath,
+    #[error("protected")]
+    Protected,
+    #[error("not_regular_file")]
+    NotRegularFile,
+    #[error("confinement")]
+    Confinement,
+    #[error("unsupported")]
+    Unsupported,
+    #[error("not_found")]
+    NotFound,
+    #[error("too_large")]
+    TooLarge,
+    #[error("unavailable")]
+    Unavailable,
     #[error("unsupported_question")]
     UnsupportedQuestion,
     #[error("store")]
@@ -275,12 +291,12 @@ pub struct RenderedBuffer {
     pub tag: ProvenanceTag,
 }
 
-/// Detection-only render check over materialized bytes: a secret or a redaction placeholder refuses disclosure (Q7). Host-authored text passes through the same check so a template can never carry protected text.
+/// Detection-only render check over materialized bytes: a secret or a redaction placeholder refuses disclosure (Q7). Host-authored text passes through the same check so a template can never carry protected text. The scan is the windowed one the CAS applies at ingest, so it covers any artifact the store holds and a scan that cannot prove the bytes secret-free refuses.
 pub fn check_render(bytes: &[u8], alias: Option<&Alias>) -> Result<(), Refusal> {
     let text = std::str::from_utf8(bytes).map_err(|_| refuse(alias, RefusalCode::Undecodable))?;
     if contains_redaction_token(text)
         || text.contains(OPERATOR_REDACTION_PLACEHOLDER)
-        || reject_secret_text(text).is_err()
+        || detect_windowed_durable_bytes(bytes) != Ok(false)
     {
         return Err(refuse(alias, RefusalCode::RenderCheck));
     }
@@ -540,6 +556,11 @@ impl EvidenceBroker {
         &self.binding.hold_id
     }
 
+    /// The run's Kernel-side bindings.
+    pub fn binding(&self) -> &RunBinding {
+        &self.binding
+    }
+
     /// Renders host-authored text under the same render check; it is tagged and uncharged (Q22).
     pub fn render_host_text(&self, text: &str) -> Result<RenderedBuffer, Refusal> {
         check_render(text.as_bytes(), None)?;
@@ -628,7 +649,7 @@ impl EvidenceBroker {
                 if range.as_ref().is_some_and(|range| range.end > *byte_length) {
                     return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
                 }
-                let held = self.hold_evidence(store, &alias, evidence_id, now_ms)?;
+                let held = self.hold_evidence(store, Some(&alias), evidence_id, now_ms)?;
                 if held.artifact_digest != *artifact_digest
                     || held.byte_length != *byte_length
                     || held.retention_class != CURATOR_CAPTURE_RETENTION_CLASS
@@ -669,7 +690,7 @@ impl EvidenceBroker {
                 {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
-                let held = self.hold_evidence(store, &alias, evidence_id, now_ms)?;
+                let held = self.hold_evidence(store, Some(&alias), evidence_id, now_ms)?;
                 let bytes = self.load_range(store, &alias, &held, range.clone())?;
                 // Two excerpts or revisions of one native source are one origin: the key is the identity tuple, without revision, representation, or span.
                 let origin_key = format!(
@@ -696,7 +717,7 @@ impl EvidenceBroker {
                 ..
             } => {
                 let judged = self.judge_canonical_source(store, Some(&alias), &expectation)?;
-                let held = self.hold_evidence(store, &alias, evidence_id, now_ms)?;
+                let held = self.hold_evidence(store, Some(&alias), evidence_id, now_ms)?;
                 let bytes = self.load_range(store, &alias, &held, range.clone())?;
                 (
                     bytes,
@@ -825,10 +846,10 @@ impl EvidenceBroker {
     }
 
     /// Grows the execution hold over the artifact before any byte is read, then returns the held facts.
-    fn hold_evidence(
+    pub(crate) fn hold_evidence(
         &self,
         store: &KernelStore,
-        alias: &Alias,
+        alias: Option<&Alias>,
         evidence_id: &str,
         now_ms: i64,
     ) -> Result<HeldEvidence, Refusal> {
@@ -838,7 +859,7 @@ impl EvidenceBroker {
                 &self.binding.hold,
                 std::slice::from_ref(&evidence_id.to_string()),
             )
-            .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
+            .map_err(|error| refuse(alias, hold_refusal(error)))?;
         let mut held = store
             .validate_held_evidence(
                 &self.binding.hold_id,
@@ -847,13 +868,13 @@ impl EvidenceBroker {
                 std::slice::from_ref(&evidence_id.to_string()),
                 now_ms,
             )
-            .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
+            .map_err(|error| refuse(alias, hold_refusal(error)))?;
         let held = held
             .pop()
-            .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
+            .ok_or_else(|| refuse(alias, RefusalCode::HoldInvalid))?;
         self.egress_allowed(
             store,
-            Some(alias),
+            alias,
             &ArtifactHandle {
                 digest: held.artifact_digest.clone(),
                 evidence_id: held.evidence_id.clone(),

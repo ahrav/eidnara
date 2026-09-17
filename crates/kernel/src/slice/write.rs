@@ -156,6 +156,7 @@ impl Envelope<'_> {
         self.guarded(|envelope| {
             if crate::source_descriptor::uses_descriptor_namespace(&spec)
                 || crate::claim_causality::uses_causality_namespace(&spec)
+                || crate::local_file::uses_local_file_namespace(&spec)
             {
                 return Err(KernelError::InvalidInput);
             }
@@ -396,11 +397,12 @@ impl Envelope<'_> {
                 .tx
                 .query_row_cached(
                     "SELECT EXISTS(SELECT 1 FROM observations
-                  WHERE object_id=?1 AND observation_kind IN (?2,?3))",
+                  WHERE object_id=?1 AND observation_kind IN (?2,?3,?4))",
                     params![
                         replaced_object_id,
                         crate::SOURCE_DESCRIPTOR_KIND,
-                        crate::CLAIM_CAUSALITY_KIND
+                        crate::CLAIM_CAUSALITY_KIND,
+                        crate::LOCAL_FILE_KIND
                     ],
                     |row| row.get(0),
                 )

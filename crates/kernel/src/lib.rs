@@ -21,6 +21,7 @@ mod durable_fs;
 mod eligibility;
 mod envelope;
 mod facts;
+mod local_file;
 mod object_write;
 pub(crate) mod open;
 mod outbox;
@@ -109,6 +110,10 @@ pub use envelope::{
     StagingCandidateSpec, TokenCheck, TokenConflict,
 };
 pub use facts::{ArtifactBudgetFacts, KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};
+pub use local_file::{
+    LOCAL_FILE_DETAIL_VERSION, LOCAL_FILE_KIND, LocalFileCaptureOutcome, LocalFileCaptureRequest,
+    LocalFileDetail, MAX_EXPIRED_CAPTURES_PER_CALL,
+};
 #[cfg(feature = "test-support")]
 pub use open::OpenPhase;
 pub use open::{KernelError, KernelStore};
