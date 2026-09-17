@@ -396,6 +396,23 @@ fn activation_requires_the_reservation_and_takes_no_second_slot() {
         CuratorJobRefusal::InvalidRequest,
         "the input subject must be the reserved target"
     );
+    let mut other_question = input("cand-1");
+    other_question.question_template = "other_question".to_string();
+    assert_eq!(
+        refusal(
+            store
+                .activate_curator_job(
+                    "proj",
+                    &job.causal_identity,
+                    &producer("f1"),
+                    &other_question,
+                    NOW
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::InvalidRequest,
+        "the input question template must be the reserved template"
+    );
     let mut too_many = input("cand-1");
     too_many.starting_references = (0..9).map(|index| format!("mem-{index}")).collect();
     assert_eq!(
@@ -998,6 +1015,14 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
     assert!(
         raw.is_err(),
         "a raw reservation whose producer carries a secret is refused by the trigger"
+    );
+    // Fingerprinted causal fields never reach a column, so the primitive scans them itself.
+    let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        reserve_curator_job_in_tx(conn, "proj", &producer("f4"), &secret_signal, NOW).map(drop)
+    });
+    assert!(
+        raw.is_err(),
+        "a raw reservation whose signal carries a secret is refused before it is hashed"
     );
     let clean_page = FrozenSelectionPage {
         references: vec![inputs("cand-6")],

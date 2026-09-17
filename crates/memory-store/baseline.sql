@@ -410,6 +410,7 @@ CREATE TABLE curator_jobs (
             firing_id TEXT NOT NULL CHECK (length(firing_id) BETWEEN 1 AND 256),
             ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
             target_json TEXT NOT NULL CHECK (length(target_json) BETWEEN 1 AND 1024),
+            question_template TEXT NOT NULL CHECK (length(question_template) BETWEEN 1 AND 256),
             input_fingerprint TEXT NOT NULL CHECK (length(input_fingerprint) = 64),
             state TEXT NOT NULL CHECK (state IN ('reserved', 'ready', 'terminal')),
             input_json TEXT CHECK (input_json IS NULL OR length(input_json) <= 8192),
@@ -433,11 +434,13 @@ CREATE INDEX idx_curator_jobs_state
 
 -- Caller text in a job row is identity: a detected secret refuses the row at every
 -- entry point, including transaction-local composition, instead of being redacted.
+-- Fingerprinted causal fields never reach a column; `reserve_curator_job_in_tx` scans them.
 CREATE TRIGGER curator_jobs_reject_secret_insert BEFORE INSERT ON curator_jobs
 BEGIN
     SELECT reject_transaction_text(NEW.producer),
            reject_transaction_text(NEW.firing_id),
            reject_transaction_text(NEW.target_json),
+           reject_transaction_text(NEW.question_template),
            reject_transaction_text(COALESCE(NEW.input_json, ''));
 END;
 

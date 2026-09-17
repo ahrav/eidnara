@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use storage::GuardedConn;
 
 use context_core::canonical_json::is_lower_hex;
+use context_core::redaction::reject_transaction_secret_text;
 
 use crate::{
     DurableWriteFamily, MemoryStore, MemoryStoreError, PreparedWrite, WriteDisposition,
@@ -149,6 +150,8 @@ pub struct CuratorJob {
     pub causal_identity: String,
     pub producer: ProducerBinding,
     pub target: ReviewTarget,
+    /// The reserved template; activation input must carry the same one.
+    pub question_template: String,
     pub input_fingerprint: String,
     pub state: CuratorJobState,
     pub queue_deadline_ms: i64,
@@ -416,6 +419,20 @@ impl CausalInputs {
             format!("{target}\u{1f}{fingerprint}").as_bytes(),
         ))
     }
+
+    /// Every string that only reaches the row as a digest, scanned at the transaction ceiling like the trigger scans stored columns; the target and template are stored verbatim and the trigger covers them.
+    fn reject_fingerprinted_secrets(&self) -> rusqlite::Result<()> {
+        let strings = self
+            .signals
+            .iter()
+            .chain(self.required_evidence.iter().map(|e| &e.evidence_id))
+            .chain(self.policy_versions.iter().flat_map(|(n, v)| [n, v]));
+        for text in strings {
+            reject_transaction_secret_text(text)
+                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+        }
+        Ok(())
+    }
 }
 
 impl CuratorJobInput {
@@ -447,7 +464,8 @@ impl ProducerBinding {
 }
 
 const JOB_COLUMNS: &str = "project, causal_identity, producer, firing_id, ordinal, target_json,
-     input_fingerprint, state, input_json, outcome, queue_deadline_ms, created_at_ms, updated_at_ms";
+     input_fingerprint, state, input_json, outcome, queue_deadline_ms, created_at_ms, updated_at_ms,
+     question_template";
 
 /// Names a stored column whose value failed to decode; the value stays out of the error so no stored caller text reaches logs.
 fn undecodable(column: usize, name: &str) -> rusqlite::Error {
@@ -479,6 +497,7 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorJob> {
             ordinal: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
         },
         target,
+        question_template: row.get(13)?,
         input_fingerprint: row.get(6)?,
         state,
         queue_deadline_ms: row.get(10)?,
@@ -581,6 +600,7 @@ pub fn reserve_curator_job_in_tx(
     let ordinal = producer.validate().map_err(refuse)?;
     let inputs = inputs.clone().normalized().map_err(refuse)?;
     let causal_identity = inputs.causal_identity().map_err(refuse)?;
+    inputs.reject_fingerprinted_secrets()?;
     if let Some(existing) = load_job(conn, project, &causal_identity)? {
         return Ok(ReserveOutcome::Existing(existing));
     }
@@ -600,9 +620,10 @@ pub fn reserve_curator_job_in_tx(
         .ok_or_else(|| refuse(CuratorJobRefusal::InvalidRequest))?;
     conn.execute(
         "INSERT INTO curator_jobs (
-             project, causal_identity, producer, firing_id, ordinal, target_json, input_fingerprint,
-             state, queue_deadline_ms, allowance_bytes, receipt_charge_bytes, created_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reserved', ?8, ?9, ?10, ?11, ?11)",
+             project, causal_identity, producer, firing_id, ordinal, target_json, question_template,
+             input_fingerprint, state, queue_deadline_ms, allowance_bytes, receipt_charge_bytes,
+             created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'reserved', ?9, ?10, ?11, ?12, ?12)",
         params![
             project,
             causal_identity,
@@ -610,6 +631,7 @@ pub fn reserve_curator_job_in_tx(
             producer.firing_id,
             ordinal,
             inputs.target.encode().map_err(refuse)?,
+            inputs.question_template,
             inputs.fingerprint().map_err(refuse)?,
             deadline,
             i64::try_from(CURATOR_JOB_ALLOWANCE_BYTES).unwrap_or(i64::MAX),
@@ -622,7 +644,7 @@ pub fn reserve_curator_job_in_tx(
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
-/// Moves a `Reserved` row to `Ready` with reference-only input inside the caller's fenced transaction. Activation consumes no second capacity slot and is refused for a row that is not reserved, belongs to another producer firing, or has passed its queue deadline.
+/// Moves a `Reserved` row to `Ready` with reference-only input inside the caller's fenced transaction. Activation consumes no second capacity slot and is refused for a row that is not reserved, belongs to another producer firing, has passed its queue deadline, or whose input names a subject or question template other than the reserved ones.
 pub fn activate_curator_job_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -646,7 +668,7 @@ pub fn activate_curator_job_in_tx(
     if job.queue_deadline_ms <= now_ms {
         return Err(refuse(CuratorJobRefusal::Expired));
     }
-    if input.subject != job.target {
+    if input.subject != job.target || input.question_template != job.question_template {
         return Err(refuse(CuratorJobRefusal::InvalidRequest));
     }
     conn.execute(
