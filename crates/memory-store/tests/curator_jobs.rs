@@ -927,6 +927,20 @@ fn frozen_pages_are_bounded_retained_under_deferral_and_enqueued_once() {
         ),
         CuratorJobRefusal::Expired
     );
+    let failed = store
+        .complete_frozen_selection(
+            "proj-1",
+            "slot-1",
+            "attempt-1",
+            FrozenSelectionState::FailedSlot,
+            NOW + CURATOR_QUEUE_LIFETIME_MS,
+        )
+        .unwrap();
+    assert_eq!(failed.state, FrozenSelectionState::FailedSlot);
+    assert_eq!(
+        failed.page, None,
+        "only an enqueue returns the page; other terminal results are compact"
+    );
 }
 
 #[test]
@@ -991,6 +1005,15 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
             .freeze_selection("proj", "slot-1", "attempt-1", &secret_page, NOW)
             .unwrap_err(),
     );
+    let secret_cursor = FrozenSelectionPage {
+        references: vec![inputs("cand-4")],
+        next_cursor: Some(format!("cursor-{AWS_KEY}")),
+    };
+    secret_detected(
+        store
+            .freeze_selection("proj", "slot-1", "attempt-1", &secret_cursor, NOW)
+            .unwrap_err(),
+    );
     // Table triggers reject caller-supplied secret text in every column that stores caller text.
     let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
         activate_curator_job_in_tx(
@@ -1052,7 +1075,7 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
         .with_conn_for_test(|conn| {
             let mut rows = Vec::new();
             let mut jobs = conn.prepare(
-                "SELECT project || producer || firing_id || target_json || COALESCE(input_json, '') || causal_identity FROM curator_jobs",
+                "SELECT project || producer || firing_id || target_json || question_template || COALESCE(input_json, '') || causal_identity FROM curator_jobs",
             )?;
             rows.extend(jobs.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
             let mut pages = conn.prepare(

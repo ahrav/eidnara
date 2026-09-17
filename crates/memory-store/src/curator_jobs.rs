@@ -784,7 +784,7 @@ pub fn freeze_selection_in_tx(
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
-/// Moves a frozen page to a terminal state, dropping its references and cursor and releasing its allowance; the receipt charge stays. The returned value still carries the page, so an `Enqueued` caller advances its slot to `next_cursor` in the same transaction; `Expired` and `FailedSlot` leave the cursor where it was. Capacity deferral is not a state: the page stays `frozen` in its slot for a later attempt.
+/// Moves a frozen page to a terminal state, dropping its references and cursor and releasing its allowance; the receipt charge stays. An `Enqueued` result still carries the page, so the caller advances its slot to `next_cursor` in the same transaction; `Expired` and `FailedSlot` return a compact receipt and leave the cursor where it was. Capacity deferral is not a state: the page stays `frozen` in its slot for a later attempt.
 pub fn complete_frozen_selection_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -811,7 +811,13 @@ pub fn complete_frozen_selection_in_tx(
           WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
         params![project, slot_id, selection_attempt, state.as_str(), now_ms],
     )?;
-    Ok(FrozenSelection { state, ..existing })
+    Ok(FrozenSelection {
+        state,
+        page: existing
+            .page
+            .filter(|_| state == FrozenSelectionState::Enqueued),
+        ..existing
+    })
 }
 
 fn load_selection(
@@ -1078,6 +1084,9 @@ impl MemoryStore {
             |write| {
                 write.identity("slot_id", slot_id)?;
                 write.identity("selection_attempt", selection_attempt)?;
+                if let Some(cursor) = &page.next_cursor {
+                    write.identity("next_cursor", cursor)?;
+                }
                 page.references
                     .iter()
                     .try_for_each(|inputs| scan_causal_identities(write, inputs))
