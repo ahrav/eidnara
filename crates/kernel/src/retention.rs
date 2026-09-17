@@ -65,10 +65,12 @@ impl KernelStore {
         let mut writer = self.lock_writer()?;
         let tx = begin_fenced_write(&mut writer, self.lease_epoch())?;
         let run = load_run_lifecycle(&tx, &run_id)?.ok_or(KernelError::NotFound)?;
+        // A review run's lease is its absolute queue deadline; renewal would let a heartbeat walk it past that bound.
         if run.terminal_state.is_some()
             || run.lease_expires_at <= heartbeat_at
             || run.lease_expires_at <= crate::current_time_ms()
             || run.heartbeat_at > heartbeat_at
+            || crate::review_staging::is_review_witness(&run.provenance_witness)
         {
             return Err(KernelError::Conflict);
         }
@@ -240,6 +242,7 @@ struct RunLifecycle {
     started_at: i64,
     heartbeat_at: i64,
     lease_expires_at: i64,
+    provenance_witness: Vec<u8>,
 }
 
 fn load_run_lifecycle(
@@ -247,7 +250,7 @@ fn load_run_lifecycle(
     extraction_run_id: &str,
 ) -> Result<Option<RunLifecycle>, KernelError> {
     tx.query_row(
-        "SELECT terminal_state,started_at,heartbeat_at,lease_expires_at
+        "SELECT terminal_state,started_at,heartbeat_at,lease_expires_at,provenance_witness
          FROM extraction_runs WHERE extraction_run_id=?1",
         [extraction_run_id],
         |row| {
@@ -256,6 +259,7 @@ fn load_run_lifecycle(
                 started_at: row.get(1)?,
                 heartbeat_at: row.get(2)?,
                 lease_expires_at: row.get(3)?,
+                provenance_witness: row.get(4)?,
             })
         },
     )

@@ -108,14 +108,14 @@ pub use outbox::{ConsumerAbandonment, OutboxEntry, OutboxPruneResult};
 pub use retention::{STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState};
 pub use review_staging::{
     CanonicalTarget, EvidenceReference, ExtractedFact, MAX_REVIEW_FACTS, MAX_REVIEW_IDENTITY_BYTES,
-    MAX_REVIEW_LIMITATIONS, MAX_REVIEW_PAYLOAD_BYTES, MAX_REVIEW_REFERENCES,
-    MAX_REVIEW_SOURCE_DEPENDENCIES, MAX_REVIEW_TEXT_BYTES, ManifestReference, PolicyDependencies,
-    ProposalAction, ProposalTarget, ProvisionalResultIdentity, REVIEW_EXPIRY_MAX_MS,
-    REVIEW_PAYLOAD_VERSION, REVIEW_PROPOSAL_KIND, REVIEW_QUEUE_LIFETIME_MS, REVIEW_SUBJECT_KIND,
+    MAX_REVIEW_LIMITATIONS, MAX_REVIEW_PAYLOAD_BYTES, MAX_REVIEW_REFERENCE_SOURCES,
+    MAX_REVIEW_REFERENCES, MAX_REVIEW_TEXT_BYTES, ManifestReference, PolicyDependencies,
+    ProposalAction, ProposalTarget, ProvisionalResultIdentity, REVIEW_PAYLOAD_VERSION,
+    REVIEW_PROPOSAL_KIND, REVIEW_QUEUE_LIFETIME_MS, REVIEW_SUBJECT_KIND, REVIEW_WITNESS_KIND,
     ReviewBinding, ReviewLifecycle, ReviewOwner, ReviewPayload, ReviewProposal,
-    ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal, ReviewStagedReference,
-    ReviewStagedRow, ReviewStagingSpec, ReviewSubject, SourceDependency, SourceSpan, Uncertainty,
-    provisional_result_identity,
+    ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal, ReviewStageError,
+    ReviewStageRefusal, ReviewStagedReference, ReviewStagedRow, ReviewStagingSpec, ReviewSubject,
+    SourceDependency, SourceSpan, Uncertainty, provisional_result_identity,
 };
 pub use scope::{
     CanonicalScope, Dimension, GraphOracle, MatchOutcome, ScopeFormError, ScopeMatchContext,

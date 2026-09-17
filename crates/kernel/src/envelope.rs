@@ -988,7 +988,7 @@ pub(super) fn stage_prepared_candidate(
     let existing_candidate = tx
         .query_row_cached(
             "SELECT extraction_run_id,sensitivity_class,candidate_kind,payload,
-                    redaction_metadata,terminal_state,provenance_witness
+                    redaction_metadata,terminal_state
              FROM candidates WHERE candidate_id=?1",
             [spec.candidate_id.as_str()],
             |row| {
@@ -999,7 +999,6 @@ pub(super) fn stage_prepared_candidate(
                     row.get::<_, Vec<u8>>(3)?,
                     row.get::<_, Vec<u8>>(4)?,
                     row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Vec<u8>>(6)?,
                 ))
             },
         )
@@ -1012,14 +1011,12 @@ pub(super) fn stage_prepared_candidate(
         stored_payload,
         stored_metadata,
         candidate_terminal,
-        stored_witness,
     )) = existing_candidate
     {
         let incoming_redacted = self_detections(spec);
         if run_id != spec.extraction_run_id
             || stored_class != candidate_sensitivity.as_str()
             || stored_kind != spec.candidate_kind.text
-            || stored_witness != provenance
             || candidate_terminal.is_some()
             || incoming_redacted
             || stored_had_detections(&stored_metadata)
@@ -1762,7 +1759,7 @@ pub(super) struct RedactedCandidate {
     pub(super) payload: RedactedField,
     /// Verified repository provenance; `None` classifies the run `Sensitive`.
     pub(super) provenance: Option<(String, String)>,
-    /// Encoded `provenance_witness` bytes written to both the run and the candidate row.
+    /// Stored on both the run and the candidate row; part of the run's restage identity.
     pub(super) witness: Vec<u8>,
     pub(super) replay: StagingReplay,
     pub(super) recorded_at: i64,
@@ -1792,8 +1789,17 @@ impl RedactedCandidate {
         {
             return Err(KernelError::InvalidInput);
         }
-        let candidate = Self {
-            witness: Vec::new(),
+        let provenance = spec
+            .provenance
+            .filter(|value| {
+                !value.repository_id.trim().is_empty() && !value.revision.trim().is_empty()
+            })
+            .map(|value| {
+                Ok::<_, KernelError>((identity(&value.repository_id)?, identity(&value.revision)?))
+            })
+            .transpose()?;
+        Ok(Self {
+            witness: provenance_witness(provenance.as_ref())?,
             replay: StagingReplay::RefreshLeases,
             extraction_run_id: identity(&spec.extraction_run_id)?,
             candidate_id: identity(&spec.candidate_id)?,
@@ -1803,29 +1809,13 @@ impl RedactedCandidate {
             source_revision: spec.source_revision,
             candidate_kind: redact(&spec.candidate_kind)?,
             payload: redact(&spec.payload)?,
-            provenance: spec
-                .provenance
-                .filter(|value| {
-                    !value.repository_id.trim().is_empty() && !value.revision.trim().is_empty()
-                })
-                .map(|value| {
-                    Ok::<_, KernelError>((
-                        identity(&value.repository_id)?,
-                        identity(&value.revision)?,
-                    ))
-                })
-                .transpose()?,
+            provenance,
             recorded_at: spec.recorded_at,
             lease_expires_at: spec.lease_expires_at,
-        };
-        let witness = candidate.provenance_json()?;
-        Ok(Self {
-            witness,
-            ..candidate
         })
     }
 
-    pub(super) fn run_sensitivity(&self) -> Sensitivity {
+    fn run_sensitivity(&self) -> Sensitivity {
         if self.provenance.is_some() {
             Sensitivity::Normal
         } else {
@@ -1835,7 +1825,7 @@ impl RedactedCandidate {
 
     /// A vocabulary-covered detection is secret, which is stricter than the
     /// sensitive class that unproven provenance already yields.
-    pub(super) fn candidate_sensitivity(&self) -> Sensitivity {
+    fn candidate_sensitivity(&self) -> Sensitivity {
         let detected = self
             .candidate_fields()
             .into_iter()
@@ -1845,18 +1835,6 @@ impl RedactedCandidate {
         } else {
             self.run_sensitivity()
         }
-    }
-
-    pub(super) fn provenance_json(&self) -> Result<Vec<u8>, KernelError> {
-        match &self.provenance {
-            Some((repository_id, revision)) => serde_json::to_vec(&serde_json::json!({
-                "kind": "repository",
-                "repository_id": repository_id,
-                "revision": revision,
-            })),
-            None => serde_json::to_vec(&serde_json::json!({"kind": "unclassified"})),
-        }
-        .map_err(|_| KernelError::InvalidInput)
     }
 
     fn candidate_fields(&self) -> Vec<(&'static str, &RedactedField)> {
@@ -1911,6 +1889,19 @@ impl RedactedCandidate {
         }
         Ok(())
     }
+}
+
+/// Public witness bytes: verified repository provenance, or the `unclassified` kind admission treats as unverified.
+fn provenance_witness(provenance: Option<&(String, String)>) -> Result<Vec<u8>, KernelError> {
+    match provenance {
+        Some((repository_id, revision)) => serde_json::to_vec(&serde_json::json!({
+            "kind": "repository",
+            "repository_id": repository_id,
+            "revision": revision,
+        })),
+        None => serde_json::to_vec(&serde_json::json!({"kind": "unclassified"})),
+    }
+    .map_err(|_| KernelError::InvalidInput)
 }
 
 struct RedactedProjection {

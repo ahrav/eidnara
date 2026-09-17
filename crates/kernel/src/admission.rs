@@ -1948,6 +1948,7 @@ fn candidate_is_materialized(
 
 /// Maps failed, canceled, abandoned, and lease-expired active staging rows to
 /// [`KernelError::NotFound`] because none can promote a candidate to canonical state.
+/// Review subjects and proposals are private inputs, never admission subjects, so they map the same way.
 fn load_candidate_facts(
     envelope: &Envelope<'_>,
     candidate_id: &str,
@@ -1962,11 +1963,17 @@ fn load_candidate_facts(
              FROM candidates c
              JOIN extraction_runs r USING(extraction_run_id)
              WHERE c.candidate_id=?1
+               AND c.candidate_kind NOT IN (?3,?4)
                AND (c.terminal_state IS NULL OR c.terminal_state='completed')
                AND (r.terminal_state IS NULL OR r.terminal_state='completed')
                AND (c.terminal_state IS NOT NULL OR c.lease_expires_at>?2)
                AND (r.terminal_state IS NOT NULL OR r.lease_expires_at>?2)",
-                params![candidate_id.as_str(), current_time_ms()],
+                params![
+                    candidate_id.as_str(),
+                    current_time_ms(),
+                    crate::review_staging::REVIEW_SUBJECT_KIND,
+                    crate::review_staging::REVIEW_PROPOSAL_KIND
+                ],
                 |row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
