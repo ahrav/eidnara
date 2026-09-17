@@ -430,9 +430,14 @@ local release gate rather than CI. `ci.yml:163-164` also provisions
 "metadata-only sibling stubs" via `scripts/provision-rust-ci-stubs.sh`, which is
 the same constraint one layer down.
 
-`packages/e2e-tests/tests/rust-multi-frame-delta-perf.test.ts` is the one place a
-hermetic daemon over `Handler` is named (`:110`), and its strict assertions are
-gated behind `EIDNARA_RUST_E2E_STRICT_PERF=1` (`:113`).
+The retained correctness witness is
+`packages/e2e-tests/tests/rust-multi-frame-delta.test.ts`. It checks that five
+small deltas apply with at most four wire messages, one page, and fewer than
+512 KiB of transport bytes. A large tail must apply within one to six pages,
+retain its provider-visible content, and increase provider bytes by more than
+512 KiB. The suite skips when `rustPrereqs.ok` is false. The benchmark cleanup
+removed timing collection, latency thresholds, and the strict-performance
+environment gate; this witness provides no performance guarantee.
 
 **A parallel-implementation pattern also exists here, as in 4a.** The memory_classifier,
 classify, and task-executor lanes have TypeScript tests
