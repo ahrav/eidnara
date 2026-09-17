@@ -279,6 +279,12 @@ pub fn finalize(
         let bound = match serialize(&ledger, bounds) {
             Ok(body) => {
                 let identity = PreparationIdentity(Sha256::digest(&body).into());
+                // The write and the hash run after the loop's poll; a budget
+                // that ended inside them refuses, as the optional phase's
+                // poll after its close does.
+                if budget.is_exhausted() {
+                    return Err(PackingFailure::Deadline);
+                }
                 return Ok(Preparation {
                     body,
                     identity,

@@ -131,14 +131,17 @@ Exercised: yes - `crates/daemon/tests/packing_serialize.rs`
 `the_exact_tokenizer_charges_fragments_independently_so_a_rebuild_drops_only_the_removed_cost`,
 `cap_exhaustion_emits_nothing_and_never_removes_required_items`,
 `an_accounting_overflow_is_refused_by_the_optional_phase_before_any_measurement`,
-and `an_exhausted_budget_refuses_before_any_measurement`.
+`an_exhausted_budget_refuses_before_any_measurement`, and
+`a_budget_that_ends_while_the_body_is_written_refuses_the_preparation`.
 Guarantee: When the closed render exceeds the serialized-bytes bound, each
 pass removes exactly the last-admitted optional group and its wrappers, and
 the rebuilt ledger equals the ledger an admission of the remaining groups
 would have closed; the loop stops at the first fitting render or when the
 pass cap or the admitted list is spent, returning `AdjustmentCapExhausted`
 with the exceeded bound and emitting no bytes; an exhausted evaluation budget
-refuses with `Deadline` before any measurement; the required items are in
+refuses with `Deadline` before any measurement, and a budget that ends while
+the fitting body is written and hashed refuses with `Deadline` instead of
+returning the preparation; the required items are in
 every emitted body, because the admission carries the required render it was
 scanned onto and adjustment rebuilds from that. A render past a rendered-bytes
 or estimated-tokens bound never reaches adjustment: `prepare_optional`
@@ -153,12 +156,16 @@ render; one byte less returns the failure with three passes and no write; a cap
 of two stops at two; each accounting bound one below the closed render, fed to
 both phases from one `AccountingBounds`, is refused by the optional phase
 with the guard counters at `(0, 0)`, and both bounds at the render admit and
-serialize with zero passes. `always` because a removed required item or an
+serialize with zero passes; a budget cancelled from the guard's write hook
+returns `Deadline`. `always` because a removed required item or an
 emitted over-budget body violates the contract.
-Fault/timing angle: none.
+Fault/timing angle: the window between the loop's poll and the return, while
+the body is written and hashed; `guard_calls::on_write` ends the budget
+inside it.
 Required faults and enabling state: A serialized-bytes limit one below the
 closed render; a limit below the required render; each accounting bound one
-below the closed render at the optional phase.
+below the closed render at the optional phase; a budget cancelled from the
+write hook.
 Confidence: high -
 [evidence](evidence/packing-adjustment-removes-last-admitted-within-the-cap.md).
 Existing check: none before this change.

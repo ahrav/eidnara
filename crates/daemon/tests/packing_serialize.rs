@@ -247,6 +247,21 @@ fn an_exhausted_budget_refuses_before_any_measurement() {
     assert_eq!(guard_calls::counts(), (0, 0));
 }
 
+/// The fitting pass copies and hashes the body after the loop's poll; a
+/// budget that ends inside that write still refuses the preparation.
+#[test]
+fn a_budget_that_ends_while_the_body_is_written_refuses_the_preparation() {
+    let fixture = fixture();
+    let admission = admit(&fixture, &GROUPS);
+    let budget = EvalBudget::unbounded();
+    let cancelling = budget.clone();
+    guard_calls::reset();
+    guard_calls::on_write(move || cancelling.cancel());
+    let result = finalize(admission, &serialization(1 << 20, 8), &budget);
+    guard_calls::reset();
+    assert_eq!(result.unwrap_err(), PackingFailure::Deadline);
+}
+
 #[test]
 fn an_accounting_overflow_is_refused_by_the_optional_phase_before_any_measurement() {
     let fixture = fixture();
