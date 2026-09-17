@@ -345,6 +345,22 @@ export interface DemandStartOutcome {
     authenticatedDaemonId?: Uint8Array;
 }
 
+/**
+ * The served daemon runs with an otherwise empty environment and resolves the user-tier
+ * `eidnara.jsonc` only from these two variables, so the launcher forwards them (absolute
+ * values only) or the daemon never sees user configuration such as the history summarizer model.
+ */
+function configLocationEnv(env: Record<string, string | undefined>): Record<string, string> {
+    const forwarded: Record<string, string> = {};
+    for (const name of ["XDG_CONFIG_HOME", "HOME"] as const) {
+        const value = env[name];
+        if (typeof value === "string" && value.length > 0 && value.startsWith("/")) {
+            forwarded[name] = value;
+        }
+    }
+    return forwarded;
+}
+
 export class HostLifecyclePolicy {
     private readonly env: Record<string, string | undefined>;
     private readonly launchTarget: NativeLaunchTarget | null;
@@ -837,6 +853,7 @@ export class HostLifecyclePolicy {
                     command: command as NativeLifecycleCommand,
                     deadlineMs,
                     dataRoot: preflight.root,
+                    env: configLocationEnv(this.env),
                     ...(payloadDir !== undefined && command !== "stop" ? { payloadDir } : {}),
                     ...(command !== "stop" && this.payloadManifestDigest !== undefined
                         ? { payloadManifestDigest: this.payloadManifestDigest }
@@ -910,6 +927,7 @@ export class HostLifecyclePolicy {
                 command: "probe",
                 deadlineMs: preflight.deadlineMs,
                 dataRoot: preflight.root,
+                env: configLocationEnv(this.env),
             });
             const relabeled = this.relabel(native, "status", command);
             if (
