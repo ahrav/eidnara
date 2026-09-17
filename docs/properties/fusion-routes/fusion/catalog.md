@@ -47,7 +47,7 @@ it.
 | Slug | Type | Reachability | Semantics | Status | Confidence |
 | --- | --- | --- | --- | --- | --- |
 | [fusion-occurrence-identity-never-collapses-payload](#fusion-occurrence-identity-never-collapses-payload) | safety | test-only | always | active | high |
-| [fusion-selection-digest-tracks-identity-tuple](#fusion-selection-digest-tracks-identity-tuple) | safety | default-production | always | active | high |
+| [fusion-selection-digest-tracks-identity-tuple](#fusion-selection-digest-tracks-identity-tuple) | safety | test-only | always | active | high |
 | [fusion-parent-groups-are-not-voters](#fusion-parent-groups-are-not-voters) | safety | test-only | always | active | high |
 | [fusion-one-contribution-per-lane-per-occurrence](#fusion-one-contribution-per-lane-per-occurrence) | safety | test-only | always | active | high |
 | [fusion-lane-positions-are-assigned-once-from-declared-lane-order](#fusion-lane-positions-are-assigned-once-from-declared-lane-order) | safety | test-only | always | active | high |
@@ -111,12 +111,16 @@ Open questions: None.
 ### fusion-selection-digest-tracks-identity-tuple
 
 Type: safety
-Reachability: default-production - `retrieval.prepare` derives both digests
-for every prepared context: `crates/daemon/src/edit_receipts.rs:352-380`
-(`Context::digest`) builds each `SelectedSpan::new`, hashes the selection
-with `SelectionDigest::derive`, and binds the daemon's accounting profile
-through `PreparationDigest::derive`; the same digest is compared at
-`retrieval.apply`.
+Reachability: test-only - `retrieval.prepare` derives both digests for every
+prepared context (`crates/daemon/src/edit_receipts.rs:352-380`,
+`Context::digest`, builds each `SelectedSpan::new`, hashes the selection with
+`SelectionDigest::derive`, and binds the daemon's accounting profile through
+`PreparationDigest::derive`; `retrieval.apply` compares the same digest), but
+the route answers `disabled` until `Handler::set_edit_receipt_limits`
+(`edit_receipts.rs:901`) installs a limit set, and `git grep
+set_edit_receipt_limits -- crates packages` finds only the setter and
+`crates/daemon/tests/` callers. The class follows the application catalog's
+reachability statement.
 Status: active
 Exercised: yes - `crates/retrieval/tests/identity.rs`
 `selection_digest_tracks_order_and_membership`,

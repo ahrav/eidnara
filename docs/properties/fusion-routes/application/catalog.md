@@ -461,4 +461,8 @@ Impact: A class could be declared enabled without a harness ever proving it.
 Open questions:
 
 - The end-to-end run against a real OpenCode server is outstanding; the
-  scripted-daemon witnesses stand in for it. (needs human input)
+  scripted-daemon witnesses stand in for it. The server harness exists
+  (`packages/e2e-tests`, a real `opencode serve` against
+  `direct_host_fixture`); the missing piece is the scenario, since no daemon
+  route produces a packed body and no production caller wires
+  `ContextApplication`. (needs human input)

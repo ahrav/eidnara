@@ -63,6 +63,9 @@ firing check is an open obligation, not a passed one.
 | `packing.application.zero_write_episode` | opencode | `sometimes` | apply-unknown-outcome-never-replays-blindly | `crates/daemon/tests/edit_receipts.rs` `every_application_outcome_leaves_the_kernel_tip_and_write_counters_unchanged`. |
 
 Unfired markers by harness: OpenCode, `packing.application.real_server_outcome`
-(the end-to-end run against a real OpenCode server; no harness exists in this
-repository). Pi: none named yet; the Pi set is frozen before U5b implements
-against it.
+(the end-to-end run against a real OpenCode server). `packages/e2e-tests`
+already starts a real `opencode serve` with the built plugin against the
+daemon's `direct_host_fixture`; what is missing is the scenario, because no
+daemon route produces a packed body and nothing wires `ContextApplication`
+into the transform, so the harness has no application path to drive yet. Pi:
+none named yet; the Pi set is frozen before U5b implements against it.
