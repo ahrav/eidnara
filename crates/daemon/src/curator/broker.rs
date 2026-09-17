@@ -296,7 +296,7 @@ pub fn check_render(bytes: &[u8], alias: Option<&Alias>) -> Result<(), Refusal> 
     let text = std::str::from_utf8(bytes).map_err(|_| refuse(alias, RefusalCode::Undecodable))?;
     if contains_redaction_token(text)
         || text.contains(OPERATOR_REDACTION_PLACEHOLDER)
-        || detect_windowed_durable_bytes(bytes) != Ok(false)
+        || detect_windowed_durable_bytes(bytes).unwrap_or(true)
     {
         return Err(refuse(alias, RefusalCode::RenderCheck));
     }

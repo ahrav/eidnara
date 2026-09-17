@@ -1,13 +1,14 @@
 //! Local-file captures record project text read by a Curator run as evidence and a typed observation.
 //!
-//! The evidence row carries the bytes' identity and the finite acquisition reference (`retain_until`); the observation carries the typed detail: the trusted project, the relative path, the capture time, the whole-buffer digest, and the captured range. The detail is a versioned JSON document in `ObservationPayload.detail`, not a descriptor class, so the frozen `OccurrenceClass` set and every descriptor reader are untouched. Generic observation writers cannot use this kind or these id prefixes. Expiry retires the observation and then the evidence; the artifact bytes stay for as long as any other live reference names their digest.
+//! The evidence row carries the bytes' identity and the finite acquisition reference (`retain_until`); the observation carries the typed detail: the trusted project, the relative path, the capture time, the whole-buffer digest, and the captured range. The detail is a versioned JSON document in `ObservationPayload.detail`, not a descriptor class, so the frozen `OccurrenceClass` set and every descriptor reader are untouched. Generic observation writers cannot use this kind or these id prefixes, and the writer here accepts a detail only when it agrees with the live Curator-capture evidence row it cites. Expiry retires the observation and then the evidence; the artifact bytes stay for as long as any other live reference names their digest.
 
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use super::redaction::identity;
 use super::slice::{ObservationPayload, ObservationSpec};
-use super::{CommitIntent, Envelope, KernelError, KernelStore, Sensitivity, map_sqlite};
+use super::{CachedSql, CommitIntent, Envelope, KernelError, KernelStore, Sensitivity, map_sqlite};
 
 pub const LOCAL_FILE_KIND: &str = "local_file_capture";
 pub const LOCAL_FILE_DETAIL_VERSION: u32 = 1;
@@ -15,6 +16,7 @@ const OBSERVATION_ID_PREFIX: &str = "localfile:";
 const OBJECT_ID_PREFIX: &str = "localfileobj:";
 /// Expiries retired per maintenance call.
 pub const MAX_EXPIRED_CAPTURES_PER_CALL: usize = 64;
+const EXPIRY_PRODUCER: &str = "kernel-local-file-expiry";
 
 /// The typed detail stored with a local-file capture observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,24 +33,17 @@ pub struct LocalFileDetail {
     pub range: (u64, u64),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct LocalFileCaptureRequest<'a> {
     pub project_digest: &'a str,
     pub relative_path: &'a str,
     pub captured_at: i64,
     pub domain_id: &'a str,
     pub scope_id: Option<&'a str>,
-    /// The live evidence row holding the captured bytes.
+    /// The live Curator-capture evidence row holding the captured bytes.
     pub evidence_id: &'a str,
     pub artifact_digest: &'a str,
     pub byte_length: u64,
-    pub sensitivity: Sensitivity,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalFileCaptureOutcome {
-    pub observation_id: String,
-    pub object_id: String,
 }
 
 pub(crate) fn uses_local_file_namespace(spec: &ObservationSpec) -> bool {
@@ -59,18 +54,36 @@ pub(crate) fn uses_local_file_namespace(spec: &ObservationSpec) -> bool {
 }
 
 impl Envelope<'_> {
-    /// Records the typed observation for one capture. The evidence must be live; the observation cites it, so `retire_evidence` conflicts until the observation is retired first. A relative path the redaction scanner would rewrite is refused, because a stored path must equal the path the run named.
+    /// Records the typed observation for one capture. The cited evidence must be a live Curator capture whose digest, length, and finite `retain_until` agree with the request; the observation's sensitivity is the evidence row's, never weaker. The observation cites the evidence, so `retire_evidence` conflicts until the observation is retired first. A relative path the redaction scanner would rewrite is refused, because a stored path must equal the path the run named.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::InvalidInput`] for an empty path or evidence id, a detail the scanner rewrites, or a serialization failure, and the observation writer's errors otherwise.
+    /// Returns [`KernelError::InvalidInput`] for an empty path or evidence id, a detail the scanner rewrites, or a serialization failure; [`KernelError::NotFound`] when no live Curator-capture row matches the request; and the observation writer's errors otherwise.
     pub fn record_local_file_capture(
         &mut self,
         request: &LocalFileCaptureRequest<'_>,
-    ) -> Result<LocalFileCaptureOutcome, KernelError> {
+    ) -> Result<(), KernelError> {
         if request.relative_path.is_empty() || request.evidence_id.is_empty() {
             return Err(KernelError::InvalidInput);
         }
+        let sensitivity: String = self
+            .tx
+            .query_row_cached(
+                "SELECT sensitivity_class FROM evidence_meta
+                 WHERE evidence_id=?1 AND artifact_digest=?2 AND byte_length=?3
+                   AND retention_class=?4 AND retain_until IS NOT NULL
+                   AND invalidated_commit_seq IS NULL",
+                params![
+                    request.evidence_id,
+                    request.artifact_digest,
+                    i64::try_from(request.byte_length).map_err(|_| KernelError::InvalidInput)?,
+                    super::cas::CURATOR_CAPTURE_RETENTION_CLASS,
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?
+            .ok_or(KernelError::NotFound)?;
         let detail = LocalFileDetail {
             detail_version: LOCAL_FILE_DETAIL_VERSION,
             project_digest: request.project_digest.to_string(),
@@ -81,11 +94,9 @@ impl Envelope<'_> {
         };
         let detail_json =
             identity(&serde_json::to_string(&detail).map_err(|_| KernelError::InvalidInput)?)?;
-        let observation_id = format!("{OBSERVATION_ID_PREFIX}{}", request.evidence_id);
-        let object_id = format!("{OBJECT_ID_PREFIX}{}", request.evidence_id);
         let spec = ObservationSpec {
-            observation_id: observation_id.clone(),
-            object_id: object_id.clone(),
+            observation_id: format!("{OBSERVATION_ID_PREFIX}{}", request.evidence_id),
+            object_id: format!("{OBJECT_ID_PREFIX}{}", request.evidence_id),
             domain_id: request.domain_id.to_string(),
             proposition_id: None,
             scope_id: request.scope_id.map(str::to_string),
@@ -102,38 +113,47 @@ impl Envelope<'_> {
             source_kind: LOCAL_FILE_KIND.to_string(),
             source_id: request.evidence_id.to_string(),
             source_revision: self.commit_seq,
-            sensitivity: request.sensitivity,
+            sensitivity: Sensitivity::from_stored(&sensitivity).restrictive(Sensitivity::Sensitive),
         };
         self.insert_observation_inner(spec)?;
-        Ok(LocalFileCaptureOutcome {
-            observation_id,
-            object_id,
-        })
+        Ok(())
     }
 }
 
 impl KernelStore {
-    /// Retires the capture observations and evidence of Curator captures whose `retain_until` has passed and that no live hold still pins, at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] per call, in one commit. Ownership ends here; the artifact bytes are reclaimed later only if no other live reference names the digest. Returns how many evidence rows were retired.
+    /// Retires the capture observation and evidence of every Curator capture whose `retain_until` has passed and that no live hold still pins, at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] per call, one commit per capture keyed by `now` and the evidence id. A capture that some other live row still cites is left alone: only its own observation is retired, and the evidence stays until that citation is gone. Ownership ends here; the artifact bytes are reclaimed later only if no other live reference names the digest. Returns how many evidence rows were retired.
     ///
     /// # Errors
     ///
-    /// Returns the commit's error; nothing is retired when the commit fails.
-    pub fn expire_local_file_captures(
-        &self,
-        intent: CommitIntent,
-        now: i64,
-    ) -> Result<usize, KernelError> {
+    /// Returns the first storage or commit error; captures retired before it stay retired.
+    pub fn expire_local_file_captures(&self, now: i64) -> Result<usize, KernelError> {
+        let expired = {
+            let reader = self.lock_reader()?;
+            expired_captures(&reader, now)?
+        };
         let mut retired = 0;
-        self.commit(intent, |envelope| {
-            for (evidence_id, evidence_object) in expired_captures(envelope, now)? {
-                for observation in live_observations_citing(envelope, &evidence_id)? {
+        for (evidence_id, evidence_object) in expired {
+            let intent = CommitIntent {
+                producer: EXPIRY_PRODUCER.to_string(),
+                operation_key: format!("{now}:{evidence_id}"),
+                request_digest: format!("{:x}", sha2::Sha256::digest(evidence_id.as_bytes())),
+                actor: EXPIRY_PRODUCER.to_string(),
+                cause: "acquisition reference expired".to_string(),
+            };
+            let receipt = self.commit(intent, |envelope| {
+                if let Some(observation) = live_capture_observation(envelope, &evidence_id)? {
                     envelope.retire_observation(&observation)?;
                 }
+                if cited_elsewhere(envelope, &evidence_id)? {
+                    return Ok("retained".to_string());
+                }
                 envelope.retire_evidence(&evidence_object)?;
+                Ok("retired".to_string())
+            })?;
+            if receipt.result != "retained" {
                 retired += 1;
             }
-            Ok(String::new())
-        })?;
+        }
         Ok(retired)
     }
 
@@ -141,7 +161,7 @@ impl KernelStore {
     ///
     /// # Errors
     ///
-    /// Returns storage errors, and [`KernelError::CorruptCanonicalRow`] when the stored detail does not decode as a [`LocalFileDetail`].
+    /// Returns storage errors, and [`KernelError::CorruptCanonicalRow`] when the stored detail does not decode as a [`LocalFileDetail`] at the current version.
     pub fn local_file_capture(
         &self,
         evidence_id: &str,
@@ -171,11 +191,10 @@ impl KernelStore {
 
 /// Live Curator captures whose acquisition reference has passed and that no live hold pins: `(evidence_id, evidence object id)`, oldest expiry first.
 fn expired_captures(
-    envelope: &Envelope<'_>,
+    connection: &rusqlite::Connection,
     now: i64,
 ) -> Result<Vec<(String, String)>, KernelError> {
-    let mut statement = envelope
-        .tx
+    let mut statement = connection
         .prepare_cached(
             "SELECT e.evidence_id,e.object_id FROM evidence_meta e
              WHERE e.retention_class=?1 AND e.invalidated_commit_seq IS NULL
@@ -204,23 +223,40 @@ fn expired_captures(
     Ok(rows)
 }
 
-/// Object ids of the live observations citing `evidence_id`, in creation order.
-fn live_observations_citing(
+/// The object id of the live capture observation citing `evidence_id`, when there is one.
+fn live_capture_observation(
     envelope: &Envelope<'_>,
     evidence_id: &str,
-) -> Result<Vec<String>, KernelError> {
-    let mut statement = envelope
+) -> Result<Option<String>, KernelError> {
+    envelope
         .tx
-        .prepare_cached(
+        .query_row_cached(
             "SELECT object_id FROM observations
-             WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL
-             ORDER BY created_commit_seq,object_id",
+             WHERE evidence_id=?1 AND observation_kind=?2 AND invalidated_commit_seq IS NULL",
+            params![evidence_id, LOCAL_FILE_KIND],
+            |row| row.get(0),
         )
-        .map_err(map_sqlite)?;
-    let rows = statement
-        .query_map([evidence_id], |row| row.get(0))
-        .map_err(map_sqlite)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(map_sqlite)?;
-    Ok(rows)
+        .optional()
+        .map_err(map_sqlite)
+}
+
+/// Whether a live row other than the capture observation cites `evidence_id`; such a row is independent support the expiry must not remove.
+fn cited_elsewhere(envelope: &Envelope<'_>, evidence_id: &str) -> Result<bool, KernelError> {
+    envelope
+        .tx
+        .query_row_cached(
+            "SELECT EXISTS(SELECT 1 FROM observations o
+                           WHERE o.evidence_id=?1 AND o.invalidated_commit_seq IS NULL
+                             AND o.observation_kind<>?2)
+                 OR EXISTS(SELECT 1 FROM decisions d
+                           WHERE d.evidence_id=?1 AND d.invalidated_commit_seq IS NULL)
+                 OR EXISTS(SELECT 1 FROM decision_events de
+                           JOIN decisions d ON d.decision_id=de.decision_id
+                           WHERE de.evidence_id=?1 AND d.invalidated_commit_seq IS NULL)
+                 OR EXISTS(SELECT 1 FROM asserted_edges a
+                           WHERE a.evidence_id=?1 AND a.invalidated_commit_seq IS NULL)",
+            params![evidence_id, LOCAL_FILE_KIND],
+            |row| row.get(0),
+        )
+        .map_err(map_sqlite)
 }

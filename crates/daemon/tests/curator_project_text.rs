@@ -7,8 +7,8 @@ use daemon::curator::broker::{
     EvidenceBroker, MAX_OPERATIONS_PER_BATCH, QuestionTemplate, RefusalCode, RunBinding,
 };
 use daemon::curator::project_text::{
-    InspectionBinding, MAX_CAPTURE_BYTES, MAX_DEPTH, MAX_VISITED_ENTRIES, ProjectText,
-    ProtectedLocations, SearchQuery,
+    InspectionBinding, MAX_CAPTURE_BYTES, MAX_DEPTH, MAX_SCAN_BYTES, MAX_VISITED_ENTRIES,
+    ProjectText, ProtectedLocations, SearchQuery,
 };
 use daemon::curator::{Completeness, MAX_EXCERPT_BYTES};
 use kernel::{
@@ -158,7 +158,7 @@ impl Fixture {
 
     /// The Kernel store's own root is always a protected location.
     fn protected(&self) -> ProtectedLocations {
-        ProtectedLocations::new([self.store_dir.path().to_path_buf()])
+        ProtectedLocations::new([self.store_dir.path().to_path_buf()]).unwrap()
     }
 
     fn capture_rows(&self) -> Vec<(String, String, Option<i64>, String, String)> {
@@ -308,11 +308,19 @@ fn confinement_refuses_escapes_links_special_files_and_protected_locations() {
     // A store file hard-linked into the project resolves to a protected identity.
     let store_file = fixture.store_dir.path().join("kernel.sqlite");
     std::fs::hard_link(&store_file, fixture.project.path().join("linked.sqlite")).unwrap();
-    let protected = ProtectedLocations::new([
-        fixture.store_dir.path().to_path_buf(),
-        store_file,
-        PathBuf::from("/definitely/missing/path"),
-    ]);
+    // A store location that cannot be identified refuses construction rather than going unprotected.
+    assert_eq!(
+        ProtectedLocations::new([PathBuf::from("/definitely/missing/path")])
+            .unwrap_err()
+            .code,
+        RefusalCode::Unavailable
+    );
+    let protected =
+        ProtectedLocations::new([fixture.store_dir.path().to_path_buf(), store_file]).unwrap();
+    // A hard link to a store file the identity set does not list is still refused: a linked file is not ordinary.
+    let unlisted = fixture.store_dir.path().join("unlisted-store-file");
+    std::fs::write(&unlisted, b"store internals").unwrap();
+    std::fs::hard_link(&unlisted, fixture.project.path().join("linked.wal")).unwrap();
     let mut text = fixture.text(&protected);
     let mut broker = fixture.broker(ArtifactDestination::Local);
     let tip = fixture.store.tip().unwrap();
@@ -325,6 +333,7 @@ fn confinement_refuses_escapes_links_special_files_and_protected_locations() {
         (".git/config", RefusalCode::Protected),
         (".eidnara/eidnara.jsonc", RefusalCode::Protected),
         ("linked.sqlite", RefusalCode::Protected),
+        ("linked.wal", RefusalCode::NotRegularFile),
         ("pipe", RefusalCode::NotRegularFile),
         ("sub", RefusalCode::NotRegularFile),
         ("missing.txt", RefusalCode::NotFound),
@@ -353,7 +362,7 @@ fn confinement_refuses_escapes_links_special_files_and_protected_locations() {
             .code,
         RefusalCode::Unavailable
     );
-    let over = ProtectedLocations::new([fixture.project.path().join("sub")]);
+    let over = ProtectedLocations::new([fixture.project.path().join("sub")]).unwrap();
     assert_eq!(
         ProjectText::open(fixture.project.path(), &over, fixture.binding())
             .unwrap_err()
@@ -426,18 +435,17 @@ fn a_remote_destination_cannot_capture_anything() {
             .code,
         RefusalCode::PolicyBlocked
     );
-    let search = text
-        .search(
+    assert_eq!(
+        text.search(
             &fixture.store,
             &mut broker,
             SearchQuery::Content("bun"),
             fixture.now,
         )
-        .unwrap();
-    assert!(search.hits.is_empty());
-    assert!(
-        search.withheld,
-        "a capture the destination cannot admit is withheld, not absent"
+        .unwrap_err()
+        .code,
+        RefusalCode::PolicyBlocked,
+        "a remote run is refused before any file is read"
     );
     assert_eq!(fixture.store.tip().unwrap(), tip);
     assert!(fixture.capture_rows().is_empty());
@@ -608,9 +616,118 @@ fn search_bounds_stop_with_explicit_incompleteness() {
     assert_eq!(
         outcome.completeness,
         Completeness::CandidateBound,
-        "an early stop is incompleteness, not absence"
+        "a listing cut short is incompleteness, not absence"
     );
+    assert!(outcome.withheld);
+    assert_eq!(
+        outcome.hits.len(),
+        1,
+        "entries listed before the bound are still examined"
+    );
+    // Scan bytes: more matching-candidate bytes than one search may read.
+    let heavy = Fixture::open();
+    let megabyte = "filler words ".repeat(usize::try_from(MAX_CAPTURE_BYTES).unwrap() / 13);
+    for index in 0..(MAX_SCAN_BYTES / MAX_CAPTURE_BYTES + 1) {
+        heavy.write(&format!("h{index:02}.txt"), megabyte.as_bytes());
+    }
+    let protected = heavy.protected();
+    let mut text = heavy.text(&protected);
+    let mut broker = heavy.broker(ArtifactDestination::Local);
+    let outcome = text
+        .search(
+            &heavy.store,
+            &mut broker,
+            SearchQuery::Content("zzz"),
+            heavy.now,
+        )
+        .unwrap();
+    assert_eq!(outcome.completeness, Completeness::ProbeBound);
     assert!(outcome.hits.is_empty());
+    assert!(
+        heavy.capture_rows().is_empty(),
+        "an unmatched file is never captured"
+    );
+}
+
+#[test]
+fn a_matching_refused_file_is_indistinguishable_from_no_match() {
+    let fixture = Fixture::open();
+    fixture.write("keys.env", b"AWS_ACCESS_KEY_ID=AKIAQ7RSTUVWXYZ23456\n");
+    fixture.write("notes.txt", b"nothing secret here");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    let tip = fixture.store.tip().unwrap();
+    let matching = text
+        .search(
+            &fixture.store,
+            &mut broker,
+            SearchQuery::Content("AKIAQ7"),
+            fixture.now,
+        )
+        .unwrap();
+    let absent = text
+        .search(
+            &fixture.store,
+            &mut broker,
+            SearchQuery::Content("no such literal"),
+            fixture.now,
+        )
+        .unwrap();
+    assert!(matching.hits.is_empty() && absent.hits.is_empty());
+    assert_eq!(
+        matching.withheld, absent.withheld,
+        "withholding does not depend on the literal"
+    );
+    assert_eq!(matching.completeness, absent.completeness);
+    assert_eq!(fixture.store.tip().unwrap(), tip);
+    assert_eq!(broker.ledger.disclosed().count(), 0);
+}
+
+#[test]
+fn a_capture_is_charged_to_the_hold_before_any_disclosure() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"twelve bytes");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    assert_eq!(
+        text.read(
+            &fixture.store,
+            &mut broker,
+            "a.txt",
+            Some(0..13),
+            fixture.now
+        )
+        .unwrap_err()
+        .code,
+        RefusalCode::InvalidRange
+    );
+    let rows = fixture.capture_rows();
+    assert_eq!(rows.len(), 1);
+    let held = fixture
+        .store
+        .validate_held_evidence(
+            broker.hold_id(),
+            CuratorHoldKind::Execution,
+            &fixture.hold_binding(),
+            std::slice::from_ref(&rows[0].0),
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(
+        held.len(),
+        1,
+        "the hold covers the capture though nothing was disclosed"
+    );
+    assert_eq!(broker.ledger.disclosed().count(), 0);
+    assert!(
+        fixture
+            .store
+            .local_file_capture(&rows[0].0)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -650,19 +767,13 @@ fn expiry_retires_the_capture_and_its_detail_but_keeps_independent_support() {
     assert_eq!(digest, canonical.digest, "one object backs both references");
     // Nothing expires while the hold is live, even past retain_until.
     let later = fixture.now + HOUR_MS + 1;
-    assert_eq!(
-        fixture
-            .store
-            .expire_local_file_captures(intent("expire-early"), later)
-            .unwrap(),
-        0
-    );
+    assert_eq!(fixture.store.expire_local_file_captures(later).unwrap(), 0);
     // Once the hold has lapsed, expiry retires the detail and then the evidence; the canonical reference and its bytes remain.
     let after_hold = fixture.now + 3 * HOUR_MS;
     assert_eq!(
         fixture
             .store
-            .expire_local_file_captures(intent("expire"), after_hold)
+            .expire_local_file_captures(after_hold)
             .unwrap(),
         1
     );
@@ -687,8 +798,59 @@ fn expiry_retires_the_capture_and_its_detail_but_keeps_independent_support() {
     assert_eq!(
         fixture
             .store
-            .expire_local_file_captures(intent("expire-again"), after_hold)
+            .expire_local_file_captures(after_hold + 1)
             .unwrap(),
         0
+    );
+    // A capture some other live observation cites keeps its evidence: only the capture's own detail is retired, and the foreign row is untouched.
+    fixture.write("cited.txt", b"cited by another observation");
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    broker.accounting.end_batch();
+    text.read(&fixture.store, &mut broker, "cited.txt", None, fixture.now)
+        .unwrap();
+    let cited = fixture.capture_rows()[0].0.clone();
+    fixture
+        .store
+        .commit(intent("foreign"), |envelope| {
+            envelope.insert_observation(kernel::ObservationSpec {
+                observation_id: "foreign-1".to_string(),
+                object_id: "foreign-object-1".to_string(),
+                domain_id: DOMAIN.to_string(),
+                proposition_id: None,
+                scope_id: None,
+                anchor_id: None,
+                evidence_id: Some(cited.clone()),
+                observation_kind: "note".to_string(),
+                payload: kernel::ObservationPayload {
+                    summary: "independent support".to_string(),
+                    classification: "note".to_string(),
+                    detail: None,
+                },
+                observed_at: fixture.now,
+                dependencies: Vec::new(),
+                source_kind: "test".to_string(),
+                source_id: "foreign".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Sensitive,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .expire_local_file_captures(after_hold + 2)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture.capture_rows().len(),
+        1,
+        "the cited evidence stays live"
+    );
+    assert!(
+        fixture.store.local_file_capture(&cited).unwrap().is_none(),
+        "the capture's own detail is retired"
     );
 }
