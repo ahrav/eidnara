@@ -388,7 +388,8 @@ adapter's whole-invocation validation is
 `packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts`; on Pi,
 `packages/pi-plugin/src/context-application-pi.test.ts` charges the whole
 system prompt under the `pi-heuristic` profile inside `editSystemPrompt`, so a
-candidate the usable window refuses is `keep` with the prompt unchanged; and,
+candidate the prompt's token budget refuses is `keep` with the prompt
+unchanged; and,
 through the OpenCode transform's publication step,
 `packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts`
 `publishes when the whole invocation fits the context limit with headroom`,
@@ -403,8 +404,10 @@ plugin every entry of the candidate message-entry surface by its canonical
 length, the Pi plugin the whole system prompt by its UTF-8 byte length; each declines
 publication when the charge exceeds the limit and the candidate is larger than
 the incoming surface, the OpenCode plugin against the model's reported context
-limit and the Pi plugin against Pi's usable window (the window less its output
-reserve); a payload that fits alone but not in the invocation is
+limit and the Pi plugin against the token budget its caller leaves for the
+prompt, Pi's usable window (the window less its output reserve) less the
+caller's charge for the messages and tool schemas the adapter never sees; a
+payload that fits alone but not in the invocation is
 refused by the adapter, never applied; a candidate no larger than the incoming
 surface is never refused for the window's own size; a limit the host has not
 reported gates nothing, and the usage sample's percentage is not a report,
@@ -428,7 +431,11 @@ estimator swap that moves the generation.
 Confidence: high - [evidence](evidence/apply-adapter-validates-entire-assembled-invocation.md).
 Existing check: None found.
 Impact: An edit that fits its own bound could overflow the invocation.
-Open questions: None.
+Open questions:
+
+- On Pi the adapter charges the system prompt alone; the caller's charge for
+  the messages and tool schemas that complete the invocation has no production
+  caller yet and is ruled with the Pi assembled invocation (parent Q6).
 
 ### apply-enabled-outcomes-are-proven-on-real-harness-paths
 

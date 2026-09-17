@@ -30,14 +30,19 @@ export function hasPackedBlock(systemPrompt: string): boolean {
     return ownedBlockStart(systemPrompt) >= 0;
 }
 
-/** The whole system prompt is charged by its UTF-8 byte length, as the OpenCode surface is; the limit is Pi's usable window when the host reports one. */
+/**
+ * The whole system prompt is charged by its UTF-8 byte length, as the OpenCode surface is. The
+ * adapter sees only the prompt, so `promptTokenBudget` is the capacity the caller leaves for it:
+ * Pi's usable window (the window less its output reserve) less the caller's charge for the rest
+ * of the assembled invocation, the messages and tool schemas. `undefined` gates nothing.
+ */
 export function validatePiInvocation(
     candidate: string,
     incoming: string,
-    usableContextLimit: number | undefined,
+    promptTokenBudget: number | undefined,
 ): InvocationValidation {
     return validateInvocation([Buffer.byteLength(candidate)], [Buffer.byteLength(incoming)], {
-        maxTokens: usableContextLimit,
+        maxTokens: promptTokenBudget,
         headroomPermille: PI_INVOCATION_HEADROOM_PERMILLE,
         profile: "pi-heuristic",
     });
@@ -45,13 +50,13 @@ export function validatePiInvocation(
 
 export type PiEdit = Edit<string> & { validation: InvocationValidation };
 
-/** An empty `replace` is still `applied_replacement`; a window refusal and an unlocatable block both confirm as `keep` with the prompt unchanged. */
+/** An empty `replace` is still `applied_replacement`; a budget refusal and an unlocatable block both confirm as `keep` with the prompt unchanged. */
 export function editSystemPrompt(
     systemPrompt: string,
     action: PackedAction,
     preparationId: string,
     body: string,
-    usableContextLimit: number | undefined,
+    promptTokenBudget: number | undefined,
 ): PiEdit {
     const block = `${OPEN_PREFIX}${preparationId}${OPEN_SUFFIX}${body}${CLOSE}`;
     const start = ownedBlockStart(systemPrompt);
@@ -71,6 +76,6 @@ export function editSystemPrompt(
             outcome: "applied_replacement",
         };
     }
-    const validation = validatePiInvocation(candidate.surface, systemPrompt, usableContextLimit);
+    const validation = validatePiInvocation(candidate.surface, systemPrompt, promptTokenBudget);
     return validation.ok ? { ...candidate, validation } : { ...unchanged, validation };
 }

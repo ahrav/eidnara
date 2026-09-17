@@ -28,7 +28,10 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u4-context-edits` at
   length against the incoming prompt under `pi-heuristic` with
   `PI_INVOCATION_HEADROOM_PERMILLE`; `editSystemPrompt` calls it on every
   candidate and confirms `keep` with the prompt unchanged when it refuses. The
-  limit is Pi's usable window when the host reports one.
+  limit is `promptTokenBudget`, the capacity the caller leaves for the prompt
+  after charging the rest of the invocation against Pi's usable window; the
+  adapter sees only the prompt, and no production caller supplies the budget
+  yet.
 - `packages/pi-plugin/src/context-application-pi.test.ts` checks the one-entry
   charge and profile, the byte-length charge on a non-ASCII prompt, the
   limit and limit-minus-one boundary through `editSystemPrompt`, and the
