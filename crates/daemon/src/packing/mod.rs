@@ -624,12 +624,23 @@ pub fn prepare_optional(
 
     let ledger = required.ledger.clone();
     // The close is part of the render the budget must cover, so its charge is
-    // held back from the scan and settled once the closing charge is known.
+    // held back from the scan and settled once the closing charge is known. A
+    // required render that leaves no room for it is over budget, not closed
+    // past the limit.
     let close_reserve = ledger.delta(BLOCK_CLOSE_FRAGMENT).with_headroom();
-    let scan_budget = required
-        .remaining
-        .checked_sub(close_reserve)
-        .unwrap_or(ClaudeTokens::ZERO);
+    let Some(scan_budget) = required.remaining.checked_sub(close_reserve) else {
+        return Err(RequiredContextFailure::OverBudget {
+            limit: required
+                .charged
+                .checked_add(required.remaining)
+                .unwrap_or(ClaudeTokens::MAX),
+            charged: required
+                .charged
+                .checked_add(close_reserve)
+                .unwrap_or(ClaudeTokens::MAX),
+        }
+        .into());
+    };
     let mut costs: Vec<ClaudeTokens> = Vec::with_capacity(partition.groups.len());
     // A group whose priced sum is unrepresentable is never admitted at a
     // saturated cost; the first such group refuses the phase after the scan.

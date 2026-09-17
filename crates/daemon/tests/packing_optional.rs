@@ -9,14 +9,14 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use daemon::packing::{
-    AccountingProfile, Charged, ClaudeTokens, OptionalAdmission, OptionalExclusion,
-    OptionalRequest, PackingTrace, PreparationRefusal, RequiredInputs, StageEvent,
-    prepare_optional, prepare_required, render,
+    AccountingProfile, BLOCK_CLOSE_FRAGMENT, Charged, ClaudeTokens, OptionalAdmission,
+    OptionalExclusion, OptionalRequest, PackingTrace, PreparationRefusal, RequiredInputs,
+    StageEvent, prepare_optional, prepare_required, render,
 };
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
 use retrieval::fusion::OccurrenceId;
-use retrieval::packing::{OptionalBound, OptionalBounds};
+use retrieval::packing::{OptionalBound, OptionalBounds, RequiredContextFailure};
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
 use support::packing::{
     Fixture, ToolSpan, accounting_bounds, bounds, byte_profile, required_render_total, tool_range,
@@ -328,6 +328,37 @@ fn a_group_whose_cost_overflows_is_refused_not_admitted_at_a_saturated_cost() {
     match result {
         Err(PreparationRefusal::OptionalCostOverflow { at }) => assert_eq!(at, 0),
         other => panic!("an unrepresentable cost must not be admitted: {other:?}"),
+    }
+}
+
+/// The required phase reserves the block open and the required fragments;
+/// the optional phase must still close the block. A limit the required render
+/// meets exactly leaves no room for the close, so the optional phase refuses
+/// rather than returning a render the budget does not cover.
+#[test]
+fn a_required_render_that_leaves_no_room_for_the_close_refuses_the_optional_phase() {
+    let a = tool_span("opt-a", "1", "aaaa");
+    let fixture = Fixture::new(&[REQUIRED, a]);
+    let limit = required_render_total(&[REQUIRED]);
+    for requests in [&[][..], &[optional(&a)][..]] {
+        let (result, _) = run(&fixture, requests, &wide(), limit);
+        match result {
+            Err(PreparationRefusal::Required(RequiredContextFailure::OverBudget {
+                limit: reported,
+                charged,
+            })) => {
+                assert_eq!(reported, ClaudeTokens::new(limit));
+                assert_eq!(
+                    charged,
+                    ClaudeTokens::new(limit + BLOCK_CLOSE_FRAGMENT.len() as u64)
+                );
+            }
+            Ok(admission) => panic!(
+                "the closed render is {} tokens over a {limit} limit: {admission:?}",
+                admission.ledger.total_with_headroom().get()
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 }
 

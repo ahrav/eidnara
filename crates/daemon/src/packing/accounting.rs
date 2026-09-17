@@ -149,7 +149,10 @@ impl Charge {
                 headroom_permille, ..
             } => u64::from(headroom_permille),
         };
-        let extra = self.tokens.get().saturating_mul(permille).div_ceil(1_000);
+        // The product is taken in `u128` so a ratio whose product exceeds
+        // `u64` is still charged at that ratio; only the final sum saturates.
+        let extra = (u128::from(self.tokens.get()) * u128::from(permille)).div_ceil(1_000);
+        let extra = u64::try_from(extra).unwrap_or(u64::MAX);
         ClaudeTokens::new(self.tokens.get().saturating_add(extra))
     }
 }

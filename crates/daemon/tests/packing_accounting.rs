@@ -163,6 +163,20 @@ fn a_heuristic_count_carries_its_authority_and_headroom_and_never_the_exact_labe
     assert_eq!(charge.tokens(), ClaudeTokens::new(3));
     assert_eq!(charge.with_headroom(), ClaudeTokens::new(4));
     assert_ne!(charge.authority(), Authority::Exact);
+    // The headroom product exceeds `u64`; the adjusted count still fits and
+    // is charged at the requested ratio, not at a saturated product.
+    let wide =
+        AccountingProfile::heuristic("wide", "wide headroom", 4_000_000_000, |_| 10_000_000_000);
+    assert_eq!(
+        wide.charge_uncached("x").with_headroom(),
+        ClaudeTokens::new(10_000_000_000 + 40_000_000_000_000_000)
+    );
+    let saturated =
+        AccountingProfile::heuristic("saturated", "saturated", u32::MAX, |_| usize::MAX);
+    assert_eq!(
+        saturated.charge_uncached("x").with_headroom(),
+        ClaudeTokens::new(u64::MAX)
+    );
 
     let exact = AccountingProfile::exact_tokenizer();
     assert_eq!(exact.charge("twelve bytes").authority(), Authority::Exact);
