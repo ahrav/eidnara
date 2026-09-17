@@ -382,6 +382,16 @@ fn only_sealed_subjects_read_and_reads_carry_sensitive_classification() {
     assert_eq!(row.lifecycle.created_at, origin);
     assert_eq!(row.lifecycle.queue_deadline_at, origin + DAY_MS);
     assert_eq!(row.lifecycle.sealed_at, origin + 1);
+    // A stored class below the review floor is not trusted: a review row never reads back as public.
+    mutate(
+        directory.path(),
+        "UPDATE candidates SET sensitivity_class='normal' WHERE candidate_id='subject-1'",
+        [],
+    );
+    let floored = store
+        .read_review_input(&reference, &job_binding(), origin + 2)
+        .unwrap();
+    assert_eq!(floored.sensitivity, Sensitivity::Sensitive);
     assert_eq!(
         stage_refusal(
             store
@@ -1062,6 +1072,20 @@ fn renewal_refuses_a_review_run_by_its_witness_kind_alone() {
             .unwrap_err(),
         KernelError::Conflict,
         "the renewal guard keys off the witness kind, not the binding schema"
+    );
+    assert_eq!(run_lease(directory.path()), before);
+    // A well-formed witness of a kind this build does not know is not a public run either.
+    mutate(
+        directory.path(),
+        "UPDATE extraction_runs SET provenance_witness=?1 WHERE extraction_run_id='run-1'",
+        params![br#"{"kind":"review_v2"}"#.to_vec()],
+    );
+    assert_eq!(
+        store
+            .renew_staging_run("run-1", origin + 1, origin + 1 + HOUR_MS)
+            .unwrap_err(),
+        KernelError::Conflict,
+        "an unknown witness kind fails closed"
     );
     assert_eq!(run_lease(directory.path()), before);
     // A witness that is not JSON at all is refused rather than treated as a public run.

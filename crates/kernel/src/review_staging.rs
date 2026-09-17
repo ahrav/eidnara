@@ -537,10 +537,11 @@ impl ReviewBinding {
     }
 }
 
-/// Decode failures count as review so that a row the current build cannot classify never becomes renewable.
+/// Only the two public witness kinds are renewable; decode failures and unknown kinds count as review so that a row the current build cannot classify never becomes renewable.
 pub(super) fn is_review_witness(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<WitnessKind>(bytes)
-        .map_or(true, |witness| witness.kind == REVIEW_WITNESS_KIND)
+    serde_json::from_slice::<WitnessKind>(bytes).map_or(true, |witness| {
+        !matches!(witness.kind.as_str(), "repository" | "unclassified")
+    })
 }
 
 /// The public staging path refuses these kinds, so a review `candidate_kind` always pairs with a review witness.
@@ -716,7 +717,9 @@ impl KernelStore {
         Ok(ReviewStagedRow {
             binding,
             payload,
-            sensitivity: Sensitivity::from_stored(&row.sensitivity),
+            // A review row is never public; a stored class below that floor is not trusted.
+            sensitivity: Sensitivity::from_stored(&row.sensitivity)
+                .restrictive(Sensitivity::Sensitive),
             lifecycle: ReviewLifecycle {
                 created_at: row.created_at,
                 queue_deadline_at: row.deadline_at,
