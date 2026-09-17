@@ -881,7 +881,7 @@ async fn a_lone_supervisor_is_renewed_when_its_grant_expires() {
     let identity = identity(&kernel_incarnation_id(home));
     write_records(
         home,
-        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("B_recovery_ms", 3_000)]),
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("B_recovery_ms", 8_000)]),
         &campaign_json(&identity),
     );
     let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
@@ -889,19 +889,19 @@ async fn a_lone_supervisor_is_renewed_when_its_grant_expires() {
             vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
         }));
     let _ = owner.run_slice(&slice_budget());
+    // The record's deadline is capped by `B_recovery_ms`, and both must outlast
+    // construction and the first embed under a loaded test run (3 s did not).
     let mut short = rebuild(home);
-    short.deadline = now() + 3_000;
+    short.deadline = now() + 8_000;
     owner.request(&short, now(), &slice_budget()).unwrap();
     for _ in 0..2 {
-        assert!(matches!(
-            owner.run_slice(&slice_budget()),
-            SliceOutcome::Advanced(_)
-        ));
+        let outcome = owner.run_slice(&slice_budget());
+        assert!(matches!(outcome, SliceOutcome::Advanced(_)), "{outcome:?}");
     }
     drive(&owner, 40, || published(&owner).len() == 1).await;
     let first = owner.maintenance().expect("the lone project is maintained");
 
-    tokio::time::sleep(Duration::from_millis(3_200)).await;
+    tokio::time::sleep(Duration::from_millis(8_200)).await;
     let later = corpus.publish("later", "later text");
     let slices = drive(&owner, 30, || published(&owner).len() == 2).await;
     assert!(

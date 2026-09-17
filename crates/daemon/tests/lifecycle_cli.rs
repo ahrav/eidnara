@@ -21,6 +21,7 @@ use std::process::{Command, Stdio};
 // The root-symlink refusal overrides the state described by the root contents.
 //
 // Linux-gated tests require a published daemon or an observed lifecycle state; argument-parsing and version-metadata tests resolve no data root and remain portable.
+// Tests that start or restart a daemon are gated to the release contract's supported target (`linux-x64-gnu`, mirroring `build_target`); on any other Linux host `start` reports `unsupported_platform` before touching the root, which `start_on_an_unsupported_target_reports_unsupported_platform_without_effects` checks.
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
@@ -37,7 +38,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_eidnara-host");
 /// The 60s aggregate cap still applies.
 const PHASE_CAP_MS: &str = "30000";
 /// Wall-clock budget for in-test waits on daemon-side transitions, aligned with the widened phase cap.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 const BUDGET: Duration = Duration::from_secs(30);
 
 /// Pinned digests of the committed release files, restated from `release_contract_tests` so the
@@ -163,7 +164,7 @@ fn effects(value: &Value) -> (bool, bool) {
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn write_payload(dir: &Path) {
     std::fs::create_dir_all(dir.join("bin")).expect("payload bin dir");
     std::fs::write(dir.join("bin/tool"), b"#dev-binary-bytes").expect("payload tool");
@@ -173,7 +174,7 @@ fn write_payload(dir: &Path) {
 }
 
 /// Dev payloads launch through `EIDNARA_HOST_TEST_ALLOW_SELF_EXEC`, a gate compiled only into debug builds.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn require_debug_build() {
     if !cfg!(debug_assertions) {
         panic!(
@@ -187,7 +188,7 @@ fn coordination_dir(root: &Path) -> PathBuf {
     root.join(host_runtime::COORDINATION_DIR_NAME)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn daemon_id(root: &Path) -> [u8; 16] {
     let publication = host_runtime::runtime_dir_path(Some(root))
         .expect("runtime dir")
@@ -197,19 +198,19 @@ fn daemon_id(root: &Path) -> [u8; 16] {
         .daemon_id
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn try_flock_exclusive(path: &Path) -> bool {
     support::flock::try_exclusive(path)
 }
 
 /// Stops an active daemon on drop so failed assertions do not leak it.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 struct DaemonJanitor {
     root: PathBuf,
     active: bool,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 impl Drop for DaemonJanitor {
     fn drop(&mut self) {
         if self.active {
@@ -294,7 +295,27 @@ fn probe_on_empty_root_reports_stopped_without_mutation() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    not(all(target_arch = "x86_64", target_env = "gnu"))
+))]
+#[test]
+fn start_on_an_unsupported_target_reports_unsupported_platform_without_effects() {
+    let root = tempfile::tempdir().expect("root");
+    let data = root.path().join("data");
+
+    let out = run(&data, &["start"]);
+    assert_eq!(out.code, 1);
+    let value = out.json();
+    assert_result(&value, "start", false, "stopped", "unsupported_platform");
+    assert_eq!(value["remediation"], "use_supported_platform");
+    assert!(
+        !data.join("eidnara").join("run").exists(),
+        "the platform gate runs before any staging"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn start_without_staged_payload_fails_closed_in_production_mode() {
     let root = tempfile::tempdir().expect("root");
@@ -309,7 +330,7 @@ fn start_without_staged_payload_fails_closed_in_production_mode() {
     assert!(!data.join("eidnara").join("run").exists());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn restart_start_failure_from_stopped_reports_false_false() {
     let root = tempfile::tempdir().expect("root");
@@ -434,7 +455,7 @@ fn emitted_check_ids_are_pinned_per_state_and_a_held_lifetime_fence_reports_wedg
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn dev_payload_without_explicit_test_self_exec_fails_closed() {
     let root = tempfile::tempdir().expect("root");
@@ -508,7 +529,7 @@ fn quarantined_record_is_classified_alike_by_every_command() {
 
 /// `restart` resolves the successor before stopping; otherwise it can commit `stop` without committing `start` and leave no takeover.
 /// `restart` leaves the running daemon serving when successor resolution fails.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_preflights_the_successor_before_committing_the_stop() {
     require_debug_build();
@@ -596,7 +617,7 @@ async fn restart_preflights_the_successor_before_committing_the_stop() {
     janitor.active = false;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_dev_mode_lifecycle_roundtrip() {
     require_debug_build();
@@ -782,7 +803,7 @@ async fn full_dev_mode_lifecycle_roundtrip() {
 }
 
 /// The envelope both credentialed lifecycle tests use for a start that carries two credential rows.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn merged_envelope() -> Value {
     serde_json::json!({
         "schema": 1,
@@ -794,14 +815,14 @@ fn merged_envelope() -> Value {
 }
 
 /// Path of the active harness selection under one data root.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn selection_path(data: &Path) -> PathBuf {
     data.join("eidnara")
         .join("harness-closures")
         .join("active-selection.json")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn credentialed_start_and_restart_refuse_changed_or_merged_credentials() {
     require_debug_build();
@@ -968,7 +989,7 @@ fn credentialed_start_and_restart_refuse_changed_or_merged_credentials() {
     janitor.active = false;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
     require_debug_build();
@@ -1164,7 +1185,7 @@ fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
     std::fs::remove_file(&selection).expect("committed-stop cleanup fixture removal");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn malformed_selector_is_cleared_by_stop_and_replaced_by_a_fresh_start() {
     require_debug_build();
@@ -1229,7 +1250,7 @@ fn malformed_selector_is_cleared_by_stop_and_replaced_by_a_fresh_start() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn spawn_failures_name_their_cause_on_stderr() {
     require_debug_build();
@@ -1258,7 +1279,7 @@ fn spawn_failures_name_their_cause_on_stderr() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn host_reclaimer_preserves_projection_pins_and_skips_unknown_references() {
     use daemon::projection_lifecycle::{
@@ -1441,7 +1462,7 @@ fn an_open_envelope_pipe_with_no_writer_cannot_hold_start_indefinitely() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sigint_runs_ordered_daemon_teardown() {
     let root = tempfile::tempdir().expect("root");
@@ -1499,7 +1520,7 @@ async fn sigint_runs_ordered_daemon_teardown() {
     assert!(probe.lifetime_lock_free);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retained_generation_restarts_after_source_payload_deletion() {
     let root = tempfile::tempdir().expect("root");
@@ -1548,7 +1569,7 @@ async fn retained_generation_restarts_after_source_payload_deletion() {
 
 /// Two simultaneous `start` commands against one data root race for `transaction.lock`.
 /// Exactly one starts the daemon; the other observes the winner (or its in-flight transaction) and never spawns a second incarnation.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn concurrent_starts_admit_exactly_one_daemon() {
     require_debug_build();
