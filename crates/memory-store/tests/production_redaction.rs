@@ -541,6 +541,7 @@ fn durable_write_registry_references_real_bindings_and_checked_tests() {
             include_str!("production_redaction.rs"),
         ),
         ("lib", store_source),
+        ("curator_jobs", include_str!("curator_jobs.rs")),
         // Kernel oracles live in the extracted crate; the registry still names them.
         (
             "kernel_redaction",

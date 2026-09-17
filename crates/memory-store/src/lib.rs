@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod curator_jobs;
 pub mod memory_classifier_ledger;
 pub(crate) mod task_lease;
 
@@ -2938,6 +2939,7 @@ pub enum DurableWriteFamily {
     KernelAlignmentProjection,
     KernelConsumerControl,
     RedactionReceipts,
+    CuratorJobs,
 }
 
 impl DurableWriteFamily {
@@ -2966,6 +2968,7 @@ impl DurableWriteFamily {
         Self::KernelAlignmentProjection,
         Self::KernelConsumerControl,
         Self::RedactionReceipts,
+        Self::CuratorJobs,
     ];
 
     pub const fn owner_kind(self) -> &'static str {
@@ -2992,6 +2995,7 @@ impl DurableWriteFamily {
             Self::KernelAlignmentProjection => "kernel_alignment_projection",
             Self::KernelConsumerControl => "kernel_consumer_control",
             Self::RedactionReceipts => "redaction_receipts",
+            Self::CuratorJobs => "curator_jobs",
         }
     }
 }
@@ -3140,6 +3144,12 @@ pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
         policy: DurableFieldPolicy::NoUntrustedText,
         preparation: "opaque batch, child scan, and owner-copy IDs with normalized detector metadata only",
         test: "production_redaction::active_note_scan_audit_is_atomic_complete_and_opaque",
+    },
+    DurableWriteRegistration {
+        family: DurableWriteFamily::CuratorJobs,
+        policy: DurableFieldPolicy::Reject,
+        preparation: "exact causal replay then identity rejection; reference-only input JSON rejects protected text",
+        test: "curator_jobs::identities_and_inputs_reject_secrets_and_stay_reference_only",
     },
 ];
 
@@ -5685,6 +5695,7 @@ impl MemoryStore {
             memory_classifier_task_complete_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
         store.prune_transform_session_roots()?;
+        store.ensure_curator_store_identity(current_time_ms())?;
         Ok(store)
     }
 
@@ -8017,6 +8028,15 @@ impl MemoryStore {
         f: impl FnOnce(&storage::GuardedConn<'_>) -> rusqlite::Result<T>,
     ) -> Result<T, storage::StoreError> {
         self.inner.with_conn(f)
+    }
+
+    /// Runs `f` inside one fenced write transaction; an `Err` rolls back every statement it ran.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_fenced_conn_for_test<T>(
+        &self,
+        f: impl FnOnce(&storage::GuardedConn<'_>) -> rusqlite::Result<T>,
+    ) -> Result<T, storage::StoreError> {
+        self.inner.with_conn_fenced(f)
     }
 
     #[cfg(feature = "test-support")]
