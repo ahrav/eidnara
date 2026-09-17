@@ -8,7 +8,7 @@ use daemon::curator::related_memories::{
     MAX_RELATED_CANDIDATES_PER_PAGE, MAX_RELATED_PAGE_HITS, RelatedHit, RelatedMemoryDiscovery,
 };
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::Occurrence;
+use kernel::source_identity::{Occurrence, Span};
 use kernel::{
     ArtifactIngestRequest, CURATOR_CAPTURE_RETENTION_CLASS, CommitIntent, CuratorHoldBinding,
     DecisionPayload, DecisionSpec, Dimension, DomainSpec, KernelStore, MAX_CURATOR_HOLD_REFERENCES,
@@ -203,7 +203,7 @@ impl Fixture {
         )
     }
 
-    /// Publishes one descriptor over `buffer` and returns its object id.
+    /// Publishes one descriptor over the whole of `buffer` and returns its object id.
     fn descriptor(
         &self,
         key: &str,
@@ -212,6 +212,21 @@ impl Fixture {
         identity: &[(&str, &str)],
         evidence: &(String, String),
         buffer: &str,
+    ) -> String {
+        self.spanned_descriptor(key, class, representation, identity, evidence, buffer, None)
+    }
+
+    /// Publishes one descriptor selecting `span` of `buffer` and returns its object id.
+    #[allow(clippy::too_many_arguments)]
+    fn spanned_descriptor(
+        &self,
+        key: &str,
+        class: &str,
+        representation: &str,
+        identity: &[(&str, &str)],
+        evidence: &(String, String),
+        buffer: &str,
+        span: Option<Span>,
     ) -> String {
         let mut published = None;
         self.store
@@ -223,7 +238,7 @@ impl Fixture {
                             identity,
                             revision: "1",
                             representation,
-                            span: None,
+                            span,
                         },
                         source_policy: SourceDescriptorPolicy::Native,
                         domain_id: DOMAIN,
@@ -817,6 +832,113 @@ fn skipped_reads_that_spend_the_batch_still_advance_the_cursor() {
     assert_eq!(rest.completeness, Completeness::Complete);
     assert!(rest.hits.is_empty() && rest.withheld);
     assert!(broker.ledger.conclusions_usable());
+}
+
+#[test]
+fn a_span_descriptor_is_matched_and_excerpted_within_its_span() {
+    let fixture = Fixture::open();
+    // One artifact backs two claims: the first selects the bytes where the subject occurs, the second selects bytes where it does not.
+    let text = "outside: bun builds the workspace | inside: nothing to see here";
+    let split = u64::try_from(text.find('|').unwrap()).unwrap();
+    let evidence = fixture.ingest("shared", text.as_bytes(), false);
+    fixture.decision("decision-front");
+    fixture.spanned_descriptor(
+        "front",
+        "canonical_claims",
+        "decision_summary",
+        &[("object_id", "decision-front")],
+        &evidence,
+        text,
+        Some(Span {
+            start: 0,
+            end: split,
+        }),
+    );
+    fixture.decision("decision-back");
+    fixture.spanned_descriptor(
+        "back",
+        "canonical_claims",
+        "decision_summary",
+        &[("object_id", "decision-back")],
+        &evidence,
+        text,
+        Some(Span {
+            start: split,
+            end: u64::try_from(text.len()).unwrap(),
+        }),
+    );
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let page = fixture.page(&mut discovery, &mut broker, None).unwrap();
+    assert_eq!(page.completeness, Completeness::Complete);
+    assert_eq!(
+        page.hits.len(),
+        1,
+        "only the span carrying the subject is related; the other selection of the same artifact is not"
+    );
+    assert!(!page.withheld);
+    let hit = &page.hits[0];
+    assert!(
+        hit.span.end <= split,
+        "the excerpt stays inside the descriptor's span"
+    );
+    assert_eq!(
+        hit.excerpt,
+        text.as_bytes()[hit.span.start as usize..hit.span.end as usize]
+    );
+    assert!(text_of(hit).contains("workspace"));
+}
+
+#[test]
+fn a_budget_spent_after_a_disclosure_ends_the_page_with_its_hits() {
+    let fixture = Fixture::open();
+    seed(&fixture, 8);
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let budget = EvalBudget::unbounded();
+    let reads_before = fixture.store.verified_object_reads_for_test();
+    // Cancel the budget once the store has served the first disclosure's object read (the probe read it once, the disclosure a second time); the page is mid-way through its candidates.
+    let store = &fixture.store;
+    let page = std::thread::scope(|scope| {
+        let watcher = budget.clone();
+        scope.spawn(move || {
+            while store.verified_object_reads_for_test() < reads_before + 2 {
+                std::thread::yield_now();
+            }
+            watcher.cancel();
+        });
+        discovery.page(store, &mut broker, None, &budget, fixture.now)
+    });
+    let disclosed = broker.ledger.disclosed().count();
+    assert!(
+        disclosed >= 1,
+        "at least one hit was disclosed before the budget went"
+    );
+    let page = page.expect("a page that disclosed something is delivered, not refused");
+    assert_eq!(page.completeness, Completeness::BudgetBound);
+    assert_eq!(
+        page.hits.len(),
+        disclosed,
+        "every disclosed hit reaches the caller"
+    );
+    assert!(page.next_cursor.is_some());
+    // The rest of the inventory follows on a live budget without disclosing any decision twice.
+    broker.accounting.end_batch();
+    let rest = fixture
+        .page(&mut discovery, &mut broker, page.next_cursor.as_deref())
+        .unwrap();
+    assert_eq!(rest.completeness, Completeness::Complete);
+    let mut delivered = owners(&broker);
+    delivered.sort();
+    delivered.dedup();
+    assert_eq!(delivered.len(), page.hits.len() + rest.hits.len());
+    assert_eq!(
+        delivered.len(),
+        7,
+        "seven of the eight seeded decisions are related"
+    );
 }
 
 #[test]

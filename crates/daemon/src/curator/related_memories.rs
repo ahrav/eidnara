@@ -1,6 +1,6 @@
 //! Bounded, read-only discovery of related memories for a Curator run.
 //!
-//! Discovery walks the Kernel's live canonical-claim and promoted-memory descriptors at one reusable snapshot in keyset order (Q17), examines a bounded number of candidates per call, and keeps the ones whose artifact text contains a term of the subject. Relatedness is tested through the broker's read-only probe, which judges eligibility, applies the egress verdict, and render-checks the whole artifact; a probe-only candidate receives no alias, hold, retained bytes, or charge. A matching candidate is disclosed through the broker's ordinary read path, so every hit is held, revalidated, tagged, charged, and added to the disclosed-input union. Discovery commits no state and records no read repair.
+//! Discovery walks the Kernel's live canonical-claim and promoted-memory descriptors at one reusable snapshot in keyset order (Q17), examines a bounded number of candidates per call, and keeps the ones whose text, the bytes their descriptor's span selects from the artifact, contains a term of the subject. Relatedness is tested through the broker's read-only probe, which judges eligibility, applies the egress verdict, and render-checks the whole artifact; a probe-only candidate receives no alias, hold, retained bytes, or charge. A matching candidate is disclosed through the broker's ordinary read path, so every hit is held, revalidated, tagged, charged, and added to the disclosed-input union. Discovery commits no state and records no read repair.
 //!
 //! A page ends with a run-local continuation cursor or an explicit completeness code; zero hits never prove absence, and a cursor the run did not issue is refused rather than restarting discovery. Excerpts follow Q19: a half-open byte span on UTF-8 boundaries into the referenced artifact, at most [`MAX_EXCERPT_BYTES`] long.
 
@@ -52,6 +52,8 @@ pub enum Completeness {
     PageFull,
     /// The model batch has no operation left, or a broker capacity bound stopped the page after at least one hit; the cursor resumes at the undelivered candidate.
     CapacityBound,
+    /// The caller's budget expired or was cancelled after the page passed at least one candidate; the cursor resumes at the next.
+    BudgetBound,
 }
 
 /// One related memory, disclosed through the broker.
@@ -150,21 +152,30 @@ impl RelatedMemoryDiscovery {
             let Some(max_rows) = NonZeroUsize::new(remaining.min(MAX_RELATED_PAGE_HITS)) else {
                 return Ok(self.finish(cursor, hits, withheld, Completeness::CandidateBound));
             };
-            let page = store
-                .live_source_descriptors(
-                    CLASSES[cursor.class_index],
-                    cursor.tip,
-                    cursor.after.as_deref(),
-                    max_rows,
-                    budget,
-                )
-                .map_err(|_| refusal(RefusalCode::Store))?;
+            let page = match store.live_source_descriptors(
+                CLASSES[cursor.class_index],
+                cursor.tip,
+                cursor.after.as_deref(),
+                max_rows,
+                budget,
+            ) {
+                Ok(page) => page,
+                Err(kernel::KernelError::Deadline) if advanced => {
+                    return Ok(self.finish(cursor, hits, withheld, Completeness::BudgetBound));
+                }
+                Err(_) => return Err(refusal(RefusalCode::Store)),
+            };
             examined += page.rows.len();
             let revisions = decision_revisions(store, &page.rows)?;
             for row in &page.rows {
                 // Every early return below leaves `cursor` before this row, so the next page examines it again; a row is only passed once it is delivered or skipped.
-                // The store honors the budget only while fetching descriptors; probing and disclosing a candidate run on unbudgeted reads, so the deadline and cancellation are polled here, once per candidate.
-                budget.check().map_err(|_| refusal(RefusalCode::Store))?;
+                // The store honors the budget only while fetching descriptors; probing and disclosing a candidate run on unbudgeted reads, so the deadline and cancellation are polled here, once per candidate. A budget spent after the page passed a candidate ends the page with what it has: the hits are already disclosed and charged, and the cursor keeps them from being disclosed again.
+                if budget.check().is_err() {
+                    if advanced {
+                        return Ok(self.finish(cursor, hits, withheld, Completeness::BudgetBound));
+                    }
+                    return Err(refusal(RefusalCode::Store));
+                }
                 let step = match expectation(row, &revisions) {
                     None => Step::Skipped { probed_bytes: 0 },
                     Some(expectation) => {
@@ -251,8 +262,8 @@ impl RelatedMemoryDiscovery {
         now_ms: i64,
     ) -> Result<Step, Refusal> {
         let max_bytes = room.min(MAX_PROBE_ARTIFACT_BYTES);
-        let bytes = match broker.probe_canonical_source(store, expectation, max_bytes) {
-            Ok(Probed::Bytes(bytes)) => bytes,
+        let (bytes, offset) = match broker.probe_canonical_source(store, expectation, max_bytes) {
+            Ok(Probed::Bytes { bytes, start }) => (bytes, start),
             // An artifact no page could probe is skipped; one this page has no room left for waits for the next page.
             Ok(Probed::TooLarge { byte_length }) if byte_length > MAX_PROBE_ARTIFACT_BYTES => {
                 return Ok(Step::Skipped { probed_bytes: 0 });
@@ -278,7 +289,8 @@ impl RelatedMemoryDiscovery {
             return Ok(Step::Stop(Completeness::CapacityBound));
         }
         let alias = broker.aliases.issue(expectation.clone());
-        let span = span.start as u64..span.end as u64;
+        // The probe returned the descriptor's selection; the disclosed span is located in the artifact.
+        let span = offset + span.start as u64..offset + span.end as u64;
         let read = match broker.read(store, alias.as_str(), Some(span.clone()), now_ms) {
             Ok(read) => read,
             Err(refusal) if refusal.code.is_capacity() => return Err(refusal),

@@ -485,8 +485,8 @@ impl Default for InvestigationAccounting {
 /// What a read-only probe of a canonical source produced.
 #[derive(Debug)]
 pub(crate) enum Probed {
-    /// The whole artifact, judged, policy-checked, and render-checked, but not disclosed.
-    Bytes(Vec<u8>),
+    /// The bytes the descriptor selects from an artifact that was judged, policy-checked, and render-checked whole but not disclosed, and their offset in the artifact.
+    Bytes { bytes: Vec<u8>, start: u64 },
     /// The artifact is longer than the caller's bound; nothing was read.
     TooLarge { byte_length: u64 },
     /// The artifact was read but cannot be disclosed: it is unreadable or fails the render check. The bytes it cost are reported so a caller can charge them.
@@ -724,7 +724,7 @@ impl EvidenceBroker {
                 decision_source_revision,
                 ..
             } => {
-                let judged = self.judge_canonical_source(store, Some(&alias), &expectation)?;
+                let (judged, _) = self.judge_canonical_source(store, Some(&alias), &expectation)?;
                 let held = self.hold_evidence(store, &alias, evidence_id, now_ms)?;
                 let bytes = self.load_range(store, &alias, &held, range.clone())?;
                 (
@@ -760,14 +760,14 @@ impl EvidenceBroker {
         })
     }
 
-    /// Reads a canonical source's whole artifact without disclosing it: the same Kernel judgement, descriptor check, egress verdict, and render check as [`Self::read`], but no alias, hold, retained buffer, charge, or ledger entry. Related-memory discovery uses it to test relatedness; a candidate that passes is then disclosed through `read`, which revalidates. `Probed::TooLarge` reports an artifact longer than `max_bytes` before any byte is read; `Probed::Refused` reports one that was read and then refused, with the bytes it cost. Only canonical sources are probed; any other expectation is refused as unsupported.
+    /// Reads a canonical source's artifact without disclosing it: the same Kernel judgement, descriptor check, egress verdict, and render check as [`Self::read`], but no alias, hold, retained buffer, charge, or ledger entry. Related-memory discovery uses it to test relatedness; a candidate that passes is then disclosed through `read`, which revalidates. The whole artifact is read and render-checked, and the bytes the descriptor's span selects are returned with the span's start: only those bytes carry the descriptor's provenance. `Probed::TooLarge` reports an artifact longer than `max_bytes` before any byte is read; `Probed::Refused` reports one that was read and then refused, with the bytes it cost. Only canonical sources are probed; any other expectation is refused as unsupported.
     pub(crate) fn probe_canonical_source(
         &self,
         store: &KernelStore,
         expectation: &ReferenceExpectation,
         max_bytes: u64,
     ) -> Result<Probed, Refusal> {
-        self.judge_canonical_source(store, None, expectation)?;
+        let (_, detail) = self.judge_canonical_source(store, None, expectation)?;
         let ReferenceExpectation::CanonicalSource {
             artifact_digest,
             evidence_id,
@@ -794,16 +794,27 @@ impl EvidenceBroker {
         if check_render(&bytes, None).is_err() {
             return Ok(Probed::Refused { byte_length });
         }
-        Ok(Probed::Bytes(bytes))
+        let Some((start, end)) = detail.span else {
+            return Ok(Probed::Bytes { bytes, start: 0 });
+        };
+        let selected = usize::try_from(start)
+            .ok()
+            .zip(usize::try_from(end).ok())
+            .and_then(|(start, end)| bytes.get(start..end))
+            .ok_or_else(|| refuse(None, RefusalCode::ExpectationChanged))?;
+        Ok(Probed::Bytes {
+            bytes: selected.to_vec(),
+            start,
+        })
     }
 
-    /// Judges a canonical descriptor together with its originating decision, then checks the live descriptor detail against the expectation. The decision's standing caps the descriptor's (Q34): a retracted, superseded, or hidden decision revokes every form derived from it. Any other expectation kind is refused as unsupported.
+    /// Judges a canonical descriptor together with its originating decision, then checks the live descriptor detail against the expectation and returns both. The decision's standing caps the descriptor's (Q34): a retracted, superseded, or hidden decision revokes every form derived from it. Any other expectation kind is refused as unsupported.
     fn judge_canonical_source(
         &self,
         store: &KernelStore,
         alias: Option<&Alias>,
         expectation: &ReferenceExpectation,
-    ) -> Result<JudgedAt, Refusal> {
+    ) -> Result<(JudgedAt, SourceDescriptorDetail), Refusal> {
         let ReferenceExpectation::CanonicalSource {
             object_id,
             class,
@@ -836,7 +847,7 @@ impl EvidenceBroker {
         {
             return Err(refuse(alias, RefusalCode::ExpectationChanged));
         }
-        Ok(judged)
+        Ok((judged, detail))
     }
 
     /// The Kernel's egress verdict folds every live reference to the digest for this destination; default-Sensitive policy means unproven evidence never reaches a remote model.
