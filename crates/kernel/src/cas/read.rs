@@ -16,6 +16,30 @@ impl KernelStore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// The stored byte length of the artifact `handle` names, or `None` when no live evidence row pairs that evidence id with that digest. Reads metadata only, so a caller can bound a read before issuing it.
+    ///
+    /// Returns `InvalidInput` for malformed digests and `ReferenceUnavailable` when metadata cannot be read.
+    pub fn artifact_byte_length(
+        &self,
+        handle: &ArtifactHandle,
+    ) -> Result<Option<u64>, ArtifactError> {
+        if !is_artifact_digest(&handle.digest) {
+            return Err(ArtifactError::new(ArtifactErrorKind::InvalidInput));
+        }
+        let unavailable = || ArtifactError::new(ArtifactErrorKind::ReferenceUnavailable);
+        let reader = self.lock_reader().map_err(|_| unavailable())?;
+        let length: Option<i64> = reader
+            .query_row(
+                "SELECT byte_length FROM evidence_meta
+                 WHERE evidence_id=?1 AND artifact_digest=?2 AND invalidated_commit_seq IS NULL",
+                [&handle.evidence_id, &handle.digest],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| unavailable())?;
+        Ok(length.map(|length| u64::try_from(length).unwrap_or(0)))
+    }
+
     /// Reads and verifies an artifact referenced by live evidence.
     ///
     /// The metadata snapshot must contain the exact evidence and digest pair, and no purge tombstone may exist. Object reads reject links and non-regular files, enforce the object size cap, and verify the SHA-256 digest before returning bytes.

@@ -225,6 +225,8 @@ pub enum RefusalCode {
     RenderCheck,
     #[error("undecodable")]
     Undecodable,
+    #[error("invalid_cursor")]
+    InvalidCursor,
     #[error("unsupported_question")]
     UnsupportedQuestion,
     #[error("store")]
@@ -436,6 +438,11 @@ impl InvestigationAccounting {
         self.batch_operations = 0;
     }
 
+    /// Operations the current batch can still admit. A caller that stops at zero avoids provoking a `BatchLimit` refusal, which would mark the run's disclosure partial.
+    pub fn batch_headroom(&self) -> usize {
+        MAX_OPERATIONS_PER_BATCH.saturating_sub(self.batch_operations)
+    }
+
     /// Charges rendered bytes before they are appended; a charge that would exceed the bound is refused whole.
     pub fn charge_render(&mut self, alias: Option<&Alias>, bytes: u64) -> Result<(), Refusal> {
         let total = self.model_visible_bytes.saturating_add(bytes);
@@ -459,6 +466,15 @@ impl Default for InvestigationAccounting {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// What a read-only probe of a canonical source produced.
+#[derive(Debug)]
+pub(crate) enum Probed {
+    /// The whole artifact, judged, policy-checked, and render-checked, but not disclosed.
+    Bytes(Vec<u8>),
+    /// The artifact is longer than the caller's bound; nothing was read.
+    TooLarge { byte_length: u64 },
 }
 
 /// What one successful read returns to the coordinator: the rendered buffer, the origin key two forms of one decision share, and the lineage member the disclosure added.
@@ -639,13 +655,13 @@ impl EvidenceBroker {
             } => {
                 let judged = self.judge(
                     store,
-                    &alias,
+                    Some(&alias),
                     object_id,
                     *source_revision,
                     artifact_digest,
                     None,
                 )?;
-                let detail = self.descriptor(store, &alias, object_id, judged.tip)?;
+                let detail = self.descriptor(store, Some(&alias), object_id, judged.tip)?;
                 if detail.class != class.code()
                     || detail.occurrence_tuple != *occurrence_tuple
                     || detail.artifact_digest != *artifact_digest
@@ -675,35 +691,11 @@ impl EvidenceBroker {
                 )
             }
             ReferenceExpectation::CanonicalSource {
-                object_id,
-                class,
-                source_revision,
-                artifact_digest,
                 evidence_id,
-                originating_decision_id,
                 decision_source_revision,
+                ..
             } => {
-                // The originating decision's standing caps the descriptor's (Q34): a retracted, superseded, or hidden decision revokes every form derived from it.
-                let judged = self.judge(
-                    store,
-                    &alias,
-                    object_id,
-                    *source_revision,
-                    artifact_digest,
-                    Some((originating_decision_id, *decision_source_revision)),
-                )?;
-                let detail = self.descriptor(store, &alias, object_id, judged.tip)?;
-                let decision_in_tuple = detail
-                    .identity
-                    .iter()
-                    .any(|(_, value)| value == originating_decision_id);
-                if detail.class != class.code()
-                    || !decision_in_tuple
-                    || detail.artifact_digest != *artifact_digest
-                    || detail.evidence_id != *evidence_id
-                {
-                    return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
-                }
+                let judged = self.judge_canonical_source(store, Some(&alias), &expectation)?;
                 let held = self.hold_evidence(store, &alias, evidence_id, now_ms)?;
                 let bytes = self.load_range(store, &alias, &held, range.clone())?;
                 (
@@ -739,6 +731,99 @@ impl EvidenceBroker {
         })
     }
 
+    /// Reads a canonical source's whole artifact without disclosing it: the same Kernel judgement, descriptor check, egress verdict, and render check as [`Self::read`], but no alias, hold, retained buffer, charge, or ledger entry. Related-memory discovery uses it to test relatedness; a candidate that passes is then disclosed through `read`, which revalidates. `Probed::TooLarge` reports an artifact longer than `max_bytes` before any byte is read. Only canonical sources are probed; any other expectation is refused as unsupported.
+    pub(crate) fn probe_canonical_source(
+        &self,
+        store: &KernelStore,
+        expectation: &ReferenceExpectation,
+        max_bytes: u64,
+    ) -> Result<Probed, Refusal> {
+        self.judge_canonical_source(store, None, expectation)?;
+        let ReferenceExpectation::CanonicalSource {
+            artifact_digest,
+            evidence_id,
+            ..
+        } = expectation
+        else {
+            return Err(refuse(None, RefusalCode::UnsupportedQuestion));
+        };
+        let handle = ArtifactHandle {
+            digest: artifact_digest.clone(),
+            evidence_id: evidence_id.clone(),
+        };
+        self.egress_allowed(store, None, &handle)?;
+        let byte_length = store
+            .artifact_byte_length(&handle)
+            .map_err(|_| refuse(None, RefusalCode::Store))?
+            .ok_or_else(|| refuse(None, RefusalCode::ExpectationChanged))?;
+        if byte_length > max_bytes {
+            return Ok(Probed::TooLarge { byte_length });
+        }
+        let bytes = store
+            .read_artifact(&handle)
+            .map_err(|_| refuse(None, RefusalCode::ExpectationChanged))?;
+        check_render(&bytes, None)?;
+        Ok(Probed::Bytes(bytes))
+    }
+
+    /// Judges a canonical descriptor together with its originating decision, then checks the live descriptor detail against the expectation. The decision's standing caps the descriptor's (Q34): a retracted, superseded, or hidden decision revokes every form derived from it. Any other expectation kind is refused as unsupported.
+    fn judge_canonical_source(
+        &self,
+        store: &KernelStore,
+        alias: Option<&Alias>,
+        expectation: &ReferenceExpectation,
+    ) -> Result<JudgedAt, Refusal> {
+        let ReferenceExpectation::CanonicalSource {
+            object_id,
+            class,
+            source_revision,
+            artifact_digest,
+            evidence_id,
+            originating_decision_id,
+            decision_source_revision,
+        } = expectation
+        else {
+            return Err(refuse(alias, RefusalCode::UnsupportedQuestion));
+        };
+        let judged = self.judge(
+            store,
+            alias,
+            object_id,
+            *source_revision,
+            artifact_digest,
+            Some((originating_decision_id, *decision_source_revision)),
+        )?;
+        let detail = self.descriptor(store, alias, object_id, judged.tip)?;
+        let decision_in_tuple = detail
+            .identity
+            .iter()
+            .any(|(_, value)| value == originating_decision_id);
+        if detail.class != class.code()
+            || !decision_in_tuple
+            || detail.artifact_digest != *artifact_digest
+            || detail.evidence_id != *evidence_id
+        {
+            return Err(refuse(alias, RefusalCode::ExpectationChanged));
+        }
+        Ok(judged)
+    }
+
+    /// The Kernel's egress verdict folds every live reference to the digest for this destination; default-Sensitive policy means unproven evidence never reaches a remote model.
+    fn egress_allowed(
+        &self,
+        store: &KernelStore,
+        alias: Option<&Alias>,
+        handle: &ArtifactHandle,
+    ) -> Result<(), Refusal> {
+        let facts = store
+            .artifact_egress_facts(handle, self.binding.destination)
+            .map_err(|_| refuse(alias, RefusalCode::ExpectationChanged))?;
+        if facts.eligibility != ArtifactEligibility::Allowed {
+            return Err(refuse(alias, RefusalCode::PolicyBlocked));
+        }
+        Ok(())
+    }
+
     /// Grows the execution hold over the artifact before any byte is read, then returns the held facts.
     fn hold_evidence(
         &self,
@@ -766,19 +851,14 @@ impl EvidenceBroker {
         let held = held
             .pop()
             .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
-        // The Kernel's egress verdict folds every live reference to the digest for this destination; default-Sensitive policy means unproven evidence never reaches a remote model.
-        let facts = store
-            .artifact_egress_facts(
-                &ArtifactHandle {
-                    digest: held.artifact_digest.clone(),
-                    evidence_id: held.evidence_id.clone(),
-                },
-                self.binding.destination,
-            )
-            .map_err(|_| refuse(Some(alias), RefusalCode::ExpectationChanged))?;
-        if facts.eligibility != ArtifactEligibility::Allowed {
-            return Err(refuse(Some(alias), RefusalCode::PolicyBlocked));
-        }
+        self.egress_allowed(
+            store,
+            Some(alias),
+            &ArtifactHandle {
+                digest: held.artifact_digest.clone(),
+                evidence_id: held.evidence_id.clone(),
+            },
+        )?;
         Ok(held)
     }
 
@@ -850,7 +930,7 @@ impl EvidenceBroker {
     fn judge(
         &self,
         store: &KernelStore,
-        alias: &Alias,
+        alias: Option<&Alias>,
         object_id: &str,
         source_revision: i64,
         artifact_digest: &str,
@@ -875,10 +955,10 @@ impl EvidenceBroker {
                 Surface::ExplicitSearch,
                 &candidates,
             )
-            .map_err(|_| refuse(Some(alias), RefusalCode::Store))?;
+            .map_err(|_| refuse(alias, RefusalCode::Store))?;
         // A snapshot taken during a classification change is not a grant.
         if !batch.is_reusable() {
-            return Err(refuse(Some(alias), RefusalCode::Store));
+            return Err(refuse(alias, RefusalCode::Store));
         }
         for (position, verdict) in batch.verdicts.iter().enumerate() {
             let is_decision = position == 1;
@@ -899,7 +979,7 @@ impl EvidenceBroker {
                 }),
             };
             if let Some(code) = code {
-                return Err(refuse(Some(alias), code));
+                return Err(refuse(alias, code));
             }
         }
         let descriptor = batch.verdicts[0];
@@ -914,21 +994,21 @@ impl EvidenceBroker {
     fn descriptor(
         &self,
         store: &KernelStore,
-        alias: &Alias,
+        alias: Option<&Alias>,
         object_id: &str,
         tip: i64,
     ) -> Result<SourceDescriptorDetail, Refusal> {
         let row = store
             .observation_for_object_as_of(object_id, tip)
-            .map_err(|_| refuse(Some(alias), RefusalCode::Store))?
+            .map_err(|_| refuse(alias, RefusalCode::Store))?
             .filter(|row| row.observation_kind == SOURCE_DESCRIPTOR_KIND)
-            .ok_or_else(|| refuse(Some(alias), RefusalCode::ExpectationChanged))?;
+            .ok_or_else(|| refuse(alias, RefusalCode::ExpectationChanged))?;
         row.payload
             .detail
             .as_deref()
             .and_then(|detail| serde_json::from_str::<SourceDescriptorDetail>(detail).ok())
             .filter(|detail| detail.descriptor_version == kernel::SOURCE_DESCRIPTOR_DETAIL_VERSION)
-            .ok_or_else(|| refuse(Some(alias), RefusalCode::ExpectationChanged))
+            .ok_or_else(|| refuse(alias, RefusalCode::ExpectationChanged))
     }
 }
 
