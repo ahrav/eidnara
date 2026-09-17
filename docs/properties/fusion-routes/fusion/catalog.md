@@ -47,7 +47,7 @@ it.
 | Slug | Type | Reachability | Semantics | Status | Confidence |
 | --- | --- | --- | --- | --- | --- |
 | [fusion-occurrence-identity-never-collapses-payload](#fusion-occurrence-identity-never-collapses-payload) | safety | test-only | always | active | high |
-| [fusion-selection-digest-tracks-identity-tuple](#fusion-selection-digest-tracks-identity-tuple) | safety | test-only | always | active | high |
+| [fusion-selection-digest-tracks-identity-tuple](#fusion-selection-digest-tracks-identity-tuple) | safety | default-production | always | active | high |
 | [fusion-parent-groups-are-not-voters](#fusion-parent-groups-are-not-voters) | safety | test-only | always | active | high |
 | [fusion-one-contribution-per-lane-per-occurrence](#fusion-one-contribution-per-lane-per-occurrence) | safety | test-only | always | active | high |
 | [fusion-lane-positions-are-assigned-once-from-declared-lane-order](#fusion-lane-positions-are-assigned-once-from-declared-lane-order) | safety | test-only | always | active | high |
@@ -111,31 +111,38 @@ Open questions: None.
 ### fusion-selection-digest-tracks-identity-tuple
 
 Type: safety
-Reachability: test-only - `SelectionDigest::derive`, `PreparationDigest::derive`,
-and `SelectedSpan::new` have no caller outside
-`crates/retrieval/tests/identity.rs` (same grep as the record above); the
-prepare route that would derive them is RP2.7.U4 work.
+Reachability: default-production - `retrieval.prepare` derives both digests
+for every prepared context: `crates/daemon/src/edit_receipts.rs:352-380`
+(`Context::digest`) builds each `SelectedSpan::new`, hashes the selection
+with `SelectionDigest::derive`, and binds the daemon's accounting profile
+through `PreparationDigest::derive`; the same digest is compared at
+`retrieval.apply`.
 Status: active
 Exercised: yes - `crates/retrieval/tests/identity.rs`
 `selection_digest_tracks_order_and_membership`,
 `selected_spans_normalize_the_whole_buffer_and_refuse_malformed_ranges`, and
-`preparation_digest_tracks_every_component_and_never_merges_component_splits`.
+`preparation_digest_tracks_every_component_and_never_merges_component_splits`;
+`crates/daemon/tests/edit_receipts.rs`
+`the_daemon_binds_its_profile_at_prepare_and_an_apply_must_echo_it_exactly`
+covers the route.
 Guarantee: The selection digest changes whenever fused order or membership
 changes, the preparation digest changes whenever the context revision,
-representation, any selected span, or the selection changes, and no two input
-tuples with different component splits derive one digest.
+representation, any selected span, the selection, or the bound accounting
+profile identity or revision changes, and no two input tuples with different
+component splits derive one digest.
 Check: `always` - the digest of a selection equals itself and differs from the
 digest of any reordering, extension, or truncation; the preparation digest
 differs for each single-component change including a span bound, a
-whole-buffer versus range selection, span order, span count, and selection; a
+whole-buffer versus range selection, span order, span count, selection,
+profile identity, and profile revision; a
 whole-buffer range normalizes to the one whole-buffer spelling and a reversed
 or out-of-range span is refused; the
 pair `("ab", "c")` and `("a", "bc")` derive different digests. `always`
 because every derivation must be sensitive to every component.
 Fault/timing angle: none; derivation is a pure function.
 Required faults and enabling state: A two-occurrence selection and its
-reorderings; a preparation input set with one component varied at a time; a
-component-split pair.
+reorderings; a preparation input set with one component varied at a time,
+the profile identity and revision included; a component-split pair.
 Confidence: high - [evidence](evidence/fusion-selection-digest-tracks-identity-tuple.md).
 Length delimiting is written before every component and a count before every
 sequence, following the kernel operation-identity derivation.
@@ -144,10 +151,10 @@ the same length-prefix discipline to commit intents, status unaudited; none
 for selection or preparation digests before this change.
 Impact: A stale or foreign preparation could pass as the one prepared, and a
 retry could apply an edit the caller never selected.
-Open questions:
-
-- Whether the preparation digest also binds the accounting profile is decided
-  by RP2.7.U4 with RP2.8; the idempotency key binds it separately today.
+Open questions: None. RP2.8 Q5 (#636) decided that the daemon owns the
+accounting profile and binds its identity and revision into the preparation
+digest under the domain tag `eidnara-retrieval-prepared-context-v1`
+(`crates/retrieval/src/fusion/identity.rs:290`, `:309-310`).
   (needs human input)
 
 ### fusion-parent-groups-are-not-voters
@@ -427,29 +434,30 @@ holding would make another likely to hold. Dominance is a hypothesis, not proof.
 - **One identifier behind the selection digest.**
   `fusion-occurrence-identity-never-collapses-payload` is upstream of
   `fusion-selection-digest-tracks-identity-tuple`: `SelectionDigest::derive`
-  hashes `OccurrenceId::as_bytes` (`crates/retrieval/src/fusion/identity.rs:266-273`)
+  hashes `OccurrenceId::as_bytes` (`crates/retrieval/src/fusion/identity.rs:277-286`)
   and the digest tests build their selections from distinct synthetic
   identifiers, so an encoder that collapsed two occurrences would hand the
   digest one input where the record expects two and the digest checks would
   pass. Only the first record detects that fault on the selection path.
 - **One tuple encoding behind the parent key, with overlapping detection.**
   `ParentGroupKey::derive` consumes the raw kernel tuple and an explicit
-  revision, not the occurrence identifier (`identity.rs:176-190`), so
+  revision, not the occurrence identifier (`identity.rs:184-200`), so
   `fusion-parent-groups-are-not-voters` shares the encoding with the first
   record rather than depending on its digest. Its test also asserts five
   distinct occurrence identifiers and a five-entry lane ranking over the same
-  sources (`crates/retrieval/tests/identity.rs:472`, `:478`), so an identifier
+  sources (`crates/retrieval/tests/identity.rs:507`, `:513`), so an identifier
   collapse across span, revision, or representation is caught by both records.
   Neither dominates the other.
 - **Selection inside preparation.**
-  `PreparationDigest::derive` hashes the selection digest as its last component
-  (`identity.rs:277-299`), so `fusion-selection-digest-tracks-identity-tuple`
+  `PreparationDigest::derive` hashes the selection digest after the spans and
+  before the two accounting profile components
+  (`identity.rs:288-313`), so `fusion-selection-digest-tracks-identity-tuple`
   covers both digests under one record: a selection reordering changes the
   preparation digest through the selection digest, and a span change reaches
   only the preparation digest. The two derivations use distinct domain strings
-  (`identity.rs:267`, `:278`), so a selection digest can never be presented as
-  a preparation digest. The record's open question on binding the accounting
-  profile is a preparation-only concern.
+  (`identity.rs:279`, `:290`), so a selection digest can never be presented as
+  a preparation digest. The accounting profile enters only the preparation
+  digest.
 - **Grouping beside, never inside, ranking.**
   `fusion-parent-groups-are-not-voters` and
   `fusion-occurrence-identity-never-collapses-payload` partition the tuple: the

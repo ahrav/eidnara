@@ -371,6 +371,25 @@ describe("prepare, apply, confirm", () => {
         expect(latch.isDenied("replacement", { ...ROUTE, routeEpoch: 8 })).toBe(false);
     });
 
+    it("latches a capability terminal answered at apply so the next run falls back to append", async () => {
+        const { calls, transport } = daemon((call) => {
+            if (call.method === "retrieval.prepare") return prepared();
+            return { kind: "terminal", terminal: "capability_unsupported", class: "replacement" };
+        });
+        const latch = new CapabilityLatch();
+        const app = new ContextApplication(transport, latch);
+        const result = await app.run("replace", target());
+        expect(result).toEqual({
+            kind: "refused",
+            terminal: "capability_unsupported",
+            cls: "replacement",
+            reason: undefined,
+        });
+        expect(calls.map((call) => call.method)).toEqual(["retrieval.prepare", "retrieval.apply"]);
+        expect(latch.isDenied("replacement", ROUTE)).toBe(true);
+        expect(latch.chooseAction("replace", ROUTE)).toBe("append");
+    });
+
     it("reports typed refusals without publishing and never retries a non-capability terminal", async () => {
         const cases: Array<[Terminal, "retrieval.prepare" | "retrieval.apply"]> = [
             ["profile_mismatch", "retrieval.apply"],

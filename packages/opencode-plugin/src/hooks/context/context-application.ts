@@ -273,7 +273,11 @@ export class ContextApplication {
             accounting_profile: profile,
         });
         const refusedApply = this.refusal(applyAnswer);
-        if (refusedApply) return refusedApply;
+        if (refusedApply) {
+            // The daemon gates the class again at apply; a denial there latches like one at prepare.
+            this.latch.observeTerminal(refusedApply.terminal, refusedApply.cls, target.route);
+            return refusedApply;
+        }
         const applied = parseApplied(applyAnswer);
         if (applied.kind === "failure") return applied;
         if (applied.kind === "receipt") {
