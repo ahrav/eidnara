@@ -113,9 +113,22 @@ pub fn decode_shape(bytes: &[u8], dimension: u32) -> Result<Vec<f32>, RowRejecti
 
 /// Checks truncation and dimension; callers validate finiteness and norm with [`validate_from_sum`] when a block carries the row's sum of squares.
 pub fn decode_length(bytes: &[u8], dimension: u32) -> Result<Vec<f32>, RowRejection> {
+    let mut row = Vec::new();
+    decode_length_into(bytes, dimension, &mut row)?;
+    Ok(row)
+}
+
+/// [`decode_length`] into a reused buffer, so a walk decodes every row without allocating for it.
+pub fn decode_length_into(
+    bytes: &[u8],
+    dimension: u32,
+    into: &mut Vec<f32>,
+) -> Result<(), RowRejection> {
     let words = decode_words(bytes)?;
     check_dimension(words.len(), dimension)?;
-    Ok(words.collect())
+    into.clear();
+    into.extend(words);
+    Ok(())
 }
 
 pub fn decode(bytes: &[u8], layout: &RowLayout) -> Result<Vec<f32>, RowRejection> {

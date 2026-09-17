@@ -46,14 +46,17 @@ pub struct EligibilityCandidate {
 impl EligibilityCandidate {
     /// Validates identity fields without acquiring a kernel reader.
     pub fn validate(&self) -> Result<(), KernelError> {
-        if self.object_id.is_empty() || self.object_id.len() > MAX_ELIGIBILITY_OBJECT_ID_BYTES {
+        Self::validate_fields(&self.object_id, self.artifact_digest.as_deref())
+    }
+
+    pub fn validate_fields(
+        object_id: &str,
+        artifact_digest: Option<&str>,
+    ) -> Result<(), KernelError> {
+        if object_id.is_empty() || object_id.len() > MAX_ELIGIBILITY_OBJECT_ID_BYTES {
             return Err(KernelError::InvalidInput);
         }
-        if self
-            .artifact_digest
-            .as_deref()
-            .is_some_and(|digest| !is_artifact_digest(digest))
-        {
+        if artifact_digest.is_some_and(|digest| !is_artifact_digest(digest)) {
             return Err(KernelError::InvalidInput);
         }
         Ok(())

@@ -156,7 +156,8 @@ tombstoned, or corrupt-payload optional row is excluded as `Duplicate`,
 `Missing`, `Excluded(Retracted)`, `Stale`, `Stale`, or `Corrupt` in the order
 found, a repeated request for a missing identity yields `Duplicate` for the
 later request and `Missing` for the first, the duplicate of a live row is read
-and loaded once, the corrupt load is not charged, and the surviving rows are
+and loaded once, the corrupt row counts as loaded before its digest is checked
+(the read is the load, as in `required/`), and the surviving rows are
 admitted. `always` because
 coverage is asserted per identity, not by aggregate count.
 Fault/timing angle: none.

@@ -621,8 +621,8 @@ fn a_corrupt_optional_payload_is_excluded_and_the_scan_continues() {
     );
     assert_eq!(
         trace.payload_loads(),
-        2,
-        "the required payload and the sound optional payload; the corrupt load is not charged"
+        3,
+        "the read is the load: the corrupt bytes came back and count before their digest is checked"
     );
 }
 

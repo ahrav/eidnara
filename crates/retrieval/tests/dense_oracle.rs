@@ -73,7 +73,11 @@ fn a_population_larger_than_k_yields_the_reference_prefix_and_visits_every_requi
         "{:?}",
         ranking.consumed
     );
-    assert!(ranking.consumed.batches <= ranking.consumed.pages + 1);
+    assert!(
+        ranking.consumed.batches <= ranking.consumed.pages + 1,
+        "a page of two rows is within 2k, so its selected rows fold into one batch: {:?}",
+        ranking.consumed
+    );
     assert!(ranking.consumed.excluded.is_empty());
     assert!(ranking.snapshot.is_some());
     for row in &ranking.ranked {
@@ -1146,11 +1150,151 @@ fn cancellation_after_a_page_is_judged_keeps_every_exclusion_of_that_page() {
         Completion::Incomplete(IncompleteReason::BudgetExhausted)
     );
     assert!(ranking.ranked.is_empty());
-    assert_eq!(ranking.consumed.judged, 8);
+    assert_eq!(
+        ranking.consumed.judged, 3,
+        "the first batch of a page wider than k holds its k best rows, alpha among them"
+    );
     assert_eq!(
         ranking.consumed.excluded,
         vec![(EligibilityVerdict::Hidden, 1)],
         "a judged exclusion counts whether or not its page was scored"
+    );
+}
+
+#[test]
+fn a_page_wider_than_k_judges_its_k_best_rows_and_nothing_more_when_they_are_all_eligible() {
+    let fixture = Fixture::all_admitted();
+    let query = axis(0);
+    let reference = fixture.reference(&query, &OBJECTS);
+    let ranking = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(8).unwrap(),
+                ..bounds(3)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(ranking.completion, Completion::Complete);
+    assert_eq!(keyed(&ranking), reference[..3]);
+    assert_eq!(ranking.consumed.pages, 1);
+    assert_eq!(
+        ranking.consumed.batches, 2,
+        "one batch of the k best rows, then the re-judgment"
+    );
+    assert_eq!(ranking.consumed.judged, 3 + 3);
+    assert!(ranking.consumed.excluded.is_empty());
+}
+
+#[test]
+fn ineligible_rows_among_the_k_best_widen_the_judged_set_until_the_page_cannot_place_another_row() {
+    // `alpha` and `beta` outscore every other row against the axis; the kernel hides both.
+    let admitted: Vec<&str> = OBJECTS
+        .iter()
+        .copied()
+        .filter(|object| *object != "alpha" && *object != "beta")
+        .collect();
+    let fixture = Fixture::new(&admitted, corpus());
+    let query = axis(0);
+    let reference = fixture.reference(&query, &admitted);
+    let ranking = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(8).unwrap(),
+                ..bounds(3)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(ranking.completion, Completion::Complete);
+    assert_eq!(keyed(&ranking), reference[..3]);
+    assert!(!ids_of(&ranking).contains(&fixture.id("alpha")));
+    assert!(!ids_of(&ranking).contains(&fixture.id("beta")));
+    assert_eq!(
+        ranking.consumed.excluded,
+        vec![(EligibilityVerdict::Hidden, 2)]
+    );
+    assert_eq!(
+        ranking.consumed.batches, 3,
+        "the k best rows, then the rest of the page, then the re-judgment"
+    );
+    assert_eq!(ranking.consumed.judged, 8 + 3);
+}
+
+/// Second-page rows outscore first-page rows; the second page's six best rows are hidden, so its first batch admits nothing.
+/// The `axis(0)` query scores each row by its first coordinate.
+fn two_pages_whose_second_leads_with_hidden_rows() -> (Fixture, Vec<String>, Vec<String>) {
+    let names: Vec<String> = (0..32).map(|index| format!("claim-{index:02}")).collect();
+    let mut rows: Vec<Row> = names.iter().map(|name| Row::claim(name, axis(1))).collect();
+    rows.sort_by_key(Row::occurrence_id);
+    let page = rows.len() / 2;
+    let mut hidden = Vec::new();
+    for (position, row) in rows.iter_mut().enumerate() {
+        let first = if position < page {
+            0.10 + 0.005 * position as f32
+        } else {
+            0.95 - 0.02 * (position - page) as f32
+        };
+        row.vector = Some(unit([first, 1.0 - first, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+    }
+    let mut by_score: Vec<&Row> = rows[page..].iter().collect();
+    by_score.sort_by(|left, right| {
+        right.vector.as_ref().unwrap()[0].total_cmp(&left.vector.as_ref().unwrap()[0])
+    });
+    for row in &by_score[..6] {
+        hidden.push(row.object.clone());
+    }
+    let objects: Vec<&str> = names.iter().map(String::as_str).collect();
+    let admitted: Vec<&str> = objects
+        .iter()
+        .copied()
+        .filter(|object| !hidden.iter().any(|name| name == object))
+        .collect();
+    let fixture = Fixture::with_objects(&objects, &admitted, rows);
+    let admitted: Vec<String> = admitted.into_iter().map(str::to_owned).collect();
+    (fixture, admitted, hidden)
+}
+
+#[test]
+fn a_batch_that_admits_no_row_ends_the_sizing_and_the_rest_of_the_page_is_one_batch() {
+    let (fixture, admitted, hidden) = two_pages_whose_second_leads_with_hidden_rows();
+    let query = axis(0);
+    let admitted: Vec<&str> = admitted.iter().map(String::as_str).collect();
+    let reference = fixture.reference(&query, &admitted);
+    let ranking = fixture
+        .rank(
+            &query,
+            OracleBounds {
+                page_rows: NonZeroUsize::new(16).unwrap(),
+                max_rows: NonZeroUsize::new(64).unwrap(),
+                ..bounds(2)
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(ranking.completion, Completion::Complete);
+    assert_eq!(keyed(&ranking), reference[..2]);
+    for name in &hidden {
+        assert!(!ids_of(&ranking).contains(&fixture.id(name)));
+    }
+    assert_eq!(ranking.consumed.pages, 2);
+    assert_eq!(
+        ranking.consumed.excluded,
+        vec![(EligibilityVerdict::Hidden, 6)]
+    );
+    assert_eq!(
+        ranking.consumed.batches,
+        1 + 2 + 1,
+        "page one judges its two eligible best rows in one batch; page two judges its two hidden best rows, then the fourteen rows the set still admits in one batch; then the re-judgment: {:?}",
+        ranking.consumed
+    );
+    assert_eq!(
+        ranking.consumed.judged,
+        2 + 16 + 2,
+        "{:?}",
+        ranking.consumed
     );
 }
 
@@ -1288,7 +1432,7 @@ fn page_size_changes_the_batch_count_but_not_the_ranking() {
         assert_visited_once(&fixture, &visited);
         assert!(
             ranking.consumed.batches <= ranking.consumed.pages + 1,
-            "a page with no row that could enter the top-K runs no batch: {:?}",
+            "eight rows are at most 2k, so a page's selected rows fold into one batch, and a page with no row that could enter the top-K runs none: {:?}",
             ranking.consumed
         );
         if let Some(previous) = &previous {

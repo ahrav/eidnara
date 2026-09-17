@@ -606,23 +606,24 @@ pub fn prepare_optional(
                 .map(|row| excludable(fetch_payload(conn, &row.payload))),
         ))
     })?;
-    // Payload verification runs after `hold` releases the connection.
+    // Payload verification runs after `hold` releases the connection. Bytes
+    // that came back count as loaded before their digest is checked; the read
+    // is the load, as in the required phase.
     let mut selected: Vec<(&SelectedOccurrence, Vec<u8>)> = Vec::with_capacity(rows.len());
     for (row, load) in rows.iter().zip(loaded) {
-        match load.and_then(|payload| {
-            row.payload
-                .verify(&payload)
-                .map(|()| payload)
-                .map_err(|_| OptionalExclusion::Corrupt)
-        }) {
-            Ok(payload) => selected.push((row, payload)),
+        let payload = match load {
+            Ok(payload) => payload,
             Err(exclusion) => {
                 excluded.push((row.occurrence, exclusion));
                 continue;
             }
-        }
+        };
         trace.payload_loads += 1;
         trace.optional(OptionalEvent::Loaded, Some(row.occurrence));
+        match row.payload.verify(&payload) {
+            Ok(()) => selected.push((row, payload)),
+            Err(_) => excluded.push((row.occurrence, OptionalExclusion::Corrupt)),
+        }
     }
     if let Some(fault) = fault {
         return Err(fault.into());
