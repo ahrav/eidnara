@@ -531,6 +531,7 @@ pub fn prepare_optional(
             &candidates,
             inputs.budget,
         )?;
+        trace.optional(OptionalEvent::Judged, None);
         for ((request, row), judged) in live.into_iter().zip(&report.occurrences) {
             let exclusion = if row.is_stale_for(request.revision) {
                 Some(OptionalExclusion::Stale)
@@ -548,7 +549,6 @@ pub fn prepare_optional(
             }
         }
     }
-    trace.optional(OptionalEvent::Judged, None);
     admit_optional_set(&rows, bounds).map_err(PreparationRefusal::OptionalBound)?;
     trace.optional(OptionalEvent::Bounded, None);
 

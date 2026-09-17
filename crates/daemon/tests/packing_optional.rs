@@ -154,6 +154,15 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
     assert!(admission.excluded.is_empty());
     assert!(admission.ungrouped.is_empty());
     assert_eq!(trace.payload_loads(), 4);
+    assert_eq!(
+        trace
+            .events()
+            .iter()
+            .filter(|event| **event == StageEvent::Optional(OptionalEvent::Judged, None))
+            .count(),
+        1,
+        "the non-empty optional batch was judged once"
+    );
     optional_starts_after_the_last_required_event(&trace);
 
     let (spare, _) = run(&fixture, &requests[1..], &wide(), budget + 3);
@@ -546,4 +555,11 @@ fn an_optional_set_with_no_live_row_completes_without_a_kernel_judgment() {
             .all(|(_, exclusion)| *exclusion == OptionalExclusion::Missing)
     );
     assert_eq!(trace.payload_loads(), 0, "no optional payload was loaded");
+    assert!(
+        !trace
+            .events()
+            .contains(&StageEvent::Optional(OptionalEvent::Judged, None)),
+        "no judgment event when the kernel was skipped: {:?}",
+        trace.events()
+    );
 }
