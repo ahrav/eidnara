@@ -282,7 +282,7 @@ impl KernelStore {
             return Err(CuratorHoldRefusal::InvalidRequest.into());
         }
         // A transfer whose result was lost is retried: the binding's live review hold is the committed answer, and nothing is written again.
-        if let Some((review_hold_id, expires_at)) =
+        if let Some((review_hold_id, expires_at, _)) =
             live_hold_of(&tx, CuratorHoldKind::Review, review, now)?
         {
             return admit_totals(&tx, &review_hold_id, CuratorHoldKind::Review, expires_at);
@@ -493,10 +493,14 @@ impl KernelStore {
         }
         // A retry recovers the committed hold first, so ids it already covers are not revalidated: one of them may have been invalidated since, and the hold still protects its bytes.
         let existing = live_hold_of(&tx, kind, binding, now)?;
+        // A purge-degraded hold is returned so its owner learns the id to release, but it protects nothing, so no reference joins it and the transaction writes nothing.
+        if let Some((hold_id, expires_at, true)) = &existing {
+            return admit_totals(&tx, hold_id, kind, *expires_at);
+        }
         let mut fresh = Vec::with_capacity(evidence_ids.len());
         for evidence_id in evidence_ids {
             let covered = match &existing {
-                Some((hold_id, _)) => is_covered(&tx, hold_id, evidence_id)?,
+                Some((hold_id, _, _)) => is_covered(&tx, hold_id, evidence_id)?,
                 None => false,
             };
             if !covered {
@@ -505,7 +509,7 @@ impl KernelStore {
         }
         let facts = precharge(&tx, binding, &fresh, quota)?;
         let (hold_id, expires_at) = match existing {
-            Some(existing) => existing,
+            Some((hold_id, expires_at, _)) => (hold_id, expires_at),
             None => (
                 insert_pin(&tx, kind, binding, expires_at, self.lease_epoch(), None)?,
                 expires_at,
@@ -570,19 +574,19 @@ fn is_covered(
     .map_err(sqlite)
 }
 
-/// The newest unreleased, unexpired hold of `kind` for `binding`, with its expiry. A purge-degraded hold still counts: it is the binding's committed hold, and returning it is how a retrying caller learns the id it must release.
+/// The newest unreleased, unexpired hold of `kind` for `binding`: its id, expiry, and whether a purge degraded it. A degraded hold still counts: it is the binding's committed hold, and returning it is how a retrying caller learns the id it must release.
 fn live_hold_of(
     tx: &Transaction<'_>,
     kind: CuratorHoldKind,
     binding: &CuratorHoldBinding,
     now: i64,
-) -> Result<Option<(String, i64)>, CuratorHoldError> {
+) -> Result<Option<(String, i64, bool)>, CuratorHoldError> {
     tx.query_row_cached(
-        "SELECT capture_pin_id,expires_at FROM capture_pins
+        "SELECT capture_pin_id,expires_at,purge_degraded_at IS NOT NULL FROM capture_pins
          WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL AND expires_at>?3
          ORDER BY created_at DESC LIMIT 1",
         params![kind.pin_kind(), binding.owner_id(), now],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )
     .optional()
     .map_err(sqlite)

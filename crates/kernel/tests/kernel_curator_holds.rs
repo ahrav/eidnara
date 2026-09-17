@@ -1597,3 +1597,56 @@ fn a_committed_capture_replays_after_its_retention_deadline() {
         .unwrap();
     assert_eq!(replayed, first);
 }
+
+#[test]
+fn a_degraded_hold_is_recovered_but_gains_no_references() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let payload = b"purged before the retry";
+    let purged = fixture.ingest("purge", payload, None);
+    let extra = fixture.ingest("extra", b"extra bytes", None);
+    let binding = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, std::slice::from_ref(&purged), now + HOUR_MS)
+        .unwrap();
+    fixture
+        .store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge", payload),
+            identity: ArtifactDeletionIdentity::Digest(format!("{:x}", Sha256::digest(payload))),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator".to_string()),
+            target_locator: Some("incident://purge".to_string()),
+            reason: Some("retired".to_string()),
+            deleted_at: now,
+        })
+        .unwrap();
+    // The retry learns the degraded hold's id but attaches nothing new to a pin that can no longer protect anything.
+    let retried = fixture
+        .store
+        .acquire_execution_hold(&binding, &[purged, extra.clone()], now + HOUR_MS)
+        .unwrap();
+    assert_eq!(retried.hold_id, hold.hold_id);
+    assert_eq!(retried.references, 1);
+    assert_eq!(fixture.pin(&hold.hold_id).4, 1);
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .validate_held_evidence(
+                    &retried.hold_id,
+                    CuratorHoldKind::Execution,
+                    &binding,
+                    &[extra],
+                    now
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::PurgeDegraded
+    );
+    fixture
+        .store
+        .release_execution_hold(&retried.hold_id, &binding)
+        .unwrap();
+}
