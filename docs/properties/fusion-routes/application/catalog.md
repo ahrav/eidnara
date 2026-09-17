@@ -74,9 +74,12 @@ visibility belongs to the harness adapter that assembles the invocation
 
 ## Reachability and observation contract
 
-Every record here is `test-only`: the routes answer `disabled` until
+Every daemon-route record here is `test-only`: the routes answer `disabled` until
 `Handler::set_edit_receipt_limits` installs an approved set, and no production
-caller installs one yet. Observation points: `ReceiptStore::{prepare, apply,
+caller installs one yet. The one plugin-side record,
+`apply-adapter-validates-entire-assembled-invocation`, is `default-production`:
+the OpenCode transform runs its gate on every publication whether or not the
+daemon routes are enabled. Observation points: `ReceiptStore::{prepare, apply,
 confirm}` and the three handlers in `crates/daemon/src/edit_receipts.rs`. The
 witnesses drive a `KernelDaemon` through `dispatch_value_for_test` in
 `crates/daemon/tests/edit_receipts.rs`, with an independent edit log of every
@@ -157,7 +160,7 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`, `uninstalling_the_limit_set_drops_the_receipts_like_a_restart_so_a_read_back_still_lands`, `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`, and `every_application_outcome_leaves_the_kernel_tip_and_write_counters_unchanged`, which reads `kernel::write_observer` before and after disable, failure, stale refusal, lost acknowledgment, decline, and uninstall and then commits one packing-caused control write; `crates/daemon/src/edit_receipts.rs` `a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete` and `a_read_back_the_store_cannot_record_is_refused_rather_than_answered_complete`.
+Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`, `uninstalling_the_limit_set_drops_the_receipts_like_a_restart_so_a_read_back_still_lands`, `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`, and `every_application_outcome_leaves_the_kernel_tip_and_write_counters_unchanged`, which reads `kernel::write_observer` before and after disable, failure, stale refusal, lost acknowledgment, decline, and uninstall and then commits one explicit observer control write (`CONTROL_CAUSE`, not a packing cause); `crates/daemon/src/edit_receipts.rs` `a_foreign_key_completes_only_on_a_well_formed_matching_read_back_and_stays_complete` and `a_read_back_the_store_cannot_record_is_refused_rather_than_answered_complete`.
 Guarantee: After a daemon restart, or after the limit set is uninstalled and reinstalled, every key of the prior incarnation is `unknown`, whether it had been forwarded or only prepared; after a lost acknowledgment the key is `unknown`; `unknown` is sticky, forwards nothing on retry, and is reclassified only by a confirm whose applied identity equals the forwarded identity.
 Check: `always` - a forwarded key and a prepared key from a shut-down daemon answer `unknown` on a fresh daemon and again on retry with an empty edit log; a confirm without an applied identity, with another identity, with an uppercase or otherwise malformed one, or for a key without the minted `<incarnation>-<identity>` shape leaves `unknown` and records nothing; a confirm with the exact identity answers `complete`, later applies read `complete`, and another outcome, a missing applied identity, or another applied identity is `conflict`; a read-back over a project whose every receipt is in flight is `receipt_unavailable`, records nothing, and the key stays `unknown`; a forwarded key answers `unknown` after the limit set is uninstalled and reinstalled on one daemon, and its read-back answers `complete` with one effect logged; on one daemon a confirm without an applied identity turns an in-flight receipt `unknown`, the retry forwards nothing, and a read-back naming another forward or another applied identity is `conflict` because the forwarded identity stays recorded through `unknown`. `always` because the incarnation prefix and the state are read on every request.
 Fault/timing angle: Daemon restart after forward, restart after prepare, lost acknowledgment.
@@ -495,4 +498,8 @@ Impact: A class could be declared enabled without a harness ever proving it.
 Open questions:
 
 - The end-to-end run against a real OpenCode server is outstanding; the
-  scripted-daemon witnesses stand in for it. (needs human input)
+  scripted-daemon witnesses stand in for it. The server harness exists
+  (`packages/e2e-tests`, a real `opencode serve` against
+  `direct_host_fixture`); the missing piece is the scenario, since no daemon
+  route produces a packed body and no production caller wires
+  `ContextApplication`. (needs human input)

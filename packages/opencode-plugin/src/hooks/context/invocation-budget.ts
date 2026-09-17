@@ -36,6 +36,11 @@ export type InvocationValidation =
     | { ok: true; candidate: InvocationCharge; reason: "fits" | "shrinks" | "limit_unknown" }
     | { ok: false; candidate: InvocationCharge; incoming: InvocationCharge; limit: number };
 
+/**
+ * `entryLengths` are UTF-8 byte counts, so the charge is bytes over the character ratio. For
+ * multibyte text that reads higher than `estimateTokens(text)`'s fallback and closer to the real
+ * tokenizer (1000 CJK characters: 1358 exact, 858 by bytes, 286 by characters); it never reads lower.
+ */
 export function chargeInvocation(
     entryLengths: readonly number[],
     budget: Pick<InvocationBudget, "headroomPermille" | "profile">,

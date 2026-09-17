@@ -54,7 +54,6 @@ firing check is an open obligation, not a passed one.
 | `packing.serialization.transport_maximum_exceeded` | daemon | `sometimes` | packing-body-serialized-once-through-the-guard | `crates/daemon/tests/prepared_output.rs` `cap_plus_one_and_arithmetic_overflow_fail_before_write`, at the guard only; the packing path cannot reach the arm under manifest-derived bounds. |
 | `packing.serialization.malformed_packing_group` | daemon | `sometimes` | packing-limits-fail-closed-at-manifest-parse | `an_unapproved_partial_unknown_mismatched_or_zero_packing_group_is_refused`. |
 | `packing.serialization.cache_state_varied` | daemon | `sometimes` | packing-output-byte-identical-across-cache-states | `identical_inputs_give_byte_identical_output_across_cache_states_threads_and_processes`. |
-
 | `packing.application.profile_echo_mismatch` | opencode | `sometimes` | apply-stale-preparation-is-rejected-before-edit (`../fusion-routes/application/catalog.md`) | `crates/daemon/tests/edit_receipts.rs` `the_daemon_binds_its_profile_at_prepare_and_an_apply_must_echo_it_exactly`; `packages/opencode-plugin/src/hooks/context/context-application.test.ts` `reports typed refusals without publishing and never retries a non-capability terminal`. |
 | `packing.application.profile_withdrawn` | opencode | `sometimes` | apply-stale-preparation-is-rejected-before-edit | `the_daemon_binds_its_profile_at_prepare_and_an_apply_must_echo_it_exactly` after `withdraw_accounting_profile`. |
 | `packing.application.invocation_over_limit` | opencode | `sometimes` | apply-adapter-validates-entire-assembled-invocation | `invocation-budget.test.ts` `admits at the limit, refuses one below it when the surface grows, and never refuses a shrinking surface`; `rust-mode-transform.test.ts` `declines the pass when the whole invocation exceeds the context limit`, `gates nothing for a model models.dev cannot name, although its usage sample inverts to the 128k default`. |
@@ -74,8 +73,12 @@ firing check is an open obligation, not a passed one.
 | `packing.application.pi_zero_write_episode` | pi | `sometimes` | apply-unknown-outcome-never-replays-blindly | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (tip and projection counter unchanged). |
 
 Unfired markers by harness: OpenCode, `packing.application.real_server_outcome`
-(the end-to-end run against a real OpenCode server; no harness exists in this
-repository). Pi, `packing.application.pi_runner_outcome` (the run through
+(the end-to-end run against a real OpenCode server). `packages/e2e-tests`
+already starts a real `opencode serve` with the built plugin against the
+daemon's `direct_host_fixture`; what is missing is the scenario, because no
+daemon route produces a packed body and nothing wires `ContextApplication`
+into the transform, so the harness has no application path to drive yet. Pi,
+`packing.application.pi_runner_outcome` (the run through
 `packages/e2e-tests/src/pi-runner/` against a built plugin; not performed
 here). Gated outcomes on Pi stay unsupported until the Pi assembled invocation
 is ruled (parent Q6); the exercised set is pure packing plus

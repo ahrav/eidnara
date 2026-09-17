@@ -16,8 +16,9 @@ digest is the fused-order witness that both bind.
   count before each sequence, and a length before each component.
   `SelectionDigest::derive` hashes the ordered occurrence identifiers;
   `PreparationDigest::derive` hashes the context revision, representation,
-  each selected span with its occurrence and normalized range, and the
-  selection digest.
+  each selected span with its occurrence and normalized range, the
+  selection digest, and the daemon's accounting profile identity and
+  revision, under the domain tag `eidnara-retrieval-prepared-context-v1`.
 - Span normalization follows the kernel: `None` is the whole buffer, encoded
   as a single zero byte; a range is a one byte followed by two big-endian
   `u64` bounds.
@@ -37,7 +38,8 @@ None. Derivation is a pure function.
 
 - One selection and every reordering, extension, and truncation of it.
 - One preparation input set with each component varied alone, including a
-  span bound, whole-buffer versus range spelling, span order, and span count.
+  span bound, whole-buffer versus range spelling, span order, span count,
+  profile identity, and profile revision.
 - The `("ab", "c")` versus `("a", "bc")` split pair.
 
 ## Investigation log
@@ -49,5 +51,8 @@ None. Derivation is a pure function.
 - Findings: RP2.7 binds the accounting profile in the idempotency key; RP2.8
   lists it among preparation digest inputs.
 - Missing evidence: an owner decision reconciling the two.
-- Conclusion: needs human input; this change binds the four components RP2.7
-  names for the preparation digest.
+- Conclusion: decided by RP2.8 Q5 (#636). The daemon owns the profile and
+  binds its identity and revision into the preparation digest after the
+  selection digest; the layout change took a new domain tag
+  (`crates/retrieval/src/fusion/identity.rs:290`). The route derivation is
+  `crates/daemon/src/edit_receipts.rs:352-380`.
