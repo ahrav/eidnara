@@ -125,7 +125,7 @@ fn lower_hex(bytes: &[u8]) -> String {
 }
 
 /// Hashes `<protocol>\n<canonical JSON>` without materializing the joined string.
-fn protocol_digest(protocol: &str, value: &Value) -> Result<String, ContractError> {
+pub(crate) fn protocol_digest(protocol: &str, value: &Value) -> Result<String, ContractError> {
     let canonical = canonical_json_encode(value)?;
     let mut hasher = Sha256::new();
     hasher.update(protocol.as_bytes());

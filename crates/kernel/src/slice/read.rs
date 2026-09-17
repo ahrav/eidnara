@@ -71,6 +71,24 @@ impl KernelStore {
         Ok(snapshot)
     }
 
+    /// The live observations of one object at `requested`, ordered by observation id. Work scales with that object's rows, not the store.
+    ///
+    /// Returns the same errors as [`Self::slice_as_of`].
+    pub fn observations_for_object_as_of(
+        &self,
+        object_id: &str,
+        requested: i64,
+    ) -> Result<Vec<ObservationRow>, KernelError> {
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|_| KernelError::Io)?;
+        snapshot_tip(&tx, requested)?;
+        let rows = load_observation_rows(&tx, requested, Some(object_id))?;
+        tx.commit().map_err(|_| KernelError::Io)?;
+        Ok(rows)
+    }
+
     /// Query work scales with `object_ids`, not the store's total decision count.
     ///
     /// Object IDs are bound as one JSON array and matched through `json_each`, so the
@@ -300,6 +318,15 @@ pub(super) fn load_observations(
     tx: &Transaction<'_>,
     requested: i64,
 ) -> Result<Vec<ObservationRow>, KernelError> {
+    load_observation_rows(tx, requested, None)
+}
+
+/// Loads observations live at `requested`, optionally only those of one object, ordered by `observation_id`.
+fn load_observation_rows(
+    tx: &Transaction<'_>,
+    requested: i64,
+    object_id: Option<&str>,
+) -> Result<Vec<ObservationRow>, KernelError> {
     let mut statement = tx
         .prepare(
             "SELECT observation_id,object_id,proposition_id,scope_id,anchor_id,evidence_id,
@@ -308,11 +335,12 @@ pub(super) fn load_observations(
              FROM observations
              WHERE created_commit_seq<=?1
                AND (invalidated_commit_seq IS NULL OR ?1<invalidated_commit_seq)
+               AND (?2 IS NULL OR object_id=?2)
              ORDER BY observation_id",
         )
         .map_err(|_| KernelError::Io)?;
     let rows = statement
-        .query_map([requested], |row| {
+        .query_map(rusqlite::params![requested, object_id], |row| {
             let payload = row.get::<_, Vec<u8>>(7)?;
             let sensitivity = row.get::<_, String>(10)?;
             Ok(ObservationRow {

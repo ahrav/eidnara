@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod canonical_json;
+pub mod curator_policy_union;
 pub mod decay;
 pub mod redaction;
 
