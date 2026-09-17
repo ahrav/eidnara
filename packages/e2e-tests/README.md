@@ -37,7 +37,7 @@ cache-stability             rust-fm-oc-3                 rust-removal-self-heal
 incident-pool-green         rust-fm-oc-5                 rust-smoke
 rust-eidnara-reduce-roundtrip   rust-fold-under-pressure     rust-steady-state-byte-identity
 rust-duplicate-tool-use-id  rust-history_summarizer-producer      rust-tail-mutation-readopt
-rust-multi-frame-delta-perf thinking-block-safety        pi-smoke
+rust-multi-frame-delta      thinking-block-safety        pi-smoke
 ```
 
 Seventeen Rust-mode tests plus `pi-smoke`.

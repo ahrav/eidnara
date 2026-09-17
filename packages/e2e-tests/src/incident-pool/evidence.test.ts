@@ -194,6 +194,24 @@ describe("mutation evidence normalization (R11)", () => {
         crossCheckEvidenceInventory(committedInventory(), committedView());
     });
 
+    it("rejects deferred mutation records without a benchmark manifest", () => {
+        const temp = mkdtempSync(join(tmpdir(), "incident-evidence-"));
+        try {
+            mkdirSync(join(temp, "mutations"));
+            writeFileSync(
+                join(temp, "mutations", "deferred.json"),
+                JSON.stringify({
+                    mutations: [{ status: "deferred", reason: "no executed drill" }],
+                }),
+            );
+            expect(() => loadMutationEvidence(temp, REPO_ROOT)).toThrow(
+                /this claim needs a real mutation record instead of a deferral/,
+            );
+        } finally {
+            rmSync(temp, { recursive: true, force: true });
+        }
+    });
+
     it("rejects duplicated, malformed, unknown-shape, and orphan-verifier records", () => {
         const temp = mkdtempSync(join(tmpdir(), "incident-evidence-"));
         try {

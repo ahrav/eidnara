@@ -16,7 +16,6 @@
         "validate:incident-history:ci": "bun scripts/validate-incident-history.ts --ci",
         "validate:incident-verifiers": "bun scripts/validate-incident-verifiers.ts --base origin/main",
         "validate:incident-verifiers:ci": "bun scripts/validate-incident-verifiers.ts --ci",
-        "validate:shm-hardening-matrix": "bun scripts/validate-shm-hardening-matrix.ts",
         "soak:shm": "bun scripts/run-shm-soak.ts",
         "mutation:rust-history_summarizer": "bun run ensure:plugin-dist && bun scripts/run-rust-history_summarizer-producer-mutation.ts",
         "mutation:rust-eidnara-reduce": "bun run ensure:plugin-dist && bun scripts/run-rust-eidnara-reduce-mutation.ts",

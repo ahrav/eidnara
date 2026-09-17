@@ -4,6 +4,7 @@ node_modules/
 *.node
 /packages/shm-native/index.js
 docs/plans/
+docs/performance/
 docs/prepared-context-reuse.md
 docs/selective-indexing.md
 plans/
