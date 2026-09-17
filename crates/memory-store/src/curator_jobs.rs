@@ -2,7 +2,7 @@
 //!
 //! A job row is a permanent receipt for the store incarnation. It is `Reserved` when a producer reserves its causal identity and worst-case allowance, `Ready` once the producer activates it with reference-only input, and `Terminal` with one content-free outcome afterwards; nothing deletes a row or reopens a terminal one. `(project, causal_identity)` deduplicates identical inputs across firings: the identity is a digest of the review target plus the fingerprint of question template, signals, required evidence with availability, and policy versions, so a new contradiction, newly available evidence, or a policy change permits exactly one new job at an unchanged target, while unrelated writes, clocks, and firing identifiers change nothing.
 //!
-//! Capacity counts `Reserved` plus `Ready` rows against 64 per project and 256 per host. Metadata quota charges every row's permanent receipt charge plus the temporary allowance of every non-terminal row against 64 MiB per project and 256 MiB per host; a terminal row releases its allowance and keeps its receipt charge, so cumulative admitted work for the incarnation is bounded and exhaustion refuses new work without deleting anything. The queue deadline is fixed at reservation and never moves.
+//! Capacity counts `Reserved` and `Ready` rows: 64 per project, 256 per host. Metadata quota counts each row's receipt charge plus allowances for non-terminal rows and frozen pages: 64 MiB per project, 256 MiB per host. Terminal jobs and pages release allowances and drop inputs or references but retain receipt charges, which bounds cumulative admitted work for the incarnation. Exhaustion refuses new work without deletion. Queue deadlines are fixed at reservation.
 //!
 //! Every write below composes with a caller's own fenced transaction through the `*_in_tx` primitives, so a producer can activate a job or enqueue a frozen page together with its own progress and commit both or neither.
 
@@ -30,19 +30,19 @@ pub const MAX_CAUSAL_SIGNALS: usize = 8;
 pub const MAX_REQUIRED_EVIDENCE: usize = 16;
 pub const MAX_CAUSAL_POLICY_VERSIONS: usize = 16;
 pub const MAX_CURATOR_JOB_INPUT_BYTES: usize = 8 * 1024;
-/// Serialized bound of one frozen page; eight maximal references fit under it.
+/// Serialized bound of one frozen page. Eight references at typical identity lengths fit; eight references at every identity bound do not, and are refused rather than truncated.
 pub const MAX_FROZEN_PAGE_BYTES: usize = 64 * 1024;
 const MAX_TARGET_JSON_BYTES: usize = 1024;
 /// Queue deadline and frozen-selection deadline, measured from reservation.
 pub const CURATOR_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const MAX_CURATOR_METADATA_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024;
 pub const MAX_CURATOR_METADATA_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
-/// Permanent receipt charge every admitted job keeps for the store incarnation.
+/// Permanent receipt charge retained for each admitted job and frozen page.
 pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 1024;
 /// Worst-case temporary allowance a reservation prepays for its input, holds, manifest, and attempt metadata; released when the job is terminal.
 pub const CURATOR_JOB_ALLOWANCE_BYTES: u64 = 32 * 1024;
-/// Temporary allowance one frozen page holds until it leaves the `frozen` state.
-pub const FROZEN_SELECTION_ALLOWANCE_BYTES: u64 = 8 * 1024;
+/// Allowance a `frozen` page holds for its serialized references, sized to [`MAX_FROZEN_PAGE_BYTES`]; terminal pages hold none.
+pub const FROZEN_SELECTION_ALLOWANCE_BYTES: u64 = 64 * 1024;
 
 const MAX_IDENTITY_BYTES: usize = 256;
 
@@ -208,7 +208,8 @@ pub struct FrozenSelection {
     pub project: String,
     pub slot_id: String,
     pub selection_attempt: String,
-    pub page: FrozenSelectionPage,
+    /// References and continuation cursor for `Frozen` pages and enqueue results; terminal rows omit both.
+    pub page: Option<FrozenSelectionPage>,
     pub state: FrozenSelectionState,
     pub selection_deadline_ms: i64,
     pub created_at_ms: i64,
@@ -300,7 +301,7 @@ fn refusal_of(error: &rusqlite::Error) -> Option<CuratorJobRefusal> {
     }
 }
 
-/// A project must be a non-empty identity: the empty string is the host-wide selector inside the aggregate queries.
+/// A project is an identity: 1 to 256 bytes, refused as a store error at the public surface so it never reaches a row.
 fn check_project(project: &str) -> Result<(), MemoryStoreError> {
     check_identity(project)
         .map_err(|_| MemoryStoreError::Serde("curator project must be 1 to 256 bytes".to_string()))
@@ -448,24 +449,26 @@ impl ProducerBinding {
 const JOB_COLUMNS: &str = "project, causal_identity, producer, firing_id, ordinal, target_json,
      input_fingerprint, state, input_json, outcome, queue_deadline_ms, created_at_ms, updated_at_ms";
 
+/// Names a stored column whose value failed to decode; the value stays out of the error so no stored caller text reaches logs.
+fn undecodable(column: usize, name: &str) -> rusqlite::Error {
+    rusqlite::Error::InvalidColumnType(column, name.to_string(), rusqlite::types::Type::Text)
+}
+
 fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorJob> {
-    let invalid = |column: usize, value: String| {
-        rusqlite::Error::InvalidColumnType(column, value, rusqlite::types::Type::Text)
-    };
     let target_json: String = row.get(5)?;
-    let target = serde_json::from_str(&target_json).map_err(|_| invalid(5, target_json))?;
+    let target = serde_json::from_str(&target_json).map_err(|_| undecodable(5, "target_json"))?;
     let state: String = row.get(7)?;
     let input_json: Option<String> = row.get(8)?;
     let outcome: Option<String> = row.get(9)?;
     let state = match (state.as_str(), input_json, outcome) {
         ("reserved", None, None) => CuratorJobState::Reserved,
-        ("ready", Some(input), None) => {
-            CuratorJobState::Ready(serde_json::from_str(&input).map_err(|_| invalid(8, input))?)
-        }
-        ("terminal", _, Some(outcome)) => CuratorJobState::Terminal(
-            CuratorJobOutcome::parse(&outcome).ok_or_else(|| invalid(9, outcome))?,
+        ("ready", Some(input), None) => CuratorJobState::Ready(
+            serde_json::from_str(&input).map_err(|_| undecodable(8, "input_json"))?,
         ),
-        (other, _, _) => return Err(invalid(7, other.to_string())),
+        ("terminal", _, Some(outcome)) => CuratorJobState::Terminal(
+            CuratorJobOutcome::parse(&outcome).ok_or_else(|| undecodable(9, "outcome"))?,
+        ),
+        _ => return Err(undecodable(7, "state")),
     };
     Ok(CuratorJob {
         project: row.get(0)?,
@@ -499,44 +502,58 @@ fn load_job(
     .optional()
 }
 
-/// Receipt charges of every row plus allowances of non-terminal rows and frozen pages.
+/// Runs `project_sql` for one project and `host_sql` for the whole host, so neither text carries an optional project predicate that would defeat its index.
+fn scalar(
+    conn: &GuardedConn<'_>,
+    project: Option<&str>,
+    project_sql: &str,
+    host_sql: &str,
+) -> rusqlite::Result<i64> {
+    match project {
+        Some(project) => conn.query_row(project_sql, [project], |row| row.get(0)),
+        None => conn.query_row(host_sql, [], |row| row.get(0)),
+    }
+}
+
 fn metadata_bytes(conn: &GuardedConn<'_>, project: Option<&str>) -> rusqlite::Result<u64> {
-    let project = project.unwrap_or("");
-    let jobs: i64 = conn.query_row(
+    let jobs = scalar(
+        conn,
+        project,
         "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0) FROM curator_jobs
-         WHERE ?1 = '' OR project = ?1",
-        [project],
-        |row| row.get(0),
+         WHERE project = ?1",
+        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0) FROM curator_jobs",
     )?;
-    let pages: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM curator_frozen_selections
-         WHERE state = 'frozen' AND (?1 = '' OR project = ?1)",
-        [project],
-        |row| row.get(0),
+    let pages = scalar(
+        conn,
+        project,
+        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0)
+         FROM curator_frozen_selections WHERE project = ?1",
+        "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0)
+         FROM curator_frozen_selections",
     )?;
-    Ok(u64::try_from(jobs).unwrap_or(u64::MAX).saturating_add(
-        u64::try_from(pages)
-            .unwrap_or(0)
-            .saturating_mul(FROZEN_SELECTION_ALLOWANCE_BYTES),
-    ))
+    Ok(u64::try_from(jobs)
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(pages).unwrap_or(u64::MAX)))
 }
 
 fn pending_jobs(conn: &GuardedConn<'_>, project: Option<&str>) -> rusqlite::Result<usize> {
-    let count: i64 = conn.query_row(
+    let count = scalar(
+        conn,
+        project,
         "SELECT COUNT(*) FROM curator_jobs
-         WHERE state IN ('reserved', 'ready') AND (?1 = '' OR project = ?1)",
-        [project.unwrap_or("")],
-        |row| row.get(0),
+         WHERE project = ?1 AND state IN ('reserved', 'ready')",
+        "SELECT COUNT(*) FROM curator_jobs WHERE state IN ('reserved', 'ready')",
     )?;
     Ok(usize::try_from(count).unwrap_or(usize::MAX))
 }
 
 fn frozen_pages(conn: &GuardedConn<'_>, project: Option<&str>) -> rusqlite::Result<usize> {
-    let count: i64 = conn.query_row(
+    let count = scalar(
+        conn,
+        project,
         "SELECT COUNT(*) FROM curator_frozen_selections
-         WHERE state = 'frozen' AND (?1 = '' OR project = ?1)",
-        [project.unwrap_or("")],
-        |row| row.get(0),
+         WHERE project = ?1 AND state = 'frozen'",
+        "SELECT COUNT(*) FROM curator_frozen_selections WHERE state = 'frozen'",
     )?;
     Ok(usize::try_from(count).unwrap_or(usize::MAX))
 }
@@ -560,6 +577,7 @@ pub fn reserve_curator_job_in_tx(
     inputs: &CausalInputs,
     now_ms: i64,
 ) -> rusqlite::Result<ReserveOutcome> {
+    check_identity(project).map_err(refuse)?;
     let ordinal = producer.validate().map_err(refuse)?;
     let inputs = inputs.clone().normalized().map_err(refuse)?;
     let causal_identity = inputs.causal_identity().map_err(refuse)?;
@@ -662,7 +680,7 @@ pub fn finish_curator_job_in_tx(
     Ok(job)
 }
 
-/// Freezes one selection page for a slot attempt. One frozen page per project and 32 per host; the page keeps its references and cursor until [`complete_frozen_selection_in_tx`] moves it out of `frozen`.
+/// Freezes one selection page for a slot attempt. One frozen page per project and 32 per host; the page keeps its references and cursor until [`complete_frozen_selection_in_tx`] moves it out of `frozen`. An attempt identity freezes exactly one page: resubmitting that page replays the row, and a different page under the same identity is refused.
 pub fn freeze_selection_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -671,6 +689,7 @@ pub fn freeze_selection_in_tx(
     page: &FrozenSelectionPage,
     now_ms: i64,
 ) -> rusqlite::Result<FrozenSelection> {
+    check_identity(project).map_err(refuse)?;
     check_identity(slot_id).map_err(refuse)?;
     check_identity(selection_attempt).map_err(refuse)?;
     if page.references.is_empty()
@@ -696,10 +715,15 @@ pub fn freeze_selection_in_tx(
         return Err(refuse(CuratorJobRefusal::PageTooLarge));
     }
     if let Some(existing) = load_selection(conn, project, slot_id, selection_attempt)? {
-        return if existing.state == FrozenSelectionState::Frozen {
-            Ok(existing)
-        } else {
-            Err(refuse(CuratorJobRefusal::Terminal))
+        return match &existing.page {
+            Some(frozen) if existing.state == FrozenSelectionState::Frozen => {
+                if *frozen == page {
+                    Ok(existing)
+                } else {
+                    Err(refuse(CuratorJobRefusal::InvalidRequest))
+                }
+            }
+            _ => Err(refuse(CuratorJobRefusal::Terminal)),
         };
     }
     if frozen_pages(conn, Some(project))? >= MAX_FROZEN_SELECTIONS_PER_PROJECT {
@@ -708,15 +732,19 @@ pub fn freeze_selection_in_tx(
     if frozen_pages(conn, None)? >= MAX_FROZEN_SELECTIONS_PER_HOST {
         return Err(refuse(CuratorJobRefusal::HostSelectionCapacity));
     }
-    check_quota(conn, project, FROZEN_SELECTION_ALLOWANCE_BYTES)?;
+    check_quota(
+        conn,
+        project,
+        CURATOR_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
+    )?;
     let deadline = now_ms
         .checked_add(CURATOR_QUEUE_LIFETIME_MS)
         .ok_or_else(|| refuse(CuratorJobRefusal::InvalidRequest))?;
     conn.execute(
         "INSERT INTO curator_frozen_selections (
              project, slot_id, selection_attempt, page_json, reference_count, next_cursor, state,
-             selection_deadline_ms, created_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'frozen', ?7, ?8, ?8)",
+             selection_deadline_ms, allowance_bytes, receipt_charge_bytes, created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'frozen', ?7, ?8, ?9, ?10, ?10)",
         params![
             project,
             slot_id,
@@ -725,6 +753,8 @@ pub fn freeze_selection_in_tx(
             i64::try_from(page.references.len()).unwrap_or(0),
             page.next_cursor,
             deadline,
+            i64::try_from(FROZEN_SELECTION_ALLOWANCE_BYTES).unwrap_or(i64::MAX),
+            i64::try_from(CURATOR_RECEIPT_CHARGE_BYTES).unwrap_or(i64::MAX),
             now_ms,
         ],
     )?;
@@ -732,7 +762,7 @@ pub fn freeze_selection_in_tx(
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
-/// Moves a frozen page to a terminal state. `Enqueued` returns the page whose `next_cursor` the caller advances its slot to in the same transaction; `Expired` and `FailedSlot` leave the cursor where it was. Capacity deferral is not a state: the page stays `frozen` in its slot for a later attempt.
+/// Moves a frozen page to a terminal state, dropping its references and cursor and releasing its allowance; the receipt charge stays. The returned value still carries the page, so an `Enqueued` caller advances its slot to `next_cursor` in the same transaction; `Expired` and `FailedSlot` leave the cursor where it was. Capacity deferral is not a state: the page stays `frozen` in its slot for a later attempt.
 pub fn complete_frozen_selection_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -753,12 +783,13 @@ pub fn complete_frozen_selection_in_tx(
         return Err(refuse(CuratorJobRefusal::Expired));
     }
     conn.execute(
-        "UPDATE curator_frozen_selections SET state = ?4, updated_at_ms = ?5
-         WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
+        "UPDATE curator_frozen_selections
+            SET state = ?4, page_json = NULL, next_cursor = NULL, allowance_bytes = 0,
+                updated_at_ms = ?5
+          WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
         params![project, slot_id, selection_attempt, state.as_str(), now_ms],
     )?;
-    load_selection(conn, project, slot_id, selection_attempt)?
-        .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
+    Ok(FrozenSelection { state, ..existing })
 }
 
 fn load_selection(
@@ -772,18 +803,19 @@ fn load_selection(
          WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3",
         params![project, slot_id, selection_attempt],
         |row| {
-            let page_json: String = row.get(0)?;
+            let page_json: Option<String> = row.get(0)?;
             let state: String = row.get(1)?;
+            let page = page_json
+                .map(|page_json| serde_json::from_str(&page_json))
+                .transpose()
+                .map_err(|_| undecodable(0, "page_json"))?;
             Ok(FrozenSelection {
                 project: project.to_string(),
                 slot_id: slot_id.to_string(),
                 selection_attempt: selection_attempt.to_string(),
-                page: serde_json::from_str(&page_json).map_err(|_| {
-                    rusqlite::Error::InvalidColumnType(0, page_json, rusqlite::types::Type::Text)
-                })?,
-                state: FrozenSelectionState::parse(&state).ok_or_else(|| {
-                    rusqlite::Error::InvalidColumnType(1, state, rusqlite::types::Type::Text)
-                })?,
+                page,
+                state: FrozenSelectionState::parse(&state)
+                    .ok_or_else(|| undecodable(1, "state"))?,
                 selection_deadline_ms: row.get(2)?,
                 created_at_ms: row.get(3)?,
             })
@@ -995,7 +1027,9 @@ impl MemoryStore {
                     [now_ms],
                 )?;
                 let pages = coordinated.tx().execute(
-                    "UPDATE curator_frozen_selections SET state = 'expired', updated_at_ms = ?1
+                    "UPDATE curator_frozen_selections
+                        SET state = 'expired', page_json = NULL, next_cursor = NULL,
+                            allowance_bytes = 0, updated_at_ms = ?1
                       WHERE state = 'frozen' AND selection_deadline_ms <= ?1",
                     [now_ms],
                 )?;

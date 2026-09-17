@@ -16,6 +16,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_changefeed_domain_seq"),
     ("index", "idx_channel1_appends_session"),
     ("index", "idx_chunk_transcripts_session_range"),
+    ("index", "idx_curator_frozen_selections_deadline"),
     ("index", "idx_curator_frozen_selections_state"),
     ("index", "idx_curator_jobs_pending"),
     ("index", "idx_curator_jobs_state"),
