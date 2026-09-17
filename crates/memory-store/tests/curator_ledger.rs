@@ -9,10 +9,10 @@ use memory_store::curator_jobs::{
     ProducerBinding, ReserveOutcome, ReviewTarget,
 };
 use memory_store::curator_ledger::{
-    AttemptMarker, CURATOR_ATTEMPT_MAX_MS, CURATOR_MAX_ATTEMPTS, CURATOR_RUN_DEADLINE_MS,
-    CURATOR_SETTLEMENT_RESERVE_MS, CURATOR_TASK_LEASE_MS, CuratorAttemptTerminal,
-    CuratorBeginOutcome, CuratorLedgerError, CuratorLedgerRefusal, CuratorReceiptTerminal,
-    DispatchOutcome, ResultSelection,
+    AbstainReason, AttemptMarker, CURATOR_ATTEMPT_MAX_MS, CURATOR_MAX_ATTEMPTS,
+    CURATOR_RUN_DEADLINE_MS, CURATOR_SETTLEMENT_RESERVE_MS, CURATOR_TASK_LEASE_MS,
+    CuratorAttemptTerminal, CuratorBeginOutcome, CuratorLedgerError, CuratorLedgerRefusal,
+    CuratorReceiptTerminal, DispatchOutcome, ReceiptCompletion, ResultSelection,
 };
 use memory_store::{LeaseAcquireOutcome, LeaseCompleteOutcome, MemoryStore};
 use storage::StorageDescriptor;
@@ -279,8 +279,7 @@ fn first_claim_fixes_both_deadlines_and_a_takeover_inherits_them() {
                 0,
                 1,
                 KERNEL,
-                CuratorReceiptTerminal::Abstained,
-                None,
+                &ReceiptCompletion::Abstained(AbstainReason::ModelDeclined),
                 later
             )
             .unwrap(),
@@ -617,8 +616,7 @@ fn four_attempts_across_generations_exhaust_the_allowance_and_the_cutoff_starts_
             1,
             1,
             KERNEL,
-            CuratorReceiptTerminal::Abstained,
-            None,
+            &ReceiptCompletion::Abstained(AbstainReason::ModelDeclined),
             cutoff - 1,
         )
         .unwrap();
@@ -657,7 +655,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
         candidate_id: "review-result:abc".to_string(),
         payload_digest: "f".repeat(64),
     };
-    // A completion without a selection cannot claim `complete`, and vice versa.
+    // A selection that does not name a result is refused before the lease is touched.
     assert_eq!(
         fixture
             .store
@@ -670,8 +668,10 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 0,
                 1,
                 KERNEL,
-                CuratorReceiptTerminal::Complete,
-                None,
+                &ReceiptCompletion::Complete(ResultSelection {
+                    candidate_id: String::new(),
+                    payload_digest: "f".repeat(64),
+                }),
                 T0 + 1
             )
             .unwrap(),
@@ -690,8 +690,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 0,
                 2,
                 KERNEL,
-                CuratorReceiptTerminal::Complete,
-                Some(&selection),
+                &ReceiptCompletion::Complete(selection.clone()),
                 T0 + 1
             )
             .unwrap(),
@@ -717,8 +716,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
             0,
             1,
             KERNEL,
-            CuratorReceiptTerminal::Complete,
-            Some(&selection),
+            &ReceiptCompletion::Complete(selection.clone()),
             T0 + 2,
         )
         .unwrap();
@@ -756,8 +754,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 0,
                 1,
                 KERNEL,
-                CuratorReceiptTerminal::Complete,
-                Some(&selection),
+                &ReceiptCompletion::Complete(selection.clone()),
                 T0 + 3
             )
             .unwrap(),
@@ -775,8 +772,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 0,
                 1,
                 KERNEL,
-                CuratorReceiptTerminal::Failed,
-                None,
+                &ReceiptCompletion::Failed,
                 T0 + 4
             )
             .unwrap(),
@@ -948,8 +944,7 @@ fn bounded_transition_sequences_preserve_allowance_deadlines_and_generation_fenc
                             0,
                             generation,
                             KERNEL,
-                            CuratorReceiptTerminal::Abstained,
-                            None,
+                            &ReceiptCompletion::Abstained(AbstainReason::ModelDeclined),
                             now,
                         )
                         .unwrap();

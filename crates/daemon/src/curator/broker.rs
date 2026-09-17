@@ -9,12 +9,12 @@ use context_core::curator_policy_union::{PolicyUnion, PolicyUnionMember};
 use context_core::redaction::{contains_redaction_token, detect_windowed_durable_bytes};
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, ArtifactEligibility, ArtifactHandle, CURATOR_CAPTURE_RETENTION_CLASS,
-    CuratorHoldBinding, CuratorHoldError, CuratorHoldKind, EligibilityCandidate,
-    EligibilityVerdict, HeldEvidence, KernelError, KernelStore, MAX_RUN_BUFFER_BYTES,
-    OPERATOR_REDACTION_PLACEHOLDER, ProjectScope, ReviewBinding, ReviewPayload, ReviewReadError,
-    ReviewStagedReference, RunBufferMap, RunBufferRefusal, SOURCE_DESCRIPTOR_KIND, Sensitivity,
-    SourceDescriptorDetail, Surface, SurfaceVisibility,
+    ArtifactDestination, ArtifactEligibility, ArtifactErrorKind, ArtifactHandle,
+    CURATOR_CAPTURE_RETENTION_CLASS, CuratorHoldBinding, CuratorHoldError, CuratorHoldKind,
+    EligibilityCandidate, EligibilityVerdict, HeldEvidence, KernelError, KernelStore,
+    MAX_RUN_BUFFER_BYTES, OPERATOR_REDACTION_PLACEHOLDER, ProjectScope, ReviewBinding,
+    ReviewPayload, ReviewReadError, ReviewStagedReference, RunBufferMap, RunBufferRefusal,
+    SOURCE_DESCRIPTOR_KIND, Sensitivity, SourceDescriptorDetail, Surface, SurfaceVisibility,
 };
 use sha2::{Digest, Sha256};
 
@@ -421,6 +421,16 @@ impl DisclosureLedger {
     pub fn conclusions_usable(&self) -> bool {
         !self.uncertain && !self.partial
     }
+
+    /// Whether any attempt's outcome is unknown.
+    pub fn is_uncertain(&self) -> bool {
+        self.uncertain
+    }
+
+    /// Whether a capacity refusal truncated the disclosed evidence set.
+    pub fn is_partial(&self) -> bool {
+        self.partial
+    }
 }
 
 /// The resource table's per-run counters.
@@ -822,6 +832,26 @@ impl EvidenceBroker {
         alias: &str,
         now_ms: i64,
     ) -> Result<Option<String>, Refusal> {
+        self.revalidate_under(
+            store,
+            alias,
+            now_ms,
+            (
+                CuratorHoldKind::Execution,
+                &self.binding.hold_id,
+                &self.binding.hold,
+            ),
+        )
+    }
+
+    /// [`Self::revalidate`] with the hold that protects a capture named explicitly: the execution hold while the run investigates, or the review hold once settlement has moved retention there and the execution hold is released.
+    pub fn revalidate_under(
+        &self,
+        store: &KernelStore,
+        alias: &str,
+        now_ms: i64,
+        hold: (CuratorHoldKind, &str, &CuratorHoldBinding),
+    ) -> Result<Option<String>, Refusal> {
         let (alias, expectation) = self.aliases.resolve(alias)?;
         match expectation {
             ReferenceExpectation::StagedSubject { reference, binding } => {
@@ -843,11 +873,12 @@ impl EvidenceBroker {
                 if *retain_until <= now_ms {
                     return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
                 }
+                let (kind, hold_id, hold_binding) = hold;
                 let mut held = store
                     .validate_held_evidence(
-                        &self.binding.hold_id,
-                        CuratorHoldKind::Execution,
-                        &self.binding.hold,
+                        hold_id,
+                        kind,
+                        hold_binding,
                         std::slice::from_ref(evidence_id),
                         now_ms,
                     )
@@ -956,9 +987,13 @@ impl EvidenceBroker {
         alias: Option<&Alias>,
         handle: &ArtifactHandle,
     ) -> Result<(), Refusal> {
+        // A digest with no live reference is a denial, not an error; the errors left are a malformed digest and a store that could not answer.
         let facts = store
             .artifact_egress_facts(handle, self.binding.destination)
-            .map_err(|_| refuse(alias, RefusalCode::ExpectationChanged))?;
+            .map_err(|error| match error.kind() {
+                ArtifactErrorKind::InvalidInput => refuse(alias, RefusalCode::ExpectationChanged),
+                _ => refuse(alias, RefusalCode::Store),
+            })?;
         if facts.eligibility != ArtifactEligibility::Allowed {
             return Err(refuse(alias, RefusalCode::PolicyBlocked));
         }

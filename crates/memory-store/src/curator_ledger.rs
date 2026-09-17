@@ -135,6 +135,93 @@ pub struct ResultSelection {
     pub payload_digest: String,
 }
 
+/// Why a review abstained, on the operator surface (Q28). `owner_sensitive`, `wrong_scope`, and `secret` are the Kernel's egress denial codes a revalidation can surface; the rest name settlement conditions under which no content may publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbstainReason {
+    /// A disclosed input's served class bars the run's destination.
+    OwnerSensitive,
+    /// A disclosed input left the project's scope.
+    WrongScope,
+    /// The model text carries a detected secret or redaction placeholder.
+    Secret,
+    /// A disclosed input no longer resolves as it did when rendered.
+    ExpectationChanged,
+    /// The proposal cites evidence the run never disclosed.
+    UndisclosedCitation,
+    /// A capacity refusal followed a disclosure, so the model reasoned over a truncated evidence set.
+    PartialDisclosure,
+    /// The model declined to conclude.
+    ModelDeclined,
+}
+
+impl AbstainReason {
+    pub const ALL: [Self; 7] = [
+        Self::OwnerSensitive,
+        Self::WrongScope,
+        Self::Secret,
+        Self::ExpectationChanged,
+        Self::UndisclosedCitation,
+        Self::PartialDisclosure,
+        Self::ModelDeclined,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OwnerSensitive => "owner_sensitive",
+            Self::WrongScope => "wrong_scope",
+            Self::Secret => "secret",
+            Self::ExpectationChanged => "expectation_changed",
+            Self::UndisclosedCitation => "undisclosed_citation",
+            Self::PartialDisclosure => "partial_disclosure",
+            Self::ModelDeclined => "model_declined",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|reason| reason.as_str() == value)
+    }
+}
+
+/// How one receipt completes. `Complete` is the only completion that selects a Kernel result; `Abstained` is the only one that carries a reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptCompletion {
+    Complete(ResultSelection),
+    Abstained(AbstainReason),
+    Failed,
+    Cancelled,
+    Unknown,
+    Expired,
+}
+
+impl ReceiptCompletion {
+    pub fn terminal(&self) -> CuratorReceiptTerminal {
+        match self {
+            Self::Complete(_) => CuratorReceiptTerminal::Complete,
+            Self::Abstained(_) => CuratorReceiptTerminal::Abstained,
+            Self::Failed => CuratorReceiptTerminal::Failed,
+            Self::Cancelled => CuratorReceiptTerminal::Cancelled,
+            Self::Unknown => CuratorReceiptTerminal::Unknown,
+            Self::Expired => CuratorReceiptTerminal::Expired,
+        }
+    }
+
+    fn selection(&self) -> Option<&ResultSelection> {
+        match self {
+            Self::Complete(selection) => Some(selection),
+            _ => None,
+        }
+    }
+
+    fn abstained_reason(&self) -> Option<AbstainReason> {
+        match self {
+            Self::Abstained(reason) => Some(*reason),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CuratorReceipt {
     pub project: String,
@@ -148,6 +235,7 @@ pub struct CuratorReceipt {
     pub execution_cutoff_ms: i64,
     pub cancelled_at_ms: Option<i64>,
     pub terminal: Option<CuratorReceiptTerminal>,
+    pub abstained_reason: Option<AbstainReason>,
     pub selected: Option<(u64, ResultSelection)>,
     pub created_at_ms: i64,
 }
@@ -248,11 +336,14 @@ fn generation_param(generation: u64) -> Result<i64, CuratorLedgerRefusal> {
     i64::try_from(generation).map_err(|_| CuratorLedgerRefusal::InvalidRequest)
 }
 
+/// Completed receipts one list call returns at most.
+pub const MAX_RECEIPT_PAGE: usize = 64;
+
 const RECEIPT_COLUMNS: &str =
     "project, causal_identity, database_incarnation_id, kernel_incarnation_id,
      authority_generation, state, generation, claim_id, run_deadline_ms, execution_cutoff_ms,
      cancelled_at_ms, terminal_kind, selected_generation, selected_candidate_id,
-     selected_payload_digest, created_at_ms";
+     selected_payload_digest, created_at_ms, abstained_reason";
 
 fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorReceipt> {
     let invalid = |column: usize, value: String| {
@@ -276,6 +367,13 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorReceipt>
         (None, None, None) => None,
         _ => return Err(invalid(13, "partial selection".to_string())),
     };
+    let abstained_reason: Option<String> = row.get(16)?;
+    let abstained_reason = abstained_reason
+        .map(|reason| AbstainReason::parse(&reason).ok_or_else(|| invalid(16, reason)))
+        .transpose()?;
+    if (terminal == Some(CuratorReceiptTerminal::Abstained)) != abstained_reason.is_some() {
+        return Err(invalid(16, "abstention without its reason".to_string()));
+    }
     Ok(CuratorReceipt {
         project: row.get(0)?,
         causal_identity: row.get(1)?,
@@ -288,6 +386,7 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorReceipt>
         execution_cutoff_ms: row.get(9)?,
         cancelled_at_ms: row.get(10)?,
         terminal,
+        abstained_reason,
         selected,
         created_at_ms: row.get(15)?,
     })
@@ -915,7 +1014,7 @@ impl MemoryStore {
         })
     }
 
-    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` terminal selects exactly one Kernel result for that generation, and the job row records the matching outcome. A predecessor generation, a stale claim, or another incarnation writes nothing.
+    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` completion selects exactly one Kernel result for that generation, and the job row records the matching outcome. A predecessor generation, a stale claim, or another incarnation writes nothing.
     #[allow(clippy::too_many_arguments)]
     pub fn complete_curator_receipt(
         &self,
@@ -927,17 +1026,16 @@ impl MemoryStore {
         slot: i64,
         generation: u64,
         kernel_incarnation_id: &str,
-        terminal: CuratorReceiptTerminal,
-        selection: Option<&ResultSelection>,
+        completion: &ReceiptCompletion,
         now_ms: i64,
     ) -> Result<LeaseCompleteOutcome, MemoryStoreError> {
-        if (terminal == CuratorReceiptTerminal::Complete) != selection.is_some()
-            || selection.is_some_and(|selection| {
-                selection.payload_digest.len() != 64
-                    || selection.candidate_id.is_empty()
-                    || selection.candidate_id.len() > 256
-            })
-        {
+        let terminal = completion.terminal();
+        let selection = completion.selection();
+        if selection.is_some_and(|selection| {
+            selection.payload_digest.len() != 64
+                || selection.candidate_id.is_empty()
+                || selection.candidate_id.len() > 256
+        }) {
             return Ok(LeaseCompleteOutcome::Conflict { kind: "invalid" });
         }
         let generation = generation_param(generation).map_err(|_| {
@@ -967,7 +1065,8 @@ impl MemoryStore {
                 let changed = tx.execute(
                     "UPDATE curator_receipts
                         SET state = 'complete', terminal_kind = ?5, selected_generation = ?6,
-                            selected_candidate_id = ?7, selected_payload_digest = ?8, updated_at_ms = ?9
+                            selected_candidate_id = ?7, selected_payload_digest = ?8, updated_at_ms = ?9,
+                            abstained_reason = ?11
                       WHERE project = ?1 AND causal_identity = ?2 AND state = 'in_progress'
                         AND generation = ?3 AND claim_id = ?4
                         AND kernel_incarnation_id = ?10
@@ -984,6 +1083,7 @@ impl MemoryStore {
                         selection.map(|selection| selection.payload_digest.as_str()),
                         now_ms,
                         kernel_incarnation_id,
+                        completion.abstained_reason().map(AbstainReason::as_str),
                     ],
                 )?;
                 if changed == 0 {
@@ -1008,6 +1108,30 @@ impl MemoryStore {
                 })
             },
         )
+    }
+
+    /// Completed receipts of `project` in causal-identity order, at most `limit`, after `after` when given. A page is one bounded read; the caller copies it and releases this store before entering the Kernel.
+    pub fn list_completed_curator_receipts(
+        &self,
+        project: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CuratorReceipt>, MemoryStoreError> {
+        let limit = limit.clamp(1, MAX_RECEIPT_PAGE) as i64;
+        self.inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare_cached(&format!(
+                    "SELECT {RECEIPT_COLUMNS} FROM curator_receipts
+                      WHERE project = ?1 AND state = 'complete' AND causal_identity > ?2
+                      ORDER BY causal_identity LIMIT ?3"
+                ))?;
+                let rows = statement.query_map(
+                    params![project, after.unwrap_or(""), limit],
+                    receipt_from_row,
+                )?;
+                rows.collect()
+            })
+            .map_err(Into::into)
     }
 
     pub fn lookup_curator_receipt(

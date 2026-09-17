@@ -263,6 +263,7 @@ impl KernelStore {
         let expected = provisional_result_identity(&execution.subject, review.generation);
         if review_expires_at <= now
             || review.subject != expected.candidate_id
+            || execution.generation != review.generation
             || execution.project_digest != review.project_digest
             || execution.kernel_incarnation != review.kernel_incarnation
             || execution.memstore_incarnation != review.memstore_incarnation
@@ -369,6 +370,39 @@ impl KernelStore {
         }
         tx.commit().map_err(sqlite)?;
         Ok(hold)
+    }
+
+    /// The active review hold owned by `binding`; released, purge-degraded, and expired holds return `None`.
+    pub fn lookup_review_hold(
+        &self,
+        binding: &CuratorHoldBinding,
+        now: i64,
+    ) -> Result<Option<CuratorHold>, CuratorHoldError> {
+        binding.validate()?;
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sqlite)?;
+        self.check_incarnation(&tx, binding)?;
+        let found: Option<(String, i64)> = tx
+            .query_row_cached(
+                "SELECT capture_pin_id,expires_at FROM capture_pins
+                 WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL
+                   AND purge_degraded_at IS NULL AND expires_at>?3
+                 ORDER BY created_at DESC LIMIT 1",
+                params![
+                    CuratorHoldKind::Review.pin_kind(),
+                    binding.owner_id(),
+                    now.max(current_time_ms())
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(sqlite)?;
+        let Some((hold_id, expires_at)) = found else {
+            return Ok(None);
+        };
+        admit_totals(&tx, &hold_id, CuratorHoldKind::Review, expires_at).map(Some)
     }
 
     /// Releases an execution hold on a trusted terminal receipt for its job and generation.

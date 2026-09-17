@@ -1,0 +1,745 @@
+//! Settlement of one Curator run across the Kernel and Memory Store, and the read that follows it.
+//!
+//! Settlement copies the run's attempt terminals out of the Memory Store, releases that read, and derives the unknown-disclosure scalar before anything else; an unknown attempt or a truncated disclosure permits only a content-free terminal. It then revalidates the full disclosed union through the Kernel at the current clock, stages the proposal at the provisional identity the run reserved, moves retention from the execution hold to a review hold in one Kernel envelope, and only then completes the task lease and receipt in the Memory Store's fenced transaction. A receipt that another generation already owns writes nothing, so a late worker's staged result stays private and expires under its original queue deadline: completed staging is not selection.
+//!
+//! Reads follow the same copy-then-enter order in reverse: the completed receipt is copied and the Memory Store released before the Kernel is entered; the Kernel row must match every selected field and both incarnations; the review hold must be live; and every disclosed input is revalidated before content is returned. Completion never freezes eligibility.
+
+use kernel::{
+    ArtifactDestination, ArtifactEligibility, ArtifactHandle, CuratorHold, CuratorHoldBinding,
+    CuratorHoldError, CuratorHoldKind, CuratorHoldRefusal, EvidenceReference, KernelStore,
+    PolicyDependencies, REVIEW_EXPIRY_MAX_MS, ReviewBinding, ReviewOwner, ReviewPayload,
+    ReviewProposal, ReviewReadError, ReviewReadRefusal, ReviewStageError, ReviewStageRefusal,
+    ReviewStagedReference, ReviewStagingSpec, StagingTerminalState, provisional_result_identity,
+};
+use memory_store::curator_ledger::{
+    AbstainReason, CuratorAttemptTerminal, CuratorReceiptTerminal, MAX_RECEIPT_PAGE,
+    ReceiptCompletion, ResultSelection,
+};
+use memory_store::{LeaseCompleteOutcome, MemoryStore};
+
+use super::broker::{EvidenceBroker, RefusalCode, check_render};
+
+/// Producer recorded on settled proposals.
+pub const SETTLEMENT_PRODUCER: &str = "curator-settlement";
+
+/// The task lease the settling worker holds. The completion id is derived from the job and generation, so a retried settlement replays instead of completing twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskClaim {
+    pub claim_id: String,
+    pub worker_instance: String,
+    pub slot: i64,
+}
+
+/// What the run produced: a proposal to publish, or the model's own decision not to conclude.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunResult {
+    Proposal(Box<ReviewProposal>),
+    Declined,
+}
+
+/// How one settlement ended in the Memory Store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settled {
+    /// The completed receipt selects this staged proposal.
+    Published(ReviewStagedReference),
+    /// A content-free abstention completed the receipt.
+    Abstained(AbstainReason),
+    /// An attempt's outcome is unknown; the receipt records that and nothing publishes.
+    Unknown,
+}
+
+/// Why a settlement wrote no completion. Nothing here carries proposal content.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SettlementError {
+    /// The receipt is not in progress at this generation under this claim; another generation owns the job.
+    #[error("fenced")]
+    Fenced,
+    /// A different proposal already occupies the provisional identity.
+    #[error("conflicting_content")]
+    ConflictingContent,
+    /// The Kernel refused the staging or hold transfer for a reason other than conflict.
+    #[error("kernel {0}")]
+    Kernel(String),
+    #[error("store {0}")]
+    Store(String),
+}
+
+/// Everything settlement needs beyond the broker: both stores, the job's review binding, the worker's claim, and the ledger clock.
+pub struct Settlement<'a> {
+    pub store: &'a KernelStore,
+    pub ledger: &'a MemoryStore,
+    /// The job's staging binding; its owner is replaced by the proposal owner for this generation.
+    pub binding: &'a ReviewBinding,
+    pub claim: &'a TaskClaim,
+    pub now_ms: &'a (dyn Fn() -> i64 + Sync),
+    /// Runs after the Kernel envelope committed and before the Memory Store completion, so a test can interleave a takeover in the crash window between the two stores.
+    #[cfg(any(test, feature = "test-support"))]
+    pub before_completion_for_test: Option<&'a (dyn Fn() + Sync)>,
+}
+
+impl Settlement<'_> {
+    /// Settles one run. The broker is the run's own; its binding names the job, generation, execution hold, and incarnations.
+    pub fn settle(
+        &self,
+        broker: &EvidenceBroker,
+        result: RunResult,
+    ) -> Result<Settled, SettlementError> {
+        let run = &broker.binding().hold;
+        self.copy_receipt(run)?;
+        // Q8: the staged proposal keeps the job's immutable queue deadline until selection moves it to the review expiry.
+        let queue_deadline_at = self
+            .ledger
+            .lookup_curator_job(&run.project_digest, &run.subject)
+            .map_err(store)?
+            .ok_or(SettlementError::Fenced)?
+            .queue_deadline_ms;
+        let disclosure_unknown = self.disclosure_unknown(run, broker)?;
+        let now = (self.now_ms)();
+        // A settlement retried after its Kernel envelope committed finds retention already on the review hold; every check below runs under that hold instead of the released execution hold.
+        let identity = provisional_result_identity(&run.subject, run.generation);
+        let review = CuratorHoldBinding {
+            subject: identity.candidate_id,
+            ..run.clone()
+        };
+        let recovered = self
+            .store
+            .lookup_review_hold(&review, now)
+            .map_err(kernel)?;
+        let content_free = |completion: ContentFree| {
+            self.complete_without_content(
+                broker,
+                completion,
+                recovered.as_ref().map(|hold| (&review, hold)),
+            )
+        };
+        if disclosure_unknown {
+            return content_free(ContentFree::Unknown);
+        }
+        if broker.ledger.is_partial() {
+            return content_free(ContentFree::Abstained(AbstainReason::PartialDisclosure));
+        }
+        let proposal = match result {
+            RunResult::Declined => {
+                return content_free(ContentFree::Abstained(AbstainReason::ModelDeclined));
+            }
+            RunResult::Proposal(proposal) => proposal,
+        };
+        let held_under = match &recovered {
+            Some(hold) => HeldUnder {
+                kind: CuratorHoldKind::Review,
+                hold_id: &hold.hold_id,
+                binding: &review,
+            },
+            None => HeldUnder {
+                kind: CuratorHoldKind::Execution,
+                hold_id: &broker.binding().hold_id,
+                binding: run,
+            },
+        };
+        let disclosed = match self.revalidate_union(broker, held_under, now) {
+            Ok(disclosed) => disclosed,
+            Err(Verdict::Abstain(reason)) => {
+                return content_free(ContentFree::Abstained(reason));
+            }
+            Err(Verdict::Store(error)) => return Err(SettlementError::Store(error)),
+        };
+        let proposal = match bind_dependencies(broker, *proposal, &disclosed) {
+            Ok(proposal) => proposal,
+            Err(reason) => return content_free(ContentFree::Abstained(reason)),
+        };
+        let (reference, created_at) = self.stage(run, queue_deadline_at, proposal, now)?;
+        let review_hold = match recovered {
+            Some(hold) => hold,
+            None => self.transfer_retention(broker, &review, created_at)?,
+        };
+        self.publish(run, &review, &review_hold, reference)
+    }
+
+    /// Q20: the marker-derived scalar. An attempt without a terminal at settlement is as unknown as one recorded unknown, and so is a broker that recorded an uncertain disclosure.
+    fn disclosure_unknown(
+        &self,
+        run: &CuratorHoldBinding,
+        broker: &EvidenceBroker,
+    ) -> Result<bool, SettlementError> {
+        let attempts = self
+            .ledger
+            .list_curator_attempts(&run.project_digest, &run.subject)
+            .map_err(store)?;
+        Ok(attempts.iter().any(|attempt| {
+            matches!(
+                attempt.terminal,
+                None | Some((CuratorAttemptTerminal::Unknown, _))
+            )
+        }) || broker.ledger.is_uncertain())
+    }
+
+    /// The Memory Store's fenced completion selecting `reference`. A fenced completion means another generation owns the receipt: the staged row stays private, and the retention this generation moved to review is released so a losing result holds nothing past its own settlement.
+    fn publish(
+        &self,
+        run: &CuratorHoldBinding,
+        review: &CuratorHoldBinding,
+        review_hold: &CuratorHold,
+        reference: ReviewStagedReference,
+    ) -> Result<Settled, SettlementError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hook) = self.before_completion_for_test {
+            hook();
+        }
+        let selection = ResultSelection {
+            candidate_id: reference.candidate_id.clone(),
+            payload_digest: reference.payload_digest.clone(),
+        };
+        match self.complete(run, ReceiptCompletion::Complete(selection.clone()))? {
+            LeaseCompleteOutcome::Applied { .. } => Ok(Settled::Published(reference)),
+            // A replayed completion id proves an earlier completion, not which result it selected.
+            LeaseCompleteOutcome::Replayed { .. } => {
+                let receipt = self
+                    .ledger
+                    .lookup_curator_receipt(&run.project_digest, &run.subject)
+                    .map_err(store)?;
+                let selected = receipt.and_then(|receipt| receipt.selected);
+                if selected == Some((run.generation, selection)) {
+                    Ok(Settled::Published(reference))
+                } else {
+                    Err(SettlementError::ConflictingContent)
+                }
+            }
+            LeaseCompleteOutcome::Conflict { .. } => {
+                self.release_review_hold(run, review, review_hold);
+                Err(SettlementError::Fenced)
+            }
+        }
+    }
+
+    /// The receipt must be in progress at the run's generation under the worker's claim and bound to the run's incarnations.
+    fn copy_receipt(&self, run: &CuratorHoldBinding) -> Result<(), SettlementError> {
+        let receipt = self
+            .ledger
+            .lookup_curator_receipt(&run.project_digest, &run.subject)
+            .map_err(store)?
+            .ok_or(SettlementError::Fenced)?;
+        if receipt.terminal.is_some()
+            || receipt.generation != run.generation
+            || receipt.claim_id != self.claim.claim_id
+            || receipt.kernel_incarnation_id != run.kernel_incarnation
+            || receipt.database_incarnation_id != run.memstore_incarnation
+        {
+            return Err(SettlementError::Fenced);
+        }
+        Ok(())
+    }
+
+    /// A content-free completion: the receipt records the terminal, then the hold that still protects the run's evidence is released on that trusted terminal. Nothing is staged.
+    fn complete_without_content(
+        &self,
+        broker: &EvidenceBroker,
+        completion: ContentFree,
+        recovered: Option<(&CuratorHoldBinding, &CuratorHold)>,
+    ) -> Result<Settled, SettlementError> {
+        let run = &broker.binding().hold;
+        let (settled, completion) = match completion {
+            ContentFree::Unknown => (Settled::Unknown, ReceiptCompletion::Unknown),
+            ContentFree::Abstained(reason) => (
+                Settled::Abstained(reason),
+                ReceiptCompletion::Abstained(reason),
+            ),
+        };
+        let terminal = completion.terminal();
+        match self.complete(run, completion)? {
+            LeaseCompleteOutcome::Applied { .. } => {}
+            // The completion id is the run's, whatever it recorded; a replay must have recorded this terminal before any retention is released on its strength.
+            LeaseCompleteOutcome::Replayed { .. } => {
+                let recorded = self
+                    .ledger
+                    .lookup_curator_receipt(&run.project_digest, &run.subject)
+                    .map_err(store)?
+                    .and_then(|receipt| receipt.terminal);
+                if recorded != Some(terminal) {
+                    return Err(SettlementError::ConflictingContent);
+                }
+            }
+            LeaseCompleteOutcome::Conflict { .. } => return Err(SettlementError::Fenced),
+        }
+        match recovered {
+            Some((review, hold)) => self.release_review_hold(run, review, hold),
+            None => match self
+                .store
+                .release_execution_hold(&broker.binding().hold_id, run)
+            {
+                Ok(())
+                | Err(CuratorHoldError::Refused(
+                    CuratorHoldRefusal::Released | CuratorHoldRefusal::Expired,
+                )) => {}
+                Err(error) => {
+                    eprintln!(
+                        "daemon: curator settlement could not release execution hold for {}/{} generation {}: {error}",
+                        run.project_digest, run.subject, run.generation
+                    );
+                }
+            },
+        }
+        Ok(settled)
+    }
+
+    fn release_review_hold(
+        &self,
+        run: &CuratorHoldBinding,
+        review: &CuratorHoldBinding,
+        hold: &CuratorHold,
+    ) {
+        if let Err(error) = self.store.release_review_hold(&hold.hold_id, review) {
+            eprintln!(
+                "daemon: curator settlement could not release review hold for {}/{} generation {}: {error}",
+                run.project_digest, run.subject, run.generation
+            );
+        }
+    }
+
+    /// The clock is sampled at the completion itself, so Kernel work between the copy and this write never lets a lapsed lease complete on stale time.
+    fn complete(
+        &self,
+        run: &CuratorHoldBinding,
+        completion: ReceiptCompletion,
+    ) -> Result<LeaseCompleteOutcome, SettlementError> {
+        self.ledger
+            .complete_curator_receipt(
+                &run.project_digest,
+                &run.subject,
+                &self.claim.claim_id,
+                &format!("curator-settlement:{}:{}", run.subject, run.generation),
+                &self.claim.worker_instance,
+                self.claim.slot,
+                run.generation,
+                &run.kernel_incarnation,
+                &completion,
+                (self.now_ms)(),
+            )
+            .map_err(store)
+    }
+
+    /// Every disclosed alias, cited or not, is re-judged at `now` under `hold`; the evidence ids they name are then validated as one held batch. Returns those ids, sorted.
+    fn revalidate_union(
+        &self,
+        broker: &EvidenceBroker,
+        hold: HeldUnder<'_>,
+        now: i64,
+    ) -> Result<Vec<String>, Verdict> {
+        let mut evidence = Vec::new();
+        for alias in broker.ledger.disclosed() {
+            match broker.revalidate_under(
+                self.store,
+                alias.as_str(),
+                now,
+                (hold.kind, hold.hold_id, hold.binding),
+            ) {
+                Ok(Some(id)) => evidence.push(id),
+                Ok(None) => {}
+                Err(refusal) => return Err(Verdict::from_refusal(refusal.code)),
+            }
+        }
+        evidence.sort();
+        evidence.dedup();
+        self.store
+            .validate_held_evidence(hold.hold_id, hold.kind, hold.binding, &evidence, now)
+            .map_err(Verdict::from_hold)?;
+        Ok(evidence)
+    }
+
+    /// Stages the proposal at the provisional identity and seals its run; returns the reference and the row's creation time. A byte-identical row already sealed by an earlier attempt of this settlement is adopted; different bytes at the identity conflict.
+    fn stage(
+        &self,
+        run: &CuratorHoldBinding,
+        queue_deadline_at: i64,
+        proposal: ReviewProposal,
+        now: i64,
+    ) -> Result<(ReviewStagedReference, i64), SettlementError> {
+        let identity = provisional_result_identity(&run.subject, run.generation);
+        let payload = ReviewPayload::Proposal(Box::new(proposal));
+        let binding = proposal_binding(self.binding, run);
+        let staged = self.store.stage_review_input(ReviewStagingSpec {
+            extraction_run_id: identity.extraction_run_id.clone(),
+            candidate_id: identity.candidate_id.clone(),
+            producer: SETTLEMENT_PRODUCER.to_string(),
+            binding: binding.clone(),
+            payload: payload.clone(),
+            recorded_at: now,
+            queue_deadline_at,
+        });
+        let reference = match staged {
+            Ok(reference) => reference,
+            Err(ReviewStageError::Refused(ReviewStageRefusal::Changed)) => {
+                return Err(SettlementError::ConflictingContent);
+            }
+            Err(ReviewStageError::Refused(ReviewStageRefusal::Terminal)) => {
+                // The run is already sealed: only the same bytes at the identity count as this settlement's result.
+                let reference = ReviewStagedReference {
+                    database_incarnation_id: run.kernel_incarnation.clone(),
+                    candidate_id: identity.candidate_id.clone(),
+                    payload_digest: payload.digest().map_err(kernel)?,
+                };
+                return match self.store.read_review_input(&reference, &binding, now) {
+                    Ok(row) => Ok((reference, row.lifecycle.created_at)),
+                    Err(ReviewReadError::Refused(ReviewReadRefusal::Changed)) => {
+                        Err(SettlementError::ConflictingContent)
+                    }
+                    Err(error) => Err(kernel(error)),
+                };
+            }
+            Err(other) => return Err(kernel(other)),
+        };
+        self.store
+            .finish_staging_run(
+                &identity.extraction_run_id,
+                StagingTerminalState::Completed,
+                now,
+            )
+            .map_err(kernel)?;
+        let created_at = self
+            .store
+            .read_review_input(&reference, &binding, now)
+            .map_err(kernel)?
+            .lifecycle
+            .created_at;
+        Ok((reference, created_at))
+    }
+
+    /// One Kernel envelope moves retention from the execution hold to the review hold owned by `review`, expiring seven days after the result's creation.
+    fn transfer_retention(
+        &self,
+        broker: &EvidenceBroker,
+        review: &CuratorHoldBinding,
+        created_at: i64,
+    ) -> Result<CuratorHold, SettlementError> {
+        let binding = broker.binding();
+        self.store
+            .transfer_execution_to_review(
+                &binding.hold_id,
+                &binding.hold,
+                review,
+                created_at.saturating_add(REVIEW_EXPIRY_MAX_MS),
+            )
+            .map_err(kernel)
+    }
+}
+
+/// The hold a revalidation runs under and the binding that owns it.
+#[derive(Clone, Copy)]
+struct HeldUnder<'a> {
+    kind: CuratorHoldKind,
+    hold_id: &'a str,
+    binding: &'a CuratorHoldBinding,
+}
+
+/// The two completions settlement records without staging anything.
+enum ContentFree {
+    Unknown,
+    Abstained(AbstainReason),
+}
+
+/// The job's binding under the proposal owner for `run`'s generation.
+fn proposal_binding(job: &ReviewBinding, run: &CuratorHoldBinding) -> ReviewBinding {
+    ReviewBinding {
+        owner: ReviewOwner::Proposal {
+            job_id: run.subject.clone(),
+            generation: run.generation,
+        },
+        ..job.clone()
+    }
+}
+
+/// The model text is render-checked, every citation must name disclosed evidence, and the policy dependencies are the broker's, never the model's.
+fn bind_dependencies(
+    broker: &EvidenceBroker,
+    mut proposal: ReviewProposal,
+    disclosed: &[String],
+) -> Result<ReviewProposal, AbstainReason> {
+    for text in proposal.new_text.iter().chain(&proposal.limitations) {
+        if check_render(text.as_bytes(), None).is_err() {
+            return Err(AbstainReason::Secret);
+        }
+    }
+    let cited: Vec<&str> = proposal
+        .support
+        .iter()
+        .chain(&proposal.contradictions)
+        .map(|reference| reference.evidence_id.as_str())
+        .collect();
+    if cited.iter().any(|evidence_id| {
+        disclosed
+            .binary_search_by(|d| d.as_str().cmp(evidence_id))
+            .is_err()
+    }) {
+        return Err(AbstainReason::UndisclosedCitation);
+    }
+    let disclosed_inputs: Vec<EvidenceReference> = disclosed
+        .iter()
+        .map(|evidence_id| EvidenceReference {
+            evidence_id: evidence_id.clone(),
+            span: None,
+        })
+        .collect();
+    let uncited_disclosed_inputs = disclosed_inputs
+        .iter()
+        .filter(|input| !cited.contains(&input.evidence_id.as_str()))
+        .cloned()
+        .collect();
+    let mut ancestry: Vec<String> = broker
+        .ledger
+        .union()
+        .members()
+        .filter_map(|member| member.owner_id.clone())
+        .collect();
+    ancestry.sort();
+    ancestry.dedup();
+    proposal.policy_dependencies = PolicyDependencies {
+        question_template: proposal.policy_dependencies.question_template,
+        disclosed_inputs,
+        uncited_disclosed_inputs,
+        ancestry,
+    };
+    Ok(proposal)
+}
+
+/// A revalidation outcome: a durable abstention reason, or a store failure that must not become one.
+enum Verdict {
+    Abstain(AbstainReason),
+    Store(String),
+}
+
+impl Verdict {
+    /// A resource or store refusal is transient and must not become a durable abstention; every other code says the disclosed input no longer stands as rendered.
+    fn from_refusal(code: RefusalCode) -> Self {
+        match code {
+            RefusalCode::Store
+            | RefusalCode::HoldLimit
+            | RefusalCode::BatchLimit
+            | RefusalCode::InspectionLimit
+            | RefusalCode::ByteLimit
+            | RefusalCode::BufferLimit
+            | RefusalCode::Unavailable => Self::Store(format!("revalidation refused: {code}")),
+            RefusalCode::PolicyBlocked => Self::Abstain(AbstainReason::OwnerSensitive),
+            RefusalCode::Scope => Self::Abstain(AbstainReason::WrongScope),
+            RefusalCode::RenderCheck => Self::Abstain(AbstainReason::Secret),
+            RefusalCode::UnknownAlias
+            | RefusalCode::InvalidRange
+            | RefusalCode::ExpectationChanged
+            | RefusalCode::OriginRevoked
+            | RefusalCode::HoldInvalid
+            | RefusalCode::Undecodable
+            | RefusalCode::InvalidCursor
+            | RefusalCode::InvalidPath
+            | RefusalCode::Protected
+            | RefusalCode::NotRegularFile
+            | RefusalCode::Confinement
+            | RefusalCode::Unsupported
+            | RefusalCode::NotFound
+            | RefusalCode::TooLarge
+            | RefusalCode::UnsupportedQuestion => Self::Abstain(AbstainReason::ExpectationChanged),
+        }
+    }
+
+    fn from_hold(error: CuratorHoldError) -> Self {
+        match error {
+            CuratorHoldError::Store(error) => Self::Store(error.to_string()),
+            CuratorHoldError::Refused(_) => Self::Abstain(AbstainReason::ExpectationChanged),
+        }
+    }
+}
+
+fn store(error: impl std::fmt::Display) -> SettlementError {
+    SettlementError::Store(error.to_string())
+}
+
+fn kernel(error: impl std::fmt::Display) -> SettlementError {
+    SettlementError::Kernel(error.to_string())
+}
+
+/// One completed job's content-free outcome, as the receipt alone reports it (Q28: an abstention lists with no Kernel row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewOutcome {
+    pub causal_identity: String,
+    pub generation: u64,
+    pub terminal: CuratorReceiptTerminal,
+    pub abstained_reason: Option<AbstainReason>,
+    /// Set when the receipt selects a result; content is read separately.
+    pub selected: bool,
+}
+
+/// One bounded page of completed outcomes and the cursor for the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewOutcomePage {
+    pub outcomes: Vec<ReviewOutcome>,
+    pub next: Option<String>,
+}
+
+/// A selected proposal whose every selected field and dependency passed the Kernel at the read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedProposal {
+    pub reference: ReviewStagedReference,
+    pub proposal: ReviewProposal,
+    /// The review hold's expiry: the sole source of the review deadline.
+    pub review_expires_at: i64,
+}
+
+/// Why a selected proposal was not returned. `NotSelected` covers receipts that are missing, in progress, or completed without a selection.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ReadRefusal {
+    #[error("not_selected")]
+    NotSelected,
+    /// The receipt belongs to another Memory Store or Kernel incarnation than the live pair.
+    #[error("incarnation_mismatch")]
+    IncarnationMismatch,
+    /// The receipt's selection and generation disagree.
+    #[error("selection_mismatch")]
+    SelectionMismatch,
+    /// The Kernel row does not match the selected fields or is no longer readable.
+    #[error("kernel {0}")]
+    Kernel(ReviewReadRefusal),
+    /// The review hold is gone: the review deadline passed or the hold was released or degraded.
+    #[error("review_expired")]
+    ReviewExpired,
+    /// A disclosed input no longer passes the Kernel's checks.
+    #[error("dependency {0}")]
+    Dependency(RefusalCode),
+    #[error("store {0}")]
+    Store(String),
+}
+
+/// Completed outcomes for `project`, at most `limit` (capped at [`MAX_RECEIPT_PAGE`]), after `after`. One Memory Store read, released before return.
+pub fn list_review_outcomes(
+    ledger: &MemoryStore,
+    project: &str,
+    after: Option<&str>,
+    limit: usize,
+) -> Result<ReviewOutcomePage, ReadRefusal> {
+    let limit = limit.clamp(1, MAX_RECEIPT_PAGE);
+    let receipts = ledger
+        .list_completed_curator_receipts(project, after, limit)
+        .map_err(|error| ReadRefusal::Store(error.to_string()))?;
+    let next = (receipts.len() == limit)
+        .then(|| {
+            receipts
+                .last()
+                .map(|receipt| receipt.causal_identity.clone())
+        })
+        .flatten();
+    let outcomes = receipts
+        .into_iter()
+        .filter_map(|receipt| {
+            Some(ReviewOutcome {
+                causal_identity: receipt.causal_identity,
+                generation: receipt.generation,
+                terminal: receipt.terminal?,
+                abstained_reason: receipt.abstained_reason,
+                selected: receipt.selected.is_some(),
+            })
+        })
+        .collect();
+    Ok(ReviewOutcomePage { outcomes, next })
+}
+
+/// Reads the proposal the job's completed receipt selects. `binding` is the job's staging binding; its owner is replaced by the selected generation's proposal owner.
+pub fn read_selected_proposal(
+    store: &KernelStore,
+    ledger: &MemoryStore,
+    project: &str,
+    causal_identity: &str,
+    binding: &ReviewBinding,
+    now: i64,
+) -> Result<SelectedProposal, ReadRefusal> {
+    let receipt = ledger
+        .lookup_curator_receipt(project, causal_identity)
+        .map_err(|error| ReadRefusal::Store(error.to_string()))?
+        .ok_or(ReadRefusal::NotSelected)?;
+    let live_memstore = ledger
+        .curator_store_incarnation()
+        .map_err(|error| ReadRefusal::Store(error.to_string()))?;
+    // The Memory Store is released; everything below is the Kernel's.
+    let (selected_generation, selection) = match (receipt.terminal, receipt.selected) {
+        (Some(CuratorReceiptTerminal::Complete), Some(selected)) => selected,
+        _ => return Err(ReadRefusal::NotSelected),
+    };
+    if receipt.database_incarnation_id != live_memstore {
+        return Err(ReadRefusal::IncarnationMismatch);
+    }
+    if selected_generation != receipt.generation
+        || selection.candidate_id
+            != provisional_result_identity(causal_identity, receipt.generation).candidate_id
+    {
+        return Err(ReadRefusal::SelectionMismatch);
+    }
+    let reference = ReviewStagedReference {
+        database_incarnation_id: receipt.kernel_incarnation_id.clone(),
+        candidate_id: selection.candidate_id.clone(),
+        payload_digest: selection.payload_digest.clone(),
+    };
+    let run = CuratorHoldBinding {
+        project_digest: project.to_string(),
+        kernel_incarnation: receipt.kernel_incarnation_id.clone(),
+        memstore_incarnation: receipt.database_incarnation_id.clone(),
+        subject: causal_identity.to_string(),
+        generation: receipt.generation,
+    };
+    let row = store
+        .read_review_input(&reference, &proposal_binding(binding, &run), now)
+        .map_err(|error| match error {
+            ReviewReadError::Refused(ReviewReadRefusal::IncarnationMismatch) => {
+                ReadRefusal::IncarnationMismatch
+            }
+            ReviewReadError::Refused(refusal) => ReadRefusal::Kernel(refusal),
+            ReviewReadError::Invalid => ReadRefusal::SelectionMismatch,
+            ReviewReadError::Store(error) => ReadRefusal::Store(error.to_string()),
+        })?;
+    let ReviewPayload::Proposal(proposal) = row.payload else {
+        return Err(ReadRefusal::Kernel(ReviewReadRefusal::DecodeRefused));
+    };
+    let review = CuratorHoldBinding {
+        subject: selection.candidate_id.clone(),
+        ..run
+    };
+    let hold = store
+        .lookup_review_hold(&review, now)
+        .map_err(|error| match error {
+            CuratorHoldError::Store(error) => ReadRefusal::Store(error.to_string()),
+            CuratorHoldError::Refused(_) => ReadRefusal::ReviewExpired,
+        })?
+        .ok_or(ReadRefusal::ReviewExpired)?;
+    // Every disclosed input, cited or not, must still be live under the review hold and eligible for a local reader.
+    let evidence: Vec<String> = proposal
+        .policy_dependencies
+        .disclosed_inputs
+        .iter()
+        .map(|input| input.evidence_id.clone())
+        .collect();
+    let held = store
+        .validate_held_evidence(
+            &hold.hold_id,
+            CuratorHoldKind::Review,
+            &review,
+            &evidence,
+            now,
+        )
+        .map_err(|error| match error {
+            CuratorHoldError::Store(error) => ReadRefusal::Store(error.to_string()),
+            CuratorHoldError::Refused(_) => ReadRefusal::Dependency(RefusalCode::HoldInvalid),
+        })?;
+    for fact in held {
+        let facts = store
+            .artifact_egress_facts(
+                &ArtifactHandle {
+                    digest: fact.artifact_digest,
+                    evidence_id: fact.evidence_id,
+                },
+                ArtifactDestination::Local,
+            )
+            .map_err(|error| ReadRefusal::Store(error.to_string()))?;
+        if facts.eligibility != ArtifactEligibility::Allowed {
+            return Err(ReadRefusal::Dependency(RefusalCode::PolicyBlocked));
+        }
+    }
+    Ok(SelectedProposal {
+        reference,
+        proposal: *proposal,
+        review_expires_at: hold.expires_at,
+    })
+}
