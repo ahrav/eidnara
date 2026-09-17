@@ -76,9 +76,21 @@ one; no row of the refusing page is judged or returned.
 - No reassociation, pairwise summation, or SIMD reduction.
 
 Every dense scoring path uses this function or reproduces it exactly, so the
-same query and row yield the same f64 everywhere. `dense::score::score_encoded`
-reproduces it over the encoded row, checking `N_gen` in the same pass over the
-coordinates, and the oracle scores stored rows through it.
+same query and row yield the same f64 everywhere.
+
+`dense::score::score_block` reproduces it for eight rows at once, one lane per
+row (`BLOCK_ROWS`). Each lane forms the same f64 products from its own row and
+adds them in increasing coordinate order from `+0.0`; no lane is ever combined
+with another, and the same holds for the sum of squares each lane accumulates
+for the generation predicate. A row of finite coordinates therefore scores to
+the same f64 bits through `score_block` as through `inner_product`, and its
+sum of squares equals the one `N_gen` accumulates. Only the NaN payload of a
+row with a non-finite coordinate may differ between the two, because IEEE 754
+leaves payload propagation to operand order; such a row is refused before its
+score is consulted, and the scalar scan names its first non-finite coordinate.
+`tests/dense_properties.rs` pins the bit equality over every f32 exponent and
+both signed zeros. The exhaustive oracle scores through `score_block`;
+`rescore` and every single-row path use `inner_product`.
 
 ## Ordering
 
@@ -96,7 +108,14 @@ generation inside the caller's read transaction:
   (`batch::dense_eligible`), visited in occurrence identifier byte order
   regardless of class, through bounded keyset pages of `page_rows` rows over
   the `occurrences` primary key. Visit order therefore equals tie order.
-- Each page is validated and scored as it is read. Every row with a vector has
+- Each page is validated and scored as it is read, in blocks of up to eight
+  rows in visit order; a row is copied out of the page statement into a reused
+  scoring lane and becomes an owned candidate only when the set admits it. A
+  block is scored when it is full, when the page ends, and before an ended
+  budget or a later row's error is acted on, so the rows visited before it are
+  validated exactly as they would have been one row at a time. The first row
+  of the page that fails the layout refuses the request, whatever block it
+  sits in. Every row with a vector has
   its identity fields validated as a kernel candidate before its score is
   consulted, so a corrupt row is refused (`Kernel`) whatever `page_rows` is.
   Only the rows that would enter the top-`k` set as it stood before the page

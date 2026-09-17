@@ -106,11 +106,29 @@ pub(super) fn decode_words(
 
 /// Truncation and dimension are checked before any coordinate is read; the norm is not, so a stored row can be read where the generation's tolerance is unknown.
 pub fn decode_shape(bytes: &[u8], dimension: u32) -> Result<Vec<f32>, RowRejection> {
-    let words = decode_words(bytes)?;
-    check_dimension(words.len(), dimension)?;
-    let row: Vec<f32> = words.collect();
+    let row = decode_length(bytes, dimension)?;
     check_finite(&row)?;
     Ok(row)
+}
+
+/// Checks truncation and dimension; callers validate finiteness and norm with [`validate_from_sum`] when a block carries the row's sum of squares.
+pub fn decode_length(bytes: &[u8], dimension: u32) -> Result<Vec<f32>, RowRejection> {
+    let mut row = Vec::new();
+    decode_length_into(bytes, dimension, &mut row)?;
+    Ok(row)
+}
+
+/// [`decode_length`] into a reused buffer, so a walk decodes every row without allocating for it.
+pub fn decode_length_into(
+    bytes: &[u8],
+    dimension: u32,
+    into: &mut Vec<f32>,
+) -> Result<(), RowRejection> {
+    let words = decode_words(bytes)?;
+    check_dimension(words.len(), dimension)?;
+    into.clear();
+    into.extend(words);
+    Ok(())
 }
 
 pub fn decode(bytes: &[u8], layout: &RowLayout) -> Result<Vec<f32>, RowRejection> {
@@ -125,10 +143,31 @@ pub fn validate_shape(row: &[f32], dimension: u32) -> Result<(), RowRejection> {
     check_finite(row)
 }
 
+pub fn validate_length(row: &[f32], dimension: u32) -> Result<(), RowRejection> {
+    check_dimension(row.len(), dimension)
+}
+
 pub fn validate(row: &[f32], layout: &RowLayout) -> Result<(), RowRejection> {
     layout.check()?;
     validate_shape(row, layout.dimension)?;
     check_norm(row, layout.unit_norm_tolerance)
+}
+
+/// Validates a row whose sum of squares was accumulated as [`validate`] accumulates it: from `+0.0`, in increasing coordinate order.
+///
+/// A `Vec<f32>` cannot hold enough coordinates for finite `f32` squares to overflow `f64`. A
+/// non-finite sum identifies a non-finite coordinate, and the scalar scan names the first one.
+pub fn validate_from_sum(
+    row: &[f32],
+    layout: &RowLayout,
+    sum_of_squares: f64,
+) -> Result<(), RowRejection> {
+    layout.check()?;
+    check_dimension(row.len(), layout.dimension)?;
+    if !sum_of_squares.is_finite() {
+        check_finite(row)?;
+    }
+    check_norm_sum(sum_of_squares, layout.unit_norm_tolerance)
 }
 
 fn check_dimension(actual: usize, expected: u32) -> Result<(), RowRejection> {
@@ -154,22 +193,20 @@ fn check_norm(row: &[f32], tolerance: f64) -> Result<(), RowRejection> {
         let widened = f64::from(*value);
         sum_of_squares += widened * widened;
     }
-    check_sum_of_squares(sum_of_squares, tolerance)
+    check_norm_sum(sum_of_squares, tolerance)
 }
 
-/// Checks a precomputed sum of squares, preserving caller-controlled accumulation order.
-pub(super) fn check_sum_of_squares(
-    sum_of_squares: f64,
-    tolerance: f64,
-) -> Result<(), RowRejection> {
+/// The admission test is written as the contract's inclusive bound so a NaN sum is refused rather than admitted by a false `>` comparison.
+fn check_norm_sum(sum_of_squares: f64, tolerance: f64) -> Result<(), RowRejection> {
     if sum_of_squares == 0.0 {
         return Err(RowRejection::ZeroNorm);
     }
     let norm = sum_of_squares.sqrt();
-    if (norm - 1.0).abs() > tolerance {
-        return Err(RowRejection::Normalization { norm });
+    if (norm - 1.0).abs() <= tolerance {
+        Ok(())
+    } else {
+        Err(RowRejection::Normalization { norm })
     }
-    Ok(())
 }
 
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"EIDF32R\0";

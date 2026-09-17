@@ -601,6 +601,167 @@ fn an_infinite_stored_coordinate_is_refused() {
     );
 }
 
+/// A page wide enough for every dense row fills one scoring block, so every lane carries a real row.
+fn one_page_bounds(k: usize) -> OracleBounds {
+    OracleBounds {
+        page_rows: NonZeroUsize::new(9).unwrap(),
+        ..bounds(k)
+    }
+}
+
+#[test]
+fn a_page_that_fills_a_scoring_block_yields_the_reference_prefix() {
+    let fixture = Fixture::all_admitted();
+    for query in [
+        axis(0),
+        axis(6),
+        unit([0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3]),
+    ] {
+        let reference = fixture.reference(&query, &OBJECTS);
+        let ranking = fixture
+            .rank(&query, one_page_bounds(8), &EvalBudget::unbounded())
+            .unwrap();
+        assert_eq!(ranking.completion, Completion::Complete);
+        assert_eq!(ranking.consumed.pages, 1);
+        assert_eq!(keyed(&ranking), reference);
+        for (row, (_, score)) in ranking.ranked.iter().zip(&reference) {
+            assert_eq!(row.score.to_bits(), score.to_bits());
+        }
+        let narrow = fixture
+            .rank(&query, bounds(8), &EvalBudget::unbounded())
+            .unwrap();
+        assert_eq!(
+            keyed(&narrow),
+            keyed(&ranking),
+            "page width never changes a score"
+        );
+    }
+}
+
+#[test]
+fn a_corrupt_row_inside_a_scoring_block_refuses_with_its_own_rejection() {
+    let ids: Vec<String> = Fixture::all_admitted().dense_ids().into_iter().collect();
+    let cases: [(usize, Vec<f32>, RowRejection); 3] = [
+        (
+            2,
+            vec![0.0, 0.0, f32::NAN, 0.0, 0.0, 0.0, 0.0, 1.0],
+            RowRejection::NonFinite { coordinate: 2 },
+        ),
+        (4, vec![0.0; 8], RowRejection::ZeroNorm),
+        (
+            6,
+            vec![0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            RowRejection::Normalization {
+                norm: 0.5f64.hypot(0.5),
+            },
+        ),
+    ];
+    for (position, vector, expected) in cases {
+        let fixture = Fixture::all_admitted();
+        let victim = ids[position].clone();
+        fixture
+            .raw()
+            .execute(
+                "UPDATE occurrence_vectors SET vector=?2 WHERE occurrence_id=?1",
+                rusqlite::params![victim, codec::encode(&vector)],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.rank(&axis(0), one_page_bounds(3), &EvalBudget::unbounded()),
+            Err(OracleRefusal::StoredRow {
+                occurrence_id: victim,
+                rejection: expected
+            }),
+            "row {position}"
+        );
+    }
+}
+
+#[test]
+fn a_corrupt_row_visited_before_the_budget_ends_still_refuses() {
+    let fixture = Fixture::all_admitted();
+    let ids: Vec<String> = fixture.dense_ids().into_iter().collect();
+    let victim = ids[1].clone();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2 WHERE occurrence_id=?1",
+            rusqlite::params![victim, codec::encode(&[f32::NAN; 8])],
+        )
+        .unwrap();
+    let budget = EvalBudget::unbounded();
+    let mut visited = 0;
+    let outcome = fixture.rank_with_hook(&axis(0), one_page_bounds(3), &budget, |window| {
+        if let Window::Visited(_) = window {
+            visited += 1;
+            if visited == 5 {
+                budget.cancel();
+            }
+        }
+    });
+    assert_eq!(
+        outcome,
+        Err(OracleRefusal::StoredRow {
+            occurrence_id: victim,
+            rejection: RowRejection::NonFinite { coordinate: 0 }
+        }),
+        "the second row was visited before the fifth ended the budget, so its rejection stands"
+    );
+}
+
+#[test]
+fn an_earlier_row_that_fails_at_scoring_outranks_a_later_row_that_fails_at_decoding() {
+    let ids: Vec<String> = Fixture::all_admitted().dense_ids().into_iter().collect();
+    let short = codec::encode(&unit([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])[..7]);
+
+    // A non-finite coordinate is found at scoring; the dimension of the next row is found at decoding.
+    let fixture = Fixture::all_admitted();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2 WHERE occurrence_id=?1",
+            rusqlite::params![ids[1], codec::encode(&[f32::NAN; 8])],
+        )
+        .unwrap();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2, vector_dimension=7 WHERE occurrence_id=?1",
+            rusqlite::params![ids[2], short],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.rank(&axis(0), one_page_bounds(3), &EvalBudget::unbounded()),
+        Err(OracleRefusal::StoredRow {
+            occurrence_id: ids[1].clone(),
+            rejection: RowRejection::NonFinite { coordinate: 0 }
+        }),
+        "the second row fails the layout first, whatever check finds it"
+    );
+
+    // The kernel refuses a corrupt identity field at scoring.
+    let fixture = Fixture::all_admitted();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrences SET source_object_id='' WHERE occurrence_id=?1",
+            rusqlite::params![ids[1]],
+        )
+        .unwrap();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2, vector_dimension=7 WHERE occurrence_id=?1",
+            rusqlite::params![ids[2], short],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.rank(&axis(0), one_page_bounds(3), &EvalBudget::unbounded()),
+        Err(OracleRefusal::Kernel(kernel::KernelError::InvalidInput)),
+        "the second row's identity fails before the third row's dimension"
+    );
+}
+
 #[test]
 fn an_invalid_query_or_layout_is_refused_before_the_projection_is_read() {
     let fixture = Fixture::all_admitted();

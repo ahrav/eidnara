@@ -7,7 +7,7 @@
 //! This module returns identical bytes for identical store contents, `now_ms`, and `budget`.
 //! The caller supplies frozen `now_ms`; this module never reads a live clock.
 
-use std::collections::HashSet;
+use retrieval::packing::skip_and_continue;
 
 use memory_store::{MemoryStore, MemoryStoreError};
 
@@ -85,25 +85,40 @@ pub(crate) fn trim_memories_to_budget(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Vec<CanonicalMemory> {
     let budget = budget_tokens.max(1.0);
-    let mut selected = Vec::new();
-    let mut categories = HashSet::<&str>::new();
-    let mut used = estimate_tokens("<project-memory>\n</project-memory>") as f64;
-    for memory in memories
+    let wrapper = estimate_tokens("<project-memory>\n</project-memory>");
+    if wrapper as f64 > budget {
+        return Vec::new();
+    }
+    let positive: Vec<&CanonicalMemory> = memories
         .iter()
         .filter(|memory| is_positive_memory_category(&memory.category))
-    {
-        let mut cost = estimate_tokens(&(render_memory_line(memory) + "\n"));
-        if !categories.contains(memory.category.as_str()) {
-            cost += estimate_tokens(&format!("<{}>\n</{}>\n", memory.category, memory.category));
-        }
-        if used + cost as f64 > budget {
-            continue;
-        }
-        used += cost as f64;
-        categories.insert(memory.category.as_str());
-        selected.push(memory.clone());
-    }
-    selected
+        .collect();
+    let mut open_categories: Vec<&str> = Vec::new();
+    let mut seen_admitted = 0;
+    let scan = skip_and_continue(
+        budget.floor() as u64 - wrapper as u64,
+        positive.len(),
+        |admitted, index| {
+            for admitted in &admitted[seen_admitted..] {
+                let category = positive[*admitted].category.as_str();
+                if !open_categories.contains(&category) {
+                    open_categories.push(category);
+                }
+            }
+            seen_admitted = admitted.len();
+            let memory = positive[index];
+            let mut cost = estimate_tokens(&(render_memory_line(memory) + "\n"));
+            if !open_categories.contains(&memory.category.as_str()) {
+                cost +=
+                    estimate_tokens(&format!("<{}>\n</{}>\n", memory.category, memory.category));
+            }
+            cost as u64
+        },
+    );
+    scan.admitted
+        .iter()
+        .map(|index| positive[*index].clone())
+        .collect()
 }
 
 pub(crate) fn trim_user_profile_to_budget(
@@ -241,4 +256,107 @@ pub fn compose_m0(
         folded_history_segment_seq,
         docs_hash: docs.canonical_hash,
     })
+}
+
+#[cfg(test)]
+mod trim_memories_tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn memory(category: &str, content: &str) -> CanonicalMemory {
+        CanonicalMemory {
+            object_id: format!("{category}-{}", content.len()),
+            category: category.to_owned(),
+            content: content.to_owned(),
+        }
+    }
+
+    /// The loop the delegating implementation replaced, kept as the reference.
+    fn reference(
+        memories: &[CanonicalMemory],
+        budget_tokens: f64,
+        estimate_tokens: impl Fn(&str) -> usize + Copy,
+    ) -> Vec<CanonicalMemory> {
+        let budget = budget_tokens.max(1.0);
+        let mut selected = Vec::new();
+        let mut categories = std::collections::HashSet::<&str>::new();
+        let mut used = estimate_tokens("<project-memory>\n</project-memory>") as f64;
+        for memory in memories
+            .iter()
+            .filter(|memory| is_positive_memory_category(&memory.category))
+        {
+            let mut cost = estimate_tokens(&(render_memory_line(memory) + "\n"));
+            if !categories.contains(memory.category.as_str()) {
+                cost +=
+                    estimate_tokens(&format!("<{}>\n</{}>\n", memory.category, memory.category));
+            }
+            if used + cost as f64 > budget {
+                continue;
+            }
+            used += cost as f64;
+            categories.insert(memory.category.as_str());
+            selected.push(memory.clone());
+        }
+        selected
+    }
+
+    #[test]
+    fn budget_boundaries_match_the_replaced_loop() {
+        let bytes = |text: &str| text.len();
+        let memories = [
+            memory("ARCHITECTURE", "alpha"),
+            memory("ARCHITECTURE", "beta beta"),
+            memory("NAMING", "gamma"),
+            memory("WARNING", "never rendered"),
+        ];
+        assert_eq!(
+            trim_memories_to_budget(&memories, 1e6, bytes).len(),
+            3,
+            "the positive rows are admitted under a generous budget"
+        );
+        let wrapper = bytes("<project-memory>\n</project-memory>") as f64;
+        for budget in [
+            f64::NAN,
+            -3.0,
+            0.0,
+            wrapper - 1.0,
+            wrapper,
+            wrapper + 10.5,
+            wrapper + 40.0,
+            wrapper + 40.5,
+            wrapper + 41.0,
+            1e30,
+            f64::INFINITY,
+        ] {
+            assert_eq!(
+                trim_memories_to_budget(&memories, budget, bytes),
+                reference(&memories, budget, bytes),
+                "budget {budget}"
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn skip_and_continue_delegation_matches_the_replaced_loop(
+            rows in proptest::collection::vec((0u8..3, 1usize..40), 0..12),
+            budget in prop_oneof![Just(f64::NAN), -50.0f64..400.0],
+        ) {
+            let memories: Vec<CanonicalMemory> = rows
+                .iter()
+                .map(|(category, len)| {
+                    memory(
+                        ["ARCHITECTURE", "NAMING", "WARNING"][*category as usize],
+                        &"x".repeat(*len),
+                    )
+                })
+                .collect();
+            let bytes = |text: &str| text.len();
+            prop_assert_eq!(
+                trim_memories_to_budget(&memories, budget, bytes),
+                reference(&memories, budget, bytes)
+            );
+        }
+    }
 }

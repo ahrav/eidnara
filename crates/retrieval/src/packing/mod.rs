@@ -1,10 +1,14 @@
 //! Selected occurrences are read by occurrence identity from their own rows.
 //! Byte-identical payloads remain distinct occurrences.
 
+mod grouping;
+mod required;
+mod scan;
+
 use std::num::NonZeroUsize;
 
-use kernel::Sensitivity;
-use kernel::source_identity::{OccurrenceClass, Span};
+use kernel::source_identity::{OccurrenceClass, Span, payload_id};
+use kernel::{MAX_PAYLOAD_BYTES, Sensitivity};
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 use storage::GuardedConn;
@@ -12,6 +16,16 @@ use storage::GuardedConn;
 use crate::eligibility::OccurrenceCandidate;
 use crate::fusion::{IdentityRefusal, OccurrenceId, ParentGroupKey};
 use crate::{ProjectionError, Tombstone, decode_span, decode_tombstone, parse_sensitivity};
+
+pub use grouping::{Group, GroupIdentity, MergedRange, Partition, Selected, Ungrouped, group};
+pub use required::{
+    AdmittedRequired, RequiredBound, RequiredBounds, RequiredContextFailure, RequiredFact,
+    RequiredRequest, RequiredReservation, TokenCount, admit_required, reserve_required,
+};
+pub use scan::{
+    BoundExceeded, OptionalBound, OptionalBounds, Scan, admit_fused_candidates, admit_optional_set,
+    skip_and_continue,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GroupingKey {
@@ -79,6 +93,19 @@ pub struct PayloadRef {
     pub byte_length: u64,
 }
 
+impl PayloadRef {
+    /// # Errors
+    ///
+    /// [`ProjectionError::CorruptRow`] when the length or the digest of `bytes`
+    /// disagrees with this reference.
+    pub fn verify(&self, bytes: &[u8]) -> Result<(), ProjectionError> {
+        if bytes.len() as u64 != self.byte_length || payload_id(bytes) != self.payload_id {
+            return Err(ProjectionError::CorruptRow);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provenance {
     pub domain_id: String,
@@ -103,6 +130,11 @@ pub struct SelectedOccurrence {
 }
 
 impl SelectedOccurrence {
+    #[must_use]
+    pub fn is_stale_for(&self, selected_revision: i64) -> bool {
+        self.tombstone.is_some() || self.revision != selected_revision
+    }
+
     /// The verdict for this candidate lives only in the report
     /// [`crate::eligibility::judge_occurrences`] returns.
     pub fn eligibility_candidate(&self) -> OccurrenceCandidate {
@@ -136,9 +168,10 @@ const SELECTED_SQL: &str =
 /// [`ProjectionError::TooManyRecords`] when more than `max` identities are
 /// given, [`ProjectionError::UnknownOccurrence`] for an identity with no row,
 /// [`ProjectionError::CorruptRow`] for a row outside the schema's shape, whose
-/// tuple digest does not match its identifier, or whose class, revision,
-/// representation, or span column disagrees with its tuple, and the SQLite
-/// error otherwise.
+/// tuple digest does not match its identifier, whose class, revision,
+/// representation, or span column disagrees with its tuple, or whose
+/// eligibility metadata the kernel would refuse, and the SQLite error
+/// otherwise.
 pub fn read_selected(
     conn: &GuardedConn<'_>,
     selected: &[OccurrenceId],
@@ -191,7 +224,7 @@ fn decode(
     }
     let grouping =
         Grouping::derive(tuple, class, revision, &representation, span).map_err(|_| corrupt())?;
-    Ok(SelectedOccurrence {
+    let selected = SelectedOccurrence {
         occurrence,
         class,
         revision,
@@ -211,5 +244,47 @@ fn decode(
         },
         tombstone,
         grouping,
-    })
+    };
+    // Metadata the kernel would refuse is this row's fault, not an untyped
+    // `InvalidInput` over the whole batch it is judged in.
+    selected
+        .eligibility_candidate()
+        .candidate
+        .validate()
+        .map_err(|_| corrupt())?;
+    Ok(selected)
+}
+
+/// Returns bytes for `payload` without verifying its digest.
+/// The caller must call [`PayloadRef::verify`] after releasing `conn` to avoid
+/// hashing while the connection is held.
+/// Rows with a mismatched byte length yield NULL, so SQLite does not
+/// materialize their blobs.
+///
+/// # Errors
+///
+/// [`ProjectionError::CorruptRow`] when no row carries the identifier, the
+/// reference exceeds [`MAX_PAYLOAD_BYTES`], or the row fails the length
+/// predicate; the SQLite error otherwise.
+pub fn fetch_payload(
+    conn: &GuardedConn<'_>,
+    payload: &PayloadRef,
+) -> Result<Vec<u8>, ProjectionError> {
+    let Ok(byte_length) = i64::try_from(payload.byte_length) else {
+        return Err(ProjectionError::CorruptRow);
+    };
+    if payload.byte_length > MAX_PAYLOAD_BYTES as u64 {
+        return Err(ProjectionError::CorruptRow);
+    }
+    let bytes: Option<Vec<u8>> = conn
+        .prepare_cached(
+            "SELECT CASE WHEN byte_length=length(bytes) AND byte_length=?2 THEN bytes END
+             FROM payloads WHERE payload_id=?1",
+        )?
+        .query_row(params![payload.payload_id, byte_length], |row| row.get(0))
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => ProjectionError::CorruptRow,
+            other => other.into(),
+        })?;
+    bytes.ok_or(ProjectionError::CorruptRow)
 }

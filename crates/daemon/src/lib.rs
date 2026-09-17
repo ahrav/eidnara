@@ -41,6 +41,7 @@ pub(crate) mod memory_render;
 pub mod memory_tool;
 pub mod message_cleanup;
 pub mod metered_decode;
+pub mod packing;
 pub(crate) mod project_docs;
 pub(crate) mod prompt_surface;
 mod retained_size;
@@ -220,7 +221,9 @@ pub mod bench_internals {
     #[derive(Default)]
     pub struct HygieneMemo(crate::tail_hygiene::HygieneMemos);
 
-    /// Returns how many leading memories fit the supplied token budget.
+    /// Returns how many memories the skip-and-continue scan admits under the
+    /// supplied token budget: a memory that does not fit is skipped and later
+    /// smaller memories are still visited.
     pub fn trim_memories_to_budget(memories: &[CanonicalMemory], budget_tokens: f64) -> usize {
         crate::m0_compose::trim_memories_to_budget(
             memories,

@@ -16,7 +16,6 @@ use super::oracle::{
     self, ExhaustiveRanking, OracleBounds, OracleRefusal, PageRow, RowSource, Walk, Window,
 };
 use super::resolve::{self, Layer, ResolveRefusal, RowFault, Winner};
-use super::score::score;
 use crate::batch::VectorGeneration;
 use crate::coverage::CURRENT_PENDING;
 use crate::eligibility::Authority;
@@ -96,12 +95,12 @@ impl RowSource for ResolvedRows<'_> {
     }
 
     /// Winners before the visited row are not live any more; the winner at it is its vector; a winner after it waits.
-    fn score(
+    fn vector(
         &mut self,
         row: &PageRow<'_>,
         layout: &RowLayout,
-        query: &[f32],
-    ) -> Result<Option<f64>, OracleRefusal> {
+        into: &mut Vec<f32>,
+    ) -> Result<bool, OracleRefusal> {
         let visited = row.occurrence_id.as_bytes();
         while let Some(winner) = self.winners.get(self.next) {
             match winner.occurrence_id.as_bytes().cmp(visited) {
@@ -127,18 +126,19 @@ impl RowSource for ResolvedRows<'_> {
                             });
                         }
                     };
-                    codec::validate(&vector, layout).map_err(|rejection| {
+                    codec::validate_length(&vector, layout.dimension).map_err(|rejection| {
                         OracleRefusal::StoredRow {
                             occurrence_id: occurrence_id.to_owned(),
                             rejection,
                         }
                     })?;
-                    return Ok(Some(score(layout.metric, query, &vector)));
+                    *into = vector;
+                    return Ok(true);
                 }
-                std::cmp::Ordering::Greater => return Ok(None),
+                std::cmp::Ordering::Greater => return Ok(false),
             }
         }
-        Ok(None)
+        Ok(false)
     }
 }
 

@@ -33,11 +33,36 @@ domain tag or component layout, or the parent derivation requires the matching
 document edit in the same change and a new domain tag for every digest whose
 bytes change. Identity types carry no project, session, or harness.
 
-`src/packing.rs` reads selected occurrences by occurrence identity and derives
-the grouping key. Attribution (sensitivity, provenance, eligibility candidate)
-comes from the occurrence's own row; `PayloadRef` is never an input to any
-read. Only `raw_tool_spans` groups (`Grouping::applies_to`); every other class
-derives `Grouping::NonGrouping`, and `GroupingKey` is derive-only. The crate holds no eligibility verdict: candidates go
-to `eligibility::judge_occurrences` and the report stays with the caller.
-Changing the grouping class set or the key's components requires the matching
-edit in `docs/properties/selection-packing/identity/catalog.md`.
+`src/packing/mod.rs` reads selected occurrences by occurrence identity and
+derives the grouping key. Attribution (sensitivity, provenance, eligibility
+candidate) comes from the occurrence's own row, and a row whose candidate the
+kernel would refuse is `CorruptRow` at the read; `PayloadRef` is never an input
+to a selection read. `fetch_payload` is the one read keyed by a `PayloadRef`:
+it returns bytes only, length-guarded in SQL, and the caller verifies the
+digest through `PayloadRef::verify` after releasing the connection. Only
+`raw_tool_spans` groups (`Grouping::applies_to`); every other class derives
+`Grouping::NonGrouping`, and `GroupingKey` is derive-only. The crate holds no
+eligibility verdict: candidates go to `eligibility::judge_occurrences` and the
+report stays with the caller. Changing the grouping class set or the key's
+components requires the matching edit in
+`docs/properties/selection-packing/identity/catalog.md`.
+
+`src/packing/required.rs` holds the pure required-phase decisions:
+`admit_required` refuses a set beyond the load-count bound before examining any
+request, then classifies rows and kernel dispositions into
+`RequiredContextFailure` in request order before any byte is loaded, and
+`reserve_required` charges loaded bytes through a caller-supplied cost function
+against an integer `TokenCount`. Neither reads a store, a clock, or a default
+bound; the daemon's `packing` module owns fact gathering, `ClaudeTokens`, and
+the trace. Changing a failure class or the stage order requires the matching
+edit in `docs/properties/selection-packing/required/catalog.md`.
+
+`src/packing/grouping.rs` groups a selected set from the selected bytes alone:
+only `raw_tool_spans` keys merge, only overlapping or byte-adjacent spans of
+one key merge, no gap is filled, and every selected identity lands in one
+group or in `Partition::refused` with an `Ungrouped` reason. It never receives
+a parent buffer. `src/packing/scan.rs` holds the skip-and-continue rule that
+both the packer and the daemon's memory trim use, and the optional-phase
+bounds check. The frozen reference in `tests/support/frozen_packer.rs` and the
+oracle fixture under `tests/fixtures/packing/` must change together with any
+rule change here.

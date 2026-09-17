@@ -6,10 +6,10 @@ use std::num::NonZeroUsize;
 use kernel::source_identity::OccurrenceClass;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-use retrieval::dense::Ranked;
 use retrieval::dense::codec::{self, Metric, RowLayout};
 use retrieval::dense::scalar::{Scales, encode, weighted_dot};
 use retrieval::dense::score::TopK;
+use retrieval::dense::{BLOCK_ROWS, Ranked, inner_product, inner_product_block};
 
 const SEED: [u8; 32] = *b"dense-ranking-laws-seed-00000001";
 
@@ -151,78 +151,6 @@ fn the_first_non_finite_coordinate_is_the_one_named() {
         .unwrap();
 }
 
-/// Rows drawn from raw bits so non-finite words, zero rows, and rows far from unit norm all occur, plus truncated and mis-sized byte strings.
-fn encoded_rows() -> impl Strategy<Value = (Vec<u8>, Vec<f32>, u32, f64)> {
-    (
-        prop::collection::vec(any::<u32>(), 0..12),
-        prop::collection::vec(-1.0f32..1.0, 1..12),
-        0usize..3,
-        prop::sample::select(vec![0.0f64, 1e-3, 0.5, 2.0]),
-    )
-        .prop_map(|(bits, query, extra_bytes, tolerance)| {
-            let row: Vec<f32> = bits.into_iter().map(f32::from_bits).collect();
-            let mut bytes = codec::encode(&row);
-            bytes.extend(std::iter::repeat_n(0u8, extra_bytes));
-            let dimension = query.len() as u32;
-            (bytes, query, dimension, tolerance)
-        })
-}
-
-#[test]
-fn scoring_an_encoded_row_matches_decoding_then_scoring_in_every_outcome() {
-    runner()
-        .run(&encoded_rows(), |(bytes, query, dimension, tolerance)| {
-            let layout = RowLayout {
-                dimension,
-                metric: Metric::InnerProduct,
-                unit_norm_tolerance: tolerance,
-            };
-            let decoded = codec::decode(&bytes, &layout)
-                .map(|row| retrieval::dense::score(Metric::InnerProduct, &query, &row).to_bits());
-            let fused =
-                retrieval::dense::score::score_encoded(&layout, &query, &bytes).map(f64::to_bits);
-            prop_assert_eq!(fused, decoded);
-            Ok(())
-        })
-        .unwrap();
-}
-
-#[test]
-fn scoring_a_unit_row_from_bytes_matches_the_in_order_model() {
-    runner()
-        .run(
-            &(
-                prop::collection::vec(-1.0f32..1.0, 1..24),
-                prop::collection::vec(-1.0f32..1.0, 1..24),
-            ),
-            |(raw, query)| {
-                let norm = raw
-                    .iter()
-                    .map(|v| f64::from(*v) * f64::from(*v))
-                    .sum::<f64>()
-                    .sqrt();
-                prop_assume!(norm > 0.0);
-                let row: Vec<f32> = raw.iter().map(|v| (f64::from(*v) / norm) as f32).collect();
-                let query: Vec<f32> = query.iter().cycle().take(row.len()).copied().collect();
-                let layout = RowLayout {
-                    dimension: row.len() as u32,
-                    metric: Metric::InnerProduct,
-                    unit_norm_tolerance: 1e-3,
-                };
-                let mut model = 0.0f64;
-                for (q, r) in query.iter().zip(&row) {
-                    model += f64::from(*q) * f64::from(*r);
-                }
-                let fused =
-                    retrieval::dense::score::score_encoded(&layout, &query, &codec::encode(&row))
-                        .unwrap();
-                prop_assert_eq!(fused.to_bits(), model.to_bits());
-                Ok(())
-            },
-        )
-        .unwrap();
-}
-
 fn positive_scales() -> impl Strategy<Value = Vec<f32>> {
     prop::collection::vec(
         prop::sample::select(vec![1.0f32, 0.5, 0.25, 1.0 / 127.0, 3.0e-3, 2.0, 1.0e-6]),
@@ -298,6 +226,96 @@ fn encoding_codes_are_clamped_counted_and_rounded_to_even() {
                     }
                 }
                 prop_assert_eq!(encoded.clipped, clipped);
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+/// Any f32 bit pattern except the non-finite ones: both signs of zero, subnormals, and every exponent.
+fn finite_f32() -> impl Strategy<Value = f32> {
+    any::<u32>().prop_filter_map("finite", |bits| {
+        let value = f32::from_bits(bits);
+        value.is_finite().then_some(value)
+    })
+}
+
+/// Blocks of eight rows against one query, all with the same length.
+fn block_rows() -> impl Strategy<Value = (Vec<f32>, Vec<Vec<f32>>)> {
+    (1usize..=40).prop_flat_map(|dimension| {
+        (
+            prop::collection::vec(finite_f32(), dimension),
+            prop::collection::vec(prop::collection::vec(finite_f32(), dimension), BLOCK_ROWS),
+        )
+    })
+}
+
+/// Each lane of the block must equal the single-row functions bit for bit, over every f32 exponent and both signed zeros, so any lane crossing, reassociation, or fusion in the tiled loop fails here.
+#[test]
+fn inner_product_block_matches_the_single_row_functions_bit_for_bit() {
+    runner()
+        .run(&block_rows(), |(query, rows)| {
+            let lanes: [&[f32]; BLOCK_ROWS] = std::array::from_fn(|lane| rows[lane].as_slice());
+            let sums = inner_product_block(&query, &lanes);
+            for (lane, row) in rows.iter().enumerate() {
+                prop_assert_eq!(
+                    sums.scores[lane].to_bits(),
+                    inner_product(&query, row).to_bits(),
+                    "score of lane {}",
+                    lane
+                );
+                let mut squares = 0.0f64;
+                for value in row {
+                    let widened = f64::from(*value);
+                    squares += widened * widened;
+                }
+                prop_assert_eq!(
+                    sums.sums_of_squares[lane].to_bits(),
+                    squares.to_bits(),
+                    "sum of squares of lane {}",
+                    lane
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Validation from a block's sum of squares decides and names rejections exactly as the scalar validator does, including a non-finite coordinate anywhere in the row, a zero norm, and a norm outside the tolerance.
+#[test]
+fn validate_from_sum_agrees_with_validate_on_every_row() {
+    runner()
+        .run(
+            &(
+                block_rows(),
+                0usize..BLOCK_ROWS,
+                any::<usize>(),
+                0u8..4,
+                0.0f64..2.0,
+            ),
+            |((query, mut rows), lane, seed, poison, tolerance)| {
+                let dimension = query.len();
+                match poison {
+                    1 => rows[lane][seed % dimension] = f32::NAN,
+                    2 => rows[lane][seed % dimension] = f32::NEG_INFINITY,
+                    3 => rows[lane].iter_mut().for_each(|value| *value = 0.0),
+                    _ => {}
+                }
+                let layout = RowLayout {
+                    dimension: dimension as u32,
+                    metric: Metric::InnerProduct,
+                    unit_norm_tolerance: tolerance,
+                };
+                let lanes: [&[f32]; BLOCK_ROWS] = std::array::from_fn(|lane| rows[lane].as_slice());
+                let sums = inner_product_block(&query, &lanes);
+                for (lane, row) in rows.iter().enumerate() {
+                    prop_assert_eq!(
+                        codec::validate_from_sum(row, &layout, sums.sums_of_squares[lane]),
+                        codec::validate(row, &layout),
+                        "lane {}",
+                        lane
+                    );
+                }
                 Ok(())
             },
         )

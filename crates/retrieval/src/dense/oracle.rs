@@ -1,8 +1,8 @@
 //! Walks every live occurrence whose class requires a vector in occurrence identifier order through bounded keyset pages, inside the caller's read transaction.
-//! Each page is validated and scored as it is read; only the rows that would enter the current top-K are judged for canonical eligibility, in rank order and in batches sized so a page whose k best rows are eligible judges only those k, and the eligible ones are offered; the top-K is re-judged once before return.
+//! Each page is validated and scored as it is read, in blocks of eight rows; only the rows that would enter the current top-K are judged for canonical eligibility, in rank order and in batches sized so a page whose k best rows are eligible judges only those k, and the eligible ones are offered; the top-K is re-judged once before return.
 //! Judging only rows that can enter the set returns the same rows as judging every row: a member of the final top-K outranks the worst held member at every earlier point of the walk, so it is never skipped.
 //! A live required row without a vector is a coverage shortfall, so the result is incomplete even when every scored row was eligible; a kernel snapshot or incarnation that moves between batches ends the walk the same way.
-//! The walk itself is shared: a `RowSource` supplies the page query and the validated score of each visited row, so the oracle reads `occurrence_vectors` and the layered ranking reads resolved layer rows through one judgment, admission, and revalidation path.
+//! The walk itself is shared: a `RowSource` supplies the page query and the vector of each visited row, so the oracle reads `occurrence_vectors` and the layered ranking reads resolved layer rows through one judgment, admission, and revalidation path.
 
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
@@ -18,7 +18,7 @@ use rusqlite::params;
 use storage::GuardedConn;
 
 use super::codec::{self, Metric, RowLayout, RowRejection};
-use super::score::{Ranked, TopK, rank_order, score_encoded};
+use super::score::{BLOCK_ROWS, Ranked, TopK, rank_order, score_block};
 use crate::ProjectionError;
 use crate::batch::{VectorGeneration, dense_eligible};
 use crate::coverage::CURRENT_PENDING;
@@ -79,13 +79,13 @@ pub(super) trait RowSource {
     /// The page query, in the shape `Progress::visit_page` documents.
     fn page_sql(&self) -> &str;
 
-    /// The score of a visited row's vector after it is validated against `layout`, or `None` when the source holds none for it.
-    fn score(
+    /// Writes the visited row's vector, checked for the layout's length, into `into`; `false` when the source holds none for the row. Block scoring validates finiteness and norm.
+    fn vector(
         &mut self,
         row: &PageRow<'_>,
         layout: &RowLayout,
-        query: &[f32],
-    ) -> Result<Option<f64>, OracleRefusal>;
+        into: &mut Vec<f32>,
+    ) -> Result<bool, OracleRefusal>;
 
     /// Runs after every page whose rows were all visited, with whether rows remain past it.
     fn after_page(&mut self, _more: bool) {}
@@ -99,20 +99,22 @@ impl RowSource for StoredVectors {
         &PAGE_SQL
     }
 
-    fn score(
+    fn vector(
         &mut self,
         row: &PageRow<'_>,
         layout: &RowLayout,
-        query: &[f32],
-    ) -> Result<Option<f64>, OracleRefusal> {
-        row.stored
-            .map(|bytes| {
-                score_encoded(layout, query, bytes).map_err(|rejection| OracleRefusal::StoredRow {
-                    occurrence_id: row.occurrence_id.to_owned(),
-                    rejection,
-                })
-            })
-            .transpose()
+        into: &mut Vec<f32>,
+    ) -> Result<bool, OracleRefusal> {
+        let Some(bytes) = row.stored else {
+            return Ok(false);
+        };
+        codec::decode_length_into(bytes, layout.dimension, into).map_err(|rejection| {
+            OracleRefusal::StoredRow {
+                occurrence_id: row.occurrence_id.to_owned(),
+                rejection,
+            }
+        })?;
+        Ok(true)
     }
 }
 
@@ -230,18 +232,6 @@ pub(super) struct PageRow<'r> {
     pub pending: bool,
 }
 
-impl PageRow<'_> {
-    fn candidate(&self) -> OccurrenceCandidate {
-        OccurrenceCandidate::new(
-            self.occurrence_id.to_owned(),
-            self.class,
-            self.source_object_id.to_owned(),
-            self.revision,
-            self.source_artifact_digest.to_owned(),
-        )
-    }
-}
-
 /// The quoted codes of every class that requires a vector, for an SQL `IN` list.
 pub(super) static DENSE_CLASSES: LazyLock<String> = LazyLock::new(|| {
     OccurrenceClass::ALL
@@ -341,6 +331,7 @@ pub(super) fn walk(
         top: TopK::new(bounds.k),
         admissions: Admissions::default(),
         after: String::new(),
+        block: Block::new(),
         hook,
     };
     loop {
@@ -425,18 +416,134 @@ struct Page {
     selected: Option<Selected>,
 }
 
-/// The walk's state between pages: the result under construction, the held set, the admission counts that size judgment batches, the identifier to resume after, and the test hook.
+/// One row of a scoring block, copied out of the page statement into buffers that are reused block after block; it becomes an owned candidate only when the top-K admits it.
+#[derive(Default)]
+struct Lane {
+    occurrence_id: String,
+    class: Option<OccurrenceClass>,
+    source_object_id: String,
+    revision: i64,
+    source_artifact_digest: String,
+    vector: Vec<f32>,
+}
+
+impl Lane {
+    fn record(&mut self, row: &PageRow<'_>) {
+        self.occurrence_id.clear();
+        self.occurrence_id.push_str(row.occurrence_id);
+        self.class = Some(row.class);
+        self.source_object_id.clear();
+        self.source_object_id.push_str(row.source_object_id);
+        self.revision = row.revision;
+        self.source_artifact_digest.clear();
+        self.source_artifact_digest
+            .push_str(row.source_artifact_digest);
+    }
+
+    fn candidate(&self) -> OccurrenceCandidate {
+        OccurrenceCandidate::new(
+            self.occurrence_id.clone(),
+            self.class.expect("a recorded row has a class"),
+            self.source_object_id.clone(),
+            self.revision,
+            self.source_artifact_digest.clone(),
+        )
+    }
+}
+
+/// Up to [`BLOCK_ROWS`] visited rows with a vector, validated and scored together.
+struct Block {
+    lanes: Vec<Lane>,
+    filled: usize,
+}
+
+impl Block {
+    fn new() -> Self {
+        Self {
+            lanes: Vec::with_capacity(BLOCK_ROWS),
+            filled: 0,
+        }
+    }
+
+    /// Obtains the row's vector from `source` into the next lane and records the row's identity behind it; `false` when the source holds no vector for the row.
+    fn push(
+        &mut self,
+        row: &PageRow<'_>,
+        source: &mut impl RowSource,
+        layout: &RowLayout,
+    ) -> Result<bool, OracleRefusal> {
+        if self.filled == self.lanes.len() {
+            self.lanes.push(Lane::default());
+        }
+        let lane = &mut self.lanes[self.filled];
+        if !source.vector(row, layout, &mut lane.vector)? {
+            return Ok(false);
+        }
+        lane.record(row);
+        self.filled += 1;
+        Ok(true)
+    }
+
+    fn is_full(&self) -> bool {
+        self.filled == BLOCK_ROWS
+    }
+
+    /// Validates and scores the buffered rows in visit order, exactly as scoring each row alone would: the first row that fails the layout refuses, every validated row counts toward coverage, and only then is its identity validated and its score offered to `top`.
+    /// A block short of `BLOCK_ROWS` repeats its first row in the spare lanes; their results are discarded.
+    fn flush(
+        &mut self,
+        request: &Walk<'_>,
+        ranking: &mut ExhaustiveRanking,
+        top: &TopK<OccurrenceCandidate>,
+        selected: &mut Selected,
+    ) -> Result<(), OracleRefusal> {
+        let filled = std::mem::take(&mut self.filled);
+        if filled == 0 {
+            return Ok(());
+        }
+        let lanes: [&[f32]; BLOCK_ROWS] =
+            std::array::from_fn(
+                |lane| &self.lanes[if lane < filled { lane } else { 0 }].vector[..],
+            );
+        let sums = score_block(request.layout.metric, request.query, &lanes);
+        for (lane, (sum_of_squares, score)) in self.lanes[..filled]
+            .iter()
+            .zip(sums.sums_of_squares.into_iter().zip(sums.scores))
+        {
+            codec::validate_from_sum(&lane.vector, &request.layout, sum_of_squares).map_err(
+                |rejection| OracleRefusal::StoredRow {
+                    occurrence_id: lane.occurrence_id.clone(),
+                    rejection,
+                },
+            )?;
+            ranking.coverage.with_vector += 1;
+            EligibilityCandidate::validate_fields(
+                &lane.source_object_id,
+                Some(&lane.source_artifact_digest),
+            )?;
+            if top.admits(score, &lane.occurrence_id) {
+                selected.candidates.push(lane.candidate());
+                selected.scores.push(score);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The walk's state between pages: the result under construction, the held set, the admission counts that size judgment batches, the identifier to resume after, the scoring block, and the test hook.
 struct Progress<H> {
     ranking: ExhaustiveRanking,
     top: TopK<OccurrenceCandidate>,
     admissions: Admissions,
     after: String,
+    block: Block,
     hook: H,
 }
 
 impl<H: FnMut(Window<'_>)> Progress<H> {
-    /// Steps one page of at most `take` rows plus one probe row past it, scoring each row while the statement is positioned on it, so no column is copied for a row that cannot enter the top-K.
+    /// Steps one page of at most `take` rows plus one probe row past it, copying each row into a reused scoring lane while the statement is positioned on it, so nothing is allocated for a row that cannot enter the top-K.
     /// The source's SQL selects the seven columns of [`PAGE_SQL`] in that order and binds the generation identifier, the identifier to start after, and the limit as `?1`, `?2`, `?3`; `after` is left at the last visited identifier.
+    /// Rows are validated and scored in blocks of up to [`BLOCK_ROWS`]: when a block is full, when the page ends, and before an ended budget or a later row's error is acted on, so the rows visited before it are judged for the layout exactly as they would have been one at a time.
     /// A row's identity fields are validated before `top.admits` is consulted, so a corrupt row is refused even when it could not enter the top-K; a missing vector is counted and its row is neither judged nor scored.
     /// `None` means the budget ended inside the page; `ranking` then describes the rows visited before it did.
     fn visit_page(
@@ -468,58 +575,60 @@ impl<H: FnMut(Window<'_>)> Progress<H> {
             Err(ScanStop::Budget) => return Ok(None),
             Err(ScanStop::Projection(error)) => return Err(error.into()),
         };
-        let mut selected: Option<Selected> = None;
+        let mut selected = Selected::default();
         let mut visited = 0usize;
-        loop {
+        let more = loop {
             let row = match rows.next().map_err(ScanStop::from) {
                 Ok(Some(row)) => row,
-                Ok(None) => break,
-                Err(ScanStop::Budget) => return Ok(None),
-                Err(ScanStop::Projection(error)) => return Err(error.into()),
+                Ok(None) => break false,
+                Err(ScanStop::Budget) => return self.flush(request, &mut selected).and(Ok(None)),
+                Err(ScanStop::Projection(error)) => {
+                    return self.flush(request, &mut selected).and(Err(error.into()));
+                }
             };
             if budget.check().is_err() {
-                return Ok(None);
+                return self.flush(request, &mut selected).and(Ok(None));
             }
             if visited == take {
-                return Ok(Some(Page {
-                    more: true,
-                    selected,
-                }));
+                break true;
             }
-            let row = borrow_row(row)?;
-            if selected.is_none() {
+            let row = match borrow_row(row) {
+                Ok(row) => row,
+                Err(error) => return self.flush(request, &mut selected).and(Err(error)),
+            };
+            if visited == 0 {
                 self.ranking.consumed.pages += 1;
-                selected = Some(Selected::default());
             }
             (self.hook)(Window::Visited(row.occurrence_id));
             if budget.is_exhausted() {
-                return Ok(None);
+                return self.flush(request, &mut selected).and(Ok(None));
             }
             visited += 1;
             self.after.clear();
             self.after.push_str(row.occurrence_id);
             self.ranking.coverage.required += 1;
-            match source.score(&row, &request.layout, request.query)? {
-                Some(score) => {
-                    self.ranking.coverage.with_vector += 1;
-                    EligibilityCandidate::validate_fields(
-                        row.source_object_id,
-                        Some(row.source_artifact_digest),
-                    )?;
-                    if self.top.admits(score, row.occurrence_id) {
-                        let selected = selected.as_mut().expect("set at the first row");
-                        selected.candidates.push(row.candidate());
-                        selected.scores.push(score);
+            match self.block.push(&row, source, &request.layout) {
+                Ok(true) => {
+                    if self.block.is_full() {
+                        self.flush(request, &mut selected)?;
                     }
                 }
-                None if row.pending => self.ranking.coverage.missing_pending += 1,
-                None => self.ranking.coverage.missing_without_pending += 1,
+                Ok(false) if row.pending => self.ranking.coverage.missing_pending += 1,
+                Ok(false) => self.ranking.coverage.missing_without_pending += 1,
+                // The buffered rows were visited before this one, so a rejection among them refuses the request instead of this error.
+                Err(error) => return self.flush(request, &mut selected).and(Err(error)),
             }
-        }
+        };
+        self.flush(request, &mut selected)?;
         Ok(Some(Page {
-            more: false,
-            selected,
+            more,
+            selected: (visited > 0).then_some(selected),
         }))
+    }
+
+    fn flush(&mut self, request: &Walk<'_>, selected: &mut Selected) -> Result<(), OracleRefusal> {
+        self.block
+            .flush(request, &mut self.ranking, &self.top, selected)
     }
 
     /// One page can contribute at most `k` top rows, so when a page selects more rows than one batch its rows are judged in rank order, a batch at a time, and `top.admits` stops the page once it rejects the best unjudged row.

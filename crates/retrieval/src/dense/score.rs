@@ -27,38 +27,64 @@ pub fn score(metric: Metric, query: &[f32], row: &[f32]) -> f64 {
     }
 }
 
-/// The dot product accumulates in coordinate order to match decoding the row before calling [`score`] bit for bit.
-pub fn score_encoded(layout: &RowLayout, query: &[f32], bytes: &[u8]) -> Result<f64, RowRejection> {
-    layout.check()?;
-    let words = codec::decode_words(bytes)?;
-    if words.len() != layout.dimension as usize {
-        return Err(RowRejection::Dimension {
-            expected: layout.dimension,
-            actual: words.len(),
-        });
+/// Eight rows give eight independent accumulation chains while each row stays accumulated in coordinate order.
+pub const BLOCK_ROWS: usize = 8;
+
+/// One entry per lane; a struct of arrays because an array of per-row structs makes the compiler interleave the two accumulators and lose the lane-parallel code.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockSums {
+    /// Accumulation starts at `+0.0` and visits squared coordinates in increasing order.
+    pub sums_of_squares: [f64; BLOCK_ROWS],
+    pub scores: [f64; BLOCK_ROWS],
+}
+
+/// Each lane accumulates coordinates in order, so finite-row scores match [`inner_product`] bit for bit.
+///
+/// Panics on unequal lengths so a shape error can never become a silently truncated score.
+pub fn inner_product_block(query: &[f32], rows: &[&[f32]; BLOCK_ROWS]) -> BlockSums {
+    for row in rows {
+        assert_eq!(query.len(), row.len(), "rows of one layout have one length");
     }
-    assert_eq!(
-        query.len(),
-        words.len(),
-        "the query was validated against the same layout as the row"
-    );
-    match layout.metric {
-        Metric::InnerProduct => {
-            let mut sum_of_squares = 0.0f64;
-            let mut sum = 0.0f64;
-            for (coordinate, (q, r)) in query.iter().zip(words).enumerate() {
-                if !r.is_finite() {
-                    return Err(RowRejection::NonFinite { coordinate });
-                }
-                let widened = f64::from(r);
-                let square = widened * widened;
-                sum_of_squares += square;
-                let product = f64::from(*q) * widened;
-                sum += product;
+    let mut squares = [0.0f64; BLOCK_ROWS];
+    let mut scores = [0.0f64; BLOCK_ROWS];
+    let tiled = query.len() / 4 * 4;
+    let mut start = 0;
+    while start < tiled {
+        // Four coordinates of each row per tile give the compiler contiguous loads to interleave across lanes.
+        let tile: [[f32; 4]; BLOCK_ROWS] = std::array::from_fn(|lane| {
+            let row = rows[lane];
+            [row[start], row[start + 1], row[start + 2], row[start + 3]]
+        });
+        let q: [f64; 4] = std::array::from_fn(|offset| f64::from(query[start + offset]));
+        for offset in 0..4 {
+            for lane in 0..BLOCK_ROWS {
+                let widened = f64::from(tile[lane][offset]);
+                squares[lane] += widened * widened;
+                let product = q[offset] * widened;
+                scores[lane] += product;
             }
-            codec::check_sum_of_squares(sum_of_squares, layout.unit_norm_tolerance)?;
-            Ok(sum)
         }
+        start += 4;
+    }
+    for (coordinate, q) in query.iter().enumerate().skip(tiled) {
+        let q = f64::from(*q);
+        for lane in 0..BLOCK_ROWS {
+            let widened = f64::from(rows[lane][coordinate]);
+            squares[lane] += widened * widened;
+            let product = q * widened;
+            scores[lane] += product;
+        }
+    }
+    BlockSums {
+        sums_of_squares: squares,
+        scores,
+    }
+}
+
+/// [`score`] for a block of rows; the metric is matched exhaustively like the single-row form.
+pub fn score_block(metric: Metric, query: &[f32], rows: &[&[f32]; BLOCK_ROWS]) -> BlockSums {
+    match metric {
+        Metric::InnerProduct => inner_product_block(query, rows),
     }
 }
 
