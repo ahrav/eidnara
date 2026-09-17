@@ -98,6 +98,12 @@ export type EidnaraSearchExecution =
           reason: ExplicitDeliveryReason;
       };
 
+function isNoRequiredConsumer(state: MemoryState | null): state is MemoryState {
+    return (
+        state !== null && state.kind === "unavailable" && state.reason === "no_required_consumer"
+    );
+}
+
 export async function executeEidnaraSearch(
     deps: EidnaraSearchToolDeps,
     rawArgs: EidnaraSearchArgs,
@@ -162,24 +168,32 @@ export async function executeEidnaraSearch(
     let memoryState: MemoryState | null = null;
     let memoryTruncated = false;
     let unresolvedObjectIds: string[] = [];
-    if (idQuery) {
-        const read = await readObjectRowsChunked({
-            client,
-            surface: "explicit_search",
-            gated: true,
-            objectIds: idQuery,
-            ...(toolContext.abort ? { signal: toolContext.abort } : {}),
-        });
-        if (read.ok) {
-            memoryRows = read.rows;
-            unresolvedObjectIds = read.unresolvedObjectIds;
-        } else {
-            memoryState = read.state;
+    let freshnessNote: string | undefined;
+    // The gate judges the lag of registered consumers. A deployment with no consumer at all
+    // (no admitted search projection) has no derived state that can lag behind the canonical
+    // rows this read returns, so the same read is repeated ungated and the result says that
+    // freshness was not judged, instead of the search failing for the deployment's lifetime.
+    const readMemory = async (gated: boolean): Promise<void> => {
+        memoryState = null;
+        if (idQuery) {
+            const read = await readObjectRowsChunked({
+                client,
+                surface: "explicit_search",
+                gated,
+                objectIds: idQuery,
+                ...(toolContext.abort ? { signal: toolContext.abort } : {}),
+            });
+            if (read.ok) {
+                memoryRows = read.rows;
+                unresolvedObjectIds = read.unresolvedObjectIds;
+            } else {
+                memoryState = read.state;
+            }
+            return;
         }
-    } else {
         const read = await client.read({
             surface: "explicit_search",
-            gated: true,
+            gated,
             ...(toolContext.abort ? { signal: toolContext.abort } : {}),
         });
         if (isAvailable(read)) {
@@ -188,11 +202,17 @@ export async function executeEidnaraSearch(
         } else {
             memoryState = read.state;
         }
+    };
+    await readMemory(true);
+    if (isNoRequiredConsumer(memoryState)) {
+        freshnessNote = `Memory: ${renderToolStateText(memoryState)} Results are read from the canonical tip.`;
+        await readMemory(false);
     }
     if (memoryState) {
         return { status: "invalid", text: `Error: ${renderToolStateText(memoryState)}` };
     }
     const notes: string[] = [];
+    if (freshnessNote) notes.push(freshnessNote);
     if (unresolvedObjectIds.length > 0) {
         notes.push(
             `Memory: unresolved object id${unresolvedObjectIds.length === 1 ? "" : "s"} (the daemon read stayed truncated): ${unresolvedObjectIds.join(", ")}`,
