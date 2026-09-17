@@ -1092,8 +1092,21 @@ impl MemoryStore {
                     .try_for_each(|inputs| scan_causal_identities(write, inputs))
             },
             |conn| {
-                freeze_selection_in_tx(conn, project, slot_id, selection_attempt, page, now_ms)
-                    .map(WriteDisposition::Applied)
+                // An identical page under an existing attempt replays the row; only a new row records its scan audit.
+                let existed = load_selection(conn, project, slot_id, selection_attempt)?.is_some();
+                let selection = freeze_selection_in_tx(
+                    conn,
+                    project,
+                    slot_id,
+                    selection_attempt,
+                    page,
+                    now_ms,
+                )?;
+                Ok(if existed {
+                    WriteDisposition::Replay(selection)
+                } else {
+                    WriteDisposition::Applied(selection)
+                })
             },
         )
     }
@@ -1147,11 +1160,12 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Ready jobs of one project in deadline order, bounded by `limit`; the dispatcher's read.
+    /// Ready jobs of one project whose queue deadline is after `now_ms`, in deadline order, bounded by `limit`; the dispatcher's read. A row past its deadline is not dispatched even before the sweep expires it.
     pub fn ready_curator_jobs(
         &self,
         project: &str,
         limit: usize,
+        now_ms: i64,
     ) -> Result<Vec<CuratorJob>, MemoryStoreError> {
         check_project(project)?;
         let limit = i64::try_from(limit.min(MAX_PENDING_CURATOR_JOBS_PER_PROJECT)).unwrap_or(0);
@@ -1159,10 +1173,10 @@ impl MemoryStore {
             .with_conn(|conn| {
                 let mut statement = conn.prepare_cached(&format!(
                     "SELECT {JOB_COLUMNS} FROM curator_jobs
-                     WHERE project = ?1 AND state = 'ready'
+                     WHERE project = ?1 AND state = 'ready' AND queue_deadline_ms > ?3
                      ORDER BY queue_deadline_ms, causal_identity LIMIT ?2"
                 ))?;
-                let rows = statement.query_map(params![project, limit], job_from_row)?;
+                let rows = statement.query_map(params![project, limit, now_ms], job_from_row)?;
                 rows.collect()
             })
             .map_err(Into::into)

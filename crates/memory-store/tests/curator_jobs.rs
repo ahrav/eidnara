@@ -457,7 +457,17 @@ fn activation_requires_the_reservation_and_takes_no_second_slot() {
         ),
         CuratorJobRefusal::NotReserved
     );
-    assert_eq!(store.ready_curator_jobs("proj", 10).unwrap(), vec![ready]);
+    assert_eq!(
+        store.ready_curator_jobs("proj", 10, NOW + 2).unwrap(),
+        vec![ready]
+    );
+    assert_eq!(
+        store
+            .ready_curator_jobs("proj", 10, job.queue_deadline_ms)
+            .unwrap(),
+        vec![],
+        "a ready row past its deadline is not dispatched before the sweep expires it"
+    );
 }
 
 #[test]
@@ -511,7 +521,7 @@ fn activation_composed_with_a_failing_producer_transaction_commits_nothing() {
         })
         .unwrap();
     assert!(matches!(committed.state, CuratorJobState::Ready(_)));
-    assert_eq!(store.ready_curator_jobs("proj", 10).unwrap().len(), 1);
+    assert_eq!(store.ready_curator_jobs("proj", 10, NOW).unwrap().len(), 1);
 }
 
 #[test]
@@ -781,12 +791,27 @@ fn frozen_pages_are_bounded_retained_under_deferral_and_enqueued_once() {
         frozen.selection_deadline_ms,
         NOW + CURATOR_QUEUE_LIFETIME_MS
     );
+    let scan_batches = || {
+        store
+            .with_conn_for_test(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM scan_batches", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .unwrap()
+    };
+    let batches_after_freeze = scan_batches();
     assert_eq!(
         store
             .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW + 5)
             .unwrap(),
         frozen,
         "the same attempt replays its page"
+    );
+    assert_eq!(
+        scan_batches(),
+        batches_after_freeze,
+        "a replayed page records no new scan audit"
     );
     let mut moved_cursor = page.clone();
     moved_cursor.next_cursor = Some("cursor-10".to_string());
