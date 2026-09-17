@@ -702,7 +702,7 @@ pub fn activate_curator_job_in_tx(
     load_job(conn, project, causal_identity)?.ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
-/// Records one terminal outcome for a non-terminal row, drops its input, and releases its allowance; the compact receipt and its charge stay. A terminal row is never reopened.
+/// Records one terminal outcome for a non-terminal row, drops its input, and releases its allowance; the compact receipt and its charge stay. A terminal row is never reopened, and a finish at or after the queue deadline is refused as expired so the permanent outcome does not depend on whether the sweep ran first.
 pub fn finish_curator_job_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -714,13 +714,17 @@ pub fn finish_curator_job_in_tx(
         "UPDATE curator_jobs
             SET state = 'terminal', outcome = ?3, allowance_bytes = 0, input_json = NULL,
                 updated_at_ms = ?4
-          WHERE project = ?1 AND causal_identity = ?2 AND state <> 'terminal'",
+          WHERE project = ?1 AND causal_identity = ?2 AND state <> 'terminal'
+            AND queue_deadline_ms > ?4",
         params![project, causal_identity, outcome.as_str(), now_ms],
     )?;
     let job = load_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
     if changed == 0 {
-        return Err(refuse(CuratorJobRefusal::Terminal));
+        return Err(refuse(match job.state {
+            CuratorJobState::Terminal(_) => CuratorJobRefusal::Terminal,
+            _ => CuratorJobRefusal::Expired,
+        }));
     }
     Ok(job)
 }

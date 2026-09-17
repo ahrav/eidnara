@@ -703,6 +703,28 @@ fn expiry_records_terminal_outcomes_without_resurrection_and_receipts_survive_re
             .state,
         CuratorJobState::Reserved
     );
+    // A finish at or after the deadline is refused the same way, so the permanent outcome does not depend on whether the sweep ran first.
+    assert_eq!(
+        refusal(
+            store
+                .finish_curator_job(
+                    "proj",
+                    &ready_job.causal_identity,
+                    CuratorJobOutcome::Completed,
+                    deadline
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::Expired
+    );
+    assert!(matches!(
+        store
+            .lookup_curator_job("proj", &ready_job.causal_identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        CuratorJobState::Ready(_)
+    ));
     assert_eq!(store.expire_curator_work(deadline).unwrap(), (2, 1));
     let ready_input: Option<String> = store
         .with_conn_for_test(|conn| {
