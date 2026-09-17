@@ -524,6 +524,10 @@ CREATE TABLE curator_receipts (
             CHECK (terminal_kind IS NOT 'complete' OR selected_candidate_id IS NOT NULL)
         );
 
+-- Receipts survive for the store incarnation; the expiry sweep reads only the in-progress ones by deadline.
+CREATE INDEX idx_curator_receipts_state
+            ON curator_receipts(state, run_deadline_ms);
+
 CREATE TABLE curator_attempts (
             project TEXT NOT NULL,
             causal_identity TEXT NOT NULL,
@@ -548,9 +552,9 @@ CREATE TRIGGER curator_receipts_no_delete BEFORE DELETE ON curator_receipts
 BEGIN SELECT RAISE(ABORT, 'curator receipts survive for the store incarnation'); END;
 
 CREATE TRIGGER curator_receipts_deadlines_immutable
-BEFORE UPDATE OF run_deadline_ms, execution_cutoff_ms, created_at_ms, database_incarnation_id, kernel_incarnation_id
+BEFORE UPDATE OF run_deadline_ms, execution_cutoff_ms, created_at_ms, database_incarnation_id, kernel_incarnation_id, authority_generation
 ON curator_receipts
-BEGIN SELECT RAISE(ABORT, 'curator receipt deadlines and incarnations are written once'); END;
+BEGIN SELECT RAISE(ABORT, 'curator receipt deadlines, incarnations, and authority are written once'); END;
 
 -- The selected candidate is caller text a completion writes once: a detected secret
 -- refuses the completion instead of being redacted, as every other Curator identity is.

@@ -20,6 +20,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_curator_frozen_selections_state"),
     ("index", "idx_curator_jobs_pending"),
     ("index", "idx_curator_jobs_state"),
+    ("index", "idx_curator_receipts_state"),
     ("index", "idx_facade_mutation_ledger_scope_newest"),
     ("index", "idx_field_scans_batch"),
     ("index", "idx_history_segment_events_session"),

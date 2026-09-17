@@ -11,8 +11,8 @@ use rusqlite::{OptionalExtension, params};
 use storage::{GuardedConn, HandoffOutcome};
 
 use crate::curator_jobs::{
-    CuratorJobOutcome, CuratorJobState, curator_write, finish_curator_job_in_tx, load_curator_job,
-    store_incarnation_in_tx,
+    CuratorJobOutcome, CuratorJobState, check_project, curator_write, finish_curator_job_in_tx,
+    load_curator_job, store_incarnation_in_tx,
 };
 use crate::task_lease::{
     LeaseAcquireOutcome, LeaseCompleteOutcome, LeaseCompletion, LeaseSelected, TaskLeaseKind,
@@ -222,10 +222,14 @@ pub enum CuratorLedgerError {
 }
 
 /// What happened after the marker committed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum DispatchOutcome<H> {
-    /// The handoff consumed the prepared request.
-    Handed { attempt_index: u32, handoff: H },
+    /// The handoff consumed the prepared request. `release` reports whether the store's read-only view was restored afterwards; a failure there cannot recall the handoff, but it means this store's connection may refuse later writes, so it is carried here rather than dropped.
+    Handed {
+        attempt_index: u32,
+        handoff: H,
+        release: Result<(), MemoryStoreError>,
+    },
     /// The recheck immediately before handoff failed; nothing was sent and the attempt is charged. It is finished `not_dispatched` when `finished` is true; otherwise it stays unterminated and counts as unknown.
     ChargedNotDispatched {
         attempt_index: u32,
@@ -584,6 +588,25 @@ pub fn finish_curator_attempt_in_tx(
     if terminal == CuratorAttemptTerminal::NotDispatched {
         return Err(refuse(CuratorLedgerRefusal::InvalidRequest));
     }
+    // A result that arrives at or after the attempt's own deadline is over budget: it cannot close the marker as complete, only as failed, cancelled, or unknown.
+    if terminal == CuratorAttemptTerminal::Complete {
+        let deadline: Option<i64> = conn
+            .query_row(
+                "SELECT attempt_deadline_ms FROM curator_attempts
+                  WHERE project = ?1 AND causal_identity = ?2 AND generation = ?3 AND attempt_index = ?4",
+                params![
+                    project,
+                    causal_identity,
+                    generation_param(generation).map_err(refuse)?,
+                    i64::from(attempt_index)
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if deadline.is_some_and(|deadline| now_ms >= deadline) {
+            return Err(refuse(CuratorLedgerRefusal::Cutoff));
+        }
+    }
     record_attempt_terminal_in_tx(
         conn,
         project,
@@ -857,6 +880,7 @@ impl MemoryStore {
         now: impl Fn() -> i64,
         handoff: impl FnOnce(P) -> H,
     ) -> Result<DispatchOutcome<H>, CuratorLedgerError> {
+        check_project(project)?;
         let refusal = std::cell::Cell::new(None);
         let result = self.inner.with_conn_fenced_then_handoff(
             |conn| {
@@ -879,6 +903,14 @@ impl MemoryStore {
                     let receipt = load_receipt(conn, project, causal_identity)?;
                     Ok(match receipt {
                         None => Some(CuratorLedgerRefusal::Missing),
+                        // The binding the commit checked is checked again: a receipt taken over, completed, or rebound since then owns this marker no longer.
+                        Some(receipt)
+                            if receipt.terminal.is_some()
+                                || receipt.generation != generation
+                                || receipt.claim_id != claim_id =>
+                        {
+                            Some(CuratorLedgerRefusal::Fenced)
+                        }
                         Some(receipt) if receipt.cancelled_at_ms.is_some() => {
                             Some(CuratorLedgerRefusal::Cancelled)
                         }
@@ -915,7 +947,7 @@ impl MemoryStore {
                     attempt,
                     HandoffOutcome::Handed {
                         handed: Ok(handoff),
-                        ..
+                        release,
                     },
                 )),
                 _,
@@ -923,6 +955,7 @@ impl MemoryStore {
                 return Ok(DispatchOutcome::Handed {
                     attempt_index: attempt.attempt_index,
                     handoff,
+                    release: release.map_err(MemoryStoreError::from),
                 });
             }
             (
@@ -988,7 +1021,7 @@ impl MemoryStore {
         })
     }
 
-    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` terminal selects exactly one Kernel result for that generation, and the job row records the matching outcome. A predecessor generation, a stale claim, another incarnation, or a job another owner already closed writes nothing. At or after the receipt's run deadline the terminal recorded is `expired`, whatever the worker reports: a renewed claim never extends the fixed run budget.
+    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` terminal selects exactly one Kernel result for that generation, and the job row records the matching outcome. A predecessor generation, a stale claim, another incarnation, or a job another owner already closed writes nothing. A cancelled receipt records `cancelled`, and one at or after its run deadline records `expired`, whatever the worker reports: a durable cancellation is never overridden and a renewed claim never extends the fixed run budget.
     #[allow(clippy::too_many_arguments)]
     pub fn complete_curator_receipt(
         &self,
@@ -1017,21 +1050,15 @@ impl MemoryStore {
             MemoryStoreError::Serde("generation exceeds the storable range".to_string())
         })?;
         // A caller holding another generation or another claim is fenced before the lease is touched, whether or not the receipt is already terminal, so a stale worker's completion ends nothing and a claim on another job cannot be spent here.
-        let Some(receipt) = self
+        let fenced = self
             .lookup_curator_receipt(project, causal_identity)?
-            .filter(|receipt| {
-                i64::try_from(receipt.generation).ok() == Some(generation)
-                    && receipt.claim_id == claim_id
-            })
-        else {
+            .is_none_or(|receipt| {
+                i64::try_from(receipt.generation).ok() != Some(generation)
+                    || receipt.claim_id != claim_id
+            });
+        if fenced {
             return Ok(LeaseCompleteOutcome::Conflict { kind: "fenced" });
-        };
-        // The run deadline is written once, so this read is authoritative for it.
-        let (terminal, selection) = if now_ms >= receipt.run_deadline_ms {
-            (CuratorReceiptTerminal::Expired, None)
-        } else {
-            (terminal, selection)
-        };
+        }
         self.complete_task_lease(
             &CURATOR_REVIEW_TASK,
             project,
@@ -1041,6 +1068,18 @@ impl MemoryStore {
             slot,
             now_ms,
             |coordinated, _claim| {
+                let tx = coordinated.tx;
+                // Read inside the transaction: a cancellation that landed since the fence check still wins, and the run deadline is authoritative from any read.
+                let Some(receipt) = load_receipt(tx, project, causal_identity)? else {
+                    return Ok(LeaseCompletion::Stale);
+                };
+                let (terminal, selection) = if receipt.cancelled_at_ms.is_some() {
+                    (CuratorReceiptTerminal::Cancelled, None)
+                } else if now_ms >= receipt.run_deadline_ms {
+                    (CuratorReceiptTerminal::Expired, None)
+                } else {
+                    (terminal, selection)
+                };
                 // The candidate id is caller text the receipt keeps for the store incarnation; it is scanned like every other Curator identity, and the table trigger refuses it again.
                 let candidate_id = selection
                     .map(|selection| {
@@ -1051,7 +1090,6 @@ impl MemoryStore {
                             .map_err(redaction_error)
                     })
                     .transpose()?;
-                let tx = coordinated.tx;
                 let changed = tx.execute(
                     "UPDATE curator_receipts
                         SET state = 'complete', terminal_kind = ?5, selected_generation = ?6,
@@ -1094,6 +1132,7 @@ impl MemoryStore {
         project: &str,
         causal_identity: &str,
     ) -> Result<Option<CuratorReceipt>, MemoryStoreError> {
+        check_project(project)?;
         self.inner
             .with_conn(|conn| load_receipt(conn, project, causal_identity))
             .map_err(Into::into)
@@ -1104,6 +1143,7 @@ impl MemoryStore {
         project: &str,
         causal_identity: &str,
     ) -> Result<Vec<CuratorAttempt>, MemoryStoreError> {
+        check_project(project)?;
         self.inner
             .with_conn(|conn| list_curator_attempts_in_tx(conn, project, causal_identity))
             .map_err(Into::into)

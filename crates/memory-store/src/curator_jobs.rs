@@ -308,7 +308,7 @@ pub(crate) fn refusal_of(error: &rusqlite::Error) -> Option<CuratorJobRefusal> {
 }
 
 /// A project is an identity: 1 to 256 bytes, refused as a store error at the public surface so it never reaches a row.
-fn check_project(project: &str) -> Result<(), MemoryStoreError> {
+pub(crate) fn check_project(project: &str) -> Result<(), MemoryStoreError> {
     check_identity(project)
         .map_err(|_| MemoryStoreError::Serde("curator project must be 1 to 256 bytes".to_string()))
 }
@@ -1078,13 +1078,13 @@ impl MemoryStore {
         )
     }
 
-    /// Expires reserved or ready jobs and frozen selections at their deadlines. In-progress receipts block job expiry until their run deadline passes; expired receipts become `unknown` when they have an unterminated attempt, otherwise `expired`. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts, and the live claim of any terminal job is fenced `expired`, so a worker that keeps renewing cannot hold a ledger slot for a job that no longer exists.
+    /// Expires reserved or ready jobs and frozen selections at their deadlines. In-progress receipts block job expiry until their run deadline passes; expired receipts, and receipts whose job another owner already closed, become `unknown` at their run deadline when they have an unterminated attempt, otherwise `expired`. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts, and the live claim of any terminal job is fenced `expired`, so a worker that keeps renewing cannot hold a ledger slot for a job that no longer exists.
     pub fn expire_curator_work(&self, now_ms: i64) -> Result<(usize, usize), CuratorJobError> {
         // The sweep carries no caller text, so it records no scan and needs no owner scope.
         let write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
         write
             .execute(&self.inner, |coordinated| {
-                // Orphaned receipts close before their jobs are terminalized in the same transaction.
+                // Orphaned receipts close before their jobs are terminalized in the same transaction; a receipt left in progress by a job finished elsewhere closes at its run deadline too.
                 coordinated.tx().execute(
                     "UPDATE curator_receipts
                         SET state = 'complete', updated_at_ms = ?1,
@@ -1098,8 +1098,9 @@ impl MemoryStore {
                         AND EXISTS(SELECT 1 FROM curator_jobs j
                                     WHERE j.project = curator_receipts.project
                                       AND j.causal_identity = curator_receipts.causal_identity
-                                      AND j.state IN ('reserved', 'ready')
-                                      AND j.queue_deadline_ms <= ?1)",
+                                      AND (j.state = 'terminal'
+                                           OR (j.state IN ('reserved', 'ready')
+                                               AND j.queue_deadline_ms <= ?1)))",
                     [now_ms],
                 )?;
                 let jobs = coordinated.tx().execute(
