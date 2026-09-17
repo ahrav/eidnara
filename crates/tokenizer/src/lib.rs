@@ -98,17 +98,15 @@ pub fn vocab_blob() -> &'static [u8] {
     VOCAB_BLOB
 }
 
-/// A byte offset at which piece scanning of `text` and of `text` followed by
-/// any suffix agree from that offset onward, found within the last `lookback`
-/// bytes when possible. The first piece scanned from an arbitrary offset may
-/// be the tail of a longer piece, so the second piece's start is the first
-/// trustworthy boundary; when the tail holds fewer than two pieces the offset
-/// is zero and a caller tokenizes the whole text.
+/// Pieces from the returned offset have the same boundaries regardless of any
+/// suffix appended to `text`; zero means the caller must tokenize all of it.
 pub fn suffix_anchor(text: &str, lookback: usize) -> usize {
     let from = text.floor_char_boundary(text.len().saturating_sub(lookback));
-    let mut starts = scan::pieces(&text[from..]).map(|(start, _)| from + start);
-    starts.next();
-    starts.next().unwrap_or(0)
+    scan::pieces(&text[from..])
+        .skip(2)
+        .map(|(start, _)| from + start)
+        .last()
+        .unwrap_or(0)
 }
 
 fn vocab() -> &'static bpe::Vocab {
@@ -222,6 +220,64 @@ mod tests {
                 "{c:?} should not be whitespace"
             );
         }
+    }
+
+    fn piece_starts(text: &str) -> Vec<usize> {
+        scan::pieces(text).map(|(start, _)| start).collect()
+    }
+
+    /// A window opening on the apostrophe of `.'re` scans a contraction the
+    /// full scan does not have, so the next piece starts mid-word.
+    #[test]
+    fn suffix_anchor_is_a_true_piece_start_when_the_window_opens_on_an_apostrophe() {
+        let lookback = 2 * MAX_PIECE_BYTES;
+        for contraction in ["'re", "'s", "'ll", "'ve", "'t", "'m", "'d"] {
+            let letters = "a".repeat(lookback - contraction.len() - 2);
+            let text = format!(".{contraction}{letters}>\n");
+            let from = text.len() - lookback;
+            assert_eq!(
+                &text[from..from + 1],
+                "'",
+                "{contraction}: window opens on the apostrophe"
+            );
+            let anchor = suffix_anchor(&text, lookback);
+            let starts = piece_starts(&text);
+            assert!(
+                starts.contains(&anchor),
+                "{contraction}: anchor {anchor} is not a piece start; starts near it: {:?}",
+                starts
+                    .iter()
+                    .filter(|start| start.abs_diff(anchor) < 8)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn suffix_anchor_is_the_last_piece_start_in_the_window() {
+        let lookback = 2 * MAX_PIECE_BYTES;
+        let long = format!("{}end\n", "word ".repeat(2_000));
+        assert!(long.len() > lookback);
+        assert_eq!(
+            suffix_anchor(&long, lookback),
+            long.len() - 1,
+            "the final newline piece"
+        );
+        let short = "ab cd\n";
+        assert_eq!(suffix_anchor(short, lookback), short.len() - 1);
+        assert_eq!(
+            suffix_anchor("ab cd", lookback),
+            0,
+            "two pieces: no trusted boundary"
+        );
+        assert_eq!(suffix_anchor("ab", lookback), 0);
+        assert_eq!(suffix_anchor("", lookback), 0);
+        let run = " ".repeat(lookback + 801);
+        assert_eq!(
+            suffix_anchor(&run, lookback),
+            0,
+            "a same-class run fills the window"
+        );
     }
 
     #[test]

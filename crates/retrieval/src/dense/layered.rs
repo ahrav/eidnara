@@ -97,10 +97,11 @@ impl RowSource for ResolvedRows<'_> {
     /// Winners before the visited row are not live any more; the winner at it is its vector; a winner after it waits.
     fn vector(
         &mut self,
-        row: &PageRow,
+        row: &PageRow<'_>,
         layout: &RowLayout,
-    ) -> Result<Option<Vec<f32>>, OracleRefusal> {
-        let visited = row.candidate.occurrence_id.as_bytes();
+        into: &mut Vec<f32>,
+    ) -> Result<bool, OracleRefusal> {
+        let visited = row.occurrence_id.as_bytes();
         while let Some(winner) = self.winners.get(self.next) {
             match winner.occurrence_id.as_bytes().cmp(visited) {
                 std::cmp::Ordering::Less => {
@@ -125,18 +126,19 @@ impl RowSource for ResolvedRows<'_> {
                             });
                         }
                     };
-                    codec::validate(&vector, layout).map_err(|rejection| {
+                    codec::validate_length(&vector, layout.dimension).map_err(|rejection| {
                         OracleRefusal::StoredRow {
                             occurrence_id: occurrence_id.to_owned(),
                             rejection,
                         }
                     })?;
-                    return Ok(Some(vector));
+                    *into = vector;
+                    return Ok(true);
                 }
-                std::cmp::Ordering::Greater => return Ok(None),
+                std::cmp::Ordering::Greater => return Ok(false),
             }
         }
-        Ok(None)
+        Ok(false)
     }
 }
 

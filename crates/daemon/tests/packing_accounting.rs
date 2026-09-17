@@ -57,8 +57,15 @@ fn every_charge_equals_the_whole_render_delta_and_every_byte_is_charged() {
         TestRng::from_seed(RngAlgorithm::ChaCha, &SEED),
     );
     let windowed_cases = std::cell::Cell::new(0usize);
+    let escaped_cases = std::cell::Cell::new(0usize);
     runner
         .run(&fragments, |fragments| {
+            if fragments
+                .iter()
+                .any(|fragment| fragment.contains(['<', '>', '&', '"', '\'']))
+            {
+                escaped_cases.set(escaped_cases.get() + 1);
+            }
             for profile in profiles() {
                 let mut ledger = Ledger::open(profile.clone());
                 let mut expected_total = profile
@@ -116,6 +123,10 @@ fn every_charge_equals_the_whole_render_delta_and_every_byte_is_charged() {
         windowed_cases.get() > 0,
         "some renders must exceed the lookback so the anchored path is exercised"
     );
+    assert!(
+        escaped_cases.get() > 0,
+        "some fragments must carry XML-significant bytes so escaping is charged"
+    );
 }
 
 /// A tail run of one character class longer than the lookback is the one
@@ -163,6 +174,20 @@ fn a_heuristic_count_carries_its_authority_and_headroom_and_never_the_exact_labe
     assert_eq!(charge.tokens(), ClaudeTokens::new(3));
     assert_eq!(charge.with_headroom(), ClaudeTokens::new(4));
     assert_ne!(charge.authority(), Authority::Exact);
+    // The headroom product exceeds `u64`; the adjusted count still fits and
+    // is charged at the requested ratio, not at a saturated product.
+    let wide =
+        AccountingProfile::heuristic("wide", "wide headroom", 4_000_000_000, |_| 10_000_000_000);
+    assert_eq!(
+        wide.charge_uncached("x").with_headroom(),
+        ClaudeTokens::new(10_000_000_000 + 40_000_000_000_000_000)
+    );
+    let saturated =
+        AccountingProfile::heuristic("saturated", "saturated", u32::MAX, |_| usize::MAX);
+    assert_eq!(
+        saturated.charge_uncached("x").with_headroom(),
+        ClaudeTokens::new(u64::MAX)
+    );
 
     let exact = AccountingProfile::exact_tokenizer();
     assert_eq!(exact.charge("twelve bytes").authority(), Authority::Exact);
@@ -170,11 +195,50 @@ fn a_heuristic_count_carries_its_authority_and_headroom_and_never_the_exact_labe
         exact.charge("twelve bytes").with_headroom(),
         exact.charge("twelve bytes").tokens()
     );
-    assert!(exact.revision().as_str().starts_with("10:claude-bpe;64:"));
+    let identity = exact.identity();
+    assert!(
+        exact
+            .revision()
+            .as_str()
+            .starts_with(&format!("5:exact;{}:{identity};64:", identity.len())),
+        "the exact revision names its own identity: {}",
+        exact.revision().as_str()
+    );
     assert_ne!(exact.revision(), heuristic.revision());
     let other_degradation =
         AccountingProfile::heuristic("bytes-over-four", "bytes/3", 250, |text| text.len() / 3);
     assert_ne!(heuristic.revision(), other_degradation.revision());
+    for profile in profiles() {
+        assert_eq!(
+            profile.declared_uncharged(),
+            daemon::packing::DECLARED_UNCHARGED,
+            "{}: the declared exclusions do not vary by profile",
+            profile.identity()
+        );
+    }
+    assert_eq!(
+        daemon::packing::DECLARED_UNCHARGED,
+        &["separator-before-memory-block"]
+    );
+}
+
+#[test]
+fn a_heuristic_impersonating_the_exact_revision_shares_neither_revision_nor_cache_entry() {
+    use sha2::Digest;
+    let exact = AccountingProfile::exact_tokenizer();
+    let digest: &'static str =
+        Box::leak(format!("{:x}", sha2::Sha256::digest(tokenizer::vocab_blob())).into_boxed_str());
+    let impostor = AccountingProfile::heuristic(exact.identity(), digest, 0, |_| 1);
+    assert_ne!(impostor.revision(), exact.revision());
+
+    let content = "content long enough to enter the shared cache under either revision ".repeat(2);
+    let expected = tokenizer::estimate_tokens(&content) as u64;
+    assert_ne!(expected, 1, "the fixture must discriminate the two counts");
+    assert_eq!(impostor.charge(&content).tokens(), ClaudeTokens::new(1));
+    let charge = exact.charge(&content);
+    assert_eq!(charge.tokens(), ClaudeTokens::new(expected));
+    assert_eq!(charge.authority(), Authority::Exact);
+    assert_eq!(impostor.charge(&content).tokens(), ClaudeTokens::new(1));
 }
 
 #[test]
@@ -380,4 +444,95 @@ fn the_optional_phase_refuses_a_render_beyond_the_accounting_bounds_and_a_foreig
         &mut trace,
     );
     assert_eq!(result.unwrap_err(), PreparationRefusal::ProfileMismatch);
+}
+
+/// At every token limit the closed render either fits, with the limit split
+/// exactly between what the ledger charged and what remains, or the phase
+/// refuses; no admitted render exceeds the limit under any profile.
+#[test]
+fn consumed_budget_plus_remaining_is_the_token_limit_under_every_profile() {
+    let required = tool_span("call-1", "1", "required bytes for the headroom check\n");
+    let a = tool_span("call-2", "1", "an optional span, the first of two\n");
+    let b = tool_span(
+        "call-3",
+        "1",
+        "another optional span, priced after the first\n",
+    );
+    let fixture = Fixture::new(&[required, a, b]);
+    let optional_bounds = retrieval::packing::OptionalBounds {
+        max_fused_candidates: NonZeroUsize::new(4).unwrap(),
+        max_parents: NonZeroUsize::new(4).unwrap(),
+        max_spans_per_parent: NonZeroUsize::new(4).unwrap(),
+        max_payload_loads: NonZeroUsize::new(4).unwrap(),
+        max_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        max_item_bytes: NonZeroU64::new(1 << 20).unwrap(),
+    };
+    let wide = AccountingBounds {
+        max_rendered_bytes: 1 << 20,
+        max_estimated_tokens: ClaudeTokens::new(1 << 20),
+    };
+    let requests = [
+        daemon::packing::OptionalRequest {
+            occurrence: a.id(),
+            revision: 1,
+        },
+        daemon::packing::OptionalRequest {
+            occurrence: b.id(),
+            revision: 1,
+        },
+    ];
+    for profile in profiles() {
+        let inputs = daemon::packing::RequiredInputs {
+            kernel: &fixture.kernel,
+            project: &fixture.project,
+            destination: kernel::ArtifactDestination::Local,
+            budget: &EvalBudget::unbounded(),
+            profile: &profile,
+        };
+        let mut admitted_counts = std::collections::BTreeSet::new();
+        for token_limit in (40u64..=400).chain([1 << 20]) {
+            let mut trace = daemon::packing::PackingTrace::default();
+            let Ok(materialized) = daemon::packing::prepare_required(
+                &fixture.store,
+                inputs,
+                &[required.request()],
+                &bounds(token_limit),
+                &wide,
+                &mut trace,
+            ) else {
+                continue;
+            };
+            assert_eq!(
+                materialized.charged().get() + materialized.remaining().get(),
+                token_limit,
+                "{}: the required phase splits the limit exactly",
+                profile.identity()
+            );
+            let Ok(closed) = daemon::packing::prepare_optional(
+                &fixture.store,
+                inputs,
+                &materialized,
+                &requests,
+                &optional_bounds,
+                &wide,
+                &mut trace,
+            ) else {
+                continue;
+            };
+            admitted_counts.insert(closed.admitted.len());
+            assert_eq!(
+                closed.ledger.total_with_headroom().get() + closed.remaining.get(),
+                token_limit,
+                "{} at {token_limit}: {} admitted",
+                profile.identity(),
+                closed.admitted.len()
+            );
+        }
+        assert_eq!(
+            admitted_counts,
+            [0, 1, 2].into_iter().collect(),
+            "{}: the sweep reaches every admission count",
+            profile.identity()
+        );
+    }
 }

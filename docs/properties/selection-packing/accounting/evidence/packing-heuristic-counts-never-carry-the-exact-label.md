@@ -12,10 +12,15 @@ and headroom and never an exact label.
   fields and is produced only by `AccountingProfile::charge`, which copies the
   profile's authority; `with_headroom` rounds the headroom up and adds nothing
   for `Exact`.
-- The `compile_fail` doctest on `Charge` shows the struct literal rejected
-  with the private-field error.
+- The `compile_fail` doctest on `Charge` shows the struct literal rejected.
+  Stable rustdoc does not check the `E0451` code, so the passing doctest
+  beside it constructs a charge through `AccountingProfile::charge` on the
+  same paths; a stale path would fail that test rather than pass the other
+  vacuously.
 - `crates/daemon/tests/packing_accounting.rs` builds a heuristic profile and
-  reads its charges' authority and headroom.
+  reads its charges' authority and headroom, and shows a heuristic that names
+  the exact identity and vocabulary digest cannot obtain an exact-labelled
+  count through the shared cache.
 
 ## Failure scenario
 

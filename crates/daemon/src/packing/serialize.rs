@@ -6,7 +6,7 @@ use kernel::applicability::EvalBudget;
 use retrieval::packing::{OptionalBounds, RequiredBounds};
 use sha2::{Digest, Sha256};
 
-use super::render::{AccountingBounds, AccountingExceeded, Ledger, admit_render};
+use super::render::{self, AccountingBounds, Ledger};
 use super::{ClaudeTokens, CostedGroup, OptionalAdmission};
 use crate::dispatch::{MAX_WIRE_BODY_BYTES, PreparedOutput, PreparedOutputError};
 use crate::projection_gates::{PackingManifest, RuntimeManifest};
@@ -114,7 +114,6 @@ impl PackingLimits {
 
     pub fn serialization_bounds(&self) -> SerializationBounds {
         SerializationBounds {
-            accounting: self.accounting_bounds(),
             max_serialized_bytes: self.serialized_bytes.get(),
             max_adjustment_passes: self.adjustment_passes,
         }
@@ -123,7 +122,6 @@ impl PackingLimits {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SerializationBounds {
-    pub accounting: AccountingBounds,
     pub max_serialized_bytes: usize,
     pub max_adjustment_passes: usize,
 }
@@ -132,7 +130,6 @@ pub struct SerializationBounds {
 pub enum SerializationBound {
     Transport,
     SerializedBytes,
-    Accounting(AccountingExceeded),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,8 +225,6 @@ enum Step {
 }
 
 fn serialize(ledger: &Ledger, bounds: &SerializationBounds) -> Result<Vec<u8>, Step> {
-    admit_render(ledger, &bounds.accounting)
-        .map_err(|exceeded| Step::Exceeded(SerializationBound::Accounting(exceeded)))?;
     let output = PreparedOutput::cached_bytes(ledger.text().as_bytes().to_vec());
     let measured = output
         .measure()
@@ -252,12 +247,19 @@ fn serialize(ledger: &Ledger, bounds: &SerializationBounds) -> Result<Vec<u8>, S
 fn rebuild(base: &Ledger, admitted: &[CostedGroup]) -> Ledger {
     let mut ledger = base.clone();
     for group in admitted {
-        super::render_group(&mut ledger, group.index, &group.group);
+        let staged = ledger.stage(render::group_fragments(group.index, &group.group));
+        ledger.commit(staged);
     }
     ledger.close();
     ledger
 }
 
+/// `prepare_optional` rejects closed renders that exceed accounting bounds.
+/// No accounting bound is re-checked here: a rebuilt ledger is the admitted
+/// ledger minus the removed groups' entries, and the profile charges each
+/// fragment independently of what follows it (see
+/// [`AccountingProfile::heuristic`](super::AccountingProfile::heuristic)), so
+/// a rebuild's total is the admitted total less the removed groups' costs.
 pub fn finalize(
     admission: OptionalAdmission,
     bounds: &SerializationBounds,
@@ -278,6 +280,12 @@ pub fn finalize(
         let bound = match serialize(&ledger, bounds) {
             Ok(body) => {
                 let identity = PreparationIdentity(Sha256::digest(&body).into());
+                // The write and the hash run after the loop's poll; a budget
+                // that ended inside them refuses, as the optional phase's
+                // poll after its close does.
+                if budget.is_exhausted() {
+                    return Err(PackingFailure::Deadline);
+                }
                 return Ok(Preparation {
                     body,
                     identity,

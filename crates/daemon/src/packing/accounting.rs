@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::token_cache::{AccountingRevision, cached_count_under};
+use crate::token_cache::{AccountingRevision, EXACT_TOKENIZER_IDENTITY, cached_count_under};
 
 use super::ClaudeTokens;
 use retrieval::packing::TokenCount;
@@ -49,7 +49,7 @@ impl Eq for AccountingProfile {}
 impl AccountingProfile {
     pub fn exact_tokenizer() -> Self {
         Self {
-            identity: "claude-bpe",
+            identity: EXACT_TOKENIZER_IDENTITY,
             revision: AccountingRevision::exact_tokenizer().clone(),
             authority: Authority::Exact,
             count: Arc::new(tokenizer::estimate_tokens),
@@ -58,6 +58,13 @@ impl AccountingProfile {
 
     /// The revision includes `identity` and `degradation`, so changing either
     /// invalidates cached counts.
+    ///
+    /// `count` must charge a rendered fragment the same whatever follows it:
+    /// `count(a + b) == count(a) + count(b)` at every fragment seam (each
+    /// fragment starts with `<` and ends with `\n`). `finalize` relies on this
+    /// to skip re-checking the accounting bounds after an adjustment rebuild;
+    /// an estimator that charges a shorter render more can emit a body over
+    /// `max_estimated_tokens`.
     pub fn heuristic(
         identity: &'static str,
         degradation: &'static str,
@@ -66,7 +73,7 @@ impl AccountingProfile {
     ) -> Self {
         Self {
             identity,
-            revision: AccountingRevision::from_components(&[identity, degradation]),
+            revision: AccountingRevision::heuristic(identity, degradation),
             authority: Authority::Heuristic {
                 degradation,
                 headroom_permille,
@@ -87,8 +94,22 @@ impl AccountingProfile {
         self.authority
     }
 
+    pub fn declared_uncharged(&self) -> &'static [&'static str] {
+        DECLARED_UNCHARGED
+    }
+
     pub fn charge(&self, text: &str) -> Charge {
         let count = cached_count_under(&self.revision, text, |text| (self.count)(text));
+        self.charge_of(count)
+    }
+
+    /// Counts without the shared cache; the cache only pays off for text that
+    /// recurs.
+    pub fn charge_uncached(&self, text: &str) -> Charge {
+        self.charge_of((self.count)(text))
+    }
+
+    fn charge_of(&self, count: usize) -> Charge {
         Charge {
             tokens: ClaudeTokens::new(count as u64),
             authority: self.authority,
@@ -96,6 +117,17 @@ impl AccountingProfile {
     }
 }
 
+/// A token count labeled by its producing [`AccountingProfile`].
+///
+/// ```
+/// use daemon::packing::{AccountingProfile, Authority};
+///
+/// let charge = AccountingProfile::exact_tokenizer().charge("twelve bytes");
+/// assert_eq!(charge.authority(), Authority::Exact);
+/// assert_eq!(charge.with_headroom(), charge.tokens());
+/// assert!(charge.tokens().get() > 0);
+/// ```
+///
 /// ```compile_fail,E0451
 /// let _ = daemon::packing::Charge {
 ///     tokens: daemon::packing::ClaudeTokens::new(1),
@@ -117,7 +149,10 @@ impl Charge {
         self.authority
     }
 
-    pub fn less(self, before: ClaudeTokens) -> Self {
+    /// The render ledger's delta; a profile's count is the only other source
+    /// of a charge, so an exact label never leaves the crate cheaper than it
+    /// was counted.
+    pub(crate) fn less(self, before: ClaudeTokens) -> Self {
         Self {
             tokens: self
                 .tokens
@@ -135,7 +170,10 @@ impl Charge {
                 headroom_permille, ..
             } => u64::from(headroom_permille),
         };
-        let extra = self.tokens.get().saturating_mul(permille).div_ceil(1_000);
+        // The product is taken in `u128` so a ratio whose product exceeds
+        // `u64` is still charged at that ratio; only the final sum saturates.
+        let extra = (u128::from(self.tokens.get()) * u128::from(permille)).div_ceil(1_000);
+        let extra = u64::try_from(extra).unwrap_or(u64::MAX);
         ClaudeTokens::new(self.tokens.get().saturating_add(extra))
     }
 }

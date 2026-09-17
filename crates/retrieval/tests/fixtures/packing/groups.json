@@ -1,5 +1,5 @@
 {
-  "reference_version": "packing-reference-v1",
+  "reference_version": "packing-reference-v3",
   "parent": "alpha beta\ngamma δelta\nepsilon zeta\n",
   "note": "Offsets are byte offsets into `parent`; the production packer never receives `parent`, only the selected bytes each span carries.",
   "cases": [

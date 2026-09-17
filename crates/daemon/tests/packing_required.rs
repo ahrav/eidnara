@@ -9,15 +9,19 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use daemon::packing::{
-    ClaudeTokens, PackingTrace, PreparationRefusal, RequiredEvent, RequiredMaterialization,
-    StageEvent,
+    AccountingProfile, ClaudeTokens, PackingTrace, PreparationRefusal, RequiredEvent,
+    RequiredInputs, RequiredMaterialization, StageEvent, prepare_required,
 };
-use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::encode;
+use kernel::{ArtifactDestination, EligibilityVerdict};
+use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{RequiredBound, RequiredBounds, RequiredContextFailure, RequiredRequest};
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
-use support::packing::{Fixture, ToolSpan, bounds, required_render_total, tool_span};
+use support::packing::{
+    Fixture, ToolSpan, accounting_bounds, bounds, required_render_total, tool_span,
+    while_connection_is_held,
+};
 
 fn required_failure(
     result: &Result<RequiredMaterialization, PreparationRefusal>,
@@ -265,7 +269,7 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
         &[&payload_id, &altered],
     );
     let (result, trace) = fixture.prepare(
-        &[FIRST.request()],
+        &[FIRST.request(), SECOND.request()],
         &bounds(1 << 20),
         &EvalBudget::unbounded(),
     );
@@ -273,19 +277,57 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
         required_failure(&result),
         &RequiredContextFailure::Corrupt(FIRST.id())
     );
-    assert_eq!(trace.payload_loads(), 0, "the load is refused, not charged");
+    assert_eq!(
+        trace.payload_loads(),
+        2,
+        "both rows returned bytes before the first digest refused"
+    );
     assert_eq!(
         required_events(&trace),
         [
             RequiredEvent::Read,
+            RequiredEvent::Read,
             RequiredEvent::Judged,
-            RequiredEvent::Admitted
+            RequiredEvent::Admitted,
+            RequiredEvent::Loaded,
+            RequiredEvent::Loaded,
         ]
     );
     assert_no_optional_work(&trace);
     damage(
         "UPDATE payloads SET bytes=?2 WHERE payload_id=?1",
         &[&payload_id, &FIRST.payload.as_bytes()],
+    );
+
+    // The payload length must match its occurrence reference.
+    let second_payload_id = kernel::source_identity::payload_id(SECOND.payload.as_bytes());
+    let longer = [SECOND.payload.as_bytes(), b"!"].concat();
+    damage(
+        "UPDATE payloads SET bytes=?2, byte_length=?3 WHERE payload_id=?1",
+        &[&second_payload_id, &longer, &(longer.len() as i64)],
+    );
+    let (result, trace) = fixture.prepare(
+        &[FIRST.request(), SECOND.request()],
+        &bounds(1 << 20),
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        required_failure(&result),
+        &RequiredContextFailure::Corrupt(SECOND.id())
+    );
+    assert_eq!(
+        trace.payload_loads(),
+        2,
+        "both rows returned bytes; the second's digest refused them"
+    );
+    assert_no_optional_work(&trace);
+    damage(
+        "UPDATE payloads SET bytes=?2, byte_length=?3 WHERE payload_id=?1",
+        &[
+            &second_payload_id,
+            &SECOND.payload.as_bytes(),
+            &(SECOND.payload.len() as i64),
+        ],
     );
 
     let identity = SECOND.identity();
@@ -306,6 +348,65 @@ fn corrupt_payload_bytes_and_foreign_tuples_are_refused_as_corrupt() {
         &RequiredContextFailure::Corrupt(FIRST.id())
     );
     assert_no_optional_work(&trace);
+    damage(
+        "UPDATE occurrences SET tuple=?2 WHERE occurrence_id=?1",
+        &[
+            &FIRST.id().to_string(),
+            &encode(&FIRST.occurrence(&FIRST.identity()), FIRST.payload)
+                .unwrap()
+                .tuple,
+        ],
+    );
+
+    // Eligibility metadata the kernel would refuse is this row's corruption,
+    // not an untyped kernel fault over the whole batch.
+    damage(
+        "UPDATE occurrences SET source_artifact_digest='not-a-digest' WHERE occurrence_id=?1",
+        &[&FIRST.id().to_string()],
+    );
+    let (result, trace) = fixture.prepare(
+        &[FIRST.request(), SECOND.request()],
+        &bounds(1 << 20),
+        &EvalBudget::unbounded(),
+    );
+    assert_eq!(
+        required_failure(&result),
+        &RequiredContextFailure::Corrupt(FIRST.id())
+    );
+    assert!(trace.events().is_empty(), "{:?}", trace.events());
+    assert_no_optional_work(&trace);
+}
+
+/// The profile prices after the last projection hold; a budget that ends
+/// there still refuses the phase rather than returning a materialization.
+#[test]
+fn a_budget_that_ends_during_reservation_refuses_the_materialization() {
+    let fixture = Fixture::new(&[FIRST]);
+    let budget = EvalBudget::unbounded();
+    let cancelling = budget.clone();
+    let profile =
+        AccountingProfile::heuristic("cancels-on-first-cost", "cancels", 0, move |text| {
+            cancelling.cancel();
+            text.len()
+        });
+    let mut trace = PackingTrace::default();
+    let result = prepare_required(
+        &fixture.store,
+        RequiredInputs {
+            kernel: &fixture.kernel,
+            project: &fixture.project,
+            destination: ArtifactDestination::Local,
+            budget: &budget,
+            profile: &profile,
+        },
+        &[FIRST.request()],
+        &bounds(1 << 20),
+        &accounting_bounds(),
+        &mut trace,
+    );
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+    assert_eq!(trace.payload_loads(), 1);
+    assert_eq!(trace.optional_events(), 0);
 }
 
 #[test]
@@ -324,6 +425,55 @@ fn an_expired_deadline_refuses_the_required_phase_before_any_optional_event() {
     cancelled.cancel();
     let (result, _) = fixture.prepare(&[FIRST.request()], &bounds(1 << 20), &cancelled);
     assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+}
+
+#[test]
+fn a_deadline_that_passes_while_the_connection_is_held_refuses_without_reading() {
+    let fixture = Fixture::new(&[FIRST]);
+    let short = EvalBudget::new(
+        Some(Instant::now() + Duration::from_millis(200)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (waited, (result, trace)) = while_connection_is_held(&fixture, || {
+        fixture.prepare(&[FIRST.request()], &bounds(1 << 20), &short)
+    });
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+    assert!(
+        waited < Duration::from_secs(2),
+        "the hold must end at the deadline, not when the holder releases: {waited:?}"
+    );
+    assert!(
+        trace.events().is_empty(),
+        "no row is read after the deadline: {:?}",
+        trace.events()
+    );
+    assert_no_optional_work(&trace);
+}
+
+#[test]
+fn a_cancellation_while_the_connection_is_held_refuses_without_reading() {
+    let fixture = Fixture::new(&[FIRST]);
+    let cancellable = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(30)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let canceller = cancellable.clone();
+    let (waited, (result, trace)) = while_connection_is_held(&fixture, || {
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                canceller.cancel();
+            });
+            fixture.prepare(&[FIRST.request()], &bounds(1 << 20), &cancellable)
+        })
+    });
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+    assert!(
+        waited < Duration::from_secs(2),
+        "the hold must end on cancellation, not at the deadline: {waited:?}"
+    );
+    assert!(trace.events().is_empty());
+    assert_no_optional_work(&trace);
 }
 
 #[test]
@@ -361,6 +511,34 @@ fn more_requests_than_the_load_bound_are_refused_before_any_read() {
         required_failure(&result),
         &RequiredContextFailure::Oversized {
             occurrence: SECOND.id(),
+            bound: RequiredBound::PayloadLoads,
+        }
+    );
+    assert!(trace.events().is_empty());
+    assert_no_optional_work(&trace);
+}
+
+/// The kernel judges at most `MAX_ELIGIBILITY_CANDIDATES` per batch, so a
+/// caller bound above it cannot be honored; the set is refused as oversized
+/// before any row is read rather than read whole and refused by the kernel.
+#[test]
+fn a_set_beyond_the_kernel_batch_cap_is_refused_before_any_read() {
+    let fixture = Fixture::new(&[FIRST]);
+    let requests: Vec<RequiredRequest> = (0..=kernel::MAX_ELIGIBILITY_CANDIDATES)
+        .map(|index| RequiredRequest {
+            occurrence: OccurrenceId::parse(&format!("{index:064x}")).unwrap(),
+            revision: 1,
+        })
+        .collect();
+    let generous = RequiredBounds {
+        max_payload_loads: NonZeroUsize::new(2 * kernel::MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        ..bounds(1 << 20)
+    };
+    let (result, trace) = fixture.prepare(&requests, &generous, &EvalBudget::unbounded());
+    assert_eq!(
+        required_failure(&result),
+        &RequiredContextFailure::Oversized {
+            occurrence: requests[kernel::MAX_ELIGIBILITY_CANDIDATES].occurrence,
             bound: RequiredBound::PayloadLoads,
         }
     );

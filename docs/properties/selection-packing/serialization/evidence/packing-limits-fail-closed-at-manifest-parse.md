@@ -41,3 +41,39 @@ None.
   value, a version disagreement with the identity, each limit at zero, and a
   body bound at and one past the transport maximum.
 - A read of the packing sources that finds none of the legacy budget helpers.
+
+## Investigation log
+
+### Q: Is the record `default-production` or `explicit-config-only`?
+
+- Sources examined: `crates/daemon/src/projection_gates.rs`
+  `RuntimeManifest::parse` (the packing branch is entered only when
+  `PACKING_LIMITS.iter().any(|name| limits_object.contains_key(*name))`, and
+  a manifest without the group leaves `packing` as `None`);
+  `crates/daemon/src/projection_admission.rs`, which reads
+  `runtime-manifest.json` from `<home>/search-admission/` at every refresh
+  and leaves the gate closed when the record is missing or refused;
+  `../../../METHOD.md` rule 4.
+- Findings: the parse runs whenever an operator publishes the record, but the
+  approval, partial-group, and malformation refusals need a manifest that
+  carries at least one `packing_*` limit. The unknown-limit check that counts
+  the packing names runs for every manifest, and a manifest without the
+  group parses and yields no limits; those two clauses are reached by
+  default, the refusals are not.
+- Missing evidence: none.
+- Conclusion: resolved with answer - `explicit-config-only`, with the
+  enabling configuration named on the record's `Reachability:` line.
+
+### Q: Does a build without the packing group refuse a manifest that carries it?
+
+- Sources examined: `RuntimeManifest::parse`'s unknown-limit and unknown-hook
+  checks; `crates/daemon/src/projection_admission.rs` `AdmissionInputs::read`;
+  `../../../search-projection/construction-contracts.md` CC9.
+- Findings: a build whose `PACKING_LIMITS` and `PACKING_APPROVAL_ID` are absent
+  refuses the keys as an unknown limit or hook, and that refusal closes the
+  gate for every hook, so the manifest gains the keys only after the daemon
+  that knows them is deployed, and a rollback must revert the manifest.
+- Missing evidence: none; the order is recorded in CC9 and the catalog's Q4
+  rulings.
+- Conclusion: resolved with answer - the rollout order is a deployment rule
+  the parser enforces by refusing unknown names.

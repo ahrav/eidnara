@@ -10,7 +10,7 @@ use daemon::dispatch::{MAX_WIRE_BODY_BYTES, guard_calls};
 use daemon::packing::{
     AccountingBound, AccountingBounds, AccountingExceeded, AccountingProfile, Charged,
     ClaudeTokens, OptionalAdmission, OptionalRequest, PackingFailure, PackingLimitRefusal,
-    PackingLimits, PackingTrace, Preparation, RequiredInputs, RequiredMaterialization,
+    PackingLimits, PackingTrace, Preparation, PreparationRefusal, RequiredInputs,
     SerializationBound, SerializationBounds, cost_cache, finalize, prepare_optional,
     prepare_required,
 };
@@ -45,15 +45,16 @@ fn fixture() -> Fixture {
     Fixture::new(&[REQUIRED, GROUPS[0], GROUPS[1], GROUPS[2]])
 }
 
-fn admit(fixture: &Fixture, spans: &[ToolSpan]) -> (RequiredMaterialization, OptionalAdmission) {
-    admit_under(fixture, spans, &byte_profile())
+fn admit(fixture: &Fixture, spans: &[ToolSpan]) -> OptionalAdmission {
+    admit_under(fixture, spans, &byte_profile(), &accounting_bounds()).unwrap()
 }
 
 fn admit_under(
     fixture: &Fixture,
     spans: &[ToolSpan],
     profile: &AccountingProfile,
-) -> (RequiredMaterialization, OptionalAdmission) {
+    accounting: &AccountingBounds,
+) -> Result<OptionalAdmission, PreparationRefusal> {
     let mut trace = PackingTrace::default();
     let budget = EvalBudget::unbounded();
     let inputs = RequiredInputs {
@@ -68,7 +69,7 @@ fn admit_under(
         inputs,
         &[REQUIRED.request()],
         &bounds(1 << 20),
-        &accounting_bounds(),
+        accounting,
         &mut trace,
     )
     .unwrap();
@@ -79,26 +80,19 @@ fn admit_under(
             revision: 1,
         })
         .collect();
-    let admission = prepare_optional(
+    prepare_optional(
         &fixture.store,
         inputs,
         &required,
         &requests,
         &wide(),
-        &accounting_bounds(),
+        accounting,
         &mut trace,
     )
-    .unwrap();
-    (required, admission)
 }
 
-fn serialization(
-    accounting: AccountingBounds,
-    max_serialized_bytes: usize,
-    max_adjustment_passes: usize,
-) -> SerializationBounds {
+fn serialization(max_serialized_bytes: usize, max_adjustment_passes: usize) -> SerializationBounds {
     SerializationBounds {
-        accounting,
         max_serialized_bytes,
         max_adjustment_passes,
     }
@@ -109,10 +103,9 @@ fn prepare(
     serialized_bytes: usize,
     pass_cap: usize,
 ) -> Result<Preparation, PackingFailure> {
-    let (_, admission) = admit(fixture, &GROUPS);
     finalize(
-        admission,
-        &serialization(accounting_bounds(), serialized_bytes, pass_cap),
+        admit(fixture, &GROUPS),
+        &serialization(serialized_bytes, pass_cap),
         &EvalBudget::unbounded(),
     )
 }
@@ -129,13 +122,13 @@ fn text(preparation: &Preparation) -> &str {
 fn the_body_is_measured_once_reserved_exactly_and_written_through_the_guard() {
     let fixture = fixture();
     for profile in [byte_profile(), AccountingProfile::exact_tokenizer()] {
-        let (_, admission) = admit_under(&fixture, &GROUPS, &profile);
+        let admission = admit_under(&fixture, &GROUPS, &profile, &accounting_bounds()).unwrap();
         let rendered = admission.ledger().rendered_bytes();
         let expected = admission.ledger().text().to_owned();
         guard_calls::reset();
         let preparation = finalize(
             admission,
-            &serialization(accounting_bounds(), rendered, 8),
+            &serialization(rendered, 8),
             &EvalBudget::unbounded(),
         )
         .unwrap();
@@ -174,7 +167,7 @@ fn a_wrapper_overflow_removes_the_last_admitted_group_and_reclaims_its_wrappers(
     assert!(repaired.body().len() < full_len);
     assert!(text(&repaired).contains("required bytes stay"));
     assert!(!text(&repaired).contains("third"));
-    let (_, twin) = admit(&fixture, &GROUPS[..2]);
+    let twin = admit(&fixture, &GROUPS[..2]);
     assert_eq!(repaired.body(), twin.ledger().text().as_bytes());
     assert_eq!(repaired.ledger(), twin.ledger());
     assert_eq!(
@@ -207,7 +200,7 @@ fn cap_exhaustion_emits_nothing_and_never_removes_required_items() {
         }
     );
 
-    let (_, required_only) = admit(&fixture, &[]);
+    let required_only = admit(&fixture, &[]);
     let required_len = required_only.ledger().rendered_bytes();
     let stripped = prepare(&fixture, required_len, 16).unwrap();
     assert_eq!(stripped.passes(), 3);
@@ -243,54 +236,83 @@ fn cap_exhaustion_emits_nothing_and_never_removes_required_items() {
 #[test]
 fn an_exhausted_budget_refuses_before_any_measurement() {
     let fixture = fixture();
-    let (_, admission) = admit(&fixture, &GROUPS);
+    let admission = admit(&fixture, &GROUPS);
     let cancelled = EvalBudget::unbounded();
     cancelled.cancel();
     guard_calls::reset();
     assert_eq!(
-        finalize(
-            admission,
-            &serialization(accounting_bounds(), 1 << 20, 8),
-            &cancelled
-        )
-        .unwrap_err(),
+        finalize(admission, &serialization(1 << 20, 8), &cancelled).unwrap_err(),
         PackingFailure::Deadline
     );
     assert_eq!(guard_calls::counts(), (0, 0));
 }
 
+/// The fitting pass copies and hashes the body after the loop's poll; a
+/// budget that ends inside that write still refuses the preparation.
 #[test]
-fn an_accounting_overflow_is_repaired_the_same_way() {
+fn a_budget_that_ends_while_the_body_is_written_refuses_the_preparation() {
     let fixture = fixture();
-    let (_, admission) = admit(&fixture, &GROUPS);
-    let tokens = admission.ledger().total_with_headroom();
-    let tight = AccountingBounds {
-        max_rendered_bytes: 1 << 20,
-        max_estimated_tokens: ClaudeTokens::new(tokens.get() - 1),
-    };
-    let unbounded = EvalBudget::unbounded();
-    let repaired = finalize(admission, &serialization(tight, 1 << 20, 8), &unbounded).unwrap();
-    assert_eq!(repaired.passes(), 1);
-    assert!(repaired.ledger().total_with_headroom() <= tight.max_estimated_tokens);
-    assert_eq!(repaired.removed()[0].index, 2);
-    let full_len = full_len(&fixture);
-    assert_eq!(
-        repaired.body(),
-        prepare(&fixture, full_len - 1, 8).unwrap().body()
-    );
+    let admission = admit(&fixture, &GROUPS);
+    let budget = EvalBudget::unbounded();
+    let cancelling = budget.clone();
+    guard_calls::reset();
+    guard_calls::on_write(move || cancelling.cancel());
+    let result = finalize(admission, &serialization(1 << 20, 8), &budget);
+    guard_calls::reset();
+    assert_eq!(result.unwrap_err(), PackingFailure::Deadline);
+}
 
-    let (_, admission) = admit(&fixture, &GROUPS);
-    assert_eq!(
-        finalize(admission, &serialization(tight, 1 << 20, 0), &unbounded).unwrap_err(),
-        PackingFailure::AdjustmentCapExhausted {
-            passes: 0,
-            bound: SerializationBound::Accounting(AccountingExceeded {
+#[test]
+fn an_accounting_overflow_is_refused_by_the_optional_phase_before_any_measurement() {
+    let fixture = fixture();
+    let admission = admit(&fixture, &GROUPS);
+    let bytes = admission.ledger().rendered_bytes();
+    let tokens = admission.ledger().total_with_headroom().get();
+    let at_value = AccountingBounds {
+        max_rendered_bytes: bytes,
+        max_estimated_tokens: ClaudeTokens::new(tokens),
+    };
+    for (accounting, exceeded) in [
+        (
+            AccountingBounds {
+                max_rendered_bytes: bytes - 1,
+                ..at_value
+            },
+            AccountingExceeded {
+                bound: AccountingBound::RenderedBytes,
+                value: bytes as u64,
+                limit: (bytes - 1) as u64,
+            },
+        ),
+        (
+            AccountingBounds {
+                max_estimated_tokens: ClaudeTokens::new(tokens - 1),
+                ..at_value
+            },
+            AccountingExceeded {
                 bound: AccountingBound::EstimatedTokens,
-                value: tokens.get(),
-                limit: tokens.get() - 1,
-            }),
-        }
-    );
+                value: tokens,
+                limit: tokens - 1,
+            },
+        ),
+    ] {
+        guard_calls::reset();
+        assert_eq!(
+            admit_under(&fixture, &GROUPS, &byte_profile(), &accounting).unwrap_err(),
+            PreparationRefusal::Accounting(exceeded)
+        );
+        assert_eq!(guard_calls::counts(), (0, 0), "{exceeded:?}");
+    }
+
+    let admission = admit_under(&fixture, &GROUPS, &byte_profile(), &at_value).unwrap();
+    let saturated = finalize(
+        admission,
+        &serialization(bytes, 0),
+        &EvalBudget::unbounded(),
+    )
+    .unwrap();
+    assert_eq!(saturated.passes(), 0);
+    assert_eq!(saturated.body().len(), bytes);
 }
 
 fn identity_hex(fixture: &Fixture, serialized_bytes: usize) -> String {
@@ -300,19 +322,12 @@ fn identity_hex(fixture: &Fixture, serialized_bytes: usize) -> String {
         .to_string()
 }
 
-fn identity_at_token_edge(fixture: &Fixture, max_estimated_tokens: u64) -> (String, usize) {
-    let (_, admission) = admit(fixture, &GROUPS);
+fn refusal_at_token_edge(fixture: &Fixture, max_estimated_tokens: u64) -> PreparationRefusal {
     let tight = AccountingBounds {
         max_rendered_bytes: 1 << 20,
         max_estimated_tokens: ClaudeTokens::new(max_estimated_tokens),
     };
-    let preparation = finalize(
-        admission,
-        &serialization(tight, 1 << 20, 8),
-        &EvalBudget::unbounded(),
-    )
-    .unwrap();
-    (preparation.identity().to_string(), preparation.passes())
+    admit_under(fixture, &GROUPS, &byte_profile(), &tight).unwrap_err()
 }
 
 #[test]
@@ -321,19 +336,25 @@ fn identical_inputs_give_byte_identical_output_across_cache_states_threads_and_p
     let full_len = full_len(&fixture);
     let reference = identity_hex(&fixture, full_len);
 
-    let (_, admission) = admit(&fixture, &GROUPS);
+    let admission = admit(&fixture, &GROUPS);
     let edge = admission.ledger().total_with_headroom().get() - 1;
-    let (edge_reference, passes) = identity_at_token_edge(&fixture, edge);
-    assert_eq!(passes, 1);
+    let edge_reference = refusal_at_token_edge(&fixture, edge);
+    assert!(matches!(
+        edge_reference,
+        PreparationRefusal::Accounting(AccountingExceeded {
+            bound: AccountingBound::EstimatedTokens,
+            ..
+        })
+    ));
 
     cost_cache::clear();
     assert_eq!(identity_hex(&fixture, full_len), reference);
-    assert_eq!(identity_at_token_edge(&fixture, edge).0, edge_reference);
+    assert_eq!(refusal_at_token_edge(&fixture, edge), edge_reference);
     assert_eq!(identity_hex(&fixture, full_len), reference);
-    assert_eq!(identity_at_token_edge(&fixture, edge).0, edge_reference);
+    assert_eq!(refusal_at_token_edge(&fixture, edge), edge_reference);
     cost_cache::rotate();
     assert_eq!(identity_hex(&fixture, full_len), reference);
-    assert_eq!(identity_at_token_edge(&fixture, edge).0, edge_reference);
+    assert_eq!(refusal_at_token_edge(&fixture, edge), edge_reference);
 
     let identities: BTreeSet<String> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..4)
@@ -511,7 +532,6 @@ fn packing_limits_join_the_manifest_as_one_approved_group() {
     assert_eq!(
         limits.serialization_bounds(),
         SerializationBounds {
-            accounting: limits.accounting_bounds(),
             max_serialized_bytes: 8000,
             max_adjustment_passes: 3,
         }
@@ -593,10 +613,29 @@ fn an_unapproved_partial_unknown_mismatched_or_zero_packing_group_is_refused() {
     }
 }
 
+/// One `PackingLimits` feeds both phases: `accounting_bounds` to admission and
+/// `serialization_bounds` to `finalize`.
+fn prepare_under(
+    fixture: &Fixture,
+    limits: &PackingLimits,
+) -> Result<Result<Preparation, PackingFailure>, PreparationRefusal> {
+    let admission = admit_under(
+        fixture,
+        &GROUPS,
+        &byte_profile(),
+        &limits.accounting_bounds(),
+    )?;
+    Ok(finalize(
+        admission,
+        &limits.serialization_bounds(),
+        &EvalBudget::unbounded(),
+    ))
+}
+
 #[test]
 fn each_serialization_bound_saturates_at_its_value_and_refuses_at_value_plus_one() {
     let fixture = fixture();
-    let (_, admission) = admit(&fixture, &GROUPS);
+    let admission = admit(&fixture, &GROUPS);
     let bytes = admission.ledger().rendered_bytes() as u64;
     let tokens = admission.ledger().total_with_headroom().get();
     let mut at_value = limits_with_packing();
@@ -604,44 +643,55 @@ fn each_serialization_bound_saturates_at_its_value_and_refuses_at_value_plus_one
     at_value.insert("packing_estimated_tokens".to_owned(), json!(tokens));
     at_value.insert("packing_serialized_bytes".to_owned(), json!(bytes));
     at_value.insert("packing_adjustment_passes".to_owned(), json!(0));
-    let limits = parse_limits(at_value.clone());
-    let unbounded = EvalBudget::unbounded();
-    let saturated = finalize(admission, &limits.serialization_bounds(), &unbounded).unwrap();
+    let saturated = prepare_under(&fixture, &parse_limits(at_value.clone()))
+        .unwrap()
+        .unwrap();
     assert_eq!(saturated.body().len() as u64, bytes);
+    assert_eq!(saturated.passes(), 0);
 
-    for (name, bound) in [
-        (
-            "packing_rendered_bytes",
-            SerializationBound::Accounting(AccountingExceeded {
-                bound: AccountingBound::RenderedBytes,
-                value: bytes,
-                limit: bytes - 1,
-            }),
-        ),
-        (
-            "packing_estimated_tokens",
-            SerializationBound::Accounting(AccountingExceeded {
-                bound: AccountingBound::EstimatedTokens,
-                value: tokens,
-                limit: tokens - 1,
-            }),
-        ),
-        (
-            "packing_serialized_bytes",
-            SerializationBound::SerializedBytes,
-        ),
-    ] {
+    let tightened = |name: &str| {
         let mut tightened = at_value.clone();
         let current = tightened[name].as_u64().unwrap();
         tightened.insert(name.to_owned(), json!(current - 1));
-        let limits = parse_limits(tightened);
-        let (_, admission) = admit(&fixture, &GROUPS);
+        parse_limits(tightened)
+    };
+    for (name, exceeded) in [
+        (
+            "packing_rendered_bytes",
+            AccountingExceeded {
+                bound: AccountingBound::RenderedBytes,
+                value: bytes,
+                limit: bytes - 1,
+            },
+        ),
+        (
+            "packing_estimated_tokens",
+            AccountingExceeded {
+                bound: AccountingBound::EstimatedTokens,
+                value: tokens,
+                limit: tokens - 1,
+            },
+        ),
+    ] {
+        guard_calls::reset();
         assert_eq!(
-            finalize(admission, &limits.serialization_bounds(), &unbounded).unwrap_err(),
-            PackingFailure::AdjustmentCapExhausted { passes: 0, bound },
+            prepare_under(&fixture, &tightened(name)).unwrap_err(),
+            PreparationRefusal::Accounting(exceeded),
             "{name}"
         );
+        assert_eq!(guard_calls::counts(), (0, 0), "{name}");
     }
+    guard_calls::reset();
+    assert_eq!(
+        prepare_under(&fixture, &tightened("packing_serialized_bytes"))
+            .unwrap()
+            .unwrap_err(),
+        PackingFailure::AdjustmentCapExhausted {
+            passes: 0,
+            bound: SerializationBound::SerializedBytes,
+        }
+    );
+    assert_eq!(guard_calls::counts(), (1, 0));
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {
@@ -675,4 +725,41 @@ fn the_packing_path_reaches_no_legacy_clamp_or_selection_module() {
     ] {
         assert!(!packing_sources.contains(forbidden), "{forbidden}");
     }
+}
+
+/// Every fragment starts with `<` and ends with `\n`, which the pre-tokenizer
+/// splits on, so the exact profile charges each fragment the same whatever
+/// follows it, and a rebuild that drops a group drops exactly that group's cost.
+#[test]
+fn the_exact_tokenizer_charges_fragments_independently_so_a_rebuild_drops_only_the_removed_cost() {
+    let fixture = fixture();
+    let exact = AccountingProfile::exact_tokenizer();
+    let prepare = |serialized_bytes: usize| {
+        finalize(
+            admit_under(&fixture, &GROUPS, &exact, &accounting_bounds()).unwrap(),
+            &serialization(serialized_bytes, 8),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap()
+    };
+    let full = prepare(1 << 20);
+    let text = full.ledger().text();
+    let mut at = 0;
+    let mut by_fragment = 0;
+    for entry in full.ledger().entries() {
+        by_fragment += tokenizer::estimate_tokens(&text[at..at + entry.bytes]);
+        at += entry.bytes;
+    }
+    assert_eq!(tokenizer::estimate_tokens(text), by_fragment);
+    assert_eq!(full.ledger().total().get(), by_fragment as u64);
+
+    let last = full.admitted().last().unwrap().clone();
+    let repaired = prepare(full.body().len() - 1);
+    assert_eq!(repaired.removed().len(), 1);
+    let twin = admit_under(&fixture, &GROUPS[..2], &exact, &accounting_bounds()).unwrap();
+    assert_eq!(repaired.ledger(), twin.ledger());
+    assert_eq!(
+        repaired.ledger().total_with_headroom(),
+        ClaudeTokens::new(full.ledger().total_with_headroom().get() - last.cost.get())
+    );
 }

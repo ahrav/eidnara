@@ -21,4 +21,7 @@ pub use oracle::{
 pub use resolve::{
     Layer, Precedence, ResolveRefusal, Resolved, RowAccess, RowFault, Winner, resolve,
 };
-pub use score::{Ranked, inner_product, rank_order, rescore, score};
+pub use score::{
+    BLOCK_ROWS, BlockSums, Ranked, inner_product, inner_product_block, rank_order, rescore, score,
+    score_block,
+};

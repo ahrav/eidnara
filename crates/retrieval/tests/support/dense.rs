@@ -277,6 +277,11 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new(admitted: &[&str], rows: Vec<Row>) -> Self {
+        Self::with_objects(&OBJECTS, admitted, rows)
+    }
+
+    /// Every object in `objects` gets a decision and those in `admitted` an admission, so a test can shape a corpus larger than [`corpus`].
+    pub fn with_objects(objects: &[&str], admitted: &[&str], rows: Vec<Row>) -> Self {
         let root = tempfile::tempdir().unwrap();
         let kernel = KernelStore::open(root.path().join("kernel")).unwrap();
         kernel
@@ -291,9 +296,9 @@ impl Fixture {
                     sensitivity: Sensitivity::Normal,
                 })?;
                 envelope.insert_scope(scope(SCOPE_A, PROJECT_A))?;
-                for object in OBJECTS {
+                for object in objects {
                     envelope.insert_decision(decision(object))?;
-                    if admitted.contains(&object) {
+                    if admitted.contains(object) {
                         envelope.record_admission(admission(object))?;
                     }
                 }
