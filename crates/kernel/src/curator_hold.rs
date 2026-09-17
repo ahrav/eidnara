@@ -13,7 +13,7 @@ use super::backup::release_capture_pin_in_tx;
 use super::cas::ArtifactHandle;
 use super::envelope::{Sensitivity, check_fence};
 use super::redaction::identity;
-use super::review_staging::{check_digest, provisional_result_identity};
+use super::review_staging::{REVIEW_PROPOSAL_KIND, check_digest, provisional_result_identity};
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
 pub const CURATOR_EXECUTION_HOLD_KIND: &str = "curator_execution";
@@ -184,7 +184,7 @@ struct StoredHold {
 }
 
 impl KernelStore {
-    /// Pins `evidence_ids` for one job until `expires_at`, the job's run cutoff, after validating every id, the reference count, the active-hold counts, and the distinct backing bytes the project and host would hold. Nothing is written when any check fails.
+    /// Pins `evidence_ids` for one job until `expires_at`, the job's run cutoff, after validating every id, the reference count, the active-hold counts, and the distinct backing bytes the project and host would hold. Nothing is written when any check fails. A binding that already owns a live hold gets that hold back with the ids added and its expiry unchanged, so a retried acquisition never allocates a second hold.
     pub fn acquire_execution_hold(
         &self,
         binding: &CuratorHoldBinding,
@@ -247,7 +247,7 @@ impl KernelStore {
         Ok(hold)
     }
 
-    /// In one envelope: acquire the review hold over the execution hold's still-live references, move the staged proposal's queue deadline and the still-future `retain_until` of Curator-captured evidence forward to the review expiry, then release the execution hold. `review` must carry the execution binding's generation, and `review.subject` must be the provisional candidate that generation staged, with both its candidate and run deadlines still ahead of the store clock; `review_expires_at` is at most [`REVIEW_EXPIRY_MAX_MS`] after that candidate's creation. Deadlines only move later; expired references are never extended and ownership never changes.
+    /// In one envelope: acquire the review hold over the execution hold's still-live references, move the still-future `retain_until` of Curator-captured evidence forward to the review expiry, then release the execution hold. `review` must carry the execution binding's generation, and `review.subject` must be the sealed review proposal that generation staged under its derived run id, with both its candidate and run deadlines still ahead of the store clock and no later than `review_expires_at`; `review_expires_at` is at most [`REVIEW_EXPIRY_MAX_MS`] after that candidate's creation. Those deadlines then move up to the review expiry so the proposal stays readable exactly as long as its bytes are held. Deadlines only move later; expired references are never extended and ownership never changes.
     pub fn transfer_execution_to_review(
         &self,
         execution_hold_id: &str,
@@ -279,11 +279,17 @@ impl KernelStore {
         let result_created_at: i64 = tx
             .query_row_cached(
                 "SELECT c.created_at FROM candidates c JOIN extraction_runs r USING(extraction_run_id)
-                 WHERE c.candidate_id=?1
-                   AND (c.terminal_state IS NULL OR c.terminal_state='completed')
-                   AND (r.terminal_state IS NULL OR r.terminal_state='completed')
-                   AND c.lease_expires_at>?2 AND r.lease_expires_at>?2",
-                params![review.subject, now],
+                 WHERE c.candidate_id=?1 AND c.extraction_run_id=?3 AND c.candidate_kind=?4
+                   AND c.terminal_state='completed' AND r.terminal_state='completed'
+                   AND c.lease_expires_at>?2 AND r.lease_expires_at>?2
+                   AND c.lease_expires_at<=?5 AND r.lease_expires_at<=?5",
+                params![
+                    review.subject,
+                    now,
+                    expected.extraction_run_id,
+                    REVIEW_PROPOSAL_KIND,
+                    review_expires_at
+                ],
                 |row| row.get(0),
             )
             .optional()
@@ -451,7 +457,13 @@ impl KernelStore {
         check_fence(&tx, self.lease_epoch())?;
         self.check_incarnation(&tx, binding)?;
         let facts = precharge(&tx, binding, evidence_ids, quota)?;
-        let hold_id = insert_pin(&tx, kind, binding, expires_at, self.lease_epoch(), None)?;
+        let (hold_id, expires_at) = match live_hold_of(&tx, kind, binding, now)? {
+            Some(existing) => existing,
+            None => (
+                insert_pin(&tx, kind, binding, expires_at, self.lease_epoch(), None)?,
+                expires_at,
+            ),
+        };
         add_references(&tx, &hold_id, expires_at, &facts)?;
         let hold = admit_totals(&tx, &hold_id, kind, expires_at)?;
         tx.commit().map_err(sqlite)?;
@@ -494,6 +506,25 @@ impl KernelStore {
         }
         Ok(())
     }
+}
+
+/// The newest unreleased, undegraded, unexpired hold of `kind` for `binding`, with its expiry.
+fn live_hold_of(
+    tx: &Transaction<'_>,
+    kind: CuratorHoldKind,
+    binding: &CuratorHoldBinding,
+    now: i64,
+) -> Result<Option<(String, i64)>, CuratorHoldError> {
+    tx.query_row_cached(
+        "SELECT capture_pin_id,expires_at FROM capture_pins
+         WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL
+           AND purge_degraded_at IS NULL AND expires_at>?3
+         ORDER BY created_at DESC LIMIT 1",
+        params![kind.pin_kind(), binding.owner_id(), now],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(sqlite)
 }
 
 fn insert_pin(
@@ -652,14 +683,16 @@ macro_rules! held_backing_sql {
                  SELECT e.artifact_digest,MAX(e.byte_length) AS byte_length FROM capture_pin_refs r
                  JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
                  JOIN evidence_meta e ON e.evidence_id=r.evidence_id
-                 WHERE p.pin_kind IN (?1,?2) AND p.released_at IS NULL AND r.released_at IS NULL",
+                 WHERE p.pin_kind IN (?1,?2) AND p.released_at IS NULL AND r.released_at IS NULL
+                   AND NOT EXISTS(SELECT 1 FROM artifact_purge_tombstones t
+                                  WHERE t.artifact_digest=e.artifact_digest)",
             $scope,
             " GROUP BY e.artifact_digest)"
         )
     };
 }
 
-/// Distinct artifact bytes active Curator pins hold, over one project's owner range or the whole host.
+/// Distinct artifact bytes active Curator pins hold, over one project's owner range or the whole host. Purged artifacts no longer occupy backing, so a degraded pin charges only its surviving bytes.
 fn held_backing(
     tx: &Transaction<'_>,
     project: Option<(&str, &str)>,
