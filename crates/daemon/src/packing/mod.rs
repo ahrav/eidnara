@@ -604,31 +604,37 @@ pub fn prepare_optional(
     }
 
     deadline(&inputs)?;
-    let candidates: Vec<_> = live
-        .iter()
-        .map(|(_, row)| row.eligibility_candidate())
-        .collect();
-    let report = judge_occurrences_within_budget(
-        inputs.kernel,
-        inputs.project,
-        inputs.destination,
-        &candidates,
-        inputs.budget,
-    )?;
-    trace.optional(OptionalEvent::Judged, None);
     let mut rows: Vec<SelectedOccurrence> = Vec::with_capacity(live.len());
-    for ((request, row), judged) in live.into_iter().zip(&report.occurrences) {
-        let exclusion = if row.is_stale_for(request.revision) {
-            Some(OptionalExclusion::Stale)
-        } else {
-            match judged.disposition {
-                Disposition::Eligible => None,
-                Disposition::PolicyExcluded(verdict) => Some(OptionalExclusion::Excluded(verdict)),
+    // A set with no live row has nothing to judge; a kernel reader is not
+    // taken for it, so its exclusions cannot depend on the kernel.
+    if !live.is_empty() {
+        let candidates: Vec<_> = live
+            .iter()
+            .map(|(_, row)| row.eligibility_candidate())
+            .collect();
+        let report = judge_occurrences_within_budget(
+            inputs.kernel,
+            inputs.project,
+            inputs.destination,
+            &candidates,
+            inputs.budget,
+        )?;
+        trace.optional(OptionalEvent::Judged, None);
+        for ((request, row), judged) in live.into_iter().zip(&report.occurrences) {
+            let exclusion = if row.is_stale_for(request.revision) {
+                Some(OptionalExclusion::Stale)
+            } else {
+                match judged.disposition {
+                    Disposition::Eligible => None,
+                    Disposition::PolicyExcluded(verdict) => {
+                        Some(OptionalExclusion::Excluded(verdict))
+                    }
+                }
+            };
+            match exclusion {
+                Some(exclusion) => excluded.push((request.occurrence, exclusion)),
+                None => rows.push(row),
             }
-        };
-        match exclusion {
-            Some(exclusion) => excluded.push((request.occurrence, exclusion)),
-            None => rows.push(row),
         }
     }
     admit_optional_set(&rows, bounds).map_err(PreparationRefusal::OptionalBound)?;

@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use daemon::packing::{
     AccountingProfile, BLOCK_CLOSE_FRAGMENT, Charged, ClaudeTokens, OptionalAdmission,
-    OptionalExclusion, OptionalRequest, PackingTrace, PreparationRefusal, RequiredInputs,
-    StageEvent, prepare_optional, prepare_required, render,
+    OptionalEvent, OptionalExclusion, OptionalRequest, PackingTrace, PreparationRefusal,
+    RequiredInputs, StageEvent, prepare_optional, prepare_required, render,
 };
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
@@ -66,14 +66,32 @@ fn run_with_profile(
     budget: u64,
     profile: &AccountingProfile,
 ) -> (Result<OptionalAdmission, PreparationRefusal>, PackingTrace) {
+    run_under(
+        fixture,
+        optional_requests,
+        optional_bounds,
+        budget,
+        profile,
+        &EvalBudget::unbounded(),
+    )
+}
+
+/// Runs the required phase and then the optional phase under `eval`.
+fn run_under(
+    fixture: &Fixture,
+    optional_requests: &[OptionalRequest],
+    optional_bounds: &OptionalBounds,
+    budget: u64,
+    profile: &AccountingProfile,
+    eval: &EvalBudget,
+) -> (Result<OptionalAdmission, PreparationRefusal>, PackingTrace) {
     let mut trace = PackingTrace::default();
     trace.note_retrieval_call();
-    let eval = EvalBudget::unbounded();
     let inputs = RequiredInputs {
         kernel: &fixture.kernel,
         project: &fixture.project,
         destination: kernel::ArtifactDestination::Local,
-        budget: &eval,
+        budget: eval,
         profile,
     };
     let required = prepare_required(
@@ -179,6 +197,15 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
     assert!(admission.excluded().is_empty());
     assert!(admission.ungrouped().is_empty());
     assert_eq!(trace.payload_loads(), 4);
+    assert_eq!(
+        trace
+            .events()
+            .iter()
+            .filter(|event| **event == StageEvent::Optional(OptionalEvent::Judged, None))
+            .count(),
+        1,
+        "the non-empty optional batch was judged once"
+    );
     optional_starts_after_the_last_required_event(&trace);
     let text = admission.ledger().text();
     assert!(text.starts_with("<packed-context>\n<required"));
@@ -668,6 +695,120 @@ fn a_deadline_that_passes_while_the_connection_is_held_refuses_the_optional_phas
     assert!(
         trace.events().is_empty(),
         "no optional row is read after the deadline: {:?}",
+        trace.events()
+    );
+}
+
+/// The estimator runs after the last projection hold; a budget that ends
+/// while optional groups are costed still refuses the phase rather than
+/// returning an admission, as the required phase refuses its reservation.
+#[test]
+fn a_budget_that_ends_during_optional_costing_refuses_the_admission() {
+    let a = tool_span("opt-a", "1", "aaaa");
+    let fixture = Fixture::new(&[REQUIRED, a]);
+    let budget = EvalBudget::unbounded();
+    let cancelling = budget.clone();
+    let profile = AccountingProfile::heuristic(
+        "cancels-on-first-optional-cost",
+        "cancels",
+        0,
+        move |text| {
+            if text.contains("<span") {
+                cancelling.cancel();
+            }
+            text.len()
+        },
+    );
+    let (result, trace) = run_under(
+        &fixture,
+        &[optional(&a)],
+        &wide(),
+        1 << 20,
+        &profile,
+        &budget,
+    );
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+    assert_eq!(trace.payload_loads(), 2, "the optional payload was loaded");
+    assert!(
+        !trace
+            .events()
+            .iter()
+            .any(|event| matches!(event, StageEvent::Optional(OptionalEvent::Scanned, ..))),
+        "no scan after the budget ended: {:?}",
+        trace.events()
+    );
+}
+
+/// A set whose every request is excluded before judgment leaves nothing for
+/// the kernel to judge, so a held kernel reader cannot turn the exclusions
+/// into a refusal.
+#[test]
+fn an_optional_set_with_no_live_row_completes_without_a_kernel_judgment() {
+    let fixture = Fixture::new(&[REQUIRED]);
+    let missing: Vec<OptionalRequest> = (0..3)
+        .map(|index| OptionalRequest {
+            occurrence: OccurrenceId::parse(&format!("{index:064x}")).unwrap(),
+            revision: 1,
+        })
+        .collect();
+    // The required phase takes its kernel judgment before the reader is held.
+    let (required, _) = fixture.prepare(
+        &[REQUIRED.request()],
+        &bounds(1 << 20),
+        &EvalBudget::unbounded(),
+    );
+    let required = required.unwrap();
+    let held = std::sync::Barrier::new(2);
+    let (result, trace) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            fixture
+                .kernel
+                .hold_readers_for_test(&held, Duration::from_secs(4))
+        });
+        held.wait();
+        let short = EvalBudget::new(
+            Some(Instant::now() + Duration::from_millis(300)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut trace = PackingTrace::default();
+        let started = Instant::now();
+        let result = prepare_optional(
+            &fixture.store,
+            RequiredInputs {
+                kernel: &fixture.kernel,
+                project: &fixture.project,
+                destination: kernel::ArtifactDestination::Local,
+                budget: &short,
+                profile: &byte_profile(),
+            },
+            &required,
+            &missing,
+            &wide(),
+            &accounting_bounds(),
+            &mut trace,
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the optional phase did not wait for the held reader: {:?}",
+            started.elapsed()
+        );
+        (result, trace)
+    });
+    let admission = result.unwrap();
+    assert!(admission.admitted().is_empty());
+    assert_eq!(admission.excluded().len(), 3);
+    assert!(
+        admission
+            .excluded()
+            .iter()
+            .all(|(_, exclusion)| *exclusion == OptionalExclusion::Missing)
+    );
+    assert_eq!(trace.payload_loads(), 0, "no optional payload was loaded");
+    assert!(
+        !trace
+            .events()
+            .contains(&StageEvent::Optional(OptionalEvent::Judged, None)),
+        "no judgment event when the kernel was skipped: {:?}",
         trace.events()
     );
 }
