@@ -145,6 +145,9 @@ pub struct ArtifactIngestRequest {
     pub provenance: Option<RepositoryProvenance>,
 }
 
+/// `retention_class` of evidence a Curator run captured for itself; an ingest request for such a row must carry a finite `retain_until`, and a new reference commits only while that deadline is still ahead of the store clock. An identical request whose receipt already committed replays regardless.
+pub const CURATOR_CAPTURE_RETENTION_CLASS: &str = "curator_capture";
+
 /// Stable identifiers returned after artifact bytes and evidence are committed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactHandle {
