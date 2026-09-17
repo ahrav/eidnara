@@ -56,3 +56,13 @@ against an integer `TokenCount`. Neither reads a store, a clock, or a default
 bound; the daemon's `packing` module owns fact gathering, `ClaudeTokens`, and
 the trace. Changing a failure class or the stage order requires the matching
 edit in `docs/properties/selection-packing/required/catalog.md`.
+
+`src/packing/grouping.rs` groups a selected set from the selected bytes alone:
+only `raw_tool_spans` keys merge, only overlapping or byte-adjacent spans of
+one key merge, no gap is filled, and every selected identity lands in one
+group or in `Partition::refused` with an `Ungrouped` reason. It never receives
+a parent buffer. `src/packing/scan.rs` holds the skip-and-continue rule that
+both the packer and the daemon's memory trim use, and the optional-phase
+bounds check. The frozen reference in `tests/support/frozen_packer.rs` and the
+oracle fixture under `tests/fixtures/packing/` must change together with any
+rule change here.

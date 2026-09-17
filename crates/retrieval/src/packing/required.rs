@@ -14,6 +14,7 @@ pub trait TokenCount: Copy + Ord + fmt::Debug {
     const ZERO: Self;
     const MAX: Self;
     fn checked_add(self, other: Self) -> Option<Self>;
+    fn checked_sub(self, other: Self) -> Option<Self>;
 }
 
 impl TokenCount for u64 {
@@ -22,6 +23,10 @@ impl TokenCount for u64 {
 
     fn checked_add(self, other: Self) -> Option<Self> {
         u64::checked_add(self, other)
+    }
+
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        u64::checked_sub(self, other)
     }
 }
 
@@ -124,7 +129,7 @@ pub fn admit_required<'a, C>(
         if row.occurrence != occurrence {
             return Err(RequiredContextFailure::Corrupt(occurrence));
         }
-        if row.tombstone.is_some() || row.revision != fact.request.revision {
+        if row.is_stale_for(fact.request.revision) {
             return Err(RequiredContextFailure::Stale(occurrence));
         }
         match fact.disposition {

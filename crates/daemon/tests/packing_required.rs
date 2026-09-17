@@ -1,308 +1,27 @@
 //! The required phase completes or refuses before any optional event, never
 //! retrieves, and never truncates a required payload.
 
+mod support;
+
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use daemon::packing::{
     ClaudeTokens, CostEstimator, PackingTrace, PreparationRefusal, RequiredEvent, RequiredInputs,
-    StageEvent, prepare_required,
+    RequiredMaterialization, StageEvent, prepare_required,
 };
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::{Occurrence, OccurrenceClass, encode};
-use kernel::{
-    AdmissionEvent, AdmissionRequest, ArtifactDestination, CommitIntent, DecisionPayload,
-    DecisionSpec, Dimension, DomainSpec, EligibilityVerdict, EventKind, KernelStore, ProjectScope,
-    ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
-};
+use kernel::source_identity::encode;
+use kernel::{ArtifactDestination, EligibilityVerdict};
 use retrieval::fusion::OccurrenceId;
 use retrieval::packing::{RequiredBound, RequiredBounds, RequiredContextFailure, RequiredRequest};
-use retrieval::{
-    OccurrenceRecord, Payload, PersistBounds, Tombstone, TombstoneReason, persist_occurrences,
-    tombstone_occurrence,
-};
-use sha2::{Digest, Sha256};
-use storage::{
-    GuardedConn, Isolation, SqliteStore, StorageBackend, StorageDescriptor, open_sqlite,
-};
-
-const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const DOMAIN: &str = "domain";
-const SCOPE: &str = "project:a";
-
-/// One token per byte, so limits can be set exactly at a payload boundary.
-struct ByteEstimator;
-
-impl CostEstimator for ByteEstimator {
-    fn profile(&self) -> &'static str {
-        "one-token-per-byte"
-    }
-
-    fn cost(&self, bytes: &[u8]) -> ClaudeTokens {
-        ClaudeTokens::new(bytes.len() as u64)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ToolSpan {
-    call: &'static str,
-    revision: &'static str,
-    payload: &'static str,
-}
-
-impl ToolSpan {
-    fn identity(&self) -> [(&'static str, &'static str); 7] {
-        [
-            ("project_id", "proj-a"),
-            ("harness", "opencode"),
-            ("session_id", "sess-01"),
-            ("parent_message_id", "msg-002"),
-            ("tool_call_id", self.call),
-            ("result_revision", "1"),
-            ("block_index", "0"),
-        ]
-    }
-
-    fn occurrence<'a>(&self, identity: &'a [(&'a str, &'a str)]) -> Occurrence<'a> {
-        Occurrence {
-            class: OccurrenceClass::RawToolSpans.code(),
-            identity,
-            revision: self.revision,
-            representation: "tool_output",
-            span: None,
-        }
-    }
-
-    fn id(&self) -> OccurrenceId {
-        let identity = self.identity();
-        OccurrenceId::parse(
-            &encode(&self.occurrence(&identity), self.payload)
-                .unwrap()
-                .occurrence_id,
-        )
-        .unwrap()
-    }
-
-    fn request(&self) -> RequiredRequest {
-        RequiredRequest {
-            occurrence: self.id(),
-            revision: self.revision.parse().unwrap(),
-        }
-    }
-
-    fn selected_bytes(&self) -> &'static [u8] {
-        self.payload.as_bytes()
-    }
-}
-
-const fn tool_span(call: &'static str, revision: &'static str, payload: &'static str) -> ToolSpan {
-    ToolSpan {
-        call,
-        revision,
-        payload,
-    }
-}
-
-struct Fixture {
-    dir: tempfile::TempDir,
-    store: SqliteStore,
-    kernel: KernelStore,
-    project: ProjectScope,
-}
-
-/// Every span's source object is admitted in the kernel, so eligibility is
-/// `Ok` unless a test names an object the kernel never saw.
-fn seed_kernel(kernel: &KernelStore, objects: &[&str]) {
-    kernel
-        .commit(
-            CommitIntent {
-                producer: "packing-required-test".to_string(),
-                operation_key: "seed".to_string(),
-                request_digest: format!("{:x}", Sha256::digest(b"seed")),
-                actor: "test".to_string(),
-                cause: "packing".to_string(),
-            },
-            |envelope| {
-                envelope.insert_domain(DomainSpec {
-                    domain_id: DOMAIN.to_string(),
-                    object_id: "domain-object".to_string(),
-                    name: "fixture".to_string(),
-                    source_kind: "fixture".to_string(),
-                    source_id: DOMAIN.to_string(),
-                    source_revision: 1,
-                    sensitivity: Sensitivity::Normal,
-                })?;
-                envelope.insert_scope(ScopeSpec {
-                    scope_id: SCOPE.to_string(),
-                    object_id: SCOPE.to_string(),
-                    source_id: SCOPE.to_string(),
-                    domain_id: DOMAIN.to_string(),
-                    source_kind: "kernel_route".to_string(),
-                    source_revision: 1,
-                    sensitivity: Sensitivity::Normal,
-                    terms: vec![ScopeTermSpec {
-                        dimension: Dimension::Project.as_str().to_string(),
-                        operator: "exact".to_string(),
-                        exact_value: Some(PROJECT.to_string()),
-                        ..ScopeTermSpec::default()
-                    }],
-                })?;
-                for object in objects {
-                    envelope.insert_decision(DecisionSpec {
-                        decision_id: format!("decision-{object}"),
-                        object_id: object.to_string(),
-                        domain_id: DOMAIN.to_string(),
-                        proposition_id: None,
-                        scope_id: Some(SCOPE.to_string()),
-                        anchor_id: None,
-                        evidence_id: None,
-                        decision_kind: "architecture".to_string(),
-                        payload: DecisionPayload {
-                            summary: format!("summary {object}"),
-                            rationale: format!("rationale {object}"),
-                        },
-                        source_kind: "repository".to_string(),
-                        source_id: object.to_string(),
-                        source_revision: 1,
-                        sensitivity: Sensitivity::Normal,
-                    })?;
-                    envelope.record_admission(AdmissionRequest {
-                        candidate_id: None,
-                        subject_object_id: Some(object.to_string()),
-                        source_class: Some(SourceClass::ExplicitUser),
-                        taint_class: Some(TaintClass::UserExplicit),
-                        event: AdmissionEvent {
-                            kind: EventKind::Other,
-                            trigger_object_id: None,
-                            approval_object_id: None,
-                            evidence_id: None,
-                            reason: "test".to_string(),
-                        },
-                    })?;
-                }
-                Ok(String::new())
-            },
-        )
-        .unwrap();
-}
-
-impl Fixture {
-    fn new(spans: &[ToolSpan]) -> Self {
-        Self::with_admitted(
-            spans,
-            &spans.iter().map(|span| span.call).collect::<Vec<_>>(),
-        )
-    }
-
-    fn with_admitted(spans: &[ToolSpan], admitted: &[&str]) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_sqlite(
-            &StorageDescriptor {
-                module_id: "eidnara-test".to_string(),
-                storage_namespace: "search-projection".to_string(),
-                isolation: Isolation::Module,
-                backend: StorageBackend::Sqlite {
-                    path: dir
-                        .path()
-                        .join("search.sqlite")
-                        .to_string_lossy()
-                        .into_owned(),
-                },
-            },
-            retrieval::BASELINE,
-        )
-        .unwrap();
-        let kernel = KernelStore::open(dir.path().join("kernel")).unwrap();
-        seed_kernel(&kernel, admitted);
-        store
-            .with_conn_fenced(|conn| {
-                persist(conn, spans);
-                Ok(())
-            })
-            .unwrap();
-        Self {
-            dir,
-            store,
-            kernel,
-            project: ProjectScope::new(PROJECT).unwrap(),
-        }
-    }
-
-    fn sqlite_path(&self) -> std::path::PathBuf {
-        self.dir.path().join("search.sqlite")
-    }
-
-    fn prepare(
-        &self,
-        requests: &[RequiredRequest],
-        bounds: &RequiredBounds<ClaudeTokens>,
-        budget: &EvalBudget,
-    ) -> (
-        Result<daemon::packing::RequiredMaterialization, PreparationRefusal>,
-        PackingTrace,
-    ) {
-        let mut trace = PackingTrace::default();
-        trace.note_retrieval_call();
-        let result = prepare_required(
-            &self.store,
-            RequiredInputs {
-                kernel: &self.kernel,
-                project: &self.project,
-                destination: ArtifactDestination::Local,
-                budget,
-                estimator: &ByteEstimator,
-            },
-            requests,
-            bounds,
-            &mut trace,
-        );
-        (result, trace)
-    }
-}
-
-fn persist(conn: &GuardedConn<'_>, spans: &[ToolSpan]) {
-    let identities: Vec<_> = spans.iter().map(ToolSpan::identity).collect();
-    let records: Vec<OccurrenceRecord<'_>> = spans
-        .iter()
-        .zip(&identities)
-        .map(|(span, identity)| OccurrenceRecord {
-            occurrence: span.occurrence(identity),
-            payload: Payload::Whole(span.payload),
-            domain_id: "domain-stable-id",
-            sensitivity: Sensitivity::Normal,
-            source_object_id: span.call,
-            source_evidence_id: "evidence",
-            source_artifact_digest: DIGEST,
-            created_commit_seq: 7,
-        })
-        .collect();
-    persist_occurrences(
-        conn,
-        &records,
-        PersistBounds {
-            max_records: NonZeroUsize::new(64).unwrap(),
-            max_payload_bytes: NonZeroUsize::new(1 << 20).unwrap(),
-            max_tuple_bytes: NonZeroUsize::new(2048).unwrap(),
-        },
-        1,
-    )
-    .unwrap();
-}
-
-fn bounds(token_limit: u64) -> RequiredBounds<ClaudeTokens> {
-    RequiredBounds {
-        max_payload_loads: NonZeroUsize::new(8).unwrap(),
-        max_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
-        max_item_bytes: NonZeroU64::new(1 << 19).unwrap(),
-        token_limit: ClaudeTokens::new(token_limit),
-    }
-}
+use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
+use support::packing::{Fixture, ToolSpan, bounds, tool_span, while_connection_is_held};
 
 fn required_failure(
-    result: &Result<daemon::packing::RequiredMaterialization, PreparationRefusal>,
+    result: &Result<RequiredMaterialization, PreparationRefusal>,
 ) -> &RequiredContextFailure<ClaudeTokens> {
     match result {
         Err(PreparationRefusal::Required(failure)) => failure,
@@ -323,7 +42,7 @@ fn required_events(trace: &PackingTrace) -> Vec<RequiredEvent> {
         .iter()
         .map(|event| match event {
             StageEvent::Required(event, _) => *event,
-            StageEvent::Optional => panic!("optional event in the required phase"),
+            StageEvent::Optional(..) => panic!("optional event in the required phase"),
         })
         .collect()
 }
@@ -697,44 +416,6 @@ fn an_expired_deadline_refuses_the_required_phase_before_any_optional_event() {
     assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
 }
 
-/// Holds the projection connection on another thread until `prepare` returns
-/// or `HOLD_CEILING` passes, then reports how long `prepare` took.
-fn while_connection_is_held(
-    fixture: &Fixture,
-    prepare: impl FnOnce() -> (
-        Result<daemon::packing::RequiredMaterialization, PreparationRefusal>,
-        PackingTrace,
-    ),
-) -> (
-    Duration,
-    Result<daemon::packing::RequiredMaterialization, PreparationRefusal>,
-    PackingTrace,
-) {
-    const HOLD_CEILING: Duration = Duration::from_secs(5);
-    let (holding_tx, holding) = mpsc::channel::<()>();
-    let (release_tx, release) = mpsc::channel::<()>();
-    std::thread::scope(|scope| {
-        scope.spawn(move || {
-            fixture
-                .store
-                .with_conn(|_| {
-                    holding_tx.send(()).unwrap();
-                    let _ = release.recv_timeout(HOLD_CEILING);
-                    Ok(())
-                })
-                .unwrap();
-        });
-        holding.recv_timeout(HOLD_CEILING).unwrap();
-        let started = Instant::now();
-        let (result, trace) = prepare();
-        let waited = started.elapsed();
-        // The holder has already left once `HOLD_CEILING` passed; the elapsed
-        // assertion reports that, not this send.
-        let _ = release_tx.send(());
-        (waited, result, trace)
-    })
-}
-
 #[test]
 fn a_deadline_that_passes_while_the_connection_is_held_refuses_without_reading() {
     let fixture = Fixture::new(&[FIRST]);
@@ -742,7 +423,7 @@ fn a_deadline_that_passes_while_the_connection_is_held_refuses_without_reading()
         Some(Instant::now() + Duration::from_millis(200)),
         Arc::new(AtomicBool::new(false)),
     );
-    let (waited, result, trace) = while_connection_is_held(&fixture, || {
+    let (waited, (result, trace)) = while_connection_is_held(&fixture, || {
         fixture.prepare(&[FIRST.request()], &bounds(1 << 20), &short)
     });
     assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
@@ -766,7 +447,7 @@ fn a_cancellation_while_the_connection_is_held_refuses_without_reading() {
         Arc::new(AtomicBool::new(false)),
     );
     let canceller = cancellable.clone();
-    let (waited, result, trace) = while_connection_is_held(&fixture, || {
+    let (waited, (result, trace)) = while_connection_is_held(&fixture, || {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 std::thread::sleep(Duration::from_millis(200));
