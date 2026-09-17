@@ -202,7 +202,7 @@ impl RelatedMemoryDiscovery {
                         let room = MAX_PAGE_PROBE_BYTES.saturating_sub(probed);
                         match self.render(store, broker, &expectation, room, now_ms) {
                             Ok(step) => step,
-                            // A run bound reached after this page disclosed something ends the page with what it has; the broker's `read` has already recorded the partial disclosure for every capacity code.
+                            // A run or batch bound reached after this page disclosed something ends the page with what it has; the broker's `read` has already marked the run partial for every code that truncates evidence.
                             Err(refusal) if refusal.code.is_capacity() && !hits.is_empty() => {
                                 Step::Stop(Completeness::CapacityBound)
                             }
@@ -307,7 +307,7 @@ impl RelatedMemoryDiscovery {
         let Some(span) = self.excerpt_span(text) else {
             return Ok(Step::Unrelated { probed_bytes });
         };
-        // Disclosing consumes one batch operation; stopping here instead of provoking the refusal keeps the run's conclusions usable.
+        // Disclosing consumes one batch operation; stopping here delivers the hits so far instead of losing them to a `BatchLimit` refusal.
         if broker.accounting.batch_headroom() == 0 {
             return Ok(Step::Stop(Completeness::CapacityBound));
         }

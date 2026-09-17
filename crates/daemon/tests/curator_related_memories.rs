@@ -12,7 +12,7 @@ use kernel::source_identity::{Occurrence, Span};
 use kernel::{
     ArtifactIngestRequest, CURATOR_CAPTURE_RETENTION_CLASS, CommitIntent, CuratorHoldBinding,
     DecisionPayload, DecisionSpec, Dimension, DomainSpec, KernelStore, MAX_CURATOR_HOLD_REFERENCES,
-    ProjectScope, ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity, SourceDescriptorPolicy,
+    ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity, SourceDescriptorPolicy,
     SourceDescriptorRequest,
 };
 use sha2::{Digest, Sha256};
@@ -154,13 +154,13 @@ impl Fixture {
             .unwrap();
         EvidenceBroker::new(
             RunBinding {
-                project: ProjectScope::new(project).unwrap(),
                 hold: binding,
                 hold_id: hold.hold_id,
                 destination: kernel::ArtifactDestination::Local,
             },
             QuestionTemplate::ExtractedFacts,
         )
+        .unwrap()
     }
 
     fn decision(&self, object: &str) {
@@ -775,12 +775,12 @@ fn a_page_waits_for_its_first_reader_no_longer_than_the_budget_allows() {
     let fixture = Fixture::open();
     seed(&fixture, 2);
     let anchor = fixture.ingest("anchor", b"anchor", false);
-    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
-    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
     let (done, wait) = std::sync::mpsc::channel();
     let observed = std::thread::scope(|scope| {
         fixture.store.with_readers_held_for_test(|| {
             scope.spawn(|| {
+                let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+                let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
                 let budget = EvalBudget::new(
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(40)),
                     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
