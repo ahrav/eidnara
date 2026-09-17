@@ -22,7 +22,7 @@ value.
   `-0.0` to `0.0`.
 - `occurrence_vectors.vector` in `search.sqlite` holds exactly these bytes.
   `dense::codec::encode` produces them; `dense::codec::decode_shape` and
-  `dense::score::score_encoded` read them through one word decoder; there is
+  `dense::codec::decode_length_into` read them through one word decoder; there is
   no second decoder.
 - A byte string whose length is not a multiple of four is a truncated word
   and is refused before any coordinate is read.
