@@ -445,3 +445,94 @@ fn the_optional_phase_refuses_a_render_beyond_the_accounting_bounds_and_a_foreig
     );
     assert_eq!(result.unwrap_err(), PreparationRefusal::ProfileMismatch);
 }
+
+/// At every token limit the closed render either fits, with the limit split
+/// exactly between what the ledger charged and what remains, or the phase
+/// refuses; no admitted render exceeds the limit under any profile.
+#[test]
+fn consumed_budget_plus_remaining_is_the_token_limit_under_every_profile() {
+    let required = tool_span("call-1", "1", "required bytes for the headroom check\n");
+    let a = tool_span("call-2", "1", "an optional span, the first of two\n");
+    let b = tool_span(
+        "call-3",
+        "1",
+        "another optional span, priced after the first\n",
+    );
+    let fixture = Fixture::new(&[required, a, b]);
+    let optional_bounds = retrieval::packing::OptionalBounds {
+        max_fused_candidates: NonZeroUsize::new(4).unwrap(),
+        max_parents: NonZeroUsize::new(4).unwrap(),
+        max_spans_per_parent: NonZeroUsize::new(4).unwrap(),
+        max_payload_loads: NonZeroUsize::new(4).unwrap(),
+        max_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        max_item_bytes: NonZeroU64::new(1 << 20).unwrap(),
+    };
+    let wide = AccountingBounds {
+        max_rendered_bytes: 1 << 20,
+        max_estimated_tokens: ClaudeTokens::new(1 << 20),
+    };
+    let requests = [
+        daemon::packing::OptionalRequest {
+            occurrence: a.id(),
+            revision: 1,
+        },
+        daemon::packing::OptionalRequest {
+            occurrence: b.id(),
+            revision: 1,
+        },
+    ];
+    for profile in profiles() {
+        let inputs = daemon::packing::RequiredInputs {
+            kernel: &fixture.kernel,
+            project: &fixture.project,
+            destination: kernel::ArtifactDestination::Local,
+            budget: &EvalBudget::unbounded(),
+            profile: &profile,
+        };
+        let mut admitted_counts = std::collections::BTreeSet::new();
+        for token_limit in (40u64..=400).chain([1 << 20]) {
+            let mut trace = daemon::packing::PackingTrace::default();
+            let Ok(materialized) = daemon::packing::prepare_required(
+                &fixture.store,
+                inputs,
+                &[required.request()],
+                &bounds(token_limit),
+                &wide,
+                &mut trace,
+            ) else {
+                continue;
+            };
+            assert_eq!(
+                materialized.charged().get() + materialized.remaining().get(),
+                token_limit,
+                "{}: the required phase splits the limit exactly",
+                profile.identity()
+            );
+            let Ok(closed) = daemon::packing::prepare_optional(
+                &fixture.store,
+                inputs,
+                &materialized,
+                &requests,
+                &optional_bounds,
+                &wide,
+                &mut trace,
+            ) else {
+                continue;
+            };
+            admitted_counts.insert(closed.admitted.len());
+            assert_eq!(
+                closed.ledger.total_with_headroom().get() + closed.remaining.get(),
+                token_limit,
+                "{} at {token_limit}: {} admitted",
+                profile.identity(),
+                closed.admitted.len()
+            );
+        }
+        assert_eq!(
+            admitted_counts,
+            [0, 1, 2].into_iter().collect(),
+            "{}: the sweep reaches every admission count",
+            profile.identity()
+        );
+    }
+}

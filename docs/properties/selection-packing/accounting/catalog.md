@@ -70,8 +70,9 @@ Reachability: test-only - `Ledger` is filled by `prepare_required` and
 packing module and its tests).
 Status: active
 Exercised: yes - `crates/daemon/tests/packing_accounting.rs`
-`every_charge_equals_the_whole_render_delta_and_every_byte_is_charged` and
-`a_tail_run_longer_than_the_lookback_still_charges_the_whole_render_delta`;
+`every_charge_equals_the_whole_render_delta_and_every_byte_is_charged`,
+`a_tail_run_longer_than_the_lookback_still_charges_the_whole_render_delta`,
+and `consumed_budget_plus_remaining_is_the_token_limit_under_every_profile`;
 `crates/daemon/tests/packing_optional.rs`
 `optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget`,
 `same_parent_spans_group_and_are_charged_as_one_merged_range`, and
@@ -79,7 +80,10 @@ Exercised: yes - `crates/daemon/tests/packing_accounting.rs`
 `crates/daemon/tests/packing_required.rs`
 `required_cost_at_the_limit_succeeds_and_one_above_fails_without_truncation`;
 `crates/daemon/src/packing/render.rs`
-`ledger_deltas_bypass_the_shared_cache_and_tokenize_a_bounded_tail`.
+`ledger_deltas_bypass_the_shared_cache_and_tokenize_a_bounded_tail`;
+`crates/tokenizer/src/lib.rs`
+`suffix_anchor_is_a_true_piece_start_when_the_window_opens_on_an_apostrophe`
+and `suffix_anchor_is_the_last_piece_start_in_the_window`.
 Guarantee: Every item the packer admits is charged the estimate of the
 rendered prefix plus item minus the estimate of the rendered prefix, including
 wrappers, separators, and escapes; a group wrapper is charged once at the
@@ -102,16 +106,22 @@ appears as `GroupOpen` and `GroupClose` entries; under the byte profile, a
 non-linear heuristic with 250 permille headroom, and the exact profile, each
 admitted group's cost equals the headroom-adjusted sum of its `GroupOpen`,
 `Range`, and `GroupClose` entries and the token limit minus the remaining
-budget equals the closed ledger's headroom-adjusted total. `always` because
-one under-charged item is an over-budget edit.
+budget equals the closed ledger's headroom-adjusted total; at every token
+limit from 40 to 400 and one generous limit, under each profile, an admitted
+render's headroom-adjusted total plus the remaining budget is the limit and
+the sweep reaches zero, one, and two admitted groups; the anchor is a piece
+start of the full scan when the window opens on the apostrophe of an `Other`
+run, and it is the last piece start when three or more pieces fit the window.
+`always` because one under-charged item is an over-budget edit.
 Fault/timing angle: none.
 Required faults and enabling state: Generated fragments with XML-significant
-bytes and lengths up to 2500, so escapes and multi-piece boundaries occur.
+bytes and lengths up to 2500, so escapes and multi-piece boundaries occur; a
+window opening on an apostrophe; token limits swept across exact fills.
 Confidence: high - [evidence](evidence/packing-charge-equals-rendered-delta.md).
 The oracle recomputes the delta over the whole prefix, independent of the
-production anchor; the exact profile's anchor is a piece boundary found by
-the tokenizer's own scanner and moves forward only once the tail outgrows
-`ANCHOR_ADVANCE_BYTES`, and heuristics are re-estimated over the whole render
+production anchor; the exact profile's anchor is the last piece start the
+tokenizer's own scanner trusts in the window and moves forward only once the
+tail outgrows `ANCHOR_ADVANCE_BYTES`, and heuristics are re-estimated over the whole render
 because they promise no locality. A group is priced by `Ledger::stage` as the
 entries it would be charged as and admitted by `Ledger::commit` of that same
 pricing, so the deducted cost and the charged entries are one computation;
@@ -166,7 +176,9 @@ Reachability: test-only - no production heuristic profile exists at this base.
 Status: active
 Exercised: yes - `crates/daemon/tests/packing_accounting.rs`
 `a_heuristic_count_carries_its_authority_and_headroom_and_never_the_exact_label`;
-the `compile_fail` doctest on `Charge`.
+the doctests on `Charge` in `crates/daemon/src/packing/accounting.rs`: a
+passing example that reaches `AccountingProfile::charge` through the same
+paths, and a `compile_fail` struct literal.
 Guarantee: Every count carries the authority of the profile that produced
 it; a heuristic profile's charges are `Heuristic` with a named degradation and
 headroom in permille; `with_headroom` adds the headroom rounded up and adds
@@ -175,8 +187,11 @@ profile, so the exact label cannot be forged.
 Check: `always` - a heuristic profile's charge reports its degradation and
 headroom, and `with_headroom` on 3 tokens at 250 permille is 4; the exact
 profile's authority is `Exact` and its headroom adds nothing; the struct
-literal for `Charge` fails to compile. `always` because an exact label on a
-heuristic count would claim provider proof the count does not have.
+literal for `Charge` fails to compile while the passing doctest beside it
+proves the paths resolve, because stable rustdoc ignores the `E0451` code and
+a `compile_fail` block alone would also pass on a stale path. `always` because
+an exact label on a heuristic count would claim provider proof the count does
+not have.
 Fault/timing angle: none.
 Required faults and enabling state: A heuristic profile with a non-zero
 headroom.

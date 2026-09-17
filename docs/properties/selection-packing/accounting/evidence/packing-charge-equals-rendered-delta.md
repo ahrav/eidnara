@@ -9,8 +9,10 @@ charge gap; the U4a ticket names the whole-render delta as the oracle.
 ## Evidence trail
 
 - `crates/daemon/src/packing/render.rs` `Ledger::stage` prices fragments
-  against the tail from the ledger's anchor, a piece boundary found by
-  `tokenizer::suffix_anchor`, keeping the count of that tail so each delta
+  against the tail from the ledger's anchor, the last trusted piece start
+  `tokenizer::suffix_anchor` finds in its window after skipping the two
+  pieces a scan from an arbitrary offset needs to resynchronise, keeping the
+  count of that tail so each delta
   tokenizes the tail once, and re-estimates the whole render for a heuristic;
   `commit` appends the staged fragments at the charges they were priced at and
   moves the anchor forward once the tail outgrows `ANCHOR_ADVANCE_BYTES`. Tail
@@ -44,6 +46,8 @@ None.
 - Generated fragment sequences long enough to exceed the lookback, including
   non-ASCII and XML-significant bytes, and a same-class run longer than it.
 - A whole-prefix oracle independent of the anchored production path.
+- A window opening on the apostrophe of an `Other` run, where the scanner
+  emits a contraction the full scan does not have.
 - A grouped optional admission whose wrapper entries can be found by kind.
 - A profile whose headroom rounds per charge, so a single whole-group price
   and per-entry charges would disagree.

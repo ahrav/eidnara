@@ -184,7 +184,7 @@ fn optional_groups_are_admitted_by_skip_and_continue_over_the_remaining_budget()
     assert!(text.starts_with("<packed-context>\n<required"));
     assert!(text.ends_with("</group>\n</packed-context>\n"));
     assert!(
-        !text.contains("elevenbytes"),
+        !text.contains("so the scan must skip it"),
         "a skipped group is not rendered"
     );
     assert!(text.contains("four") && text.contains("sixsix"));

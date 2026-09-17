@@ -110,6 +110,17 @@ impl AccountingProfile {
     }
 }
 
+/// A token count labeled by its producing [`AccountingProfile`].
+///
+/// ```
+/// use daemon::packing::{AccountingProfile, Authority};
+///
+/// let charge = AccountingProfile::exact_tokenizer().charge("twelve bytes");
+/// assert_eq!(charge.authority(), Authority::Exact);
+/// assert_eq!(charge.with_headroom(), charge.tokens());
+/// assert!(charge.tokens().get() > 0);
+/// ```
+///
 /// ```compile_fail,E0451
 /// let _ = daemon::packing::Charge {
 ///     tokens: daemon::packing::ClaudeTokens::new(1),
