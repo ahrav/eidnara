@@ -819,180 +819,13 @@ impl KernelStore {
         spec: StagingCandidateSpec,
     ) -> Result<StagingCandidateRow, KernelError> {
         let spec = RedactedCandidate::new(spec)?;
-        let run_sensitivity = spec.run_sensitivity();
         let candidate_sensitivity = spec.candidate_sensitivity();
         let mut writer = self.lock_writer()?;
         let tx = writer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
         check_fence(&tx, self.lease_epoch())?;
-        let provenance = spec.provenance_json()?;
-        let existing = tx
-            .query_row_cached(
-                "SELECT extractor,source_kind,source_id,source_revision,sensitivity_class,
-                        provenance_witness,terminal_state,lease_expires_at,heartbeat_at
-                 FROM extraction_runs WHERE extraction_run_id=?1",
-                [spec.extraction_run_id.as_str()],
-                |row| {
-                    Ok((
-                        (
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<i64>>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, Vec<u8>>(5)?,
-                        ),
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, i64>(7)?,
-                        row.get::<_, i64>(8)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(map_sqlite)?;
-        if let Some((stored_identity, terminal_state, lease_expires_at, heartbeat_at)) = existing {
-            let expected = (
-                spec.extractor.clone(),
-                Some(spec.source_kind.clone()),
-                Some(spec.source_id.clone()),
-                Some(spec.source_revision),
-                run_sensitivity.as_str().to_string(),
-                provenance.clone(),
-            );
-            // An out-of-order producer inside the lease but behind the heartbeat would still
-            // extend the run through the MAX assignments below.
-            if stored_identity != expected
-                || terminal_state.is_some()
-                || lease_expires_at <= spec.recorded_at
-                || lease_expires_at <= current_time_ms()
-                // The store clock decides liveness, but an out-of-order producer inside a
-                // live lease could still extend it from behind the heartbeat.
-                || heartbeat_at > spec.recorded_at
-            {
-                return Err(KernelError::Conflict);
-            }
-            tx.execute_cached(
-                "UPDATE extraction_runs
-                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
-                 WHERE extraction_run_id=?3",
-                params![
-                    spec.recorded_at,
-                    spec.lease_expires_at,
-                    spec.extraction_run_id
-                ],
-            )
-            .map_err(map_sqlite)?;
-            // Staging into a live run is a heartbeat for the run, and the run's
-            // active candidates share its lease exactly as they do under
-            // `renew_staging_run`: a candidate whose own lease lapsed while the
-            // run's kept being extended would otherwise be revived by completion.
-            tx.execute_cached(
-                "UPDATE candidates
-                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
-                 WHERE extraction_run_id=?3 AND terminal_state IS NULL",
-                params![
-                    spec.recorded_at,
-                    spec.lease_expires_at,
-                    spec.extraction_run_id
-                ],
-            )
-            .map_err(map_sqlite)?;
-        } else {
-            tx.execute_cached(
-                "INSERT INTO extraction_runs(
-                     extraction_run_id,extractor,source_kind,source_id,source_revision,
-                     sensitivity_class,provenance_witness,redaction_metadata,started_at,
-                     heartbeat_at,lease_expires_at
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10)",
-                params![
-                    spec.extraction_run_id,
-                    spec.extractor,
-                    spec.source_kind,
-                    spec.source_id,
-                    spec.source_revision,
-                    run_sensitivity.as_str(),
-                    provenance,
-                    b"[]".to_vec(),
-                    spec.recorded_at,
-                    spec.lease_expires_at,
-                ],
-            )
-            .map_err(map_sqlite)?;
-        }
-        let existing_candidate = tx
-            .query_row_cached(
-                "SELECT extraction_run_id,sensitivity_class,candidate_kind,payload,
-                        redaction_metadata,terminal_state
-                 FROM candidates WHERE candidate_id=?1",
-                [spec.candidate_id.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Vec<u8>>(3)?,
-                        row.get::<_, Vec<u8>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(map_sqlite)?;
-        if let Some((
-            run_id,
-            stored_class,
-            stored_kind,
-            stored_payload,
-            stored_metadata,
-            candidate_terminal,
-        )) = existing_candidate
-        {
-            let incoming_redacted = self_detections(&spec);
-            if run_id != spec.extraction_run_id
-                || stored_class != candidate_sensitivity.as_str()
-                || stored_kind != spec.candidate_kind.text
-                || candidate_terminal.is_some()
-                || incoming_redacted
-                || stored_had_detections(&stored_metadata)
-                || stored_payload != spec.payload.text.as_bytes()
-            {
-                return Err(KernelError::Conflict);
-            }
-            tx.execute_cached(
-                "UPDATE candidates
-                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
-                 WHERE candidate_id=?3",
-                params![spec.recorded_at, spec.lease_expires_at, spec.candidate_id],
-            )
-            .map_err(map_sqlite)?;
-            tx.commit().map_err(map_sqlite)?;
-            return Ok(StagingCandidateRow {
-                candidate_id: spec.candidate_id,
-                payload: spec.payload.text,
-                sensitivity: candidate_sensitivity,
-            });
-        }
-        let candidate_metadata = spec.candidate_detection_json()?;
-        tx.execute_cached(
-            "INSERT INTO candidates(
-                 candidate_id,extraction_run_id,candidate_kind,payload,sensitivity_class,
-                 provenance_witness,redaction_metadata,created_at,heartbeat_at,lease_expires_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8,?9)",
-            params![
-                spec.candidate_id,
-                spec.extraction_run_id,
-                spec.candidate_kind.text,
-                spec.payload.text.as_bytes(),
-                candidate_sensitivity.as_str(),
-                provenance,
-                candidate_metadata,
-                spec.recorded_at,
-                spec.lease_expires_at,
-            ],
-        )
-        .map_err(map_sqlite)?;
-        spec.record(&tx)?;
+        stage_prepared_candidate(&tx, &spec)?;
         tx.commit().map_err(map_sqlite)?;
         Ok(StagingCandidateRow {
             candidate_id: spec.candidate_id,
@@ -1037,6 +870,195 @@ impl KernelStore {
         tx.commit().map_err(map_sqlite)?;
         Ok(removed)
     }
+}
+
+/// `StagingReplay` controls whether re-staging updates heartbeat and lease columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StagingReplay {
+    /// Public producers heartbeat a live run by staging into it: the run and its active candidates move their heartbeat and lease forward.
+    RefreshLeases,
+    /// A byte-identical restage is acknowledged without changing stored data or extending the queue deadline.
+    Immutable,
+}
+
+/// Shared by the public `StagingCandidateSpec` path and the private review-input path. `stage_prepared_candidate` runs inside the caller's fenced immediate transaction; the caller commits it.
+pub(super) fn stage_prepared_candidate(
+    tx: &Transaction<'_>,
+    spec: &RedactedCandidate,
+) -> Result<(), KernelError> {
+    let run_sensitivity = spec.run_sensitivity();
+    let candidate_sensitivity = spec.candidate_sensitivity();
+    let provenance = spec.witness.clone();
+    let refresh_leases = spec.replay == StagingReplay::RefreshLeases;
+    let existing = tx
+        .query_row_cached(
+            "SELECT extractor,source_kind,source_id,source_revision,sensitivity_class,
+                    provenance_witness,terminal_state,lease_expires_at,heartbeat_at
+             FROM extraction_runs WHERE extraction_run_id=?1",
+            [spec.extraction_run_id.as_str()],
+            |row| {
+                Ok((
+                    (
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ),
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(map_sqlite)?;
+    if let Some((stored_identity, terminal_state, lease_expires_at, heartbeat_at)) = existing {
+        let expected = (
+            spec.extractor.clone(),
+            Some(spec.source_kind.clone()),
+            Some(spec.source_id.clone()),
+            Some(spec.source_revision),
+            run_sensitivity.as_str().to_string(),
+            provenance.clone(),
+        );
+        // An out-of-order producer inside the lease but behind the heartbeat would still
+        // extend the run through the MAX assignments below.
+        if stored_identity != expected
+            || terminal_state.is_some()
+            || lease_expires_at <= spec.recorded_at
+            || lease_expires_at <= current_time_ms()
+            // The store clock decides liveness, but an out-of-order producer inside a
+            // live lease could still extend it from behind the heartbeat.
+            || (refresh_leases && heartbeat_at > spec.recorded_at)
+        {
+            return Err(KernelError::Conflict);
+        }
+        if refresh_leases {
+            tx.execute_cached(
+                "UPDATE extraction_runs
+                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
+                 WHERE extraction_run_id=?3",
+                params![
+                    spec.recorded_at,
+                    spec.lease_expires_at,
+                    spec.extraction_run_id
+                ],
+            )
+            .map_err(map_sqlite)?;
+            // Staging into a live run is a heartbeat for the run, and the run's
+            // active candidates share its lease exactly as they do under
+            // `renew_staging_run`: a candidate whose own lease lapsed while the
+            // run's kept being extended would otherwise be revived by completion.
+            tx.execute_cached(
+                "UPDATE candidates
+                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
+                 WHERE extraction_run_id=?3 AND terminal_state IS NULL",
+                params![
+                    spec.recorded_at,
+                    spec.lease_expires_at,
+                    spec.extraction_run_id
+                ],
+            )
+            .map_err(map_sqlite)?;
+        }
+    } else {
+        tx.execute_cached(
+            "INSERT INTO extraction_runs(
+                 extraction_run_id,extractor,source_kind,source_id,source_revision,
+                 sensitivity_class,provenance_witness,redaction_metadata,started_at,
+                 heartbeat_at,lease_expires_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?9,?10)",
+            params![
+                spec.extraction_run_id,
+                spec.extractor,
+                spec.source_kind,
+                spec.source_id,
+                spec.source_revision,
+                run_sensitivity.as_str(),
+                provenance,
+                b"[]".to_vec(),
+                spec.recorded_at,
+                spec.lease_expires_at,
+            ],
+        )
+        .map_err(map_sqlite)?;
+    }
+    let existing_candidate = tx
+        .query_row_cached(
+            "SELECT extraction_run_id,sensitivity_class,candidate_kind,payload,
+                    redaction_metadata,terminal_state,provenance_witness
+             FROM candidates WHERE candidate_id=?1",
+            [spec.candidate_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(map_sqlite)?;
+    if let Some((
+        run_id,
+        stored_class,
+        stored_kind,
+        stored_payload,
+        stored_metadata,
+        candidate_terminal,
+        stored_witness,
+    )) = existing_candidate
+    {
+        let incoming_redacted = self_detections(spec);
+        if run_id != spec.extraction_run_id
+            || stored_class != candidate_sensitivity.as_str()
+            || stored_kind != spec.candidate_kind.text
+            || stored_witness != provenance
+            || candidate_terminal.is_some()
+            || incoming_redacted
+            || stored_had_detections(&stored_metadata)
+            || stored_payload != spec.payload.text.as_bytes()
+        {
+            return Err(KernelError::Conflict);
+        }
+        if refresh_leases {
+            tx.execute_cached(
+                "UPDATE candidates
+                 SET heartbeat_at=MAX(heartbeat_at,?1),lease_expires_at=MAX(lease_expires_at,?2)
+                 WHERE candidate_id=?3",
+                params![spec.recorded_at, spec.lease_expires_at, spec.candidate_id],
+            )
+            .map_err(map_sqlite)?;
+        }
+        return Ok(());
+    }
+    let candidate_metadata = spec.candidate_detection_json()?;
+    tx.execute_cached(
+        "INSERT INTO candidates(
+             candidate_id,extraction_run_id,candidate_kind,payload,sensitivity_class,
+             provenance_witness,redaction_metadata,created_at,heartbeat_at,lease_expires_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8,?9)",
+        params![
+            spec.candidate_id,
+            spec.extraction_run_id,
+            spec.candidate_kind.text,
+            spec.payload.text.as_bytes(),
+            candidate_sensitivity.as_str(),
+            provenance,
+            candidate_metadata,
+            spec.recorded_at,
+            spec.lease_expires_at,
+        ],
+    )
+    .map_err(map_sqlite)?;
+    spec.record(tx)?;
+    Ok(())
 }
 
 /// `generation` is separate from `rows` because an empty rebuild still has to
@@ -1728,18 +1750,23 @@ fn domain_name_is_redacted(tx: &Transaction<'_>, object_id: &str) -> Result<bool
     .map_err(map_sqlite)
 }
 
-struct RedactedCandidate {
-    extraction_run_id: String,
-    candidate_id: String,
-    extractor: String,
-    source_kind: String,
-    source_id: String,
-    source_revision: i64,
-    candidate_kind: RedactedField,
-    payload: RedactedField,
-    provenance: Option<(String, String)>,
-    recorded_at: i64,
-    lease_expires_at: i64,
+/// A staging request after identity checks, redaction, and provenance encoding.
+pub(super) struct RedactedCandidate {
+    pub(super) extraction_run_id: String,
+    pub(super) candidate_id: String,
+    pub(super) extractor: String,
+    pub(super) source_kind: String,
+    pub(super) source_id: String,
+    pub(super) source_revision: i64,
+    pub(super) candidate_kind: RedactedField,
+    pub(super) payload: RedactedField,
+    /// Verified repository provenance; `None` classifies the run `Sensitive`.
+    pub(super) provenance: Option<(String, String)>,
+    /// Encoded `provenance_witness` bytes written to both the run and the candidate row.
+    pub(super) witness: Vec<u8>,
+    pub(super) replay: StagingReplay,
+    pub(super) recorded_at: i64,
+    pub(super) lease_expires_at: i64,
 }
 
 impl RedactedCandidate {
@@ -1765,7 +1792,9 @@ impl RedactedCandidate {
         {
             return Err(KernelError::InvalidInput);
         }
-        Ok(Self {
+        let candidate = Self {
+            witness: Vec::new(),
+            replay: StagingReplay::RefreshLeases,
             extraction_run_id: identity(&spec.extraction_run_id)?,
             candidate_id: identity(&spec.candidate_id)?,
             extractor: identity(&spec.extractor)?,
@@ -1788,10 +1817,15 @@ impl RedactedCandidate {
                 .transpose()?,
             recorded_at: spec.recorded_at,
             lease_expires_at: spec.lease_expires_at,
+        };
+        let witness = candidate.provenance_json()?;
+        Ok(Self {
+            witness,
+            ..candidate
         })
     }
 
-    fn run_sensitivity(&self) -> Sensitivity {
+    pub(super) fn run_sensitivity(&self) -> Sensitivity {
         if self.provenance.is_some() {
             Sensitivity::Normal
         } else {
@@ -1801,7 +1835,7 @@ impl RedactedCandidate {
 
     /// A vocabulary-covered detection is secret, which is stricter than the
     /// sensitive class that unproven provenance already yields.
-    fn candidate_sensitivity(&self) -> Sensitivity {
+    pub(super) fn candidate_sensitivity(&self) -> Sensitivity {
         let detected = self
             .candidate_fields()
             .into_iter()
@@ -1813,7 +1847,7 @@ impl RedactedCandidate {
         }
     }
 
-    fn provenance_json(&self) -> Result<Vec<u8>, KernelError> {
+    pub(super) fn provenance_json(&self) -> Result<Vec<u8>, KernelError> {
         match &self.provenance {
             Some((repository_id, revision)) => serde_json::to_vec(&serde_json::json!({
                 "kind": "repository",

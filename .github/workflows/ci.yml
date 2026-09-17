@@ -199,6 +199,11 @@ jobs:
         # every tracked file.
         run: scripts/forbid-comment-markers.sh
 
+      - name: Invented provenance
+        # Review-staging and Curator paths carry no caller provenance, so a
+        # fixture cannot upgrade their classification.
+        run: scripts/forbid-invented-provenance.sh
+
       - name: Retired memory-plane identifiers
         # The retired second memory plane (its mirror, its intent ledger, its
         # operation contract, its fallback reads, and its two-lane selection) is
