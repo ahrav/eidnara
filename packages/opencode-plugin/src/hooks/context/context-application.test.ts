@@ -117,6 +117,19 @@ describe("capability latch", () => {
         );
         expect(latch.isDenied("cross_step_reuse", ROUTE)).toBe(true);
     });
+
+    it("retains at most 1000 routes, forgetting the least recently used denial", () => {
+        const latch = new CapabilityLatch();
+        latch.observeTerminal("capability_unsupported", "replacement", ROUTE);
+        for (let i = 0; i < 1000; i++) {
+            latch.observeTerminal("capability_unsupported", "replacement", {
+                ...ROUTE,
+                sessionId: `ses-evict-${i}`,
+            });
+        }
+        expect(latch.isDenied("replacement", ROUTE)).toBe(false);
+        expect(latch.isDenied("replacement", { ...ROUTE, sessionId: "ses-evict-999" })).toBe(true);
+    });
 });
 
 describe("entry edits", () => {
@@ -253,6 +266,56 @@ describe("prepare, apply, confirm", () => {
             appliedIdentity: "fe".repeat(32),
         });
         expect(calls).toHaveLength(3);
+    });
+
+    it("reports unknown and still confirms when the publication rejects after the forward", async () => {
+        const { calls, transport } = daemon(honest());
+        const app = new ContextApplication(transport, new CapabilityLatch());
+        const result = await app.run(
+            "append",
+            target({
+                publish: async () => {
+                    throw new Error("host edit rejected");
+                },
+            }),
+        );
+        expect(result).toEqual({
+            kind: "unknown",
+            preparationId: prepared().preparation_id,
+            forwardedIdentity: "fe".repeat(32),
+            appliedIdentity: undefined,
+        });
+        expect(calls.map((call) => call.method)).toEqual([
+            "retrieval.prepare",
+            "retrieval.apply",
+            "retrieval.confirm",
+        ]);
+        expect(calls[2]?.body.applied_identity).toBeNull();
+    });
+
+    it("publishes the body it sized at prepare even when the target's body changes mid-flight", async () => {
+        const { calls, transport } = daemon(honest());
+        const published: EntryEdit[] = [];
+        let body = "one";
+        const app = new ContextApplication(transport, new CapabilityLatch());
+        const result = await app.run("append", {
+            route: ROUTE,
+            context,
+            entries: () => [],
+            get body() {
+                const current = body;
+                body = "a body far beyond the bytes the daemon authorized";
+                return current;
+            },
+            publish: async (edit, forwardedIdentity) => {
+                published.push(edit);
+                return forwardedIdentity;
+            },
+        });
+        expect(result.kind).toBe("applied");
+        expect(calls[0]?.body.edit_bytes).toBe(3);
+        const entry = published[0]?.entries[0] as { parts: Array<{ text: string }> };
+        expect(entry.parts[0]?.text).toBe("one");
     });
 
     it("reports unknown, never refused, when the daemon answers the confirm with a terminal after publication", async () => {
