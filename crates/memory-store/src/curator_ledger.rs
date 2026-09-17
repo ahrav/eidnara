@@ -462,6 +462,18 @@ pub fn take_over_curator_receipt_in_tx(
     {
         return Err(refuse(CuratorLedgerRefusal::AuthorityChanged));
     }
+    // Authority rows are versioned per context store, so two stores can share a generation number; the fence the transition put on the receipt's own claim is the durable record that it moved.
+    let predecessor_fence: Option<Option<String>> = conn
+        .query_row(
+            "SELECT terminal_kind FROM note_eval_claims
+              WHERE project = ?1 AND task_kind = ?2 AND claim_id = ?3",
+            params![project, CURATOR_REVIEW_TASK.task_kind, receipt.claim_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if predecessor_fence.flatten().as_deref() == Some("authority_changed") {
+        return Err(refuse(CuratorLedgerRefusal::AuthorityChanged));
+    }
     let changed = conn.execute(
         "UPDATE curator_receipts
             SET generation = generation + 1, claim_id = ?4, updated_at_ms = ?5
@@ -898,12 +910,17 @@ impl MemoryStore {
         now: impl Fn() -> i64,
         handoff: impl FnOnce(P) -> H,
     ) -> Result<DispatchOutcome<H>, CuratorLedgerError> {
-        check_project(project)?;
+        // The marker's caller text is prepared and audited like every other Curator identity; the handoff commits with the marker and its scan evidence.
+        let mut write = curator_write(project, &["curator-ledger", "dispatch", causal_identity])?;
+        write.identity("provider", &marker.provider)?;
+        write.identity("model", &marker.model)?;
+        write.identity("credential_id", &marker.credential_id)?;
         let refusal = std::cell::Cell::new(None);
-        let result = self.inner.with_conn_fenced_then_handoff(
-            |conn| {
+        let result = write.execute_then_handoff(
+            &self.inner,
+            |coordinated| {
                 commit_curator_attempt_in_tx(
-                    conn,
+                    coordinated.tx(),
                     project,
                     causal_identity,
                     generation,
@@ -912,6 +929,7 @@ impl MemoryStore {
                     marker,
                     now(),
                 )
+                .map(WriteDisposition::Applied)
                 .inspect_err(|error| refusal.set(refusal_of(error)))
             },
             |conn, attempt| {
@@ -962,7 +980,7 @@ impl MemoryStore {
         // A committed marker is reported as charged whatever happened afterward; only a failure before the commit is an error, so the caller never re-charges a marker it already holds.
         let (attempt, reason) = match (result, refusal.get()) {
             (Err(_), Some(refusal)) => return Err(CuratorLedgerError::Refused(refusal)),
-            (Err(error), None) => return Err(CuratorLedgerError::Store(error.into())),
+            (Err(error), None) => return Err(CuratorLedgerError::Store(error)),
             (
                 Ok((
                     attempt,
@@ -1042,7 +1060,7 @@ impl MemoryStore {
         })
     }
 
-    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` terminal selects exactly one Kernel result for that generation, and the job row records the matching outcome. A predecessor generation, a stale claim, another incarnation, or a job another owner already closed or that has passed its queue deadline writes nothing. A cancelled receipt records `cancelled`, and one at or after its run deadline records `expired`, whatever the worker reports: a durable cancellation is never overridden and a renewed claim never extends the fixed run budget.
+    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` terminal selects exactly one Kernel result for that generation, requires an attempt this generation closed `complete`, and the job row records the matching outcome. A predecessor generation, a stale claim, another incarnation, or a job another owner already closed or that has passed its queue deadline writes nothing. A cancelled receipt records `cancelled`, and one at or after its run deadline records `expired`, whatever the worker reports: a durable cancellation is never overridden and a renewed claim never extends the fixed run budget.
     #[allow(clippy::too_many_arguments)]
     pub fn complete_curator_receipt(
         &self,
@@ -1079,6 +1097,21 @@ impl MemoryStore {
             });
         if fenced {
             return Ok(LeaseCompleteOutcome::Conflict { kind: "fenced" });
+        }
+        // A published result must come from an attempt this generation closed `complete` inside its budget; the store has no other evidence the selection exists. A complete terminal never reverts, so this read outside the lease is authoritative, and the claim survives the refusal.
+        if terminal == CuratorReceiptTerminal::Complete
+            && !self
+                .list_curator_attempts(project, causal_identity)?
+                .iter()
+                .any(|attempt| {
+                    i64::try_from(attempt.generation).ok() == Some(generation)
+                        && matches!(
+                            attempt.terminal,
+                            Some((CuratorAttemptTerminal::Complete, _))
+                        )
+                })
+        {
+            return Ok(LeaseCompleteOutcome::Conflict { kind: "invalid" });
         }
         self.complete_task_lease(
             &CURATOR_REVIEW_TASK,

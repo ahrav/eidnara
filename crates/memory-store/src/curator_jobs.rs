@@ -1080,7 +1080,7 @@ impl MemoryStore {
         )
     }
 
-    /// Expires reserved or ready jobs and frozen selections at their deadlines. In-progress receipts block job expiry until their run deadline passes; expired receipts, and receipts whose job another owner already closed, become `unknown` at their run deadline when they have an unterminated attempt, otherwise `expired`. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts, and the live claim of any terminal job is fenced `expired`, so a worker that keeps renewing cannot hold a ledger slot for a job that no longer exists.
+    /// Expires reserved or ready jobs and frozen selections at their deadlines. In-progress receipts block job expiry until their run deadline passes; expired receipts, and receipts whose job another owner already closed, close at their run deadline as `cancelled` when a cancellation was recorded, `unknown` when they have an unterminated attempt, otherwise `expired`, and the job outcome follows the receipt as a completion would map it. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts, and the live claim of any terminal job is fenced `expired`, so a worker that keeps renewing cannot hold a ledger slot for a job that no longer exists.
     pub fn expire_curator_work(&self, now_ms: i64) -> Result<(usize, usize), CuratorJobError> {
         // The sweep carries no caller text, so it records no scan and needs no owner scope.
         let write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
@@ -1090,7 +1090,9 @@ impl MemoryStore {
                 coordinated.tx().execute(
                     "UPDATE curator_receipts
                         SET state = 'complete', updated_at_ms = ?1,
-                            terminal_kind = CASE WHEN EXISTS(
+                            terminal_kind = CASE
+                              WHEN cancelled_at_ms IS NOT NULL THEN 'cancelled'
+                              WHEN EXISTS(
                                 SELECT 1 FROM curator_attempts a
                                  WHERE a.project = curator_receipts.project
                                    AND a.causal_identity = curator_receipts.causal_identity
@@ -1108,12 +1110,14 @@ impl MemoryStore {
                 let jobs = coordinated.tx().execute(
                     "UPDATE curator_jobs
                         SET state = 'terminal', allowance_bytes = 0, input_json = NULL, updated_at_ms = ?1,
-                            outcome = CASE WHEN EXISTS(
-                                SELECT 1 FROM curator_receipts r
+                            outcome = COALESCE((
+                                SELECT CASE r.terminal_kind
+                                         WHEN 'unknown' THEN 'unknown'
+                                         WHEN 'cancelled' THEN 'failed'
+                                         ELSE 'expired' END
+                                  FROM curator_receipts r
                                  WHERE r.project = curator_jobs.project
-                                   AND r.causal_identity = curator_jobs.causal_identity
-                                   AND r.terminal_kind = 'unknown')
-                              THEN 'unknown' ELSE 'expired' END
+                                   AND r.causal_identity = curator_jobs.causal_identity), 'expired')
                       WHERE state IN ('reserved', 'ready') AND queue_deadline_ms <= ?1
                         AND NOT EXISTS(SELECT 1 FROM curator_receipts r
                                         WHERE r.project = curator_jobs.project

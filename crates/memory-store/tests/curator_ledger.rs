@@ -114,12 +114,16 @@ impl Fixture {
 }
 
 fn activate_memories(store: &MemoryStore) -> i64 {
+    activate_memories_under(store, "ctx")
+}
+
+fn activate_memories_under(store: &MemoryStore, context_store: &str) -> i64 {
     let preparing = store
-        .authority_begin_prepare("ctx", PROJECT, "memories")
+        .authority_begin_prepare(context_store, PROJECT, "memories")
         .unwrap();
     let row = store
         .authority_finish_prepare(
-            "ctx",
+            context_store,
             PROJECT,
             "memories",
             preparing.generation,
@@ -133,6 +137,11 @@ fn activate_memories(store: &MemoryStore) -> i64 {
 
 /// Drains the `memories` authority and re-activates it at the next generation, fencing every live claim.
 fn rotate_memories_authority(store: &MemoryStore, now: i64) -> i64 {
+    drain_memories_authority(store, now);
+    activate_memories(store)
+}
+
+fn drain_memories_authority(store: &MemoryStore, now: i64) {
     let draining = store
         .authority_begin_drain("ctx", PROJECT, "memories", "lease", now + 1_000_000, now)
         .unwrap();
@@ -174,7 +183,6 @@ fn rotate_memories_authority(store: &MemoryStore, now: i64) -> i64 {
             now,
         )
         .unwrap();
-    activate_memories(store)
 }
 
 fn subject(candidate: &str) -> ReviewTarget {
@@ -705,6 +713,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
     let fixture = Fixture::open();
     let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
     fixture.begin(&claim, T0);
+    fixture.completed_attempt(1, &claim, T0);
     let selection = ResultSelection {
         candidate_id: "review-result:abc".to_string(),
         payload_digest: "f".repeat(64),
@@ -1483,6 +1492,7 @@ fn a_completion_against_a_job_another_owner_closed_writes_nothing_to_the_receipt
     let fixture = Fixture::open();
     let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
     fixture.begin(&claim, T0);
+    fixture.completed_attempt(1, &claim, T0);
     fixture
         .store
         .finish_curator_job(
@@ -1553,6 +1563,7 @@ fn a_selected_candidate_carrying_a_secret_is_refused_at_the_receipt() {
     let fixture = Fixture::open();
     let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
     fixture.begin(&claim, T0);
+    fixture.completed_attempt(1, &claim, T0);
     let leaked = ResultSelection {
         candidate_id: format!("review-result:{AWS_KEY}"),
         payload_digest: "f".repeat(64),
@@ -1635,6 +1646,7 @@ fn a_completed_receipt_still_fences_a_claim_that_does_not_own_it() {
     let fixture = Fixture::open();
     let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
     fixture.begin(&claim, T0);
+    fixture.completed_attempt(1, &claim, T0);
     assert!(matches!(
         complete(
             &fixture,
@@ -1710,6 +1722,7 @@ fn a_completion_at_or_after_the_run_deadline_records_expired_not_the_worker_resu
     let CuratorBeginOutcome::Begun(r) = fixture.begin(&claim, T0) else {
         panic!("first claim begins")
     };
+    fixture.completed_attempt(1, &claim, T0);
     // A live worker renews between attempts, so its claim outlives the fixed run budget.
     let mut now = T0;
     while now + CURATOR_TASK_LEASE_MS <= r.run_deadline_ms {
@@ -1912,10 +1925,7 @@ fn a_cancelled_receipt_records_cancelled_whatever_the_worker_reports() {
     let fixture = Fixture::open();
     let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
     fixture.begin(&claim, T0);
-    assert!(matches!(
-        fixture.dispatch(1, &claim, T0 + 1).unwrap(),
-        DispatchOutcome::Handed { .. }
-    ));
+    fixture.completed_attempt(1, &claim, T0);
     fixture
         .store
         .cancel_curator_receipt(PROJECT, &fixture.identity, T0 + 2)
@@ -2114,4 +2124,138 @@ fn the_curator_lease_wrappers_bound_the_project_before_the_ledger() {
             .renew_curator_task(&long, "crc:x", "worker-a", 0, 1, T0)
             .is_err()
     );
+}
+
+impl Fixture {
+    /// One in-budget attempt handed off and closed `Complete` under `claim`.
+    fn completed_attempt(&self, generation: u64, claim: &str, now: i64) {
+        let DispatchOutcome::Handed { attempt_index, .. } =
+            self.dispatch(generation, claim, now).unwrap()
+        else {
+            panic!("the attempt hands off")
+        };
+        self.store
+            .finish_curator_attempt(
+                PROJECT,
+                &self.identity,
+                generation,
+                claim,
+                attempt_index,
+                CuratorAttemptTerminal::Complete,
+                now + 1,
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn a_complete_receipt_needs_a_completed_attempt_in_its_generation() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    // No attempt at all, then one handed off but never closed complete: neither backs a publication.
+    for (completion, now) in [("c-1", T0 + 1), ("c-2", T0 + 3)] {
+        assert_eq!(
+            complete(
+                &fixture,
+                &fixture.identity,
+                &claim,
+                completion,
+                "worker-a",
+                1,
+                CuratorReceiptTerminal::Complete,
+                Some(&selection()),
+                now,
+            )
+            .unwrap(),
+            LeaseCompleteOutcome::Conflict { kind: "invalid" }
+        );
+        assert_eq!(receipt(&fixture).terminal, None);
+        if completion == "c-1" {
+            assert!(matches!(
+                fixture.dispatch(1, &claim, T0 + 2).unwrap(),
+                DispatchOutcome::Handed { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn the_sweep_keeps_a_cancelled_orphaned_receipt_cancelled() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let CuratorBeginOutcome::Begun(r) = fixture.begin(&claim, T0) else {
+        panic!("first claim begins")
+    };
+    assert!(matches!(
+        fixture.dispatch(1, &claim, T0 + 1).unwrap(),
+        DispatchOutcome::Handed { .. }
+    ));
+    fixture
+        .store
+        .cancel_curator_receipt(PROJECT, &fixture.identity, T0 + 2)
+        .unwrap();
+    // The worker crashes; the sweep closes the receipt once both deadlines have passed.
+    let late = (T0 + CURATOR_QUEUE_LIFETIME_MS).max(r.run_deadline_ms);
+    fixture.store.expire_curator_work(late).unwrap();
+    assert_eq!(
+        receipt(&fixture).terminal,
+        Some(CuratorReceiptTerminal::Cancelled)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .lookup_curator_job(PROJECT, &fixture.identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Failed)
+    );
+}
+
+#[test]
+fn a_dispatch_records_scan_evidence_for_its_permanent_marker_text() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    assert!(matches!(
+        fixture.dispatch(1, &claim, T0 + 1).unwrap(),
+        DispatchOutcome::Handed { .. }
+    ));
+    let fields: Vec<String> = fixture
+        .store
+        .with_conn_for_test(|conn| {
+            conn.prepare(
+                "SELECT DISTINCT field_id FROM scan_owner_copies
+                  WHERE field_id IN ('provider', 'model', 'credential_id') ORDER BY field_id",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect()
+        })
+        .unwrap();
+    assert_eq!(fields, ["credential_id", "model", "provider"]);
+}
+
+#[test]
+fn a_takeover_is_refused_across_context_stores_even_at_an_equal_generation() {
+    let mut fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let CuratorBeginOutcome::Begun(r) = fixture.begin(&claim, T0) else {
+        panic!("first claim begins")
+    };
+    // Ownership of `memories` moves to another context store whose first activation lands on the same generation number.
+    drain_memories_authority(&fixture.store, T0 + 1);
+    fixture.registration = activate_memories_under(&fixture.store, "ctx-b");
+    assert_eq!(fixture.registration as u64, r.authority_generation);
+    let successor = fixture.claim("acq-2", "worker-b", T0 + 2).unwrap();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .take_over_curator_receipt(PROJECT, &fixture.identity, 1, &successor, T0 + 3)
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::AuthorityChanged
+    );
+    assert_eq!(receipt(&fixture).claim_id, claim);
 }
