@@ -13,7 +13,7 @@ use host_runtime::model_execution::backend::{
     BackendError, BackendEvent, BackendTerminal, ErrorClass, EventSink, FinishReason, Harness,
 };
 use host_runtime::model_execution::config::ModelExecutionLimits;
-use host_runtime::model_execution::protocol::SendRequest;
+use host_runtime::model_execution::protocol::{RequestError, SendRequest};
 use host_runtime::model_execution::supervisor::{
     INTERNAL_LAUNCH_ABORT_GRACE, InternalOutcome, InternalRunKey, Launch,
     MAX_INTERNAL_KEY_FIELD_BYTES, SessionKey, Supervisor,
@@ -44,7 +44,15 @@ fn matching_public_key(job: &str) -> SessionKey {
     }
 }
 
-fn public_send(supervisor: &Supervisor, session: &str) -> String {
+fn public_key(session: &str) -> SessionKey {
+    SessionKey {
+        project_root: "/workspace/project".into(),
+        harness: Harness::OpenCode,
+        session: session.to_owned(),
+    }
+}
+
+fn try_public_send(supervisor: &Supervisor, session: &str) -> Result<String, RequestError> {
     let request = SendRequest {
         prompt: "public".to_owned(),
         system: None,
@@ -58,17 +66,11 @@ fn public_send(supervisor: &Supervisor, session: &str) -> String {
         "params": send_params("public", None, "prov/model-a"),
     }))
     .unwrap();
-    supervisor
-        .send(
-            &SessionKey {
-                project_root: "/workspace/project".into(),
-                harness: Harness::OpenCode,
-                session: session.to_owned(),
-            },
-            request,
-            &body,
-        )
-        .expect("public send admits")
+    supervisor.send(&public_key(session), request, &body)
+}
+
+fn public_send(supervisor: &Supervisor, session: &str) -> String {
+    try_public_send(supervisor, session).expect("public send admits")
 }
 
 async fn until(mut cond: impl FnMut() -> bool, what: &str) {
@@ -468,13 +470,17 @@ async fn cancellation_propagates_and_permits_return_only_after_physical_completi
     assert_eq!(run.residue().unwrap_err().code, "teardown_unconfirmed");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn shutdown_joins_internal_runs() {
     let (backend, _public_gate) = ScriptedBackend::gated("public");
-    let supervisor = Supervisor::new(Arc::clone(&backend) as Arc<_>);
+    let limits = ModelExecutionLimits {
+        max_backend_processes: 3,
+        ..ModelExecutionLimits::default()
+    };
+    let supervisor = Supervisor::with_limits(Arc::clone(&backend) as Arc<_>, limits);
     public_send(&supervisor, "s1");
     let script = Scripted::new();
-    let run = supervisor
+    let running = supervisor
         .launch_internal(
             internal_key("job-1", 1),
             0,
@@ -482,26 +488,79 @@ async fn shutdown_joins_internal_runs() {
             script.launch("internal", true),
         )
         .unwrap();
+    // The stuck launch ignores cancellation, and its forced teardown outlasts the cutoff.
+    let stuck_script = Scripted::new();
+    let stuck = supervisor
+        .launch_internal(
+            internal_key("job-2", 1),
+            0,
+            Instant::now() + Duration::from_secs(1),
+            stuck_script.launch("stuck", false),
+        )
+        .unwrap();
     until(
-        || script.starts.load(Ordering::SeqCst) == 1 && backend.starts() == 1,
-        "both run",
+        || {
+            script.starts.load(Ordering::SeqCst) == 1
+                && stuck_script.starts.load(Ordering::SeqCst) == 1
+                && backend.starts() == 1
+        },
+        "all three run",
     )
     .await;
+    // Every backend permit is held, so this launch is still queued at shutdown.
+    let queued = supervisor
+        .launch_internal(
+            internal_key("job-3", 1),
+            0,
+            far(),
+            script.launch("queued", true),
+        )
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        script.starts.load(Ordering::SeqCst),
+        1,
+        "the queued launch waits for a permit"
+    );
     let unresolved = supervisor.shutdown().await;
-    assert_eq!(unresolved, 0);
+    assert_eq!(
+        unresolved, 1,
+        "only the aborted launch has unproven teardown"
+    );
     assert_eq!(
         script.cancels.load(Ordering::SeqCst),
         1,
-        "shutdown cancelled the internal launch"
+        "shutdown cancelled the running cooperative launch once"
     );
     assert_eq!(backend.cancels_observed(), 1, "and the public one");
-    assert_eq!(run.settled().await, InternalOutcome::Cancelled);
+    // Every phase reports the host shutdown, not a coordinator cancel or the cutoff.
+    assert_eq!(running.settled().await, InternalOutcome::Shutdown);
+    assert_eq!(
+        stuck.settled().await,
+        InternalOutcome::Shutdown,
+        "a teardown that outlasts the cutoff is still a shutdown"
+    );
+    assert!(stuck.work_unresolved());
+    assert_eq!(queued.settled().await, InternalOutcome::Shutdown);
+    assert_eq!(
+        script.starts.load(Ordering::SeqCst),
+        1,
+        "the queued launch never ran"
+    );
     let metrics = supervisor.metrics();
     assert_eq!(metrics.sessions, 0);
     assert_eq!(metrics.live_runs, 0);
     assert_eq!(
         metrics.retained_bytes_available,
         metrics.retained_bytes_capacity
+    );
+    // A closed supervisor refuses later internal launches.
+    assert_eq!(
+        supervisor
+            .launch_internal(internal_key("job-4", 1), 0, far(), script.launch("x", true))
+            .unwrap_err()
+            .code,
+        "cancelled"
     );
 }
 
@@ -541,19 +600,7 @@ async fn the_cutoff_bounds_the_backend_permit_wait_without_a_launch() {
     // Late acquisition: the permit released after the cutoff reaches nothing.
     public_gate.add_permits(1);
     until(
-        || {
-            supervisor
-                .status(
-                    &SessionKey {
-                        project_root: "/workspace/project".into(),
-                        harness: Harness::OpenCode,
-                        session: "s1".to_owned(),
-                    },
-                    &public_run,
-                )
-                .unwrap()
-                == "completed"
-        },
+        || supervisor.status(&public_key("s1"), &public_run).unwrap() == "completed",
         "the public run completes",
     )
     .await;
@@ -706,4 +753,79 @@ async fn an_identity_is_single_use_only_while_its_run_is_retained() {
         metrics.free_run_slots,
         ModelExecutionLimits::default().max_active_runs
     );
+}
+
+#[tokio::test]
+async fn an_internal_terminal_never_forces_a_public_eviction() {
+    let supervisor = Supervisor::with_limits(
+        ScriptedBackend::completing("public") as Arc<_>,
+        ModelExecutionLimits {
+            max_terminal_sessions: 1,
+            ..ModelExecutionLimits::default()
+        },
+    );
+    // One public deletion guard fills the cap.
+    public_send(&supervisor, "s1");
+    supervisor.delete(&public_key("s1")).await.unwrap();
+    assert_eq!(supervisor.metrics().tombstones, 1);
+    // The internal run commits while the cap is full, its own entry is not yet evictable, and no other internal terminal is retained.
+    let script = Scripted::new();
+    let run = supervisor
+        .launch_internal(
+            internal_key("job-1", 1),
+            0,
+            far(),
+            script.launch("one", true),
+        )
+        .unwrap();
+    script.gate.add_permits(1);
+    assert_eq!(run.settled().await, InternalOutcome::Completed);
+    assert_eq!(
+        supervisor.metrics().tombstones,
+        1,
+        "the deletion guard survived the internal commit"
+    );
+    // The guard still refuses the deleted session, and the cap sweep that send runs evicts the internal terminal instead.
+    assert_eq!(
+        try_public_send(&supervisor, "s1").unwrap_err().code,
+        "session_deleted"
+    );
+    let metrics = supervisor.metrics();
+    assert_eq!(metrics.tombstones, 1);
+    assert_eq!(metrics.internal_runs, 0);
+    assert_eq!(metrics.sessions, 1);
+}
+
+#[tokio::test]
+async fn internal_output_is_bounded_but_never_retained() {
+    let supervisor = Supervisor::new(ScriptedBackend::completing("public") as Arc<_>);
+    let baseline = supervisor.metrics().retained_bytes_available;
+    let text = "z".repeat(64 * 1024);
+    let emitted = text.len();
+    let run = supervisor
+        .launch_internal(
+            internal_key("job-1", 1),
+            0,
+            far(),
+            Box::new(move |events, _| {
+                Box::pin(async move {
+                    events.emit(BackendEvent::AssistantText {
+                        text,
+                        finish_reason: None,
+                    });
+                    BackendTerminal::Completed {
+                        finish_reason: FinishReason::Completed,
+                    }
+                })
+            }),
+        )
+        .unwrap();
+    assert_eq!(run.settled().await, InternalOutcome::Completed);
+    // No subscriber can read an internal replay, so the retained terminal keeps only its key metadata and terminal headroom.
+    let held = baseline - supervisor.metrics().retained_bytes_available;
+    assert!(
+        held < emitted,
+        "the emitted text stayed charged: {held} bytes held for a {emitted}-byte message"
+    );
+    assert_eq!(supervisor.metrics().internal_runs, 1);
 }

@@ -602,7 +602,7 @@ impl Supervisor {
         run
     }
 
-    /// Admits one Curator attempt as an internal run and spawns its launch under the same run slots, backend permits, retained bytes, task tracker, and shutdown as public runs. `request_bytes` is the prepared request's retained size, charged like a public request. The backend-permit wait ends at `cutoff`; a run that has not started by then terminates as cancelled without ever calling `launch`, and one that has started has its token cancelled at `cutoff`. An internal key admits exactly one run while that run is retained; a second launch under it is refused. No command permit is taken: internal admission must not consume the public callback budget, and the run slot is what bounds it.
+    /// Admits one Curator attempt as an internal run and spawns its launch under the same run slots, backend permits, retained bytes, task tracker, and shutdown as public runs. `request_bytes` is the prepared request's retained size, charged like a public request; text the launch emits through its sink counts against the per-run replay cap but is not retained. The backend-permit wait ends at `cutoff`; a run that has not started by then terminates as cancelled without ever calling `launch`, and one that has started has its token cancelled at `cutoff`. An internal key admits exactly one run while that run is retained; a second launch under it is refused. No command permit is taken: internal admission must not consume the public callback budget, and the run slot is what bounds it.
     pub fn launch_internal(
         &self,
         key: InternalRunKey,
@@ -1064,13 +1064,10 @@ impl Supervisor {
                 mark_record_unresolved(&inner, &mut lock_run(&run));
             }
             // Cancellation must produce a `Cancelled` terminal even if the backend returns another terminal.
+            // The token alone cannot say who cancelled it, so the reason is ranked from the supervisor's state.
             let outcome = if run.cancel.is_cancelled() {
                 TerminalOutcome::Cancelled {
-                    message: if cutoff.is_some_and(|at| Instant::now() >= at) {
-                        CUTOFF_MESSAGE
-                    } else {
-                        "run cancelled"
-                    },
+                    message: stop_reason(&inner, &run, cutoff).unwrap_or("run cancelled"),
                 }
             } else {
                 TerminalOutcome::Backend(terminal)
@@ -1178,16 +1175,16 @@ impl Drop for DoneGuard {
     }
 }
 
-/// The cancellation a run must honour once it holds a backend permit: shutdown, its own cancel, or an expired cutoff.
+/// Ranks the stop causes a run can carry. Shutdown takes precedence over the cutoff, which takes precedence over run cancellation.
 fn stop_reason(inner: &Inner, run: &Run, cutoff: Option<Instant>) -> Option<&'static str> {
     if inner.closing.is_cancelled() {
         return Some(SHUTDOWN_MESSAGE);
     }
-    if run.cancel.is_cancelled() {
-        return Some("run cancelled");
-    }
     if cutoff.is_some_and(|at| Instant::now() >= at) {
         return Some(CUTOFF_MESSAGE);
+    }
+    if run.cancel.is_cancelled() {
+        return Some("run cancelled");
     }
     None
 }
@@ -1281,11 +1278,17 @@ fn append_event(inner: &Arc<Inner>, run: &Arc<Run>, event: BackendEvent) -> Sink
                 ErrorClass::Permanent,
             ));
         } else if let Some(charge) = charge {
+            state.replay_bytes += len;
+            // `subscribe` resolves only public keys, so an internal run's text counts against the per-run cap and the budget check without being retained.
+            if matches!(run.key, RunKey::Internal(_)) {
+                drop(state);
+                drop(charge);
+                return SinkStatus::Accepted;
+            }
             state.replay.push(Arc::new(ReplayFrame {
                 bytes,
                 _charge: charge,
             }));
-            state.replay_bytes += len;
             drop(state);
             run.notify.notify_waiters();
             return SinkStatus::Accepted;
@@ -1393,8 +1396,7 @@ fn enforce_terminal_cap(
     keep_key: Option<&RunKey>,
     released: &mut Released,
 ) {
-    // The 257-session bound makes O(sessions) scans per eviction sufficient.
-    // The 257-session bound does not justify an ordered structure.
+    // The scan is O(sessions) per eviction: the cap plus at most one uncounted internal terminal per backend permit does not justify an ordered structure.
     loop {
         let mut retained = 0usize;
         // Internal terminals are evicted before any public entry, so Curator churn cannot revoke a public deletion guard early; within one class the oldest goes first.
@@ -1416,10 +1418,13 @@ fn enforce_terminal_cap(
                     // Eviction would release charges for state still held by the backend task.
                     // Backend permits bound the number of transiently unevictable runs.
                     // A returned run with `work_unresolved` is evictable; `Inner::unresolved_runs` keeps its verdict for `shutdown`.
-                    (
-                        state.completed_at,
-                        state.work_done && state.subscriber_count == 0 && run.run_id != keep_run_id,
-                    )
+                    let evictable =
+                        state.work_done && state.subscriber_count == 0 && run.run_id != keep_run_id;
+                    // An unevictable internal terminal is not counted either: counting it while it cannot be chosen would make room for it by evicting a public entry.
+                    if !evictable && matches!(key, RunKey::Internal(_)) {
+                        continue;
+                    }
+                    (state.completed_at, evictable)
                 }
             };
             retained += 1;
