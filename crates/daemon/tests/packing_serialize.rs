@@ -711,3 +711,40 @@ fn the_packing_path_reaches_no_legacy_clamp_or_selection_module() {
         assert!(!packing_sources.contains(forbidden), "{forbidden}");
     }
 }
+
+/// Every fragment starts with `<` and ends with `\n`, which the pre-tokenizer
+/// splits on, so the exact profile charges each fragment the same whatever
+/// follows it, and a rebuild that drops a group drops exactly that group's cost.
+#[test]
+fn the_exact_tokenizer_charges_fragments_independently_so_a_rebuild_drops_only_the_removed_cost() {
+    let fixture = fixture();
+    let exact = AccountingProfile::exact_tokenizer();
+    let prepare = |serialized_bytes: usize| {
+        finalize(
+            admit_under(&fixture, &GROUPS, &exact, &accounting_bounds()).unwrap(),
+            &serialization(serialized_bytes, 8),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap()
+    };
+    let full = prepare(1 << 20);
+    let text = full.ledger().text();
+    let mut at = 0;
+    let mut by_fragment = 0;
+    for entry in full.ledger().entries() {
+        by_fragment += tokenizer::estimate_tokens(&text[at..at + entry.bytes]);
+        at += entry.bytes;
+    }
+    assert_eq!(tokenizer::estimate_tokens(text), by_fragment);
+    assert_eq!(full.ledger().total().get(), by_fragment as u64);
+
+    let last = full.admitted().last().unwrap().clone();
+    let repaired = prepare(full.body().len() - 1);
+    assert_eq!(repaired.removed().len(), 1);
+    let twin = admit_under(&fixture, &GROUPS[..2], &exact, &accounting_bounds()).unwrap();
+    assert_eq!(repaired.ledger(), twin.ledger());
+    assert_eq!(
+        repaired.ledger().total_with_headroom(),
+        ClaudeTokens::new(full.ledger().total_with_headroom().get() - last.cost.get())
+    );
+}

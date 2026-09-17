@@ -24,8 +24,13 @@ The rendered-bytes and estimated-tokens bounds belong to the accounting part:
 `packing-accounting-bounds-refuse-at-limit-plus-one`), so `finalize` receives
 no admission over them and re-checks neither. `SerializationBounds` carries the
 serialized-bytes limit and the pass cap only. Adjustment repairs a
-serialized-bytes overflow; a rebuilt ledger is a shorter prefix of an admitted
-render, so it cannot re-enter an accounting bound the admission passed.
+serialized-bytes overflow; a rebuilt ledger is the admitted ledger less the
+removed groups' entries, and the profile charges each fragment independently
+of what follows it (every fragment starts with `<` and ends with `\n`, which
+the exact tokenizer's pre-tokenizer splits on; `AccountingProfile::heuristic`
+records the same requirement for an estimator), so a rebuild's total is the
+admitted total less the removed groups' costs and cannot re-enter an
+accounting bound the admission passed.
 
 ## Observation contract
 
@@ -67,7 +72,7 @@ Recorded by the repository owner at the U4b change:
 | --- | --- | --- | --- | --- | --- |
 | [packing-body-serialized-once-through-the-guard](#packing-body-serialized-once-through-the-guard) | safety | test-only | always | active | high |
 | [packing-adjustment-removes-last-admitted-within-the-cap](#packing-adjustment-removes-last-admitted-within-the-cap) | safety | test-only | always | active | high |
-| [packing-limits-fail-closed-at-manifest-parse](#packing-limits-fail-closed-at-manifest-parse) | safety | default-production | always | active | high |
+| [packing-limits-fail-closed-at-manifest-parse](#packing-limits-fail-closed-at-manifest-parse) | safety | explicit-config-only | always | active | high |
 | [packing-output-byte-identical-across-cache-states](#packing-output-byte-identical-across-cache-states) | safety | test-only | always | active | high |
 
 ## Records
@@ -123,6 +128,7 @@ Reachability: test-only - as above.
 Status: active
 Exercised: yes - `crates/daemon/tests/packing_serialize.rs`
 `a_wrapper_overflow_removes_the_last_admitted_group_and_reclaims_its_wrappers`,
+`the_exact_tokenizer_charges_fragments_independently_so_a_rebuild_drops_only_the_removed_cost`,
 `cap_exhaustion_emits_nothing_and_never_removes_required_items`,
 `an_accounting_overflow_is_refused_by_the_optional_phase_before_any_measurement`,
 and `an_exhausted_budget_refuses_before_any_measurement`.
@@ -163,8 +169,11 @@ Open questions: None.
 ### packing-limits-fail-closed-at-manifest-parse
 
 Type: safety
-Reachability: default-production - `RuntimeManifest::parse` runs on every
-manifest read.
+Reachability: explicit-config-only - `RuntimeManifest::parse` runs on every
+manifest read, but the packing branch runs only when the manifest names at
+least one `packing_*` limit; a manifest without the group leaves `packing`
+as `None`, so the approval, partial-group, and malformation refusals need a
+manifest that carries the group.
 Status: active
 Exercised: yes - `crates/daemon/tests/packing_serialize.rs`
 `packing_limits_join_the_manifest_as_one_approved_group`,

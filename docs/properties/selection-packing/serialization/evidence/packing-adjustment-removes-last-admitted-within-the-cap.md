@@ -25,6 +25,15 @@ fixed the pass unit as a group and the order as last-admitted first.
   `PreparationRefusal::Accounting`, so `finalize` never sees one; the test
   `an_accounting_overflow_is_refused_by_the_optional_phase_before_any_measurement`
   drives both phases from one `AccountingBounds` and observes that refusal.
+- A rebuild cannot re-enter an accounting bound the admission passed because
+  the profile charges each fragment independently of what follows it: every
+  fragment starts with `<` and ends with `\n`, which the exact tokenizer's
+  pre-tokenizer splits on, and `AccountingProfile::heuristic` documents the
+  same requirement for an estimator. The test
+  `the_exact_tokenizer_charges_fragments_independently_so_a_rebuild_drops_only_the_removed_cost`
+  checks that the exact count of the closed render equals the sum of its
+  per-entry counts and that the repaired total is the full total less the
+  removed group's cost.
 - `crates/daemon/tests/packing_serialize.rs` checks the removed group's
   partition index, compares the repaired body and ledger with a fresh admission
   of the remaining groups, checks the total dropped by the removed group's

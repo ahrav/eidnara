@@ -253,8 +253,12 @@ fn rebuild(base: &Ledger, admitted: &[CostedGroup]) -> Ledger {
     ledger
 }
 
-/// `prepare_optional` rejects closed renders that exceed accounting bounds;
-/// rebuilds can only shorten a render, so no accounting bound is re-checked here.
+/// `prepare_optional` rejects closed renders that exceed accounting bounds.
+/// No accounting bound is re-checked here: a rebuilt ledger is the admitted
+/// ledger minus the removed groups' entries, and the profile charges each
+/// fragment independently of what follows it (see
+/// [`AccountingProfile::heuristic`](super::AccountingProfile::heuristic)), so
+/// a rebuild's total is the admitted total less the removed groups' costs.
 pub fn finalize(
     admission: OptionalAdmission,
     bounds: &SerializationBounds,
