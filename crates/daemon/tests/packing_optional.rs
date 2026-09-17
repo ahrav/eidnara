@@ -411,6 +411,49 @@ fn a_close_priced_above_its_reserve_after_admission_refuses_the_optional_phase()
     }
 }
 
+/// The close is priced after the last deadline poll of the scan; a budget
+/// that ends inside that pricing still refuses the phase.
+#[test]
+fn a_budget_that_ends_while_the_close_is_priced_refuses_the_optional_phase() {
+    let a = tool_span("opt-a", "1", "aaaa");
+    let fixture = Fixture::new(&[REQUIRED, a]);
+    let budget = EvalBudget::unbounded();
+    let cancelling = budget.clone();
+    let profile = AccountingProfile::heuristic("cancels-at-close", "cancels", 0, move |text| {
+        if text.ends_with(&format!("</group>\n{BLOCK_CLOSE_FRAGMENT}")) {
+            cancelling.cancel();
+        }
+        text.len()
+    });
+    let mut trace = PackingTrace::default();
+    let inputs = RequiredInputs {
+        kernel: &fixture.kernel,
+        project: &fixture.project,
+        destination: kernel::ArtifactDestination::Local,
+        budget: &budget,
+        profile: &profile,
+    };
+    let required = prepare_required(
+        &fixture.store,
+        inputs,
+        &[REQUIRED.request()],
+        &bounds(1 << 20),
+        &accounting_bounds(),
+        &mut trace,
+    )
+    .unwrap();
+    let result = prepare_optional(
+        &fixture.store,
+        inputs,
+        &required,
+        &[optional(&a)],
+        &wide(),
+        &accounting_bounds(),
+        &mut trace,
+    );
+    assert_eq!(result.unwrap_err(), PreparationRefusal::Deadline);
+}
+
 #[test]
 fn optional_faults_are_excluded_with_a_reason_and_never_refuse_the_preparation() {
     let live = tool_span("opt-live", "1", "live");

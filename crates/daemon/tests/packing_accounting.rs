@@ -57,8 +57,15 @@ fn every_charge_equals_the_whole_render_delta_and_every_byte_is_charged() {
         TestRng::from_seed(RngAlgorithm::ChaCha, &SEED),
     );
     let windowed_cases = std::cell::Cell::new(0usize);
+    let escaped_cases = std::cell::Cell::new(0usize);
     runner
         .run(&fragments, |fragments| {
+            if fragments
+                .iter()
+                .any(|fragment| fragment.contains(['<', '>', '&', '"', '\'']))
+            {
+                escaped_cases.set(escaped_cases.get() + 1);
+            }
             for profile in profiles() {
                 let mut ledger = Ledger::open(profile.clone());
                 let mut expected_total = profile
@@ -115,6 +122,10 @@ fn every_charge_equals_the_whole_render_delta_and_every_byte_is_charged() {
     assert!(
         windowed_cases.get() > 0,
         "some renders must exceed the lookback so the anchored path is exercised"
+    );
+    assert!(
+        escaped_cases.get() > 0,
+        "some fragments must carry XML-significant bytes so escaping is charged"
     );
 }
 

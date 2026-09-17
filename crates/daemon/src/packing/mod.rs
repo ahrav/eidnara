@@ -692,6 +692,7 @@ pub fn prepare_optional(
         return Err(PreparationRefusal::OptionalCostOverflow { at });
     }
     let close = ledger.close().with_headroom();
+    deadline(&inputs)?;
     let Some(remaining) = scan
         .remaining
         .checked_add(close_reserve)
