@@ -985,7 +985,7 @@ impl MemoryStore {
         )
     }
 
-    /// Expires reserved or ready jobs and frozen selections at their deadlines. In-progress receipts block job expiry until their run deadline passes; expired receipts become `unknown` when they have an unterminated attempt, otherwise `expired`. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts.
+    /// Expires reserved or ready jobs and frozen selections at their deadlines. In-progress receipts block job expiry until their run deadline passes; expired receipts become `unknown` when they have an unterminated attempt, otherwise `expired`. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts, and the live claim of any terminal job is fenced `expired`, so a worker that keeps renewing cannot hold a ledger slot for a job that no longer exists.
     pub fn expire_curator_work(&self, now_ms: i64) -> Result<(usize, usize), CuratorJobError> {
         // The sweep carries no caller text, so it records no scan and needs no owner scope.
         let write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
@@ -1029,6 +1029,21 @@ impl MemoryStore {
                     "UPDATE curator_frozen_selections SET state = 'expired', updated_at_ms = ?1
                       WHERE state = 'frozen' AND selection_deadline_ms <= ?1",
                     [now_ms],
+                )?;
+                // Renewal checks the claim, not the job, so a claim on a terminal job would otherwise live as long as its worker heartbeats.
+                coordinated.tx().execute(
+                    "UPDATE note_eval_claims
+                        SET terminal_kind = 'expired', terminal_response = ?2, terminal_at_ms = ?1
+                      WHERE task_kind = ?3 AND terminal_kind IS NULL
+                        AND EXISTS(SELECT 1 FROM curator_jobs j
+                                    WHERE j.project = note_eval_claims.project
+                                      AND j.rowid = note_eval_claims.note_id
+                                      AND j.state = 'terminal')",
+                    params![
+                        now_ms,
+                        crate::task_lease::kind_response("expired"),
+                        crate::curator_ledger::CURATOR_REVIEW_TASK.task_kind
+                    ],
                 )?;
                 Ok(if jobs + pages == 0 {
                     WriteDisposition::Replay((0, 0))

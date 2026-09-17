@@ -529,6 +529,13 @@ BEFORE UPDATE OF run_deadline_ms, execution_cutoff_ms, created_at_ms, database_i
 ON curator_receipts
 BEGIN SELECT RAISE(ABORT, 'curator receipt deadlines and incarnations are written once'); END;
 
+-- The selected candidate is caller text a completion writes once: a detected secret
+-- refuses the completion instead of being redacted, as every other Curator identity is.
+CREATE TRIGGER curator_receipts_reject_secret_update BEFORE UPDATE OF selected_candidate_id ON curator_receipts
+BEGIN
+    SELECT reject_transaction_text(COALESCE(NEW.selected_candidate_id, ''));
+END;
+
 CREATE TRIGGER curator_attempts_no_delete BEFORE DELETE ON curator_attempts
 BEGIN SELECT RAISE(ABORT, 'a committed curator attempt stays consumed'); END;
 

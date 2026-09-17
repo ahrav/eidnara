@@ -6,16 +6,17 @@
 //!
 //! [`MemoryStore::dispatch_curator_attempt`] is the disclosure ordering point: the marker commits, then live time, cancellation, and the claim are rechecked and one synchronous handoff consumes the prepared request while this store still owns its connection. Commit failure hands nothing off; a recheck failure after commit leaves a charged marker and sends nothing. Both stores are released before any network await, and the Kernel guard is taken before this store by the caller.
 
+use context_core::canonical_json::is_lower_hex;
 use rusqlite::{OptionalExtension, params};
 use storage::{GuardedConn, HandoffOutcome};
 
 use crate::curator_jobs::{
-    CuratorJobOutcome, CuratorJobRefusal, CuratorJobState, curator_write, finish_curator_job_in_tx,
-    load_curator_job, refusal_of as job_refusal_of, store_incarnation_in_tx,
+    CuratorJobOutcome, CuratorJobState, curator_write, finish_curator_job_in_tx, load_curator_job,
+    store_incarnation_in_tx,
 };
 use crate::task_lease::{
     LeaseAcquireOutcome, LeaseCompleteOutcome, LeaseCompletion, LeaseSelected, TaskLeaseKind,
-    module_authority_tx,
+    module_authority_tx, redaction_error,
 };
 use crate::{
     MemoryStore, MemoryStoreError, NOTE_EVAL_NO_WORK_RETENTION_MS, NOTE_EVAL_RESPONSE_REDACT_MS,
@@ -424,7 +425,7 @@ pub fn begin_curator_receipt_in_tx(
         .ok_or_else(|| refuse(CuratorLedgerRefusal::Missing))
 }
 
-/// Adopts an in-progress receipt at `predecessor_generation` under the next generation with a new live claim. Deadlines are not in the update, so they are inherited unchanged; a takeover at or past the cutoff succeeds but can start no attempt.
+/// Adopts an in-progress receipt at `predecessor_generation` under the next generation with a new live claim. Deadlines are not in the update, so they are inherited unchanged; a takeover at or past the cutoff succeeds but can start no attempt. The receipt's bound authority generation must still be current: a claim acquired after the `memories` authority moved cannot adopt a receipt begun under the old one, so no completion publishes across that change.
 pub fn take_over_curator_receipt_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -436,6 +437,13 @@ pub fn take_over_curator_receipt_in_tx(
     let predecessor = generation_param(predecessor_generation).map_err(refuse)?;
     if !claim_is_live(conn, project, causal_identity, claim_id, now_ms)? {
         return Err(refuse(CuratorLedgerRefusal::ClaimInvalid));
+    }
+    let receipt = load_receipt(conn, project, causal_identity)?
+        .ok_or_else(|| refuse(CuratorLedgerRefusal::Missing))?;
+    if module_authority_tx(conn, &CURATOR_REVIEW_TASK, project)?.map(|(generation, _)| generation)
+        != i64::try_from(receipt.authority_generation).ok()
+    {
+        return Err(refuse(CuratorLedgerRefusal::AuthorityChanged));
     }
     let changed = conn.execute(
         "UPDATE curator_receipts
@@ -463,8 +471,8 @@ pub fn commit_curator_attempt_in_tx(
     now_ms: i64,
 ) -> rusqlite::Result<CuratorAttempt> {
     let generation = generation_param(generation).map_err(refuse)?;
-    if marker.body_digest.len() != 64
-        || marker.policy_union_digest.len() != 64
+    if !is_lower_hex(&marker.body_digest, 64)
+        || !is_lower_hex(&marker.policy_union_digest, 64)
         || marker.request_bytes == 0
         || marker.request_bytes > CURATOR_MAX_REQUEST_BYTES
         || marker.provider.is_empty()
@@ -561,9 +569,35 @@ pub fn commit_curator_attempt_in_tx(
     })
 }
 
-/// Records the attempt's terminal under the claim that owns the receipt's current generation, so a predecessor cannot stamp an outcome on a successor's marker. `NotDispatched` is written only by [`MemoryStore::dispatch_curator_attempt`].
+/// Records a dispatched attempt's terminal under the claim that owns the receipt's current generation, so a predecessor cannot stamp an outcome on a successor's marker. `NotDispatched` is proof that no bytes were sent; only [`MemoryStore::dispatch_curator_attempt`] knows that, so it is refused here.
 #[allow(clippy::too_many_arguments)]
 pub fn finish_curator_attempt_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    causal_identity: &str,
+    generation: u64,
+    claim_id: &str,
+    attempt_index: u32,
+    terminal: CuratorAttemptTerminal,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    if terminal == CuratorAttemptTerminal::NotDispatched {
+        return Err(refuse(CuratorLedgerRefusal::InvalidRequest));
+    }
+    record_attempt_terminal_in_tx(
+        conn,
+        project,
+        causal_identity,
+        generation,
+        claim_id,
+        attempt_index,
+        terminal,
+        now_ms,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_attempt_terminal_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
     causal_identity: &str,
@@ -906,15 +940,19 @@ impl MemoryStore {
             }
         };
         let finished = self
-            .finish_curator_attempt(
-                project,
-                causal_identity,
-                generation,
-                claim_id,
-                attempt.attempt_index,
-                CuratorAttemptTerminal::NotDispatched,
-                now(),
-            )
+            .ledger_transaction(project, "finish-attempt", causal_identity, |conn| {
+                record_attempt_terminal_in_tx(
+                    conn,
+                    project,
+                    causal_identity,
+                    generation,
+                    claim_id,
+                    attempt.attempt_index,
+                    CuratorAttemptTerminal::NotDispatched,
+                    now(),
+                )
+                .map(WriteDisposition::Applied)
+            })
             .is_ok();
         Ok(DispatchOutcome::ChargedNotDispatched {
             attempt_index: attempt.attempt_index,
@@ -923,7 +961,7 @@ impl MemoryStore {
         })
     }
 
-    /// Records a dispatched attempt's terminal under the claim holding the current generation. `NotDispatched` is reserved for the dispatch path, which alone knows nothing was sent.
+    /// Records a dispatched attempt's terminal under the claim holding the current generation. `NotDispatched` is refused: the dispatch path alone knows nothing was sent.
     #[allow(clippy::too_many_arguments)]
     pub fn finish_curator_attempt(
         &self,
@@ -950,7 +988,7 @@ impl MemoryStore {
         })
     }
 
-    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` terminal selects exactly one Kernel result for that generation, and the job row records the matching outcome. A predecessor generation, a stale claim, or another incarnation writes nothing.
+    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` terminal selects exactly one Kernel result for that generation, and the job row records the matching outcome. A predecessor generation, a stale claim, another incarnation, or a job another owner already closed writes nothing. At or after the receipt's run deadline the terminal recorded is `expired`, whatever the worker reports: a renewed claim never extends the fixed run budget.
     #[allow(clippy::too_many_arguments)]
     pub fn complete_curator_receipt(
         &self,
@@ -968,7 +1006,7 @@ impl MemoryStore {
     ) -> Result<LeaseCompleteOutcome, MemoryStoreError> {
         if (terminal == CuratorReceiptTerminal::Complete) != selection.is_some()
             || selection.is_some_and(|selection| {
-                selection.payload_digest.len() != 64
+                !is_lower_hex(&selection.payload_digest, 64)
                     || selection.candidate_id.is_empty()
                     || selection.candidate_id.len() > 256
             })
@@ -978,17 +1016,22 @@ impl MemoryStore {
         let generation = generation_param(generation).map_err(|_| {
             MemoryStoreError::Serde("generation exceeds the storable range".to_string())
         })?;
-        // A caller holding another generation or another claim is fenced before the lease is touched, so a stale worker's completion ends nothing.
-        let fenced = self
+        // A caller holding another generation or another claim is fenced before the lease is touched, whether or not the receipt is already terminal, so a stale worker's completion ends nothing and a claim on another job cannot be spent here.
+        let Some(receipt) = self
             .lookup_curator_receipt(project, causal_identity)?
-            .is_none_or(|receipt| {
-                receipt.terminal.is_none()
-                    && (i64::try_from(receipt.generation).ok() != Some(generation)
-                        || receipt.claim_id != claim_id)
-            });
-        if fenced {
+            .filter(|receipt| {
+                i64::try_from(receipt.generation).ok() == Some(generation)
+                    && receipt.claim_id == claim_id
+            })
+        else {
             return Ok(LeaseCompleteOutcome::Conflict { kind: "fenced" });
-        }
+        };
+        // The run deadline is written once, so this read is authoritative for it.
+        let (terminal, selection) = if now_ms >= receipt.run_deadline_ms {
+            (CuratorReceiptTerminal::Expired, None)
+        } else {
+            (terminal, selection)
+        };
         self.complete_task_lease(
             &CURATOR_REVIEW_TASK,
             project,
@@ -998,6 +1041,16 @@ impl MemoryStore {
             slot,
             now_ms,
             |coordinated, _claim| {
+                // The candidate id is caller text the receipt keeps for the store incarnation; it is scanned like every other Curator identity, and the table trigger refuses it again.
+                let candidate_id = selection
+                    .map(|selection| {
+                        coordinated
+                            .prepared
+                            .borrow_mut()
+                            .transaction_identity("selected_candidate_id", &selection.candidate_id)
+                            .map_err(redaction_error)
+                    })
+                    .transpose()?;
                 let tx = coordinated.tx;
                 let changed = tx.execute(
                     "UPDATE curator_receipts
@@ -1007,7 +1060,10 @@ impl MemoryStore {
                         AND generation = ?3 AND claim_id = ?4
                         AND kernel_incarnation_id = ?10
                         AND database_incarnation_id = (SELECT database_incarnation_id
-                                                       FROM curator_store_identity WHERE id = 0)",
+                                                       FROM curator_store_identity WHERE id = 0)
+                        AND EXISTS(SELECT 1 FROM curator_jobs j
+                                    WHERE j.project = ?1 AND j.causal_identity = ?2
+                                      AND j.state <> 'terminal')",
                     params![
                         project,
                         causal_identity,
@@ -1015,24 +1071,17 @@ impl MemoryStore {
                         claim_id,
                         terminal.as_str(),
                         selection.map(|_| generation),
-                        selection.map(|selection| selection.candidate_id.as_str()),
+                        candidate_id,
                         selection.map(|selection| selection.payload_digest.as_str()),
                         now_ms,
                         kernel_incarnation_id,
                     ],
                 )?;
+                // A job already closed by another owner leaves this completion stale with the receipt untouched; the update above requires the job to be open, so the job finish below cannot find it terminal.
                 if changed == 0 {
                     return Ok(LeaseCompletion::Stale);
                 }
-                // A job already closed by another owner leaves this completion stale rather than failing the transaction.
-                if let Err(error) =
-                    finish_curator_job_in_tx(tx, project, causal_identity, terminal.job_outcome(), now_ms)
-                {
-                    if job_refusal_of(&error) == Some(CuratorJobRefusal::Terminal) {
-                        return Ok(LeaseCompletion::Stale);
-                    }
-                    return Err(error);
-                }
+                finish_curator_job_in_tx(tx, project, causal_identity, terminal.job_outcome(), now_ms)?;
                 Ok(LeaseCompletion::Applied {
                     response_json: format!("{{\"terminal\":\"{}\"}}", terminal.as_str()),
                 })

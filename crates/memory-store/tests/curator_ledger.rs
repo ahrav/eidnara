@@ -14,7 +14,7 @@ use memory_store::curator_ledger::{
     CuratorBeginOutcome, CuratorLedgerError, CuratorLedgerRefusal, CuratorReceiptTerminal,
     DispatchOutcome, ResultSelection,
 };
-use memory_store::{LeaseAcquireOutcome, LeaseCompleteOutcome, MemoryStore};
+use memory_store::{LeaseAcquireOutcome, LeaseCompleteOutcome, MemoryStore, MemoryStoreError};
 use storage::StorageDescriptor;
 
 const PROJECT: &str = "proj";
@@ -129,6 +129,52 @@ fn activate_memories(store: &MemoryStore) -> i64 {
         )
         .unwrap();
     i64::try_from(row.generation).unwrap()
+}
+
+/// Drains the `memories` authority and re-activates it at the next generation, fencing every live claim.
+fn rotate_memories_authority(store: &MemoryStore, now: i64) -> i64 {
+    let draining = store
+        .authority_begin_drain("ctx", PROJECT, "memories", "lease", now + 1_000_000, now)
+        .unwrap();
+    let token = draining
+        .coordinator_token
+        .clone()
+        .expect("coordinator token");
+    for step in [
+        "seed",
+        "memories",
+        "notes",
+        "history_segments",
+        "reconcile",
+        "verify",
+    ] {
+        store
+            .authority_drain_step(
+                "ctx",
+                PROJECT,
+                "memories",
+                draining.generation,
+                step,
+                Some(0),
+                &token,
+                now,
+            )
+            .unwrap();
+    }
+    store
+        .authority_finish_drain(
+            "ctx",
+            PROJECT,
+            "memories",
+            draining.generation,
+            "hash",
+            "hash",
+            true,
+            &token,
+            now,
+        )
+        .unwrap();
+    activate_memories(store)
 }
 
 fn subject(candidate: &str) -> ReviewTarget {
@@ -1224,7 +1270,24 @@ fn a_failure_after_the_marker_commits_is_a_charged_unsent_attempt_not_a_failed_c
         attempts[0].terminal, None,
         "and stays unknown until its owner finishes it"
     );
-    // The owning claim can still record the no-disclosure proof once the store recovers.
+    // Only the dispatch path may write the no-disclosure proof; the owning claim can still close the marker honestly as unknown once the store recovers.
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .finish_curator_attempt(
+                    PROJECT,
+                    &fixture.identity,
+                    1,
+                    &claim,
+                    0,
+                    CuratorAttemptTerminal::NotDispatched,
+                    T0 + 2,
+                )
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::InvalidRequest
+    );
     fixture
         .store
         .finish_curator_attempt(
@@ -1233,7 +1296,7 @@ fn a_failure_after_the_marker_commits_is_a_charged_unsent_attempt_not_a_failed_c
             1,
             &claim,
             0,
-            CuratorAttemptTerminal::NotDispatched,
+            CuratorAttemptTerminal::Unknown,
             T0 + 2,
         )
         .unwrap();
@@ -1324,4 +1387,388 @@ fn ledger_writes_bound_the_project_like_every_other_curator_write() {
             .unwrap_err(),
         CuratorLedgerError::Store(_)
     ));
+}
+
+const AWS_KEY: &str = "AKIAQ7RSTUVWXYZ23456";
+
+fn selection() -> ResultSelection {
+    ResultSelection {
+        candidate_id: "review-result:abc".to_string(),
+        payload_digest: "f".repeat(64),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete(
+    fixture: &Fixture,
+    identity: &str,
+    claim: &str,
+    completion_id: &str,
+    worker: &str,
+    generation: u64,
+    terminal: CuratorReceiptTerminal,
+    selection: Option<&ResultSelection>,
+    now: i64,
+) -> Result<LeaseCompleteOutcome, MemoryStoreError> {
+    fixture.store.complete_curator_receipt(
+        PROJECT,
+        identity,
+        claim,
+        completion_id,
+        worker,
+        0,
+        generation,
+        KERNEL,
+        terminal,
+        selection,
+        now,
+    )
+}
+
+fn receipt(fixture: &Fixture) -> memory_store::curator_ledger::CuratorReceipt {
+    fixture
+        .store
+        .lookup_curator_receipt(PROJECT, &fixture.identity)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn a_takeover_under_a_changed_authority_is_refused_and_cannot_publish() {
+    let mut fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    // The `memories` authority moves; the first claim is fenced and the job stays Ready.
+    fixture.registration = rotate_memories_authority(&fixture.store, T0 + 1);
+    let successor = fixture.claim("acq-2", "worker-b", T0 + 1).unwrap();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .take_over_curator_receipt(PROJECT, &fixture.identity, 1, &successor, T0 + 2)
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::AuthorityChanged
+    );
+    let r = receipt(&fixture);
+    assert_eq!((r.generation, r.claim_id.as_str()), (1, claim.as_str()));
+    assert_eq!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &successor,
+            "c-1",
+            "worker-b",
+            2,
+            CuratorReceiptTerminal::Complete,
+            Some(&selection()),
+            T0 + 3
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Conflict { kind: "fenced" }
+    );
+    assert!(receipt(&fixture).terminal.is_none());
+}
+
+#[test]
+fn a_completion_against_a_job_another_owner_closed_writes_nothing_to_the_receipt() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    fixture
+        .store
+        .finish_curator_job(
+            PROJECT,
+            &fixture.identity,
+            CuratorJobOutcome::Failed,
+            T0 + 1,
+        )
+        .unwrap();
+    assert_eq!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Complete,
+            Some(&selection()),
+            T0 + 2
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Conflict { kind: "stale" }
+    );
+    let r = receipt(&fixture);
+    assert_eq!((r.terminal, r.selected.clone()), (None, None), "{r:?}");
+}
+
+#[test]
+fn not_dispatched_is_written_only_by_the_dispatch_path() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let DispatchOutcome::Handed { attempt_index, .. } =
+        fixture.dispatch(1, &claim, T0 + 1).unwrap()
+    else {
+        panic!("first attempt hands off")
+    };
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .finish_curator_attempt(
+                    PROJECT,
+                    &fixture.identity,
+                    1,
+                    &claim,
+                    attempt_index,
+                    CuratorAttemptTerminal::NotDispatched,
+                    T0 + 2,
+                )
+                .unwrap_err()
+        ),
+        CuratorLedgerRefusal::InvalidRequest
+    );
+    let attempts = fixture
+        .store
+        .list_curator_attempts(PROJECT, &fixture.identity)
+        .unwrap();
+    assert_eq!(
+        attempts[0].terminal, None,
+        "a handed-off attempt keeps no false proof"
+    );
+}
+
+#[test]
+fn a_selected_candidate_carrying_a_secret_is_refused_at_the_receipt() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let leaked = ResultSelection {
+        candidate_id: format!("review-result:{AWS_KEY}"),
+        payload_digest: "f".repeat(64),
+    };
+    let error = complete(
+        &fixture,
+        &fixture.identity,
+        &claim,
+        "c-1",
+        "worker-a",
+        1,
+        CuratorReceiptTerminal::Complete,
+        Some(&leaked),
+        T0 + 1,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            MemoryStoreError::Redaction(
+                context_core::redaction::RedactionErrorKind::SecretDetected
+            )
+        ),
+        "{error:?}"
+    );
+    let r = receipt(&fixture);
+    assert_eq!((r.terminal, r.selected.clone()), (None, None), "{r:?}");
+}
+
+#[test]
+fn marker_and_selection_digests_must_be_lowercase_hex() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    for (body, policy) in [
+        ("z".repeat(64), "e".repeat(64)),
+        ("e".repeat(64), "Z".repeat(64)),
+    ] {
+        let mut bad = marker(1);
+        bad.body_digest = body;
+        bad.policy_union_digest = policy;
+        let error = fixture
+            .store
+            .dispatch_curator_attempt(
+                PROJECT,
+                &fixture.identity,
+                1,
+                &claim,
+                KERNEL,
+                &bad,
+                "prepared",
+                || T0 + 1,
+                |prepared| prepared,
+            )
+            .unwrap_err();
+        assert_eq!(refusal(error), CuratorLedgerRefusal::InvalidRequest);
+    }
+    assert_eq!(fixture.attempts(), 0);
+    let mut bad = selection();
+    bad.payload_digest = "g".repeat(64);
+    assert_eq!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Complete,
+            Some(&bad),
+            T0 + 2
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Conflict { kind: "invalid" }
+    );
+}
+
+#[test]
+fn a_completed_receipt_still_fences_a_claim_that_does_not_own_it() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    assert!(matches!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Complete,
+            Some(&selection()),
+            T0 + 1
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Applied { .. }
+    ));
+    // The same worker leases another job, then names the completed receipt with that claim.
+    let other = ready_job(&fixture.store, "cand-2");
+    let LeaseAcquireOutcome::Claim {
+        claim: other_claim, ..
+    } = fixture
+        .store
+        .acquire_curator_task(
+            PROJECT,
+            "acq-2",
+            "worker-a",
+            0,
+            fixture.registration,
+            &other,
+            T0 + 2,
+        )
+        .unwrap()
+    else {
+        panic!("the second job is leasable")
+    };
+    assert_eq!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &other_claim.claim_id,
+            "c-2",
+            "worker-a",
+            1,
+            CuratorReceiptTerminal::Failed,
+            None,
+            T0 + 3
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Conflict { kind: "fenced" }
+    );
+    assert!(
+        matches!(
+            fixture
+                .store
+                .renew_curator_task(
+                    PROJECT,
+                    &other_claim.claim_id,
+                    "worker-a",
+                    0,
+                    fixture.registration,
+                    T0 + 4
+                )
+                .unwrap(),
+            memory_store::NoteEvalRenewOutcome::Renewed { .. }
+        ),
+        "the unrelated live claim survives"
+    );
+}
+
+#[test]
+fn a_completion_at_or_after_the_run_deadline_records_expired_not_the_worker_result() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let CuratorBeginOutcome::Begun(r) = fixture.begin(&claim, T0) else {
+        panic!("first claim begins")
+    };
+    // A live worker renews between attempts, so its claim outlives the fixed run budget.
+    let mut now = T0;
+    while now + CURATOR_TASK_LEASE_MS <= r.run_deadline_ms {
+        now += CURATOR_TASK_LEASE_MS / 2;
+        assert!(matches!(
+            fixture
+                .store
+                .renew_curator_task(PROJECT, &claim, "worker-a", 0, fixture.registration, now)
+                .unwrap(),
+            memory_store::NoteEvalRenewOutcome::Renewed { .. }
+        ));
+    }
+    let outcome = complete(
+        &fixture,
+        &fixture.identity,
+        &claim,
+        "c-1",
+        "worker-a",
+        1,
+        CuratorReceiptTerminal::Complete,
+        Some(&selection()),
+        r.run_deadline_ms,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome,
+        LeaseCompleteOutcome::Applied {
+            response_json: "{\"terminal\":\"expired\"}".to_string()
+        }
+    );
+    let r = receipt(&fixture);
+    assert_eq!(
+        (r.terminal, r.selected),
+        (Some(CuratorReceiptTerminal::Expired), None)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .lookup_curator_job(PROJECT, &fixture.identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+    );
+}
+
+#[test]
+fn the_sweep_fences_the_live_claim_of_a_job_it_expires() {
+    let fixture = Fixture::open();
+    let late = T0 + CURATOR_QUEUE_LIFETIME_MS - 1;
+    let claim = fixture.claim("acq-1", "worker-a", late).unwrap();
+    assert_eq!(fixture.store.expire_curator_work(late + 1).unwrap(), (1, 0));
+    assert_eq!(
+        fixture
+            .store
+            .renew_curator_task(
+                PROJECT,
+                &claim,
+                "worker-a",
+                0,
+                fixture.registration,
+                late + 2
+            )
+            .unwrap(),
+        memory_store::NoteEvalRenewOutcome::TerminalReplay {
+            kind: "expired".to_string(),
+            response: Some("{\"result\":\"expired\"}".to_string())
+        }
+    );
 }
