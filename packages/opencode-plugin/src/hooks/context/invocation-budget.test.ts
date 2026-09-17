@@ -5,12 +5,9 @@ import {
     installTokenizerForTest,
     resetTokenEstimatorForTest,
 } from "../../shared/token-estimator";
-import {
-    chargeInvocation,
-    HARNESS_PROFILE_IDENTITY,
-    harnessProfile,
-    validateInvocation,
-} from "./invocation-budget";
+import { chargeInvocation, harnessProfile, validateInvocation } from "./invocation-budget";
+
+const BUDGET = { headroomPermille: 250, profile: "opencode-heuristic" } as const;
 
 afterEach(() => {
     resetTokenEstimatorForTest();
@@ -19,15 +16,15 @@ afterEach(() => {
 describe("invocation budget", () => {
     it("charges every entry with headroom and labels the count heuristic under the estimator generation", () => {
         const lengths = [40, 120, 7];
-        const charge = chargeInvocation(lengths, 250);
+        const charge = chargeInvocation(lengths, BUDGET);
         expect(charge.entries).toBe(3);
         expect(charge.bytes).toBe(167);
         expect(charge.estimatedTokens).toBe(Math.ceil(167 / HEURISTIC_CHARS_PER_TOKEN));
         expect(charge.chargedTokens).toBe(Math.ceil((charge.estimatedTokens * 1250) / 1000));
-        expect(charge.profile.identity).toBe(HARNESS_PROFILE_IDENTITY);
+        expect(charge.profile.identity).toBe("opencode-heuristic");
         expect(charge.profile.authority).toBe("heuristic");
-        expect(charge.profile.revision).toBe(harnessProfile().revision);
-        expect(chargeInvocation([lengths[2]!], 250).chargedTokens).toBeLessThan(
+        expect(charge.profile.revision).toBe(harnessProfile("opencode-heuristic").revision);
+        expect(chargeInvocation([lengths[2]!], BUDGET).chargedTokens).toBeLessThan(
             charge.chargedTokens,
         );
     });
@@ -35,13 +32,13 @@ describe("invocation budget", () => {
     it("admits at the limit, refuses one below it when the surface grows, and never refuses a shrinking surface", () => {
         const candidate = [40, 120, 7];
         const incoming = [40, 120];
-        const charged = chargeInvocation(candidate, 250).chargedTokens;
+        const charged = chargeInvocation(candidate, BUDGET).chargedTokens;
         expect(
-            validateInvocation(candidate, incoming, { maxTokens: charged, headroomPermille: 250 }),
+            validateInvocation(candidate, incoming, { ...BUDGET, maxTokens: charged }),
         ).toMatchObject({ ok: true, reason: "fits" });
         const over = validateInvocation(candidate, incoming, {
+            ...BUDGET,
             maxTokens: charged - 1,
-            headroomPermille: 250,
         });
         expect(over.ok).toBe(false);
         if (!over.ok) {
@@ -49,31 +46,35 @@ describe("invocation budget", () => {
             expect(over.incoming.bytes).toBe(160);
             expect(over.candidate.bytes).toBe(167);
         }
-        expect(
-            validateInvocation(incoming, candidate, { maxTokens: 1, headroomPermille: 250 }),
-        ).toMatchObject({ ok: true, reason: "shrinks" });
-        expect(
-            validateInvocation(candidate, candidate, { maxTokens: 1, headroomPermille: 250 }),
-        ).toMatchObject({ ok: true, reason: "shrinks" });
+        expect(validateInvocation(incoming, candidate, { ...BUDGET, maxTokens: 1 })).toMatchObject({
+            ok: true,
+            reason: "shrinks",
+        });
+        expect(validateInvocation(candidate, candidate, { ...BUDGET, maxTokens: 1 })).toMatchObject(
+            { ok: true, reason: "shrinks" },
+        );
     });
 
     it("gates nothing when the host has not reported a limit", () => {
         expect(
-            validateInvocation([1 << 20], [], { maxTokens: undefined, headroomPermille: 250 }),
+            validateInvocation([1 << 20], [], { ...BUDGET, maxTokens: undefined }),
         ).toMatchObject({ ok: true, reason: "limit_unknown" });
     });
 
     it("moves its revision with the estimator generation", () => {
-        const before = harnessProfile().revision;
+        const before = harnessProfile("pi-heuristic").revision;
         installTokenizerForTest(null);
-        expect(harnessProfile().revision).not.toBe(before);
-        expect(harnessProfile().authority).toBe("heuristic");
+        expect(harnessProfile("pi-heuristic").revision).not.toBe(before);
+        expect(harnessProfile("pi-heuristic")).toMatchObject({
+            identity: "pi-heuristic",
+            authority: "heuristic",
+        });
     });
 
     it("charges by the same heuristic the estimator falls back to", () => {
         installTokenizerForTest(null);
         for (const length of [1, 3, 4, 167, 4_096, 358_401]) {
-            expect(chargeInvocation([length], 0).estimatedTokens).toBe(
+            expect(chargeInvocation([length], BUDGET).estimatedTokens).toBe(
                 estimateTokens("x".repeat(length)),
             );
         }

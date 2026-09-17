@@ -104,8 +104,9 @@ export function isPackedEntry(value: unknown): value is PackedEntry {
     );
 }
 
-export interface EntryEdit {
-    entries: unknown[];
+/** The surface after an edit and the outcome literal the edit is. */
+export interface Edit<Surface> {
+    surface: Surface;
     outcome: Outcome;
 }
 
@@ -116,18 +117,18 @@ export function editEntries(
     sessionId: string,
     preparationId: string,
     body: string,
-): EntryEdit {
+): Edit<unknown[]> {
     const owned = entries.some(isPackedEntry);
     if (action === "append") {
-        if (body.length === 0 || owned) return { entries: [...entries], outcome: "keep" };
+        if (body.length === 0 || owned) return { surface: [...entries], outcome: "keep" };
         return {
-            entries: [...entries, packedEntry(sessionId, preparationId, body)],
+            surface: [...entries, packedEntry(sessionId, preparationId, body)],
             outcome: "append",
         };
     }
     const kept = entries.filter((entry) => !isPackedEntry(entry));
     if (body.length > 0) kept.push(packedEntry(sessionId, preparationId, body));
-    return { entries: kept, outcome: "applied_replacement" };
+    return { surface: kept, outcome: "applied_replacement" };
 }
 
 function packedEntry(sessionId: string, preparationId: string, body: string): PackedEntry {
@@ -164,13 +165,14 @@ export type ApplicationResult =
     | Refused
     | { kind: "failure"; reason: string };
 
-export interface ApplicationTarget {
+export interface ApplicationTarget<Surface> {
     route: RouteKey;
     context: WireContext;
-    entries: () => readonly unknown[];
     body: string;
+    /** Computes the edit against the surface as it is when the daemon has forwarded. */
+    edit: (action: PackedAction, preparationId: string, body: string) => Edit<Surface>;
     /** Returns the identity the host observed, or `undefined` when the acknowledgment was lost; a rejection is read the same way. */
-    publish: (edit: EntryEdit, forwardedIdentity: string) => Promise<string | undefined>;
+    publish: (edit: Edit<Surface>, forwardedIdentity: string) => Promise<string | undefined>;
     signal?: AbortSignal;
 }
 
@@ -181,6 +183,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 type PrepareAnswer =
     | { kind: "prepared"; preparationId: string; profile: AccountingBinding }
     | { kind: "failure"; reason: string };
+
+/** Adapters interpolate the id into host markup unescaped; only the `retrieval.prepare` minted alphabet is accepted. */
+const PREPARATION_ID = /^[0-9a-f]{16}-[0-9a-f]{64}$/;
 
 function parsePrepared(answer: unknown): PrepareAnswer {
     if (!isRecord(answer)) return { kind: "failure", reason: "malformed_prepare_answer" };
@@ -193,6 +198,7 @@ function parsePrepared(answer: unknown): PrepareAnswer {
     if (
         answer.kind === "prepared" &&
         typeof answer.preparation_id === "string" &&
+        PREPARATION_ID.test(answer.preparation_id) &&
         isAccountingBinding(answer.accounting_profile)
     ) {
         return {
@@ -238,7 +244,10 @@ export class ContextApplication {
         private readonly latch: CapabilityLatch,
     ) {}
 
-    async run(intent: PackedAction, target: ApplicationTarget): Promise<ApplicationResult> {
+    async run<Surface>(
+        intent: PackedAction,
+        target: ApplicationTarget<Surface>,
+    ): Promise<ApplicationResult> {
         let action = this.latch.chooseAction(intent, target.route);
         // Read once: the bytes the daemon authorizes are the bytes published.
         const body = target.body;
@@ -256,10 +265,10 @@ export class ContextApplication {
         }
     }
 
-    private async applyPrepared(
+    private async applyPrepared<Surface>(
         action: PackedAction,
         answer: unknown,
-        target: ApplicationTarget,
+        target: ApplicationTarget<Surface>,
         body: string,
     ): Promise<ApplicationResult> {
         const prepared = parsePrepared(answer);
@@ -284,13 +293,7 @@ export class ContextApplication {
         }
         const { forwardedIdentity } = applied;
 
-        const edit = editEntries(
-            target.entries(),
-            action,
-            target.route.sessionId,
-            preparationId,
-            body,
-        );
+        const edit = target.edit(action, preparationId, body);
         let appliedIdentity: string | undefined;
         try {
             appliedIdentity = await target.publish(edit, forwardedIdentity);
@@ -339,7 +342,7 @@ export class ContextApplication {
     }
 
     private call(
-        target: ApplicationTarget,
+        target: Pick<ApplicationTarget<never>, "route" | "signal">,
         method: RetrievalMethod,
         fields: Record<string, unknown>,
     ): Promise<unknown> {

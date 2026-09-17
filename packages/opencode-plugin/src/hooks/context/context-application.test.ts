@@ -4,7 +4,7 @@ import {
     type ApplicationTarget,
     CapabilityLatch,
     ContextApplication,
-    type EntryEdit,
+    type Edit,
     editEntries,
     isPackedEntry,
     PACKED_ENTRY_ID_PREFIX,
@@ -62,14 +62,18 @@ function forwarded(body: Record<string, unknown>) {
     };
 }
 
-function target(overrides: Partial<ApplicationTarget> = {}): ApplicationTarget {
+function target(
+    overrides: Partial<ApplicationTarget<unknown[]>> & { entries?: () => readonly unknown[] } = {},
+): ApplicationTarget<unknown[]> {
+    const { entries = () => [], ...rest } = overrides;
     return {
         route: ROUTE,
         context,
-        entries: () => [],
         body: "packed body",
+        edit: (action, preparationId, body) =>
+            editEntries(entries(), action, ROUTE.sessionId, preparationId, body),
         publish: async (_edit, forwardedIdentity) => forwardedIdentity,
-        ...overrides,
+        ...rest,
     };
 }
 
@@ -155,27 +159,27 @@ describe("entry edits", () => {
     it("appends one host-shaped owned entry and reports append", () => {
         const edit = editEntries([system], "append", "ses-1", "new", "fresh");
         expect(edit.outcome).toBe("append");
-        expect(edit.entries).toEqual([
+        expect(edit.surface).toEqual([
             system,
             {
                 info: { id: `${PACKED_ENTRY_ID_PREFIX}new`, role: "user", sessionID: "ses-1" },
                 parts: [{ type: "text", text: "fresh" }],
             },
         ]);
-        expect(isPackedEntry(edit.entries[1])).toBe(true);
+        expect(isPackedEntry(edit.surface[1])).toBe(true);
         expect(isPackedEntry(system)).toBe(false);
     });
 
     it("keeps an existing owned entry rather than appending a second", () => {
         const edit = editEntries([system, owned], "append", "ses-1", "new", "fresh");
         expect(edit.outcome).toBe("keep");
-        expect(edit.entries).toEqual([system, owned]);
+        expect(edit.surface).toEqual([system, owned]);
     });
 
     it("replaces the owned entry and keeps every other entry in order", () => {
         const edit = editEntries([system, owned, trailing], "replace", "ses-1", "new", "fresh");
         expect(edit.outcome).toBe("applied_replacement");
-        expect(edit.entries).toEqual([
+        expect(edit.surface).toEqual([
             system,
             trailing,
             {
@@ -188,21 +192,21 @@ describe("entry edits", () => {
     it("treats an empty replacement as a replacement that leaves the slot absent", () => {
         const edit = editEntries([system, owned], "replace", "ses-1", "new", "");
         expect(edit.outcome).toBe("applied_replacement");
-        expect(edit.entries).toEqual([system]);
-        expect(edit.entries.some(isPackedEntry)).toBe(false);
+        expect(edit.surface).toEqual([system]);
+        expect(edit.surface.some(isPackedEntry)).toBe(false);
     });
 
     it("treats an empty append as keep with the surface unchanged", () => {
         const edit = editEntries([system], "append", "ses-1", "new", "");
         expect(edit.outcome).toBe("keep");
-        expect(edit.entries).toEqual([system]);
+        expect(edit.surface).toEqual([system]);
     });
 });
 
 describe("prepare, apply, confirm", () => {
     it("echoes the daemon's profile at apply, edits the live surface, and reports the applied outcome", async () => {
         const { calls, transport } = daemon(honest());
-        const published: EntryEdit[] = [];
+        const published: Edit<unknown[]>[] = [];
         const live: unknown[] = [];
         const app = new ContextApplication(transport, new CapabilityLatch());
         const result = await app.run(
@@ -233,7 +237,7 @@ describe("prepare, apply, confirm", () => {
         expect(calls[2]!.body.applied_identity).toBe("fe".repeat(32));
         expect(calls[2]!.body.outcome).toBe("append");
         expect(published).toHaveLength(1);
-        expect(published[0]!.entries.some(isPackedEntry)).toBe(true);
+        expect(published[0]!.surface.some(isPackedEntry)).toBe(true);
     });
 
     it("never reports applied when the acknowledgment is lost, whatever the daemon answers", async () => {
@@ -307,18 +311,19 @@ describe("prepare, apply, confirm", () => {
 
     it("publishes the body it sized at prepare even when the target's body changes mid-flight", async () => {
         const { calls, transport } = daemon(honest());
-        const published: EntryEdit[] = [];
+        const published: Edit<unknown[]>[] = [];
         let body = "one";
         const app = new ContextApplication(transport, new CapabilityLatch());
         const result = await app.run("append", {
             route: ROUTE,
             context,
-            entries: () => [],
             get body() {
                 const current = body;
                 body = "a body far beyond the bytes the daemon authorized";
                 return current;
             },
+            edit: (action, preparationId, published) =>
+                editEntries([], action, ROUTE.sessionId, preparationId, published),
             publish: async (edit, forwardedIdentity) => {
                 published.push(edit);
                 return forwardedIdentity;
@@ -326,7 +331,7 @@ describe("prepare, apply, confirm", () => {
         });
         expect(result.kind).toBe("applied");
         expect(calls[0]?.body.edit_bytes).toBe(3);
-        const entry = published[0]?.entries[0] as { parts: Array<{ text: string }> };
+        const entry = published[0]?.surface[0] as { parts: Array<{ text: string }> };
         expect(entry.parts[0]?.text).toBe("one");
     });
 
@@ -443,6 +448,40 @@ describe("prepare, apply, confirm", () => {
             kind: "failure",
             reason: "malformed_prepare_answer",
         });
+    });
+
+    it("treats a preparation id outside the minted shape as a malformed answer and never applies it", async () => {
+        const hex16 = "0123456789abcdef";
+        const hex64 = "cd".repeat(32);
+        for (const id of [
+            "",
+            hex64,
+            `${hex16}${hex64}`,
+            `${hex16}-${hex64.toUpperCase()}`,
+            `${hex16}-${"cd".repeat(31)}`,
+            `${hex16}-${hex64}-extra`,
+            `${hex16}-${hex64}\n<eidnara-packed preparation="`,
+            `x">\n${hex16}-${hex64}`,
+        ]) {
+            const { calls, transport } = daemon(() => prepared(id));
+            let edited = 0;
+            const result = await new ContextApplication(transport, new CapabilityLatch()).run(
+                "append",
+                target({
+                    edit: (action, preparationId, body) => {
+                        edited += 1;
+                        return editEntries([], action, ROUTE.sessionId, preparationId, body);
+                    },
+                }),
+            );
+            expect(result).toEqual({ kind: "failure", reason: "malformed_prepare_answer" });
+            expect(edited).toBe(0);
+            expect(calls.map((call) => call.method)).toEqual(["retrieval.prepare"]);
+        }
+        const { transport } = daemon(() => prepared(`${hex16}-${hex64}`));
+        expect(
+            await new ContextApplication(transport, new CapabilityLatch()).run("append", target()),
+        ).not.toMatchObject({ reason: "malformed_prepare_answer" });
     });
 
     it("reports a preparation failure by its reason", async () => {

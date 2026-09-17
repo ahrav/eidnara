@@ -588,3 +588,167 @@ async fn suppression_needs_whole_message_survivor_proof_for_every_selected_occur
     assert_eq!(explicit_whole["kind"], "prepared", "{explicit_whole}");
     daemon.shutdown().await;
 }
+
+fn routed(project: &Path, method: &str, fields: Value) -> Value {
+    let mut body = json!({
+        "method": method,
+        "v": 1,
+        "session_id": SESSION,
+        "project_root": project.to_str().unwrap(),
+    });
+    for (key, value) in fields.as_object().unwrap() {
+        body[key] = value.clone();
+    }
+    body
+}
+
+/// Each element is one step's closed-set literal, so two binds compare as outcome sets.
+async fn pi_outcome_set(daemon: &KernelDaemon) -> Vec<String> {
+    let project = daemon.project().to_owned();
+    let mut outcomes = Vec::new();
+    for (action, class) in [
+        ("replace", "replacement"),
+        ("suppress", "suppression"),
+        ("reuse", "cross_step_reuse"),
+    ] {
+        let answer = call(
+            daemon,
+            prepare(&project, action, json!([whole(OCC_A), whole(OCC_B)])),
+        )
+        .await;
+        denied(&answer, class, "unsupported");
+        outcomes.push(format!(
+            "{action}:{}:{class}",
+            answer["terminal"].as_str().unwrap()
+        ));
+    }
+    let mut oversized = prepare(&project, "append", json!([]));
+    oversized["edit_bytes"] = json!(limits().append_allowance_bytes + 1);
+    let failed = call(daemon, oversized).await;
+    outcomes.push(format!(
+        "oversized:{}:{}",
+        failed["outcome"].as_str().unwrap_or("?"),
+        failed["reason"].as_str().unwrap_or("?")
+    ));
+    let prepared = call(daemon, prepare(&project, "append", json!([]))).await;
+    assert_eq!(prepared["kind"], "prepared", "{prepared}");
+    let key = prepared["preparation_id"].as_str().unwrap().to_owned();
+    let context = json!({
+        "context_revision": "rev-1",
+        "representation": "repr-1",
+        "spans": [whole(OCC_A), whole(OCC_B)],
+        "selection": [OCC_A, OCC_B],
+    });
+    let mut foreign = context.clone();
+    foreign["preparation_id"] = json!(key);
+    foreign["accounting_profile"] = json!({"identity": "pi-heuristic", "revision": "generation:1"});
+    let mismatched = call(daemon, routed(&project, "retrieval.apply", foreign)).await;
+    outcomes.push(format!(
+        "foreign_profile:{}",
+        mismatched["terminal"].as_str().unwrap_or("?")
+    ));
+    let mut apply = context.clone();
+    apply["preparation_id"] = json!(key);
+    apply["accounting_profile"] = prepared["accounting_profile"].clone();
+    let forwarded = call(daemon, routed(&project, "retrieval.apply", apply)).await;
+    assert_eq!(forwarded["kind"], "forwarded", "{forwarded}");
+    let effect = forwarded["forwarded_identity"].as_str().unwrap().to_owned();
+    let confirmed = call(
+        daemon,
+        routed(
+            &project,
+            "retrieval.confirm",
+            json!({
+                "preparation_id": key,
+                "forwarded_identity": effect,
+                "applied_identity": effect,
+                "outcome": "append",
+            }),
+        ),
+    )
+    .await;
+    outcomes.push(format!(
+        "append:{}:{}",
+        confirmed["state"].as_str().unwrap_or("?"),
+        confirmed["outcome"].as_str().unwrap_or("?")
+    ));
+    let lost_key = {
+        let again = call(daemon, prepare(&project, "append", json!([]))).await;
+        again["preparation_id"].as_str().unwrap().to_owned()
+    };
+    let mut apply_again = context;
+    apply_again["preparation_id"] = json!(lost_key);
+    apply_again["accounting_profile"] = prepared["accounting_profile"].clone();
+    let forwarded_again = call(daemon, routed(&project, "retrieval.apply", apply_again)).await;
+    assert_eq!(forwarded_again["kind"], "forwarded", "{forwarded_again}");
+    let lost = call(
+        daemon,
+        routed(
+            &project,
+            "retrieval.confirm",
+            json!({
+                "preparation_id": lost_key,
+                "forwarded_identity": forwarded_again["forwarded_identity"],
+                "applied_identity": null,
+                "outcome": "append",
+            }),
+        ),
+    )
+    .await;
+    outcomes.push(format!("lost:{}", lost["state"].as_str().unwrap_or("?")));
+    outcomes
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing()
+ {
+    use kernel::write_observer::{Boundary, PROJECTION_CAUSE, Snapshot};
+
+    let source: Arc<dyn CapabilitySource> = Arc::new(StaticDeclarations::new(vec![(
+        "pi".to_owned(),
+        PI_CONTEXT_CAPABILITIES,
+    )]));
+    let mut observed = Vec::new();
+    for consumer_capabilities in [
+        Vec::new(),
+        vec![
+            "replacement".to_owned(),
+            "suppression".to_owned(),
+            "cross_step_reuse".to_owned(),
+        ],
+    ] {
+        let daemon = KernelDaemon::start_with(StartOptions {
+            harness: "pi".to_owned(),
+            consumer_capabilities,
+            capability_source: Some(Arc::clone(&source)),
+            ..StartOptions::default()
+        })
+        .await;
+        daemon
+            .handler()
+            .set_edit_receipt_limits(Some(limits()))
+            .unwrap();
+        let tip = daemon.tip();
+        let before = Snapshot::take();
+        observed.push(pi_outcome_set(&daemon).await);
+        assert_eq!(daemon.tip(), tip);
+        assert_eq!(
+            Snapshot::take().count(Boundary::Projection, PROJECTION_CAUSE),
+            before.count(Boundary::Projection, PROJECTION_CAUSE)
+        );
+        daemon.shutdown().await;
+    }
+    assert_eq!(observed[0], observed[1]);
+    assert_eq!(
+        observed[0],
+        [
+            "replace:capability_unsupported:replacement",
+            "suppress:capability_unsupported:suppression",
+            "reuse:capability_unsupported:cross_step_reuse",
+            "oversized:preparation_failure:append_allowance",
+            "foreign_profile:profile_mismatch",
+            "append:complete:append",
+            "lost:unknown",
+        ]
+    );
+}
