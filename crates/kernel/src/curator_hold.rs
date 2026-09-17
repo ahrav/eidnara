@@ -13,7 +13,9 @@ use super::backup::release_capture_pin_in_tx;
 use super::cas::ArtifactHandle;
 use super::envelope::{Sensitivity, check_fence};
 use super::redaction::identity;
-use super::review_staging::{REVIEW_PROPOSAL_KIND, check_digest, provisional_result_identity};
+use super::review_staging::{
+    REVIEW_PROPOSAL_KIND, ReviewPayload, check_digest, provisional_result_identity,
+};
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
 pub const CURATOR_EXECUTION_HOLD_KIND: &str = "curator_execution";
@@ -285,9 +287,9 @@ impl KernelStore {
         {
             return admit_totals(&tx, &review_hold_id, CuratorHoldKind::Review, expires_at);
         }
-        let result_created_at: i64 = tx
+        let (result_created_at, payload): (i64, Vec<u8>) = tx
             .query_row_cached(
-                "SELECT c.created_at FROM candidates c JOIN extraction_runs r USING(extraction_run_id)
+                "SELECT c.created_at,c.payload FROM candidates c JOIN extraction_runs r USING(extraction_run_id)
                  WHERE c.candidate_id=?1 AND c.extraction_run_id=?3 AND c.candidate_kind=?4
                    AND c.terminal_state='completed' AND r.terminal_state='completed'
                    AND c.lease_expires_at>?2 AND r.lease_expires_at>?2
@@ -299,7 +301,7 @@ impl KernelStore {
                     REVIEW_PROPOSAL_KIND,
                     review_expires_at
                 ],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(sqlite)?
@@ -317,6 +319,17 @@ impl KernelStore {
             execution,
             now,
         )?;
+        // The review hold must cover what the proposal discloses; `disclosed_inputs` is the superset of every cited and uncited reference.
+        let ReviewPayload::Proposal(proposal) =
+            ReviewPayload::decode(&payload).map_err(|_| CuratorHoldRefusal::InvalidRequest)?
+        else {
+            return Err(CuratorHoldRefusal::InvalidRequest.into());
+        };
+        for reference in &proposal.policy_dependencies.disclosed_inputs {
+            if !is_covered(&tx, &execution_hold_id, &reference.evidence_id)? {
+                return Err(CuratorHoldRefusal::NotCovered.into());
+            }
+        }
         let review_hold_id = insert_pin(
             &tx,
             CuratorHoldKind::Review,
@@ -430,15 +443,7 @@ impl KernelStore {
         for evidence_id in evidence_ids {
             let evidence_id =
                 identity(evidence_id).map_err(|_| CuratorHoldRefusal::InvalidRequest)?;
-            let covered: bool = tx
-                .query_row_cached(
-                    "SELECT EXISTS(SELECT 1 FROM capture_pin_refs
-                     WHERE capture_pin_id=?1 AND evidence_id=?2 AND released_at IS NULL)",
-                    params![hold_id, evidence_id],
-                    |row| row.get(0),
-                )
-                .map_err(sqlite)?;
-            if !covered {
+            if !is_covered(&tx, &hold_id, &evidence_id)? {
                 return Err(CuratorHoldRefusal::NotCovered.into());
             }
             facts.push(load_live_evidence(&tx, &evidence_id)?);
@@ -468,16 +473,35 @@ impl KernelStore {
         if expires_at <= now {
             return Err(CuratorHoldRefusal::InvalidRequest.into());
         }
-        // Once this generation's proposal is under its review hold, its execution phase is over: a late acquisition retry must not open a replacement execution hold beside it.
+        // A transferred generation's execution phase is over for good: its proposal is terminal, so no acquisition retry may open a replacement execution hold, whether the review hold is still live or already gone.
         let review = CuratorHoldBinding {
             subject: provisional_result_identity(&binding.subject, binding.generation).candidate_id,
             ..binding.clone()
         };
-        if live_hold_of(&tx, CuratorHoldKind::Review, &review, now)?.is_some() {
+        let transferred: bool = tx
+            .query_row_cached(
+                "SELECT EXISTS(SELECT 1 FROM capture_pins WHERE pin_kind=?1 AND owner_id=?2)",
+                params![CURATOR_REVIEW_HOLD_KIND, review.owner_id()],
+                |row| row.get(0),
+            )
+            .map_err(sqlite)?;
+        if transferred {
             return Err(CuratorHoldRefusal::InvalidRequest.into());
         }
-        let facts = precharge(&tx, binding, evidence_ids, quota)?;
-        let (hold_id, expires_at) = match live_hold_of(&tx, kind, binding, now)? {
+        // A retry recovers the committed hold first, so ids it already covers are not revalidated: one of them may have been invalidated since, and the hold still protects its bytes.
+        let existing = live_hold_of(&tx, kind, binding, now)?;
+        let mut fresh = Vec::with_capacity(evidence_ids.len());
+        for evidence_id in evidence_ids {
+            let covered = match &existing {
+                Some((hold_id, _)) => is_covered(&tx, hold_id, evidence_id)?,
+                None => false,
+            };
+            if !covered {
+                fresh.push(evidence_id.clone());
+            }
+        }
+        let facts = precharge(&tx, binding, &fresh, quota)?;
+        let (hold_id, expires_at) = match existing {
             Some(existing) => existing,
             None => (
                 insert_pin(&tx, kind, binding, expires_at, self.lease_epoch(), None)?,
@@ -526,6 +550,21 @@ impl KernelStore {
         }
         Ok(())
     }
+}
+
+/// Whether `hold_id` carries an unreleased reference to `evidence_id`.
+fn is_covered(
+    tx: &Transaction<'_>,
+    hold_id: &str,
+    evidence_id: &str,
+) -> Result<bool, CuratorHoldError> {
+    tx.query_row_cached(
+        "SELECT EXISTS(SELECT 1 FROM capture_pin_refs
+         WHERE capture_pin_id=?1 AND evidence_id=?2 AND released_at IS NULL)",
+        params![hold_id, evidence_id],
+        |row| row.get(0),
+    )
+    .map_err(sqlite)
 }
 
 /// The newest unreleased, undegraded, unexpired hold of `kind` for `binding`, with its expiry.

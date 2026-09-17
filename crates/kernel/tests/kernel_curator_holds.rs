@@ -175,6 +175,18 @@ impl Fixture {
     }
 
     fn proposal_payload(&self) -> ReviewPayload {
+        self.proposal_payload_disclosing(&[])
+    }
+
+    /// A retain proposal whose policy dependencies disclose (and leave uncited) `disclosed`.
+    fn proposal_payload_disclosing(&self, disclosed: &[String]) -> ReviewPayload {
+        let disclosed: Vec<kernel::EvidenceReference> = disclosed
+            .iter()
+            .map(|evidence_id| kernel::EvidenceReference {
+                evidence_id: evidence_id.clone(),
+                span: None,
+            })
+            .collect();
         ReviewPayload::Proposal(Box::new(ReviewProposal {
             action: kernel::ProposalAction::Retain,
             target: kernel::ProposalTarget::Memory(kernel::CanonicalTarget {
@@ -194,8 +206,8 @@ impl Fixture {
             },
             policy_dependencies: kernel::PolicyDependencies {
                 question_template: kernel::ReviewQuestionTemplate::ExtractedFacts,
-                disclosed_inputs: vec![],
-                uncited_disclosed_inputs: vec![],
+                disclosed_inputs: disclosed.clone(),
+                uncited_disclosed_inputs: disclosed,
                 ancestry: vec![],
             },
         }))
@@ -213,6 +225,23 @@ impl Fixture {
         recorded_at: i64,
         deadline: i64,
     ) -> i64 {
+        self.stage_proposal_with(
+            job_id,
+            generation,
+            recorded_at,
+            deadline,
+            self.proposal_payload(),
+        )
+    }
+
+    fn stage_proposal_with(
+        &self,
+        job_id: &str,
+        generation: u64,
+        recorded_at: i64,
+        deadline: i64,
+        payload: ReviewPayload,
+    ) -> i64 {
         let identity = provisional_result_identity(job_id, generation);
         self.store
             .stage_review_input(ReviewStagingSpec {
@@ -220,7 +249,7 @@ impl Fixture {
                 candidate_id: identity.candidate_id,
                 producer: "curator".to_string(),
                 binding: self.review_binding(job_id, generation),
-                payload: self.proposal_payload(),
+                payload,
                 recorded_at,
                 queue_deadline_at: deadline,
             })
@@ -1347,4 +1376,109 @@ fn a_transferred_generation_acquires_no_further_execution_hold() {
         .store
         .release_review_hold(&review_hold.hold_id, &review)
         .unwrap();
+    // The generation's proposal is terminal; even after its review hold is gone, no execution hold reopens it.
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "a transferred generation never acquires again"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+}
+
+#[test]
+fn review_transfer_requires_the_hold_to_cover_every_disclosed_input() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let held = fixture.ingest("held", b"held bytes", None);
+    let unheld = fixture.ingest("unheld", b"never held", None);
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&held), now + HOUR_MS)
+        .unwrap();
+    let created = fixture.stage_proposal_with(
+        "job-1",
+        1,
+        now - 1_000,
+        now + DAY_MS - 1_000,
+        fixture.proposal_payload_disclosing(&[held.clone(), unheld.clone()]),
+    );
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(
+                    &hold.hold_id,
+                    &execution,
+                    &review,
+                    created + REVIEW_EXPIRY_MAX_MS,
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::NotCovered,
+        "a disclosed input outside the execution hold refuses the transfer"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
+    // Extending the hold over the missing input makes the same transfer admissible.
+    fixture
+        .store
+        .extend_execution_hold(&hold.hold_id, &execution, std::slice::from_ref(&unheld))
+        .unwrap();
+    let review_hold = fixture
+        .store
+        .transfer_execution_to_review(
+            &hold.hold_id,
+            &execution,
+            &review,
+            created + REVIEW_EXPIRY_MAX_MS,
+        )
+        .unwrap();
+    assert_eq!(review_hold.references, 2);
+}
+
+#[test]
+fn acquisition_retry_recovers_the_hold_after_a_covered_row_is_invalidated() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let first = fixture.ingest("a", b"alpha bytes", None);
+    let second = fixture.ingest("b", b"beta bytes!!", None);
+    let binding = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, &[first.clone(), second.clone()], now + HOUR_MS)
+        .unwrap();
+    fixture
+        .store
+        .commit(intent("retire", b"retire"), |envelope| {
+            envelope.retire_evidence("evidence-object-a")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    // The identical retry recovers the committed hold although one of its rows is no longer live.
+    let retried = fixture
+        .store
+        .acquire_execution_hold(&binding, &[first, second], now + HOUR_MS)
+        .unwrap();
+    assert_eq!(retried.hold_id, hold.hold_id);
+    assert_eq!(retried.references, 2);
+    // A retry that adds an unavailable id is still refused.
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(&binding, &["evidence-missing".to_string()], now + HOUR_MS)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::UnavailableEvidence
+    );
 }
