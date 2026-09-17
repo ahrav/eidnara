@@ -41,11 +41,37 @@ pub const MAX_RESPONSE_HEAD_BYTES: usize = 64 * 1024;
 pub const MAX_RESPONSE_HEADERS: usize = 32;
 /// Body frames one response may deliver, so a peer cannot trickle the allowance one byte at a time.
 pub const MAX_RESPONSE_FRAMES: usize = 4096;
-/// Longest a connect or a completion may take whatever deadline the caller passes.
-pub const MAX_PHASE_DURATION: Duration = Duration::from_secs(30);
-/// Longest wait for the next byte of a response.
+/// The connect phase clamps a longer caller deadline to this duration.
+pub const MAX_CONNECT_DURATION: Duration = Duration::from_secs(30);
+/// Fixed completion allowance before the per-token allowance is added.
+pub const COMPLETION_FLOOR: Duration = Duration::from_secs(30);
+pub const COMPLETION_PER_TOKEN: Duration = Duration::from_millis(30);
+/// Limits the wait for each body frame after the response head arrives.
 pub const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const ALPN_HTTP1: &[u8] = b"http/1.1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timing {
+    pub connect: Duration,
+    pub completion_floor: Duration,
+    pub completion_per_token: Duration,
+    pub frame_idle: Duration,
+}
+
+impl Timing {
+    pub const PRODUCTION: Timing = Timing {
+        connect: MAX_CONNECT_DURATION,
+        completion_floor: COMPLETION_FLOOR,
+        completion_per_token: COMPLETION_PER_TOKEN,
+        frame_idle: FRAME_IDLE_TIMEOUT,
+    };
+
+    /// Longest a completion may take for a request that asks for `max_tokens` output tokens.
+    pub fn completion_budget(&self, max_tokens: u32) -> Duration {
+        self.completion_floor
+            .saturating_add(self.completion_per_token.saturating_mul(max_tokens))
+    }
+}
 
 type Body = Full<Bytes>;
 type Transport = TokioIo<TlsStream<TcpStream>>;
@@ -101,8 +127,8 @@ impl Credential {
     }
 
     fn header(&self) -> HeaderValue {
-        let mut value =
-            HeaderValue::from_str(&self.0).unwrap_or_else(|_| HeaderValue::from_static(""));
+        let mut value = HeaderValue::from_str(&self.0)
+            .expect("Credential::new admits only a valid header value");
         value.set_sensitive(true);
         value
     }
@@ -239,6 +265,7 @@ pub struct ResponseAccounting {
 pub struct Sender {
     endpoint: Endpoint,
     credential: Credential,
+    timing: Timing,
 }
 
 impl Sender {
@@ -246,10 +273,20 @@ impl Sender {
         Self {
             endpoint,
             credential,
+            timing: Timing::PRODUCTION,
         }
     }
 
-    /// Opens a fresh connection and completes the TCP, TLS, and HTTP/1 handshakes by `deadline`, clamped to [`MAX_PHASE_DURATION`]. No request byte is written; the connection is not polled again until [`InFlight::complete`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_timing(endpoint: Endpoint, credential: Credential, timing: Timing) -> Self {
+        Self {
+            endpoint,
+            credential,
+            timing,
+        }
+    }
+
+    /// Opens a fresh connection and completes the TCP, TLS, and HTTP/1 handshakes by `deadline`, clamped to [`Timing::connect`]. No request byte is written.
     pub async fn connect(&self, deadline: Instant) -> Result<Connected, SendError> {
         let handshakes = async {
             let tcp = TcpStream::connect((self.endpoint.host.as_str(), self.endpoint.port))
@@ -271,16 +308,17 @@ impl Sender {
                 connection,
                 host: self.endpoint.host.clone(),
                 credential: self.credential.clone(),
+                timing: self.timing,
             })
         };
-        tokio::time::timeout_at(clamp(deadline), handshakes)
+        tokio::time::timeout_at(clamp(deadline, self.timing.connect), handshakes)
             .await
             .map_err(|_| SendError::Deadline)?
     }
 }
 
-fn clamp(deadline: Instant) -> Instant {
-    deadline.min(Instant::now() + MAX_PHASE_DURATION)
+fn clamp(deadline: Instant, budget: Duration) -> Instant {
+    deadline.min(Instant::now() + budget)
 }
 
 /// A handshaken, unpolled connection that can carry exactly one request.
@@ -289,6 +327,7 @@ pub struct Connected {
     connection: Connection<Transport, Body>,
     host: String,
     credential: Credential,
+    timing: Timing,
 }
 
 impl std::fmt::Debug for Connected {
@@ -316,6 +355,8 @@ impl Connected {
         Ok(InFlight {
             connection: self.connection,
             response,
+            timing: self.timing,
+            max_tokens: request.max_tokens,
         })
     }
 }
@@ -335,6 +376,8 @@ type ResponseFuture = std::pin::Pin<
 pub struct InFlight {
     connection: Connection<Transport, Body>,
     response: ResponseFuture,
+    timing: Timing,
+    max_tokens: u32,
 }
 
 impl std::fmt::Debug for InFlight {
@@ -344,11 +387,13 @@ impl std::fmt::Debug for InFlight {
 }
 
 impl InFlight {
-    /// Polls the connection, so the request is written, and reads the one response by `deadline`, clamped to [`MAX_PHASE_DURATION`], with at most [`FRAME_IDLE_TIMEOUT`] between bytes. The connection is dropped afterwards whatever the outcome; there is no second attempt.
+    /// Polls the connection, so the request is written, and reads the one response by `deadline`, clamped to [`Timing::completion_budget`] for the request's `max_tokens`, with at most [`Timing::frame_idle`] between body frames. The connection is dropped afterwards whatever the outcome; there is no second attempt.
     pub async fn complete(self, deadline: Instant) -> Result<AssistantText, SendError> {
         let InFlight {
             mut connection,
             mut response,
+            timing,
+            max_tokens,
         } = self;
         let mut accounting = ResponseAccounting::default();
         let exchange = async {
@@ -362,19 +407,16 @@ impl InFlight {
                     SendError::Transport
                 }
             };
-            let response = tokio::time::timeout(FRAME_IDLE_TIMEOUT, async {
-                tokio::select! {
-                    biased;
-                    response = &mut response => response.map_err(unsent),
-                    closed = &mut connection => {
-                        closed.map_err(|_| SendError::Transport)?;
-                        connection_done = true;
-                        response.await.map_err(unsent)
-                    }
+            // The head wait is the provider's whole generation time for a non-streaming request, so only the completion budget bounds it; the frame idle limit starts with the body.
+            let response = tokio::select! {
+                biased;
+                response = &mut response => response.map_err(unsent),
+                closed = &mut connection => {
+                    closed.map_err(|_| SendError::Transport)?;
+                    connection_done = true;
+                    response.await.map_err(unsent)
                 }
-            })
-            .await
-            .map_err(|_| SendError::Deadline)??;
+            }?;
             let (head, body) = response.into_parts();
             // Hyper refuses a head it cannot buffer; a head it could buffer is still held to the declared bound before anything else is read.
             accounting.head_bytes = head
@@ -402,8 +444,14 @@ impl InFlight {
             {
                 return Err(SendError::ResponseTooLarge);
             }
-            let bytes =
-                collect_body(body, &mut connection, connection_done, &mut accounting).await?;
+            let bytes = collect_body(
+                body,
+                &mut connection,
+                connection_done,
+                timing.frame_idle,
+                &mut accounting,
+            )
+            .await?;
             if head.status != StatusCode::OK {
                 return Err(SendError::Status(head.status.as_u16()));
             }
@@ -429,9 +477,12 @@ impl InFlight {
                 accounting,
             })
         };
-        tokio::time::timeout_at(clamp(deadline), exchange)
-            .await
-            .map_err(|_| SendError::Deadline)?
+        tokio::time::timeout_at(
+            clamp(deadline, timing.completion_budget(max_tokens)),
+            exchange,
+        )
+        .await
+        .map_err(|_| SendError::Deadline)?
     }
 }
 
@@ -440,12 +491,13 @@ async fn collect_body(
     mut body: Incoming,
     connection: &mut Connection<Transport, Body>,
     mut connection_done: bool,
+    frame_idle: Duration,
     accounting: &mut ResponseAccounting,
 ) -> Result<Vec<u8>, SendError> {
     let mut bytes = Vec::new();
     let mut frames = 0usize;
     loop {
-        let next = tokio::time::timeout(FRAME_IDLE_TIMEOUT, async {
+        let next = tokio::time::timeout(frame_idle, async {
             if connection_done {
                 return body.frame().await;
             }
@@ -477,5 +529,23 @@ async fn collect_body(
             accounting.transport_bytes = charged;
             bytes.extend_from_slice(chunk);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_production_completion_budget_covers_the_largest_request() {
+        // Anthropic's SDKs estimate a non-streaming request at 3600 s per 128,000 output tokens and refuse one expected to exceed ten minutes; the budget for the largest admissible request must sit between the two.
+        let sdk_estimate = Duration::from_secs(3600 * u64::from(MAX_OUTPUT_TOKENS) / 128_000);
+        let budget = Timing::PRODUCTION.completion_budget(MAX_OUTPUT_TOKENS);
+        assert!(budget >= sdk_estimate, "{budget:?} < {sdk_estimate:?}");
+        assert!(budget <= Duration::from_secs(600), "{budget:?}");
+        assert_eq!(
+            Timing::PRODUCTION.completion_budget(1),
+            COMPLETION_FLOOR + COMPLETION_PER_TOKEN
+        );
     }
 }

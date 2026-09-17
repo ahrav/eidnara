@@ -9,7 +9,7 @@ use std::time::Duration;
 use daemon::curator::model_request::{
     ANTHROPIC_VERSION, AssistantText, Credential, Endpoint, MAX_OUTPUT_TOKENS,
     MAX_RAW_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_FRAMES, MAX_RESPONSE_HEAD_BYTES,
-    MAX_RESPONSE_HEADERS, Message, MessagesRequest, Role, SendError, Sender,
+    MAX_RESPONSE_HEADERS, Message, MessagesRequest, Role, SendError, Sender, Timing,
 };
 use daemon::curator::model_response::{DecodeError, StopReason};
 use rustls::pki_types::PrivateKeyDer;
@@ -76,6 +76,10 @@ struct Peer {
     connections: Arc<AtomicUsize>,
     listener: Option<TcpListener>,
     acceptor: TlsAcceptor,
+    /// How long the peer holds the whole response after it has read the request, so a test can stand in for a provider that is still generating.
+    respond_after: Duration,
+    /// Splits the response at a byte offset and pauses between the two halves, so a test can stall a body mid-transfer.
+    stall: Option<(usize, Duration)>,
 }
 
 /// What the peer saw; every judgement is made by the test, not inside the peer task.
@@ -85,8 +89,7 @@ struct Observed {
     body: Vec<u8>,
     /// Whether a second connection arrived within the observation window after the exchange.
     reconnected: bool,
-    /// Encrypted bytes received once the handshake had completed and again after the client's handoff, when the script measured them.
-    after_handshake: usize,
+    /// Encrypted bytes received after the request has been read.
     after_handoff: Option<usize>,
 }
 
@@ -124,6 +127,8 @@ impl Peer {
             connections: Arc::new(AtomicUsize::new(0)),
             listener: Some(listener),
             acceptor: TlsAcceptor::from(Arc::new(config)),
+            respond_after: Duration::ZERO,
+            stall: None,
         }
     }
 
@@ -143,6 +148,8 @@ impl Peer {
         let listener = self.listener.take().unwrap();
         let acceptor = self.acceptor.clone();
         let connections = self.connections.clone();
+        let respond_after = self.respond_after;
+        let stall = self.stall;
         tokio::spawn(async move {
             let mut observed = Observed::default();
             let (tcp, _) = listener.accept().await.unwrap();
@@ -158,7 +165,6 @@ impl Peer {
                     .is_ok();
                 return observed;
             };
-            observed.after_handshake = received.load(Ordering::SeqCst);
             before_read(&mut tls, received.clone()).await;
             let mut raw = Vec::new();
             let mut buffer = [0u8; 16 * 1024];
@@ -192,11 +198,21 @@ impl Peer {
                     break;
                 }
             }
-            observed.after_handoff = observed
-                .after_handoff
-                .or(Some(received.load(Ordering::SeqCst)));
+            observed.after_handoff = Some(received.load(Ordering::SeqCst));
+            tokio::time::sleep(respond_after).await;
             // The client may refuse and hang up mid-write; that is its right and not the peer's failure.
-            let _ = tls.write_all(&respond(&observed)).await;
+            let response = respond(&observed);
+            match stall {
+                Some((split, pause)) if split < response.len() => {
+                    let _ = tls.write_all(&response[..split]).await;
+                    let _ = tls.flush().await;
+                    tokio::time::sleep(pause).await;
+                    let _ = tls.write_all(&response[split..]).await;
+                }
+                _ => {
+                    let _ = tls.write_all(&response).await;
+                }
+            }
             let _ = tls.shutdown().await;
             observed.reconnected = tokio::time::timeout(OBSERVATION_WINDOW, listener.accept())
                 .await
@@ -285,13 +301,12 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
     let mut peer = Peer::start().await;
     let (armed_tx, armed_rx) = tokio::sync::oneshot::channel::<()>();
     let server = peer.serve(
-        Box::new(move |tls, received| {
+        Box::new(move |tls, _| {
             Box::pin(async move {
-                // The client has handed its request over by the time this fires. The peer polls its socket for the observation window and then compares exact byte counts: encrypted request bytes would have raised the counter.
+                // The client hands off its request before `armed_tx` releases this read. The peer reads for `OBSERVATION_WINDOW`; an earlier request byte would be consumed here, so the head check would miss `POST`.
                 armed_rx.await.unwrap();
                 let mut probe = [0u8; 1];
                 let _ = tokio::time::timeout(OBSERVATION_WINDOW, tls.read(&mut probe)).await;
-                let _ = received.load(Ordering::SeqCst);
             })
         }),
         |_| json_response("200 OK", &message("bun builds it"), ""),
@@ -312,10 +327,6 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
     );
     assert!(answer.accounting.parser_scratch_bytes < answer.accounting.transport_bytes);
     assert!(answer.accounting.head_bytes > 0);
-    assert!(
-        observed.after_handoff.unwrap() > observed.after_handshake,
-        "the request arrived only once the connection was polled"
-    );
     assert!(!observed.reconnected);
     assert_eq!(peer.connections.load(Ordering::SeqCst), 1);
     // The wire request: fixed path and version, identity encoding, one-use connection, no tools, no streaming, and the credential exactly once, in its header.
@@ -610,6 +621,112 @@ async fn request_bounds_and_deadlines_are_enforced_by_the_sender() {
         .await;
     assert_eq!(outcome.unwrap_err(), SendError::Deadline);
     drop(hold_tx);
+    let observed = server.await.unwrap();
+    assert!(!observed.reconnected);
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 1);
+}
+
+/// Shortened limits for the timing proofs: a small fixed completion allowance, a per-token allowance the tests can reason about, and a frame idle limit well under the head waits the peer is scripted to impose.
+fn short_timing() -> Timing {
+    Timing {
+        connect: Duration::from_secs(5),
+        completion_floor: Duration::from_millis(300),
+        completion_per_token: Duration::from_millis(1),
+        frame_idle: Duration::from_millis(200),
+    }
+}
+
+fn sender_with(peer: &Peer, timing: Timing) -> Sender {
+    Sender::with_timing(
+        Endpoint::for_test("localhost", peer.port, peer.roots.clone()).unwrap(),
+        Credential::new("sk-test-credential".to_string()).unwrap(),
+        timing,
+    )
+}
+
+#[tokio::test]
+async fn the_head_wait_is_bounded_by_the_completion_budget_not_the_frame_idle_limit() {
+    // A non-streaming provider sends nothing until generation ends. A head that arrives after the frame idle limit but inside the completion budget must still be accepted.
+    let mut peer = Peer::start().await;
+    peer.respond_after = Duration::from_millis(600);
+    let server = peer.serve(no_wait(), |_| json_response("200 OK", &message("late"), ""));
+    let mut request = request();
+    request.max_tokens = 2_000;
+    let answer = sender_with(&peer, short_timing())
+        .connect(deadline())
+        .await
+        .unwrap()
+        .handoff(&request)
+        .unwrap()
+        .complete(deadline())
+        .await
+        .unwrap();
+    assert_eq!(answer.text, "late");
+    assert!(!server.await.unwrap().reconnected);
+}
+
+#[tokio::test]
+async fn the_completion_budget_scales_with_the_requested_output_tokens() {
+    // The same one-second head wait: inside the budget of a request that asks for 2,000 tokens (300 ms + 2,000 ms), outside the budget of one that asks for 64 (300 ms + 64 ms).
+    let mut peer = Peer::start().await;
+    peer.respond_after = Duration::from_secs(1);
+    let server = peer.serve(no_wait(), |_| {
+        json_response("200 OK", &message("generous"), "")
+    });
+    let mut generous = request();
+    generous.max_tokens = 2_000;
+    let answer = sender_with(&peer, short_timing())
+        .connect(deadline())
+        .await
+        .unwrap()
+        .handoff(&generous)
+        .unwrap()
+        .complete(deadline())
+        .await
+        .unwrap();
+    assert_eq!(answer.text, "generous");
+    assert!(!server.await.unwrap().reconnected);
+
+    let mut peer = Peer::start().await;
+    peer.respond_after = Duration::from_secs(1);
+    let server = peer.serve(no_wait(), |_| {
+        json_response("200 OK", &message("terse"), "")
+    });
+    let mut terse = request();
+    terse.max_tokens = 64;
+    let outcome = sender_with(&peer, short_timing())
+        .connect(deadline())
+        .await
+        .unwrap()
+        .handoff(&terse)
+        .unwrap()
+        .complete(deadline())
+        .await;
+    assert_eq!(outcome.unwrap_err(), SendError::Deadline);
+    let observed = server.await.unwrap();
+    assert!(!observed.reconnected);
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_body_that_stalls_past_the_frame_idle_limit_is_a_deadline() {
+    // The frame idle limit still governs the body: a head followed by half a body and a pause longer than the limit ends the send, even though the completion budget has room left.
+    let mut peer = Peer::start().await;
+    let response = json_response("200 OK", &message("stalled"), "");
+    let split = response.len() - 8;
+    peer.stall = Some((split, Duration::from_millis(600)));
+    let server = peer.serve(no_wait(), move |_| response);
+    let mut request = request();
+    request.max_tokens = 5_000;
+    let outcome = sender_with(&peer, short_timing())
+        .connect(deadline())
+        .await
+        .unwrap()
+        .handoff(&request)
+        .unwrap()
+        .complete(deadline())
+        .await;
+    assert_eq!(outcome.unwrap_err(), SendError::Deadline);
     let observed = server.await.unwrap();
     assert!(!observed.reconnected);
     assert_eq!(peer.connections.load(Ordering::SeqCst), 1);
