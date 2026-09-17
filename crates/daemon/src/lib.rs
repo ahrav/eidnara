@@ -31160,6 +31160,13 @@ mod tests {
 
     /// The test uses a classify budget that setup cannot exhaust, so payload shape rather than deadline behavior determines the result.
     const TEST_CLASSIFY_TIMEOUT_MS: u64 = 600_000;
+    /// Request budget for the tests that cut a stalled producer leg off at the
+    /// deadline. It must outlast the receipt and ledger writes that precede the
+    /// leg under the full suite's load (1 s did not), while staying far below
+    /// the producer's own `CLASSIFY_AWAIT_TIMEOUT`, and `DEADLINE_TEST_CEILING`
+    /// bounds the wait for that cutoff.
+    const DEADLINE_TEST_TIMEOUT_MS: u64 = 5_000;
+    const DEADLINE_TEST_CEILING: Duration = Duration::from_secs(20);
 
     /// A handler bound to one route with the memories authority in `MODULE`,
     /// ready to run classify commands against `store`.
@@ -32247,14 +32254,14 @@ mod tests {
         let ids = [test_memory_id(1)];
         let producer = Arc::new(ProducerState::default());
         let harness = MemoryClassifierHarness::start(&producer).await;
-        // The digest covers `timeout_ms`, so both legs carry the same 1 s budget.
-        let payload = classify_payload(&ids, 1_000);
+        // The digest covers `timeout_ms`, so both legs carry the same budget.
+        let payload = classify_payload(&ids, DEADLINE_TEST_TIMEOUT_MS);
         harness
             .crash_after_dispatch(&producer, payload.clone(), "stalled-probe")
             .await;
         producer.block_status.store(true, Ordering::SeqCst);
         let retry = harness.classify(payload, "stalled-probe");
-        let resumed = tokio::time::timeout(Duration::from_secs(10), retry)
+        let resumed = tokio::time::timeout(DEADLINE_TEST_CEILING, retry)
             .await
             .expect("the probe is cut off by the request deadline, not the producer's own timeout");
         producer.block_status.store(false, Ordering::SeqCst);
@@ -33244,8 +33251,11 @@ mod tests {
         let producer = Arc::new(ProducerState::default());
         let harness = MemoryClassifierHarness::start(&producer).await;
         producer.block_connect.store(true, Ordering::SeqCst);
-        let request = harness.classify(classify_payload(&ids, 1_000), "stalled-connect");
-        let outcome = tokio::time::timeout(Duration::from_secs(10), request)
+        let request = harness.classify(
+            classify_payload(&ids, DEADLINE_TEST_TIMEOUT_MS),
+            "stalled-connect",
+        );
+        let outcome = tokio::time::timeout(DEADLINE_TEST_CEILING, request)
             .await
             .expect("connect is cut off by the request deadline");
         producer.block_connect.store(false, Ordering::SeqCst);

@@ -179,7 +179,7 @@ pub fn reserve_required<C: TokenCount>(
     admitted: &[AdmittedRequired<'_>],
     bytes: &[&[u8]],
     token_limit: C,
-    cost: impl Fn(&[u8]) -> C,
+    mut cost: impl FnMut(&AdmittedRequired<'_>, &[u8]) -> C,
 ) -> Result<RequiredReservation<C>, RequiredContextFailure<C>> {
     if let Some(unloaded) = admitted.get(bytes.len()) {
         return Err(RequiredContextFailure::Corrupt(unloaded.row.occurrence));
@@ -190,7 +190,7 @@ pub fn reserve_required<C: TokenCount>(
         if bytes.len() as u64 != item.row.payload.byte_length {
             return Err(RequiredContextFailure::Corrupt(item.row.occurrence));
         }
-        let cost = cost(bytes);
+        let cost = cost(item, bytes);
         let sum = charged.checked_add(cost);
         charged = match sum {
             Some(sum) if sum <= token_limit => sum,

@@ -273,6 +273,14 @@ fn reopen(
     (projection, after)
 }
 
+/// Milliseconds of a deadline that a test must reach: far enough out that
+/// binding, admission, and the ledger writes before the timed leg finish under
+/// a loaded runner (300 ms did not with 16 or more test threads), near enough
+/// that a pass blocked on it still ends within the test. `NEAR` is the same
+/// span on the pass clock.
+const NEAR_MS: u64 = 3_000;
+const NEAR: i64 = NEAR_MS as i64;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn payload_corruption_quarantines_before_tokenization_or_inference() {
     let dir = tempfile::tempdir().unwrap();
@@ -369,7 +377,7 @@ async fn publication_search_deadline_preserves_admission_without_recharging() {
     let project = ProjectScope::new(PROJECT).unwrap();
     let bounds = bounds();
     // The budget's deadline is the publication guard's deadline, so a held write lock blocks within it.
-    let short_guard = budget(Duration::from_millis(300));
+    let short_guard = budget(Duration::from_millis(NEAR_MS));
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let mut events = Vec::new();
     let mut at_admission = None;
@@ -701,10 +709,10 @@ async fn a_held_job_is_polled_only_until_its_episode_deadline() {
     let gate = GateGuard(engine.block_calls());
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
 
-    // The grant ends 300 ms after now while the result wait is five seconds.
+    // The grant ends `NEAR_MS` after now while the result wait is five seconds.
     let near = DispatchBounds {
         input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
-        grant: grant(3, NOW + 300),
+        grant: grant(3, NOW + NEAR),
         ..bounds()
     };
     let started = std::time::Instant::now();
@@ -712,14 +720,14 @@ async fn a_held_job_is_polled_only_until_its_episode_deadline() {
     assert_eq!(end, None);
     assert_eq!(admitted(&events).len(), 1);
     assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "the poll ran {:?} past a 300 ms deadline",
+        started.elapsed() < Duration::from_millis(NEAR_MS) + Duration::from_secs(2),
+        "the poll ran {:?} past a {NEAR_MS} ms deadline",
         started.elapsed()
     );
     let held = ledger(dir.path(), occurrence);
     assert_eq!(
         (held.state.as_str(), held.deadline),
-        ("admitted", Some(NOW + 300))
+        ("admitted", Some(NOW + NEAR))
     );
 
     // A later pass under a grant that ends a day out still polls only until the job's own persisted deadline.
@@ -728,8 +736,8 @@ async fn a_held_job_is_polled_only_until_its_episode_deadline() {
     assert_eq!(end, None);
     assert!(admitted(&events).is_empty(), "{events:?}");
     assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "the poll ran {:?} past the job's 300 ms deadline",
+        started.elapsed() < Duration::from_millis(NEAR_MS) + Duration::from_secs(2),
+        "the poll ran {:?} past the job's {NEAR_MS} ms deadline",
         started.elapsed()
     );
     TestEngine::release(&gate.0);
@@ -887,14 +895,14 @@ async fn a_result_ready_after_the_row_deadline_is_not_published() {
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let near = DispatchBounds {
         input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
-        grant: grant(3, NOW + 300),
+        grant: grant(3, NOW + NEAR),
         ..bounds()
     };
     let (end, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
     assert_eq!(end, None);
     assert_eq!(admitted(&events).len(), 1);
     let held = ledger(dir.path(), occurrence);
-    assert_eq!(held.deadline, Some(NOW + 300));
+    assert_eq!(held.deadline, Some(NOW + NEAR));
     drop(gate);
     let host_job = held.host_job_id.clone().unwrap();
     assert!(matches!(
@@ -907,14 +915,14 @@ async fn a_result_ready_after_the_row_deadline_is_not_published() {
         PollOutcome::Page(_)
     ));
 
-    // The pass runs under a day-long grant, but 400 ms pass inside it before the ready result is looked at, past the row's 300 ms.
+    // The pass runs under a day-long grant, but `NEAR_MS + 100` ms pass inside it before the ready result is looked at, past the row's `NEAR_MS`.
     let (end, events) = pass_delayed_at_poll(
         &corpus,
         &projection,
         &local_embeddings,
         &bounds(),
         NOW,
-        Duration::from_millis(400),
+        Duration::from_millis(NEAR_MS + 100),
     );
     assert_eq!(end, None, "{events:?}");
     assert!(published(&events).is_empty(), "{events:?}");
@@ -930,7 +938,7 @@ async fn a_result_ready_after_the_row_deadline_is_not_published() {
         &projection,
         &local_embeddings,
         &bounds(),
-        NOW + 301,
+        NOW + NEAR + 1,
     );
     assert_eq!(
         stopped(&events),
@@ -947,13 +955,13 @@ async fn a_pending_row_past_its_deadline_is_not_admitted() {
     let object = corpus.publish("m0", "message across restart");
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &object);
-    // The row is admitted under a 300 ms deadline, then a new host incarnation returns it to pending with that episode kept.
+    // The row is admitted under a `NEAR_MS` deadline, then a new host incarnation returns it to pending with that episode kept.
     let engine = TestEngine::new();
     let gate = GateGuard(engine.block_calls());
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let near = DispatchBounds {
         input: daemon::embedding_dispatch::InputEnvelope::UNBOUNDED,
-        grant: grant(3, NOW + 300),
+        grant: grant(3, NOW + NEAR),
         ..bounds()
     };
     let (_, events) = pass(&corpus, &projection, &local_embeddings, &near, NOW);
@@ -961,11 +969,11 @@ async fn a_pending_row_past_its_deadline_is_not_admitted() {
     let held = ledger(dir.path(), occurrence);
     assert_eq!(
         (held.state.as_str(), held.deadline),
-        ("admitted", Some(NOW + 300))
+        ("admitted", Some(NOW + NEAR))
     );
     drop(gate);
 
-    // Under a new host and a day-long grant, 400 ms of earlier pass work pass before this row is reached.
+    // Under a new host and a day-long grant, `NEAR_MS + 100` ms of earlier pass work pass before this row is reached.
     let restarted_engine = TestEngine::new();
     let restarted_gate = GateGuard(restarted_engine.block_calls());
     let restarted_lane = component(&restarted_engine, LocalEmbeddingsLimits::default());
@@ -975,7 +983,7 @@ async fn a_pending_row_past_its_deadline_is_not_admitted() {
         &restarted_lane,
         &bounds(),
         NOW,
-        Duration::from_millis(400),
+        Duration::from_millis(NEAR_MS + 100),
         |event| matches!(event, DispatchEvent::Bound(_)),
     );
     drop(restarted_gate);
@@ -2016,7 +2024,7 @@ async fn a_disposition_held_past_its_deadline_ends_the_pass() {
         tokens: u64::MAX,
     };
     // The stop for the refused input is the pass's first write after binding; a lock taken at the binding holds it to the deadline.
-    let short_guard = budget(Duration::from_millis(300));
+    let short_guard = budget(Duration::from_millis(NEAR_MS));
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let mut write_lock = None;
     let mut events = Vec::new();
@@ -2064,15 +2072,15 @@ async fn a_refusal_learned_after_the_row_deadline_is_not_recorded_under_the_pass
     let (projection, rows) = corpus.bootstrap(dir.path());
     let occurrence = occurrence_of(&rows, &over);
     let engine = TestEngine::new();
-    // The token count answers after the row's 300 ms deadline, and its answer refuses the input.
-    engine.delay_counts(Duration::from_millis(500));
+    // The token count answers after the row's `NEAR_MS` deadline, and its answer refuses the input.
+    engine.delay_counts(Duration::from_millis(NEAR_MS + 200));
     let local_embeddings = component(&engine, LocalEmbeddingsLimits::default());
     let limits = DispatchBounds {
         input: daemon::embedding_dispatch::InputEnvelope {
             bytes: u64::MAX,
             tokens: 1,
         },
-        grant: grant(3, NOW + 300),
+        grant: grant(3, NOW + NEAR),
         ..bounds()
     };
     let (end, events) = pass(&corpus, &projection, &local_embeddings, &limits, NOW);
@@ -2087,7 +2095,13 @@ async fn a_refusal_learned_after_the_row_deadline_is_not_recorded_under_the_pass
     assert_eq!(engine.calls(), 0);
 
     // A pass whose clock is past the deadline stops the row itself.
-    let (end, events) = pass(&corpus, &projection, &local_embeddings, &limits, NOW + 400);
+    let (end, events) = pass(
+        &corpus,
+        &projection,
+        &local_embeddings,
+        &limits,
+        NOW + NEAR + 100,
+    );
     assert_eq!(end, None);
     let row = ledger(dir.path(), occurrence);
     assert_eq!(stopped(&events).len(), 1, "{events:?}");
@@ -2197,7 +2211,7 @@ async fn terminal_search_deadline_preserves_the_candidate_for_retry() {
     let project = ProjectScope::new(PROJECT).unwrap();
     let limits = bounds();
     // The budget's deadline bounds the terminal obsoletion write, so a held write lock blocks within it.
-    let short_guard = budget(Duration::from_millis(300));
+    let short_guard = budget(Duration::from_millis(NEAR_MS));
     let mut dispatcher = EmbeddingDispatcher::new(&corpus.kernel, &projection, &local_embeddings);
     let mut write_lock = None;
     let mut events = Vec::new();

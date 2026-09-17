@@ -152,6 +152,10 @@ impl<T> TopK<T> {
             })
     }
 
+    pub fn k(&self) -> usize {
+        self.k.get()
+    }
+
     /// A row that ranks at or below the current worst member when the set is full is dropped.
     pub fn offer(&mut self, ranked: Ranked, payload: T) {
         if self.heap.len() < self.k.get() {

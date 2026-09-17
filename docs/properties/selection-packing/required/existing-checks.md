@@ -11,7 +11,7 @@ assertions, not adequacy.
 | `crates/kernel/src/applicability/checkout.rs` `EvalBudget` tests | An expired deadline or cancellation makes `is_exhausted` true. | unaudited | The budget primitive, not a phase that polls it between stages. |
 | `crates/daemon/src/m0_compose.rs` `trim_user_profile_to_budget` | Trims a profile to a floating budget clamped to at least one token. | unaudited | The precedent the packer must not inherit; it answers malformed budgets. |
 | `crates/daemon/src/memory_render.rs` `render_memory_line` | Renders a memory line cut at 64 KiB. | unaudited | The precedent the packer must not inherit; the cut is silent. |
-| `crates/daemon/src/packing.rs` `materialized_bytes_are_never_printed` | `MaterializedRequired` and `RequiredMaterialization` render the byte length under `Debug`, never the bytes. | unaudited | A logging rule, not a required-phase class, budget, or trace claim; no record here owns it. |
+| `crates/daemon/src/packing/mod.rs` `materialized_bytes_are_never_printed` | `MaterializedRequired` and `RequiredMaterialization` render the byte length under `Debug`, never the bytes. | unaudited | A logging rule, not a required-phase class, budget, or trace claim; no record here owns it. |
 
 Suspiciously quiet areas: no check before this part refused a floating budget,
 and no check charged payload bytes through an injected estimator.

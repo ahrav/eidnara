@@ -7,8 +7,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use daemon::packing::{
-    ClaudeTokens, CostEstimator, PackingTrace, PreparationRefusal, RequiredInputs,
-    RequiredMaterialization, prepare_required,
+    AccountingBounds, AccountingProfile, ClaudeTokens, PackingTrace, PreparationRefusal,
+    RequiredInputs, RequiredMaterialization, prepare_required, render,
 };
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, OccurrenceClass, Span, encode};
@@ -30,16 +30,25 @@ pub const DIGEST: &str = "000000000000000000000000000000000000000000000000000000
 pub const DOMAIN: &str = "domain";
 pub const SCOPE: &str = "project:a";
 
-/// One token per byte, so limits can be set exactly at a payload boundary.
-pub struct ByteEstimator;
+/// One token per rendered byte with no headroom, so limits can be set exactly
+/// at a fragment boundary and deltas are linear.
+pub fn byte_profile() -> AccountingProfile {
+    AccountingProfile::heuristic("one-token-per-byte", "bytes", 0, str::len)
+}
 
-impl CostEstimator for ByteEstimator {
-    fn profile(&self) -> &'static str {
-        "one-token-per-byte"
-    }
+/// The byte-profile charge of the block open plus every required fragment.
+pub fn required_render_total(spans: &[ToolSpan]) -> u64 {
+    let fragments: usize = spans
+        .iter()
+        .map(|span| render::required_fragment(span.id(), span.selected_bytes()).len())
+        .sum();
+    (daemon::packing::BLOCK_OPEN_FRAGMENT.len() + fragments) as u64
+}
 
-    fn cost(&self, bytes: &[u8]) -> ClaudeTokens {
-        ClaudeTokens::new(bytes.len() as u64)
+pub fn accounting_bounds() -> AccountingBounds {
+    AccountingBounds {
+        max_rendered_bytes: 1 << 22,
+        max_estimated_tokens: ClaudeTokens::new(1 << 22),
     }
 }
 
@@ -266,6 +275,7 @@ impl Fixture {
     ) {
         let mut trace = PackingTrace::default();
         trace.note_retrieval_call();
+        let profile = byte_profile();
         let result = prepare_required(
             &self.store,
             RequiredInputs {
@@ -273,10 +283,11 @@ impl Fixture {
                 project: &self.project,
                 destination: ArtifactDestination::Local,
                 budget,
-                estimator: &ByteEstimator,
+                profile: &profile,
             },
             requests,
             bounds,
+            &accounting_bounds(),
             &mut trace,
         );
         (result, trace)

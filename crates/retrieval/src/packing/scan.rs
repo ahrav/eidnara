@@ -13,21 +13,24 @@ pub struct Scan<C> {
     pub remaining: C,
 }
 
-/// `marginal` sees the indices admitted so far, so a wrapper shared by
-/// several items is charged once.
-pub fn skip_and_continue<C: TokenCount>(
+/// `admit` runs on `state` after an item's cost is deducted, so `marginal`
+/// prices later items against everything already admitted.
+pub fn skip_and_continue<C: TokenCount, S>(
     budget: C,
     count: usize,
-    mut marginal: impl FnMut(&[usize], usize) -> C,
+    state: &mut S,
+    mut marginal: impl FnMut(&mut S, usize) -> C,
+    mut admit: impl FnMut(&mut S, usize),
 ) -> Scan<C> {
     let mut remaining = budget;
     let mut admitted: Vec<usize> = Vec::new();
     let mut skipped = Vec::new();
     for index in 0..count {
-        let cost = marginal(&admitted, index);
+        let cost = marginal(state, index);
         match remaining.checked_sub(cost) {
             Some(left) => {
                 remaining = left;
+                admit(state, index);
                 admitted.push(index);
             }
             None => skipped.push(index),
