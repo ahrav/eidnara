@@ -1,8 +1,10 @@
-//! The Curator investigation coordinator's daemon-owned pieces: the evidence broker, run-local aliases, accounting, provenance tags, the disclosure ledger, bounded related-memory discovery, and confined project-text inspection.
+//! The Curator investigation coordinator's daemon-owned pieces: the evidence broker, run-local aliases, accounting, provenance tags, the disclosure ledger, bounded related-memory discovery, confined project-text inspection, and the verified one-use model sender with its bounded response decoding.
 
 use std::ops::Range;
 
 pub mod broker;
+pub mod model_request;
+pub mod model_response;
 pub mod project_text;
 pub mod related_memories;
 
