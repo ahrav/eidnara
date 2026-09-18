@@ -675,6 +675,8 @@ const HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS: i64 =
     history_summarizer::HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS;
 const SESSION_UNRESOLVED_MESSAGE: &str = "session unresolved; launch Claude Code through the Eidnara wrapper so eidnara_* can bind to this conversation";
 const OPENCODE_HARNESS: &str = "opencode";
+/// Pi binds routes with its own session id and has no transform, so no lineage proof exists for it.
+const PI_HARNESS: &str = "pi";
 const STATE_SYNC_SEED_MAX_ID_BYTES: usize = 128;
 const STATE_SYNC_SEED_MAX_STAGED_BYTES: usize = 32 * 1024 * 1024;
 /// The final seed batch must carry every one of these; the sender emits them unconditionally.
@@ -11144,8 +11146,12 @@ impl HandlerCore {
             return Err(session_unresolved_error());
         }
 
-        let conversation_key = if binding.harness == OPENCODE_HARNESS
-            && self.module_knows_transform_session(bound_session, &binding.project_root)
+        // OpenCode proves a session through an accepted transform on this root. Pi has no
+        // transform to prove anything with; its plugin is the only binder and binds the harness's
+        // own session id, so the route-bound session is the conversation.
+        let conversation_key = if (binding.harness == OPENCODE_HARNESS
+            && self.module_knows_transform_session(bound_session, &binding.project_root))
+            || binding.harness == PI_HARNESS
         {
             bound_session.to_string()
         } else {
@@ -29264,6 +29270,40 @@ mod tests {
         assert!(
             store
                 .search_notes_like(project.to_str().unwrap(), "wrapper-instance", "token keyed")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pi_bound_session_writes_notes_without_transform_proof() {
+        let resolver = FakeSessionResolver::with(&[("pi-ses", FakeResolve::None)]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver.clone(),
+        );
+        handler.bind_route(
+            test_route(7),
+            binding_with_harness(project.to_str().unwrap(), PI_HARNESS, "pi-ses"),
+        );
+        let outcome = call_facade(
+            &handler,
+            "eidnara_note",
+            json!({ "action": "write", "content": "keyed by the pi session" }),
+        )
+        .await;
+        assert!(
+            !tool_is_error(outcome),
+            "pi note write must not need a resolver"
+        );
+        assert!(
+            resolver.calls().is_empty(),
+            "pi never consults the session resolver"
+        );
+        assert!(
+            !store
+                .search_notes_like(project.to_str().unwrap(), "pi-ses", "pi session")
                 .unwrap()
                 .is_empty()
         );
