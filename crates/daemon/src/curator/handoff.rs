@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 use kernel::{
     ExtractedFact, KernelStore, ReviewBinding, ReviewOwner, ReviewPayload, ReviewStageError,
     ReviewStagedReference, ReviewStagingSpec, ReviewSubject, SourceDependency, SourceSpan,
@@ -94,6 +96,12 @@ pub fn review_policy_versions() -> BTreeMap<String, String> {
     ])
 }
 
+/// The fixed-width stand-in for a session id inside the identities the handoff derives: the wire protocol admits 256 session bytes, the store bounds every identity at 256, so the id itself never appears in one. The first 32 lower-hex digits of its SHA-256.
+pub fn session_key(session_id: &str) -> String {
+    let digest = Sha256::digest(session_id.as_bytes());
+    format!("{digest:x}")[..32].to_string()
+}
+
 /// The binding a staged History Summarizer subject is read under. `chunk_ordinal` is the first message of the chunk that presented the facts, the job's `producer.ordinal`, so the coordinator reconstructs the binding from the job row alone and a firing that adopts the reservation reads under the same binding.
 pub fn review_binding(
     project_digest: &str,
@@ -156,6 +164,8 @@ pub fn review_subject(
             spans,
         });
     }
+    extracted.sort_by(|a, b| (&a.text, &a.spans).cmp(&(&b.text, &b.spans)));
+    extracted.dedup();
     let origins = origins
         .into_values()
         .map(|mut origin| {
@@ -192,17 +202,14 @@ fn reserved_row(
     request: &HandoffRequest<'_>,
     producer: &ProducerBinding,
     inputs: &CausalInputs,
-    payload_digest: &str,
-    kernel_incarnation: &str,
 ) -> Result<ReservedRow, HandoffError> {
-    // A recorded reservation names the job only when its payload digest and kernel incarnation match this firing's; `adopt` decides whether the firing can activate it.
+    // A recorded reservation names the job only when it is the job this firing would reserve now: same subject bytes, Kernel incarnation, and review policies. One recorded under other policy versions is left to expire and the current policy gets its own job (Q25/Q29); `adopt` decides whether the firing can activate the named job.
+    let causal_identity = inputs.causal_identity().map_err(CuratorJobError::Refused)?;
     let held = request
         .firing
         .curator_reservation
         .as_ref()
-        .filter(|held| {
-            held.payload_digest == payload_digest && held.kernel_incarnation == kernel_incarnation
-        })
+        .filter(|held| held.causal_identity == causal_identity)
         .map(|held| {
             request
                 .store
@@ -294,8 +301,9 @@ pub fn reserve_and_stage(
         ));
     };
     // The candidate and its run are named by the subject bytes, not the firing, so a later firing that adopts the reservation restages the same row under the same identity.
-    let candidate_id = format!("hs-{session_id}-{}", &payload_digest[..32]);
-    let extraction_run_id = format!("hs-run-{session_id}-{}", &payload_digest[..32]);
+    let session_key = session_key(session_id);
+    let candidate_id = format!("hs-{session_key}-{}", &payload_digest[..32]);
+    let extraction_run_id = format!("hs-run-{session_key}-{}", &payload_digest[..32]);
     let chunk_ordinal = firing
         .chunk_range
         .as_ref()
@@ -303,7 +311,7 @@ pub fn reserve_and_stage(
         .from_ordinal;
     let producer = ProducerBinding {
         producer: PRODUCER.to_string(),
-        firing_id: format!("{session_id}#{}", firing.firing_seq),
+        firing_id: format!("{session_key}#{}", firing.firing_seq),
         ordinal: chunk_ordinal,
     };
     let inputs = CausalInputs {
@@ -317,13 +325,7 @@ pub fn reserve_and_stage(
         required_evidence: Vec::new(),
         policy_versions: review_policy_versions(),
     };
-    let job = match reserved_row(
-        request,
-        &producer,
-        &inputs,
-        &payload_digest,
-        &target.kernel_incarnation,
-    )? {
+    let job = match reserved_row(request, &producer, &inputs)? {
         ReservedRow::Job(job) => *job,
         ReservedRow::Done(handoff) => return Ok(handoff),
     };

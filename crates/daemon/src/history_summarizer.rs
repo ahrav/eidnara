@@ -1825,15 +1825,13 @@ fn curator_decision_before_publish(
                 failure_backoff_at_ms,
                 completion_now_ms(),
             );
-            let current = store.load(session_id)?.meta.history_summarizer;
-            persist_history_summarizer_state(
+            // Fenced on this firing's predicate: a persist that lost its row-version race means another writer moved the session on, and that writer's state is not this firing's to abandon.
+            abandon_matching_run_with_detail(
                 store,
                 session_id,
-                abandon_with_detail(
-                    &current,
-                    failure_backoff_at_ms,
-                    Some(format!("curator handoff failed: {error}")),
-                ),
+                &publish_predicate(publishing)?,
+                failure_backoff_at_ms,
+                Some(format!("curator handoff failed: {error}")),
             )?;
             Err(HistorySummarizerDriveError::CuratorHandoff(error))
         }

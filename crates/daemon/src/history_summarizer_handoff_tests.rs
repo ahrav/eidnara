@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::*;
 use crate::curator::handoff::{
     Handoff, HandoffError, HandoffRequest, HandoffTarget, PRODUCER, SUBJECT_SOURCE_KIND,
-    reserve_and_stage, review_binding, review_subject,
+    reserve_and_stage, review_binding, review_policy_versions, review_subject, session_key,
 };
 use crate::history_summarizer::{ValidatedPublishRequest, publish_validated_chunk};
 use crate::history_summarizer_citations::{Citation, FrozenAlias, FrozenAliasTable};
@@ -144,7 +144,7 @@ impl Rig {
         let payload_digest = payload.digest().unwrap();
         ReviewStagedReference {
             database_incarnation_id: self.kernel_incarnation.clone(),
-            candidate_id: format!("hs-{SESSION}-{}", &payload_digest[..32]),
+            candidate_id: format!("hs-{}-{}", session_key(SESSION), &payload_digest[..32]),
             payload_digest,
         }
     }
@@ -408,7 +408,10 @@ fn identical_facts_from_the_next_firing_adopt_the_orphaned_reservation() {
     let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
     let adopted = activation(rig.handoff(t0() + 10).unwrap());
     assert_eq!(adopted.causal_identity, first.causal_identity);
-    assert_eq!(adopted.producer.firing_id, format!("{SESSION}#4"));
+    assert_eq!(
+        adopted.producer.firing_id,
+        format!("{}#4", session_key(SESSION))
+    );
     assert_eq!(
         rig.store.curator_headroom(PROJECT).unwrap(),
         headroom_before,
@@ -511,7 +514,7 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
         job.producer,
         ProducerBinding {
             producer: PRODUCER.to_string(),
-            firing_id: format!("{SESSION}#3"),
+            firing_id: format!("{}#3", session_key(SESSION)),
             ordinal: 2,
         }
     );
@@ -923,7 +926,10 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     let ready = rig.store.ready_curator_jobs(PROJECT, 8, t0()).unwrap();
     assert_eq!(ready.len(), 1);
     let job = &ready[0];
-    assert_eq!(job.producer.firing_id, format!("{SESSION}#3"));
+    assert_eq!(
+        job.producer.firing_id,
+        format!("{}#3", session_key(SESSION))
+    );
     let CuratorJobState::Ready(input) = &job.state else {
         panic!("{:?}", job.state);
     };
@@ -1111,5 +1117,143 @@ fn a_reservation_the_sweep_already_expired_reads_as_expired_at_late_publication(
     assert_eq!(
         rig.job(&reservation.causal_identity).queue_deadline_ms,
         reservation.queue_deadline_ms
+    );
+}
+
+/// Equal fact sets encode to equal bytes whatever order the model emitted them in, so a reordered retry names the same candidate and adopts the same reservation.
+#[test]
+fn the_subject_is_the_same_whatever_order_the_facts_arrive_in() {
+    let mut reversed = facts();
+    reversed.reverse();
+    assert_eq!(
+        review_subject(&facts(), &aliases()).unwrap(),
+        review_subject(&reversed, &aliases()).unwrap()
+    );
+}
+
+/// The wire protocol admits a 256-byte session id; every identity the handoff derives from it stays inside the store's identity bound.
+#[test]
+fn a_session_id_at_the_wire_bound_still_hands_off() {
+    let rig = Rig::open();
+    let session_id = "s".repeat(256);
+    let firing = publishing_state(3);
+    let handoff = reserve_and_stage(
+        &rig.target(),
+        &HandoffRequest {
+            store: &rig.store,
+            project: PROJECT,
+            session_id: &session_id,
+            firing: &firing,
+            facts: &facts(),
+            aliases: &aliases(),
+            now_ms: t0(),
+        },
+        |_| Ok(1),
+    )
+    .unwrap();
+    assert!(matches!(handoff, Handoff::Activate(_)), "{handoff:?}");
+}
+
+/// A recorded reservation names this firing's job only when it is the job this firing would reserve now. One made under other policy versions, as before a process upgrade, is left to expire and the new policy gets its own job (Q25/Q29).
+#[test]
+fn a_reservation_under_other_policy_versions_is_not_adopted() {
+    use crate::curator::broker::QuestionTemplate;
+
+    let rig = Rig::open();
+    let reference = rig.staged_reference();
+    let inputs = |policy_versions: BTreeMap<String, String>| CausalInputs {
+        target: ReviewTarget::StagedSubject {
+            kernel_incarnation: rig.kernel_incarnation.clone(),
+            candidate_id: reference.candidate_id.clone(),
+            payload_digest: reference.payload_digest.clone(),
+        },
+        question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
+        signals: Vec::new(),
+        required_evidence: Vec::new(),
+        policy_versions,
+    };
+    let current = inputs(review_policy_versions()).causal_identity().unwrap();
+    // A prior firing reserved the same subject under an older step schema and never published.
+    let prior = ProducerBinding {
+        producer: PRODUCER.to_string(),
+        firing_id: "prior-firing".to_string(),
+        ordinal: 2,
+    };
+    let previous_policy = inputs(BTreeMap::from([(
+        "step_schema".to_string(),
+        "previous".to_string(),
+    )]));
+    let previous = match rig
+        .store
+        .reserve_curator_job(PROJECT, &prior, &previous_policy, t0())
+        .unwrap()
+    {
+        memory_store::curator_jobs::ReserveOutcome::Reserved(job) => job,
+        other => panic!("{other:?}"),
+    };
+    assert_ne!(previous.causal_identity, current);
+    let mut state = publishing_state(3);
+    state.curator_reservation = Some(memory_store::CuratorReservation {
+        firing_seq: 2,
+        causal_identity: previous.causal_identity.clone(),
+        candidate_id: reference.candidate_id,
+        payload_digest: reference.payload_digest,
+        kernel_incarnation: rig.kernel_incarnation.clone(),
+        queue_deadline_ms: previous.queue_deadline_ms,
+    });
+    rig.persist(state);
+    let adopted = activation(rig.handoff(t0() + 1).unwrap());
+    assert_eq!(
+        adopted.causal_identity, current,
+        "the firing reserves under the policy it runs, not the one it recorded"
+    );
+    assert_eq!(
+        rig.job(&previous.causal_identity).state,
+        CuratorJobState::Reserved,
+        "the previous policy's reservation is left for the sweep"
+    );
+}
+
+/// A handoff failure abandons the firing that reserved, fenced on its publish predicate; a newer firing that moved the session on is untouched.
+#[test]
+fn a_handoff_failure_abandons_only_the_firing_that_reserved() {
+    let rig = Rig::open();
+    let publishing = rig.state();
+    let publishing_row_version = rig.store.load(SESSION).unwrap().row_version.unwrap();
+    // Another writer moved the session on to firing 4 before the reservation was recorded.
+    let mut next = publishing_state(4);
+    next.state = HistorySummarizerPhase::AwaitingProducer;
+    rig.persist(next.clone());
+    let mut validated = validated_range(2, 4);
+    validated.extraction = ExtractionOutcome::Accepted { count: 2 };
+    let target = rig.target();
+    let result = curator_decision_before_publish(CuratorDecisionRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        publishing: &publishing,
+        publishing_row_version,
+        validated: &validated,
+        aliases: &aliases(),
+        curator_handoff: Some(&target),
+        created_at_ms: t0(),
+        failure_started_at_ms: t0(),
+        failure_backoff_at_ms: 0,
+        completion_now_ms: t0,
+    });
+    assert!(
+        matches!(
+            result,
+            Err(HistorySummarizerDriveError::CuratorHandoff(
+                HandoffError::Persist(HistorySummarizerStateError::InvalidTransition { .. })
+            ))
+        ),
+        "{:?}",
+        result.err()
+    );
+    assert_eq!(
+        rig.state(),
+        next,
+        "the newer firing is not abandoned by the one that lost the race"
     );
 }
