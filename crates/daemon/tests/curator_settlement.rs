@@ -10,6 +10,7 @@ use daemon::curator::settlement::{
     ReadRefusal, RunResult, SETTLEMENT_PRODUCER, SelectedProposal, Settled, Settlement,
     SettlementError, TaskClaim, list_review_outcomes, read_selected_proposal,
 };
+use daemon::curator::steps::Step;
 use daemon::git_sources::{GitReadBounds, RepositoryBinding, read_selection};
 use daemon::harness_sources::SourcePublisher;
 use kernel::source_identity::OccurrenceClass;
@@ -1009,6 +1010,34 @@ fn revoked_or_uncited_dependencies_abstain_and_conflicting_content_is_refused() 
         Err(SettlementError::ConflictingContent)
     );
     assert_eq!(fixture.receipt().terminal, None);
+}
+
+#[test]
+fn a_proposal_the_kernel_cannot_stage_completes_without_content() {
+    // 32,700 quote characters decode under the text bound and pass the step schema, but every one of them serializes as two bytes, so the encoded payload exceeds the Kernel's bound. The model's oversized proposal completes the receipt as an abstention; it is not a Kernel failure that leaves the receipt open.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    let text = "\"".repeat(32_700);
+    let step = format!(
+        r#"{{"v":1,"step":{{"kind":"propose","action":"create","new_text":{},"uncertainty":"low"}}}}"#,
+        serde_json::to_string(&text).unwrap()
+    );
+    assert!(Step::parse(&step, &broker, false).is_ok());
+    let mut oversized = fixture.proposal(&[]);
+    oversized.new_text = Some(text);
+    assert_eq!(
+        fixture
+            .settle(&broker, RunResult::Proposal(Box::new(oversized)))
+            .unwrap(),
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    let receipt = fixture.receipt();
+    assert_eq!(receipt.terminal, Some(CuratorReceiptTerminal::Abstained));
+    assert_eq!(
+        receipt.abstained_reason,
+        Some(AbstainReason::ExpectationChanged)
+    );
+    assert_eq!(fixture.read(fixture.now + 6), Err(ReadRefusal::NotSelected));
 }
 
 #[test]

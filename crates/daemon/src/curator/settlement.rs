@@ -143,11 +143,11 @@ impl Settlement<'_> {
             }
             Err(Verdict::Store(error)) => return Err(SettlementError::Store(error)),
         };
-        let proposal = match bind_dependencies(broker, *proposal, &disclosed) {
-            Ok(proposal) => proposal,
+        let payload = match bind_dependencies(broker, *proposal, &disclosed) {
+            Ok(payload) => payload,
             Err(reason) => return content_free(ContentFree::Abstained(reason)),
         };
-        let (reference, created_at) = self.stage(run, queue_deadline_at, proposal, now)?;
+        let (reference, created_at) = self.stage(run, queue_deadline_at, payload, now)?;
         let review_hold = match recovered {
             Some(hold) => hold,
             None => self.transfer_retention(broker, &review, created_at)?,
@@ -350,11 +350,10 @@ impl Settlement<'_> {
         &self,
         run: &CuratorHoldBinding,
         queue_deadline_at: i64,
-        proposal: ReviewProposal,
+        payload: ReviewPayload,
         now: i64,
     ) -> Result<(ReviewStagedReference, i64), SettlementError> {
         let identity = provisional_result_identity(&run.subject, run.generation);
-        let payload = ReviewPayload::Proposal(Box::new(proposal));
         let binding = proposal_binding(self.binding, run);
         let staged = self.store.stage_review_input(ReviewStagingSpec {
             extraction_run_id: identity.extraction_run_id.clone(),
@@ -447,12 +446,12 @@ fn proposal_binding(job: &ReviewBinding, run: &CuratorHoldBinding) -> ReviewBind
     }
 }
 
-/// The model text is render-checked, every citation must name disclosed evidence, and the policy dependencies are the broker's, never the model's.
+/// The model text is render-checked, every citation must name disclosed evidence, and the policy dependencies are the broker's, never the model's. The bound payload must then encode under the Kernel's rules: the step schema bounds decoded text, but the Kernel bounds the serialized payload, so a proposal that passes the schema and still cannot be staged is the model's abstention, not a Kernel failure.
 fn bind_dependencies(
     broker: &EvidenceBroker,
     mut proposal: ReviewProposal,
     disclosed: &[String],
-) -> Result<ReviewProposal, AbstainReason> {
+) -> Result<ReviewPayload, AbstainReason> {
     for text in proposal.new_text.iter().chain(&proposal.limitations) {
         if check_render(text.as_bytes(), None).is_err() {
             return Err(AbstainReason::Secret);
@@ -497,7 +496,12 @@ fn bind_dependencies(
         uncited_disclosed_inputs,
         ancestry,
     };
-    Ok(proposal)
+    let payload = ReviewPayload::Proposal(Box::new(proposal));
+    match payload.encode() {
+        Ok(_) => Ok(payload),
+        Err(ReviewStageRefusal::SecretDetected) => Err(AbstainReason::Secret),
+        Err(_) => Err(AbstainReason::ExpectationChanged),
+    }
 }
 
 /// A revalidation outcome: a durable abstention reason, or a store failure that must not become one.
