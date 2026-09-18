@@ -127,15 +127,18 @@ struct ReadFile {
 }
 
 impl ProjectText {
-    /// Opens the root without following a link and refuses a root that is, contains, or lies inside a protected location.
+    /// Opens the root without following a link and refuses a root that is, contains, or lies inside a protected location. Only a missing root is `NotFound`; a root that exists but cannot be resolved or opened is a host failure or a type refusal, never absence.
     pub fn open(
         project_root: &Path,
         protected: &ProtectedLocations,
         binding: InspectionBinding,
     ) -> Result<Self, Refusal> {
-        let canonical = project_root
-            .canonicalize()
-            .map_err(|_| refusal(RefusalCode::NotFound))?;
+        let canonical = project_root.canonicalize().map_err(|error| {
+            refusal(match error.kind() {
+                std::io::ErrorKind::NotFound => RefusalCode::NotFound,
+                _ => RefusalCode::Unavailable,
+            })
+        })?;
         if protected
             .roots
             .iter()
@@ -148,7 +151,7 @@ impl ProjectText {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|_| refusal(RefusalCode::NotFound))?;
+        .map_err(|errno| refusal(open_refusal(errno)))?;
         let metadata = metadata(&root)?;
         if protected
             .identities
@@ -237,12 +240,13 @@ impl ProjectText {
             if scanned.saturating_add(probed.len()) > MAX_SCAN_BYTES {
                 return Ok(finish(outcome, Completeness::ProbeBound));
             }
+            // The file is charged before it is read: a file the read then refuses has still been read, and the scan bound is on bytes read, not on bytes accepted.
+            scanned = scanned.saturating_add(probed.len());
             // Deliverability is decided before any literal is applied, for every query kind: a file that cannot be read or rendered is withheld whether or not its path, name, or text would have matched.
             let Ok(file) = self.read_file(&relative, &probed) else {
                 outcome.withheld = true;
                 continue;
             };
-            scanned += u64::try_from(file.bytes.len()).unwrap_or(u64::MAX);
             let text = String::from_utf8_lossy(&file.bytes);
             let position = match query {
                 SearchQuery::Path(needle) => relative.contains(needle).then_some(0),
@@ -406,8 +410,12 @@ impl ProjectText {
         let captured = match self.captured.get(&digest) {
             Some(captured) => captured.clone(),
             None => {
+                // Job identities are project-scoped, so the capture's identity carries the project: two projects whose runs share a subject and generation and capture identical bytes are two captures, each with its own detail and acquisition reference.
                 let hold = &broker.binding().hold;
-                let evidence_id = format!("curcap:{}:{}:{digest}", hold.subject, hold.generation);
+                let evidence_id = format!(
+                    "curcap:{}:{}:{}:{digest}",
+                    hold.project_digest, hold.subject, hold.generation
+                );
                 let handle = store
                     .ingest_exact_artifact(ArtifactIngestRequest {
                         intent: intent(&evidence_id, &digest),

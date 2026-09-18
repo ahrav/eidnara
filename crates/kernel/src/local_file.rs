@@ -6,7 +6,9 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
+use super::cas::ProviderEgress;
 use super::redaction::identity;
+use super::review_staging::check_digest;
 use super::slice::{EVIDENCE_CITED_SQL, ObservationPayload, ObservationSpec};
 use super::{CachedSql, CommitIntent, Envelope, KernelError, KernelStore, Sensitivity, map_sqlite};
 
@@ -54,16 +56,19 @@ pub(crate) fn uses_local_file_namespace(spec: &ObservationSpec) -> bool {
 }
 
 impl Envelope<'_> {
-    /// Records the typed observation for one capture. The cited evidence must be a live Curator capture whose digest, length, and finite `retain_until` agree with the request; the observation's sensitivity is the evidence row's, never weaker. The observation cites the evidence, so `retire_evidence` conflicts until the observation is retired first. A relative path the redaction scanner would rewrite is refused, because a stored path must equal the path the run named.
+    /// Records the typed observation for one capture. The cited evidence must be a live, local-only Curator capture whose digest, length, and finite `retain_until` agree with the request; the observation's sensitivity is the evidence row's, never weaker. The observation cites the evidence, so `retire_evidence` conflicts until the observation is retired first. The detail claims project-confined provenance, so its shape is checked here rather than trusted from the caller: the project digest is a lowercase hex digest and the relative path is ordinary components only. A relative path the redaction scanner would rewrite is refused, because a stored path must equal the path the run named.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::InvalidInput`] for an empty path or evidence id, a detail the scanner rewrites, or a serialization failure; [`KernelError::NotFound`] when no live Curator-capture row matches the request; and the observation writer's errors otherwise.
+    /// Returns [`KernelError::InvalidInput`] for an empty evidence id, a malformed project digest or relative path, a detail the scanner rewrites, or a serialization failure; [`KernelError::NotFound`] when no live, local-only Curator-capture row matches the request; and the observation writer's errors otherwise.
     pub fn record_local_file_capture(
         &mut self,
         request: &LocalFileCaptureRequest<'_>,
     ) -> Result<(), KernelError> {
-        if request.relative_path.is_empty() || request.evidence_id.is_empty() {
+        if request.evidence_id.is_empty()
+            || check_digest(request.project_digest).is_err()
+            || !is_relative_path(request.relative_path)
+        {
             return Err(KernelError::InvalidInput);
         }
         let sensitivity: String = self
@@ -71,13 +76,14 @@ impl Envelope<'_> {
             .query_row_cached(
                 "SELECT sensitivity_class FROM evidence_meta
                  WHERE evidence_id=?1 AND artifact_digest=?2 AND byte_length=?3
-                   AND retention_class=?4 AND retain_until IS NOT NULL
-                   AND invalidated_commit_seq IS NULL",
+                   AND retention_class=?4 AND provider_egress_class=?5
+                   AND retain_until IS NOT NULL AND invalidated_commit_seq IS NULL",
                 params![
                     request.evidence_id,
                     request.artifact_digest,
                     i64::try_from(request.byte_length).map_err(|_| KernelError::InvalidInput)?,
                     super::cas::CURATOR_CAPTURE_RETENTION_CLASS,
+                    ProviderEgress::LocalOnly.as_str(),
                 ],
                 |row| row.get(0),
             )
@@ -131,7 +137,7 @@ impl Envelope<'_> {
 impl KernelStore {
     /// Retires the capture observation and evidence of every Curator capture whose `retain_until` has passed and that no live hold still pins, at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] per call, one commit per capture keyed by `now` and the evidence id. A capture that some other live row still cites keeps its evidence: its own observation is retired, and the capture leaves the sweep until that citation is gone, so a retained capture costs nothing on later calls and never displaces a newer expired one from the page. Ownership ends here; the artifact bytes are reclaimed later only if no other live reference names the digest. Returns how many evidence rows were retired.
     ///
-    /// A capture whose retirement the store refuses (`NotFound`, `Conflict`, or `InvalidInput` from its own commit) is skipped and the sweep continues, so one such row cannot hold every capture behind it in the page.
+    /// Candidates are chosen under a reader lock; each commit re-evaluates the expiry and pin predicate under the writer, so a hold acquired or extended over a candidate in between keeps it. A capture whose retirement the store refuses (`NotFound`, `Conflict`, or `InvalidInput` from its own commit) is skipped and the sweep continues, so one such row cannot hold every capture behind it in the page; a row whose registry object is not a live evidence object can never be retired and is not a candidate at all.
     ///
     /// # Errors
     ///
@@ -151,14 +157,7 @@ impl KernelStore {
                 cause: "acquisition reference expired".to_string(),
             };
             let outcome = self.commit(intent, |envelope| {
-                for observation in live_capture_observations(envelope, &evidence_id)? {
-                    envelope.retire_observation(&observation)?;
-                }
-                if cited_elsewhere(envelope, &evidence_id)? {
-                    return Ok("retained".to_string());
-                }
-                envelope.retire_evidence(&evidence_object)?;
-                Ok("retired".to_string())
+                retire_expired_capture(envelope, now, &evidence_id, &evidence_object)
             });
             match outcome {
                 Ok(receipt) => {
@@ -205,7 +204,61 @@ impl KernelStore {
     }
 }
 
-/// Live Curator captures whose acquisition reference has passed, that no live hold pins, and that the sweep still has work for: `(evidence_id, evidence object id)`, oldest expiry first. A capture whose observation is already retired and whose evidence another live row cites has nothing left to retire until that citation goes, so it is not a candidate.
+/// Retires one candidate inside its own transaction: the capture's own observations, then the evidence unless another live row cites it. The candidate list was read outside this transaction, so the expiry and pin predicate is checked again first; a capture a hold has pinned since then is left alone as `Conflict`, which the sweep skips without a commit.
+fn retire_expired_capture(
+    envelope: &mut Envelope<'_>,
+    now: i64,
+    evidence_id: &str,
+    evidence_object: &str,
+) -> Result<String, KernelError> {
+    let still_expired: bool = envelope
+        .tx
+        .query_row_cached(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM evidence_meta e
+                               WHERE e.evidence_id=?3 AND {EXPIRED_UNPINNED_SQL})"
+            ),
+            params![
+                super::cas::CURATOR_CAPTURE_RETENTION_CLASS,
+                now,
+                evidence_id
+            ],
+            |row| row.get(0),
+        )
+        .map_err(map_sqlite)?;
+    if !still_expired {
+        return Err(KernelError::Conflict);
+    }
+    for observation in live_capture_observations(envelope, evidence_id)? {
+        envelope.retire_observation(&observation)?;
+    }
+    if cited_elsewhere(envelope, evidence_id)? {
+        return Ok("retained".to_string());
+    }
+    envelope.retire_evidence(evidence_object)?;
+    Ok("retired".to_string())
+}
+
+/// Whether `path` is a relative path of ordinary components: non-empty, no leading `/`, no NUL, and no empty, `.`, or `..` component.
+fn is_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .all(|component| !matches!(component, "" | "." | ".."))
+}
+
+/// SQL predicate over an `evidence_meta` row aliased `e`: a live Curator capture (`?1` the retention class) whose acquisition reference has passed at `?2` and that no live hold pins at `?2`. The candidate query and the per-capture recheck evaluate this same text.
+const EXPIRED_UNPINNED_SQL: &str = "e.retention_class=?1 AND e.invalidated_commit_seq IS NULL
+           AND e.retain_until IS NOT NULL AND e.retain_until<=?2
+           AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
+                            JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
+                            WHERE r.evidence_id=e.evidence_id
+                              AND r.released_at IS NULL AND p.released_at IS NULL
+                              AND (p.expires_at IS NULL OR p.expires_at>?2))";
+
+/// Live Curator captures whose acquisition reference has passed, that no live hold pins, whose registry object is a live evidence object, and that the sweep still has work for: `(evidence_id, evidence object id)`, oldest expiry first. A capture whose observation is already retired and whose evidence another live row cites has nothing left to retire until that citation goes, so it is not a candidate.
 fn expired_captures(
     connection: &rusqlite::Connection,
     now: i64,
@@ -233,13 +286,10 @@ fn expired_captures(
 fn expired_captures_sql() -> String {
     format!(
         "SELECT e.evidence_id,e.object_id FROM evidence_meta e
-         WHERE e.retention_class=?1 AND e.invalidated_commit_seq IS NULL
-           AND e.retain_until IS NOT NULL AND e.retain_until<=?2
-           AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
-                            JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
-                            WHERE r.evidence_id=e.evidence_id
-                              AND r.released_at IS NULL AND p.released_at IS NULL
-                              AND (p.expires_at IS NULL OR p.expires_at>?2))
+         WHERE {EXPIRED_UNPINNED_SQL}
+           AND EXISTS(SELECT 1 FROM object_registry g
+                      WHERE g.object_id=e.object_id AND g.object_kind='evidence'
+                        AND g.invalidated_commit_seq IS NULL)
            AND (EXISTS(SELECT 1 FROM observations c
                        WHERE c.evidence_id=e.evidence_id AND c.observation_kind=?4
                          AND c.invalidated_commit_seq IS NULL)
@@ -289,12 +339,140 @@ fn cited_elsewhere(envelope: &Envelope<'_>, evidence_id: &str) -> Result<bool, K
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, StatementStatus, params};
+    use sha2::Digest as _;
 
-    use super::{LOCAL_FILE_KIND, MAX_EXPIRED_CAPTURES_PER_CALL, expired_captures_sql};
+    use super::{
+        LOCAL_FILE_KIND, LocalFileCaptureRequest, MAX_EXPIRED_CAPTURES_PER_CALL,
+        expired_captures_sql, retire_expired_capture,
+    };
     use crate::cas::CURATOR_CAPTURE_RETENTION_CLASS;
     use crate::schema::apply_kernel_schema;
+    use crate::{
+        ArtifactIngestRequest, CommitIntent, CuratorHoldBinding, DomainSpec, KernelError,
+        KernelStore, ProviderEgress, Sensitivity,
+    };
 
     const NOW: i64 = 10_000;
+
+    fn intent(key: &str) -> CommitIntent {
+        CommitIntent {
+            producer: "test".to_string(),
+            operation_key: key.to_string(),
+            request_digest: "d".repeat(64),
+            actor: "test".to_string(),
+            cause: "test".to_string(),
+        }
+    }
+
+    /// A store holding one capture whose acquisition reference lapses at the returned time, and the hold binding of a run over it. Ingest requires the reference to be live when the capture is created, so the time is the wall clock's.
+    fn store_with_lapsing_capture(
+        root: &std::path::Path,
+    ) -> (KernelStore, CuratorHoldBinding, i64) {
+        let lapses_at = crate::current_time_ms() + 60_000;
+        let store = KernelStore::open(root).unwrap();
+        store
+            .commit(intent("seed"), |envelope| {
+                envelope.insert_domain(DomainSpec {
+                    domain_id: "domain".to_string(),
+                    object_id: "domain-object".to_string(),
+                    name: "domain".to_string(),
+                    source_kind: "test".to_string(),
+                    source_id: "domain".to_string(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let body = b"captured project text";
+        let digest = format!("{:x}", sha2::Sha256::digest(body));
+        store
+            .ingest_exact_artifact(ArtifactIngestRequest {
+                intent: intent("ingest"),
+                payload: body.to_vec(),
+                evidence_id: "cap".to_string(),
+                object_id: "cap-object".to_string(),
+                object_kind: "evidence".to_string(),
+                domain_id: "domain".to_string(),
+                source_kind: "local_file".to_string(),
+                source_id: "a.txt".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+                retain_until: Some(lapses_at),
+                asserted_sensitivity: Sensitivity::Sensitive,
+                provider_egress: ProviderEgress::LocalOnly,
+                provenance: None,
+            })
+            .unwrap();
+        store
+            .commit(intent("observe"), |envelope| {
+                envelope.record_local_file_capture(&LocalFileCaptureRequest {
+                    project_digest: &"a".repeat(64),
+                    relative_path: "a.txt",
+                    captured_at: 1,
+                    domain_id: "domain",
+                    scope_id: None,
+                    evidence_id: "cap",
+                    artifact_digest: &digest,
+                    byte_length: u64::try_from(body.len()).unwrap(),
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let kernel_incarnation: String = Connection::open_with_flags(
+            root.join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT database_incarnation_id FROM kernel_format_marker",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+        let binding = CuratorHoldBinding {
+            project_digest: "a".repeat(64),
+            kernel_incarnation,
+            memstore_incarnation: "m".repeat(32),
+            subject: "job".to_string(),
+            generation: 1,
+        };
+        (store, binding, lapses_at)
+    }
+
+    #[test]
+    fn a_capture_pinned_after_it_was_selected_for_expiry_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, binding, lapses_at) = store_with_lapsing_capture(root.path());
+        let now = lapses_at + 1;
+        // Between the candidate query and this commit, a run acquires a hold over the lapsed capture.
+        store
+            .acquire_execution_hold(&binding, &["cap".to_string()], now + 60_000)
+            .unwrap();
+        let outcome = store.commit(intent("expire"), |envelope| {
+            retire_expired_capture(envelope, now, "cap", "cap-object")
+        });
+        assert_eq!(
+            outcome,
+            Err(KernelError::Conflict),
+            "a pinned capture is not retired under the hold"
+        );
+        assert!(
+            store.local_file_capture("cap").unwrap().is_some(),
+            "the capture's detail is still live"
+        );
+        // Unpinned, the same call retires it.
+        let unpinned = tempfile::tempdir().unwrap();
+        let (store, _, lapses_at) = store_with_lapsing_capture(unpinned.path());
+        let receipt = store
+            .commit(intent("expire"), |envelope| {
+                retire_expired_capture(envelope, lapses_at + 1, "cap", "cap-object")
+            })
+            .unwrap();
+        assert_eq!(receipt.result, "retired");
+        assert!(store.local_file_capture("cap").unwrap().is_none());
+    }
 
     /// One live capture whose acquisition reference lapsed at `NOW`, with its capture observation, plus `history` captures earlier sweeps already retired.
     fn store_with_retired_captures(history: usize) -> Connection {

@@ -98,8 +98,12 @@ impl Fixture {
     }
 
     fn hold_binding(&self) -> CuratorHoldBinding {
+        self.hold_binding_for(PROJECT)
+    }
+
+    fn hold_binding_for(&self, project: &str) -> CuratorHoldBinding {
         CuratorHoldBinding {
-            project_digest: PROJECT.to_string(),
+            project_digest: project.to_string(),
             kernel_incarnation: incarnation(self.store_dir.path()),
             memstore_incarnation: "m".repeat(32),
             subject: "job-1".to_string(),
@@ -109,13 +113,18 @@ impl Fixture {
 
     /// A broker with an execution hold over `anchor` for this project, disclosing to `destination`.
     fn broker(&self, destination: ArtifactDestination) -> EvidenceBroker {
+        self.broker_for(PROJECT, destination)
+    }
+
+    /// A broker for a run of `project`, whose hold subject and generation are the fixture's.
+    fn broker_for(&self, project: &str, destination: ArtifactDestination) -> EvidenceBroker {
         let anchor = self
             .store
             .ingest_artifact(ArtifactIngestRequest {
                 intent: intent(&format!("anchor-{destination:?}")),
                 payload: b"anchor".to_vec(),
-                evidence_id: format!("evidence-anchor-{destination:?}"),
-                object_id: format!("evidence-object-anchor-{destination:?}"),
+                evidence_id: format!("evidence-anchor-{destination:?}-{project}"),
+                object_id: format!("evidence-object-anchor-{destination:?}-{project}"),
                 object_kind: "evidence".to_string(),
                 domain_id: DOMAIN.to_string(),
                 source_kind: "conversation".to_string(),
@@ -129,7 +138,7 @@ impl Fixture {
                 provenance: None,
             })
             .unwrap();
-        let binding = self.hold_binding();
+        let binding = self.hold_binding_for(project);
         let hold = self
             .store
             .acquire_execution_hold(&binding, &[anchor.evidence_id], self.now + 2 * HOUR_MS)
@@ -1072,34 +1081,39 @@ fn retained_captures_do_not_starve_newer_expired_captures() {
 #[test]
 fn a_capture_the_store_refuses_to_retire_does_not_stall_the_sweep() {
     let fixture = Fixture::open();
-    // A Curator-capture row whose registry object is not an evidence object: retiring it is refused as NotFound on every sweep. Its acquisition reference sorts ahead of the run's captures.
-    fixture
-        .store
-        .ingest_exact_artifact(ArtifactIngestRequest {
-            intent: intent("unretirable"),
-            payload: b"not an evidence object".to_vec(),
-            evidence_id: "unretirable".to_string(),
-            object_id: "unretirable-object".to_string(),
-            object_kind: "artifact".to_string(),
-            domain_id: DOMAIN.to_string(),
-            source_kind: "local_file".to_string(),
-            source_id: "unretirable.txt".to_string(),
-            source_revision: 1,
-            media_type: "text/plain".to_string(),
-            retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
-            retain_until: Some(fixture.now + HOUR_MS - 1),
-            asserted_sensitivity: Sensitivity::Sensitive,
-            provider_egress: ProviderEgress::LocalOnly,
-            provenance: None,
-        })
-        .unwrap();
-    fixture.write("a.txt", b"captured behind the refused row");
+    // A full page of Curator-capture rows whose registry objects are not evidence objects: retiring one is refused as NotFound on every sweep. Their acquisition references sort ahead of the run's capture, so a sweep that only ever looked at the first page would never reach it.
+    for index in 0..kernel::MAX_EXPIRED_CAPTURES_PER_CALL {
+        fixture
+            .store
+            .ingest_exact_artifact(ArtifactIngestRequest {
+                intent: intent(&format!("unretirable-{index}")),
+                payload: format!("not an evidence object {index}").into_bytes(),
+                evidence_id: format!("unretirable-{index:03}"),
+                object_id: format!("unretirable-object-{index:03}"),
+                object_kind: "artifact".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "local_file".to_string(),
+                source_id: "unretirable.txt".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+                retain_until: Some(fixture.now + HOUR_MS - 1),
+                asserted_sensitivity: Sensitivity::Sensitive,
+                provider_egress: ProviderEgress::LocalOnly,
+                provenance: None,
+            })
+            .unwrap();
+    }
+    fixture.write("a.txt", b"captured behind the refused rows");
     let protected = fixture.protected();
     let mut text = fixture.text(&protected);
     let mut broker = fixture.broker(ArtifactDestination::Local);
     text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
         .unwrap();
-    assert_eq!(fixture.capture_rows().len(), 2);
+    assert_eq!(
+        fixture.capture_rows().len(),
+        kernel::MAX_EXPIRED_CAPTURES_PER_CALL + 1
+    );
     let after_hold = fixture.now + 3 * HOUR_MS;
     assert_eq!(
         fixture
@@ -1107,11 +1121,11 @@ fn a_capture_the_store_refuses_to_retire_does_not_stall_the_sweep() {
             .expire_local_file_captures(after_hold)
             .unwrap(),
         1,
-        "the capture behind the refused row is retired in the same sweep"
+        "the capture behind the refused rows is retired in the same sweep"
     );
     let rows = fixture.capture_rows();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, "unretirable");
+    assert_eq!(rows.len(), kernel::MAX_EXPIRED_CAPTURES_PER_CALL);
+    assert!(rows.iter().all(|row| row.0.starts_with("unretirable-")));
 }
 
 #[test]
@@ -1147,4 +1161,190 @@ fn a_generic_correction_cannot_forge_a_capture_observation() {
         });
         assert_eq!(refused, Err(kernel::KernelError::InvalidInput), "{key}");
     }
+}
+
+#[test]
+fn a_root_that_exists_but_cannot_be_opened_is_not_reported_as_absent() {
+    let fixture = Fixture::open();
+    let protected = fixture.protected();
+    let file = fixture.write("plain.txt", b"a file, not a directory");
+    assert_eq!(
+        ProjectText::open(&file, &protected, fixture.binding())
+            .unwrap_err()
+            .code,
+        RefusalCode::NotRegularFile,
+        "an existing root that is not a directory is a type refusal"
+    );
+    assert_eq!(
+        ProjectText::open(
+            &fixture.project.path().join("missing"),
+            &protected,
+            fixture.binding()
+        )
+        .unwrap_err()
+        .code,
+        RefusalCode::NotFound
+    );
+    assert_eq!(
+        ProjectText::open(&file.join("below-a-file"), &protected, fixture.binding())
+            .unwrap_err()
+            .code,
+        RefusalCode::Unavailable,
+        "a root whose ancestor is not a directory is a host failure, not absence"
+    );
+}
+
+#[test]
+fn refused_files_are_charged_against_the_scan_bound() {
+    let fixture = Fixture::open();
+    // One more undecodable file than the scan bound admits, each read in full before it is refused.
+    let mut undecodable = vec![b'x'; usize::try_from(MAX_CAPTURE_BYTES).unwrap()];
+    undecodable[0] = 0xff;
+    for index in 0..(MAX_SCAN_BYTES / MAX_CAPTURE_BYTES + 1) {
+        fixture.write(&format!("b{index:02}.bin"), &undecodable);
+    }
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    let outcome = text
+        .search(
+            &fixture.store,
+            &mut broker,
+            SearchQuery::Content("zzz"),
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(
+        outcome.completeness,
+        Completeness::ProbeBound,
+        "bytes read from a refused file count toward the scan bound"
+    );
+    assert!(outcome.withheld);
+    assert!(outcome.hits.is_empty());
+}
+
+#[test]
+fn captures_of_identical_bytes_by_two_projects_are_two_captures() {
+    let fixture = Fixture::open();
+    let body = b"the same bytes in two projects\n";
+    fixture.write("same.txt", body);
+    let other_root = tempfile::tempdir().unwrap();
+    std::fs::write(other_root.path().join("elsewhere.txt"), body).unwrap();
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    text.read(&fixture.store, &mut broker, "same.txt", None, fixture.now)
+        .unwrap();
+    // A second project whose run shares the first's job subject and generation captures the same bytes under another path.
+    let other_project = "b".repeat(64);
+    let mut other_text =
+        ProjectText::open(other_root.path(), &protected, fixture.binding()).unwrap();
+    let mut other_broker = fixture.broker_for(&other_project, ArtifactDestination::Local);
+    other_text
+        .read(
+            &fixture.store,
+            &mut other_broker,
+            "elsewhere.txt",
+            None,
+            fixture.now,
+        )
+        .unwrap();
+    let rows = fixture.capture_rows();
+    assert_eq!(rows.len(), 2, "one capture per project, not a replay");
+    let details: Vec<(String, String)> = rows
+        .iter()
+        .map(|(evidence_id, ..)| {
+            let detail = fixture
+                .store
+                .local_file_capture(evidence_id)
+                .unwrap()
+                .unwrap();
+            (detail.project_digest, detail.relative_path)
+        })
+        .collect();
+    assert!(details.contains(&(PROJECT.to_string(), "same.txt".to_string())));
+    assert!(details.contains(&(other_project, "elsewhere.txt".to_string())));
+}
+
+#[test]
+fn the_capture_writer_refuses_a_detail_that_does_not_describe_a_confined_capture() {
+    let fixture = Fixture::open();
+    // Two bodies: the store folds egress across every row of one digest, so remote-allowed evidence needs bytes of its own.
+    let body = b"bytes the writer is asked to describe";
+    let remote_body = b"bytes that may leave the host";
+    let ingest = |evidence_id: &str, payload: &[u8], provider_egress| {
+        fixture
+            .store
+            .ingest_exact_artifact(ArtifactIngestRequest {
+                intent: intent(&format!("ingest-{evidence_id}")),
+                payload: payload.to_vec(),
+                evidence_id: evidence_id.to_string(),
+                object_id: format!("{evidence_id}-object"),
+                object_kind: "evidence".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "local_file".to_string(),
+                source_id: "any.txt".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+                retain_until: Some(fixture.now + HOUR_MS),
+                asserted_sensitivity: Sensitivity::Sensitive,
+                provider_egress,
+                provenance: None,
+            })
+            .unwrap();
+    };
+    ingest("local", body, ProviderEgress::LocalOnly);
+    ingest("remote", remote_body, ProviderEgress::RemoteAllowed);
+    let record = |key: &str, evidence_id: &str, project_digest: &str, relative_path: &str| {
+        let bytes: &[u8] = if evidence_id == "remote" {
+            remote_body
+        } else {
+            body
+        };
+        fixture.store.commit(intent(key), |envelope| {
+            envelope.record_local_file_capture(&kernel::LocalFileCaptureRequest {
+                project_digest,
+                relative_path,
+                captured_at: fixture.now,
+                domain_id: DOMAIN,
+                scope_id: None,
+                evidence_id,
+                artifact_digest: &format!("{:x}", Sha256::digest(bytes)),
+                byte_length: u64::try_from(bytes.len()).unwrap(),
+            })?;
+            Ok(String::new())
+        })
+    };
+    for (key, project, path) in [
+        ("absolute", PROJECT, "/etc/passwd"),
+        ("traversing", PROJECT, "src/../../etc/passwd"),
+        ("dot", PROJECT, "./src/main.rs"),
+        ("empty-component", PROJECT, "src//main.rs"),
+        ("nul", PROJECT, "src/\0main.rs"),
+        ("empty", PROJECT, ""),
+        ("not-a-digest", "the project", "src/main.rs"),
+        ("uppercase-digest", &"A".repeat(64), "src/main.rs"),
+    ] {
+        assert_eq!(
+            record(key, "local", project, path),
+            Err(kernel::KernelError::InvalidInput),
+            "{key}"
+        );
+    }
+    assert_eq!(
+        record("remote", "remote", PROJECT, "src/main.rs"),
+        Err(kernel::KernelError::NotFound),
+        "evidence that may leave the host is not a project capture"
+    );
+    record("ok", "local", PROJECT, "src/main.rs").unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .local_file_capture("local")
+            .unwrap()
+            .unwrap()
+            .relative_path,
+        "src/main.rs"
+    );
 }
