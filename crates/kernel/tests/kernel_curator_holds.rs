@@ -1547,6 +1547,15 @@ fn a_transfer_retry_recovers_a_purge_degraded_review_hold() {
         .transfer_execution_to_review(&hold.hold_id, &execution, &review, review_expires_at)
         .unwrap();
     assert_eq!(retried.hold_id, review_hold.hold_id);
+    // So does a settlement that recovers by lookup: the degraded pin is still the binding's committed hold, and validation under it is what refuses.
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(&review, now)
+            .unwrap()
+            .map(|found| found.hold_id),
+        Some(review_hold.hold_id.clone())
+    );
     assert_eq!(
         refusal(
             fixture

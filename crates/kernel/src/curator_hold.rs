@@ -402,7 +402,7 @@ impl KernelStore {
         Ok(hold)
     }
 
-    /// The active review hold owned by `binding`; released, purge-degraded, and expired holds return `None`.
+    /// The review hold owned by `binding` that is unreleased and unexpired; released and expired holds return `None`. A purge-degraded hold is returned like [`Self::transfer_execution_to_review`] returns it: it protects nothing and validation under it refuses, but it is the binding's committed hold and the id its owner must release.
     pub fn lookup_review_hold(
         &self,
         binding: &CuratorHoldBinding,
@@ -414,22 +414,13 @@ impl KernelStore {
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite)?;
         self.check_incarnation(&tx, binding)?;
-        let found: Option<(String, i64)> = tx
-            .query_row_cached(
-                "SELECT capture_pin_id,expires_at FROM capture_pins
-                 WHERE pin_kind=?1 AND owner_id=?2 AND released_at IS NULL
-                   AND purge_degraded_at IS NULL AND expires_at>?3
-                 ORDER BY created_at DESC LIMIT 1",
-                params![
-                    CuratorHoldKind::Review.pin_kind(),
-                    binding.owner_id(),
-                    now.max(current_time_ms())
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(sqlite)?;
-        let Some((hold_id, expires_at)) = found else {
+        let found = live_hold_of(
+            &tx,
+            CuratorHoldKind::Review,
+            binding,
+            now.max(current_time_ms()),
+        )?;
+        let Some((hold_id, expires_at, _degraded)) = found else {
             return Ok(None);
         };
         admit_totals(&tx, &hold_id, CuratorHoldKind::Review, expires_at).map(Some)

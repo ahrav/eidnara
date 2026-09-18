@@ -520,7 +520,7 @@ CREATE TABLE curator_receipts (
             selected_payload_digest TEXT CHECK (selected_payload_digest IS NULL OR length(selected_payload_digest) = 64),
             abstained_reason TEXT CHECK (abstained_reason IS NULL OR abstained_reason IN (
                 'owner_sensitive', 'wrong_scope', 'secret', 'expectation_changed', 'undisclosed_citation',
-                'partial_disclosure', 'model_declined')),
+                'partial_disclosure', 'model_declined', 'invalid_proposal')),
             created_at_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
             PRIMARY KEY (project, causal_identity),

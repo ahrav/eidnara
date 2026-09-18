@@ -473,7 +473,7 @@ fn proposal_binding(job: &ReviewBinding, run: &CuratorHoldBinding) -> ReviewBind
     }
 }
 
-/// The model text is render-checked, every citation must name disclosed evidence under a disclosed alias, and the policy dependencies are the broker's, never the model's. The bound payload then passes the Kernel's own field scan, so a secret in any model-controlled identity abstains instead of leaving the receipt in progress behind a staging refusal no retry can pass.
+/// The model text is render-checked, every citation must name disclosed evidence under a disclosed alias, and the policy dependencies are the broker's, never the model's. The bound payload then passes the Kernel's own payload rules, so a secret in any model-controlled field, or a shape the Kernel would refuse, abstains instead of leaving the receipt in progress behind a staging refusal no retry can pass.
 fn bind_dependencies(
     broker: &EvidenceBroker,
     mut proposal: ReviewProposal,
@@ -544,9 +544,11 @@ fn bind_dependencies(
         uncited_disclosed_inputs,
         ancestry,
     };
+    // The Kernel's own payload rules, run here so a proposal that could never be staged completes the receipt instead of failing every retry the same way. The dependencies above are settlement's; anything else these rules reject is the model's.
     let payload = ReviewPayload::Proposal(Box::new(proposal));
     match payload.encode() {
         Err(ReviewStageRefusal::SecretDetected) => Err(AbstainReason::Secret),
+        Err(ReviewStageRefusal::Invalid) => Err(AbstainReason::InvalidProposal),
         _ => Ok(payload),
     }
 }
