@@ -789,6 +789,69 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
     );
 }
 
+#[test]
+fn every_abstain_reason_writes_under_the_column_check_and_reads_back() {
+    // The explicit match requires every `AbstainReason` variant; completing each `ALL` entry checks the column CHECK and the row parser cover it.
+    let listed = |reason: AbstainReason| match reason {
+        AbstainReason::OwnerSensitive
+        | AbstainReason::WrongScope
+        | AbstainReason::Secret
+        | AbstainReason::ExpectationChanged
+        | AbstainReason::UndisclosedCitation
+        | AbstainReason::PartialDisclosure
+        | AbstainReason::ModelDeclined => AbstainReason::ALL.contains(&reason),
+    };
+    for reason in AbstainReason::ALL {
+        assert!(listed(reason));
+        let fixture = Fixture::open();
+        let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+        let CuratorBeginOutcome::Begun(_) = fixture.begin(&claim, T0) else {
+            panic!("first claim begins")
+        };
+        let completed = fixture
+            .store
+            .complete_curator_receipt(
+                PROJECT,
+                &fixture.identity,
+                &claim,
+                "completion-1",
+                "worker-a",
+                0,
+                1,
+                KERNEL,
+                &ReceiptCompletion::Abstained(reason),
+                T0 + 1,
+            )
+            .unwrap();
+        assert!(
+            matches!(completed, LeaseCompleteOutcome::Applied { .. }),
+            "{reason:?}: {completed:?}"
+        );
+        let receipt = fixture
+            .store
+            .lookup_curator_receipt(PROJECT, &fixture.identity)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.terminal, Some(CuratorReceiptTerminal::Abstained));
+        assert_eq!(receipt.abstained_reason, Some(reason));
+        assert_eq!(receipt.selected, None);
+        let page = fixture
+            .store
+            .list_completed_curator_receipts(PROJECT, None, 10)
+            .unwrap();
+        assert_eq!(page.len(), 1, "{reason:?}");
+        assert_eq!(page[0].abstained_reason, Some(reason));
+    }
+    let mut names: Vec<&str> = AbstainReason::ALL.iter().map(|r| r.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        AbstainReason::ALL.len(),
+        "reason strings collide"
+    );
+}
+
 /// A bounded transition table over charged-not-dispatched attempts, takeover, expiry, reopen, and recovery. Every sequence must keep the consumed total at or under four across generations, never commit a fifth, never move either absolute deadline, and complete only through the current generation.
 #[test]
 fn bounded_transition_sequences_preserve_allowance_deadlines_and_generation_fencing() {

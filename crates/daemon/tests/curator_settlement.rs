@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use daemon::curator::broker::{EvidenceBroker, QuestionTemplate, ReferenceExpectation, RunBinding};
+use daemon::curator::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
 use daemon::curator::settlement::{
     ReadRefusal, RunResult, SETTLEMENT_PRODUCER, SelectedProposal, Settled, Settlement,
     SettlementError, TaskClaim, list_review_outcomes, read_selected_proposal,
@@ -14,10 +15,10 @@ use daemon::git_sources::{GitReadBounds, RepositoryBinding, read_selection};
 use daemon::harness_sources::SourcePublisher;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    CommitIntent, CuratorHoldBinding, CuratorHoldKind, Dimension, DomainSpec, EvidenceReference,
-    KernelStore, ManifestReference, PolicyDependencies, ProjectScope, ProposalAction,
-    ProposalTarget, ProviderEgress, REVIEW_EXPIRY_MAX_MS, ReviewBinding, ReviewOwner,
-    ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadRefusal,
+    ArtifactDestination, CommitIntent, CuratorHoldBinding, CuratorHoldKind, Dimension, DomainSpec,
+    EvidenceReference, KernelStore, ManifestReference, PolicyDependencies, ProjectScope,
+    ProposalAction, ProposalTarget, ProviderEgress, REVIEW_EXPIRY_MAX_MS, ReviewBinding,
+    ReviewOwner, ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadRefusal,
     ReviewStagedReference, ReviewStagingSpec, ScopeSpec, ScopeTermSpec, Sensitivity,
     SourceDependency, SourceDescriptorDetail, StagingTerminalState, Uncertainty,
     provisional_result_identity,
@@ -37,6 +38,7 @@ const DOMAIN: &str = "domain";
 const SCOPE: &str = "project:a";
 const COMMIT_MESSAGE: &str = "Build the workspace with bun\n";
 const SECOND_MESSAGE: &str = "Pin the toolchain\n";
+const PROJECT_FILE: &str = "fn main() { println!(\"the workspace builds with bun\"); }\n";
 const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HOUR_MS: i64 = 60 * 60 * 1_000;
 
@@ -149,6 +151,7 @@ struct Fixture {
     /// A second published commit, disclosed by `broker_with_second`.
     second: (String, SourceDescriptorDetail),
     _second_repo_dir: tempfile::TempDir,
+    project_dir: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -190,6 +193,9 @@ impl Fixture {
         let second_repo_dir = tempfile::tempdir().unwrap();
         let second = publish_commit(&store, second_repo_dir.path(), SECOND_MESSAGE, now);
         let ledger_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project_dir.path().join("src")).unwrap();
+        std::fs::write(project_dir.path().join("src/main.rs"), PROJECT_FILE).unwrap();
         let ledger = MemoryStore::open(&MemoryStore::test_descriptor(
             ledger_dir.path(),
             "eidnara-curator-settlement-test",
@@ -273,6 +279,7 @@ impl Fixture {
             source,
             second,
             _second_repo_dir: second_repo_dir,
+            project_dir,
         };
         fixture.claim = fixture.claim_task("acq-1", "worker-a", now).unwrap();
         let CuratorBeginOutcome::Begun(_) = fixture
@@ -371,6 +378,10 @@ impl Fixture {
 
     /// A remote-destination broker for `generation` that has disclosed the published commit.
     fn broker(&self, generation: u64) -> EvidenceBroker {
+        self.broker_to(generation, ArtifactDestination::Remote)
+    }
+
+    fn broker_to(&self, generation: u64, destination: ArtifactDestination) -> EvidenceBroker {
         let binding = self.hold_binding(generation);
         let hold = self
             .store
@@ -385,7 +396,7 @@ impl Fixture {
                 project: ProjectScope::new(PROJECT).unwrap(),
                 hold: binding,
                 hold_id: hold.hold_id,
-                destination: kernel::ArtifactDestination::Remote,
+                destination,
             },
             QuestionTemplate::ExtractedFacts,
         );
@@ -394,6 +405,30 @@ impl Fixture {
             .read(&self.store, commit.as_str(), None, self.now + 2)
             .unwrap();
         broker
+    }
+
+    /// A local broker with the commit and one project-text capture disclosed; the capture's acquisition reference ends at `now + HOUR_MS`. Returns the capture's evidence id.
+    fn local_broker_with_capture(&self, generation: u64) -> (EvidenceBroker, String) {
+        let mut broker = self.broker_to(generation, ArtifactDestination::Local);
+        let protected = ProtectedLocations::new([self.kernel_dir.path().to_path_buf()]).unwrap();
+        let mut text = ProjectText::open(
+            self.project_dir.path(),
+            &protected,
+            InspectionBinding {
+                domain_id: DOMAIN.to_string(),
+                scope_id: Some(SCOPE.to_string()),
+                retain_until: self.now + HOUR_MS,
+            },
+        )
+        .unwrap();
+        let read = text
+            .read(&self.store, &mut broker, "src/main.rs", None, self.now + 2)
+            .unwrap();
+        let capture = match broker.aliases.resolve(read.alias.as_str()).unwrap().1 {
+            ReferenceExpectation::TemporaryCapture { evidence_id, .. } => evidence_id.clone(),
+            other => panic!("a project-text read issues a capture alias, not {other:?}"),
+        };
+        (broker, capture)
     }
 
     /// A broker that has disclosed both commits.
@@ -1090,6 +1125,56 @@ fn kernel_results_stay_private_until_the_receipt_selects_them() {
         None
     );
     assert_eq!(fixture.read(fixture.now + 6), Err(ReadRefusal::NotSelected));
+}
+
+#[test]
+fn recovery_adopts_captures_whose_acquisition_reference_moved_to_the_review_expiry() {
+    // The committed hold transfer moves every live capture's `retain_until` to the review expiry, so the retry sees a longer reference than the one the alias was issued with; the capture is still the one the run disclosed.
+    let fixture = Fixture::open();
+    let (broker, capture) = fixture.local_broker_with_capture(1);
+    let evidence = fixture.evidence_id();
+    let bound = fixture.bound_proposal_over(&[&evidence], &[&evidence, &capture]);
+    let reference = fixture.kernel_half(&broker, &bound);
+    let review = fixture.review_hold_binding(1, &reference.candidate_id);
+    let hold = fixture
+        .store
+        .lookup_review_hold(&review, fixture.now + 6)
+        .unwrap()
+        .unwrap();
+    let held = fixture
+        .store
+        .validate_held_evidence(
+            &hold.hold_id,
+            CuratorHoldKind::Review,
+            &review,
+            std::slice::from_ref(&capture),
+            fixture.now + 6,
+        )
+        .unwrap();
+    assert_eq!(
+        held[0].retain_until,
+        Some(hold.expires_at),
+        "the transfer moved the capture's reference from one hour to the review expiry"
+    );
+    assert_eq!(
+        fixture
+            .settle(
+                &broker,
+                RunResult::Proposal(Box::new(fixture.proposal(&[&evidence])))
+            )
+            .unwrap(),
+        Settled::Published(reference.clone())
+    );
+    assert_eq!(fixture.read(fixture.now + 6).unwrap().reference, reference);
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(&review, fixture.now + 6)
+            .unwrap()
+            .map(|hold| hold.references),
+        Some(2),
+        "the review hold still covers both disclosed inputs"
+    );
 }
 
 #[test]

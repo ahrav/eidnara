@@ -17,7 +17,7 @@ use memory_store::curator_ledger::{
 };
 use memory_store::{LeaseCompleteOutcome, MemoryStore};
 
-use super::broker::{EvidenceBroker, RefusalCode, check_render};
+use super::broker::{EvidenceBroker, HeldUnder, RefusalCode, check_render};
 
 /// Producer recorded on settled proposals.
 pub const SETTLEMENT_PRODUCER: &str = "curator-settlement";
@@ -125,16 +125,11 @@ impl Settlement<'_> {
             RunResult::Proposal(proposal) => proposal,
         };
         let held_under = match &recovered {
-            Some(hold) => HeldUnder {
-                kind: CuratorHoldKind::Review,
-                hold_id: &hold.hold_id,
+            Some(hold) => HeldUnder::Review {
+                hold,
                 binding: &review,
             },
-            None => HeldUnder {
-                kind: CuratorHoldKind::Execution,
-                hold_id: &broker.binding().hold_id,
-                binding: run,
-            },
+            None => HeldUnder::Execution(broker.binding()),
         };
         let disclosed = match self.revalidate_union(broker, held_under, now) {
             Ok(disclosed) => disclosed,
@@ -326,12 +321,7 @@ impl Settlement<'_> {
     ) -> Result<Vec<String>, Verdict> {
         let mut evidence = Vec::new();
         for alias in broker.ledger.disclosed() {
-            match broker.revalidate_under(
-                self.store,
-                alias.as_str(),
-                now,
-                (hold.kind, hold.hold_id, hold.binding),
-            ) {
+            match broker.revalidate_under(self.store, alias.as_str(), now, hold) {
                 Ok(Some(id)) => evidence.push(id),
                 Ok(None) => {}
                 Err(refusal) => return Err(Verdict::from_refusal(refusal.code)),
@@ -340,7 +330,7 @@ impl Settlement<'_> {
         evidence.sort();
         evidence.dedup();
         self.store
-            .validate_held_evidence(hold.hold_id, hold.kind, hold.binding, &evidence, now)
+            .validate_held_evidence(hold.hold_id(), hold.kind(), hold.binding(), &evidence, now)
             .map_err(Verdict::from_hold)?;
         Ok(evidence)
     }
@@ -420,14 +410,6 @@ impl Settlement<'_> {
             )
             .map_err(kernel)
     }
-}
-
-/// The hold a revalidation runs under and the binding that owns it.
-#[derive(Clone, Copy)]
-struct HeldUnder<'a> {
-    kind: CuratorHoldKind,
-    hold_id: &'a str,
-    binding: &'a CuratorHoldBinding,
 }
 
 /// The two completions settlement records without staging anything.
