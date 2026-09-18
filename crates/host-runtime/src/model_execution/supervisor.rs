@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
@@ -19,8 +20,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use super::backend::{
-    BackendError, BackendEvent, BackendRequest, BackendTerminal, ErrorClass, EventSink, Harness,
-    LlmExecutionBackend, SinkStatus,
+    BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
+    EventSink, Harness, LlmExecutionBackend, SinkStatus,
 };
 use super::config::{
     KEY_META_OVERHEAD_BYTES, ModelExecutionLimits, SESSION_IDENTITY_COPIES, TERMINAL_HEADROOM_BYTES,
@@ -59,6 +60,87 @@ impl SessionKey {
     }
 }
 
+/// The durable identity of one Curator attempt run under the supervisor. It binds the task kind, the project and job, the receipt generation and attempt, and both store incarnations, so a run from another generation, attempt, or incarnation is a different key even when every other field matches.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct InternalRunKey {
+    pub task_kind: String,
+    pub project_digest: String,
+    pub job_id: String,
+    pub receipt_generation: u64,
+    pub attempt: u32,
+    pub kernel_incarnation: String,
+    pub memstore_incarnation: String,
+}
+
+impl std::fmt::Debug for InternalRunKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InternalRunKey")
+            .field("task_kind", &self.task_kind)
+            .field("project_digest_len", &self.project_digest.len())
+            .field("job_id_len", &self.job_id.len())
+            .field("receipt_generation", &self.receipt_generation)
+            .field("attempt", &self.attempt)
+            .finish()
+    }
+}
+
+impl InternalRunKey {
+    fn meta_bytes(&self) -> usize {
+        self.task_kind
+            .len()
+            .saturating_add(self.project_digest.len())
+            .saturating_add(self.job_id.len())
+            .saturating_add(self.kernel_incarnation.len())
+            .saturating_add(self.memstore_incarnation.len())
+            .saturating_mul(SESSION_IDENTITY_COPIES)
+            .saturating_add(KEY_META_OVERHEAD_BYTES)
+    }
+
+    /// Every field is bounded so the key's retained charge stays within the derivation the budget was sized for.
+    fn validate(&self) -> Result<(), RequestError> {
+        let fields = [
+            &self.task_kind,
+            &self.project_digest,
+            &self.job_id,
+            &self.kernel_incarnation,
+            &self.memstore_incarnation,
+        ];
+        if fields
+            .iter()
+            .any(|field| field.is_empty() || field.len() > MAX_INTERNAL_KEY_FIELD_BYTES)
+        {
+            return Err(app(
+                "invalid_request",
+                "an internal run key field is empty or too long",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The index key. A public session and an internal run are different variants, so no string a public caller presents can name an internal run through status, cancel, delete, or subscribe.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum RunKey {
+    Public(SessionKey),
+    Internal(InternalRunKey),
+}
+
+impl RunKey {
+    fn meta_bytes(&self) -> usize {
+        match self {
+            Self::Public(key) => key.meta_bytes(),
+            Self::Internal(key) => key.meta_bytes(),
+        }
+    }
+
+    fn is_public(&self, key: &SessionKey) -> bool {
+        matches!(self, Self::Public(own) if own == key)
+    }
+}
+
+/// The one-shot erased launch: given the run's event sink and cancellation token, it produces the backend future. The public path wraps the supervisor's backend and request in one; the Curator supplies its own with its real dependencies.
+pub type Launch = Box<dyn FnOnce(EventSink, CancellationToken) -> BackendFuture + Send + 'static>;
+
 fn app(code: &'static str, message: &str) -> RequestError {
     RequestError {
         code,
@@ -69,6 +151,13 @@ fn app(code: &'static str, message: &str) -> RequestError {
 fn closed_error() -> RequestError {
     app("cancelled", "the host is shutting down")
 }
+
+const CUTOFF_MESSAGE: &str = "execution cutoff reached";
+const SHUTDOWN_MESSAGE: &str = "host shutdown";
+/// Longest an internal launch may run on after its token is cancelled before the supervisor aborts its task and reports the teardown unproven. Public backends keep their own cooperative teardown.
+pub const INTERNAL_LAUNCH_ABORT_GRACE: Duration = Duration::from_secs(5);
+/// Longest any one field of an [`InternalRunKey`] may be.
+pub const MAX_INTERNAL_KEY_FIELD_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
@@ -124,6 +213,8 @@ struct RunState {
     /// A subscriber-held frame retains its charge until the subscriber drops it.
     purged: bool,
     completed_at: Option<Instant>,
+    /// The message of a committed cancellation terminal, so an internal handle can tell a cutoff from a coordinator cancel or a host shutdown.
+    cancel_reason: Option<&'static str>,
     /// `run_permit` is held from admission through terminal commitment, enforcing the run cap.
     run_permit: Option<OwnedSemaphorePermit>,
     /// `base_charge` covers immutable request bytes, key metadata, and terminal headroom.
@@ -167,7 +258,7 @@ impl std::fmt::Debug for ReplayFrame {
 
 struct Run {
     run_id: String,
-    key: SessionKey,
+    key: RunKey,
     /// `fingerprint` is the SHA-256 of the exact `session.send` body bytes.
     /// byte-identical resend matches, anything else conflicts.
     fingerprint: [u8; 32],
@@ -188,7 +279,7 @@ enum SessionEntry {
 }
 
 struct Index {
-    sessions: HashMap<SessionKey, SessionEntry>,
+    sessions: HashMap<RunKey, SessionEntry>,
     runs: HashMap<String, Arc<Run>>,
     next_seq: u64,
     closed: bool,
@@ -242,6 +333,8 @@ pub struct SupervisorMetrics {
     pub sessions: usize,
     pub live_runs: usize,
     pub tombstones: usize,
+    /// Internal runs among `sessions` and `live_runs`.
+    pub internal_runs: usize,
 }
 
 pub struct Supervisor {
@@ -315,6 +408,11 @@ impl Supervisor {
             .values()
             .filter(|entry| matches!(entry, SessionEntry::Tombstone(_)))
             .count();
+        let internal_runs = index
+            .sessions
+            .keys()
+            .filter(|key| matches!(key, RunKey::Internal(_)))
+            .count();
         SupervisorMetrics {
             free_command_permits: inner.commands.available_permits(),
             free_run_slots: inner.run_slots.available_permits(),
@@ -325,6 +423,7 @@ impl Supervisor {
             sessions: index.sessions.len(),
             live_runs: index.runs.len(),
             tombstones,
+            internal_runs,
         }
     }
 
@@ -357,7 +456,7 @@ impl Supervisor {
             return Some(Err(closed_error()));
         }
         self.sweep_expired(&mut index, &mut released);
-        match index.sessions.get(key) {
+        match index.sessions.get(&RunKey::Public(key.clone())) {
             Some(SessionEntry::Live(run)) if run.fingerprint == fingerprint => {
                 Some(Ok(run.run_id.clone()))
             }
@@ -388,14 +487,7 @@ impl Supervisor {
             .saturating_add(TERMINAL_HEADROOM_BYTES);
 
         // Admission sweeps expired entries outside the lock and retries once under retained-byte pressure.
-        let run_permit = Arc::clone(&inner.run_slots).try_acquire_owned().ok();
-        let charge = match inner.retained.try_charge(base_bytes) {
-            Some(charge) => Some(charge),
-            None => {
-                self.pressure_sweep();
-                inner.retained.try_charge(base_bytes)
-            }
-        };
+        let (run_permit, charge) = self.reserve(base_bytes);
 
         // Rust drops the guard before the candidate reservation because the candidate reservation is declared first.
         let mut released = Released::default();
@@ -404,9 +496,10 @@ impl Supervisor {
             return Err(closed_error());
         }
         self.sweep_expired(&mut index, &mut released);
+        let run_key = RunKey::Public(key.clone());
         // Admission checks byte-identical requests for deduplication before checking capacity.
         // A resend of an existing run returns its ID even when every candidate reservation fails.
-        match index.sessions.get(key) {
+        match index.sessions.get(&run_key) {
             Some(SessionEntry::Live(run)) => {
                 return if run.fingerprint == fingerprint {
                     Ok(run.run_id.clone())
@@ -429,13 +522,55 @@ impl Supervisor {
         let Some(run_permit) = run_permit else {
             return Err(app("queue_full", "active-run capacity is exhausted"));
         };
-        let Some(mut charge) = charge else {
+        let Some(charge) = charge else {
             return Err(app("queue_full", "retained-byte capacity is exhausted"));
         };
 
+        let run = self.admit(
+            &mut index,
+            run_key,
+            fingerprint,
+            run_permit,
+            charge,
+            base_bytes,
+        );
+        let run_id = run.run_id.clone();
+        // Holding the index lock while spawning prevents shutdown from closing the tracker before every visible run task registers.
+        // Shutdown sets `closed` under the index lock before closing the tracker.
+        // The tracker drain waits for every run task registered while the index lock is held.
+        let backend = Arc::clone(&inner.backend);
+        let backend_request = BackendRequest {
+            prompt: request.prompt,
+            system: request.system,
+            provider: request.provider,
+            model: request.model,
+            max_output_tokens: request.max_output_tokens,
+            temperature: request.temperature,
+            harness: key.harness,
+            session: key.session.clone(),
+            run_id: run_id.clone(),
+        };
+        self.spawn_run(
+            run,
+            Box::new(move |sink, cancel| backend.execute(backend_request, sink, cancel)),
+            None,
+        );
+        Ok(run_id)
+    }
+
+    /// Publishes a queued run in both indices under the index lock the caller holds.
+    fn admit(
+        &self,
+        index: &mut Index,
+        key: RunKey,
+        fingerprint: [u8; 32],
+        run_permit: OwnedSemaphorePermit,
+        mut charge: ByteCharge,
+        base_bytes: usize,
+    ) -> Arc<Run> {
         let seq = index.next_seq;
         index.next_seq += 1;
-        let run_id = format!("model_execution-{}-{seq}", inner.incarnation);
+        let run_id = format!("model_execution-{}-{seq}", self.inner.incarnation);
         let run = Arc::new(Run {
             run_id: run_id.clone(),
             key: key.clone(),
@@ -453,6 +588,7 @@ impl Supervisor {
                 record_unresolved: false,
                 purged: false,
                 completed_at: None,
+                cancel_reason: None,
                 run_permit: Some(run_permit),
                 base_charge: charge.split_or_take(base_bytes),
             }),
@@ -461,13 +597,68 @@ impl Supervisor {
         });
         index
             .sessions
-            .insert(key.clone(), SessionEntry::Live(Arc::clone(&run)));
-        index.runs.insert(run_id.clone(), Arc::clone(&run));
-        // Holding the index lock while spawning prevents shutdown from closing the tracker before every visible run task registers.
-        // Shutdown sets `closed` under the index lock before closing the tracker.
-        // The tracker drain waits for every run task registered while the index lock is held.
-        self.spawn_run(run, request);
-        Ok(run_id)
+            .insert(key, SessionEntry::Live(Arc::clone(&run)));
+        index.runs.insert(run_id, Arc::clone(&run));
+        run
+    }
+
+    /// Admits one Curator attempt as an internal run and spawns its launch under the same run slots, backend permits, retained bytes, task tracker, and shutdown as public runs. `request_bytes` is the prepared request's retained size, charged like a public request; text the launch emits through its sink counts against the per-run replay cap but is not retained. The backend-permit wait ends at `cutoff`; a run that has not started by then terminates as cancelled without ever calling `launch`, and one that has started has its token cancelled at `cutoff`. An internal key admits exactly one run while that run is retained; a second launch under it is refused. No command permit is taken: internal admission must not consume the public callback budget, and the run slot is what bounds it.
+    pub fn launch_internal(
+        &self,
+        key: InternalRunKey,
+        request_bytes: usize,
+        cutoff: Instant,
+        launch: Launch,
+    ) -> Result<InternalRun, RequestError> {
+        key.validate()?;
+        let inner = &self.inner;
+        let base_bytes = request_bytes
+            .saturating_add(key.meta_bytes())
+            .saturating_add(TERMINAL_HEADROOM_BYTES);
+        let (run_permit, charge) = self.reserve(base_bytes);
+        let mut released = Released::default();
+        let mut index = lock_index(inner);
+        if index.closed {
+            return Err(closed_error());
+        }
+        self.sweep_expired(&mut index, &mut released);
+        let run_key = RunKey::Internal(key);
+        if index.sessions.contains_key(&run_key) {
+            return Err(app(
+                "internal_run_exists",
+                "the attempt identity already names a run",
+            ));
+        }
+        let Some(run_permit) = run_permit else {
+            return Err(app("queue_full", "active-run capacity is exhausted"));
+        };
+        let Some(charge) = charge else {
+            return Err(app("queue_full", "retained-byte capacity is exhausted"));
+        };
+        // An internal key admits one run, so no request fingerprint is compared for it.
+        let run = self.admit(
+            &mut index, run_key, [0u8; 32], run_permit, charge, base_bytes,
+        );
+        self.spawn_run(Arc::clone(&run), launch, Some(cutoff));
+        Ok(InternalRun {
+            inner: Arc::clone(inner),
+            run,
+            cutoff,
+        })
+    }
+
+    /// The candidate run slot and retained-byte reservation admission takes before the index lock, retrying the charge once after a pressure sweep.
+    fn reserve(&self, base_bytes: usize) -> (Option<OwnedSemaphorePermit>, Option<ByteCharge>) {
+        let inner = &self.inner;
+        let run_permit = Arc::clone(&inner.run_slots).try_acquire_owned().ok();
+        let charge = match inner.retained.try_charge(base_bytes) {
+            Some(charge) => Some(charge),
+            None => {
+                self.pressure_sweep();
+                inner.retained.try_charge(base_bytes)
+            }
+        };
+        (run_permit, charge)
     }
 
     /// A known run reports its state verbatim; all other run IDs report `missing`.
@@ -483,7 +674,7 @@ impl Supervisor {
         match index.runs.get(run_id) {
             // Run IDs are sequential within an incarnation; callers must not distinguish runs outside their bound session from unknown runs.
             // A leaked run ID makes adjacent IDs guessable, so runs outside the caller's bound session report `missing`.
-            Some(run) if run.key == *key => Ok(lock_run(run).status.as_str()),
+            Some(run) if run.key.is_public(key) => Ok(lock_run(run).status.as_str()),
             _ => Ok(protocol::STATUS_MISSING),
         }
     }
@@ -504,7 +695,7 @@ impl Supervisor {
             index
                 .runs
                 .get(run_id)
-                .filter(|run| run.key == *key)
+                .filter(|run| run.key.is_public(key))
                 .cloned()
         };
         let Some(run) = run else { return Ok(()) };
@@ -532,12 +723,13 @@ impl Supervisor {
                 return Err(closed_error());
             }
             self.sweep_expired(&mut index, &mut released);
-            match index.sessions.get(key) {
+            match index.sessions.get(&RunKey::Public(key.clone())) {
                 Some(SessionEntry::Live(run)) => Arc::clone(run),
                 // Deleting a tombstoned or nonexistent session succeeds without purging state.
                 Some(SessionEntry::Tombstone(_)) | None => return Ok(()),
             }
         };
+        let run_key = RunKey::Public(key.clone());
         // Reserve tombstone capacity before waiting so eviction cannot consume the deletion guard's budget.
         let mut reserved_tombstone = self.inner.retained.try_charge(key.meta_bytes());
         let mut settlement = SettlementFlags::default();
@@ -564,14 +756,14 @@ impl Supervisor {
             }
             // Only the delete that still owns `run` purges it, preventing double release.
             let same_run = matches!(
-                index.sessions.get(key),
+                index.sessions.get(&run_key),
                 Some(SessionEntry::Live(current)) if Arc::ptr_eq(current, &run)
             );
             if same_run {
                 if let Some(charge) = reserved_tombstone.take() {
                     released.charges.push(charge);
                 }
-                index.sessions.remove(key);
+                index.sessions.remove(&run_key);
                 index.runs.remove(&run.run_id);
                 let mut state = lock_run(&run);
                 state.purged = true;
@@ -584,7 +776,7 @@ impl Supervisor {
                 released.replays.push(std::mem::take(&mut state.replay));
                 drop(state);
                 index.sessions.insert(
-                    key.clone(),
+                    run_key.clone(),
                     SessionEntry::Tombstone(Tombstone {
                         created_at: Instant::now(),
                         _charge: tombstone_charge,
@@ -594,7 +786,7 @@ impl Supervisor {
                 drop(index);
                 break;
             }
-            match index.sessions.get(key) {
+            match index.sessions.get(&run_key) {
                 None => {
                     // Install a tombstone if `run` was removed during `wait_work_done` so the deletion guard remains present.
                     // Use the reservation taken before the wait because the removed run's charges have already been released.
@@ -604,14 +796,20 @@ impl Supervisor {
                         .or_else(|| self.inner.retained.try_charge(key.meta_bytes()))
                         .unwrap_or_else(ByteCharge::none);
                     index.sessions.insert(
-                        key.clone(),
+                        run_key.clone(),
                         SessionEntry::Tombstone(Tombstone {
                             created_at: Instant::now(),
                             _charge: charge,
                         }),
                     );
                     // Run the terminal-session cap with the new tombstone protected so the cap cannot evict it.
-                    enforce_terminal_cap(&self.inner, &mut index, "", Some(key), &mut released);
+                    enforce_terminal_cap(
+                        &self.inner,
+                        &mut index,
+                        "",
+                        Some(&run_key),
+                        &mut released,
+                    );
                     drop(index);
                     break;
                 }
@@ -652,7 +850,7 @@ impl Supervisor {
             return Err(closed_error());
         }
         self.sweep_expired(&mut index, &mut released);
-        let run = match index.sessions.get(key) {
+        let run = match index.sessions.get(&RunKey::Public(key.clone())) {
             Some(SessionEntry::Live(run)) => Arc::clone(run),
             Some(SessionEntry::Tombstone(_)) => {
                 return Err(app("session_deleted", "the session was deleted"));
@@ -704,7 +902,7 @@ impl Supervisor {
         let unresolved = inner.unresolved_runs.load(Ordering::Relaxed);
         let mut released = Released::default();
         let mut index = lock_index(inner);
-        let sessions: Vec<SessionKey> = index.sessions.keys().cloned().collect();
+        let sessions: Vec<RunKey> = index.sessions.keys().cloned().collect();
         for key in sessions {
             remove_session(&mut index, &key, &mut released);
         }
@@ -741,33 +939,33 @@ impl Supervisor {
         enforce_terminal_cap(&self.inner, index, "", None, released);
     }
 
-    fn spawn_run(&self, run: Arc<Run>, request: SendRequest) {
+    /// Spawns the run task. `cutoff`, when present, bounds the wait for a backend permit, is rechecked once the permit is held, and cancels the launch's token if the launch is still running when it passes; a launch that ignores that token is aborted after [`INTERNAL_LAUNCH_ABORT_GRACE`]. Public runs pass no cutoff and keep their backends' cooperative teardown.
+    fn spawn_run(&self, run: Arc<Run>, launch: Launch, cutoff: Option<Instant>) {
         let inner = Arc::clone(&self.inner);
-        let backend_request = BackendRequest {
-            prompt: request.prompt,
-            system: request.system,
-            provider: request.provider,
-            model: request.model,
-            max_output_tokens: request.max_output_tokens,
-            temperature: request.temperature,
-            harness: run.key.harness,
-            session: run.key.session.clone(),
-            run_id: run.run_id.clone(),
-        };
         self.inner.tracker.spawn(async move {
             // `DoneGuard` marks `work_done` even if the task panics or is aborted.
             // cancel and delete waiters can never hang on a lost task.
             let _done = DoneGuard {
                 run: Arc::clone(&run),
             };
+            let cutoff_reached = async {
+                match cutoff {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            };
             let permit = tokio::select! {
                 biased;
                 () = inner.closing.cancelled() => {
-                    finish(&inner, &run, TerminalOutcome::Cancelled { message: "host shutdown" });
+                    finish(&inner, &run, TerminalOutcome::Cancelled { message: SHUTDOWN_MESSAGE });
                     return;
                 }
                 () = run.cancel.cancelled() => {
                     finish(&inner, &run, TerminalOutcome::Cancelled { message: "run cancelled" });
+                    return;
+                }
+                () = cutoff_reached => {
+                    finish(&inner, &run, TerminalOutcome::Cancelled { message: CUTOFF_MESSAGE });
                     return;
                 }
                 permit = Arc::clone(&inner.backends).acquire_owned() => permit,
@@ -777,31 +975,14 @@ impl Supervisor {
                     &inner,
                     &run,
                     TerminalOutcome::Cancelled {
-                        message: "host shutdown",
+                        message: SHUTDOWN_MESSAGE,
                     },
                 );
                 return;
             };
-            // The task rechecks `closing` and run cancellation after acquiring a permit because either can fire while the permit branch wins.
-            // The task rechecks cancellation after acquiring a permit to prevent a cancelled run from starting the backend.
-            if inner.closing.is_cancelled() {
-                finish(
-                    &inner,
-                    &run,
-                    TerminalOutcome::Cancelled {
-                        message: "host shutdown",
-                    },
-                );
-                return;
-            }
-            if run.cancel.is_cancelled() {
-                finish(
-                    &inner,
-                    &run,
-                    TerminalOutcome::Cancelled {
-                        message: "run cancelled",
-                    },
-                );
+            // The permit branch can win in the same poll that fires shutdown, cancellation, or the cutoff; the recheck keeps such a run from launching.
+            if let Some(message) = stop_reason(&inner, &run, cutoff) {
+                finish(&inner, &run, TerminalOutcome::Cancelled { message });
                 return;
             }
             if !begin_running(&run) {
@@ -823,14 +1004,34 @@ impl Supervisor {
             let sink = EventSink::new(Arc::new(move |event| {
                 append_event(&sink_inner, &sink_run, event)
             }));
-            // The host runs the backend in a tracked task so panics become join errors.
+            // The host runs the launch in a tracked task so panics become join errors.
             // Without join-error handling, a backend panic could leave the run `running` and retain its active-run slot.
-            let backend = Arc::clone(&inner.backend);
             let backend_cancel = run.cancel.clone();
-            let backend_task = inner
+            let mut backend_task = inner
                 .tracker
-                .spawn(async move { backend.execute(backend_request, sink, backend_cancel).await });
-            let terminal = match backend_task.await {
+                .spawn(async move { launch(sink, backend_cancel).await });
+            let joined = match cutoff {
+                None => backend_task.await,
+                Some(at) => {
+                    // An internal launch is cancelled at its cutoff and, if it ignores its token, aborted after the grace period so shutdown and the coordinator never wait on it forever.
+                    let cancel = run.cancel.clone();
+                    let escalate = async {
+                        tokio::select! {
+                            () = cancel.cancelled() => {}
+                            () = tokio::time::sleep_until(at) => cancel.cancel(),
+                        }
+                        tokio::time::sleep(INTERNAL_LAUNCH_ABORT_GRACE).await;
+                    };
+                    tokio::select! {
+                        joined = &mut backend_task => joined,
+                        () = escalate => {
+                            backend_task.abort();
+                            backend_task.await
+                        }
+                    }
+                }
+            };
+            let terminal = match joined {
                 Ok(terminal) => terminal,
                 Err(join_error) => {
                     let message = if join_error.is_panic() {
@@ -864,9 +1065,10 @@ impl Supervisor {
                 mark_record_unresolved(&inner, &mut lock_run(&run));
             }
             // Cancellation must produce a `Cancelled` terminal even if the backend returns another terminal.
+            // The token alone cannot say who cancelled it, so the reason is ranked from the supervisor's state.
             let outcome = if run.cancel.is_cancelled() {
                 TerminalOutcome::Cancelled {
-                    message: "run cancelled",
+                    message: stop_reason(&inner, &run, cutoff).unwrap_or("run cancelled"),
                 }
             } else {
                 TerminalOutcome::Backend(terminal)
@@ -974,6 +1176,20 @@ impl Drop for DoneGuard {
     }
 }
 
+/// Ranks the stop causes a run can carry. Shutdown takes precedence over the cutoff, which takes precedence over run cancellation.
+fn stop_reason(inner: &Inner, run: &Run, cutoff: Option<Instant>) -> Option<&'static str> {
+    if inner.closing.is_cancelled() {
+        return Some(SHUTDOWN_MESSAGE);
+    }
+    if cutoff.is_some_and(|at| Instant::now() >= at) {
+        return Some(CUTOFF_MESSAGE);
+    }
+    if run.cancel.is_cancelled() {
+        return Some("run cancelled");
+    }
+    None
+}
+
 async fn wait_work_done(run: &Run) {
     loop {
         let notified = run.notify.notified();
@@ -1063,11 +1279,17 @@ fn append_event(inner: &Arc<Inner>, run: &Arc<Run>, event: BackendEvent) -> Sink
                 ErrorClass::Permanent,
             ));
         } else if let Some(charge) = charge {
+            state.replay_bytes += len;
+            // `subscribe` resolves only public keys, so an internal run's text counts against the per-run cap and the budget check without being retained.
+            if matches!(run.key, RunKey::Internal(_)) {
+                drop(state);
+                drop(charge);
+                return SinkStatus::Accepted;
+            }
             state.replay.push(Arc::new(ReplayFrame {
                 bytes,
                 _charge: charge,
             }));
-            state.replay_bytes += len;
             drop(state);
             run.notify.notify_waiters();
             return SinkStatus::Accepted;
@@ -1146,6 +1368,9 @@ fn finish(inner: &Arc<Inner>, run: &Arc<Run>, outcome: TerminalOutcome) {
         state.terminal_appended = true;
         state.status = status;
         state.completed_at = Some(Instant::now());
+        if let TerminalOutcome::Cancelled { message } = &outcome {
+            state.cancel_reason = Some(message);
+        }
         if let Some(permit) = state.run_permit.take() {
             released.permits.push(permit);
         }
@@ -1169,14 +1394,14 @@ fn enforce_terminal_cap(
     inner: &Arc<Inner>,
     index: &mut Index,
     keep_run_id: &str,
-    keep_key: Option<&SessionKey>,
+    keep_key: Option<&RunKey>,
     released: &mut Released,
 ) {
-    // The 257-session bound makes O(sessions) scans per eviction sufficient.
-    // The 257-session bound does not justify an ordered structure.
+    // The scan is O(sessions) per eviction: the cap plus at most one uncounted internal terminal per backend permit does not justify an ordered structure.
     loop {
         let mut retained = 0usize;
-        let mut oldest: Option<(SessionKey, Instant)> = None;
+        // Internal terminals are evicted before any public entry, so Curator churn cannot revoke a public deletion guard early; within one class the oldest goes first.
+        let mut oldest: Option<(RunKey, (bool, Instant))> = None;
         for (key, entry) in &index.sessions {
             let (at, evictable) = match entry {
                 SessionEntry::Tombstone(tombstone) => {
@@ -1194,18 +1419,21 @@ fn enforce_terminal_cap(
                     // Eviction would release charges for state still held by the backend task.
                     // Backend permits bound the number of transiently unevictable runs.
                     // A returned run with `work_unresolved` is evictable; `Inner::unresolved_runs` keeps its verdict for `shutdown`.
-                    (
-                        state.completed_at,
-                        state.work_done && state.subscriber_count == 0 && run.run_id != keep_run_id,
-                    )
+                    let evictable =
+                        state.work_done && state.subscriber_count == 0 && run.run_id != keep_run_id;
+                    // An unevictable internal terminal is not counted either: counting it while it cannot be chosen would make room for it by evicting a public entry.
+                    if !evictable && matches!(key, RunKey::Internal(_)) {
+                        continue;
+                    }
+                    (state.completed_at, evictable)
                 }
             };
             retained += 1;
-            if evictable
-                && let Some(at) = at
-                && oldest.as_ref().is_none_or(|(_, best)| at < *best)
-            {
-                oldest = Some((key.clone(), at));
+            if evictable && let Some(at) = at {
+                let rank = (matches!(key, RunKey::Public(_)), at);
+                if oldest.as_ref().is_none_or(|(_, best)| rank < *best) {
+                    oldest = Some((key.clone(), rank));
+                }
             }
         }
         if retained <= inner.limits.max_terminal_sessions {
@@ -1219,7 +1447,7 @@ fn enforce_terminal_cap(
 }
 
 /// A removed live run is marked `purged` so late subscribers detach instead of replaying a log whose charges were released.
-fn remove_session(index: &mut Index, key: &SessionKey, released: &mut Released) {
+fn remove_session(index: &mut Index, key: &RunKey, released: &mut Released) {
     let Some(entry) = index.sessions.remove(key) else {
         return;
     };
@@ -1248,7 +1476,7 @@ fn remove_session(index: &mut Index, key: &SessionKey, released: &mut Released) 
 fn sweep_for(inner: &Arc<Inner>, index: &mut Index, released: &mut Released) {
     let now = Instant::now();
     let retention = inner.limits.terminal_retention;
-    let expired: Vec<SessionKey> = index
+    let expired: Vec<RunKey> = index
         .sessions
         .iter()
         .filter(|(_, entry)| match entry {
@@ -1269,6 +1497,82 @@ fn sweep_for(inner: &Arc<Inner>, index: &mut Index, released: &mut Released) {
         .collect();
     for key in expired {
         remove_session(index, &key, released);
+    }
+}
+
+/// The Curator's handle on one internal run. It is the only way to address the run: public status, cancel, delete, and subscribe never see it.
+pub struct InternalRun {
+    inner: Arc<Inner>,
+    run: Arc<Run>,
+    cutoff: Instant,
+}
+
+/// How an internal run ended. `Lost` means the run's task stopped without committing a terminal, which only a panic or abort of the supervisor's own task can cause; launched work may still be live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InternalOutcome {
+    Completed,
+    Failed,
+    /// Cancelled through [`InternalRun::cancel`].
+    Cancelled,
+    /// The execution cutoff passed before the launch started or while it was still running. A launch that returned before its token was cancelled reports its own terminal.
+    Cutoff,
+    /// The host shut down.
+    Shutdown,
+    Lost,
+}
+
+impl InternalRun {
+    pub fn run_id(&self) -> &str {
+        &self.run.run_id
+    }
+
+    /// Cancels the run and resolves once its task has fully stopped, so no launched work outlives the call. A run that already reached a terminal is unaffected. Dropping this future after the terminal committed loses only the completion proof; `settled` recovers it.
+    pub async fn cancel(&self) -> Result<(), RequestError> {
+        self.run.cancel.cancel();
+        // The terminal this commits may win over the task's own, so it carries the same ranked reason: a cancel during shutdown or after the cutoff is still a shutdown or a cutoff.
+        let message =
+            stop_reason(&self.inner, &self.run, Some(self.cutoff)).unwrap_or("run cancelled");
+        finish(
+            &self.inner,
+            &self.run,
+            TerminalOutcome::Cancelled { message },
+        );
+        wait_work_done(&self.run).await;
+        Supervisor::settlement_error(&self.run)
+    }
+
+    /// Resolves once the run's task has fully stopped, with how it ended. The launch's own result travels through whatever the launch captured; the supervisor reports only the terminal class.
+    pub async fn settled(&self) -> InternalOutcome {
+        wait_work_done(&self.run).await;
+        let state = lock_run(&self.run);
+        match state.status {
+            Status::Completed => InternalOutcome::Completed,
+            Status::Failed => InternalOutcome::Failed,
+            Status::Cancelled => match state.cancel_reason {
+                Some(CUTOFF_MESSAGE) => InternalOutcome::Cutoff,
+                Some(SHUTDOWN_MESSAGE) => InternalOutcome::Shutdown,
+                _ => InternalOutcome::Cancelled,
+            },
+            Status::Queued | Status::Running => InternalOutcome::Lost,
+        }
+    }
+
+    /// The teardown, cleanup, and record verdicts a settled run carries, ranked as the public settlement operations rank them; `Ok` means every one is proven.
+    pub fn residue(&self) -> Result<(), RequestError> {
+        Supervisor::settlement_error(&self.run)
+    }
+
+    /// Whether the run's teardown could not be proven, so launched work may still be executing.
+    pub fn work_unresolved(&self) -> bool {
+        lock_run(&self.run).work_unresolved
+    }
+}
+
+impl std::fmt::Debug for InternalRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InternalRun")
+            .field("run_id", &self.run.run_id)
+            .finish()
     }
 }
 
