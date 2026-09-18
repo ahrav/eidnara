@@ -395,6 +395,17 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
     assert_eq!(first["kind"], json!("page"));
     assert_eq!(first["items"], json!(expected_items[..1]));
     assert_eq!(first["next"], json!(identities[0].0));
+    // A null cursor is the absent one: the spelling a response's `next` uses for the end of a walk starts the next walk.
+    assert_eq!(
+        daemon
+            .call(envelope(
+                "review.list",
+                &project,
+                json!({ "limit": 1, "after": null })
+            ))
+            .await,
+        first
+    );
     let second = daemon
         .call(envelope(
             "review.list",
