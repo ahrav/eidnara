@@ -711,10 +711,11 @@ fn a_completed_receipt_selects_the_staged_proposal_and_reads_pass_the_kernel() {
     // Selection moved the row's deadline with the hold: readable past the 24-hour queue deadline, refused at the review expiry.
     assert!(fixture.read(fixture.now + 25 * HOUR_MS).is_ok());
     assert!(fixture.read(hold.expires_at - 1).is_ok());
-    assert!(matches!(
+    assert_eq!(
         fixture.read(hold.expires_at),
-        Err(ReadRefusal::Kernel(ReviewReadRefusal::Expired) | ReadRefusal::ReviewExpired)
-    ));
+        Err(ReadRefusal::ReviewExpired),
+        "the moved deadline is the review expiry, not a Kernel refusal"
+    );
     // The list pages by causal identity: a full page carries a cursor, and the page after it is empty.
     let page = list_review_outcomes(&fixture.ledger, PROJECT, None, 1).unwrap();
     assert_eq!(page.outcomes.len(), 1);

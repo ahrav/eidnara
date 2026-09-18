@@ -702,6 +702,8 @@ pub fn read_selected_proposal(
             ReviewReadError::Refused(ReviewReadRefusal::IncarnationMismatch) => {
                 ReadRefusal::IncarnationMismatch
             }
+            // Selection moved the row's deadline to the review expiry, so a lapsed deadline on a selected row is the review window ending.
+            ReviewReadError::Refused(ReviewReadRefusal::Expired) => ReadRefusal::ReviewExpired,
             ReviewReadError::Refused(refusal) => ReadRefusal::Kernel(refusal),
             ReviewReadError::Invalid => ReadRefusal::SelectionMismatch,
             ReviewReadError::Store(error) => ReadRefusal::Store(error.to_string()),
