@@ -1933,3 +1933,26 @@ fn an_inspection_ceiling_refusal_on_a_capture_marks_the_evidence_set_partial() {
     );
     assert!(!broker.ledger.conclusions_usable());
 }
+
+#[test]
+fn a_capture_whose_detail_cannot_be_recorded_leaves_no_evidence_behind() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"bytes whose detail the store refuses");
+    let protected = fixture.protected();
+    // A scope the store does not know: the detail's observation cannot be written.
+    let mut binding = fixture.binding();
+    binding.scope_id = Some("scope-that-does-not-exist".to_string());
+    let mut text = ProjectText::open(fixture.project.path(), &protected, binding).unwrap();
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Store
+    );
+    assert!(
+        fixture.capture_rows().is_empty(),
+        "evidence without its detail is not left live"
+    );
+    assert!(broker.aliases.is_empty());
+}

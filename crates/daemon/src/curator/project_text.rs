@@ -478,24 +478,23 @@ impl ProjectText {
                     .map_err(|_| refusal(RefusalCode::Store))?
                     .is_some();
                 // Ownership is charged to the run's reservation at first capture, not deferred to the first disclosure, and before the detail is written: a capture the hold cannot carry must not stay live until expiry, so a fresh evidence row (no earlier run's detail cites it) is retired again in that case. The held facts, not the request, define the alias: a replayed ingest keeps the row's original `retain_until`.
-                let held = match broker.hold_evidence(store, None, &evidence_id, &digest, now_ms) {
-                    Ok(held) => held,
-                    Err(refused) => {
-                        if !recorded {
-                            // Best effort: the row is unreferenced and expires on its own if this fails.
-                            let _ = store.commit(
-                                intent(&format!("{evidence_id}:unheld"), &digest),
-                                |envelope| {
-                                    envelope
-                                        .retire_evidence(&format!("curcapobj:{evidence_id}"))?;
-                                    Ok(String::new())
-                                },
-                            );
-                        }
-                        return Err(refused);
+                // A fresh evidence row (no earlier run's detail cites it) that this capture cannot complete is retired again rather than left live until expiry. Best effort: an unreferenced row expires on its own if this fails.
+                let abandon = |refused: Refusal| {
+                    if !recorded {
+                        let _ = store.commit(
+                            intent(&format!("{evidence_id}:abandoned"), &digest),
+                            |envelope| {
+                                envelope.retire_evidence(&format!("curcapobj:{evidence_id}"))?;
+                                Ok(String::new())
+                            },
+                        );
                     }
+                    refused
                 };
-                // The typed detail is what makes the evidence a project capture. An earlier run of this job already recorded it when a live detail exists; otherwise this commit must be the one that records it. A receipt that replays without a live detail was seated by someone else under this intent and proves nothing, so the capture is refused rather than disclosed without provenance.
+                let held = broker
+                    .hold_evidence(store, None, &evidence_id, &digest, now_ms)
+                    .map_err(abandon)?;
+                // The typed detail is what makes the evidence a project capture. An earlier run of this job already recorded it when a live detail exists; otherwise this commit must be the one that records it. A receipt that replays without a live detail was seated by someone else under this intent and proves nothing, so the capture is refused rather than disclosed without provenance. The hold reference taken above stays with the hold until it expires: the store has no per-reference release, and a run whose details cannot be recorded cannot capture anyway.
                 if !recorded {
                     let receipt = store
                         .commit(
@@ -515,13 +514,13 @@ impl ProjectText {
                             },
                         )
                         .map_err(|error| {
-                            refusal(match error {
+                            abandon(refusal(match error {
                                 KernelError::InvalidInput => RefusalCode::RenderCheck,
                                 _ => RefusalCode::Store,
-                            })
+                            }))
                         })?;
                     if receipt.replayed {
-                        return Err(refusal(RefusalCode::Store));
+                        return Err(abandon(refusal(RefusalCode::Store)));
                     }
                 }
                 let captured = Captured {
