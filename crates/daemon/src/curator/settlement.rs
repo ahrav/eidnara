@@ -774,6 +774,12 @@ pub fn read_selected_proposal(
         )
         .map_err(|error| match error {
             CuratorHoldError::Store(error) => ReadRefusal::Store(error.to_string()),
+            // The hold ended between the lookup above and this validation: the same review expiry the lookup would have reported a moment later.
+            CuratorHoldError::Refused(
+                CuratorHoldRefusal::Missing
+                | CuratorHoldRefusal::Released
+                | CuratorHoldRefusal::Expired,
+            ) => ReadRefusal::ReviewExpired,
             CuratorHoldError::Refused(_) => ReadRefusal::Dependency(RefusalCode::HoldInvalid),
         })?;
     for fact in held {
