@@ -1,4 +1,4 @@
-//! The closed, versioned step schema the model answers with: one bounded read batch, one proposal, or an abstention. Decoding rejects unknown fields, unknown variants, and out-of-range values; validation then rejects aliases the broker never issued, empty or inverted ranges, and batches over the per-batch bound, all before any operation has an effect.
+//! The closed, versioned step schema: one bounded read batch, one proposal, or an abstention. Decoding rejects unknown fields, unknown variants, and out-of-range values; validation rejects unissued aliases, empty or inverted ranges, oversized batches, proposals whose action disagrees with their target or text, and proposal text that together exceeds [`MAX_REVIEW_TEXT_BYTES`], all before any operation has an effect.
 
 use std::ops::Range;
 
@@ -9,11 +9,10 @@ use kernel::{
 use serde::Deserialize;
 
 use super::broker::{EvidenceBroker, MAX_OPERATIONS_PER_BATCH, RefusalCode};
+pub use super::project_text::MAX_QUERY_BYTES;
 
 /// The schema version every step must declare.
 pub const STEP_VERSION: u32 = 1;
-/// Longest literal a search operation may carry.
-pub const MAX_SEARCH_LITERAL_BYTES: usize = 256;
 /// Longest relative path a project-text operation may name.
 pub const MAX_PATH_BYTES: usize = 1024;
 
@@ -148,7 +147,7 @@ impl Step {
                         }
                         Operation::FindRelated { .. } => {}
                         Operation::SearchProject { literal, .. } => {
-                            literal_ok(literal, MAX_SEARCH_LITERAL_BYTES)?;
+                            literal_ok(literal, MAX_QUERY_BYTES)?;
                         }
                         Operation::ReadProject { path, range } => {
                             literal_ok(path, MAX_PATH_BYTES)?;
@@ -158,27 +157,17 @@ impl Step {
                 }
             }
             Step::Propose(outcome) => {
-                // The Kernel's own proposal rules (KTD2), applied before anything is bound: create needs a staged candidate and text; revise needs a memory and text; retain and retire need a memory and no text; no-change carries no text.
-                let (needs_memory, needs_text) = match outcome.action {
-                    ProposalAction::Create => (Some(false), true),
-                    ProposalAction::Revise => (Some(true), true),
-                    ProposalAction::Retain | ProposalAction::Retire => (Some(true), false),
-                    ProposalAction::NoChange => (None, false),
-                };
-                if needs_memory.is_some_and(|needs| needs != targets_memory)
-                    || needs_text != outcome.new_text.is_some()
+                if !outcome
+                    .action
+                    .admits(targets_memory, outcome.new_text.is_some())
                 {
                     return Err(RefusalCode::Unsupported);
                 }
-                if outcome
-                    .new_text
-                    .as_ref()
-                    .is_some_and(|text| text.is_empty() || text.len() > MAX_REVIEW_TEXT_BYTES)
+                let texts = outcome.new_text.iter().chain(&outcome.limitations);
+                let text_bytes: usize = texts.clone().map(String::len).sum();
+                if texts.clone().any(String::is_empty)
+                    || text_bytes > MAX_REVIEW_TEXT_BYTES
                     || outcome.limitations.len() > MAX_REVIEW_LIMITATIONS
-                    || outcome
-                        .limitations
-                        .iter()
-                        .any(|text| text.is_empty() || text.len() > MAX_REVIEW_TEXT_BYTES)
                     || outcome.support.len() + outcome.contradictions.len() > MAX_REVIEW_REFERENCES
                 {
                     return Err(RefusalCode::TooLarge);
