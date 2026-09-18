@@ -488,6 +488,18 @@ impl Envelope<'_> {
         &mut self,
         object_id: &str,
     ) -> Result<RetirementOutcome, KernelError> {
+        // A local-file capture observation is the capture's provenance; only capture expiry retires it.
+        if crate::local_file::is_local_file_object(object_id) {
+            return Err(KernelError::InvalidInput);
+        }
+        self.retire_capture_observation(object_id)
+    }
+
+    /// [`Self::retire_observation`] without the reserved-namespace check, for the capture expiry that owns those rows.
+    pub(crate) fn retire_capture_observation(
+        &mut self,
+        object_id: &str,
+    ) -> Result<RetirementOutcome, KernelError> {
         self.guarded(|envelope| {
             envelope.retire_slice_object(object_id, "observation", "observations")
         })

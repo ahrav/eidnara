@@ -1,6 +1,6 @@
 //! Local-file captures record project text read by a Curator run as evidence and a typed observation.
 //!
-//! The evidence row carries the bytes' identity and the finite acquisition reference (`retain_until`); the observation carries the typed detail: the trusted project, the relative path, the capture time, the whole-buffer digest, and the captured range. The detail is a versioned JSON document in `ObservationPayload.detail`, not a descriptor class, so the frozen `OccurrenceClass` set and every descriptor reader are untouched. Generic observation writers cannot use this kind or these id prefixes, and the writer here accepts a detail only when it agrees with the live Curator-capture evidence row it cites. Expiry retires the observation and then the evidence; the artifact bytes stay for as long as any other live reference names their digest.
+//! The evidence row carries the bytes' identity and the finite acquisition reference (`retain_until`); the observation carries the typed detail: the trusted project, the relative path, the capture time, the whole-buffer digest, and the captured range. The detail is a versioned JSON document in `ObservationPayload.detail`, not a descriptor class, so the frozen `OccurrenceClass` set and every descriptor reader are untouched. Generic observation writers cannot use this kind or these id prefixes, or retire an observation under them, and the writer here accepts a detail only when it agrees with the live Curator-capture evidence row it cites. Expiry retires the observation and then the evidence; the artifact bytes stay for as long as any other live reference names their digest.
 
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,11 @@ pub struct LocalFileCaptureRequest<'a> {
     pub evidence_id: &'a str,
     pub artifact_digest: &'a str,
     pub byte_length: u64,
+}
+
+/// Whether `object_id` names a local-file capture observation object.
+pub(crate) fn is_local_file_object(object_id: &str) -> bool {
+    object_id.starts_with(OBJECT_ID_PREFIX)
 }
 
 pub(crate) fn uses_local_file_namespace(spec: &ObservationSpec) -> bool {
@@ -245,7 +250,7 @@ fn retire_expired_capture(
         return Err(KernelError::Conflict);
     }
     for observation in live_capture_observations(envelope, evidence_id)? {
-        envelope.retire_observation(&observation)?;
+        envelope.retire_capture_observation(&observation)?;
     }
     if cited_elsewhere(envelope, evidence_id)? {
         return Ok("retained".to_string());

@@ -1,6 +1,6 @@
 //! Real-store proofs for confined project-text inspection: captures as owned evidence with typed detail and hold charging, reuse without duplication, confinement and protected-location refusals, special files, caps, search bounds, remote refusal, and expiry that keeps independent support.
 
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use daemon::curator::broker::{
@@ -102,11 +102,15 @@ impl Fixture {
     }
 
     fn hold_binding_for(&self, project: &str) -> CuratorHoldBinding {
+        self.hold_binding_with(project, "job-1")
+    }
+
+    fn hold_binding_with(&self, project: &str, subject: &str) -> CuratorHoldBinding {
         CuratorHoldBinding {
             project_digest: project.to_string(),
             kernel_incarnation: incarnation(self.store_dir.path()),
             memstore_incarnation: "m".repeat(32),
-            subject: "job-1".to_string(),
+            subject: subject.to_string(),
             generation: 1,
         }
     }
@@ -119,6 +123,44 @@ impl Fixture {
     /// A broker for a run of `project`, whose hold subject and generation are the fixture's.
     fn broker_for(&self, project: &str, destination: ArtifactDestination) -> EvidenceBroker {
         self.broker_with_references(project, destination, 1)
+    }
+
+    /// A broker for another run of the fixture's project: same project, another job subject.
+    fn broker_of_run(&self, subject: &str) -> EvidenceBroker {
+        let anchor = self
+            .store
+            .ingest_artifact(ArtifactIngestRequest {
+                intent: intent(&format!("anchor-{subject}")),
+                payload: format!("anchor {subject}").into_bytes(),
+                evidence_id: format!("evidence-anchor-{subject}"),
+                object_id: format!("evidence-object-anchor-{subject}"),
+                object_kind: "evidence".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "conversation".to_string(),
+                source_id: "src/anchor".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: "canonical".to_string(),
+                retain_until: None,
+                asserted_sensitivity: Sensitivity::Normal,
+                provider_egress: ProviderEgress::RemoteAllowed,
+                provenance: None,
+            })
+            .unwrap();
+        let binding = self.hold_binding_with(PROJECT, subject);
+        let hold = self
+            .store
+            .acquire_execution_hold(&binding, &[anchor.evidence_id], self.now + 2 * HOUR_MS)
+            .unwrap();
+        EvidenceBroker::new(
+            RunBinding {
+                hold: binding,
+                hold_id: hold.hold_id,
+                destination: ArtifactDestination::Local,
+            },
+            QuestionTemplate::ExtractedFacts,
+        )
+        .unwrap()
     }
 
     /// A broker whose execution hold already carries `references` canonical references, so at most `MAX_CURATOR_HOLD_REFERENCES - references` captures can still be pinned.
@@ -175,7 +217,7 @@ impl Fixture {
 
     fn binding_for(&self, project: &str) -> InspectionBinding {
         InspectionBinding {
-            project_digest: project.to_string(),
+            hold: self.hold_binding_for(project),
             domain_id: DOMAIN.to_string(),
             scope_id: None,
             retain_until: self.now + HOUR_MS,
@@ -303,7 +345,7 @@ fn a_read_captures_exact_bytes_once_with_typed_detail_and_a_charged_hold() {
         broker.shared_origin(again.alias.as_str()).unwrap(),
         Some(&read.alias)
     );
-    // The same bytes under another path are one artifact: the CAS holds them once and the run reuses its capture.
+    // The same bytes under another path are one artifact but another capture: the CAS holds the object once, and each path has its own evidence row and detail.
     fixture.write("copy/main.rs", body.as_bytes());
     text.read(
         &fixture.store,
@@ -313,7 +355,9 @@ fn a_read_captures_exact_bytes_once_with_typed_detail_and_a_charged_hold() {
         fixture.now,
     )
     .unwrap();
-    assert_eq!(fixture.capture_rows().len(), 1);
+    let rows = fixture.capture_rows();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].1, rows[1].1, "one object backs both captures");
 }
 
 #[test]
@@ -1485,8 +1529,11 @@ fn a_seated_observation_receipt_cannot_stand_in_for_the_capture_detail() {
     let digest = format!("{:x}", Sha256::digest(body));
     let hold = fixture.hold_binding();
     let evidence_id = format!(
-        "curcap:{}:{}:{}:{digest}",
-        hold.project_digest, hold.subject, hold.generation
+        "curcap:{}:{}:{}:{digest}:{:x}",
+        hold.project_digest,
+        hold.subject,
+        hold.generation,
+        Sha256::digest(b"a.txt")
     );
     // A caller seats a receipt under the capture's observation intent before the run captures the file.
     fixture
@@ -1520,4 +1567,129 @@ fn a_seated_observation_receipt_cannot_stand_in_for_the_capture_detail() {
             .is_none()
     );
     assert_eq!(broker.ledger.disclosed().count(), 0);
+}
+
+#[test]
+fn two_paths_with_identical_bytes_are_two_captures_with_their_own_paths() {
+    let fixture = Fixture::open();
+    let body = b"the same bytes under two names";
+    fixture.write("a.txt", body);
+    fixture.write("b/copy.txt", body);
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    let outcome = text
+        .search(
+            &fixture.store,
+            &mut broker,
+            SearchQuery::Name("copy"),
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(outcome.hits.len(), 1);
+    let (_, expectation) = broker
+        .aliases
+        .resolve(outcome.hits[0].alias.as_str())
+        .unwrap();
+    let daemon::curator::broker::ReferenceExpectation::TemporaryCapture { evidence_id, .. } =
+        expectation
+    else {
+        panic!("a search hit is a temporary capture");
+    };
+    assert_eq!(
+        fixture
+            .store
+            .local_file_capture(evidence_id)
+            .unwrap()
+            .unwrap()
+            .relative_path,
+        "b/copy.txt",
+        "the hit's provenance names the path that matched"
+    );
+    text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+        .unwrap();
+    let rows = fixture.capture_rows();
+    assert_eq!(rows.len(), 2, "one capture per path");
+    assert_eq!(rows[0].1, rows[1].1, "one object backs both");
+}
+
+#[test]
+fn a_generic_writer_cannot_retire_a_capture_observation() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"captured");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+        .unwrap();
+    let evidence_id = fixture.capture_rows()[0].0.clone();
+    let refused = fixture.store.commit(intent("retire-capture"), |envelope| {
+        envelope.retire_observation(&format!("localfileobj:{evidence_id}"))?;
+        Ok(String::new())
+    });
+    assert_eq!(refused, Err(kernel::KernelError::InvalidInput));
+    assert!(
+        fixture
+            .store
+            .local_file_capture(&evidence_id)
+            .unwrap()
+            .is_some(),
+        "the capture's detail is still live"
+    );
+    // Expiry, the coordinated path, still retires it.
+    assert_eq!(
+        fixture
+            .store
+            .expire_local_file_captures(fixture.now + 3 * HOUR_MS)
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn a_subtree_that_cannot_be_listed_makes_the_inventory_incomplete() {
+    if rustix::process::geteuid().is_root() {
+        // Root reads any directory; there is no listing failure to provoke.
+        return;
+    }
+    let fixture = Fixture::open();
+    fixture.write("ok.txt", b"bun");
+    fixture.write("locked/hidden.txt", b"bun inside");
+    let locked = fixture.project.path().join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    let outcome = text.search(
+        &fixture.store,
+        &mut broker,
+        SearchQuery::Content("bun"),
+        fixture.now,
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome.hits.len(), 1);
+    assert!(outcome.withheld);
+    assert_eq!(
+        outcome.completeness,
+        Completeness::CandidateBound,
+        "an unlisted subtree is incompleteness, not absence"
+    );
+}
+
+#[test]
+fn a_broker_of_another_run_of_the_same_project_is_refused() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"bun");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut other = fixture.broker_of_run("job-2");
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        text.read(&fixture.store, &mut other, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Scope
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip, "nothing was captured");
 }

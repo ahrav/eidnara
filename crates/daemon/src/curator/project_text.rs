@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use kernel::{
     ArtifactErrorKind, ArtifactIngestRequest, CURATOR_CAPTURE_RETENTION_CLASS, CommitIntent,
-    KernelError, KernelStore, LocalFileCaptureRequest, ProviderEgress, Sensitivity,
+    CuratorHoldBinding, KernelError, KernelStore, LocalFileCaptureRequest, ProviderEgress,
+    Sensitivity,
 };
 use rustix::fs::{Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
@@ -70,8 +71,8 @@ impl ProtectedLocations {
 
 #[derive(Debug, Clone)]
 pub struct InspectionBinding {
-    /// The project whose root this inspection opens; a broker for another project is refused before any path is read.
-    pub project_digest: String,
+    /// The run this inspection serves: the hold binding of the broker that may read through it. A broker with any other binding is refused before any path is read, so captures carry one run's identity and acquisition reference.
+    pub hold: CuratorHoldBinding,
     pub domain_id: String,
     pub scope_id: Option<String>,
     /// Each capture is created with this finite acquisition reference.
@@ -111,8 +112,8 @@ pub struct ProjectText {
     root: OwnedFd,
     protected: BTreeSet<(u64, u64)>,
     binding: InspectionBinding,
-    /// Captures this run already owns, by artifact digest, so one file's bytes are ingested and observed once per run.
-    captured: BTreeMap<String, Captured>,
+    /// Captures this run already owns, by relative path and artifact digest, so one file is ingested and observed once per run. Two paths with the same bytes are two captures over one stored object: each carries its own path in its provenance.
+    captured: BTreeMap<(String, String), Captured>,
 }
 
 #[derive(Debug, Clone)]
@@ -233,7 +234,11 @@ impl ProjectText {
                         children.reverse();
                         pending.extend(children);
                     }
-                    Err(_) => outcome.withheld = true,
+                    // A subtree that could not be listed was not examined: incomplete, not empty.
+                    Err(_) => {
+                        outcome.completeness = Completeness::CandidateBound;
+                        outcome.withheld = true;
+                    }
                 }
                 continue;
             }
@@ -348,7 +353,7 @@ impl ProjectText {
         metadata(&handle)
     }
 
-    /// Reads one ordinary file under confinement. `probed` comes from [`Self::probe`]; the file is opened again for reading and must be the same object, so a swap between the two opens is refused rather than read. A file with more than one hard link is not ordinary: a link can name a protected file the identity set does not list. Only UTF-8 bytes of at most [`MAX_CAPTURE_BYTES`] that pass the render check, under a path that passes it too, are returned. Every byte the read takes is charged to `scanned` before any refusal about the bytes, so a refused file, or one larger than its probed size said, costs what it read.
+    /// Reads one ordinary file under confinement. `probed` comes from [`Self::probe`]; the file is opened again for reading and must be the same object, so a swap between the two opens is refused rather than read. A file with more than one hard link is not ordinary: a link can name a protected file the identity set does not list. Only UTF-8 bytes of at most [`MAX_CAPTURE_BYTES`] that pass the render check, under a path that passes it too, are returned. Every byte the read takes is charged to `scanned` before any refusal about the bytes, so a refused file, or one larger than its probed size said, costs what it read; the read itself stops one byte past the capture size or the remaining scan headroom, whichever is smaller.
     fn read_file(
         &self,
         relative: &str,
@@ -361,6 +366,8 @@ impl ProjectText {
         if probed.len() > MAX_CAPTURE_BYTES {
             return Err(refusal(RefusalCode::TooLarge));
         }
+        // The read is bounded by the capture size and by what the scan bound still admits, so a file that grew past its probe cannot be read past either by more than the one byte that detects it.
+        let limit = MAX_CAPTURE_BYTES.min(MAX_SCAN_BYTES.saturating_sub(*scanned));
         *scanned = scanned.saturating_add(probed.len());
         let handle = self.open_beneath(relative, OFlags::RDONLY | OFlags::NONBLOCK)?;
         let opened = metadata(&handle)?;
@@ -375,12 +382,12 @@ impl ProjectText {
         let mut bytes = Vec::new();
         // The size is checked again on the bytes read: the file can grow between the stat and the read.
         File::from(handle)
-            .take(MAX_CAPTURE_BYTES.saturating_add(1))
+            .take(limit.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|_| refusal(RefusalCode::Unavailable))?;
         let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         *scanned = scanned.saturating_add(read.saturating_sub(probed.len()));
-        if read > MAX_CAPTURE_BYTES {
+        if read > limit {
             return Err(refusal(RefusalCode::TooLarge));
         }
         std::str::from_utf8(&bytes).map_err(|_| refusal(RefusalCode::Undecodable))?;
@@ -421,14 +428,18 @@ impl ProjectText {
     ) -> Result<Alias, Refusal> {
         let digest = format!("{:x}", Sha256::digest(&file.bytes));
         let byte_length = u64::try_from(file.bytes.len()).unwrap_or(u64::MAX);
-        let captured = match self.captured.get(&digest) {
+        let key = (file.relative.clone(), digest.clone());
+        let captured = match self.captured.get(&key) {
             Some(captured) => captured.clone(),
             None => {
-                // Job identities are project-scoped, so the capture's identity carries the project: two projects whose runs share a subject and generation and capture identical bytes are two captures, each with its own detail and acquisition reference.
-                let hold = &broker.binding().hold;
+                // The capture's identity is the run's (job identities are project-scoped, so the project is part of it), the bytes, and the path: two projects, two runs, or two paths with identical bytes are distinct captures, each with its own detail and acquisition reference over one stored object. The path is hashed so the id stays within the store's field bound.
+                let hold = &self.binding.hold;
                 let evidence_id = format!(
-                    "curcap:{}:{}:{}:{digest}",
-                    hold.project_digest, hold.subject, hold.generation
+                    "curcap:{}:{}:{}:{digest}:{:x}",
+                    hold.project_digest,
+                    hold.subject,
+                    hold.generation,
+                    Sha256::digest(file.relative.as_bytes())
                 );
                 let handle = store
                     .ingest_exact_artifact(ArtifactIngestRequest {
@@ -469,7 +480,7 @@ impl ProjectText {
                             intent(&format!("{evidence_id}:observation"), &digest),
                             |envelope| {
                                 envelope.record_local_file_capture(&LocalFileCaptureRequest {
-                                    project_digest: &self.binding.project_digest,
+                                    project_digest: &self.binding.hold.project_digest,
                                     relative_path: &file.relative,
                                     captured_at: now_ms,
                                     domain_id: &self.binding.domain_id,
@@ -500,7 +511,7 @@ impl ProjectText {
                         .retain_until
                         .ok_or_else(|| refusal(RefusalCode::Store))?,
                 };
-                self.captured.insert(digest.clone(), captured.clone());
+                self.captured.insert(key, captured.clone());
                 captured
             }
         };
@@ -538,9 +549,9 @@ fn metadata(handle: &OwnedFd) -> Result<std::fs::Metadata, Refusal> {
     .map_err(|_| refusal(RefusalCode::Unavailable))
 }
 
-/// A capture is Sensitive by construction, so a remote destination can never disclose one; refusing at entry reads nothing for a run that could not be shown it. A broker whose hold belongs to another project is refused the same way: this root's files are that project's, and its captures would carry the wrong provenance.
+/// A capture is Sensitive by construction, so a remote destination can never disclose one; refusing at entry reads nothing for a run that could not be shown it. A broker whose hold binding is not the inspection's is refused the same way: another project's run would take this root's files with the wrong provenance, and another run of the same project would mix its identity with this inspection's acquisition reference.
 fn admit(binding: &InspectionBinding, broker: &EvidenceBroker) -> Result<(), Refusal> {
-    if broker.binding().hold.project_digest != binding.project_digest {
+    if broker.binding().hold != binding.hold {
         return Err(refusal(RefusalCode::Scope));
     }
     if broker.binding().destination == kernel::ArtifactDestination::Remote {
@@ -603,6 +614,16 @@ fn refusal(code: RefusalCode) -> Refusal {
 mod tests {
     use super::*;
 
+    fn hold_binding() -> kernel::CuratorHoldBinding {
+        kernel::CuratorHoldBinding {
+            project_digest: "a".repeat(64),
+            kernel_incarnation: "k".repeat(32),
+            memstore_incarnation: "m".repeat(32),
+            subject: "job".to_string(),
+            generation: 1,
+        }
+    }
+
     #[test]
     fn relative_paths_are_ordinary_components_only() {
         for accepted in ["a", "a/b.txt", "deep/er/path"] {
@@ -645,7 +666,7 @@ mod tests {
             root.path(),
             &ProtectedLocations::default(),
             InspectionBinding {
-                project_digest: "a".repeat(64),
+                hold: hold_binding(),
                 domain_id: "domain".to_string(),
                 scope_id: None,
                 retain_until: 1,
@@ -671,6 +692,36 @@ mod tests {
         };
         assert_eq!(refused.code, RefusalCode::Undecodable);
         assert_eq!(scanned, 4);
+    }
+
+    #[test]
+    fn a_read_stops_at_the_scan_headroom_when_the_file_outgrew_its_probe() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("grow.txt"), b"short").unwrap();
+        let text = ProjectText::open(
+            root.path(),
+            &ProtectedLocations::default(),
+            InspectionBinding {
+                hold: hold_binding(),
+                domain_id: "domain".to_string(),
+                scope_id: None,
+                retain_until: 1,
+            },
+        )
+        .unwrap();
+        let probed = text.probe("grow.txt").unwrap();
+        std::fs::write(root.path().join("grow.txt"), b"no longer short").unwrap();
+        // Five bytes of headroom admit the probed size; the grown file is cut off one byte past it and refused.
+        let mut scanned = MAX_SCAN_BYTES - 5;
+        let Err(refused) = text.read_file("grow.txt", &probed, &mut scanned) else {
+            panic!("a file that outgrew the headroom is refused");
+        };
+        assert_eq!(refused.code, RefusalCode::TooLarge);
+        assert_eq!(
+            scanned,
+            MAX_SCAN_BYTES + 1,
+            "the overrun is one byte, not a file"
+        );
     }
 
     #[test]
