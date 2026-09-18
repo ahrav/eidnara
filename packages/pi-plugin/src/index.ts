@@ -63,6 +63,14 @@ import {
 } from "./tools/todo-view-pi";
 
 const PREFIX = "[eidnara][pi]";
+/**
+ * The Pi plugin has no message transform: nothing folds history or serves `§N§` tags, so
+ * owning compaction would only cancel Pi's native compaction and leave the session to
+ * overflow. While this is false, every compaction-on path in this file is skipped, whatever
+ * the compaction setting says; `docs/specifications/pi-context-transform.md` describes the
+ * transform that flips it.
+ */
+export const PI_TRANSFORM_AVAILABLE: boolean = false;
 const managedDemandStart = createLazyManagedDemandStart({
     declaringModuleUrl: import.meta.url,
     parentPackageName: "@eidnara/pi",
@@ -321,14 +329,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         resolveProjectIdentityForSession(projectDir, config.allow_home_project) ?? "";
     info(`loaded | harness=pi | project=${projectIdentity} | dir=${projectDir}`);
     // Pi registers tools once per process, so compaction registration does not follow later /cd config changes.
-    // The Pi plugin has no message transform yet: nothing folds history or serves `§N§` tags, so
-    // owning compaction would only cancel Pi's native compaction and leave the session to
-    // overflow. Until a Pi transform ships, Pi always runs in compaction-off mode: native
-    // compaction proceeds and `eidnara_reduce` is not registered, whatever the compaction
-    // setting says.
     const compactionRequested = isCompactionEnabled(config);
-    const compactionOff = true;
-    if (compactionRequested) {
+    const compactionOff = !PI_TRANSFORM_AVAILABLE || !compactionRequested;
+    if (compactionRequested && !PI_TRANSFORM_AVAILABLE) {
         info(
             "the compaction setting is not honored on Pi: no Pi context transform exists yet, so native Pi compaction proceeds and eidnara_reduce is not registered",
         );
