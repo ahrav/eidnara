@@ -1,4 +1,4 @@
-//! The closed, versioned step schema: one bounded read batch, one proposal, or an abstention. Decoding rejects unknown fields, unknown variants, and out-of-range values; validation rejects unissued aliases, empty or inverted ranges, oversized batches, proposals whose action disagrees with their target or text, and proposal text that together exceeds [`MAX_REVIEW_TEXT_BYTES`], all before any operation has an effect.
+//! The closed, versioned step schema: one bounded read batch, one proposal, or an abstention. Decoding rejects unknown fields, unknown variants, and out-of-range values; validation rejects unissued aliases, blank proposal text, empty or inverted ranges, oversized batches, proposals whose action disagrees with their target or text, and proposal text that together exceeds [`MAX_REVIEW_TEXT_BYTES`], all before any operation has an effect.
 
 use std::ops::Range;
 
@@ -165,7 +165,7 @@ impl Step {
                 }
                 let texts = outcome.new_text.iter().chain(&outcome.limitations);
                 let text_bytes: usize = texts.clone().map(String::len).sum();
-                if texts.clone().any(String::is_empty)
+                if texts.clone().any(|text| text.trim().is_empty())
                     || text_bytes > MAX_REVIEW_TEXT_BYTES
                     || outcome.limitations.len() > MAX_REVIEW_LIMITATIONS
                     || outcome.support.len() + outcome.contradictions.len() > MAX_REVIEW_REFERENCES

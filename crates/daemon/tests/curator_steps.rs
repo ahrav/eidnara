@@ -188,6 +188,16 @@ fn steps_are_rejected_before_any_effect() {
             Err(RefusalCode::TooLarge),
         ),
         (
+            r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":" \t\n","support":[],"uncertainty":"low"}}"#,
+            true,
+            Err(RefusalCode::TooLarge),
+        ),
+        (
+            r#"{"v":1,"step":{"kind":"propose","action":"retain","support":[],"limitations":["  "],"uncertainty":"low"}}"#,
+            true,
+            Err(RefusalCode::TooLarge),
+        ),
+        (
             r#"{"v":1,"step":{"kind":"propose","action":"retain","support":[],"uncertainty":"certain"}}"#,
             true,
             Err(RefusalCode::Undecodable),
