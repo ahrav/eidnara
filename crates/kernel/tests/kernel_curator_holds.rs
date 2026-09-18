@@ -941,3 +941,89 @@ fn run_buffers_load_each_artifact_once_and_refuse_at_the_exact_boundary() {
     );
     assert_eq!(fixture.store.verified_object_reads_for_test(), reads);
 }
+
+/// A capture whose evidence another live row cites is retired once: the second sweep neither commits again nor lets a full page of such captures hide a later unreferenced one.
+#[test]
+fn expiry_visits_a_retained_capture_once_and_reaches_captures_behind_a_full_page() {
+    use kernel::{
+        LocalFileCaptureRequest, MAX_EXPIRED_CAPTURES_PER_CALL, ObservationPayload, ObservationSpec,
+    };
+    let fixture = Fixture::open();
+    let now = now_ms();
+    // A full page of captures that expire first, each with its capture observation and cited by an independent observation.
+    for index in 0..MAX_EXPIRED_CAPTURES_PER_CALL {
+        let key = format!("cited-{index:03}");
+        let evidence_id = fixture.ingest(&key, key.as_bytes(), Some(now + HOUR_MS));
+        fixture
+            .store
+            .commit(intent(&format!("foreign-{key}"), b"foreign"), |envelope| {
+                envelope.record_local_file_capture(&LocalFileCaptureRequest {
+                    project_digest: &"0a".repeat(32),
+                    relative_path: &key,
+                    captured_at: now,
+                    domain_id: "domain",
+                    scope_id: None,
+                    evidence_id: &evidence_id,
+                    artifact_digest: &format!("{:x}", Sha256::digest(key.as_bytes())),
+                    byte_length: key.len() as u64,
+                })?;
+                envelope.insert_observation(ObservationSpec {
+                    observation_id: format!("foreign-{key}"),
+                    object_id: format!("foreign-object-{key}"),
+                    domain_id: "domain".to_string(),
+                    proposition_id: None,
+                    scope_id: None,
+                    anchor_id: None,
+                    evidence_id: Some(evidence_id),
+                    observation_kind: "note".to_string(),
+                    payload: ObservationPayload {
+                        summary: "independent support".to_string(),
+                        classification: "note".to_string(),
+                        detail: None,
+                    },
+                    observed_at: now,
+                    dependencies: Vec::new(),
+                    source_kind: "test".to_string(),
+                    source_id: key.clone(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Sensitive,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+    // One unreferenced capture that expires later than every cited one.
+    let lone = fixture.ingest("lone", b"lone", Some(now + HOUR_MS + 1));
+    let after = now + 2 * HOUR_MS;
+    let live_capture_evidence = || {
+        inspect(fixture.root(), |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM evidence_meta WHERE evidence_id=?1 AND invalidated_commit_seq IS NULL",
+                [&lone],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        })
+    };
+    // The first sweep takes the full page of cited captures and retains every one of them.
+    assert_eq!(fixture.store.expire_local_file_captures(after).unwrap(), 0);
+    assert_eq!(live_capture_evidence(), 1);
+    let tip = fixture.store.tip().unwrap();
+    // The second sweep must not revisit the retained page: it reaches the lone capture and retires it, and the retained captures cost no commits.
+    assert_eq!(
+        fixture.store.expire_local_file_captures(after + 1).unwrap(),
+        1
+    );
+    assert_eq!(live_capture_evidence(), 0);
+    assert_eq!(
+        fixture.store.tip().unwrap(),
+        tip + 1,
+        "exactly one commit: the lone capture's retirement, none for the retained page"
+    );
+    // A third sweep finds nothing and writes nothing.
+    assert_eq!(
+        fixture.store.expire_local_file_captures(after + 2).unwrap(),
+        0
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip + 1);
+}

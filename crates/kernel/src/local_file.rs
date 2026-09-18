@@ -121,7 +121,7 @@ impl Envelope<'_> {
 }
 
 impl KernelStore {
-    /// Retires the capture observation and evidence of every Curator capture whose `retain_until` has passed and that no live hold still pins, at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] per call, one commit per capture keyed by `now` and the evidence id. A capture that some other live row still cites is left alone: only its own observation is retired, and the evidence stays until that citation is gone. Ownership ends here; the artifact bytes are reclaimed later only if no other live reference names the digest. Returns how many evidence rows were retired.
+    /// Retires the capture observation and evidence of every Curator capture whose `retain_until` has passed and that no live hold still pins, at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] per call, one commit per capture keyed by `now` and the evidence id. A capture that some other live row still cites is left alone: only its own observation is retired, and the evidence stays until that citation is gone. Once its observation is retired, such a capture is not selected again while the citation lives, so a full page of retained captures costs no commits and never hides a later unreferenced one. Ownership ends here; the artifact bytes are reclaimed later only if no other live reference names the digest. Returns how many evidence rows were retired.
     ///
     /// # Errors
     ///
@@ -189,29 +189,46 @@ impl KernelStore {
     }
 }
 
-/// Live Curator captures whose acquisition reference has passed and that no live hold pins: `(evidence_id, evidence object id)`, oldest expiry first.
+/// Whether a live row other than the capture observation cites the evidence row `e`; `?2` is [`LOCAL_FILE_KIND`]. Shared by the sweep's selection and its in-transaction check so both agree on what counts as a citation.
+const CITED_ELSEWHERE_SQL: &str = "EXISTS(SELECT 1 FROM observations o
+                    WHERE o.evidence_id=e.evidence_id AND o.invalidated_commit_seq IS NULL
+                      AND o.observation_kind<>?2)
+          OR EXISTS(SELECT 1 FROM decisions d
+                    WHERE d.evidence_id=e.evidence_id AND d.invalidated_commit_seq IS NULL)
+          OR EXISTS(SELECT 1 FROM decision_events de
+                    JOIN decisions d ON d.decision_id=de.decision_id
+                    WHERE de.evidence_id=e.evidence_id AND d.invalidated_commit_seq IS NULL)
+          OR EXISTS(SELECT 1 FROM asserted_edges a
+                    WHERE a.evidence_id=e.evidence_id AND a.invalidated_commit_seq IS NULL)";
+
+/// Live Curator captures whose acquisition reference has passed, that no live hold pins, and that still have work: a live capture observation to retire, or evidence nothing else cites. `(evidence_id, evidence object id)`, oldest expiry first.
 fn expired_captures(
     connection: &rusqlite::Connection,
     now: i64,
 ) -> Result<Vec<(String, String)>, KernelError> {
     let mut statement = connection
-        .prepare_cached(
+        .prepare_cached(&format!(
             "SELECT e.evidence_id,e.object_id FROM evidence_meta e
              WHERE e.retention_class=?1 AND e.invalidated_commit_seq IS NULL
-               AND e.retain_until IS NOT NULL AND e.retain_until<=?2
+               AND e.retain_until IS NOT NULL AND e.retain_until<=?3
                AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
                                 JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
                                 WHERE r.evidence_id=e.evidence_id
                                   AND r.released_at IS NULL AND p.released_at IS NULL
-                                  AND (p.expires_at IS NULL OR p.expires_at>?2))
+                                  AND (p.expires_at IS NULL OR p.expires_at>?3))
+               AND (EXISTS(SELECT 1 FROM observations o
+                           WHERE o.evidence_id=e.evidence_id AND o.observation_kind=?2
+                             AND o.invalidated_commit_seq IS NULL)
+                    OR NOT ({CITED_ELSEWHERE_SQL}))
              ORDER BY e.retain_until,e.evidence_id
-             LIMIT ?3",
-        )
+             LIMIT ?4"
+        ))
         .map_err(map_sqlite)?;
     let rows = statement
         .query_map(
             params![
                 super::cas::CURATOR_CAPTURE_RETENTION_CLASS,
+                LOCAL_FILE_KIND,
                 now,
                 i64::try_from(MAX_EXPIRED_CAPTURES_PER_CALL).unwrap_or(i64::MAX)
             ],
@@ -245,16 +262,7 @@ fn cited_elsewhere(envelope: &Envelope<'_>, evidence_id: &str) -> Result<bool, K
     envelope
         .tx
         .query_row_cached(
-            "SELECT EXISTS(SELECT 1 FROM observations o
-                           WHERE o.evidence_id=?1 AND o.invalidated_commit_seq IS NULL
-                             AND o.observation_kind<>?2)
-                 OR EXISTS(SELECT 1 FROM decisions d
-                           WHERE d.evidence_id=?1 AND d.invalidated_commit_seq IS NULL)
-                 OR EXISTS(SELECT 1 FROM decision_events de
-                           JOIN decisions d ON d.decision_id=de.decision_id
-                           WHERE de.evidence_id=?1 AND d.invalidated_commit_seq IS NULL)
-                 OR EXISTS(SELECT 1 FROM asserted_edges a
-                           WHERE a.evidence_id=?1 AND a.invalidated_commit_seq IS NULL)",
+            &format!("SELECT {CITED_ELSEWHERE_SQL} FROM evidence_meta e WHERE e.evidence_id=?1"),
             params![evidence_id, LOCAL_FILE_KIND],
             |row| row.get(0),
         )
