@@ -1406,3 +1406,34 @@ fn a_hold_capacity_refusal_on_a_capture_marks_the_evidence_set_partial() {
     );
     assert!(!broker.ledger.conclusions_usable());
 }
+
+#[test]
+fn a_root_inside_a_refused_component_is_protected() {
+    let fixture = Fixture::open();
+    fixture.write(
+        ".git/config",
+        b"[remote \"origin\"]\n\turl = https://token@example.invalid/repo.git\n",
+    );
+    fixture.write(".eidnara/store/state.json", b"{}");
+    fixture.write("ok/a.txt", b"plain");
+    let protected = fixture.protected();
+    for root in [".git", ".eidnara/store"] {
+        assert_eq!(
+            ProjectText::open(
+                &fixture.project.path().join(root),
+                &protected,
+                fixture.binding()
+            )
+            .unwrap_err()
+            .code,
+            RefusalCode::Protected,
+            "{root}"
+        );
+    }
+    ProjectText::open(
+        &fixture.project.path().join("ok"),
+        &protected,
+        fixture.binding(),
+    )
+    .unwrap();
+}

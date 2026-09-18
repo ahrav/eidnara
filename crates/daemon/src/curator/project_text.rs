@@ -127,7 +127,7 @@ struct ReadFile {
 }
 
 impl ProjectText {
-    /// Opens the root without following a link and refuses a root that is, contains, or lies inside a protected location. Only a missing root is `NotFound`; a root that exists but cannot be resolved or opened is a host failure or a type refusal, never absence.
+    /// Opens the root without following a link and refuses a root that is, contains, or lies inside a protected location, or that is or lies beneath a refused component. Only a missing root is `NotFound`; a root that exists but cannot be resolved or opened is a host failure or a type refusal, never absence.
     pub fn open(
         project_root: &Path,
         protected: &ProtectedLocations,
@@ -145,6 +145,12 @@ impl ProjectText {
             .any(|root| root.starts_with(&canonical) || canonical.starts_with(root))
         {
             return Err(refusal(RefusalCode::Unavailable));
+        }
+        // A root that is, or lies beneath, a refused component would let every relative path skip the component check.
+        if canonical.components().any(|component| {
+            REFUSED_COMPONENTS.contains(&component.as_os_str().to_str().unwrap_or(""))
+        }) {
+            return Err(refusal(RefusalCode::Protected));
         }
         let root = rustix::fs::open(
             &canonical,
@@ -178,7 +184,7 @@ impl ProjectText {
     ) -> Result<EvidenceRead, Refusal> {
         admit_destination(broker)?;
         let probed = self.probe(relative_path)?;
-        let file = self.read_file(relative_path, &probed)?;
+        let file = self.read_file(relative_path, &probed, &mut 0)?;
         let alias = self.capture(store, broker, &file, now_ms)?;
         broker.read(store, alias.as_str(), range, now_ms)
     }
@@ -240,10 +246,8 @@ impl ProjectText {
             if scanned.saturating_add(probed.len()) > MAX_SCAN_BYTES {
                 return Ok(finish(outcome, Completeness::ProbeBound));
             }
-            // The file is charged before it is read: a file the read then refuses has still been read, and the scan bound is on bytes read, not on bytes accepted.
-            scanned = scanned.saturating_add(probed.len());
-            // Deliverability is decided before any literal is applied, for every query kind: a file that cannot be read or rendered is withheld whether or not its path, name, or text would have matched.
-            let Ok(file) = self.read_file(&relative, &probed) else {
+            // Deliverability is decided before any literal is applied, for every query kind: a file that cannot be read or rendered is withheld whether or not its path, name, or text would have matched. The read charges the bytes it takes to `scanned`, accepted or refused.
+            let Ok(file) = self.read_file(&relative, &probed, &mut scanned) else {
                 outcome.withheld = true;
                 continue;
             };
@@ -342,14 +346,20 @@ impl ProjectText {
         metadata(&handle)
     }
 
-    /// Reads one ordinary file under confinement. `probed` comes from [`Self::probe`]; the file is opened again for reading and must be the same object, so a swap between the two opens is refused rather than read. A file with more than one hard link is not ordinary: a link can name a protected file the identity set does not list. Only UTF-8 bytes of at most [`MAX_CAPTURE_BYTES`] that pass the render check, under a path that passes it too, are returned.
-    fn read_file(&self, relative: &str, probed: &std::fs::Metadata) -> Result<ReadFile, Refusal> {
+    /// Reads one ordinary file under confinement. `probed` comes from [`Self::probe`]; the file is opened again for reading and must be the same object, so a swap between the two opens is refused rather than read. A file with more than one hard link is not ordinary: a link can name a protected file the identity set does not list. Only UTF-8 bytes of at most [`MAX_CAPTURE_BYTES`] that pass the render check, under a path that passes it too, are returned. Every byte the read takes is charged to `scanned` before any refusal about the bytes, so a refused file, or one larger than its probed size said, costs what it read.
+    fn read_file(
+        &self,
+        relative: &str,
+        probed: &std::fs::Metadata,
+        scanned: &mut u64,
+    ) -> Result<ReadFile, Refusal> {
         if !probed.file_type().is_file() {
             return Err(refusal(RefusalCode::NotRegularFile));
         }
         if probed.len() > MAX_CAPTURE_BYTES {
             return Err(refusal(RefusalCode::TooLarge));
         }
+        *scanned = scanned.saturating_add(probed.len());
         let handle = self.open_beneath(relative, OFlags::RDONLY | OFlags::NONBLOCK)?;
         let opened = metadata(&handle)?;
         if (opened.dev(), opened.ino()) != (probed.dev(), probed.ino())
@@ -366,7 +376,9 @@ impl ProjectText {
             .take(MAX_CAPTURE_BYTES.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|_| refusal(RefusalCode::Unavailable))?;
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CAPTURE_BYTES {
+        let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        *scanned = scanned.saturating_add(read.saturating_sub(probed.len()));
+        if read > MAX_CAPTURE_BYTES {
             return Err(refusal(RefusalCode::TooLarge));
         }
         std::str::from_utf8(&bytes).map_err(|_| refusal(RefusalCode::Undecodable))?;
@@ -608,6 +620,41 @@ mod tests {
             validate_relative(&format!("{longest}c")).unwrap_err().code,
             RefusalCode::InvalidPath
         );
+    }
+
+    #[test]
+    fn a_file_that_grew_after_its_probe_is_charged_the_bytes_it_read() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("grow.txt"), b"short").unwrap();
+        let text = ProjectText::open(
+            root.path(),
+            &ProtectedLocations::default(),
+            InspectionBinding {
+                domain_id: "domain".to_string(),
+                scope_id: None,
+                retain_until: 1,
+            },
+        )
+        .unwrap();
+        let probed = text.probe("grow.txt").unwrap();
+        // The probe said five bytes; the file is longer by the time it is read.
+        std::fs::write(root.path().join("grow.txt"), b"no longer short").unwrap();
+        let mut scanned = 0;
+        let file = text.read_file("grow.txt", &probed, &mut scanned).unwrap();
+        assert_eq!(file.bytes, b"no longer short");
+        assert_eq!(
+            scanned, 15,
+            "the charge is the bytes read, not the probed size"
+        );
+        // A refused read still charges what it read.
+        std::fs::write(root.path().join("grow.txt"), [0xff, 0xfe, 0x00, 0x41]).unwrap();
+        let probed = text.probe("grow.txt").unwrap();
+        let mut scanned = 0;
+        let Err(refused) = text.read_file("grow.txt", &probed, &mut scanned) else {
+            panic!("undecodable bytes are refused");
+        };
+        assert_eq!(refused.code, RefusalCode::Undecodable);
+        assert_eq!(scanned, 4);
     }
 
     #[test]

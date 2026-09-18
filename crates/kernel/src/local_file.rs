@@ -160,8 +160,9 @@ impl KernelStore {
                 || Ok(()),
             );
             match outcome {
+                // A replayed receipt is another sweep's retirement at this cutoff; this call's transaction did not run.
                 Ok(receipt) => {
-                    if receipt.result == "retired" {
+                    if receipt.result == "retired" && !receipt.replayed {
                         retired += 1;
                     }
                 }
@@ -357,7 +358,7 @@ mod tests {
 
     use super::{
         LOCAL_FILE_KIND, LocalFileCaptureRequest, MAX_EXPIRED_CAPTURES_PER_CALL,
-        expired_captures_sql, expiry_intent, retire_expired_capture,
+        commit_with_writer, expired_captures_sql, expiry_intent, retire_expired_capture,
     };
     use crate::cas::CURATOR_CAPTURE_RETENTION_CLASS;
     use crate::schema::apply_kernel_schema;
@@ -468,6 +469,29 @@ mod tests {
         );
         assert_eq!(store.expire_local_file_captures(now).unwrap(), 1);
         assert!(store.local_file_capture("cap").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_replayed_expiry_receipt_is_not_counted_as_a_retirement() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, _, lapses_at) = store_with_lapsing_capture(root.path());
+        let now = lapses_at + 1;
+        // Another sweep at the same cutoff committed this capture's receipt first; the closure here stands in for that sweep's retirement.
+        let mut writer = store.lock_writer().unwrap();
+        commit_with_writer(
+            &mut writer,
+            store.lease_epoch(),
+            expiry_intent(now, "cap"),
+            |_| Ok("retired".to_string()),
+            || Ok(()),
+        )
+        .unwrap();
+        drop(writer);
+        assert_eq!(
+            store.expire_local_file_captures(now).unwrap(),
+            0,
+            "a replayed receipt is the other sweep's retirement, not this one's"
+        );
     }
 
     #[test]
