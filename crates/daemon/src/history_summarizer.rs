@@ -1671,7 +1671,6 @@ fn publish_output_from_awaiting(
         validated: &validated,
         aliases: &validation_chunk.aliases,
         curator_handoff,
-        created_at_ms,
         failure_started_at_ms,
         failure_backoff_at_ms,
         completion_now_ms,
@@ -1742,7 +1741,6 @@ struct CuratorDecisionRequest<'a> {
     validated: &'a ValidatedChunk,
     aliases: &'a FrozenAliasTable,
     curator_handoff: Option<&'a HandoffTarget>,
-    created_at_ms: i64,
     failure_started_at_ms: i64,
     failure_backoff_at_ms: i64,
     completion_now_ms: fn() -> i64,
@@ -1768,7 +1766,6 @@ fn curator_decision_before_publish(
         validated,
         aliases,
         curator_handoff,
-        created_at_ms,
         failure_started_at_ms,
         failure_backoff_at_ms,
         completion_now_ms,
@@ -1782,6 +1779,7 @@ fn curator_decision_before_publish(
             publishing_row_version,
         });
     };
+    // The reservation is clocked at completion, not at the firing's start: the producer wait can reach ten minutes, and the queue lifetime begins when capacity is reserved.
     let handoff = handoff::reserve_and_stage(
         target,
         &HandoffRequest {
@@ -1791,7 +1789,7 @@ fn curator_decision_before_publish(
             firing: publishing,
             facts: &validated.facts,
             aliases,
-            now_ms: created_at_ms,
+            now_ms: completion_now_ms(),
         },
         |reservation| {
             persist_reservation(

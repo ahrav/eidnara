@@ -1235,7 +1235,6 @@ fn a_handoff_failure_abandons_only_the_firing_that_reserved() {
         validated: &validated,
         aliases: &aliases(),
         curator_handoff: Some(&target),
-        created_at_ms: t0(),
         failure_started_at_ms: t0(),
         failure_backoff_at_ms: 0,
         completion_now_ms: t0,
@@ -1294,4 +1293,35 @@ fn the_handoff_key_separates_projects_sessions_and_policies() {
     assert_ne!(key, handoff_key(&"b".repeat(64), SESSION, &current));
     assert_ne!(key, handoff_key(PROJECT_DIGEST, "other", &current));
     assert_ne!(key, handoff_key(PROJECT_DIGEST, SESSION, &previous));
+}
+
+/// The producer wait can reach ten minutes; the queue lifetime starts when capacity is reserved, not when the firing started.
+#[test]
+fn the_queue_deadline_starts_at_the_reservation_not_the_firing() {
+    let rig = Rig::open();
+    let publishing = rig.state();
+    let publishing_row_version = rig.store.load(SESSION).unwrap().row_version.unwrap();
+    let mut validated = validated_range(2, 4);
+    validated.extraction = ExtractionOutcome::Accepted { count: 2 };
+    let target = rig.target();
+    let decision = curator_decision_before_publish(CuratorDecisionRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        publishing: &publishing,
+        publishing_row_version,
+        validated: &validated,
+        aliases: &aliases(),
+        curator_handoff: Some(&target),
+        // The firing started ten minutes before its producer completed.
+        failure_started_at_ms: t0() - 600_000,
+        failure_backoff_at_ms: 0,
+        completion_now_ms: t0,
+    })
+    .unwrap();
+    assert!(decision.curator_activation.is_some());
+    assert_eq!(
+        rig.reservation().queue_deadline_ms,
+        t0() + CURATOR_QUEUE_LIFETIME_MS
+    );
 }
