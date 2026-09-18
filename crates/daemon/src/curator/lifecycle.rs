@@ -142,7 +142,8 @@ fn kernel_slice(
     if cancelled() {
         return Ok(None);
     }
-    let advanced = kernel.expire_local_file_captures(now_ms)? > 0;
+    let expiry = kernel.expire_local_file_captures(now_ms)?;
+    let advanced = expiry.retired + expiry.retained > 0;
     Ok(
         maintenance_slice(cancelled, || kernel.run_staging_maintenance(now_ms))?
             .map(|maintained| advanced || maintained),
@@ -365,6 +366,122 @@ mod tests {
             ))
         ));
         (staged, binding)
+    }
+
+    /// Seeds one lapsed Curator capture whose evidence a foreign observation cites, so the sweep can retire only its observation and must keep the evidence.
+    fn seed_retained_capture(kernel_store: &kernel::KernelStore, lapses_at: i64) {
+        use sha2::Digest as _;
+        let intent = |key: &str| kernel::CommitIntent {
+            producer: "lifecycle-test".to_string(),
+            operation_key: key.to_string(),
+            request_digest: format!("{:x}", sha2::Sha256::digest(key.as_bytes())),
+            actor: "test".to_string(),
+            cause: "proof".to_string(),
+        };
+        kernel_store
+            .commit(intent("domain"), |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "domain".to_string(),
+                    object_id: "domain-object".to_string(),
+                    name: "fixture".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: "domain".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let payload = b"captured bytes";
+        let digest = format!("{:x}", sha2::Sha256::digest(payload));
+        let handle = kernel_store
+            .ingest_artifact(kernel::ArtifactIngestRequest {
+                intent: intent("capture"),
+                payload: payload.to_vec(),
+                evidence_id: "evidence-capture".to_string(),
+                object_id: "evidence-object-capture".to_string(),
+                object_kind: "evidence".to_string(),
+                domain_id: "domain".to_string(),
+                source_kind: kernel::LOCAL_FILE_SOURCE_KIND.to_string(),
+                source_id: "notes.txt".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: kernel::CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+                retain_until: Some(lapses_at),
+                asserted_sensitivity: kernel::Sensitivity::Sensitive,
+                provider_egress: kernel::ProviderEgress::LocalOnly,
+                provenance: None,
+            })
+            .unwrap();
+        kernel_store
+            .commit(intent("observations"), |envelope| {
+                envelope.record_local_file_capture(&kernel::LocalFileCaptureRequest {
+                    project_digest: &"0a".repeat(32),
+                    relative_path: "notes.txt",
+                    captured_at: lapses_at - 1,
+                    domain_id: "domain",
+                    scope_id: None,
+                    evidence_id: &handle.evidence_id,
+                    artifact_digest: &digest,
+                    byte_length: payload.len() as u64,
+                })?;
+                envelope.insert_observation(kernel::ObservationSpec {
+                    observation_id: "foreign".to_string(),
+                    object_id: "foreign-object".to_string(),
+                    domain_id: "domain".to_string(),
+                    proposition_id: None,
+                    scope_id: None,
+                    anchor_id: None,
+                    evidence_id: Some(handle.evidence_id.clone()),
+                    observation_kind: "note".to_string(),
+                    payload: kernel::ObservationPayload {
+                        summary: "independent support".to_string(),
+                        classification: "note".to_string(),
+                        detail: None,
+                    },
+                    observed_at: lapses_at - 1,
+                    dependencies: Vec::new(),
+                    source_kind: "test".to_string(),
+                    source_id: "foreign".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Sensitive,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    /// Retiring a retained capture's observation is cleanup work: the pass that did it follows without the idle interval, so a backlog of cited captures drains page after page; the pass after it, with nothing left, idles.
+    #[test]
+    fn retiring_a_retained_capture_counts_as_advancing() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&MemoryStore::test_descriptor(
+            store_dir.path(),
+            "eidnara-curator-lifecycle-test",
+        ))
+        .unwrap();
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+        let t0 = crate::now_ms();
+        seed_retained_capture(&kernel_store, t0 + 1_000);
+        let sweep_at = t0 + 2_000;
+        let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &|| false)
+            .expect("not cancelled");
+        assert!(pass.healthy);
+        assert!(
+            kernel_store
+                .local_file_capture("evidence-capture")
+                .unwrap()
+                .is_none(),
+            "the capture's own observation was retired"
+        );
+        assert!(
+            pass.advanced,
+            "retiring a retained capture's observation is progress"
+        );
+        let again = sweep_and_sample(&store, Some(&kernel_store), sweep_at + 1, None, &|| false)
+            .expect("not cancelled");
+        assert!(!again.advanced, "nothing was left to retire");
     }
 
     fn maintenance(

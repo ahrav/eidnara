@@ -787,8 +787,13 @@ impl MemoryStore {
                 )?);
                 grouped::<String>(
                     conn,
-                    "SELECT state, COUNT(*) FROM curator_frozen_selections GROUP BY state",
+                    "SELECT state, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
+                     FROM curator_frozen_selections GROUP BY state",
                     |state, row| {
+                        // A page's receipt charge is permanent whatever its state; only its allowance is released at a terminal.
+                        facts.receipt_charge_bytes = facts
+                            .receipt_charge_bytes
+                            .saturating_add(unsigned(row.get(2)?));
                         if let Some(state) = curator_jobs::FrozenSelectionState::parse(&state) {
                             *facts.selection_slot(state) += unsigned(row.get(1)?);
                         }
@@ -21951,6 +21956,43 @@ mod tests {
                 "{code:?} has no counter"
             );
         }
+    }
+
+    /// A frozen page's receipt charge is permanent and its allowance temporary; the sampler must attribute each to the right counter, including once the page is terminal and only the receipt charge remains.
+    #[test]
+    fn frozen_page_receipt_charges_are_permanent_not_allowances_in_the_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let receipt = curator_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES;
+        let allowance = curator_jobs::FROZEN_SELECTION_ALLOWANCE_BYTES;
+        store
+            .with_fenced_conn_for_test(|conn| {
+                conn.execute(
+                    "INSERT INTO curator_frozen_selections (
+                         project, slot_id, selection_attempt, page_json, reference_count, next_cursor,
+                         state, selection_deadline_ms, allowance_bytes, receipt_charge_bytes,
+                         created_at_ms, updated_at_ms
+                     ) VALUES ('p', 'slot', 'a1', '{}', 1, NULL, 'frozen', 10, ?1, ?2, 1, 1),
+                              ('p', 'slot', 'a0', NULL, 1, NULL, 'enqueued', 10, 0, ?2, 1, 1)",
+                    rusqlite::params![
+                        i64::try_from(allowance).unwrap(),
+                        i64::try_from(receipt).unwrap()
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let facts = store.curator_status_facts().unwrap();
+        assert_eq!(facts.metadata_bytes, 2 * receipt + allowance);
+        assert_eq!(
+            facts.receipt_charge_bytes,
+            2 * receipt,
+            "both pages' receipt charges are permanent"
+        );
+        assert_eq!(
+            facts.allowance_bytes, allowance,
+            "only the frozen page still holds an allowance"
+        );
     }
 
     #[test]

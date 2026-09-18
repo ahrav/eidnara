@@ -1012,14 +1012,18 @@ fn expiry_retires_the_capture_and_its_detail_but_keeps_independent_support() {
     assert_eq!(digest, canonical.digest, "one object backs both references");
     // Nothing expires while the hold is live, even past retain_until.
     let later = fixture.now + HOUR_MS + 1;
-    assert_eq!(fixture.store.expire_local_file_captures(later).unwrap(), 0);
+    assert_eq!(
+        fixture.store.expire_local_file_captures(later).unwrap(),
+        kernel::CaptureExpiry::default()
+    );
     // Once the hold has lapsed, expiry retires the detail and then the evidence; the canonical reference and its bytes remain.
     let after_hold = fixture.now + 3 * HOUR_MS;
     assert_eq!(
         fixture
             .store
             .expire_local_file_captures(after_hold)
-            .unwrap(),
+            .unwrap()
+            .retired,
         1
     );
     assert!(fixture.capture_rows().is_empty());
@@ -1044,7 +1048,8 @@ fn expiry_retires_the_capture_and_its_detail_but_keeps_independent_support() {
         fixture
             .store
             .expire_local_file_captures(after_hold + 1)
-            .unwrap(),
+            .unwrap()
+            .retired,
         0
     );
     // A capture some other live observation cites keeps its evidence: only the capture's own detail is retired, and the foreign row is untouched.
@@ -1067,7 +1072,11 @@ fn expiry_retires_the_capture_and_its_detail_but_keeps_independent_support() {
             .store
             .expire_local_file_captures(after_hold + 2)
             .unwrap(),
-        0
+        kernel::CaptureExpiry {
+            retired: 0,
+            retained: 1
+        },
+        "the cited capture is retained, and the sweep reports that work"
     );
     assert_eq!(
         fixture.capture_rows().len(),
@@ -1084,7 +1093,8 @@ fn expiry_retires_the_capture_and_its_detail_but_keeps_independent_support() {
         fixture
             .store
             .expire_local_file_captures(after_hold + 3)
-            .unwrap(),
+            .unwrap()
+            .retired,
         0
     );
     assert_eq!(
@@ -1103,7 +1113,8 @@ fn expiry_retires_the_capture_and_its_detail_but_keeps_independent_support() {
         fixture
             .store
             .expire_local_file_captures(after_hold + 4)
-            .unwrap(),
+            .unwrap()
+            .retired,
         1,
         "the evidence is retired once nothing else cites it"
     );
@@ -1174,11 +1185,13 @@ fn retained_captures_do_not_starve_newer_expired_captures() {
     let first = fixture
         .store
         .expire_local_file_captures(after_hold)
-        .unwrap();
+        .unwrap()
+        .retired;
     let second = fixture
         .store
         .expire_local_file_captures(after_hold + 1)
-        .unwrap();
+        .unwrap()
+        .retired;
     assert_eq!(
         first + second,
         1,
@@ -1194,7 +1207,8 @@ fn retained_captures_do_not_starve_newer_expired_captures() {
         fixture
             .store
             .expire_local_file_captures(after_hold + 2)
-            .unwrap(),
+            .unwrap()
+            .retired,
         0
     );
     assert_eq!(
@@ -1245,7 +1259,8 @@ fn a_capture_the_store_refuses_to_retire_does_not_stall_the_sweep() {
         fixture
             .store
             .expire_local_file_captures(after_hold)
-            .unwrap(),
+            .unwrap()
+            .retired,
         1,
         "the capture behind the refused rows is retired in the same sweep"
     );
@@ -1706,7 +1721,8 @@ fn a_generic_writer_cannot_retire_a_capture_observation() {
         fixture
             .store
             .expire_local_file_captures(fixture.now + 3 * HOUR_MS)
-            .unwrap(),
+            .unwrap()
+            .retired,
         1
     );
 }

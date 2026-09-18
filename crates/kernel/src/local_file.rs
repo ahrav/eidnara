@@ -22,6 +22,13 @@ const OBSERVATION_ID_PREFIX: &str = "localfile:";
 const OBJECT_ID_PREFIX: &str = "localfileobj:";
 /// Expiries retired per maintenance call.
 pub const MAX_EXPIRED_CAPTURES_PER_CALL: usize = 64;
+
+/// What one expiry sweep did. `retired` captures lost their observation and evidence; `retained` captures lost only their observation because another live row still cites the evidence. A sweep with both at zero found no work in the page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureExpiry {
+    pub retired: usize,
+    pub retained: usize,
+}
 /// The reserved producer expiry receipts are written under; a caller cannot commit under it, so a receipt found under an expiry key was written by this sweep.
 const EXPIRY_PRODUCER: &str = "local-file-expiry";
 /// The reserved producer under which a run abandons a capture it could not complete.
@@ -182,19 +189,19 @@ impl Envelope<'_> {
 }
 
 impl KernelStore {
-    /// Retires the capture observation and evidence of every Curator capture whose `retain_until` has passed and that no live hold still pins, at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] per call, one commit per capture keyed by `now` and the evidence id. A capture that some other live row still cites keeps its evidence: its own observation is retired, and the capture leaves the sweep until that citation is gone, so a retained capture costs nothing on later calls and never displaces a newer expired one from the page. Ownership ends here; the artifact bytes are reclaimed later only if no other live reference names the digest. Returns how many evidence rows were retired.
+    /// Retires the capture observation and evidence of every Curator capture whose `retain_until` has passed and that no live hold still pins, at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] per call, one commit per capture keyed by `now` and the evidence id. A capture that some other live row still cites keeps its evidence: its own observation is retired, and the capture leaves the sweep until that citation is gone, so a retained capture costs nothing on later calls and never displaces a newer expired one from the page. Ownership ends here; the artifact bytes are reclaimed later only if no other live reference names the digest. Returns how many captures were retired outright and how many were retained for a citation; either is work done, and a call that did neither found nothing to do in the page.
     ///
     /// Candidates are chosen under a reader lock; each commit re-evaluates the expiry and pin predicate under the writer, so a hold acquired or extended over a candidate in between keeps it. A capture whose retirement the store refuses (`NotFound`, `Conflict`, or `InvalidInput` from its own commit) is skipped and the sweep continues, so one such row cannot hold every capture behind it in the page; a row whose registry object is not a live evidence object can never be retired and is not a candidate at all. Receipts are written under a reserved producer, so no caller can seat a receipt under an expiry key and have it replayed in place of the retirement.
     ///
     /// # Errors
     ///
     /// Returns the first storage, lock, or fence error; captures retired before it stay retired.
-    pub fn expire_local_file_captures(&self, now: i64) -> Result<usize, KernelError> {
+    pub fn expire_local_file_captures(&self, now: i64) -> Result<CaptureExpiry, KernelError> {
         let expired = {
             let reader = self.lock_reader()?;
             expired_captures(&reader, now)?
         };
-        let mut retired = 0;
+        let mut sweep = CaptureExpiry::default();
         for (evidence_id, evidence_object) in expired {
             let mut writer = self.lock_writer()?;
             let outcome = commit_with_writer(
@@ -206,16 +213,17 @@ impl KernelStore {
             );
             match outcome {
                 // A replayed receipt is another sweep's retirement at this cutoff; this call's transaction did not run.
-                Ok(receipt) => {
-                    if receipt.result == "retired" && !receipt.replayed {
-                        retired += 1;
-                    }
-                }
+                Ok(receipt) if receipt.replayed => {}
+                Ok(receipt) => match receipt.result.as_str() {
+                    "retired" => sweep.retired += 1,
+                    "retained" => sweep.retained += 1,
+                    _ => {}
+                },
                 Err(KernelError::NotFound | KernelError::Conflict | KernelError::InvalidInput) => {}
                 Err(error) => return Err(error),
             }
         }
-        Ok(retired)
+        Ok(sweep)
     }
 
     /// Retires a capture its run could not complete: the capture's own observations, then the evidence unless another live row cites it. For a run whose capture was ingested but could not be held or described, so the row does not stay live until its acquisition reference lapses. The caller proves it is that run: `hold_id` must be a live execution hold owned by `binding`, and the capture is named by the inputs [`local_file_capture_id`] derives it from, so a run can abandon only captures of its own identity. The commit runs under the reserved producer, so no caller can seat a receipt in its place. Idempotent for one capture.
@@ -484,7 +492,7 @@ mod tests {
     use sha2::Digest as _;
 
     use super::{
-        LOCAL_FILE_KIND, LocalFileCaptureRequest, MAX_EXPIRED_CAPTURES_PER_CALL,
+        CaptureExpiry, LOCAL_FILE_KIND, LocalFileCaptureRequest, MAX_EXPIRED_CAPTURES_PER_CALL,
         commit_with_writer, expired_captures_sql, expiry_intent, retire_expired_capture,
     };
     use crate::cas::CURATOR_CAPTURE_RETENTION_CLASS;
@@ -594,7 +602,7 @@ mod tests {
             Err(KernelError::InvalidInput),
             "the expiry producer is reserved to the store"
         );
-        assert_eq!(store.expire_local_file_captures(now).unwrap(), 1);
+        assert_eq!(store.expire_local_file_captures(now).unwrap().retired, 1);
         assert!(store.local_file_capture("cap").unwrap().is_none());
     }
 
@@ -616,7 +624,7 @@ mod tests {
         drop(writer);
         assert_eq!(
             store.expire_local_file_captures(now).unwrap(),
-            0,
+            CaptureExpiry::default(),
             "a replayed receipt is the other sweep's retirement, not this one's"
         );
     }
