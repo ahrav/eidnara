@@ -50,7 +50,7 @@ pub enum Handoff {
     Activate(Box<PreparedActivation>),
     /// No reservation was made; publication records this reason with its progress (Q31).
     Nonadmission(CuratorNonadmissionCode),
-    /// Identical causal inputs already have a job past reservation; nothing is reopened and nothing is recorded.
+    /// Identical causal inputs already have a job this firing cannot activate; nothing is reopened and nothing is recorded.
     Settled,
 }
 
@@ -94,12 +94,12 @@ pub fn review_policy_versions() -> BTreeMap<String, String> {
     ])
 }
 
-/// The binding a staged History Summarizer subject is read under; the coordinator reconstructs it from the reservation.
+/// The binding a staged History Summarizer subject is read under. `chunk_ordinal` is the first message of the chunk that presented the facts, the job's `producer.ordinal`, so the coordinator reconstructs the binding from the job row alone and a firing that adopts the reservation reads under the same binding.
 pub fn review_binding(
     project_digest: &str,
     domain_id: &str,
     session_id: &str,
-    firing_seq: u64,
+    chunk_ordinal: u64,
     job_id: &str,
 ) -> ReviewBinding {
     ReviewBinding {
@@ -111,7 +111,7 @@ pub fn review_binding(
         subject_source: SourceDependency {
             source_kind: SUBJECT_SOURCE_KIND.to_string(),
             source_id: session_id.to_string(),
-            source_revision: i64::try_from(firing_seq).unwrap_or(i64::MAX),
+            source_revision: i64::try_from(chunk_ordinal).unwrap_or(i64::MAX),
         },
         reference_sources: Vec::new(),
     }
@@ -195,45 +195,79 @@ fn reserved_row(
     payload_digest: &str,
     kernel_incarnation: &str,
 ) -> Result<ReservedRow, HandoffError> {
-    let firing = request.firing;
-    // A reservation this firing already recorded for these exact bytes is reused, never reserved again.
-    if let Some(held) = firing.curator_reservation.as_ref().filter(|held| {
-        held.firing_seq == firing.firing_seq
-            && held.payload_digest == payload_digest
-            && held.kernel_incarnation == kernel_incarnation
-    }) {
-        return match request
-            .store
-            .lookup_curator_job(request.project, &held.causal_identity)
-        {
-            Ok(Some(job)) => Ok(ReservedRow::Job(Box::new(job))),
-            Ok(None) => Err(CuratorJobError::Refused(CuratorJobRefusal::Missing).into()),
-            Err(error) => Err(CuratorJobError::Store(error).into()),
-        };
-    }
-    match request
-        .store
-        .reserve_curator_job(request.project, producer, inputs, request.now_ms)
-    {
-        Ok(ReserveOutcome::Reserved(job)) => Ok(ReservedRow::Job(Box::new(job))),
-        // Identical inputs already have a row: another firing's live reservation, a Ready job, or a terminal one all stand.
-        Ok(ReserveOutcome::Existing(job)) => Ok(match job.state {
-            CuratorJobState::Reserved if job.producer == *producer => {
-                ReservedRow::Job(Box::new(job))
+    // A recorded reservation names the job only when its payload digest and kernel incarnation match this firing's; `adopt` decides whether the firing can activate it.
+    let held = request
+        .firing
+        .curator_reservation
+        .as_ref()
+        .filter(|held| {
+            held.payload_digest == payload_digest && held.kernel_incarnation == kernel_incarnation
+        })
+        .map(|held| {
+            request
+                .store
+                .lookup_curator_job(request.project, &held.causal_identity)
+                .map_err(CuratorJobError::Store)
+        })
+        .transpose()?
+        .flatten();
+    let existing = match held {
+        Some(job) => job,
+        None => match request.store.reserve_curator_job(
+            request.project,
+            producer,
+            inputs,
+            request.now_ms,
+        ) {
+            Ok(ReserveOutcome::Reserved(job)) => return Ok(ReservedRow::Job(Box::new(job))),
+            Ok(ReserveOutcome::Existing(job)) => job,
+            Err(CuratorJobError::Refused(
+                CuratorJobRefusal::ProjectCapacity
+                | CuratorJobRefusal::HostCapacity
+                | CuratorJobRefusal::MetadataQuota,
+            )) => {
+                return Ok(ReservedRow::Done(Handoff::Nonadmission(
+                    CuratorNonadmissionCode::CapacityFull,
+                )));
             }
-            _ => ReservedRow::Done(Handoff::Settled),
-        }),
-        Err(CuratorJobError::Refused(
-            CuratorJobRefusal::ProjectCapacity
-            | CuratorJobRefusal::HostCapacity
-            | CuratorJobRefusal::MetadataQuota,
-        )) => Ok(ReservedRow::Done(Handoff::Nonadmission(
-            CuratorNonadmissionCode::CapacityFull,
-        ))),
-        Err(CuratorJobError::Store(_)) => Ok(ReservedRow::Done(Handoff::Nonadmission(
-            CuratorNonadmissionCode::CuratorUnavailable,
-        ))),
-        Err(error) => Err(error.into()),
+            Err(CuratorJobError::Store(_)) => {
+                return Ok(ReservedRow::Done(Handoff::Nonadmission(
+                    CuratorNonadmissionCode::CuratorUnavailable,
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        },
+    };
+    adopt(request, producer, existing)
+}
+
+fn adopt(
+    request: &HandoffRequest<'_>,
+    producer: &ProducerBinding,
+    job: CuratorJob,
+) -> Result<ReservedRow, HandoffError> {
+    match job.state {
+        CuratorJobState::Reserved if job.producer == *producer => {
+            Ok(ReservedRow::Job(Box::new(job)))
+        }
+        // Firing ids are unique per firing, so a `Reserved` row another firing of this producer left can be activated by no one until it is rebound.
+        CuratorJobState::Reserved if job.producer.producer == producer.producer => {
+            match request.store.rebind_reserved_curator_job(
+                request.project,
+                &job.causal_identity,
+                producer,
+                request.now_ms,
+            ) {
+                Ok(job) => Ok(ReservedRow::Job(Box::new(job))),
+                Err(CuratorJobError::Refused(
+                    CuratorJobRefusal::Expired
+                    | CuratorJobRefusal::NotReserved
+                    | CuratorJobRefusal::Terminal,
+                )) => Ok(ReservedRow::Done(Handoff::Settled)),
+                Err(error) => Err(error.into()),
+            }
+        }
+        _ => Ok(ReservedRow::Done(Handoff::Settled)),
     }
 }
 
@@ -259,17 +293,18 @@ pub fn reserve_and_stage(
             CuratorNonadmissionCode::SubjectRefused,
         ));
     };
-    // The candidate is named by the subject bytes, so identical facts from two firings name one target and deduplicate on the causal identity; the run is the firing's, so a retry of one firing restages under its own run.
+    // The candidate and its run are named by the subject bytes, not the firing, so a later firing that adopts the reservation restages the same row under the same identity.
     let candidate_id = format!("hs-{session_id}-{}", &payload_digest[..32]);
-    let extraction_run_id = format!("hs-run-{session_id}-{}", firing.firing_seq);
+    let extraction_run_id = format!("hs-run-{session_id}-{}", &payload_digest[..32]);
+    let chunk_ordinal = firing
+        .chunk_range
+        .as_ref()
+        .ok_or(HandoffError::NoChunkRange)?
+        .from_ordinal;
     let producer = ProducerBinding {
         producer: PRODUCER.to_string(),
         firing_id: format!("{session_id}#{}", firing.firing_seq),
-        ordinal: firing
-            .chunk_range
-            .as_ref()
-            .ok_or(HandoffError::NoChunkRange)?
-            .from_ordinal,
+        ordinal: chunk_ordinal,
     };
     let inputs = CausalInputs {
         target: ReviewTarget::StagedSubject {
@@ -306,7 +341,7 @@ pub fn reserve_and_stage(
         &target.project_digest,
         &target.domain_id,
         session_id,
-        firing.firing_seq,
+        chunk_ordinal,
         &job.causal_identity,
     );
     let reference = ReviewStagedReference {

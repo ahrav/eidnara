@@ -214,7 +214,7 @@ impl Rig {
                 PROJECT_DIGEST,
                 DOMAIN,
                 SESSION,
-                reservation.firing_seq,
+                self.job(&reservation.causal_identity).producer.ordinal,
                 &reservation.causal_identity,
             ),
             now_ms,
@@ -329,6 +329,113 @@ fn activation(handoff: Handoff) -> PreparedActivation {
     }
 }
 
+/// Drives the next firing over `from_ordinal..=to_ordinal` to Publishing through the production transitions, which carry the prior firing's reservation forward.
+fn next_publishing_firing(
+    rig: &Rig,
+    from_ordinal: u64,
+    to_ordinal: u64,
+) -> HistorySummarizerDurableState {
+    let idle = rig.state();
+    assert_eq!(idle.state, HistorySummarizerPhase::Idle);
+    let FireOutcome::Fired(firing) = fire(
+        &idle,
+        from_ordinal,
+        to_ordinal,
+        "fp".to_string(),
+        selected_range_identities(),
+        0,
+        HistorySegmentSetGeneration::default(),
+        t0(),
+    )
+    .unwrap() else {
+        panic!("the idle state fires");
+    };
+    let awaiting = producer_started(
+        &firing,
+        "producer".to_string(),
+        format!("run-{}", firing.firing_seq),
+        "pi".to_string(),
+    )
+    .unwrap();
+    let validating = output_received(&awaiting, "").unwrap();
+    validation_ok(&validating).unwrap()
+}
+
+#[test]
+fn a_reservation_left_by_an_abandoned_firing_does_not_block_the_next_firing() {
+    let rig = Rig::open();
+    let orphaned = activation(rig.handoff(t0()).unwrap());
+    let stale = rig.reservation();
+    // Firing 3 fails after the reservation exists and recovery abandons it with the reservation retained.
+    let abandoned = abandon_with_detail(&rig.state(), t0() + 1, Some("crash".to_string()));
+    assert_eq!(abandoned.curator_reservation, Some(stale.clone()));
+    rig.persist(abandoned);
+    // Firing 4 summarizes the next chunk and extracts nothing to hand off; the stale reservation rides along in its durable state.
+    let next = next_publishing_firing(&rig, 5, 6);
+    assert_eq!(next.firing_seq, 4);
+    assert_eq!(next.curator_reservation, Some(stale.clone()));
+    rig.persist(next);
+    let result = rig.publish_range(None, None, t0() + 10, 5, 6).unwrap();
+    assert_eq!(result.curator_activation, None);
+    assert_eq!(result.curator_nonadmission_count, 0);
+    let after = rig.store.load(SESSION).unwrap();
+    assert_eq!(after.meta.publication_floor_ordinal, Some(7));
+    assert_eq!(
+        after.meta.history_summarizer.state,
+        HistorySummarizerPhase::Idle
+    );
+    assert_eq!(
+        after.meta.history_summarizer.curator_reservation, None,
+        "the publication drops a reservation that binds no firing"
+    );
+    // The orphaned job is untouched; the expiry sweep closes it.
+    assert_eq!(
+        rig.job(&orphaned.causal_identity).state,
+        CuratorJobState::Reserved
+    );
+}
+
+#[test]
+fn identical_facts_from_the_next_firing_adopt_the_orphaned_reservation() {
+    let rig = Rig::open();
+    let first = activation(rig.handoff(t0()).unwrap());
+    let orphaned = rig.reservation();
+    rig.persist(abandon_with_detail(
+        &rig.state(),
+        t0() + 1,
+        Some("crash".to_string()),
+    ));
+    // Firing 4 re-summarizes the same chunk and extracts the same facts.
+    rig.persist(next_publishing_firing(&rig, 2, 4));
+    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
+    let adopted = activation(rig.handoff(t0() + 10).unwrap());
+    assert_eq!(adopted.causal_identity, first.causal_identity);
+    assert_eq!(adopted.producer.firing_id, format!("{SESSION}#4"));
+    assert_eq!(
+        rig.store.curator_headroom(PROJECT).unwrap(),
+        headroom_before,
+        "adoption reserves nothing new"
+    );
+    // The durable reservation now names this firing; the job's deadline and identity never moved.
+    let reservation = rig.reservation();
+    assert_eq!(reservation.firing_seq, 4);
+    assert_eq!(reservation.causal_identity, orphaned.causal_identity);
+    assert_eq!(reservation.candidate_id, orphaned.candidate_id);
+    assert_eq!(reservation.queue_deadline_ms, orphaned.queue_deadline_ms);
+    let job = rig.job(&first.causal_identity);
+    assert_eq!(job.state, CuratorJobState::Reserved);
+    assert_eq!(job.producer, adopted.producer);
+    assert_eq!(job.queue_deadline_ms, orphaned.queue_deadline_ms);
+    // The fenced publication activates the adopted job with this firing's history.
+    let result = rig.publish(Some(&adopted), None, t0() + 11).unwrap();
+    assert_eq!(
+        result.curator_activation,
+        Some(CuratorActivationOutcome::Activated)
+    );
+    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(rig.state().curator_reservation, None);
+}
+
 #[test]
 fn the_subject_reports_one_origin_per_cited_part_with_exact_ranges() {
     let subject = review_subject(&facts(), &aliases()).unwrap();
@@ -412,11 +519,11 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
             payload_digest: reservation.payload_digest.clone(),
         }
     );
-    // The subject is sealed and reads back under the binding the coordinator reconstructs; the binding cites the session's chunk at this firing.
+    // The binding cites the session's chunk by its first message, not the firing.
     let row = rig.read_subject(&reservation, t0() + 1).unwrap();
     assert_eq!(row.binding.subject_source.source_kind, SUBJECT_SOURCE_KIND);
     assert_eq!(row.binding.subject_source.source_id, SESSION);
-    assert_eq!(row.binding.subject_source.source_revision, 3);
+    assert_eq!(row.binding.subject_source.source_revision, 2);
     assert_eq!(
         row.lifecycle.queue_deadline_at,
         reservation.queue_deadline_ms
@@ -666,7 +773,7 @@ fn capacity_refusal_before_the_reservation_is_the_recorded_nonadmission() {
     // No subject was staged for it.
     let missing = rig.kernel.read_review_input(
         &rig.staged_reference(),
-        &review_binding(PROJECT_DIGEST, DOMAIN, SESSION, 3, "job"),
+        &review_binding(PROJECT_DIGEST, DOMAIN, SESSION, 2, "job"),
         t0() + 1,
     );
     assert!(
@@ -809,7 +916,13 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
                 candidate_id: candidate_id.clone(),
                 payload_digest: payload_digest.clone(),
             },
-            &review_binding(PROJECT_DIGEST, DOMAIN, SESSION, 3, &job.causal_identity),
+            &review_binding(
+                PROJECT_DIGEST,
+                DOMAIN,
+                SESSION,
+                job.producer.ordinal,
+                &job.causal_identity,
+            ),
             t0() + 1,
         )
         .unwrap();

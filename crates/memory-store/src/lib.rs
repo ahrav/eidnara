@@ -11347,7 +11347,7 @@ impl MemoryStore {
                     .unwrap_or(1)
                     .max(request.publication_floor_ordinal.max(1)),
             );
-            // KTD3: the durable reservation and the request's activation must name the same job, or neither is touched; the activation itself runs after every other bail-out below so it commits only with the history.
+            // An activation must name the job this firing reserved; a reservation another firing left behind is accepted only without an activation. Either mismatch refuses before anything is written.
             match (
                 meta.history_summarizer.curator_reservation.as_ref(),
                 request.curator_activation.as_ref(),
@@ -11355,6 +11355,8 @@ impl MemoryStore {
                 (None, None) => {}
                 (Some(reservation), Some(activation))
                     if reservation.causal_identity == activation.causal_identity => {}
+                (Some(reservation), None)
+                    if reservation.firing_seq != meta.history_summarizer.firing_seq => {}
                 _ => {
                     return Err(curator_jobs::refuse(
                         curator_jobs::CuratorJobRefusal::InvalidRequest,
