@@ -1678,7 +1678,6 @@ describe("rust-mode guidance fetch", () => {
                     config: {
                         protected_tags: 3,
                         cache_ttl: "5m",
-                        transform_mode: "rust",
                         prompt_surface: {
                             default: "light",
                             tool_descriptions: { eidnara_search: "x" },
