@@ -63,7 +63,7 @@ A user instruction like "always commit + build after every fix" describes how th
   - `A:` means assistant (you, in your primary-agent role).
   - `TC:` is a compact summary of a tool call ("TC: read(foo.ts)"). Use them to understand what was done; do not copy them verbatim. If a chunk is dominated by `TC:` runs, derive the narrative from what those tools were doing collectively.
   - `commits: ...` lists commit hashes mentioned in a work unit; keep relevant ones in narrative.
-  - `⟦sN⟧` marks the start of one presented message part and names it `sN`. The text after the marker, up to the next `⟦` marker or the end of the line, is that part's exact presented content; a part may itself contain ` / ` where several blocks of one message were joined. Every fact must cite at least one part.
+  - `«sN»` marks the start of one presented message part and names it `sN`. The text after the marker, up to the end of the line or up to but not including the ` / ` that precedes the next `«` marker, is that part's exact presented content. Parts on one line are joined with ` / `; that separator belongs to no part, but a part may itself contain ` / ` where several blocks of one message were joined, so count only the ` / ` immediately before a `«` as a separator. A part cut by `[… tokens truncated …]` cannot be cited. Every fact must cite at least one part.
 
 ---
 
