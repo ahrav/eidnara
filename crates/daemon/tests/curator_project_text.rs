@@ -115,6 +115,48 @@ impl Fixture {
         }
     }
 
+    /// A broker and inspection binding for the same job identity under another MemoryStore incarnation, as after a MemoryStore recreation the Kernel store survived.
+    fn run_of_another_memstore(&self) -> (EvidenceBroker, InspectionBinding) {
+        let mut hold = self.hold_binding();
+        hold.memstore_incarnation = "n".repeat(32);
+        let anchor = self
+            .store
+            .ingest_artifact(ArtifactIngestRequest {
+                intent: intent("anchor-other-memstore"),
+                payload: b"anchor other memstore".to_vec(),
+                evidence_id: "evidence-anchor-other-memstore".to_string(),
+                object_id: "evidence-object-anchor-other-memstore".to_string(),
+                object_kind: "evidence".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "conversation".to_string(),
+                source_id: "src/anchor".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: "canonical".to_string(),
+                retain_until: None,
+                asserted_sensitivity: Sensitivity::Normal,
+                provider_egress: ProviderEgress::RemoteAllowed,
+                provenance: None,
+            })
+            .unwrap();
+        let acquired = self
+            .store
+            .acquire_execution_hold(&hold, &[anchor.evidence_id], self.now + 2 * HOUR_MS)
+            .unwrap();
+        let broker = EvidenceBroker::new(
+            RunBinding {
+                hold: hold.clone(),
+                hold_id: acquired.hold_id,
+                destination: ArtifactDestination::Local,
+            },
+            QuestionTemplate::ExtractedFacts,
+        )
+        .unwrap();
+        let mut binding = self.binding();
+        binding.hold = hold;
+        (broker, binding)
+    }
+
     /// A broker with an execution hold over `anchor` for this project, disclosing to `destination`.
     fn broker(&self, destination: ArtifactDestination) -> EvidenceBroker {
         self.broker_for(PROJECT, destination)
@@ -1351,7 +1393,7 @@ fn the_capture_writer_refuses_a_detail_that_does_not_describe_a_confined_capture
                 object_kind: "evidence".to_string(),
                 domain_id: DOMAIN.to_string(),
                 source_kind: "local_file".to_string(),
-                source_id: "any.txt".to_string(),
+                source_id: "src/main.rs".to_string(),
                 source_revision: 1,
                 media_type: "text/plain".to_string(),
                 retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
@@ -1536,8 +1578,9 @@ fn a_seated_observation_receipt_cannot_stand_in_for_the_capture_detail() {
     let digest = format!("{:x}", Sha256::digest(body));
     let hold = fixture.hold_binding();
     let evidence_id = format!(
-        "curcap:{}:{}:{}:{digest}:{:x}",
+        "curcap:{}:{}:{}:{}:{digest}:{:x}",
         hold.project_digest,
+        hold.memstore_incarnation,
         hold.subject,
         hold.generation,
         Sha256::digest(b"a.txt")
@@ -1699,4 +1742,156 @@ fn a_broker_of_another_run_of_the_same_project_is_refused() {
         RefusalCode::Scope
     );
     assert_eq!(fixture.store.tip().unwrap(), tip, "nothing was captured");
+}
+
+#[test]
+fn the_same_job_under_another_memstore_incarnation_is_another_capture() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"bytes captured across a memstore recreation");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+        .unwrap();
+    let (mut other_broker, other_binding) = fixture.run_of_another_memstore();
+    let mut other_text =
+        ProjectText::open(fixture.project.path(), &protected, other_binding).unwrap();
+    other_text
+        .read(
+            &fixture.store,
+            &mut other_broker,
+            "a.txt",
+            None,
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.capture_rows().len(),
+        2,
+        "a recreated MemoryStore's job does not replay the old incarnation's capture"
+    );
+}
+
+#[test]
+fn the_capture_writer_binds_the_detail_to_the_evidence_registry_row() {
+    let fixture = Fixture::open();
+    let body = b"bytes under a registry row that is not a local-file evidence object";
+    let digest = format!("{:x}", Sha256::digest(body));
+    let byte_length = u64::try_from(body.len()).unwrap();
+    let ingest = |evidence_id: &str, object_kind: &str, source_kind: &str, source_id: &str| {
+        fixture
+            .store
+            .ingest_exact_artifact(ArtifactIngestRequest {
+                intent: intent(&format!("ingest-{evidence_id}")),
+                payload: body.to_vec(),
+                evidence_id: evidence_id.to_string(),
+                object_id: format!("{evidence_id}-object"),
+                object_kind: object_kind.to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: source_kind.to_string(),
+                source_id: source_id.to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+                retain_until: Some(fixture.now + HOUR_MS),
+                asserted_sensitivity: Sensitivity::Sensitive,
+                provider_egress: ProviderEgress::LocalOnly,
+                provenance: None,
+            })
+            .unwrap();
+    };
+    ingest(
+        "artifact-kind",
+        "artifact",
+        kernel::LOCAL_FILE_SOURCE_KIND,
+        "src/main.rs",
+    );
+    ingest("other-source", "evidence", "conversation", "src/main.rs");
+    ingest(
+        "other-path",
+        "evidence",
+        kernel::LOCAL_FILE_SOURCE_KIND,
+        "src/other.rs",
+    );
+    ingest(
+        "well-formed",
+        "evidence",
+        kernel::LOCAL_FILE_SOURCE_KIND,
+        "src/main.rs",
+    );
+    let record = |key: &str, evidence_id: &str| {
+        fixture.store.commit(intent(key), |envelope| {
+            envelope.record_local_file_capture(&kernel::LocalFileCaptureRequest {
+                project_digest: PROJECT,
+                relative_path: "src/main.rs",
+                captured_at: fixture.now,
+                domain_id: DOMAIN,
+                scope_id: None,
+                evidence_id,
+                artifact_digest: &digest,
+                byte_length,
+            })?;
+            Ok(String::new())
+        })
+    };
+    for evidence_id in ["artifact-kind", "other-source", "other-path"] {
+        assert_eq!(
+            record(&format!("record-{evidence_id}"), evidence_id),
+            Err(kernel::KernelError::NotFound),
+            "{evidence_id}"
+        );
+    }
+    record("record-well-formed", "well-formed").unwrap();
+}
+
+#[test]
+fn a_capture_refused_by_the_hold_leaves_no_rows_behind() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"bytes the hold has no room for");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker_with_references(
+        PROJECT,
+        ArtifactDestination::Local,
+        kernel::MAX_CURATOR_HOLD_REFERENCES,
+    );
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::HoldLimit
+    );
+    assert!(
+        fixture.capture_rows().is_empty(),
+        "a capture the hold cannot carry is not left live until expiry"
+    );
+    assert!(broker.aliases.is_empty());
+}
+
+#[test]
+fn refused_reads_of_a_cached_capture_issue_no_aliases() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"read once, then refused");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture
+        .broker(ArtifactDestination::Local)
+        .with_inspection_limit(1);
+    text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+        .unwrap();
+    let issued = broker.aliases.len();
+    for _ in 0..3 {
+        broker.accounting.end_batch();
+        assert_eq!(
+            text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+                .unwrap_err()
+                .code,
+            RefusalCode::InspectionLimit
+        );
+    }
+    assert_eq!(
+        broker.aliases.len(),
+        issued,
+        "a read the inspection ceiling refuses issues no alias"
+    );
 }

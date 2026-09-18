@@ -41,7 +41,7 @@ const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_XDEV);
-const SOURCE_KIND: &str = "local_file";
+const SOURCE_KIND: &str = kernel::LOCAL_FILE_SOURCE_KIND;
 const MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 
 /// The host's own store locations, by device and inode and by canonical path.
@@ -381,12 +381,13 @@ impl ProjectText {
         }
         let mut bytes = Vec::new();
         // The size is checked again on the bytes read: the file can grow between the stat and the read.
-        File::from(handle)
+        // A read that fails part-way leaves what it read in `bytes`; those bytes are charged before the failure is reported.
+        let outcome = File::from(handle)
             .take(limit.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|_| refusal(RefusalCode::Unavailable))?;
+            .read_to_end(&mut bytes);
         let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         *scanned = scanned.saturating_add(read.saturating_sub(probed.len()));
+        outcome.map_err(|_| refusal(RefusalCode::Unavailable))?;
         if read > limit {
             return Err(refusal(RefusalCode::TooLarge));
         }
@@ -426,17 +427,20 @@ impl ProjectText {
         file: &ReadFile,
         now_ms: i64,
     ) -> Result<Alias, Refusal> {
+        // A disclosure the run's ceilings would refuse is refused here, before anything is stored or an alias is issued: every alias must be one the broker could admit.
+        broker.accounting.admit_check(None)?;
         let digest = format!("{:x}", Sha256::digest(&file.bytes));
         let byte_length = u64::try_from(file.bytes.len()).unwrap_or(u64::MAX);
         let key = (file.relative.clone(), digest.clone());
         let captured = match self.captured.get(&key) {
             Some(captured) => captured.clone(),
             None => {
-                // The capture's identity is the run's (job identities are project-scoped, so the project is part of it), the bytes, and the path: two projects, two runs, or two paths with identical bytes are distinct captures, each with its own detail and acquisition reference over one stored object. The path is hashed so the id stays within the store's field bound.
+                // The capture's identity is the run's, the bytes, and the path: two projects, two MemoryStore incarnations, two runs, or two paths with identical bytes are distinct captures, each with its own detail and acquisition reference over one stored object. The Kernel incarnation is not part of it because the hold binding already refuses another Kernel store. The path is hashed so the id stays within the store's field bound.
                 let hold = &self.binding.hold;
                 let evidence_id = format!(
-                    "curcap:{}:{}:{}:{digest}:{:x}",
+                    "curcap:{}:{}:{}:{}:{digest}:{:x}",
                     hold.project_digest,
+                    hold.memstore_incarnation,
                     hold.subject,
                     hold.generation,
                     Sha256::digest(file.relative.as_bytes())
@@ -469,11 +473,29 @@ impl ProjectText {
                 if handle.digest != digest {
                     return Err(refusal(RefusalCode::Store));
                 }
-                // The typed detail is what makes the evidence a project capture. An earlier run of this job already recorded it when a live detail exists; otherwise this commit must be the one that records it. A receipt that replays without a live detail was seated by someone else under this intent and proves nothing, so the capture is refused rather than disclosed without provenance.
                 let recorded = store
                     .local_file_capture(&evidence_id)
                     .map_err(|_| refusal(RefusalCode::Store))?
                     .is_some();
+                // Ownership is charged to the run's reservation at first capture, not deferred to the first disclosure, and before the detail is written: a capture the hold cannot carry must not stay live until expiry, so a fresh evidence row (no earlier run's detail cites it) is retired again in that case. The held facts, not the request, define the alias: a replayed ingest keeps the row's original `retain_until`.
+                let held = match broker.hold_evidence(store, None, &evidence_id, &digest, now_ms) {
+                    Ok(held) => held,
+                    Err(refused) => {
+                        if !recorded {
+                            // Best effort: the row is unreferenced and expires on its own if this fails.
+                            let _ = store.commit(
+                                intent(&format!("{evidence_id}:unheld"), &digest),
+                                |envelope| {
+                                    envelope
+                                        .retire_evidence(&format!("curcapobj:{evidence_id}"))?;
+                                    Ok(String::new())
+                                },
+                            );
+                        }
+                        return Err(refused);
+                    }
+                };
+                // The typed detail is what makes the evidence a project capture. An earlier run of this job already recorded it when a live detail exists; otherwise this commit must be the one that records it. A receipt that replays without a live detail was seated by someone else under this intent and proves nothing, so the capture is refused rather than disclosed without provenance.
                 if !recorded {
                     let receipt = store
                         .commit(
@@ -502,8 +524,6 @@ impl ProjectText {
                         return Err(refusal(RefusalCode::Store));
                     }
                 }
-                // Ownership is charged to the run's reservation at first capture, not deferred to the first disclosure. The held facts, not the request, define the alias: a replayed ingest keeps the row's original `retain_until`.
-                let held = broker.hold_evidence(store, None, &evidence_id, &digest, now_ms)?;
                 let captured = Captured {
                     evidence_id,
                     byte_length: held.byte_length,

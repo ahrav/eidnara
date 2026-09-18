@@ -14,6 +14,8 @@ use super::slice::{EVIDENCE_CITED_SQL, ObservationPayload, ObservationSpec};
 use super::{CachedSql, CommitIntent, Envelope, KernelError, KernelStore, Sensitivity, map_sqlite};
 
 pub const LOCAL_FILE_KIND: &str = "local_file_capture";
+/// `source_kind` of the evidence row a capture ingests; the capture writer accepts a detail only for evidence registered under it.
+pub const LOCAL_FILE_SOURCE_KIND: &str = "local_file";
 pub const LOCAL_FILE_DETAIL_VERSION: u32 = 1;
 const OBSERVATION_ID_PREFIX: &str = "localfile:";
 const OBJECT_ID_PREFIX: &str = "localfileobj:";
@@ -63,11 +65,11 @@ pub(crate) fn uses_local_file_namespace(spec: &ObservationSpec) -> bool {
 }
 
 impl Envelope<'_> {
-    /// Records the typed observation for one capture. The cited evidence must be a live, local-only Curator capture whose digest, length, and finite `retain_until` agree with the request; the observation's sensitivity is the evidence row's, never weaker. The observation cites the evidence, so `retire_evidence` conflicts until the observation is retired first. The detail claims project-confined provenance, so its shape is checked here rather than trusted from the caller: the project digest is a lowercase hex digest and the relative path is ordinary components only. A relative path the redaction scanner would rewrite is refused, because a stored path must equal the path the run named.
+    /// Records the typed observation for one capture. The cited evidence must be a live, local-only Curator capture whose digest, length, and finite `retain_until` agree with the request, registered as an evidence object of the request's domain under [`LOCAL_FILE_SOURCE_KIND`] with the relative path as its source id; the observation's sensitivity is the evidence row's, never weaker. The observation cites the evidence, so `retire_evidence` conflicts until the observation is retired first. The detail claims project-confined provenance, so its shape is checked here rather than trusted from the caller: the project digest is a lowercase hex digest and the relative path is ordinary components only. A relative path the redaction scanner would rewrite is refused, because a stored path must equal the path the run named.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::InvalidInput`] for an empty evidence id, a malformed project digest or relative path, a detail the scanner rewrites, or a serialization failure; [`KernelError::NotFound`] when no live, local-only Curator-capture row matches the request; and the observation writer's errors otherwise.
+    /// Returns [`KernelError::InvalidInput`] for an empty evidence id, a malformed project digest or relative path, a detail the scanner rewrites, or a serialization failure; [`KernelError::NotFound`] when no live, local-only Curator-capture row registered that way matches the request; and the observation writer's errors otherwise.
     pub fn record_local_file_capture(
         &mut self,
         request: &LocalFileCaptureRequest<'_>,
@@ -78,19 +80,26 @@ impl Envelope<'_> {
         {
             return Err(KernelError::InvalidInput);
         }
+        // The detail describes one registry row: a live evidence object of this domain, registered as a local-file source under the same relative path.
         let sensitivity: String = self
             .tx
             .query_row_cached(
-                "SELECT sensitivity_class FROM evidence_meta
-                 WHERE evidence_id=?1 AND artifact_digest=?2 AND byte_length=?3
-                   AND retention_class=?4 AND provider_egress_class=?5
-                   AND retain_until IS NOT NULL AND invalidated_commit_seq IS NULL",
+                "SELECT e.sensitivity_class FROM evidence_meta e
+                 JOIN object_registry g ON g.object_id=e.object_id
+                 WHERE e.evidence_id=?1 AND e.artifact_digest=?2 AND e.byte_length=?3
+                   AND e.retention_class=?4 AND e.provider_egress_class=?5
+                   AND e.retain_until IS NOT NULL AND e.invalidated_commit_seq IS NULL
+                   AND g.object_kind='evidence' AND g.invalidated_commit_seq IS NULL
+                   AND g.domain_id=?6 AND g.source_kind=?7 AND g.source_id=?8",
                 params![
                     request.evidence_id,
                     request.artifact_digest,
                     i64::try_from(request.byte_length).map_err(|_| KernelError::InvalidInput)?,
                     super::cas::CURATOR_CAPTURE_RETENTION_CLASS,
                     ProviderEgress::LocalOnly.as_str(),
+                    request.domain_id,
+                    LOCAL_FILE_SOURCE_KIND,
+                    request.relative_path,
                 ],
                 |row| row.get(0),
             )

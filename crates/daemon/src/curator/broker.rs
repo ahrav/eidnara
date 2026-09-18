@@ -459,14 +459,20 @@ impl InvestigationAccounting {
 
     /// Admits one operation of the current batch; refused-after-admission operations count, decode-rejected steps do not.
     pub fn admit_operation(&mut self, alias: Option<&Alias>) -> Result<(), Refusal> {
+        self.admit_check(alias)?;
+        self.batch_operations += 1;
+        self.issued_inspections += 1;
+        Ok(())
+    }
+
+    /// The refusal [`Self::admit_operation`] would give right now, without admitting anything; a caller that must do work before its operation is admitted asks first so a refused operation costs nothing.
+    pub fn admit_check(&self, alias: Option<&Alias>) -> Result<(), Refusal> {
         if self.batch_operations >= MAX_OPERATIONS_PER_BATCH {
             return Err(refuse(alias, RefusalCode::BatchLimit));
         }
         if self.issued_inspections >= self.max_inspections {
             return Err(refuse(alias, RefusalCode::InspectionLimit));
         }
-        self.batch_operations += 1;
-        self.issued_inspections += 1;
         Ok(())
     }
 
