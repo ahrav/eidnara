@@ -72,7 +72,7 @@ pub struct Settlement<'a> {
     pub binding: &'a ReviewBinding,
     pub claim: &'a TaskClaim,
     pub now_ms: &'a (dyn Fn() -> i64 + Sync),
-    /// Runs after the Kernel envelope committed and before the Memory Store completion, so a test can interleave a takeover in the crash window between the two stores.
+    /// Runs after the Kernel work and before the Memory Store completion, so a test can interleave a takeover in the crash window between the two stores.
     #[cfg(any(test, feature = "test-support"))]
     pub before_completion_for_test: Option<&'a (dyn Fn() + Sync)>,
 }
@@ -176,10 +176,6 @@ impl Settlement<'_> {
         review_hold: &CuratorHold,
         reference: ReviewStagedReference,
     ) -> Result<Settled, SettlementError> {
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(hook) = self.before_completion_for_test {
-            hook();
-        }
         let selection = ResultSelection {
             candidate_id: reference.candidate_id.clone(),
             payload_digest: reference.payload_digest.clone(),
@@ -232,7 +228,7 @@ impl Settlement<'_> {
         recovered: Option<(&CuratorHoldBinding, &CuratorHold)>,
     ) -> Result<Settled, SettlementError> {
         let run = &broker.binding().hold;
-        let (settled, completion) = match completion {
+        let (mut settled, completion) = match completion {
             ContentFree::Unknown => (Settled::Unknown, ReceiptCompletion::Unknown),
             ContentFree::Abstained(reason) => (
                 Settled::Abstained(reason),
@@ -242,18 +238,29 @@ impl Settlement<'_> {
         let terminal = completion.terminal();
         match self.complete(run, completion)? {
             LeaseCompleteOutcome::Applied { .. } => {}
-            // The completion id is the run's, whatever it recorded; a replay must have recorded this terminal before any retention is released on its strength.
+            // The completion id is the run's, whatever it recorded; a replay must have recorded this terminal before any retention is released on its strength, and the reason it recorded is the one reported.
             LeaseCompleteOutcome::Replayed { .. } => {
-                let recorded = self
+                let receipt = self
                     .ledger
                     .lookup_curator_receipt(&run.project_digest, &run.subject)
-                    .map_err(store)?
-                    .and_then(|receipt| receipt.terminal);
-                if recorded != Some(terminal) {
+                    .map_err(store)?;
+                if receipt.as_ref().and_then(|receipt| receipt.terminal) != Some(terminal) {
                     return Err(SettlementError::ConflictingContent);
                 }
+                if let (Settled::Abstained(reason), Some(recorded)) = (
+                    &mut settled,
+                    receipt.and_then(|receipt| receipt.abstained_reason),
+                ) {
+                    *reason = recorded;
+                }
             }
-            LeaseCompleteOutcome::Conflict { .. } => return Err(SettlementError::Fenced),
+            // Another generation owns the receipt: this one can never complete, so the review hold it had moved retention to is released as the publication path does. Its execution hold ends only on a trusted terminal or at the run cutoff.
+            LeaseCompleteOutcome::Conflict { .. } => {
+                if let Some((review, hold)) = recovered {
+                    self.release_review_hold(run, review, hold);
+                }
+                return Err(SettlementError::Fenced);
+            }
         }
         match recovered {
             Some((review, hold)) => self.release_review_hold(run, review, hold),
@@ -296,6 +303,10 @@ impl Settlement<'_> {
         run: &CuratorHoldBinding,
         completion: ReceiptCompletion,
     ) -> Result<LeaseCompleteOutcome, SettlementError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hook) = self.before_completion_for_test {
+            hook();
+        }
         self.ledger
             .complete_curator_receipt(
                 &run.project_digest,

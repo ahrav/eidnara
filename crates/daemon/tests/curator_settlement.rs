@@ -1178,6 +1178,80 @@ fn recovery_adopts_captures_whose_acquisition_reference_moved_to_the_review_expi
 }
 
 #[test]
+fn a_replayed_abstention_reports_the_reason_the_receipt_recorded() {
+    // A retry after completion is fenced at the receipt copy, so a replayed completion id means two settlements of one claim passed that copy together. The one that completes second replays the first whatever reason it derived itself: here it cites evidence the run never disclosed while the other records that the model declined, and the receipt's reason is the one it reports.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    let first = || {
+        assert_eq!(
+            fixture.settle(&broker, RunResult::Declined).unwrap(),
+            Settled::Abstained(AbstainReason::ModelDeclined)
+        );
+    };
+    let binding = fixture.review_binding();
+    let now = fixture.now + 5;
+    let clock = move || now;
+    let mut settlement = fixture.settlement(&binding, &fixture.claim, &clock);
+    settlement.before_completion_for_test = Some(&first);
+    assert_eq!(
+        settlement
+            .settle(
+                &broker,
+                RunResult::Proposal(Box::new(fixture.proposal(&[&"f".repeat(64)])))
+            )
+            .unwrap(),
+        Settled::Abstained(AbstainReason::ModelDeclined)
+    );
+    assert_eq!(
+        fixture.receipt().abstained_reason,
+        Some(AbstainReason::ModelDeclined)
+    );
+}
+
+#[test]
+fn a_fenced_content_free_completion_releases_the_recovered_review_hold() {
+    // Generation 1 staged and transferred, then crashed. Its retry revalidates under the recovered review hold but ends content-free, and a successor takes over in the window before its completion: the fenced write leaves the Kernel row private and must not leave the seven-day review hold behind it.
+    let fixture = Fixture::open();
+    let evidence = fixture.evidence_id();
+    let loser = fixture.broker(1);
+    let reference = fixture.kernel_half(&loser, &fixture.bound_proposal(&[&evidence]));
+    let review = fixture.review_hold_binding(1, &reference.candidate_id);
+    let later = fixture.now + CURATOR_TASK_LEASE_MS + 1;
+    assert!(
+        fixture
+            .store
+            .lookup_review_hold(&review, later + 1)
+            .unwrap()
+            .is_some()
+    );
+    let takeover = || {
+        let claimed = fixture.claim_task("acq-2", "worker-b", later).unwrap();
+        fixture
+            .ledger
+            .take_over_curator_receipt(PROJECT, &fixture.identity, 1, &claimed.claim_id, later)
+            .unwrap();
+    };
+    let binding = fixture.review_binding();
+    let clock = move || later - CURATOR_TASK_LEASE_MS + 5;
+    let mut settlement = fixture.settlement(&binding, &fixture.claim, &clock);
+    settlement.before_completion_for_test = Some(&takeover);
+    assert_eq!(
+        settlement.settle(&loser, RunResult::Declined),
+        Err(SettlementError::Fenced)
+    );
+    assert_eq!(fixture.receipt().terminal, None);
+    assert_eq!(fixture.read(later + 1), Err(ReadRefusal::NotSelected));
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(&review, later + 1)
+            .unwrap(),
+        None,
+        "the fenced generation released the review hold it had moved retention to"
+    );
+}
+
+#[test]
 fn a_takeover_fences_the_losing_generation_and_selects_only_its_own_result() {
     let fixture = Fixture::open();
     let evidence = fixture.evidence_id();
