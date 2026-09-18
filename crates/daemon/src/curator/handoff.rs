@@ -120,7 +120,7 @@ pub fn handoff_key(
     format!("{:x}", hasher.finalize())[..32].to_string()
 }
 
-/// The binding a staged History Summarizer subject is read under. `chunk_ordinal` is the first message of the chunk that presented the facts, the job's `producer.ordinal`, so the coordinator reconstructs the binding from the job row alone and a firing that adopts the reservation reads under the same binding.
+/// The binding a staged History Summarizer subject is read under. `chunk_ordinal` is the first message of the chunk that presented the facts, the job's `producer.ordinal`, so the coordinator reconstructs the binding from the job row alone and a firing that adopts the reservation reads under the same binding: rebinding keeps the ordinal, and the adopting firing takes its producer binding from the row.
 pub fn review_binding(
     project_digest: &str,
     domain_id: &str,
@@ -348,6 +348,8 @@ pub fn reserve_and_stage(
         ReservedRow::Job(job) => *job,
         ReservedRow::Done(handoff) => return Ok(handoff),
     };
+    // The row's binding is this firing's, at the ordinal the subject was or will be staged under; an adopted row keeps the ordinal of the firing that staged it.
+    let producer = job.producer.clone();
     let row_version = persist(&CuratorReservation {
         firing_seq: firing.firing_seq,
         causal_identity: job.causal_identity.clone(),
@@ -362,7 +364,7 @@ pub fn reserve_and_stage(
         &target.project_digest,
         &target.domain_id,
         session_id,
-        chunk_ordinal,
+        producer.ordinal,
         &job.causal_identity,
     );
     let reference = ReviewStagedReference {
