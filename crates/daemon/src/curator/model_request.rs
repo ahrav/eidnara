@@ -460,10 +460,9 @@ impl InFlight {
                 .get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| {
-                    value
-                        .trim_start()
-                        .to_ascii_lowercase()
-                        .starts_with("application/json")
+                    value.split(';').next().is_some_and(|media_type| {
+                        media_type.trim().eq_ignore_ascii_case("application/json")
+                    })
                 });
             if !json {
                 return Err(SendError::ContentType);

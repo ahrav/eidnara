@@ -470,6 +470,25 @@ async fn compressed_non_json_and_error_responses_are_refused() {
         refused_with(html.into_bytes()).await,
         SendError::ContentType
     );
+    // The media type is compared whole, so a type that merely begins with `application/json` is not JSON; parameters after `;` are ignored.
+    let body = message("x");
+    let with_type = |content_type: &str| {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    };
+    for content_type in ["application/jsonp", "application/json-patch+json"] {
+        assert_eq!(
+            refused_with(with_type(content_type)).await,
+            SendError::ContentType,
+            "{content_type}"
+        );
+    }
+    let mut peer = Peer::start().await;
+    let (outcome, _) = exchange_with(&mut peer, with_type("Application/JSON; charset=utf-8")).await;
+    assert_eq!(outcome.unwrap().text, "x");
     let error_body =
         r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#;
     let mut peer = Peer::start().await;

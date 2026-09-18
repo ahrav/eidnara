@@ -75,6 +75,8 @@ enum Value {
     Object(Vec<(String, Value)>),
     Array(Vec<Value>),
     String(String),
+    Null,
+    /// A boolean or number; the value is not kept.
     Other,
 }
 
@@ -156,7 +158,7 @@ pub fn decode_message(body: &[u8]) -> Result<DecodedMessage, DecodeError> {
         return Err(DecodeError::NoText);
     }
     let stop_reason = match root.field("stop_reason") {
-        None | Some(Value::Other) => None,
+        None | Some(Value::Null) => None,
         Some(Value::String(reason)) => Some(StopReason::from_wire(reason)),
         Some(_) => return Err(DecodeError::Shape),
     };
@@ -198,7 +200,7 @@ impl Parser<'_> {
                 .map(Value::String),
             b't' => self.expect(b"true").map(|()| Value::Other),
             b'f' => self.expect(b"false").map(|()| Value::Other),
-            b'n' => self.expect(b"null").map(|()| Value::Other),
+            b'n' => self.expect(b"null").map(|()| Value::Null),
             b'-' | b'0'..=b'9' => self.number().map(|()| Value::Other),
             _ => Err(DecodeError::Syntax),
         }
@@ -601,5 +603,22 @@ mod tests {
             .stop_reason,
             Some(StopReason::Other)
         );
+        // A null stop reason is an absent one; a boolean, number, array, or object is outside the closed shape.
+        let with_stop_reason = |reason: &str| {
+            message(r#"[{"type":"text","text":"t"}]"#).replace(r#""end_turn""#, reason)
+        };
+        assert_eq!(
+            decode_message(with_stop_reason("null").as_bytes())
+                .unwrap()
+                .stop_reason,
+            None
+        );
+        for reason in ["true", "false", "123", "[]", "{}"] {
+            assert_eq!(
+                decode_message(with_stop_reason(reason).as_bytes()),
+                Err(DecodeError::Shape),
+                "{reason}"
+            );
+        }
     }
 }
