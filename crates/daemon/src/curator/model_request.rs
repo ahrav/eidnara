@@ -1,6 +1,6 @@
 //! One verified, one-use sender for Anthropic Messages requests.
 //!
-//! The sender opens a fresh TCP connection to the fixed production host, completes a rustls handshake that verifies the full chain and hostname against the webpki roots with SNI for that host and TLS 1.2 or newer, and completes an HTTP/1 handshake, all without writing a byte of any request. The caller then hands over exactly one owned request; the handoff is synchronous and moves the request into the connection's dispatch queue, and no request byte reaches the peer until the caller asks for completion. Completing polls the connection once, reads the response under the raw-byte allowance, refuses compressed or non-JSON bodies, decodes the message under the closed bounds, runs the common render check, and yields one [`AssistantText`]. There is no retry, redirect, reconnect, proxy, pool, or fallback anywhere in this module; a second request needs a second connection. The credential is written into the `x-api-key` header and nowhere else.
+//! The sender opens a fresh TCP connection to the fixed production host, completes a rustls handshake that verifies the full chain and hostname against the webpki roots with SNI for that host and TLS 1.2 or newer, and completes an HTTP/1 handshake, all without writing a byte of any request. The caller then hands over exactly one owned request; the handoff is synchronous and moves the request into the connection's dispatch queue, and no request byte reaches the peer until the caller asks for completion. Completing polls the connection once, reads the response under the raw-byte allowance, refuses compressed or non-JSON bodies, decodes the message under the closed bounds, runs the common render check, and yields one [`AssistantText`]. There is no retry, redirect, reconnect, proxy, pool, or fallback anywhere in this module; a second request needs a second connection. The TCP connect itself follows the standard resolver contract and may try each address the host resolves to until one accepts, all under the connect deadline; no request exists on the wire until after the TLS and HTTP handshakes, so a refused address is not a resend. The credential is written into the `x-api-key` header and nowhere else.
 //!
 //! Hyper and rustls connection types never leave this module; callers see [`Sender`], [`Connected`], [`InFlight`], and [`AssistantText`]. An endpoint other than the production one exists only under the `test-support` feature, for the local TLS peer the sender proof runs against.
 
@@ -36,7 +36,7 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 pub const MAX_OUTPUT_TOKENS: u32 = 8_000;
 /// Raw response body bytes one send may receive, charged before each chunk is kept; a provider error body counts the same.
 pub const MAX_RAW_RESPONSE_BYTES: usize = 1024 * 1024;
-/// Response head bytes accepted, and the headers a head may hold; the head is not part of the body allowance, so it gets its own bound, applied both to hyper's read buffer and to the parsed headers.
+/// Response head bytes accepted, and the headers a head may hold; the head is not part of the body allowance, so it gets its own bound. Hyper's read buffer is capped at it, with the slack its buffer growth allows, and the parsed head is then held to it exactly: header names and values plus any non-canonical reason phrase, the parts a peer chooses.
 pub const MAX_RESPONSE_HEAD_BYTES: usize = 64 * 1024;
 pub const MAX_RESPONSE_HEADERS: usize = 32;
 /// Body frames one response may deliver, so a peer cannot trickle the allowance one byte at a time.
@@ -253,7 +253,7 @@ pub struct AssistantText {
     pub accounting: ResponseAccounting,
 }
 
-/// Bytes a response cost, kept apart: the head, the body the transport delivered, and what the parser allocated for itself.
+/// Bytes a response cost, kept apart: the parsed head (header names and values plus any non-canonical reason phrase, not delimiters), the body the transport delivered, and what the parser allocated for itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResponseAccounting {
     pub head_bytes: usize,
@@ -418,12 +418,16 @@ impl InFlight {
                 }
             }?;
             let (head, body) = response.into_parts();
-            // Hyper refuses a head it cannot buffer; a head it could buffer is still held to the declared bound before anything else is read.
+            // Hyper refuses a head it cannot buffer; a head it could buffer is still held to the declared bound before anything else is read. The reason phrase is counted because it is the one head part outside the headers that a peer sizes freely.
             accounting.head_bytes = head
                 .headers
                 .iter()
                 .map(|(name, value)| name.as_str().len() + value.len())
-                .sum();
+                .sum::<usize>()
+                + head
+                    .extensions
+                    .get::<hyper::ext::ReasonPhrase>()
+                    .map_or(0, |reason| reason.as_bytes().len());
             if accounting.head_bytes > MAX_RESPONSE_HEAD_BYTES {
                 return Err(SendError::ResponseTooLarge);
             }

@@ -583,6 +583,17 @@ async fn response_size_bounds_hold_for_declared_chunked_trickled_and_wide_heads(
         refused_with(json_response("200 OK", &message("x"), &many)).await,
         SendError::Transport
     );
+    // A reason phrase is head bytes too: one past the bound is refused even though it is in no header.
+    let body = message("x");
+    let long_reason = format!(
+        "HTTP/1.1 200 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "R".repeat(MAX_RESPONSE_HEAD_BYTES + 1),
+        body.len()
+    );
+    assert_eq!(
+        refused_with(long_reason.into_bytes()).await,
+        SendError::ResponseTooLarge
+    );
 }
 
 #[tokio::test]
