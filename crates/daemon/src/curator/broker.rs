@@ -426,13 +426,14 @@ impl DisclosureLedger {
         self.union.insert(member);
     }
 
-    /// Whether `start..end` lies within one range rendered under `alias`.
+    /// Whether `start..end` names at least one byte and lies within one range rendered under `alias`.
     pub fn covers(&self, alias: &Alias, start: u64, end: u64) -> bool {
-        self.rendered.get(alias).is_some_and(|ranges| {
-            ranges
-                .iter()
-                .any(|range| range.start <= start && end <= range.end)
-        })
+        start < end
+            && self.rendered.get(alias).is_some_and(|ranges| {
+                ranges
+                    .iter()
+                    .any(|range| range.start <= start && end <= range.end)
+            })
     }
 
     /// The marker-derived scalar (Q20): any unknown attempt terminal makes every later conclusion unusable.

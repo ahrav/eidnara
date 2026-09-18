@@ -1345,6 +1345,26 @@ fn a_citation_span_must_lie_within_the_bytes_rendered_under_its_alias() {
         Ok(Settled::Abstained(AbstainReason::UndisclosedCitation)),
         "a span past the rendered excerpt is not a citation to disclosed bytes"
     );
+    // A span of no bytes lies within any range and cites nothing.
+    let fixture = Fixture::open();
+    let mut broker = fixture.broker(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let second = fixture.second.1.evidence_id.clone();
+    let alias = broker.aliases.issue(Fixture::expectation(&fixture.second));
+    broker
+        .read(&fixture.store, alias.as_str(), Some(0..8), fixture.now + 2)
+        .unwrap();
+    let mut empty = fixture.proposal(&[&second]);
+    empty.support[0].span = Some(SourceSpan {
+        alias: alias.as_str().to_string(),
+        start: 4,
+        end: 4,
+    });
+    assert_eq!(
+        fixture.settle(&broker, RunResult::Proposal(Box::new(empty))),
+        Ok(Settled::Abstained(AbstainReason::UndisclosedCitation)),
+        "an empty span identifies no disclosed bytes"
+    );
     let fixture = Fixture::open();
     let mut broker = fixture.broker(1);
     fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
