@@ -337,7 +337,7 @@ impl Rig {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closed_gate_runs_nothing_and_an_open_gate_runs_the_job_to_policy_blocked_abstention() {
     let rig = Rig::open().await;
     let now = now_ms();
@@ -421,7 +421,7 @@ async fn a_closed_gate_runs_nothing_and_an_open_gate_runs_the_job_to_policy_bloc
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_subject_staged_from_an_older_root_of_the_project_is_read_under_that_root() {
     // The staged row is keyed by the older root's digest. Reading it under the newest root would consume the job as a wrong-scope abstention.
     let rig = Rig::open().await;
@@ -447,7 +447,7 @@ async fn a_subject_staged_from_an_older_root_of_the_project_is_read_under_that_r
     assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ready_jobs_no_bound_root_owns_do_not_starve_the_jobs_behind_them() {
     // Unroutable jobs stay Ready for their queue deadline and sort first by deadline. A pass must still reach the routable job behind a full page of them.
     let rig = Rig::open().await;
@@ -471,7 +471,7 @@ async fn ready_jobs_no_bound_root_owns_do_not_starve_the_jobs_behind_them() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_naming_another_providers_credential_closes_the_gate() {
     // The sender speaks Anthropic's protocol and writes the named credential into `x-api-key`. A record naming the OpenAI secret, fingerprint and all, must close the gate rather than send that secret to Anthropic.
     let rig = Rig::open().await;
@@ -501,7 +501,7 @@ async fn a_record_naming_another_providers_credential_closes_the_gate() {
     assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cancelled_worker_loop_returns_before_the_stores_are_released() {
     // The daemon joins the worker under its task tracker before it releases the stores; the loop must return on cancellation from its idle wait, not after the next interval.
     let rig = Rig::open().await;
@@ -520,7 +520,7 @@ async fn a_cancelled_worker_loop_returns_before_the_stores_are_released() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_gate_stays_closed_until_the_host_has_derived_the_credential_identities() {
     // The record names the credential by the keyed identity the host derives once the incarnation key exists; before that nothing can vouch for the named credential, so a matching record must not open the gate.
     let rig = Rig::open().await;

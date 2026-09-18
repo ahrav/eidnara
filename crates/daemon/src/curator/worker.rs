@@ -134,7 +134,10 @@ impl Worker {
         );
         let kernel_incarnation = kernel.database_incarnation_id_within_budget(&budget).ok()?;
         let memstore_incarnation = self.store.curator_store_incarnation().ok()?;
-        let probe = Sender::new(self.endpoint.clone(), Credential::new("probe".into()).ok()?);
+        let probe = Sender::new(
+            self.endpoint.clone(),
+            Credential::new("probe".into(), "probe".into()).ok()?,
+        );
         Some(LiveIdentity {
             kernel_baseline_digest: kernel::kernel_baseline_digest().ok()?.to_string(),
             memstore_baseline_digest: memory_store::baseline_digest(),
@@ -196,7 +199,10 @@ impl Worker {
                 .set_activation(ActivationState::Closed("unknown_credential"));
             return 0;
         };
-        let Ok(credential) = Credential::new(secret.to_string()) else {
+        let Ok(credential) = Credential::new(
+            activation.approval.credential_id.clone(),
+            secret.to_string(),
+        ) else {
             self.status
                 .set_activation(ActivationState::Closed("unknown_credential"));
             return 0;
@@ -227,7 +233,11 @@ impl Worker {
                 let project = route.project.clone();
                 tokio::task::spawn_blocking(move || {
                     store
-                        .ready_curator_jobs(&project, MAX_PENDING_CURATOR_JOBS_PER_PROJECT)
+                        .ready_curator_jobs(
+                            &project,
+                            MAX_PENDING_CURATOR_JOBS_PER_PROJECT,
+                            crate::now_ms(),
+                        )
                         .map_err(|error| error.to_string())
                 })
                 .await
@@ -394,6 +404,17 @@ impl Worker {
                 .map_err(|error| store_error(&error))?,
             CuratorBeginOutcome::Complete(_) => return Ok(None),
         };
+        // The inspection serves the run the coordinator binds its hold to: the same Kernel digest, incarnations, job, and generation.
+        let hold = kernel::CuratorHoldBinding {
+            project_digest: binding.project_digest.clone(),
+            kernel_incarnation: receipt.kernel_incarnation_id.clone(),
+            memstore_incarnation: self
+                .store
+                .curator_store_incarnation()
+                .map_err(|error| store_error(&error))?,
+            subject: job.causal_identity.clone(),
+            generation: receipt.generation,
+        };
         let project_text =
             ProtectedLocations::new([self.home.clone()])
                 .ok()
@@ -402,6 +423,7 @@ impl Worker {
                         &root.project_root,
                         &protected,
                         InspectionBinding {
+                            hold,
                             domain_id: MEMORY_DOMAIN_ID.to_string(),
                             scope_id: Some(root.scope_id.clone()),
                             retain_until: receipt.execution_cutoff_ms,
@@ -539,6 +561,7 @@ mod tests {
                 payload_digest: "0".repeat(64),
             },
             input_fingerprint: "1".repeat(64),
+            question_template: "extracted_facts".to_string(),
             state: CuratorJobState::Reserved,
             queue_deadline_ms: 10,
             created_at_ms: 1,

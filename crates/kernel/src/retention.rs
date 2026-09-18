@@ -13,8 +13,11 @@ use crate::cas::gc::GcFaults;
 /// Retention interval after a staging run reaches a terminal state, in milliseconds.
 pub const STAGING_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 
-/// Maximum number of runs removed by one deletion transaction.
-const DELETE_BATCH_RUNS: i64 = 1_024;
+/// Maximum number of runs removed by one deletion transaction. `deleted_runs ==
+/// STAGING_DELETE_BATCH_RUNS` means eligible aged runs may remain; a smaller count means the
+/// deleter exhausted them at that clock.
+pub const STAGING_DELETE_BATCH_RUNS: usize = 1_024;
+const DELETE_BATCH_RUNS: i64 = STAGING_DELETE_BATCH_RUNS as i64;
 
 /// Owners cannot declare `abandoned`, reserving it for lease-sweep reclamation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,11 +94,11 @@ impl KernelStore {
         tx.commit().map_err(map_sqlite)
     }
 
-    /// `terminal_at` starts the run's retention clock, so it is bracketed by the run's own timestamps: at or after `max(started_at, heartbeat_at)`, and inside the lease. A value below the floor lets the next sweep delete a run that just finished, and one past the lease exempts the run from the cutoff indefinitely.
+    /// `terminal_at` starts the run's retention clock, so it is bracketed by the timestamps of every row it stamps: at or after the run's `started_at` and `heartbeat_at` and each active candidate's `heartbeat_at`, and inside the lease. A value below the floor lets the next sweep delete a run that just finished, and one past the lease exempts the run from the cutoff indefinitely.
     ///
     /// # Errors
     ///
-    /// - Returns [`KernelError::InvalidInput`] when the id is empty, `terminal_at` is negative, or `terminal_at` precedes the run's `started_at` or `heartbeat_at`.
+    /// - Returns [`KernelError::InvalidInput`] when the id is empty, `terminal_at` is negative, or `terminal_at` precedes the run's `started_at`, the run's `heartbeat_at`, or an active candidate's `heartbeat_at`.
     /// - Returns [`KernelError::NotFound`] when no run has the id.
     /// - Returns [`KernelError::Conflict`] when the run is already terminal, or its lease has expired at `terminal_at` or on the store clock. The sweep abandons by the store clock, so a producer cannot complete a run the sweep would already have reclaimed by dating the completion inside the lease.
     pub fn finish_staging_run(
@@ -114,7 +117,13 @@ impl KernelStore {
         if run.terminal_state.is_some() {
             return Err(KernelError::Conflict);
         }
-        if terminal_at < run.started_at.max(run.heartbeat_at) {
+        let candidate_heartbeat = latest_active_candidate_heartbeat(&tx, &run_id)?;
+        if terminal_at
+            < run
+                .started_at
+                .max(run.heartbeat_at)
+                .max(candidate_heartbeat)
+        {
             return Err(KernelError::InvalidInput);
         }
         // The lease also caps terminal_at from above, so a clock error cannot park a run
@@ -264,6 +273,20 @@ fn load_run_lifecycle(
         },
     )
     .optional()
+    .map_err(map_sqlite)
+}
+
+/// Zero when the run has no active candidate, so the run's own timestamps decide the floor.
+fn latest_active_candidate_heartbeat(
+    tx: &Transaction<'_>,
+    extraction_run_id: &str,
+) -> Result<i64, KernelError> {
+    tx.query_row(
+        "SELECT COALESCE(MAX(heartbeat_at),0) FROM candidates
+         WHERE extraction_run_id=?1 AND terminal_state IS NULL",
+        [extraction_run_id],
+        |row| row.get(0),
+    )
     .map_err(map_sqlite)
 }
 
