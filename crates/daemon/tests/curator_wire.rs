@@ -20,7 +20,8 @@ use memory_store::curator_jobs::{
     CausalInputs, CuratorJob, CuratorJobInput, ProducerBinding, ReserveOutcome, ReviewTarget,
 };
 use memory_store::curator_ledger::{
-    AbstainReason, CuratorBeginOutcome, CuratorReceipt, ReceiptCompletion,
+    AbstainReason, AttemptMarker, CuratorAttemptTerminal, CuratorBeginOutcome, CuratorReceipt,
+    DispatchOutcome, ReceiptCompletion,
 };
 use serde_json::{Value, json};
 use support::kernel_daemon::{KernelDaemon, SESSION};
@@ -236,6 +237,41 @@ fn publish(
         worker_instance: "worker-a".to_string(),
         slot: begun.job.producer.ordinal as i64,
     };
+    // A publication must come from an attempt this generation closed complete; the ledger has no other evidence the selection exists.
+    let outcome = store
+        .dispatch_curator_attempt(
+            PROJECT,
+            &begun.job.causal_identity,
+            begun.receipt.generation,
+            &claim.claim_id,
+            kernel_incarnation,
+            &AttemptMarker {
+                body_digest: "b".repeat(64),
+                request_bytes: 100,
+                provider: "localhost/v1/messages@2023-06-01".to_string(),
+                model: "claude-canonical-1".to_string(),
+                credential_id: "cred-1".to_string(),
+                policy_union_digest: "e".repeat(64),
+            },
+            (),
+            || now,
+            |()| (),
+        )
+        .unwrap();
+    let DispatchOutcome::Handed { attempt_index, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    store
+        .finish_curator_attempt(
+            PROJECT,
+            &begun.job.causal_identity,
+            begun.receipt.generation,
+            &claim.claim_id,
+            attempt_index,
+            CuratorAttemptTerminal::Complete,
+            now,
+        )
+        .unwrap();
     let binding = job_binding(digest, &begun.job).expect("a History Summarizer job has a binding");
     let settled = Settlement {
         store: kernel,
