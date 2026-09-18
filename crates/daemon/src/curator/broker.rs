@@ -10,9 +10,9 @@ use context_core::redaction::{contains_redaction_token, detect_windowed_durable_
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDestination, ArtifactEligibility, ArtifactErrorKind, ArtifactHandle,
-    CURATOR_CAPTURE_RETENTION_CLASS, CuratorHoldBinding, CuratorHoldError, CuratorHoldKind,
-    EligibilityCandidate, EligibilityVerdict, HeldEvidence, KernelError, KernelStore,
-    MAX_RUN_BUFFER_BYTES, OPERATOR_REDACTION_PLACEHOLDER, ProjectScope, ReviewBinding,
+    CURATOR_CAPTURE_RETENTION_CLASS, CuratorHold, CuratorHoldBinding, CuratorHoldError,
+    CuratorHoldKind, EligibilityCandidate, EligibilityVerdict, HeldEvidence, KernelError,
+    KernelStore, MAX_RUN_BUFFER_BYTES, OPERATOR_REDACTION_PLACEHOLDER, ProjectScope, ReviewBinding,
     ReviewPayload, ReviewReadError, ReviewStagedReference, RunBufferMap, RunBufferRefusal,
     SOURCE_DESCRIPTOR_KIND, Sensitivity, SourceDescriptorDetail, Surface, SurfaceVisibility,
 };
@@ -533,6 +533,47 @@ pub struct RunBinding {
     pub destination: ArtifactDestination,
 }
 
+/// Which hold a revalidation runs under: the run's execution hold, or the review hold the settlement owns.
+#[derive(Debug, Clone, Copy)]
+pub enum HeldUnder<'a> {
+    Execution(&'a RunBinding),
+    Review {
+        hold: &'a CuratorHold,
+        binding: &'a CuratorHoldBinding,
+    },
+}
+
+impl HeldUnder<'_> {
+    pub fn kind(&self) -> CuratorHoldKind {
+        match self {
+            Self::Execution(_) => CuratorHoldKind::Execution,
+            Self::Review { .. } => CuratorHoldKind::Review,
+        }
+    }
+
+    pub fn hold_id(&self) -> &str {
+        match self {
+            Self::Execution(run) => &run.hold_id,
+            Self::Review { hold, .. } => &hold.hold_id,
+        }
+    }
+
+    pub fn binding(&self) -> &CuratorHoldBinding {
+        match self {
+            Self::Execution(run) => &run.hold,
+            Self::Review { binding, .. } => binding,
+        }
+    }
+
+    /// The review hold's expiry; an execution hold has no moved reference.
+    fn moved_reference(&self) -> Option<i64> {
+        match self {
+            Self::Execution(_) => None,
+            Self::Review { hold, .. } => Some(hold.expires_at),
+        }
+    }
+}
+
 /// The broker: aliases, accounting, buffers, ledger, and the reads that tie them to Kernel expectations.
 pub struct EvidenceBroker {
     pub aliases: AliasTable,
@@ -832,16 +873,7 @@ impl EvidenceBroker {
         alias: &str,
         now_ms: i64,
     ) -> Result<Option<String>, Refusal> {
-        self.revalidate_under(
-            store,
-            alias,
-            now_ms,
-            (
-                CuratorHoldKind::Execution,
-                &self.binding.hold_id,
-                &self.binding.hold,
-            ),
-        )
+        self.revalidate_under(store, alias, now_ms, HeldUnder::Execution(&self.binding))
     }
 
     /// [`Self::revalidate`] with the hold that protects a capture named explicitly: the execution hold while the run investigates, or the review hold once settlement has moved retention there and the execution hold is released.
@@ -850,7 +882,7 @@ impl EvidenceBroker {
         store: &KernelStore,
         alias: &str,
         now_ms: i64,
-        hold: (CuratorHoldKind, &str, &CuratorHoldBinding),
+        hold: HeldUnder<'_>,
     ) -> Result<Option<String>, Refusal> {
         let (alias, expectation) = self.aliases.resolve(alias)?;
         match expectation {
@@ -873,12 +905,11 @@ impl EvidenceBroker {
                 if *retain_until <= now_ms {
                     return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
                 }
-                let (kind, hold_id, hold_binding) = hold;
                 let mut held = store
                     .validate_held_evidence(
-                        hold_id,
-                        kind,
-                        hold_binding,
+                        hold.hold_id(),
+                        hold.kind(),
+                        hold.binding(),
                         std::slice::from_ref(evidence_id),
                         now_ms,
                     )
@@ -886,10 +917,15 @@ impl EvidenceBroker {
                 let held = held
                     .pop()
                     .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
+                // The hold transfer moves a capture's acquisition reference to the review expiry; under the review hold, that is the other value the reference may legitimately hold.
+                let reference_stands = held.retain_until == Some(*retain_until)
+                    || hold
+                        .moved_reference()
+                        .is_some_and(|moved| held.retain_until == Some(moved));
                 if held.artifact_digest != *artifact_digest
                     || held.byte_length != *byte_length
                     || held.retention_class != CURATOR_CAPTURE_RETENTION_CLASS
-                    || held.retain_until != Some(*retain_until)
+                    || !reference_stands
                 {
                     return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
                 }
