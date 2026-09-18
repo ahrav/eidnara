@@ -56,6 +56,7 @@ pub struct AttemptBinding {
 /// The assembled request bytes with the provenance of every prompt byte in them and the policy union they disclose. Built once by [`prepare_body`]; nothing mutates it afterwards, so the digest, the size, and the bytes handed over agree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedBody {
+    hold_id: String,
     model: String,
     tags: Vec<ProvenanceTag>,
     body: RequestBody,
@@ -65,6 +66,10 @@ pub struct PreparedBody {
 }
 
 impl PreparedBody {
+    pub fn hold_id(&self) -> &str {
+        &self.hold_id
+    }
+
     pub fn model(&self) -> &str {
         &self.model
     }
@@ -101,6 +106,8 @@ pub enum DisclosureRefusal {
     /// The broker judged its disclosures for a local destination; they were never admitted for a remote model.
     #[error("destination_not_remote")]
     DestinationNotRemote,
+    #[error("broker_mismatch")]
+    BrokerMismatch,
     #[error("cancelled")]
     Cancelled,
     #[error("prompt_not_utf8")]
@@ -120,11 +127,12 @@ pub enum DisclosureRefusal {
     /// A store failed; the rendered failure is the store's own.
     #[error("store {0}")]
     Store(String),
-    /// The marker committed and the post-commit recheck lapsed; the attempt is charged and nothing was sent.
+    /// The attempt marker committed and the post-commit recheck lapsed; the attempt is charged and nothing was sent. `terminal_recorded` is false when the ledger also refused the `NotDispatched` terminal; the attempt then stays unterminated and counts as unknown.
     #[error("charged_not_dispatched {reason}")]
     ChargedNotDispatched {
         attempt_index: u32,
         reason: CuratorLedgerRefusal,
+        terminal_recorded: bool,
     },
     /// The sender refused before or after the handoff; when `sent` is false no request byte left the host.
     #[error("send {error}")]
@@ -166,11 +174,16 @@ pub fn prepare_body(
     system: RenderedBuffer,
     turn: Vec<RenderedBuffer>,
 ) -> Result<PreparedBody, DisclosureRefusal> {
+    let hold_id = broker.binding().hold_id.clone();
     let mut tags = Vec::with_capacity(turn.len() + 1);
     let mut prompt_end = 0usize;
     let mut system_text = Vec::new();
     let mut content = Vec::new();
     for (index, buffer) in std::iter::once(system).chain(turn).enumerate() {
+        // Aliases are broker-local, so a buffer from another hold could resolve to a different reference than the one that produced its bytes.
+        if buffer.hold_id != hold_id {
+            return Err(DisclosureRefusal::BrokerMismatch);
+        }
         let range: Range<usize> = prompt_end..prompt_end + buffer.bytes.len();
         prompt_end = range.end;
         tags.push(ProvenanceTag {
@@ -207,6 +220,7 @@ pub fn prepare_body(
         .encode()
         .map_err(|_| DisclosureRefusal::PolicyUnion)?;
     Ok(PreparedBody {
+        hold_id,
         model: request.model,
         body_digest: format!("{:x}", Sha256::digest(body.as_bytes())),
         tags,
@@ -224,6 +238,9 @@ impl Disclosure<'_> {
         cancel: &CancellationToken,
         deadline: Instant,
     ) -> Result<Disclosed, DisclosureRefusal> {
+        if prepared.hold_id != self.broker.binding().hold_id {
+            return Err(DisclosureRefusal::BrokerMismatch);
+        }
         if self.broker.binding().destination != ArtifactDestination::Remote {
             return Err(DisclosureRefusal::DestinationNotRemote);
         }
@@ -284,11 +301,18 @@ impl Disclosure<'_> {
             DispatchOutcome::ChargedNotDispatched {
                 attempt_index,
                 reason,
-                ..
+                finished,
             } => {
+                if !finished {
+                    eprintln!(
+                        "daemon: curator disclosure terminal NotDispatched not recorded for {}/{} attempt {attempt_index}: {reason}",
+                        self.binding.project, self.binding.causal_identity
+                    );
+                }
                 return Err(DisclosureRefusal::ChargedNotDispatched {
                     attempt_index,
                     reason,
+                    terminal_recorded: finished,
                 });
             }
             DispatchOutcome::Handed {

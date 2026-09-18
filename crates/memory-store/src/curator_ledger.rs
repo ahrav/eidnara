@@ -539,7 +539,7 @@ pub fn commit_curator_attempt_in_tx(
     })
 }
 
-/// Records the attempt's terminal under the claim that owns the receipt's current generation, so a predecessor cannot stamp an outcome on a successor's marker. `NotDispatched` is written only by [`MemoryStore::dispatch_curator_attempt`].
+/// Records the attempt's terminal under the claim that owns the receipt's current generation, so a predecessor cannot stamp an outcome on a successor's marker. Only the dispatch path writes `NotDispatched`: [`MemoryStore::dispatch_curator_attempt`] after its post-commit recheck withholds the handoff, or the holder of the handoff result when the connection provably took nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn finish_curator_attempt_in_tx(
     conn: &GuardedConn<'_>,

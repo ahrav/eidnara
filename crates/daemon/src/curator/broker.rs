@@ -284,11 +284,12 @@ pub struct JudgedAt {
     pub tip: i64,
 }
 
-/// Rendered bytes with their tag; the bytes are owned by the render and borrowed by the assembler.
+/// Rendered bytes, their tag, and the producing run's hold id. The bytes are owned by the render and borrowed by the assembler; the hold id lets the assembler refuse a buffer another broker admitted, since aliases are broker-local.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedBuffer {
     pub(crate) bytes: Vec<u8>,
     pub(crate) tag: ProvenanceTag,
+    pub(crate) hold_id: String,
 }
 
 impl RenderedBuffer {
@@ -298,6 +299,10 @@ impl RenderedBuffer {
 
     pub fn tag(&self) -> &ProvenanceTag {
         &self.tag
+    }
+
+    pub fn hold_id(&self) -> &str {
+        &self.hold_id
     }
 }
 
@@ -583,6 +588,7 @@ impl EvidenceBroker {
                 verdict: None,
                 charged_bytes: 0,
             },
+            hold_id: self.binding.hold_id.clone(),
         })
     }
 
@@ -735,6 +741,7 @@ impl EvidenceBroker {
                     verdict,
                     charged_bytes: charged,
                 },
+                hold_id: self.binding.hold_id.clone(),
             },
             alias,
             origin_key,

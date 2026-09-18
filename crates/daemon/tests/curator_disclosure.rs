@@ -147,7 +147,7 @@ fn publish_commit(
 /// A Kernel store holding one commit message published through the byte-verifying Git publisher (the only producer of remote-eligible evidence a Curator fixture may use), a Memory Store with a ready job under a live claim and receipt, and a remote-destination broker that has disclosed the commit.
 struct Fixture {
     kernel_dir: tempfile::TempDir,
-    _ledger_dir: tempfile::TempDir,
+    ledger_dir: tempfile::TempDir,
     _repo_dir: tempfile::TempDir,
     store: Arc<KernelStore>,
     ledger: Arc<MemoryStore>,
@@ -289,7 +289,7 @@ impl Fixture {
         };
         Self {
             kernel_dir,
-            _ledger_dir: ledger_dir,
+            ledger_dir,
             _repo_dir: repo_dir,
             store: Arc::new(store),
             ledger: Arc::new(ledger),
@@ -458,6 +458,7 @@ async fn the_captured_request_is_the_tagged_prepared_body_the_marker_binds() {
     assert_eq!(prepared.tags().len(), 2);
     assert_eq!(offset, "Extract facts.".len() + COMMIT_MESSAGE.len());
     assert!(prepared.policy_union_canonical().contains("native_source"));
+    assert_eq!(prepared.hold_id(), broker.hold_id());
 
     let mut peer = Peer::start().await;
     let server = peer.serve(no_wait(), |_| answer(MODEL));
@@ -655,6 +656,39 @@ async fn nothing_is_sent_without_approval_under_cancellation_or_when_the_marker_
 }
 
 #[tokio::test]
+async fn a_buffer_or_body_judged_under_another_broker_is_refused_before_any_connection() {
+    let fixture = Fixture::open();
+    let (remote, _) = fixture.broker();
+    let (local, local_turn) = fixture.broker_for(kernel::ArtifactDestination::Local);
+    // Both brokers issued `ref-1` for the same commit, so only the run stamp can tell whose judgement admitted the bytes.
+    let alias = local_turn[0].tag().alias.clone().unwrap();
+    assert!(remote.aliases.resolve(alias.as_str()).is_ok());
+    let system = remote.render_host_text("Extract facts.").unwrap();
+    assert_eq!(
+        prepare_body(&remote, &profile(), system, local_turn.clone()).unwrap_err(),
+        DisclosureRefusal::BrokerMismatch,
+        "a buffer judged for the local destination is not assembled under the remote broker"
+    );
+    let local_prepared = fixture.prepared(&local, local_turn);
+    assert_eq!(local_prepared.hold_id(), local.hold_id());
+    let peer = Peer::start().await;
+    let refusal = attempt(
+        &fixture,
+        &peer,
+        &remote,
+        &local_prepared,
+        Some(&fixture.approval()),
+        &move || fixture.now + 3,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refusal, DisclosureRefusal::BrokerMismatch);
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert!(fixture.attempts().is_empty());
+}
+
+#[tokio::test]
 async fn a_post_commit_lapse_stays_charged_and_sends_nothing() {
     let fixture = Fixture::open();
     let (broker, turn) = fixture.broker();
@@ -689,6 +723,7 @@ async fn a_post_commit_lapse_stays_charged_and_sends_nothing() {
             refusal,
             DisclosureRefusal::ChargedNotDispatched {
                 attempt_index: 0,
+                terminal_recorded: true,
                 ..
             }
         ),
@@ -699,6 +734,66 @@ async fn a_post_commit_lapse_stays_charged_and_sends_nothing() {
     assert_eq!(
         attempts[0].terminal.map(|(terminal, _)| terminal),
         Some(CuratorAttemptTerminal::NotDispatched)
+    );
+    let observed = server.await.unwrap();
+    assert!(observed.head.is_empty(), "nothing was sent");
+}
+
+#[tokio::test]
+async fn a_lapsed_attempt_whose_terminal_cannot_be_recorded_reports_it() {
+    let fixture = Fixture::open();
+    let (broker, turn) = fixture.broker();
+    let prepared = fixture.prepared(&broker, turn);
+    // The clock lapses past the claim and a successor takes the receipt after the commit: the recheck withholds the handoff, and the ledger then refuses the predecessor's `NotDispatched` terminal.
+    let lapsed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flip = Arc::clone(&lapsed);
+    let ledger_path = fixture.ledger_dir.path().join("memory.sqlite");
+    let identity = fixture.identity.clone();
+    storage::after_commit_for_test(move || {
+        flip.store(true, Ordering::SeqCst);
+        rusqlite::Connection::open(ledger_path)
+            .unwrap()
+            .execute(
+                "UPDATE curator_receipts SET claim_id = 'claim-successor'
+                  WHERE project = ?1 AND causal_identity = ?2",
+                rusqlite::params![PROJECT, identity],
+            )
+            .unwrap();
+    });
+    let base = fixture.now + 3;
+    let clock = move || {
+        if lapsed.load(Ordering::SeqCst) {
+            base + 2 * HOUR_MS
+        } else {
+            base
+        }
+    };
+    let mut peer = Peer::start().await;
+    let server = peer.serve(no_wait(), |_| answer(MODEL));
+    let refusal = attempt(
+        &fixture,
+        &peer,
+        &broker,
+        &prepared,
+        Some(&fixture.approval()),
+        &clock,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        refusal,
+        DisclosureRefusal::ChargedNotDispatched {
+            attempt_index: 0,
+            reason: CuratorLedgerRefusal::ClaimInvalid,
+            terminal_recorded: false,
+        }
+    );
+    let attempts = fixture.attempts();
+    assert_eq!(attempts.len(), 1, "the marker stays charged");
+    assert_eq!(
+        attempts[0].terminal, None,
+        "the attempt is left without a terminal"
     );
     let observed = server.await.unwrap();
     assert!(observed.head.is_empty(), "nothing was sent");
