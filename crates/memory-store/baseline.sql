@@ -485,6 +485,18 @@ CREATE TABLE curator_frozen_selections (
 CREATE INDEX idx_curator_frozen_selections_state
             ON curator_frozen_selections(project, state, selection_deadline_ms);
 
+-- One keyset continuation per project and selection task: where the next
+-- selection resumes. It advances in the same transaction that enqueues a
+-- page or completes an empty slot, never on a deferred or expired page, and a
+-- NULL cursor means the last pass reached the end so the next one starts over.
+CREATE TABLE curator_selection_cursors (
+            project TEXT NOT NULL CHECK (length(project) > 0),
+            slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),
+            cursor TEXT CHECK (cursor IS NULL OR length(cursor) <= 512),
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (project, slot_id)
+        );
+
 CREATE INDEX idx_curator_frozen_selections_deadline
             ON curator_frozen_selections(state, selection_deadline_ms);
 
@@ -495,6 +507,19 @@ BEGIN
            reject_transaction_text(NEW.selection_attempt),
            reject_transaction_text(COALESCE(NEW.page_json, ''));
 END;
+
+-- The slot id and cursor are caller text bound into the same family: a detected secret
+-- refuses the row on insert and on the upsert that advances the cursor.
+CREATE TRIGGER curator_selection_cursors_reject_secret_insert
+BEFORE INSERT ON curator_selection_cursors
+BEGIN
+    SELECT reject_transaction_text(NEW.slot_id),
+           reject_transaction_text(COALESCE(NEW.cursor, ''));
+END;
+
+CREATE TRIGGER curator_selection_cursors_reject_secret_update
+BEFORE UPDATE OF cursor ON curator_selection_cursors
+BEGIN SELECT reject_transaction_text(COALESCE(NEW.cursor, '')); END;
 
 -- One Curator receipt per admitted job: the run deadline and execution cutoff are
 -- written at the first claim and inherited unchanged by every takeover; the

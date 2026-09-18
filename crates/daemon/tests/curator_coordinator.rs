@@ -736,7 +736,7 @@ async fn run_case(case: &Case) {
             .observation_for_object_as_of(object_id, tip_after)
             .unwrap()
             .unwrap();
-        assert_eq!(before.payload, after.payload, "{}", case.name);
+        assert_eq!(before, after, "{}", case.name);
     }
 }
 
@@ -1195,6 +1195,240 @@ async fn a_citation_outside_the_disclosed_bytes_is_refused_before_binding() {
         fixture.receipt().terminal,
         Some(CuratorReceiptTerminal::Abstained)
     );
+}
+
+/// The production positive path before any U7 work: selection over live, eligible, repository-backed descriptors freezes a page, the page is enqueued atomically with its scheduler slot, a ready job is claimed, and the coordinator publishes an inspectable proposal from it without touching canonical memory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_selected_eligible_memory_becomes_a_published_proposal_through_the_shared_path() {
+    use daemon::curator::selection::{SelectionScope, select_review_targets};
+    use memory_store::curator_jobs::{
+        CuratorJobState, EnqueueOutcome, FrozenSelectionState, ProducerBinding,
+    };
+    let fixture = Fixture::open(CASES[0].sources);
+    let tip_before = fixture.store.tip().unwrap();
+    // Selection: both published commits are live and eligible; the fixture's own job has other causal inputs, so both are selected.
+    let budget = kernel::applicability::EvalBudget::new(None, Arc::default());
+    let selection = select_review_targets(
+        &fixture.store,
+        &fixture.ledger,
+        &SelectionScope {
+            project: &kernel::ProjectScope::new(PROJECT).unwrap(),
+            project_digest: PROJECT,
+            classes: &[kernel::source_identity::OccurrenceClass::GitCommits],
+            policy_versions: &BTreeMap::new(),
+        },
+        None,
+        &budget,
+    )
+    .unwrap();
+    assert_eq!(selection.references.len(), 2);
+    assert_eq!(selection.next_cursor, None, "one pass covers the inventory");
+    assert!(
+        selection.references.iter().all(|inputs| matches!(
+            &inputs.target,
+            ReviewTarget::Memory { object_id, .. } if fixture.sources.iter().any(|(id, _)| *id == *object_id)
+        ))
+    );
+    // Freeze under a scheduler slot and enqueue atomically with the slot's completion.
+    let frozen = fixture
+        .ledger
+        .freeze_selection(
+            PROJECT,
+            "curator-review-selection",
+            "curator-review-selection@1",
+            &selection,
+            fixture.now,
+        )
+        .unwrap();
+    let registration = fixture
+        .ledger
+        .next_memory_classifier_scheduler_generation("eidnara-memory_classifier-scheduler")
+        .unwrap();
+    let memory_store::LeaseAcquireOutcome::Claim { claim, .. } = fixture
+        .ledger
+        .acquire_memory_classifier_task(
+            PROJECT,
+            "curator-review-selection@1",
+            "eidnara-memory_classifier-scheduler",
+            2,
+            registration,
+            3,
+            fixture.now,
+            fixture.now,
+        )
+        .unwrap()
+    else {
+        panic!("the selection slot is leased")
+    };
+    let producer = ProducerBinding {
+        producer: "memory-classifier-selection".to_string(),
+        firing_id: "curator-review-selection@1".to_string(),
+        ordinal: 0,
+    };
+    let enqueued = fixture
+        .ledger
+        .enqueue_frozen_selection(
+            PROJECT,
+            &claim.claim_id,
+            "curator-review-selection@1:complete",
+            "eidnara-memory_classifier-scheduler",
+            2,
+            &frozen,
+            &producer,
+            fixture.now + 1,
+        )
+        .unwrap();
+    assert_eq!(
+        enqueued,
+        EnqueueOutcome::Enqueued {
+            jobs: 2,
+            replayed: 0,
+            next_cursor: None
+        }
+    );
+    assert_eq!(
+        fixture
+            .ledger
+            .lookup_frozen_selection(
+                PROJECT,
+                "curator-review-selection",
+                "curator-review-selection@1"
+            )
+            .unwrap()
+            .unwrap()
+            .state,
+        FrozenSelectionState::Enqueued
+    );
+    // A second selection over the same inventory finds nothing: every target already has a job.
+    let again = select_review_targets(
+        &fixture.store,
+        &fixture.ledger,
+        &SelectionScope {
+            project: &kernel::ProjectScope::new(PROJECT).unwrap(),
+            project_digest: PROJECT,
+            classes: &[kernel::source_identity::OccurrenceClass::GitCommits],
+            policy_versions: &BTreeMap::new(),
+        },
+        None,
+        &budget,
+    )
+    .unwrap();
+    assert!(again.references.is_empty());
+    // The ready job for the subject commit is claimed and run through the coordinator.
+    let ready = fixture
+        .ledger
+        .ready_curator_jobs(PROJECT, 16, fixture.now)
+        .unwrap();
+    let job = ready
+        .iter()
+        .find(|job| {
+            matches!(&job.target, ReviewTarget::Memory { object_id, .. } if *object_id == fixture.sources[0].0)
+                && job.producer == producer
+        })
+        .unwrap()
+        .clone();
+    let CuratorJobState::Ready(input) = &job.state else {
+        panic!("{job:?}")
+    };
+    let memory_store::LeaseAcquireOutcome::Claim {
+        claim: job_claim, ..
+    } = fixture
+        .ledger
+        .acquire_curator_task(
+            PROJECT,
+            "acq-selected",
+            "worker-b",
+            1,
+            fixture.registration(),
+            &job.causal_identity,
+            fixture.now + 2,
+        )
+        .unwrap()
+    else {
+        panic!("the ready job is claimed")
+    };
+    let CuratorBeginOutcome::Begun(receipt) = fixture
+        .ledger
+        .begin_curator_receipt(
+            PROJECT,
+            &job.causal_identity,
+            &fixture.kernel_incarnation(),
+            &job_claim.claim_id,
+            fixture.now + 2,
+        )
+        .unwrap()
+    else {
+        panic!("first claim begins")
+    };
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(
+        r#"{"v":1,"step":{"kind":"propose","action":"retain","support":[{"alias":"ref-1"}],"contradictions":[],"limitations":["only the subject itself was available"],"uncertainty":"medium"}}"#,
+    )]);
+    let coordinator = fixture.coordinator(&peer, Some(fixture.approval()));
+    let binding = ReviewBinding {
+        owner: ReviewOwner::Job {
+            job_id: job.causal_identity.clone(),
+        },
+        ..fixture.binding()
+    };
+    let task_claim = TaskClaim {
+        claim_id: job_claim.claim_id.clone(),
+        worker_instance: "worker-b".to_string(),
+        slot: 1,
+    };
+    let settled = coordinator
+        .investigate(
+            JobContext {
+                job: &job,
+                input,
+                receipt: &receipt,
+                claim: &task_claim,
+                binding: &binding,
+                question: QuestionTemplate::ExtractedFacts,
+                project_root: None,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let Settled::Published(reference) = settled else {
+        panic!("{settled:?}")
+    };
+    assert_eq!(server.await.unwrap().len(), 1);
+    let selected = read_selected_proposal(
+        &fixture.store,
+        &fixture.ledger,
+        PROJECT,
+        &job.causal_identity,
+        &binding,
+        fixture.now + 6,
+    )
+    .unwrap();
+    assert_eq!(selected.reference, reference);
+    assert_eq!(selected.proposal.action, kernel::ProposalAction::Retain);
+    assert!(matches!(
+        &selected.proposal.target,
+        kernel::ProposalTarget::Memory(target) if target.object_id == fixture.sources[0].0
+    ));
+    assert_eq!(
+        selected.proposal.support[0].evidence_id,
+        fixture.evidence(0)
+    );
+    // Nothing canonical changed: every descriptor reads the same before and after.
+    let tip_after = fixture.store.tip().unwrap();
+    for (object_id, _) in &fixture.sources {
+        let before = fixture
+            .store
+            .observation_for_object_as_of(object_id, tip_before)
+            .unwrap()
+            .unwrap();
+        let after = fixture
+            .store
+            .observation_for_object_as_of(object_id, tip_after)
+            .unwrap()
+            .unwrap();
+        assert_eq!(before, after);
+    }
 }
 
 /// A source whose message is `filler` repeated to `bytes`, behind a one-line lead that names the subject.

@@ -14741,6 +14741,86 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
         &self.store
     }
 
+    /// The production selector: the project's live canonical descriptors, judged through the Kernel, minus targets that already have a review job. The Kernel scope is the bound route's; the ledger project is the authority project the slot is leased under. A missing binding or kernel and a transient selection error retry the slot, as `run_task` retains the same conditions; every other selection error completes it.
+    fn select_review_page(
+        &self,
+        project: &memory_classifier_scheduler::ScheduledProject,
+        cursor: Option<&str>,
+    ) -> Result<
+        memory_store::curator_jobs::FrozenSelectionPage,
+        memory_classifier_scheduler::SelectionFailure,
+    > {
+        use memory_classifier_scheduler::SelectionFailure;
+        // The lease names a project at a generation; a root that moved to another project or an authority that advanced since the snapshot must not select for the lease it left. The classify path refuses the same way.
+        let route_root = project.route_root.to_string_lossy().to_string();
+        match memories_authority_for_route(&self.store, &route_root) {
+            Ok(MemoriesAuthority::Module(authority))
+                if authority.project == project.project
+                    && authority.generation == project.authority_generation => {}
+            Ok(MemoriesAuthority::Module(authority)) => {
+                return Err(SelectionFailure::Failed(format!(
+                    "the route now resolves to {} at generation {}, the lease is on {} at generation {}",
+                    authority.project,
+                    authority.generation,
+                    project.project,
+                    project.authority_generation
+                )));
+            }
+            Ok(MemoriesAuthority::NotModule { message }) => {
+                return Err(SelectionFailure::Failed(message));
+            }
+            Err(error) => {
+                return Err(SelectionFailure::Retry(format!(
+                    "authority lookup failed: {error}"
+                )));
+            }
+        }
+        let binding = self.binding_for_root(&project.route_root).ok_or_else(|| {
+            SelectionFailure::Retry("no live route is bound to the project".to_string())
+        })?;
+        let kernel = self
+            .memory_classifier
+            .kernel
+            .kernel_store()
+            .map_err(|outcome| {
+                SelectionFailure::Retry(format!("kernel unavailable: {outcome:?}"))
+            })?;
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(30)),
+            Arc::default(),
+        );
+        // The policies a review depends on: a change to either permits one new job at an unchanged target (Q25/Q29).
+        let policy_versions = BTreeMap::from([
+            (
+                "question_template".to_string(),
+                curator::broker::QuestionTemplate::ExtractedFacts.revision(),
+            ),
+            (
+                "step_schema".to_string(),
+                curator::steps::STEP_VERSION.to_string(),
+            ),
+        ]);
+        curator::selection::select_review_targets(
+            &kernel,
+            &self.store,
+            &curator::selection::SelectionScope {
+                project: binding.kernel_project.scope(),
+                project_digest: &project.project,
+                classes: curator::selection::MEMORY_CLASSES,
+                policy_versions: &policy_versions,
+            },
+            cursor,
+            &budget,
+        )
+        .map_err(|error| {
+            if error.is_transient() {
+                SelectionFailure::Retry(error.to_string())
+            } else {
+                SelectionFailure::Failed(error.to_string())
+            }
+        })
+    }
+
     /// The newest root speaks for a project: roots collapse by project before
     /// the winner's schedule is read, so a newest binding without a schedule
     /// unschedules the project.
@@ -14812,6 +14892,12 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
             memory_classifier_scheduler::ScheduledTask::MessageIndexCleanup => {
                 return memory_classifier_scheduler::TaskRunOutcome::NotRunnable {
                     reason: "message-index cleanup has no production enable path".to_string(),
+                };
+            }
+            // Selection runs through its own slot path, never through the classify protocol.
+            memory_classifier_scheduler::ScheduledTask::CuratorReviewSelection => {
+                return memory_classifier_scheduler::TaskRunOutcome::NotRunnable {
+                    reason: "curator selection is not a classify task".to_string(),
                 };
             }
             memory_classifier_scheduler::ScheduledTask::ReviewUserMemories => {}
@@ -32716,6 +32802,40 @@ mod tests {
                     .is_none(),
                 "{project}: no receipt is written for a refused run"
             );
+        }
+    }
+
+    /// Selection combines the route's Kernel scope with the leased project, so a
+    /// root that moved to another project after the snapshot must not select for
+    /// the lease it left. Both projects share a generation, as in the classify case.
+    #[tokio::test(flavor = "current_thread")]
+    async fn memory_classifier_scheduler_bridge_refuses_to_select_for_a_root_that_moved_to_another_project()
+     {
+        use memory_classifier_scheduler::{ScheduledTask, SchedulerHost, SelectionFailure};
+        let producer = Arc::new(ProducerState::default());
+        let harness = MemoryClassifierHarness::start(&producer).await;
+        harness.schedule(Some("*/15 * * * *"));
+        let bridge = harness.scheduler_bridge();
+        let mut project = bridge.scheduled_projects().unwrap().remove(0);
+        project.task = ScheduledTask::CuratorReviewSelection;
+        assert!(
+            bridge.select_review_page(&project, None).is_ok(),
+            "the bound project selects"
+        );
+
+        activate_module_authority(
+            &harness.store,
+            "context",
+            "git:other",
+            &harness.route_root,
+            "memories",
+        );
+        match bridge.select_review_page(&project, None) {
+            Err(SelectionFailure::Failed(reason)) => assert!(
+                reason.contains("git:other") && reason.contains("git:identity"),
+                "{reason}"
+            ),
+            other => panic!("a moved root selected for its old lease: {other:?}"),
         }
     }
 
