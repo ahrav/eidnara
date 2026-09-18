@@ -1095,7 +1095,8 @@ impl MemoryStore {
         };
         let finished = self
             .ledger_transaction(project, "finish-attempt", causal_identity, |conn| {
-                // The proof is never dated before the marker it closes, whatever the clock did in between.
+                // The proof is never dated before anything the ledger already holds, whatever the clock did in between; the floor is read inside this transaction so a marker another thread committed since the handoff counts too.
+                let floor = ledger_clock_floor(conn, project, causal_identity)?;
                 record_attempt_terminal_in_tx(
                     conn,
                     project,
@@ -1104,7 +1105,7 @@ impl MemoryStore {
                     claim_id,
                     attempt.attempt_index,
                     CuratorAttemptTerminal::NotDispatched,
-                    now().max(attempt.committed_at_ms),
+                    now().max(floor),
                 )
                 .map(WriteDisposition::Applied)
             })
