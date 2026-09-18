@@ -22,8 +22,9 @@ use sha2::{Digest, Sha256};
 
 use super::broker::{
     Alias, EvidenceBroker, EvidenceRead, ReferenceExpectation, Refusal, RefusalCode, check_render,
+    check_whole_artifact,
 };
-use super::{Completeness, excerpt_window, is_capacity};
+use super::{Completeness, excerpt_window};
 
 pub const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
 pub const MAX_SCAN_BYTES: u64 = 16 * 1024 * 1024;
@@ -262,7 +263,7 @@ impl ProjectText {
             }
             let alias = match self.capture(store, broker, &file, now_ms) {
                 Ok(alias) => alias,
-                Err(refusal) if is_capacity(refusal.code) => return capacity(outcome, refusal),
+                Err(refusal) if refusal.code.is_capacity() => return capacity(outcome, refusal),
                 Err(_) => {
                     outcome.withheld = true;
                     continue;
@@ -278,7 +279,7 @@ impl ProjectText {
                     span,
                     excerpt: read.buffer.bytes,
                 }),
-                Err(refusal) if is_capacity(refusal.code) => return capacity(outcome, refusal),
+                Err(refusal) if refusal.code.is_capacity() => return capacity(outcome, refusal),
                 Err(_) => outcome.withheld = true,
             }
         }
@@ -365,8 +366,8 @@ impl ProjectText {
             return Err(refusal(RefusalCode::TooLarge));
         }
         std::str::from_utf8(&bytes).map_err(|_| refusal(RefusalCode::Undecodable))?;
-        // The bytes must survive ingestion unchanged and the path is stored in the typed detail, so a buffer or a path the scanner would rewrite is refused here, before any literal is applied and before anything is stored.
-        check_render(&bytes, None)?;
+        // The bytes must survive ingestion unchanged and the path is stored in the typed detail, so a buffer or a path the scanner would rewrite is refused here, before any literal is applied and before anything is stored. A file may exceed the scanner's single-pass input limit, so its bytes take the windowed whole-artifact check ingest applies.
+        check_whole_artifact(&bytes, None)?;
         check_render(relative.as_bytes(), None)?;
         Ok(ReadFile {
             relative: relative.to_string(),
@@ -459,7 +460,7 @@ impl ProjectText {
                         })
                     })?;
                 // Ownership is charged to the run's reservation at first capture, not deferred to the first disclosure. The held facts, not the request, define the alias: a replayed ingest keeps the row's original `retain_until`.
-                let held = broker.hold_evidence(store, None, &evidence_id, now_ms)?;
+                let held = broker.hold_evidence(store, None, &evidence_id, &digest, now_ms)?;
                 let captured = Captured {
                     evidence_id,
                     byte_length: held.byte_length,

@@ -14,8 +14,8 @@ use daemon::curator::project_text::{
 use daemon::curator::{Completeness, MAX_EXCERPT_BYTES};
 use kernel::{
     ArtifactDestination, ArtifactHandle, ArtifactIngestRequest, CURATOR_CAPTURE_RETENTION_CLASS,
-    CommitIntent, CuratorHoldBinding, CuratorHoldKind, DomainSpec, KernelStore, ProjectScope,
-    ProviderEgress, Sensitivity,
+    CommitIntent, CuratorHoldBinding, CuratorHoldKind, DomainSpec, KernelStore, ProviderEgress,
+    Sensitivity,
 };
 use sha2::{Digest, Sha256};
 
@@ -136,13 +136,13 @@ impl Fixture {
             .unwrap();
         EvidenceBroker::new(
             RunBinding {
-                project: ProjectScope::new(PROJECT).unwrap(),
                 hold: binding,
                 hold_id: hold.hold_id,
                 destination,
             },
             QuestionTemplate::ExtractedFacts,
         )
+        .unwrap()
     }
 
     fn binding(&self) -> InspectionBinding {

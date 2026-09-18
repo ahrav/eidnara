@@ -2,6 +2,38 @@
   "protocol": "eidnara-canonical-json-contract-v1",
   "memory_classifierRequestEncodingVersion": 1,
   "memory_classifierRequestDigestProtocol": "eidnara-memory_classifier-request-v1",
+  "curatorPolicyUnionVersion": 1,
+  "curatorPolicyUnionDigestProtocol": "eidnara-curator-policy-union-v1",
+  "curatorPolicyUnion": [
+    {
+      "name": "two-members-out-of-order",
+      "members": [
+        {
+          "kind": "canonical_source",
+          "id": "desc-1",
+          "revision": "3",
+          "owner_id": "decision-1",
+          "owner_revision": "2"
+        },
+        {
+          "kind": "staged_subject",
+          "id": "cand-1",
+          "revision": "d1",
+          "owner_id": null,
+          "owner_revision": null
+        },
+        {
+          "kind": "staged_subject",
+          "id": "cand-1",
+          "revision": "d1",
+          "owner_id": null,
+          "owner_revision": null
+        }
+      ],
+      "canonical": "{\"members\":[{\"id\":\"cand-1\",\"kind\":\"staged_subject\",\"owner_id\":null,\"owner_revision\":null,\"revision\":\"d1\"},{\"id\":\"desc-1\",\"kind\":\"canonical_source\",\"owner_id\":\"decision-1\",\"owner_revision\":\"2\",\"revision\":\"3\"}],\"v\":1}",
+      "digest": "2a7cab657b4abc08dccf9dd0843f68159edf5e776d322a24068e2558912cc76e"
+    }
+  ],
   "canonicalization": [
     {
       "name": "scalars-and-key-order",
