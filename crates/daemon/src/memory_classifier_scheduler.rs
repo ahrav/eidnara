@@ -195,7 +195,7 @@ pub(crate) enum TickEvent {
     /// The host could not report its projects, so nothing ran and no due
     /// instant moved; the next tick sees the same slots.
     Deferred { reason: String },
-    /// The slot's frozen page could not be enqueued because pending review capacity is full. The page stays frozen in its slot, the claim stays live, and the due instant does not move; the next tick offers the same page again, and the capacity drains as jobs finish or expire.
+    /// The slot's frozen page could not be enqueued because pending review capacity is full. The page stays frozen in its slot, the claim stays live, and the due instant does not move; the next tick offers the same page again, and the capacity drains as jobs finish or expire. The due table is this instance's memory: after a restart the page is durable but its slot is not, so the project's next cron slot resumes it, and a page older than its 24-hour lifetime by then records `curator_selection_expired` and the slot after that re-selects from the unchanged cursor.
     CapacityDeferred {
         project: String,
         due_at_ms: i64,
