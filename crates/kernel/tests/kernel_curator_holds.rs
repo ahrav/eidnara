@@ -1027,3 +1027,44 @@ fn expiry_visits_a_retained_capture_once_and_reaches_captures_behind_a_full_page
     );
     assert_eq!(fixture.store.tip().unwrap(), tip + 1);
 }
+
+/// A hold acquired after the sweep chose its candidates but before it retired one still pins that capture: the retiring transaction rechecks the pins it read outside it.
+#[test]
+fn expiry_skips_a_capture_a_hold_pinned_after_the_sweep_chose_it() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let evidence_id = fixture.ingest("late-pin", b"late pin", Some(now + HOUR_MS));
+    let after = now + 2 * HOUR_MS;
+    let binding = fixture.binding("subject", 1);
+    let mut hold = None;
+    let retired = fixture
+        .store
+        .expire_local_file_captures_with_hook_for_test(after, || {
+            hold = Some(
+                fixture
+                    .store
+                    .acquire_execution_hold(
+                        &binding,
+                        std::slice::from_ref(&evidence_id),
+                        after + HOUR_MS,
+                    )
+                    .unwrap(),
+            );
+        })
+        .unwrap();
+    assert_eq!(
+        retired, 0,
+        "a capture pinned since the snapshot is not retired"
+    );
+    let held = fixture
+        .store
+        .validate_held_evidence(
+            &hold.unwrap().hold_id,
+            CuratorHoldKind::Execution,
+            &binding,
+            std::slice::from_ref(&evidence_id),
+            now_ms(),
+        )
+        .unwrap();
+    assert_eq!(held.len(), 1, "the hold still reaches its evidence");
+}
