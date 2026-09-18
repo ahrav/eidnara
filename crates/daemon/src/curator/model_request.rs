@@ -1,6 +1,6 @@
 //! One verified, one-use sender for Anthropic Messages requests.
 //!
-//! The sender opens a fresh TCP connection to the fixed production host, completes a rustls handshake that verifies the full chain and hostname against the webpki roots with SNI for that host and TLS 1.2 or newer, and completes an HTTP/1 handshake, all without writing a byte of any request. The caller then hands over exactly one owned request; the handoff is synchronous and moves the request into the connection's dispatch queue, and no request byte reaches the peer until the caller asks for completion. Completing polls the connection once, reads the response under the raw-byte allowance, refuses compressed or non-JSON bodies, decodes the message under the closed bounds, runs the common render check, and yields one [`AssistantText`]. There is no retry, redirect, reconnect, proxy, pool, or fallback anywhere in this module; a second request needs a second connection. The credential is written into the `x-api-key` header and nowhere else.
+//! The sender opens a fresh TCP connection to the fixed production host, completes a rustls handshake that verifies the full chain and hostname against the webpki roots with SNI for that host and TLS 1.2 or newer, and completes an HTTP/1 handshake, all without writing a byte of any request. The caller then hands over exactly one owned request; the handoff is synchronous and moves the request into the connection's dispatch queue, and no request byte reaches the peer until the caller asks for completion. Completing polls the connection once, reads the response under the raw-byte allowance, refuses compressed or non-JSON bodies, decodes the message under the closed bounds, runs the common render check, and yields one [`AssistantText`]. There is no retry, redirect, reconnect, proxy, pool, or fallback anywhere in this module; a second request needs a second connection. The TCP connect itself follows the standard resolver contract and may try each address the host resolves to until one accepts, all under the connect deadline; no request exists on the wire until after the TLS and HTTP handshakes, so a refused address is not a resend. The credential is written into the `x-api-key` header and nowhere else.
 //!
 //! Hyper and rustls connection types never leave this module; callers see [`Sender`], [`Connected`], [`InFlight`], and [`AssistantText`]. An endpoint other than the production one exists only under the `test-support` feature, for the local TLS peer the sender proof runs against.
 
@@ -36,16 +36,42 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 pub const MAX_OUTPUT_TOKENS: u32 = 8_000;
 /// Raw response body bytes one send may receive, charged before each chunk is kept; a provider error body counts the same.
 pub const MAX_RAW_RESPONSE_BYTES: usize = 1024 * 1024;
-/// Response head bytes accepted, and the headers a head may hold; the head is not part of the body allowance, so it gets its own bound, applied both to hyper's read buffer and to the parsed headers.
+/// Response head bytes accepted, and the headers a head may hold; the head is not part of the body allowance, so it gets its own bound. Hyper's read buffer is capped at it, with the slack its buffer growth allows, and the parsed head is then held to it exactly: header names and values plus any non-canonical reason phrase, the parts a peer chooses.
 pub const MAX_RESPONSE_HEAD_BYTES: usize = 64 * 1024;
 pub const MAX_RESPONSE_HEADERS: usize = 32;
 /// Body frames one response may deliver, so a peer cannot trickle the allowance one byte at a time.
 pub const MAX_RESPONSE_FRAMES: usize = 4096;
-/// Longest a connect or a completion may take whatever deadline the caller passes.
-pub const MAX_PHASE_DURATION: Duration = Duration::from_secs(30);
-/// Longest wait for the next byte of a response.
+/// The connect phase clamps a longer caller deadline to this duration.
+pub const MAX_CONNECT_DURATION: Duration = Duration::from_secs(30);
+/// Fixed completion allowance before the per-token allowance is added.
+pub const COMPLETION_FLOOR: Duration = Duration::from_secs(30);
+pub const COMPLETION_PER_TOKEN: Duration = Duration::from_millis(30);
+/// Limits the wait for each body frame after the response head arrives.
 pub const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const ALPN_HTTP1: &[u8] = b"http/1.1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timing {
+    pub connect: Duration,
+    pub completion_floor: Duration,
+    pub completion_per_token: Duration,
+    pub frame_idle: Duration,
+}
+
+impl Timing {
+    pub const PRODUCTION: Timing = Timing {
+        connect: MAX_CONNECT_DURATION,
+        completion_floor: COMPLETION_FLOOR,
+        completion_per_token: COMPLETION_PER_TOKEN,
+        frame_idle: FRAME_IDLE_TIMEOUT,
+    };
+
+    /// Longest a completion may take for a request that asks for `max_tokens` output tokens.
+    pub fn completion_budget(&self, max_tokens: u32) -> Duration {
+        self.completion_floor
+            .saturating_add(self.completion_per_token.saturating_mul(max_tokens))
+    }
+}
 
 type Body = Full<Bytes>;
 type Transport = TokioIo<TlsStream<TcpStream>>;
@@ -114,8 +140,8 @@ impl Credential {
     }
 
     fn header(&self) -> HeaderValue {
-        let mut value =
-            HeaderValue::from_str(&self.secret).unwrap_or_else(|_| HeaderValue::from_static(""));
+        let mut value = HeaderValue::from_str(&self.secret)
+            .expect("Credential::new admits only a valid header value");
         value.set_sensitive(true);
         value
     }
@@ -214,21 +240,24 @@ struct WireRequest<'a> {
     stream: bool,
 }
 
-/// Serialized request bytes that passed [`MessagesRequest::body`]'s shape, token, and size bounds. Only that constructor produces one, so a handoff cannot carry bytes the bounds never saw.
+/// Serialized request bytes that passed [`MessagesRequest::body`]'s shape, token, and size bounds, with the `max_tokens` the bytes ask for, which sizes the completion budget. Only that constructor produces one, so a handoff cannot carry bytes the bounds never saw.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequestBody(Vec<u8>);
+pub struct RequestBody {
+    bytes: Vec<u8>,
+    max_tokens: u32,
+}
 
 impl RequestBody {
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.bytes.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.bytes.is_empty()
     }
 }
 
@@ -256,7 +285,10 @@ impl MessagesRequest {
         if body.len() > MAX_REQUEST_BYTES {
             return Err(SendError::RequestTooLarge);
         }
-        Ok(RequestBody(body))
+        Ok(RequestBody {
+            bytes: body,
+            max_tokens: self.max_tokens,
+        })
     }
 }
 
@@ -270,7 +302,7 @@ pub struct AssistantText {
     pub accounting: ResponseAccounting,
 }
 
-/// Bytes a response cost, kept apart: the head, the body the transport delivered, and what the parser allocated for itself.
+/// Bytes a response cost, kept apart: the parsed head (header names and values plus any non-canonical reason phrase, not delimiters), the body the transport delivered, and what the parser allocated for itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResponseAccounting {
     pub head_bytes: usize,
@@ -282,6 +314,7 @@ pub struct ResponseAccounting {
 pub struct Sender {
     endpoint: Endpoint,
     credential: Credential,
+    timing: Timing,
 }
 
 impl Sender {
@@ -299,10 +332,20 @@ impl Sender {
         Self {
             endpoint,
             credential,
+            timing: Timing::PRODUCTION,
         }
     }
 
-    /// Opens a fresh connection and completes the TCP, TLS, and HTTP/1 handshakes by `deadline`, clamped to [`MAX_PHASE_DURATION`]. No request byte is written; the connection is not polled again until [`InFlight::complete`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_timing(endpoint: Endpoint, credential: Credential, timing: Timing) -> Self {
+        Self {
+            endpoint,
+            credential,
+            timing,
+        }
+    }
+
+    /// Opens a fresh connection and completes the TCP, TLS, and HTTP/1 handshakes by `deadline`, clamped to [`Timing::connect`]. No request byte is written.
     pub async fn connect(&self, deadline: Instant) -> Result<Connected, SendError> {
         let handshakes = async {
             let tcp = TcpStream::connect((self.endpoint.host.as_str(), self.endpoint.port))
@@ -324,16 +367,17 @@ impl Sender {
                 connection,
                 host: self.endpoint.host.clone(),
                 credential: self.credential.clone(),
+                timing: self.timing,
             })
         };
-        tokio::time::timeout_at(clamp(deadline), handshakes)
+        tokio::time::timeout_at(clamp(deadline, self.timing.connect), handshakes)
             .await
             .map_err(|_| SendError::Deadline)?
     }
 }
 
-fn clamp(deadline: Instant) -> Instant {
-    deadline.min(Instant::now() + MAX_PHASE_DURATION)
+fn clamp(deadline: Instant, budget: Duration) -> Instant {
+    deadline.min(Instant::now() + budget)
 }
 
 /// A handshaken, unpolled connection that can carry exactly one request.
@@ -342,6 +386,7 @@ pub struct Connected {
     connection: Connection<Transport, Body>,
     host: String,
     credential: Credential,
+    timing: Timing,
 }
 
 impl std::fmt::Debug for Connected {
@@ -361,13 +406,15 @@ impl Connected {
             .header(header::CONNECTION, "close")
             .header("x-api-key", self.credential.header())
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .body(Full::new(Bytes::from(body.0)))
+            .body(Full::new(Bytes::from(body.bytes)))
             .map_err(|_| SendError::RequestTooLarge)?;
         // `try_send_request` moves the request into the dispatch queue before it returns its future; a fresh connection admits exactly one request before it is polled.
         let response = Box::pin(self.send.try_send_request(wire));
         Ok(InFlight {
             connection: self.connection,
             response,
+            timing: self.timing,
+            max_tokens: body.max_tokens,
         })
     }
 }
@@ -387,6 +434,8 @@ type ResponseFuture = std::pin::Pin<
 pub struct InFlight {
     connection: Connection<Transport, Body>,
     response: ResponseFuture,
+    timing: Timing,
+    max_tokens: u32,
 }
 
 impl std::fmt::Debug for InFlight {
@@ -396,11 +445,13 @@ impl std::fmt::Debug for InFlight {
 }
 
 impl InFlight {
-    /// Polls the connection, so the request is written, and reads the one response by `deadline`, clamped to [`MAX_PHASE_DURATION`], with at most [`FRAME_IDLE_TIMEOUT`] between bytes. The connection is dropped afterwards whatever the outcome; there is no second attempt.
+    /// Polls the connection, so the request is written, and reads the one response by `deadline`, clamped to [`Timing::completion_budget`] for the request's `max_tokens`, with at most [`Timing::frame_idle`] between body frames. The connection is dropped afterwards whatever the outcome; there is no second attempt.
     pub async fn complete(self, deadline: Instant) -> Result<AssistantText, SendError> {
         let InFlight {
             mut connection,
             mut response,
+            timing,
+            max_tokens,
         } = self;
         let mut accounting = ResponseAccounting::default();
         let exchange = async {
@@ -414,26 +465,27 @@ impl InFlight {
                     SendError::Transport
                 }
             };
-            let response = tokio::time::timeout(FRAME_IDLE_TIMEOUT, async {
-                tokio::select! {
-                    biased;
-                    response = &mut response => response.map_err(unsent),
-                    closed = &mut connection => {
-                        closed.map_err(|_| SendError::Transport)?;
-                        connection_done = true;
-                        response.await.map_err(unsent)
-                    }
+            // The head wait is the provider's whole generation time for a non-streaming request, so only the completion budget bounds it; the frame idle limit starts with the body.
+            let response = tokio::select! {
+                biased;
+                response = &mut response => response.map_err(unsent),
+                closed = &mut connection => {
+                    closed.map_err(|_| SendError::Transport)?;
+                    connection_done = true;
+                    response.await.map_err(unsent)
                 }
-            })
-            .await
-            .map_err(|_| SendError::Deadline)??;
+            }?;
             let (head, body) = response.into_parts();
-            // Hyper refuses a head it cannot buffer; a head it could buffer is still held to the declared bound before anything else is read.
+            // Hyper refuses a head it cannot buffer; a head it could buffer is still held to the declared bound before anything else is read. The reason phrase is counted because it is the one head part outside the headers that a peer sizes freely.
             accounting.head_bytes = head
                 .headers
                 .iter()
                 .map(|(name, value)| name.as_str().len() + value.len())
-                .sum();
+                .sum::<usize>()
+                + head
+                    .extensions
+                    .get::<hyper::ext::ReasonPhrase>()
+                    .map_or(0, |reason| reason.as_bytes().len());
             if accounting.head_bytes > MAX_RESPONSE_HEAD_BYTES {
                 return Err(SendError::ResponseTooLarge);
             }
@@ -454,8 +506,14 @@ impl InFlight {
             {
                 return Err(SendError::ResponseTooLarge);
             }
-            let bytes =
-                collect_body(body, &mut connection, connection_done, &mut accounting).await?;
+            let bytes = collect_body(
+                body,
+                &mut connection,
+                connection_done,
+                timing.frame_idle,
+                &mut accounting,
+            )
+            .await?;
             if head.status != StatusCode::OK {
                 return Err(SendError::Status(head.status.as_u16()));
             }
@@ -464,10 +522,9 @@ impl InFlight {
                 .get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| {
-                    value
-                        .trim_start()
-                        .to_ascii_lowercase()
-                        .starts_with("application/json")
+                    value.split(';').next().is_some_and(|media_type| {
+                        media_type.trim().eq_ignore_ascii_case("application/json")
+                    })
                 });
             if !json {
                 return Err(SendError::ContentType);
@@ -482,9 +539,12 @@ impl InFlight {
                 accounting,
             })
         };
-        tokio::time::timeout_at(clamp(deadline), exchange)
-            .await
-            .map_err(|_| SendError::Deadline)?
+        tokio::time::timeout_at(
+            clamp(deadline, timing.completion_budget(max_tokens)),
+            exchange,
+        )
+        .await
+        .map_err(|_| SendError::Deadline)?
     }
 }
 
@@ -493,12 +553,13 @@ async fn collect_body(
     mut body: Incoming,
     connection: &mut Connection<Transport, Body>,
     mut connection_done: bool,
+    frame_idle: Duration,
     accounting: &mut ResponseAccounting,
 ) -> Result<Vec<u8>, SendError> {
     let mut bytes = Vec::new();
     let mut frames = 0usize;
     loop {
-        let next = tokio::time::timeout(FRAME_IDLE_TIMEOUT, async {
+        let next = tokio::time::timeout(frame_idle, async {
             if connection_done {
                 return body.frame().await;
             }
@@ -530,5 +591,23 @@ async fn collect_body(
             accounting.transport_bytes = charged;
             bytes.extend_from_slice(chunk);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_production_completion_budget_covers_the_largest_request() {
+        // Anthropic's SDKs estimate a non-streaming request at 3600 s per 128,000 output tokens and refuse one expected to exceed ten minutes; the budget for the largest admissible request must sit between the two.
+        let sdk_estimate = Duration::from_secs(3600 * u64::from(MAX_OUTPUT_TOKENS) / 128_000);
+        let budget = Timing::PRODUCTION.completion_budget(MAX_OUTPUT_TOKENS);
+        assert!(budget >= sdk_estimate, "{budget:?} < {sdk_estimate:?}");
+        assert!(budget <= Duration::from_secs(600), "{budget:?}");
+        assert_eq!(
+            Timing::PRODUCTION.completion_budget(1),
+            COMPLETION_FLOOR + COMPLETION_PER_TOKEN
+        );
     }
 }

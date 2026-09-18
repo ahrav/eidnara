@@ -43,6 +43,11 @@ fn inspect<T>(root: &std::path::Path, read: impl FnOnce(&Connection) -> T) -> T 
     read(&conn)
 }
 
+fn mutate(root: &std::path::Path, sql: &str, params: impl rusqlite::Params) {
+    let conn = Connection::open(root.join("kernel.sqlite")).unwrap();
+    conn.execute(sql, params).unwrap();
+}
+
 fn incarnation(root: &std::path::Path) -> String {
     inspect(root, |conn| {
         conn.query_row(
@@ -170,6 +175,18 @@ impl Fixture {
     }
 
     fn proposal_payload(&self) -> ReviewPayload {
+        self.proposal_payload_disclosing(&[])
+    }
+
+    /// A retain proposal whose policy dependencies disclose (and leave uncited) `disclosed`.
+    fn proposal_payload_disclosing(&self, disclosed: &[String]) -> ReviewPayload {
+        let disclosed: Vec<kernel::EvidenceReference> = disclosed
+            .iter()
+            .map(|evidence_id| kernel::EvidenceReference {
+                evidence_id: evidence_id.clone(),
+                span: None,
+            })
+            .collect();
         ReviewPayload::Proposal(Box::new(ReviewProposal {
             action: kernel::ProposalAction::Retain,
             target: kernel::ProposalTarget::Memory(kernel::CanonicalTarget {
@@ -189,8 +206,8 @@ impl Fixture {
             },
             policy_dependencies: kernel::PolicyDependencies {
                 question_template: kernel::ReviewQuestionTemplate::ExtractedFacts,
-                disclosed_inputs: vec![],
-                uncited_disclosed_inputs: vec![],
+                disclosed_inputs: disclosed.clone(),
+                uncited_disclosed_inputs: disclosed,
                 ancestry: vec![],
             },
         }))
@@ -208,6 +225,23 @@ impl Fixture {
         recorded_at: i64,
         deadline: i64,
     ) -> i64 {
+        self.stage_proposal_with(
+            job_id,
+            generation,
+            recorded_at,
+            deadline,
+            self.proposal_payload(),
+        )
+    }
+
+    fn stage_proposal_with(
+        &self,
+        job_id: &str,
+        generation: u64,
+        recorded_at: i64,
+        deadline: i64,
+        payload: ReviewPayload,
+    ) -> i64 {
         let identity = provisional_result_identity(job_id, generation);
         self.store
             .stage_review_input(ReviewStagingSpec {
@@ -215,7 +249,7 @@ impl Fixture {
                 candidate_id: identity.candidate_id,
                 producer: "curator".to_string(),
                 binding: self.review_binding(job_id, generation),
-                payload: self.proposal_payload(),
+                payload,
                 recorded_at,
                 queue_deadline_at: deadline,
             })
@@ -648,6 +682,20 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
         ),
         CuratorHoldRefusal::Missing
     );
+    // A retried transfer whose first result was lost gets the committed review hold back, and writes nothing.
+    let pins_before = fixture.pins();
+    let retried = fixture
+        .store
+        .transfer_execution_to_review(&hold.hold_id, &execution, &review, review_expires_at)
+        .unwrap();
+    assert_eq!(retried.hold_id, review_hold.hold_id);
+    assert_eq!(retried.expires_at, review_expires_at);
+    assert_eq!(fixture.pins(), pins_before);
+    fixture
+        .store
+        .release_review_hold(&review_hold.hold_id, &review)
+        .unwrap();
+    assert!(fixture.pin(&review_hold.hold_id).3.is_some());
     assert_eq!(
         refusal(
             fixture
@@ -656,13 +704,105 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
                 .unwrap_err()
         ),
         CuratorHoldRefusal::Released,
-        "a released execution hold cannot be transferred twice"
+        "once the review hold is gone too, the released execution hold cannot be transferred again"
     );
-    fixture
+}
+
+#[test]
+fn review_transfer_requires_the_execution_generation_and_a_live_proposal_deadline() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let evidence = fixture.ingest("held", b"held bytes", None);
+    let stale = fixture.binding("job-1", 1);
+    let stale_hold = fixture
         .store
-        .release_review_hold(&review_hold.hold_id, &review)
+        .acquire_execution_hold(&stale, std::slice::from_ref(&evidence), now + HOUR_MS)
         .unwrap();
-    assert!(fixture.pin(&review_hold.hold_id).3.is_some());
+    // A successor generation staged its own proposal; the stale worker's hold cannot become its review hold.
+    let created = fixture.stage_proposal("job-1", 2, now - 1_000, now + DAY_MS - 1_000);
+    let successor = provisional_result_identity("job-1", 2);
+    let successor_review = fixture.binding(&successor.candidate_id, 2);
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(
+                    &stale_hold.hold_id,
+                    &stale,
+                    &successor_review,
+                    created + REVIEW_EXPIRY_MAX_MS,
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "the review subject must be the execution generation's own provisional result"
+    );
+    assert_eq!(
+        fixture.pins(),
+        pins_before,
+        "a refused transfer writes no review pin"
+    );
+    assert!(
+        fixture.pin(&stale_hold.hold_id).3.is_none(),
+        "a refused transfer leaves the execution hold live"
+    );
+    let deadline: i64 = inspect(fixture.root(), |conn| {
+        conn.query_row(
+            "SELECT lease_expires_at FROM candidates WHERE candidate_id=?1",
+            [successor.candidate_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        deadline,
+        now + DAY_MS - 1_000,
+        "a refused transfer moves no proposal deadline"
+    );
+
+    // The matching proposal's lease has expired, so no review hold may pin its bytes.
+    let execution = fixture.binding("job-2", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    let created = fixture.stage_proposal("job-2", 1, now - 1_000, now + DAY_MS - 1_000);
+    let identity = provisional_result_identity("job-2", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    mutate(
+        fixture.root(),
+        "UPDATE candidates SET lease_expires_at=?1 WHERE candidate_id=?2",
+        rusqlite::params![now - 1, identity.candidate_id],
+    );
+    mutate(
+        fixture.root(),
+        "UPDATE extraction_runs SET lease_expires_at=?1 WHERE extraction_run_id=?2",
+        rusqlite::params![now - 1, identity.extraction_run_id],
+    );
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(
+                    &hold.hold_id,
+                    &execution,
+                    &review,
+                    created + REVIEW_EXPIRY_MAX_MS,
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "an expired proposal cannot anchor a review hold"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
+    assert_eq!(
+        fixture.retain_until(&evidence),
+        None,
+        "a refused transfer moves no retention"
+    );
 }
 
 #[test]
@@ -913,4 +1053,600 @@ fn run_buffers_load_each_artifact_once_and_refuse_at_the_exact_boundary() {
         RunBufferRefusal::CapacityExhausted
     );
     assert_eq!(fixture.store.verified_object_reads_for_test(), reads);
+}
+
+#[test]
+fn review_transfer_requires_a_sealed_proposal_row_covered_by_the_review_window() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let evidence = fixture.ingest("held", b"held bytes", None);
+
+    // Persisted but not sealed: `read_review_input` would report `Unsealed`, so no review hold may cover it.
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    let identity = provisional_result_identity("job-1", 1);
+    fixture
+        .store
+        .stage_review_input(ReviewStagingSpec {
+            extraction_run_id: identity.extraction_run_id.clone(),
+            candidate_id: identity.candidate_id.clone(),
+            producer: "curator".to_string(),
+            binding: fixture.review_binding("job-1", 1),
+            payload: fixture.proposal_payload(),
+            recorded_at: now - 1_000,
+            queue_deadline_at: now + DAY_MS - 1_000,
+        })
+        .unwrap();
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(
+                    &hold.hold_id,
+                    &execution,
+                    &review,
+                    now + REVIEW_EXPIRY_MAX_MS - 1_000
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "an unsealed proposal cannot anchor a review hold"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
+
+    // A review expiry before the proposal's queue deadline would leave the proposal readable after its hold lapsed.
+    let execution = fixture.binding("job-2", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    let created = fixture.stage_proposal("job-2", 1, now - 1_000, now + DAY_MS - 1_000);
+    let identity = provisional_result_identity("job-2", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(&hold.hold_id, &execution, &review, now + HOUR_MS)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "the review window must reach the proposal's queue deadline"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
+    // Exactly at the deadline is covered.
+    let review_hold = fixture
+        .store
+        .transfer_execution_to_review(&hold.hold_id, &execution, &review, now + DAY_MS - 1_000)
+        .unwrap();
+    assert_eq!(review_hold.expires_at, now + DAY_MS - 1_000);
+    assert!(created <= now);
+
+    // A completed row that merely carries the derived candidate id, staged through the public path under another run and kind, is not the proposal.
+    let execution = fixture.binding("job-3", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    let identity = provisional_result_identity("job-3", 1);
+    fixture
+        .store
+        .stage_candidate(kernel::StagingCandidateSpec {
+            extraction_run_id: "generic-run".to_string(),
+            candidate_id: identity.candidate_id.clone(),
+            extractor: "extractor".to_string(),
+            source_kind: "repository".to_string(),
+            source_id: "src/generic".to_string(),
+            source_revision: 1,
+            candidate_kind: "generic".to_string(),
+            payload: "{}".to_string(),
+            provenance: None,
+            recorded_at: now - 1_000,
+            lease_expires_at: now + HOUR_MS - 1_000,
+        })
+        .unwrap();
+    fixture
+        .store
+        .finish_staging_run("generic-run", StagingTerminalState::Completed, now)
+        .unwrap();
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(
+                    &hold.hold_id,
+                    &execution,
+                    &review,
+                    now + REVIEW_EXPIRY_MAX_MS - 1_000
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "only the derived run's review proposal row anchors a review hold"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
+}
+
+#[test]
+fn acquisition_reuses_the_live_hold_of_a_binding() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let first = fixture.ingest("a", b"alpha bytes", None);
+    let second = fixture.ingest("b", b"beta bytes!!", None);
+    let binding = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, std::slice::from_ref(&first), now + HOUR_MS)
+        .unwrap();
+    let pins_before = fixture.pins();
+    // A retry whose first response was lost lands on the same hold: same id, same expiry, no second pin.
+    let retried = fixture
+        .store
+        .acquire_execution_hold(&binding, &[first.clone(), second], now + 2 * HOUR_MS)
+        .unwrap();
+    assert_eq!(retried.hold_id, hold.hold_id);
+    assert_eq!(
+        retried.expires_at, hold.expires_at,
+        "the expiry never moves"
+    );
+    assert_eq!(retried.references, 2);
+    assert_eq!(fixture.pins(), pins_before);
+    // Once released, the binding may hold again under a new pin.
+    fixture
+        .store
+        .release_execution_hold(&hold.hold_id, &binding)
+        .unwrap();
+    let fresh = fixture
+        .store
+        .acquire_execution_hold(&binding, &[first], now + HOUR_MS)
+        .unwrap();
+    assert_ne!(fresh.hold_id, hold.hold_id);
+    assert_eq!(fixture.pins(), pins_before + 1);
+}
+
+#[test]
+fn purged_bytes_stop_charging_the_backing_quota() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let purged_payload = b"purged evidence bytes";
+    let purged = fixture.ingest("purge", purged_payload, None);
+    let kept = fixture.ingest("kept", &[b'k'; 10], None);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&fixture.binding("job-1", 1), &[purged, kept], now + HOUR_MS)
+        .unwrap();
+    assert_eq!(hold.backing_bytes, 21 + 10);
+    fixture
+        .store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge", purged_payload),
+            identity: ArtifactDeletionIdentity::Digest(format!(
+                "{:x}",
+                Sha256::digest(purged_payload)
+            )),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator".to_string()),
+            target_locator: Some("incident://purge".to_string()),
+            reason: Some("retired".to_string()),
+            deleted_at: now,
+        })
+        .unwrap();
+    // The degraded hold still charges its surviving 10 bytes; the purged 21 are gone from the host.
+    let next = fixture.ingest("next", &[b'n'; 10], None);
+    let admitted = fixture
+        .store
+        .acquire_execution_hold_with_quota_for_test(
+            &fixture.binding("job-2", 1),
+            std::slice::from_ref(&next),
+            now + HOUR_MS,
+            20,
+            20,
+        )
+        .unwrap();
+    assert_eq!(admitted.backing_bytes, 10);
+}
+
+/// Holds an `IMMEDIATE` transaction on the store file for `hold_ms` while `work` runs, so the store's next write waits on the busy handler.
+fn with_writer_blocked<T>(root: &std::path::Path, hold_ms: u64, work: impl FnOnce() -> T) -> T {
+    let path = root.join("kernel.sqlite");
+    let (ready, wait) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        ready.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(hold_ms));
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    wait.recv().unwrap();
+    let result = work();
+    holder.join().unwrap();
+    result
+}
+
+#[test]
+fn deadlines_are_judged_by_the_clock_inside_the_write_transaction() {
+    let fixture = Fixture::open();
+    let evidence = fixture.ingest("held", b"held bytes", None);
+
+    // Acquisition: the expiry passes while the call waits for the writer.
+    let binding = fixture.binding("job-1", 1);
+    let pins_before = fixture.pins();
+    let result = with_writer_blocked(fixture.root(), 400, || {
+        fixture.store.acquire_execution_hold(
+            &binding,
+            std::slice::from_ref(&evidence),
+            now_ms() + 100,
+        )
+    });
+    assert_eq!(
+        refusal(result.unwrap_err()),
+        CuratorHoldRefusal::InvalidRequest,
+        "an expiry that has passed by the time the writer is held is refused"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+
+    // Transfer: the review expiry passes while the call waits for the writer.
+    let execution = fixture.binding("job-2", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(
+            &execution,
+            std::slice::from_ref(&evidence),
+            now_ms() + HOUR_MS,
+        )
+        .unwrap();
+    let now = now_ms();
+    fixture.stage_proposal("job-2", 1, now - 1_000, now + 150);
+    let identity = provisional_result_identity("job-2", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let pins_before = fixture.pins();
+    let result = with_writer_blocked(fixture.root(), 400, || {
+        fixture
+            .store
+            .transfer_execution_to_review(&hold.hold_id, &execution, &review, now + 150)
+    });
+    assert_eq!(
+        refusal(result.unwrap_err()),
+        CuratorHoldRefusal::InvalidRequest,
+        "a review window that has closed by the time the writer is held is refused"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    assert!(
+        fixture.pin(&hold.hold_id).3.is_none(),
+        "the execution hold stays live"
+    );
+}
+
+#[test]
+fn a_transferred_generation_acquires_no_further_execution_hold() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let evidence = fixture.ingest("held", b"held bytes", None);
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    let created = fixture.stage_proposal("job-1", 1, now - 1_000, now + DAY_MS - 1_000);
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let review_hold = fixture
+        .store
+        .transfer_execution_to_review(
+            &hold.hold_id,
+            &execution,
+            &review,
+            created + REVIEW_EXPIRY_MAX_MS,
+        )
+        .unwrap();
+    // A late acquisition retry for the same generation cannot open a second, replacement execution hold.
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "the generation's bytes are already under its review hold"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    // The successor generation is unaffected.
+    fixture
+        .store
+        .acquire_execution_hold(
+            &fixture.binding("job-1", 2),
+            std::slice::from_ref(&evidence),
+            now + HOUR_MS,
+        )
+        .unwrap();
+    fixture
+        .store
+        .release_review_hold(&review_hold.hold_id, &review)
+        .unwrap();
+    // The generation's proposal is terminal; even after its review hold is gone, no execution hold reopens it.
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(&execution, std::slice::from_ref(&evidence), now + HOUR_MS)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest,
+        "a transferred generation never acquires again"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+}
+
+#[test]
+fn review_transfer_requires_the_hold_to_cover_every_disclosed_input() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let held = fixture.ingest("held", b"held bytes", None);
+    let unheld = fixture.ingest("unheld", b"never held", None);
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&held), now + HOUR_MS)
+        .unwrap();
+    let created = fixture.stage_proposal_with(
+        "job-1",
+        1,
+        now - 1_000,
+        now + DAY_MS - 1_000,
+        fixture.proposal_payload_disclosing(&[held.clone(), unheld.clone()]),
+    );
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let pins_before = fixture.pins();
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .transfer_execution_to_review(
+                    &hold.hold_id,
+                    &execution,
+                    &review,
+                    created + REVIEW_EXPIRY_MAX_MS,
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::NotCovered,
+        "a disclosed input outside the execution hold refuses the transfer"
+    );
+    assert_eq!(fixture.pins(), pins_before);
+    assert!(fixture.pin(&hold.hold_id).3.is_none());
+    // Extending the hold over the missing input makes the same transfer admissible.
+    fixture
+        .store
+        .extend_execution_hold(&hold.hold_id, &execution, std::slice::from_ref(&unheld))
+        .unwrap();
+    let review_hold = fixture
+        .store
+        .transfer_execution_to_review(
+            &hold.hold_id,
+            &execution,
+            &review,
+            created + REVIEW_EXPIRY_MAX_MS,
+        )
+        .unwrap();
+    assert_eq!(review_hold.references, 2);
+}
+
+#[test]
+fn acquisition_retry_recovers_the_hold_after_a_covered_row_is_invalidated() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let first = fixture.ingest("a", b"alpha bytes", None);
+    let second = fixture.ingest("b", b"beta bytes!!", None);
+    let binding = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, &[first.clone(), second.clone()], now + HOUR_MS)
+        .unwrap();
+    fixture
+        .store
+        .commit(intent("retire", b"retire"), |envelope| {
+            envelope.retire_evidence("evidence-object-a")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    // The identical retry recovers the committed hold although one of its rows is no longer live.
+    let retried = fixture
+        .store
+        .acquire_execution_hold(&binding, &[first, second], now + HOUR_MS)
+        .unwrap();
+    assert_eq!(retried.hold_id, hold.hold_id);
+    assert_eq!(retried.references, 2);
+    // A retry that adds an unavailable id is still refused.
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(&binding, &["evidence-missing".to_string()], now + HOUR_MS)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::UnavailableEvidence
+    );
+}
+
+#[test]
+fn a_transfer_retry_recovers_a_purge_degraded_review_hold() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let payload = b"purged during review";
+    let purged = fixture.ingest("purge", payload, None);
+    let execution = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&execution, std::slice::from_ref(&purged), now + HOUR_MS)
+        .unwrap();
+    let created = fixture.stage_proposal("job-1", 1, now - 1_000, now + DAY_MS - 1_000);
+    let identity = provisional_result_identity("job-1", 1);
+    let review = fixture.binding(&identity.candidate_id, 1);
+    let review_expires_at = created + REVIEW_EXPIRY_MAX_MS;
+    let review_hold = fixture
+        .store
+        .transfer_execution_to_review(&hold.hold_id, &execution, &review, review_expires_at)
+        .unwrap();
+    fixture
+        .store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge", payload),
+            identity: ArtifactDeletionIdentity::Digest(format!("{:x}", Sha256::digest(payload))),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator".to_string()),
+            target_locator: Some("incident://purge".to_string()),
+            reason: Some("retired".to_string()),
+            deleted_at: now,
+        })
+        .unwrap();
+    // The retry still learns the committed hold's id, so the degraded pin can be released rather than left to expire.
+    let retried = fixture
+        .store
+        .transfer_execution_to_review(&hold.hold_id, &execution, &review, review_expires_at)
+        .unwrap();
+    assert_eq!(retried.hold_id, review_hold.hold_id);
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .validate_held_evidence(
+                    &retried.hold_id,
+                    CuratorHoldKind::Review,
+                    &review,
+                    &[purged],
+                    now
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::PurgeDegraded
+    );
+    fixture
+        .store
+        .release_review_hold(&retried.hold_id, &review)
+        .unwrap();
+}
+
+#[test]
+fn acquisition_bounds_its_input_before_scanning_covered_ids() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let evidence = fixture.ingest("a", b"alpha bytes", None);
+    let binding = fixture.binding("job-1", 1);
+    fixture
+        .store
+        .acquire_execution_hold(&binding, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    let repeated = vec![evidence; MAX_CURATOR_HOLD_REFERENCES + 1];
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(&binding, &repeated, now + HOUR_MS)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::TooManyReferences,
+        "an over-long retry is refused before any per-id work"
+    );
+}
+
+#[test]
+fn a_committed_capture_replays_after_its_retention_deadline() {
+    let fixture = Fixture::open();
+    let request = |retain_until: i64| ArtifactIngestRequest {
+        intent: intent("capture-replay", b"capture"),
+        payload: b"capture".to_vec(),
+        evidence_id: "evidence-capture-replay".to_string(),
+        object_id: "evidence-object-capture-replay".to_string(),
+        object_kind: "evidence".to_string(),
+        domain_id: "domain".to_string(),
+        source_kind: "local_file".to_string(),
+        source_id: "src/file".to_string(),
+        source_revision: 1,
+        media_type: "text/plain".to_string(),
+        retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+        retain_until: Some(retain_until),
+        asserted_sensitivity: Sensitivity::Sensitive,
+        provider_egress: ProviderEgress::LocalOnly,
+        provenance: None,
+    };
+    let retain_until = now_ms() + 200;
+    let first = fixture
+        .store
+        .ingest_artifact(request(retain_until))
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // The identical intent replays its committed receipt even though the reference is now dead; only a new reference needs a live deadline.
+    let replayed = fixture
+        .store
+        .ingest_artifact(request(retain_until))
+        .unwrap();
+    assert_eq!(replayed, first);
+}
+
+#[test]
+fn a_degraded_hold_is_recovered_but_gains_no_references() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let payload = b"purged before the retry";
+    let purged = fixture.ingest("purge", payload, None);
+    let extra = fixture.ingest("extra", b"extra bytes", None);
+    let binding = fixture.binding("job-1", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, std::slice::from_ref(&purged), now + HOUR_MS)
+        .unwrap();
+    fixture
+        .store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge", payload),
+            identity: ArtifactDeletionIdentity::Digest(format!("{:x}", Sha256::digest(payload))),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator".to_string()),
+            target_locator: Some("incident://purge".to_string()),
+            reason: Some("retired".to_string()),
+            deleted_at: now,
+        })
+        .unwrap();
+    // The retry learns the degraded hold's id but attaches nothing new to a pin that can no longer protect anything.
+    let retried = fixture
+        .store
+        .acquire_execution_hold(&binding, &[purged, extra.clone()], now + HOUR_MS)
+        .unwrap();
+    assert_eq!(retried.hold_id, hold.hold_id);
+    assert_eq!(retried.references, 1);
+    assert_eq!(fixture.pin(&hold.hold_id).4, 1);
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .validate_held_evidence(
+                    &retried.hold_id,
+                    CuratorHoldKind::Execution,
+                    &binding,
+                    &[extra],
+                    now
+                )
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::PurgeDegraded
+    );
+    fixture
+        .store
+        .release_execution_hold(&retried.hold_id, &binding)
+        .unwrap();
 }

@@ -19,8 +19,8 @@ use daemon::git_sources::{GitReadBounds, RepositoryBinding, read_selection};
 use daemon::harness_sources::SourcePublisher;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    CommitIntent, CuratorHoldBinding, Dimension, DomainSpec, KernelStore, ProjectScope,
-    ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity, SourceDescriptorDetail,
+    CommitIntent, CuratorHoldBinding, Dimension, DomainSpec, KernelStore, ProviderEgress,
+    ScopeSpec, ScopeTermSpec, Sensitivity, SourceDescriptorDetail,
 };
 use memory_store::curator_jobs::{
     CausalInputs, CuratorJobInput, EvidenceAvailability, ProducerBinding, ReserveOutcome,
@@ -364,13 +364,13 @@ impl Fixture {
             .unwrap();
         let mut broker = EvidenceBroker::new(
             RunBinding {
-                project: ProjectScope::new(PROJECT).unwrap(),
                 hold: binding,
                 hold_id: hold.hold_id,
                 destination,
             },
             QuestionTemplate::ExtractedFacts,
-        );
+        )
+        .unwrap();
         let commit = broker.aliases.issue(self.source_expectation());
         let commit = broker
             .read(&self.store, commit.as_str(), None, self.now + 2)
@@ -462,7 +462,7 @@ async fn the_captured_request_is_the_tagged_prepared_body_the_marker_binds() {
     assert_eq!(prepared.tags().len(), 2);
     assert_eq!(offset, "Extract facts.".len() + COMMIT_MESSAGE.len());
     assert!(prepared.policy_union_canonical().contains("native_source"));
-    assert_eq!(prepared.hold_id(), broker.hold_id());
+    assert_eq!(prepared.broker(), broker.id());
 
     let mut peer = Peer::start().await;
     let server = peer.serve(no_wait(), |_| answer(MODEL));
@@ -660,7 +660,7 @@ async fn a_buffer_or_body_judged_under_another_broker_is_refused_before_any_conn
     let fixture = Fixture::open();
     let (remote, _) = fixture.broker();
     let (mut local, local_turn) = fixture.broker_for(kernel::ArtifactDestination::Local);
-    // Both brokers issued `ref-1` for the same commit, so only the run stamp can tell whose judgement admitted the bytes.
+    // Both brokers share the job's one live hold and both issued `ref-1` for the same commit, so only the broker stamp can tell whose judgement admitted the bytes.
     let alias = local_turn[0].tag().alias.clone().unwrap();
     assert!(remote.aliases.resolve(alias.as_str()).is_ok());
     let system = remote.render_host_text("Extract facts.").unwrap();
@@ -675,7 +675,9 @@ async fn a_buffer_or_body_judged_under_another_broker_is_refused_before_any_conn
         .unwrap()
         .buffer;
     let local_prepared = fixture.prepared(&local, vec![reread]);
-    assert_eq!(local_prepared.hold_id(), local.hold_id());
+    assert_eq!(local_prepared.broker(), local.id());
+    assert_ne!(local.id(), remote.id());
+    assert_eq!(local.hold_id(), remote.hold_id(), "one binding, one hold");
     let peer = Peer::start().await;
     let refusal = attempt(
         &fixture,
@@ -701,7 +703,7 @@ async fn a_post_commit_lapse_stays_charged_and_sends_nothing() {
     // The clock jumps past the attempt deadline between the commit and the recheck: the post-commit barrier flips it while the ledger still owns its connection.
     let lapsed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flip = Arc::clone(&lapsed);
-    storage::after_commit_for_test(move || flip.store(true, Ordering::SeqCst));
+    storage::after_commit_for_test(move |_| flip.store(true, Ordering::SeqCst));
     let base = fixture.now + 3;
     let clock = move || {
         if lapsed.load(Ordering::SeqCst) {
@@ -754,7 +756,7 @@ async fn a_lapsed_attempt_whose_terminal_cannot_be_recorded_reports_it() {
     let flip = Arc::clone(&lapsed);
     let ledger_path = fixture.ledger_dir.path().join("memory.sqlite");
     let identity = fixture.identity.clone();
-    storage::after_commit_for_test(move || {
+    storage::after_commit_for_test(move |_| {
         flip.store(true, Ordering::SeqCst);
         rusqlite::Connection::open(ledger_path)
             .unwrap()
@@ -786,11 +788,12 @@ async fn a_lapsed_attempt_whose_terminal_cannot_be_recorded_reports_it() {
     )
     .await
     .unwrap_err();
+    // The successor's takeover rebinds the receipt's claim, so the recheck sees a fence before it asks whether the old claim is live.
     assert_eq!(
         refusal,
         DisclosureRefusal::ChargedNotDispatched {
             attempt_index: 0,
-            reason: CuratorLedgerRefusal::ClaimInvalid,
+            reason: CuratorLedgerRefusal::Fenced,
             terminal_recorded: false,
         }
     );
@@ -988,7 +991,7 @@ async fn the_network_wait_begins_only_after_both_owners_release() {
     let (probe_go_tx, probe_go_rx) = std::sync::mpsc::channel::<()>();
     let (probe_ready_tx, probe_ready_rx) = std::sync::mpsc::channel::<()>();
     let kernel_in_stall = Arc::clone(&fixture.store);
-    storage::after_commit_for_test(move || {
+    storage::after_commit_for_test(move |_| {
         probe_go_tx.send(()).unwrap();
         probe_ready_rx.recv().unwrap();
         let read_started = StdInstant::now();

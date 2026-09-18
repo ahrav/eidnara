@@ -6,17 +6,21 @@ use context_core::redaction::RedactionErrorKind;
 use memory_store::curator_jobs::{
     CURATOR_JOB_ALLOWANCE_BYTES, CURATOR_QUEUE_LIFETIME_MS, CURATOR_RECEIPT_CHARGE_BYTES,
     CausalInputs, CuratorJobError, CuratorJobInput, CuratorJobOutcome, CuratorJobRefusal,
-    CuratorJobState, EvidenceAvailability, FROZEN_SELECTION_ALLOWANCE_BYTES, FrozenSelectionPage,
-    FrozenSelectionState, MAX_CURATOR_METADATA_BYTES_PER_PROJECT, MAX_FROZEN_SELECTIONS_PER_HOST,
-    MAX_PENDING_CURATOR_JOBS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_PROJECT,
-    MAX_SELECTION_REFERENCES, ProducerBinding, ReserveOutcome, ReviewTarget,
-    activate_curator_job_in_tx, reserve_curator_job_in_tx,
+    CuratorJobState, EvidenceAvailability, FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+    FROZEN_SELECTION_ALLOWANCE_BYTES, FrozenSelectionPage, FrozenSelectionState,
+    MAX_CAUSAL_POLICY_VERSIONS, MAX_CAUSAL_SIGNALS, MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+    MAX_FROZEN_PAGE_BYTES, MAX_FROZEN_SELECTIONS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_HOST,
+    MAX_PENDING_CURATOR_JOBS_PER_PROJECT, MAX_REQUIRED_EVIDENCE, MAX_SELECTION_REFERENCES,
+    ProducerBinding, ReserveOutcome, ReviewTarget, activate_curator_job_in_tx,
+    complete_frozen_selection_in_tx, freeze_selection_in_tx, reserve_curator_job_in_tx,
 };
 use memory_store::{MemoryStore, MemoryStoreError};
 use storage::StorageDescriptor;
 
 const NOW: i64 = 1_700_000_000_000;
 const AWS_KEY: &str = "AKIAQ7RSTUVWXYZ23456";
+/// A keyed-JSON credential the scanner recognizes only in its raw form; serializing it inside another JSON document escapes the quotes it keys on.
+const KEYED_SECRET: &str = r#"{"clientSecret":"hunter-two"}"#;
 
 fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
     MemoryStore::test_descriptor(dir, "eidnara-curator-jobs-test")
@@ -83,6 +87,17 @@ fn incarnation_survives_reopen_and_changes_on_replacement() {
     assert_eq!(first.len(), 32);
     let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     assert_eq!(store.curator_store_incarnation().unwrap(), first);
+    // REPLACE runs as delete-then-insert, and the connection does not enable recursive triggers, so the delete guard alone would not fire.
+    let replaced: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO curator_store_identity (id, database_incarnation_id, created_at_ms)
+             VALUES (0, ?1, 1)",
+            ["ab".repeat(16)],
+        )
+        .map(drop)
+    });
+    assert!(replaced.is_err(), "the incarnation row cannot be replaced");
+    assert_eq!(store.curator_store_incarnation().unwrap(), first);
     drop(store);
     std::fs::remove_file(dir.path().join("memory.sqlite")).unwrap();
     let replaced = MemoryStore::open(&descriptor(dir.path())).unwrap();
@@ -120,7 +135,7 @@ fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job(
         .finish_curator_job(
             "proj",
             &job.causal_identity,
-            CuratorJobOutcome::Abstained,
+            CuratorJobOutcome::Failed,
             NOW + 10,
         )
         .unwrap();
@@ -131,7 +146,7 @@ fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job(
         ReserveOutcome::Existing(existing) => {
             assert_eq!(
                 existing.state,
-                CuratorJobState::Terminal(CuratorJobOutcome::Abstained)
+                CuratorJobState::Terminal(CuratorJobOutcome::Failed)
             );
         }
         other => panic!("expected the terminal row, got {other:?}"),
@@ -187,7 +202,7 @@ fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job(
             .unwrap()
             .unwrap()
             .state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Abstained)
+        CuratorJobState::Terminal(CuratorJobOutcome::Failed)
     );
     // Evidence that becomes available at the unchanged target is a causal change; conflicting availability for one id is a producer error.
     let mut flipped = inputs("cand-1");
@@ -395,6 +410,23 @@ fn activation_requires_the_reservation_and_takes_no_second_slot() {
         CuratorJobRefusal::InvalidRequest,
         "the input subject must be the reserved target"
     );
+    let mut other_question = input("cand-1");
+    other_question.question_template = "other_question".to_string();
+    assert_eq!(
+        refusal(
+            store
+                .activate_curator_job(
+                    "proj",
+                    &job.causal_identity,
+                    &producer("f1"),
+                    &other_question,
+                    NOW
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::InvalidRequest,
+        "the input question template must be the reserved template"
+    );
     let mut too_many = input("cand-1");
     too_many.starting_references = (0..9).map(|index| format!("mem-{index}")).collect();
     assert_eq!(
@@ -439,7 +471,17 @@ fn activation_requires_the_reservation_and_takes_no_second_slot() {
         ),
         CuratorJobRefusal::NotReserved
     );
-    assert_eq!(store.ready_curator_jobs("proj", 10).unwrap(), vec![ready]);
+    assert_eq!(
+        store.ready_curator_jobs("proj", 10, NOW + 2).unwrap(),
+        vec![ready]
+    );
+    assert_eq!(
+        store
+            .ready_curator_jobs("proj", 10, job.queue_deadline_ms)
+            .unwrap(),
+        vec![],
+        "a ready row past its deadline is not dispatched before the sweep expires it"
+    );
 }
 
 #[test]
@@ -493,7 +535,7 @@ fn activation_composed_with_a_failing_producer_transaction_commits_nothing() {
         })
         .unwrap();
     assert!(matches!(committed.state, CuratorJobState::Ready(_)));
-    assert_eq!(store.ready_curator_jobs("proj", 10).unwrap().len(), 1);
+    assert_eq!(store.ready_curator_jobs("proj", 10, NOW).unwrap().len(), 1);
 }
 
 #[test]
@@ -554,7 +596,7 @@ fn capacity_counts_reserved_and_ready_and_refusal_writes_nothing() {
     // A terminal outcome frees the slot but keeps its receipt charge.
     let first = inputs("cand-0").causal_identity().unwrap();
     store
-        .finish_curator_job("proj", &first, CuratorJobOutcome::Completed, NOW + 1)
+        .finish_curator_job("proj", &first, CuratorJobOutcome::Failed, NOW + 1)
         .unwrap();
     let after = store.curator_headroom("proj").unwrap();
     assert_eq!(after.pending_jobs, MAX_PENDING_CURATOR_JOBS_PER_PROJECT - 1);
@@ -590,6 +632,12 @@ fn capacity_counts_reserved_and_ready_and_refusal_writes_nothing() {
                 .unwrap_err()
         ),
         CuratorJobRefusal::HostCapacity
+    );
+    let host_full = store.curator_headroom("proj-host").unwrap();
+    assert_eq!(host_full.pending_jobs, 0);
+    assert_eq!(
+        host_full.host_pending_jobs, MAX_PENDING_CURATOR_JOBS_PER_HOST,
+        "headroom reports the host bound that refuses an otherwise empty project"
     );
 }
 
@@ -655,6 +703,28 @@ fn expiry_records_terminal_outcomes_without_resurrection_and_receipts_survive_re
             .state,
         CuratorJobState::Reserved
     );
+    // A finish at or after the deadline is refused the same way, so the permanent outcome does not depend on whether the sweep ran first.
+    assert_eq!(
+        refusal(
+            store
+                .finish_curator_job(
+                    "proj",
+                    &ready_job.causal_identity,
+                    CuratorJobOutcome::Failed,
+                    deadline
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::Expired
+    );
+    assert!(matches!(
+        store
+            .lookup_curator_job("proj", &ready_job.causal_identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        CuratorJobState::Ready(_)
+    ));
     assert_eq!(store.expire_curator_work(deadline).unwrap(), (2, 1));
     let ready_input: Option<String> = store
         .with_conn_for_test(|conn| {
@@ -694,10 +764,19 @@ fn expiry_records_terminal_outcomes_without_resurrection_and_receipts_survive_re
         .unwrap();
     assert_eq!(selection.state, FrozenSelectionState::Expired);
     assert_eq!(
-        selection.page.next_cursor,
-        Some("cursor-2".to_string()),
-        "expiry does not advance the cursor"
+        selection.page, None,
+        "an expired page drops its references and cursor; the slot never advanced"
     );
+    let expired_page: Option<String> = store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT page_json FROM curator_frozen_selections WHERE slot_id = 'slot-1'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(expired_page, None, "a terminal page receipt stays compact");
     // Late activation records nothing and does not resurrect the row.
     assert_eq!(
         refusal(
@@ -720,8 +799,10 @@ fn expiry_records_terminal_outcomes_without_resurrection_and_receipts_survive_re
     );
     assert_eq!(
         after.project_metadata_bytes,
-        3 * CURATOR_RECEIPT_CHARGE_BYTES + CURATOR_JOB_ALLOWANCE_BYTES,
-        "every admitted job keeps its permanent receipt charge"
+        3 * CURATOR_RECEIPT_CHARGE_BYTES
+            + FROZEN_PAGE_RECEIPT_CHARGE_BYTES
+            + CURATOR_JOB_ALLOWANCE_BYTES,
+        "every admitted job and every frozen page keeps its permanent receipt charge"
     );
     drop(store);
     let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
@@ -754,12 +835,46 @@ fn frozen_pages_are_bounded_retained_under_deferral_and_enqueued_once() {
         frozen.selection_deadline_ms,
         NOW + CURATOR_QUEUE_LIFETIME_MS
     );
+    let scan_batches = || {
+        store
+            .with_conn_for_test(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM scan_batches", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .unwrap()
+    };
+    let batches_after_freeze = scan_batches();
     assert_eq!(
         store
             .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW + 5)
             .unwrap(),
         frozen,
         "the same attempt replays its page"
+    );
+    assert_eq!(
+        scan_batches(),
+        batches_after_freeze,
+        "a replayed page records no new scan audit"
+    );
+    let mut moved_cursor = page.clone();
+    moved_cursor.next_cursor = Some("cursor-10".to_string());
+    assert_eq!(
+        refusal(
+            store
+                .freeze_selection("proj", "slot-1", "attempt-1", &moved_cursor, NOW + 6)
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::InvalidRequest,
+        "an attempt identity freezes exactly one page; a different page under it is refused"
+    );
+    assert_eq!(
+        store
+            .lookup_frozen_selection("proj", "slot-1", "attempt-1")
+            .unwrap()
+            .unwrap(),
+        frozen,
+        "a refused replay changes nothing"
     );
     let mut nine = page.clone();
     nine.references.push(inputs("cand-9"));
@@ -789,17 +904,42 @@ fn frozen_pages_are_bounded_retained_under_deferral_and_enqueued_once() {
             .state,
         FrozenSelectionState::Frozen
     );
+    // An enqueue must commit with the slot's cursor advance, so only the composable primitive accepts it.
+    assert_eq!(
+        refusal(
+            store
+                .complete_frozen_selection(
+                    "proj",
+                    "slot-1",
+                    "attempt-1",
+                    FrozenSelectionState::Enqueued,
+                    NOW + 10
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::InvalidRequest,
+        "the standalone wrapper cannot enqueue: the cursor would commit without the slot"
+    );
     let enqueued = store
-        .complete_frozen_selection(
-            "proj",
-            "slot-1",
-            "attempt-1",
-            FrozenSelectionState::Enqueued,
-            NOW + 10,
-        )
+        .with_fenced_conn_for_test(|conn| {
+            complete_frozen_selection_in_tx(
+                conn,
+                "proj",
+                "slot-1",
+                "attempt-1",
+                FrozenSelectionState::Enqueued,
+                NOW + 10,
+            )
+        })
         .unwrap();
     assert_eq!(enqueued.state, FrozenSelectionState::Enqueued);
-    assert_eq!(enqueued.page.next_cursor, Some("cursor-9".to_string()));
+    assert_eq!(
+        enqueued
+            .page
+            .expect("an enqueue returns the page whose cursor the slot advances to")
+            .next_cursor,
+        Some("cursor-9".to_string())
+    );
     assert_eq!(
         refusal(
             store
@@ -861,6 +1001,24 @@ fn frozen_pages_are_bounded_retained_under_deferral_and_enqueued_once() {
         CuratorJobRefusal::HostSelectionCapacity
     );
     // An expired page cannot be enqueued late.
+    let late: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        complete_frozen_selection_in_tx(
+            conn,
+            "proj-1",
+            "slot-1",
+            "attempt-1",
+            FrozenSelectionState::Enqueued,
+            NOW + CURATOR_QUEUE_LIFETIME_MS,
+        )
+        .map(drop)
+    });
+    assert!(
+        late.unwrap_err()
+            .to_string()
+            .contains("deadline has passed"),
+        "a late enqueue is refused as expired"
+    );
+    // Any completion at or after the deadline is refused the same way, so the receipt does not depend on whether the sweep ran first.
     assert_eq!(
         refusal(
             store
@@ -868,12 +1026,26 @@ fn frozen_pages_are_bounded_retained_under_deferral_and_enqueued_once() {
                     "proj-1",
                     "slot-1",
                     "attempt-1",
-                    FrozenSelectionState::Enqueued,
+                    FrozenSelectionState::FailedSlot,
                     NOW + CURATOR_QUEUE_LIFETIME_MS
                 )
                 .unwrap_err()
         ),
         CuratorJobRefusal::Expired
+    );
+    let failed = store
+        .complete_frozen_selection(
+            "proj-2",
+            "slot-1",
+            "attempt-1",
+            FrozenSelectionState::FailedSlot,
+            NOW + 20,
+        )
+        .unwrap();
+    assert_eq!(failed.state, FrozenSelectionState::FailedSlot);
+    assert_eq!(
+        failed.page, None,
+        "only an enqueue returns the page; other terminal results are compact"
     );
 }
 
@@ -939,7 +1111,16 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
             .freeze_selection("proj", "slot-1", "attempt-1", &secret_page, NOW)
             .unwrap_err(),
     );
-    // The transaction-local primitive is guarded by the same rule through the table triggers.
+    let secret_cursor = FrozenSelectionPage {
+        references: vec![inputs("cand-4")],
+        next_cursor: Some(format!("cursor-{AWS_KEY}")),
+    };
+    secret_detected(
+        store
+            .freeze_selection("proj", "slot-1", "attempt-1", &secret_cursor, NOW)
+            .unwrap_err(),
+    );
+    // Table triggers reject caller-supplied secret text in every column that stores caller text.
     let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
         activate_curator_job_in_tx(
             conn,
@@ -955,6 +1136,76 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
         raw.is_err(),
         "a raw insert of secret text is refused by the trigger"
     );
+    let mut secret_producer = producer("f3");
+    secret_producer.producer = format!("history-{AWS_KEY}");
+    let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        reserve_curator_job_in_tx(conn, "proj", &secret_producer, &inputs("cand-5"), NOW).map(drop)
+    });
+    assert!(
+        raw.is_err(),
+        "a raw reservation whose producer carries a secret is refused by the trigger"
+    );
+    // A keyed-JSON credential inside a serialized column is escaped past the detector, so the primitives scan each raw string before encoding.
+    let mut keyed_input = input("cand-1");
+    keyed_input.starting_references = vec![KEYED_SECRET.to_string()];
+    let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        activate_curator_job_in_tx(
+            conn,
+            "proj",
+            &job.causal_identity,
+            &producer("f1"),
+            &keyed_input,
+            NOW,
+        )
+        .map(drop)
+    });
+    assert!(
+        raw.is_err(),
+        "a raw activation whose reference is a keyed-JSON credential is refused"
+    );
+    let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        reserve_curator_job_in_tx(conn, "proj", &producer("f5"), &inputs(KEYED_SECRET), NOW)
+            .map(drop)
+    });
+    assert!(
+        raw.is_err(),
+        "a raw reservation whose candidate id is a keyed-JSON credential is refused"
+    );
+    let keyed_page = FrozenSelectionPage {
+        references: vec![inputs("cand-7")],
+        next_cursor: Some(KEYED_SECRET.to_string()),
+    };
+    let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        freeze_selection_in_tx(conn, "proj", "slot-7", "attempt-1", &keyed_page, NOW).map(drop)
+    });
+    assert!(
+        raw.is_err(),
+        "a raw freeze whose cursor is a keyed-JSON credential is refused"
+    );
+    // Fingerprinted causal fields never reach a column, so the primitive scans them itself.
+    let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        reserve_curator_job_in_tx(conn, "proj", &producer("f4"), &secret_signal, NOW).map(drop)
+    });
+    assert!(
+        raw.is_err(),
+        "a raw reservation whose signal carries a secret is refused before it is hashed"
+    );
+    let clean_page = FrozenSelectionPage {
+        references: vec![inputs("cand-6")],
+        next_cursor: None,
+    };
+    for (slot_id, attempt) in [
+        (format!("slot-{AWS_KEY}"), "attempt-1".to_string()),
+        ("slot-1".to_string(), format!("attempt-{AWS_KEY}")),
+    ] {
+        let raw: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+            freeze_selection_in_tx(conn, "proj", &slot_id, &attempt, &clean_page, NOW).map(drop)
+        });
+        assert!(
+            raw.is_err(),
+            "a raw freeze whose slot or attempt identity carries a secret is refused by the trigger"
+        );
+    }
     assert_eq!(
         store
             .lookup_curator_job("proj", &job.causal_identity)
@@ -967,15 +1218,278 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
         .with_conn_for_test(|conn| {
             let mut rows = Vec::new();
             let mut jobs = conn.prepare(
-                "SELECT project || firing_id || target_json || COALESCE(input_json, '') || causal_identity FROM curator_jobs",
+                "SELECT project || producer || firing_id || target_json || question_template || COALESCE(input_json, '') || causal_identity FROM curator_jobs",
             )?;
             rows.extend(jobs.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
-            let mut pages = conn.prepare("SELECT page_json FROM curator_frozen_selections")?;
+            let mut pages = conn.prepare(
+                "SELECT project || slot_id || selection_attempt || COALESCE(page_json, '') || COALESCE(next_cursor, '') FROM curator_frozen_selections",
+            )?;
             rows.extend(pages.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?);
             Ok(rows)
         })
         .unwrap();
     assert_eq!(stored.len(), 1, "only the clean reservation exists");
-    assert!(stored.iter().all(|text| !text.contains(AWS_KEY)));
+    assert!(
+        stored
+            .iter()
+            .all(|text| !text.contains(AWS_KEY) && !text.contains("hunter-two"))
+    );
     assert!(stored[0].contains("cand-1"));
+}
+
+/// One reference at every identity and list bound; eight of them exceed [`MAX_FROZEN_PAGE_BYTES`].
+fn maximal_inputs(index: usize) -> CausalInputs {
+    let identity = |prefix: &str, ordinal: usize| format!("{prefix}-{index}-{ordinal:03}");
+    CausalInputs {
+        target: ReviewTarget::Memory {
+            object_id: format!("{:0>256}", format!("object-{index}")),
+            source_revision: 7,
+        },
+        question_template: format!("{:0>256}", "question"),
+        signals: (0..MAX_CAUSAL_SIGNALS)
+            .map(|ordinal| format!("{:0>256}", identity("signal", ordinal)))
+            .collect(),
+        required_evidence: (0..MAX_REQUIRED_EVIDENCE)
+            .map(|ordinal| EvidenceAvailability {
+                evidence_id: format!("{:0>256}", identity("evidence", ordinal)),
+                available: ordinal % 2 == 0,
+            })
+            .collect(),
+        policy_versions: (0..MAX_CAUSAL_POLICY_VERSIONS)
+            .map(|ordinal| {
+                (
+                    format!("{:0>256}", identity("policy", ordinal)),
+                    format!("{:0>256}", identity("version", ordinal)),
+                )
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn frozen_page_bound_is_typed_and_admits_pages_the_schema_stores() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    // A single maximal reference is well over 8 KiB and under the page bound.
+    let one = FrozenSelectionPage {
+        references: vec![maximal_inputs(0)],
+        next_cursor: Some("c".repeat(512)),
+    };
+    let serialized = serde_json::to_string(&one).unwrap().len();
+    assert!(serialized > 8 * 1024 && serialized < MAX_FROZEN_PAGE_BYTES);
+    let frozen = store
+        .freeze_selection("proj", "slot-1", "attempt-1", &one, NOW)
+        .unwrap();
+    assert_eq!(frozen.state, FrozenSelectionState::Frozen);
+    let stored_len: i64 = store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT length(page_json) FROM curator_frozen_selections WHERE slot_id = 'slot-1'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert!(
+        usize::try_from(stored_len).unwrap() > 8 * 1024,
+        "the schema stores the page the module admitted"
+    );
+    // Eight maximal references exceed the bound and are refused with the typed refusal.
+    let eight = FrozenSelectionPage {
+        references: (0..MAX_SELECTION_REFERENCES).map(maximal_inputs).collect(),
+        next_cursor: None,
+    };
+    assert!(serde_json::to_string(&eight).unwrap().len() > MAX_FROZEN_PAGE_BYTES);
+    assert_eq!(
+        refusal(
+            store
+                .freeze_selection("proj-2", "slot-1", "attempt-1", &eight, NOW)
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::PageTooLarge
+    );
+    assert!(
+        store
+            .lookup_frozen_selection("proj-2", "slot-1", "attempt-1")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn terminal_pages_drop_their_references_and_keep_a_receipt_charge() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1")],
+        next_cursor: Some("cursor-3".to_string()),
+    };
+    store
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    assert_eq!(
+        store
+            .curator_headroom("proj")
+            .unwrap()
+            .project_metadata_bytes,
+        FROZEN_PAGE_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
+        "a frozen page holds its allowance and its permanent receipt"
+    );
+    let enqueued = store
+        .with_fenced_conn_for_test(|conn| {
+            complete_frozen_selection_in_tx(
+                conn,
+                "proj",
+                "slot-1",
+                "attempt-1",
+                FrozenSelectionState::Enqueued,
+                NOW + 1,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        enqueued
+            .page
+            .as_ref()
+            .and_then(|page| page.next_cursor.clone()),
+        Some("cursor-3".to_string()),
+        "the enqueue hands the slot the cursor it advances to"
+    );
+    let receipt = store
+        .lookup_frozen_selection("proj", "slot-1", "attempt-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.state, FrozenSelectionState::Enqueued);
+    assert_eq!(receipt.page, None, "a terminal page keeps no references");
+    let (page_json, cursor): (Option<String>, Option<String>) = store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT page_json, next_cursor FROM curator_frozen_selections WHERE slot_id = 'slot-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(page_json, None);
+    assert_eq!(cursor, None);
+    assert_eq!(
+        store
+            .curator_headroom("proj")
+            .unwrap()
+            .project_metadata_bytes,
+        FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+        "the allowance is released; the receipt charge stays for the incarnation"
+    );
+    // A failed slot also drops its page, and every attempt leaves one receipt behind.
+    store
+        .freeze_selection("proj", "slot-1", "attempt-2", &page, NOW + 2)
+        .unwrap();
+    store
+        .complete_frozen_selection(
+            "proj",
+            "slot-1",
+            "attempt-2",
+            FrozenSelectionState::FailedSlot,
+            NOW + 3,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .curator_headroom("proj")
+            .unwrap()
+            .project_metadata_bytes,
+        2 * FROZEN_PAGE_RECEIPT_CHARGE_BYTES
+    );
+    let retained: i64 = store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM curator_frozen_selections WHERE page_json IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(retained, 0, "no terminal page retains its references");
+}
+
+#[test]
+fn transaction_local_primitives_validate_the_project_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let too_long = "p".repeat(257);
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1")],
+        next_cursor: None,
+    };
+    for project in ["", too_long.as_str()] {
+        let reserve: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+            reserve_curator_job_in_tx(conn, project, &producer("f1"), &inputs("cand-1"), NOW)
+                .map(drop)
+        });
+        let message = reserve.unwrap_err().to_string();
+        assert!(
+            message.contains(&CuratorJobRefusal::InvalidRequest.to_string()),
+            "a raw reservation refuses an invalid project as a typed refusal, got {message}"
+        );
+        let freeze: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+            freeze_selection_in_tx(conn, project, "slot-1", "attempt-1", &page, NOW).map(drop)
+        });
+        let message = freeze.unwrap_err().to_string();
+        assert!(
+            message.contains(&CuratorJobRefusal::InvalidRequest.to_string()),
+            "a raw freeze refuses an invalid project as a typed refusal, got {message}"
+        );
+    }
+    let rows: (i64, i64) = store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM curator_jobs), (SELECT COUNT(*) FROM curator_frozen_selections)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(rows, (0, 0), "an invalid project writes nothing");
+}
+
+/// A frozen page's reference identities are scanned at freeze and the audit rows stay while the page holds its references; a terminal page drops them with the references, keeping only the slot and attempt identities the compact row retains.
+#[test]
+fn a_terminal_page_releases_the_scan_audit_of_its_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1"), inputs("cand-2")],
+        next_cursor: Some("cursor-1".to_string()),
+    };
+    store
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    let scans = |store: &MemoryStore| -> Vec<String> {
+        store
+            .with_conn_for_test(|conn| {
+                conn.prepare("SELECT DISTINCT field_id FROM scan_owner_copies ORDER BY field_id")?
+                    .query_map([], |row| row.get(0))?
+                    .collect()
+            })
+            .unwrap()
+    };
+    let frozen = scans(&store);
+    assert!(
+        frozen.iter().any(|field| field == "candidate_id"),
+        "{frozen:?}"
+    );
+    store
+        .complete_frozen_selection(
+            "proj",
+            "slot-1",
+            "attempt-1",
+            FrozenSelectionState::FailedSlot,
+            NOW + 1,
+        )
+        .unwrap();
+    assert_eq!(
+        scans(&store),
+        ["project", "selection_attempt", "slot_id"],
+        "only the identities the compact row still retains keep their audit"
+    );
 }

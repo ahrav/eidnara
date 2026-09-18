@@ -70,6 +70,10 @@ pub struct Peer {
     pub connections: Arc<AtomicUsize>,
     listener: Option<TcpListener>,
     acceptor: TlsAcceptor,
+    /// How long the peer holds the whole response after it has read the request, so a test can stand in for a provider that is still generating.
+    pub respond_after: Duration,
+    /// Splits the response at a byte offset and pauses between the two halves, so a test can stall a body mid-transfer.
+    pub stall: Option<(usize, Duration)>,
 }
 
 /// What the peer saw; every judgement is made by the test, not inside the peer task.
@@ -118,6 +122,8 @@ impl Peer {
             connections: Arc::new(AtomicUsize::new(0)),
             listener: Some(listener),
             acceptor: TlsAcceptor::from(Arc::new(config)),
+            respond_after: Duration::ZERO,
+            stall: None,
         }
     }
 
@@ -142,6 +148,8 @@ impl Peer {
         let listener = self.listener.take().unwrap();
         let acceptor = self.acceptor.clone();
         let connections = self.connections.clone();
+        let respond_after = self.respond_after;
+        let stall = self.stall;
         tokio::spawn(async move {
             let mut observed = Observed::default();
             let (tcp, _) = listener.accept().await.unwrap();
@@ -194,8 +202,20 @@ impl Peer {
             observed.after_handoff = observed
                 .after_handoff
                 .or(Some(received.load(Ordering::SeqCst)));
+            tokio::time::sleep(respond_after).await;
             // The client may refuse and hang up mid-write; that is its right and not the peer's failure.
-            let _ = tls.write_all(&respond(&observed)).await;
+            let response = respond(&observed);
+            match stall {
+                Some((split, pause)) if split < response.len() => {
+                    let _ = tls.write_all(&response[..split]).await;
+                    let _ = tls.flush().await;
+                    tokio::time::sleep(pause).await;
+                    let _ = tls.write_all(&response[split..]).await;
+                }
+                _ => {
+                    let _ = tls.write_all(&response).await;
+                }
+            }
             let _ = tls.shutdown().await;
             observed.reconnected = tokio::time::timeout(OBSERVATION_WINDOW, listener.accept())
                 .await

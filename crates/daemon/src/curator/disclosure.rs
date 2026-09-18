@@ -20,8 +20,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::broker::{
-    EvidenceBroker, OriginClass, ProvenanceTag, Refusal, RefusalCode, RenderedBuffer, check_render,
-    hold_refusal,
+    BrokerId, EvidenceBroker, OriginClass, ProvenanceTag, Refusal, RefusalCode, RenderedBuffer,
+    check_render, hold_refusal,
 };
 use super::model_request::{
     AssistantText, Message, MessagesRequest, RequestBody, Role, SendError, Sender,
@@ -48,7 +48,7 @@ pub struct DisclosureApproval {
 /// The assembled request bytes with the provenance of every prompt byte in them and the policy union they disclose. Built once by [`prepare_body`]; nothing mutates it afterwards, so the digest, the size, and the bytes handed over agree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedBody {
-    hold_id: String,
+    broker: BrokerId,
     model: String,
     tags: Vec<ProvenanceTag>,
     body: RequestBody,
@@ -58,8 +58,9 @@ pub struct PreparedBody {
 }
 
 impl PreparedBody {
-    pub fn hold_id(&self) -> &str {
-        &self.hold_id
+    /// The broker whose buffers this body was assembled from; only that broker's alias table names them.
+    pub fn broker(&self) -> BrokerId {
+        self.broker
     }
 
     pub fn model(&self) -> &str {
@@ -129,7 +130,7 @@ pub enum DisclosureRefusal {
         reason: CuratorLedgerRefusal,
         terminal_recorded: bool,
     },
-    /// The sender refused before or after the handoff; when `sent` is false no request byte left the host.
+    /// The sender refused before or after the handoff; when `sent` is false no request byte left the host by the sender's account. A refusal after the marker committed ends the attempt `Failed` whatever `sent` says: `NotDispatched` is the ledger's own proof and only its dispatch path writes it.
     #[error("send {error}")]
     Send {
         attempt_index: Option<u32>,
@@ -170,14 +171,14 @@ pub fn prepare_body(
     system: RenderedBuffer,
     turn: Vec<RenderedBuffer>,
 ) -> Result<PreparedBody, DisclosureRefusal> {
-    let hold_id = broker.binding().hold_id.clone();
+    let id = broker.id();
     let mut tags = Vec::with_capacity(turn.len() + 1);
     let mut prompt_end = 0usize;
     let mut system_text = Vec::new();
     let mut content = Vec::new();
     for (index, buffer) in std::iter::once(system).chain(turn).enumerate() {
-        // Aliases are broker-local, so a buffer from another hold could resolve to a different reference than the one that produced its bytes.
-        if buffer.hold_id != hold_id {
+        // Aliases are broker-local, so a buffer from another broker could resolve to a different reference than the one that produced its bytes.
+        if buffer.broker != id {
             return Err(DisclosureRefusal::BrokerMismatch);
         }
         let range: Range<usize> = prompt_end..prompt_end + buffer.bytes.len();
@@ -219,7 +220,7 @@ pub fn prepare_body(
         .encode()
         .map_err(|_| DisclosureRefusal::PolicyUnion)?;
     Ok(PreparedBody {
-        hold_id,
+        broker: id,
         model: request.model,
         body_digest: format!("{:x}", Sha256::digest(body.as_bytes())),
         tags,
@@ -237,7 +238,7 @@ impl Disclosure<'_> {
         cancel: &CancellationToken,
         deadline: Instant,
     ) -> Result<Disclosed, DisclosureRefusal> {
-        if prepared.hold_id != self.broker.binding().hold_id {
+        if prepared.broker != self.broker.id() {
             return Err(DisclosureRefusal::BrokerMismatch);
         }
         if self.broker.binding().destination != ArtifactDestination::Remote {
@@ -317,14 +318,17 @@ impl Disclosure<'_> {
                     terminal_recorded: finished,
                 });
             }
+            // The sender knows the connection never took the request, but `NotDispatched` is the ledger's proof of no disclosure and only the dispatch path may write it; the attempt is charged and ends `Failed`, and `sent: false` reports what the sender saw.
             DispatchOutcome::Handed {
                 attempt_index,
                 handoff: Err(error),
+                release,
                 ..
             } => {
+                self.released(attempt_index, release);
                 return Err(self.end(
                     attempt_index,
-                    CuratorAttemptTerminal::NotDispatched,
+                    CuratorAttemptTerminal::Failed,
                     DisclosureRefusal::Send {
                         attempt_index: Some(attempt_index),
                         error,
@@ -336,7 +340,11 @@ impl Disclosure<'_> {
                 attempt_index,
                 handoff: Ok(in_flight),
                 attempt_deadline_ms,
-            } => (attempt_index, in_flight, attempt_deadline_ms),
+                release,
+            } => {
+                self.released(attempt_index, release);
+                (attempt_index, in_flight, attempt_deadline_ms)
+            }
         };
         // The ledger bounded the attempt when it committed the marker; a response after that bound is not this attempt's.
         let remaining = u64::try_from(attempt_deadline_ms - (self.now_ms)()).unwrap_or(0);
@@ -351,11 +359,11 @@ impl Disclosure<'_> {
         };
         let text = match completed {
             Ok(text) => text,
-            // `NotReady` means the connection took the request back unwritten: the attempt was never dispatched.
+            // `NotReady` means the connection took the request back unwritten. The ledger still ends the attempt `Failed`, because no-disclosure proof is the dispatch path's alone; `sent: false` carries the sender's report.
             Err(SendError::NotReady) => {
                 return Err(self.end(
                     attempt_index,
-                    CuratorAttemptTerminal::NotDispatched,
+                    CuratorAttemptTerminal::Failed,
                     DisclosureRefusal::Send {
                         attempt_index: Some(attempt_index),
                         error: SendError::NotReady,
@@ -461,6 +469,17 @@ impl Disclosure<'_> {
             )
             .map(|_| ())
             .map_err(|error| DisclosureRefusal::Hold(hold_refusal(error)))
+    }
+
+    /// The ledger restored its read-only view after the handoff, or did not. A failure cannot recall the handoff and does not end the attempt, but this store may refuse the terminal later; it is logged here so a `TerminalNotRecorded` that follows has its cause on record.
+    fn released(&self, attempt_index: u32, release: Result<(), memory_store::MemoryStoreError>) {
+        if let Err(error) = release {
+            let hold = &self.broker.binding().hold;
+            eprintln!(
+                "daemon: curator disclosure ledger release failed for {}/{} attempt {attempt_index}: {error}",
+                hold.project_digest, hold.subject
+            );
+        }
     }
 
     /// Records a non-complete terminal and returns the refusal that caused it. A terminal the ledger refuses leaves the attempt unknown, which nothing redispatches; the cause still reaches the caller, so the ledger failure is logged here.
