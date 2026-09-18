@@ -762,6 +762,8 @@ corpus_case!(corpus_injected_instructions, 7);
 fn the_corpus_covers_every_relation_once() {
     assert_eq!(CASES.len(), 8);
     let mut relations: Vec<_> = CASES.iter().map(|case| case.relation).collect();
+    // `dedup` drops only adjacent repeats; the sort makes any repeat adjacent.
+    relations.sort_unstable_by_key(|relation| *relation as u8);
     relations.dedup();
     assert_eq!(relations.len(), 8);
 }
@@ -1849,5 +1851,22 @@ async fn an_invalid_model_profile_is_unavailable_not_budget_exhaustion() {
         Err(InvestigationError::Unavailable)
     );
     assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.receipt().terminal, None);
+}
+
+/// A run cancelled before it opens returns to its lifecycle owner without settling: an opening refusal or cutoff must not durably complete a receipt the owner asked to stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_run_does_not_settle_its_opening_refusal() {
+    let fixture = Fixture::open(&[Source {
+        message: "sensitive subject text\n",
+        protected: true,
+    }]);
+    let peer = Peer::start().await;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert_eq!(
+        fixture.run(&peer, Some(fixture.approval()), &cancel).await,
+        Err(InvestigationError::Cancelled)
+    );
     assert_eq!(fixture.receipt().terminal, None);
 }

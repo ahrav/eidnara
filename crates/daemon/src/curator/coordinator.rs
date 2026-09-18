@@ -295,6 +295,10 @@ impl Run<'_> {
         starting: Vec<ReferenceExpectation>,
         cancel: &CancellationToken,
     ) -> Result<Settled, InvestigationError> {
+        // A run its owner already stopped settles nothing, not even an opening refusal: the receipt stays with the lifecycle owner.
+        if cancel.is_cancelled() {
+            return Err(InvestigationError::Cancelled);
+        }
         let now = (self.coordinator.now_ms)();
         // The subject is the first disclosure; a subject the policy refuses is the abstention AE1 names, settled without any request. At the cutoff not even that read is admitted.
         {
