@@ -700,7 +700,11 @@ fn settle_unpublishable_reservation(
         outcome,
         request.now_ms,
     ) {
-        Ok(_) | Err(CuratorJobError::Refused(CuratorJobRefusal::Terminal)) => Ok(()),
+        // A job the sweep already closed, or one reserved under an authority this session no longer publishes to, is nothing more this pass can settle.
+        Ok(_)
+        | Err(CuratorJobError::Refused(CuratorJobRefusal::Terminal | CuratorJobRefusal::Missing)) => {
+            Ok(())
+        }
         Err(CuratorJobError::Refused(refusal)) => Err(HistorySummarizerStateError::Publish(
             HistorySummarizerPublishError::CuratorActivation(refusal),
         )),

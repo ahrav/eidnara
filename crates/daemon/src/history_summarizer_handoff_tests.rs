@@ -2021,3 +2021,44 @@ fn a_reservation_made_under_an_earlier_memories_authority_republishes_under_the_
     assert_eq!(rig.state().state, HistorySummarizerPhase::Idle);
     assert_eq!(rig.pending(), None);
 }
+
+#[test]
+fn a_fence_refusal_still_abandons_the_firing_when_its_job_is_not_under_the_current_project() {
+    // The job was reserved under "git:other"; the fenced publication under PROJECT is refused because the selected input changed. The reservation is dropped, the job cannot be finished from here, and the firing must still return to Idle with the refusal reported.
+    let rig = Rig::open();
+    let handoff = reserve_and_stage(
+        &rig.target(),
+        &HandoffRequest {
+            store: &rig.store,
+            project: "git:other",
+            session_id: SESSION,
+            firing: &rig.state(),
+            facts: &facts(),
+            aliases: &aliases(),
+            now_ms: t0(),
+        },
+        |reservation| Ok(rig.retain(reservation, &pending_publication(&validated_range(2, 4)))),
+    )
+    .unwrap();
+    let prepared = activation(handoff);
+    let mut changed = rig.store.load(SESSION).unwrap();
+    changed.meta.block_identity_by_mid.get_mut("m2").unwrap()[0].byte_fingerprint =
+        "content-b".to_string();
+    rig.store
+        .commit(SESSION, changed.row_version, &changed.core, &changed.meta)
+        .unwrap();
+    let refused = rig.publish(Some(&prepared), None, t0() + 1);
+    assert!(
+        matches!(
+            refused,
+            Err(HistorySummarizerStateError::Publish(
+                HistorySummarizerPublishError::FenceRejected { .. }
+            ))
+        ),
+        "{refused:?}"
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+}
