@@ -139,6 +139,55 @@ describe("managed authenticated compatibility probe", () => {
         expect(calls).toEqual(["catalog.list", "host.status"]);
     });
 
+    test("a host that has not published its first health snapshot is polled, not judged", async () => {
+        // The host answers `{"components": {}}` until its first health probe lands.
+        const calls: string[] = [];
+        let reads = 0;
+        const starting: ManagedCompatibilityClient = {
+            authenticated: peer(),
+            catalogList: async () => {
+                calls.push("catalog.list");
+                return catalog;
+            },
+            hostStatus: async () => {
+                calls.push("host.status");
+                reads += 1;
+                return reads < 3
+                    ? { health: "degraded", metrics: { components: {} } }
+                    : {
+                          health: "ok",
+                          metrics: { components: { context: { metrics: wireEpochs() } } },
+                      };
+            },
+        };
+        const snapshot = await readCompatibilitySnapshot(starting, performance.now() + 1_000);
+
+        expect(verdict(snapshot).ok).toBe(true);
+        expect(snapshot.epochs).toEqual({ ...hostRelease.epochs });
+        expect(calls).toEqual(["catalog.list", "host.status", "host.status", "host.status"]);
+    });
+
+    test("a host still without a context component at the deadline is judged on the last read", async () => {
+        const calls: string[] = [];
+        const snapshot = await readCompatibilitySnapshot(
+            {
+                authenticated: peer(),
+                catalogList: async () => {
+                    calls.push("catalog.list");
+                    return catalog;
+                },
+                hostStatus: async () => {
+                    calls.push("host.status");
+                    return { health: "degraded", metrics: { components: {} } };
+                },
+            },
+            performance.now() + 120,
+        );
+
+        expect(verdict(snapshot)).toMatchObject({ ok: false, reason: "incompatible_epochs" });
+        expect(calls.filter((call) => call === "host.status").length).toBeGreaterThan(1);
+    });
+
     test("epoch mismatch uses one bounded host status request", async () => {
         const calls: string[] = [];
         const snapshot = await readCompatibilitySnapshot(
