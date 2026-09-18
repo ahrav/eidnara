@@ -245,6 +245,11 @@ impl KernelDaemon {
         self.handler.kernel_store_for_test().unwrap()
     }
 
+    /// The Memory Store the daemon installed, so a test can write ledger rows the daemon then reads.
+    pub fn memory_store(&self) -> Option<Arc<memory_store::MemoryStore>> {
+        self.handler.memory_store_for_test()
+    }
+
     pub fn tip(&self) -> i64 {
         self.store().tip().unwrap()
     }
