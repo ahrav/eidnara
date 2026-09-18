@@ -7,43 +7,60 @@ the substitution is visible and irreversible. Tracing that question backwards
 from `publish_validated_chunk` showed the module makes five separate durable
 writes before the publish and only the sixth carries the substitution. The
 interesting property is not where the commit is but what is inside it, because
-five writes land in five independent transactions and six writes land in one.
+separate writes land in separate transactions and the whole set lands in one.
 
 ## Evidence trail
 
 The publish path in `crates/daemon/src/history_summarizer.rs`:
 
-- `:444-460` `publish_validated_chunk` re-checks the pinned fingerprint against
+- `:418-434` `publish_validated_chunk` re-checks the pinned fingerprint against
   the observed one and abandons the matching firing before returning a mismatch.
-- `:462-511` projects validated history_segments, events, primer candidates, and
+- `:436-485` projects validated history_segments, events, primer candidates, and
   optionally user observations onto store row shapes.
-- `:513-526` builds `HistorySummarizerPublishRequest`, always with
-  `chunk_transcript: Some(...)` and `raw_chunk_messages: Some(...)`.
-- `:527-530` calls the publication fence when present, otherwise
+- `:487-500` builds `HistorySummarizerPublishRequest`, always with
+  `chunk_transcript: Some(...)`, and carries the caller's
+  `curator_nonadmission` code.
+- `:501-504` calls the publication fence when present, otherwise
   `store.publish_history_summarizer_chunk` directly.
 
 The transaction in `crates/memory-store/src/lib.rs`:
 
-- `:9360` `self.inner.with_conn_fenced(|tx| { ... })` opens it.
-- `:9361-9382` reads `(row_version, meta)` and applies the row-version CAS.
-- `:9384-9407` deserializes meta, checks the phase, checks the five-field
+- `:11198` `write.execute(&self.inner, |coordinated| { ... })` opens it through
+  the prepared-write wrapper.
+- `:11201-11222` reads `(row_version, meta)` and applies the row-version CAS.
+- `:11224-11247` deserializes meta, checks the phase, checks the five-field
   predicate.
-- `:9413-9425` the block-identity content fence.
-- `:9427-9434` the revert-epoch check.
-- `:9436-9455` re-reads `(MAX(sequence), COUNT(*))` and checks it against the
+- `:11253-11265` the block-identity content fence.
+- `:11267-11274` the revert-epoch check.
+- `:11276-11295` re-reads `(MAX(sequence), COUNT(*))` and checks it against the
   pinned history_segment-set generation.
-- `:9457` `first_appended_sequence = next_history_segment_sequence_tx(...)`.
-- `:9458-9471` `append_history_segments_tx`, write 1.
-- `:9472-9481` `insert_chunk_transcripts_tx`, write 2.
-- `:9482` `enqueue_history_summarizer_side_channels_tx`, write 3.
-- `:9484-9488` raises `meta.publication_floor_ordinal` with a `max`, write 4.
-- `:9489` `meta.history_summarizer = idle_history_summarizer_after_success(firing_seq)`, write 5.
-- `:9491-9500` `UPDATE cache_state SET row_version = next, meta = ...
-  WHERE session_id = ?1 AND row_version = ?4`, write 6.
-- `:9502-9505` returns `PublishTxnOutcome::Committed`.
-- `:9508-9517` after the transaction, drains the queued side channels best
+- `:11298-11302` raises `meta.publication_floor_ordinal` with a `max`.
+- `:11303` `meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing()`,
+  the idle state that keeps the sequence and the nonadmission facts.
+- `:11304-11311` increments the nonadmission count and binds the latest reason
+  to the publishing `firing_seq` when the request carries a code.
+- `:11314-11324` serializes and secret-scans the metadata. This runs before any
+  row is appended so that a serialization failure writes nothing; the serialized
+  metadata depends on nothing the appends produce.
+- `:11326` `first_appended_sequence = next_history_segment_sequence_tx(...)`.
+- `:11327-11340` `append_history_segments_tx`, write 1. It validates the whole
+  batch before its first insert, so an overlap return writes nothing.
+- `:11341-11349` `insert_chunk_transcripts_tx`, write 2.
+- `:11350` `enqueue_history_summarizer_side_channels_tx`, write 3.
+- `:11352-11356` `UPDATE cache_state SET row_version = next, meta = ...
+  WHERE session_id = ?1 AND row_version = ?4`, write 4, which carries the floor,
+  the idle state, and the nonadmission facts in one row.
+- `:11358-11361` returns `PublishTxnOutcome::Committed`.
+- `:11371-11377` after the transaction, drains the queued side channels best
   effort. Failures stay queued for a later transform, per the comment at
-  `:9509-9510`.
+  `:11371-11372`.
+
+Correction: an earlier revision of this trail cited the transaction at
+`:9360-9517`, named `idle_history_summarizer_after_success`, and listed the floor
+and state updates as writes 4 and 5 after the side-channel enqueue. That helper
+no longer exists, the metadata is now computed and serialized before the first
+append, and the row `UPDATE` is the only write that carries it. The line
+numbers above are verified against HEAD.
 
 The wrapper, outside this repository, at
 `../commons/crates/storage/src/lib.rs` (source-catalog path, not present at HEAD):
@@ -60,15 +77,15 @@ than an error, so the transaction commits in those cases too. That is deliberate
 for `Committed` and harmless for the rejection variants, which write nothing.
 
 Confirmation that the transaction touches no render state: the store's doc at
-`:9345-9350` states it "intentionally leaves render state (`CoreState`,
+`:11162-11167` states it "intentionally leaves render state (`CoreState`,
 `coverage_ordinal`, watermarks, and m1 revision) untouched", matching the module
-side at `history_summarizer.rs:441-443`. I read the closure body and found no write
-outside the six listed above.
+side at `history_summarizer.rs:415-417`. I read the closure body and found no write
+outside the four listed above.
 
 ## Failure scenario
 
-Suppose the history_segment append at `:9458` committed but the row-version bump at
-`:9496` did not. The session would hold a model-generated summary row while
+Suppose the history_segment append at `:11327` committed but the row-version bump at
+`:11352` did not. The session would hold a model-generated summary row while
 `meta.history_summarizer` still said `Publishing` and the publication floor had not
 moved. The next `handle_restart_load` would see `Publishing`, abandon, and make
 the session refire-eligible (`history_summarizer.rs:648-653`). The refire would assemble
@@ -106,7 +123,7 @@ outside the window by construction. Options, cheapest first:
 
 1. Assert the post-condition conjunction after a successful publish and after
    each rejection variant, which does not test atomicity but does pin the
-   six-write set so a future change that drops one is caught.
+   write set so a future change that drops one is caught.
 2. Add a `#[cfg(test)]` hook inside the closure, between the append and the
    row-version bump, that returns a `rusqlite::Error`. That exercises rollback,
    which is the achievable half of the property.
