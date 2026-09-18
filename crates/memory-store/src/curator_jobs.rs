@@ -867,14 +867,7 @@ pub fn complete_frozen_selection_in_tx(
     if existing.selection_deadline_ms <= now_ms {
         return Err(refuse(CuratorJobRefusal::Expired));
     }
-    conn.execute(
-        "UPDATE curator_frozen_selections
-            SET state = ?4, page_json = NULL, next_cursor = NULL, allowance_bytes = 0,
-                updated_at_ms = ?5
-          WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
-        params![project, slot_id, selection_attempt, state.as_str(), now_ms],
-    )?;
-    release_frozen_page_scans(conn, project, slot_id, selection_attempt)?;
+    retire_frozen_page_in_tx(conn, project, slot_id, selection_attempt, state, now_ms)?;
     Ok(FrozenSelection {
         state,
         page: existing
@@ -882,6 +875,25 @@ pub fn complete_frozen_selection_in_tx(
             .filter(|_| state == FrozenSelectionState::Enqueued),
         ..existing
     })
+}
+
+/// The terminal write for one frozen row: `state`, references and cursor dropped, allowance released, scan audit retired. Callers decide whether the deadline permits it.
+fn retire_frozen_page_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    slot_id: &str,
+    selection_attempt: &str,
+    state: FrozenSelectionState,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE curator_frozen_selections
+            SET state = ?4, page_json = NULL, next_cursor = NULL, allowance_bytes = 0,
+                updated_at_ms = ?5
+          WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
+        params![project, slot_id, selection_attempt, state.as_str(), now_ms],
+    )?;
+    release_frozen_page_scans(conn, project, slot_id, selection_attempt)
 }
 
 /// The scan owner of one page's reference and cursor text; retired when the page goes terminal and that text leaves the row.
@@ -960,8 +972,9 @@ pub fn enqueue_frozen_selection_in_tx(
     if existing.state != FrozenSelectionState::Frozen {
         return Err(refuse(CuratorJobRefusal::Terminal));
     }
+    // A page at or past its deadline is retired here the way the sweep retires it, since the pre-deadline completion refuses it: the slot records the failure instead of retrying an enqueue that can never succeed.
     if existing.selection_deadline_ms <= now_ms {
-        complete_frozen_selection_in_tx(
+        retire_frozen_page_in_tx(
             conn,
             project,
             &selection.slot_id,

@@ -6,14 +6,14 @@ use context_core::redaction::RedactionErrorKind;
 use memory_store::curator_jobs::{
     CURATOR_JOB_ALLOWANCE_BYTES, CURATOR_QUEUE_LIFETIME_MS, CURATOR_RECEIPT_CHARGE_BYTES,
     CausalInputs, CuratorJobError, CuratorJobInput, CuratorJobOutcome, CuratorJobRefusal,
-    CuratorJobState, EvidenceAvailability, FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+    CuratorJobState, EnqueueOutcome, EvidenceAvailability, FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
     FROZEN_SELECTION_ALLOWANCE_BYTES, FrozenSelectionPage, FrozenSelectionState,
     MAX_CAUSAL_POLICY_VERSIONS, MAX_CAUSAL_SIGNALS, MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
     MAX_FROZEN_PAGE_BYTES, MAX_FROZEN_SELECTIONS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_HOST,
     MAX_PENDING_CURATOR_JOBS_PER_PROJECT, MAX_REQUIRED_EVIDENCE, MAX_SELECTION_REFERENCES,
     ProducerBinding, ReserveOutcome, ReviewTarget, activate_curator_job_in_tx,
-    advance_selection_cursor_in_tx, complete_frozen_selection_in_tx, freeze_selection_in_tx,
-    reserve_curator_job_in_tx,
+    advance_selection_cursor_in_tx, complete_frozen_selection_in_tx,
+    enqueue_frozen_selection_in_tx, freeze_selection_in_tx, reserve_curator_job_in_tx,
 };
 use memory_store::{MemoryStore, MemoryStoreError};
 use storage::StorageDescriptor;
@@ -1268,6 +1268,40 @@ fn a_selection_cursor_carrying_a_secret_is_refused_on_insert_and_upsert() {
         })
         .unwrap();
     assert_eq!(stored, vec!["0\u{1f}object-1".to_string()]);
+}
+
+/// A page that reaches its deadline between the slot's sweep and its enqueue is recorded as the slot's failure inside the enqueue transaction, not refused back to the caller for another retry.
+#[test]
+fn an_enqueue_at_or_after_the_page_deadline_records_the_failed_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1")],
+        next_cursor: Some("cursor-2".to_string()),
+    };
+    let frozen = store
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    let at_deadline = NOW + CURATOR_QUEUE_LIFETIME_MS;
+    let outcome = store
+        .with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), at_deadline)
+        })
+        .unwrap();
+    assert_eq!(outcome, EnqueueOutcome::Expired);
+    let row = store
+        .lookup_frozen_selection("proj", "slot-1", "attempt-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, FrozenSelectionState::FailedSlot);
+    assert_eq!(row.page, None, "a terminal row drops its page");
+    assert_eq!(
+        store
+            .lookup_curator_job("proj", &inputs("cand-1").causal_identity().unwrap())
+            .unwrap(),
+        None,
+        "nothing was enqueued"
+    );
 }
 
 /// One reference at every identity and list bound; eight of them exceed [`MAX_FROZEN_PAGE_BYTES`].

@@ -105,7 +105,7 @@ pub fn select_review_targets(
         return Ok(finish(Vec::new(), None));
     }
     let mut cursor = Cursor::decode(cursor, classes.len());
-    let tip = store.tip().map_err(kernel)?;
+    let tip = store.tip_within_budget(budget).map_err(kernel)?;
     let mut references = Vec::new();
     let mut examined = 0usize;
     // A page that filled at the end of a batch returns before another batch is read and judged.
