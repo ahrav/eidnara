@@ -38794,6 +38794,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            curator_nonadmission: Default::default(),
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -38827,6 +38828,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            curator_nonadmission: Default::default(),
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -39262,6 +39264,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
+                curator_nonadmission: None,
             })
             .unwrap();
 

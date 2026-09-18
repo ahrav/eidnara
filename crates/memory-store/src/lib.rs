@@ -529,6 +529,63 @@ pub struct HistorySummarizerSelectedMessageIdentity {
     pub block_identities: Vec<BlockIdentity>,
 }
 
+/// Why a History Summarizer fact set was rejected as a whole (Q30). Closed and content-free: the daemon's validator produces it and the publication transaction records it as a nonadmission reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionFailure {
+    /// A fact cited an alias the chunk never issued.
+    #[error("unknown_alias")]
+    UnknownAlias,
+    /// A cited range is empty, inverted, past the presented text, or not on UTF-8 character boundaries.
+    #[error("invalid_span")]
+    InvalidSpan,
+    /// A citation names a message outside the finally accepted history segment.
+    #[error("outside_accepted_segment")]
+    OutsideAcceptedSegment,
+    /// A fact carries more citations than the validator allows.
+    #[error("too_many_citations")]
+    TooManyCitations,
+    /// A citation's syntax did not parse, or a fact item was citations with no text.
+    #[error("malformed_citation")]
+    MalformedCitation,
+    /// The `<facts>` block carried material that is neither a category block nor a bullet item, or appeared more than once.
+    #[error("malformed_facts")]
+    MalformedFacts,
+    /// A fact carried no citation, so it cannot be reattached to native identity.
+    #[error("missing_citation")]
+    MissingCitation,
+}
+
+/// Why a History Summarizer firing's fact candidates were not admitted to Curator review before any reservation was made (Q31). Closed and content-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum CuratorNonadmissionCode {
+    /// No Curator handoff could take the candidates.
+    CuratorUnavailable,
+    /// Review capacity for the project or host was full.
+    CapacityFull,
+    /// Evidence the candidates require is not available for retention.
+    EvidenceUnavailable,
+    /// The validator rejected the optional fact set as a whole.
+    FactSetRejected { failure: ExtractionFailure },
+}
+
+/// The latest recorded nonadmission, bound to the firing that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedNonadmission {
+    pub firing_seq: u64,
+    pub code: CuratorNonadmissionCode,
+}
+
+/// Producer-owned nonadmission facts. `count` only grows; both survive every phase transition, abandonment, and reset of the producer state within the session's store lifetime, and are written only by the fenced publication that also advances history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CuratorNonadmission {
+    #[serde(default)]
+    pub count: u64,
+    #[serde(default)]
+    pub latest: Option<RecordedNonadmission>,
+}
+
 /// The durable history_summarizer state stored inside [`ModuleMeta`]. Idle keeps
 /// `firing_seq` as the monotonic last-issued sequence and clears the in-flight
 /// identifiers; abandon paths additionally set `failure_backoff_at_ms`.
@@ -590,6 +647,9 @@ pub struct HistorySummarizerDurableState {
     /// state: it makes repeated fence/outbox failures visible without affecting bytes.
     #[serde(default)]
     pub consecutive_publish_failures: u32,
+    /// Q31 nonadmission count and latest reason. Unlike the fields above, these are not cleared by any transition: every constructor carries them from the prior state.
+    #[serde(default)]
+    pub curator_nonadmission: CuratorNonadmission,
 }
 
 impl Default for HistorySummarizerDurableState {
@@ -610,6 +670,18 @@ impl Default for HistorySummarizerDurableState {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            curator_nonadmission: CuratorNonadmission::default(),
+        }
+    }
+}
+
+impl HistorySummarizerDurableState {
+    /// The idle state with everything in flight cleared; the sequence and the nonadmission facts survive.
+    pub fn cleared_of_in_flight_firing(&self) -> Self {
+        HistorySummarizerDurableState {
+            firing_seq: self.firing_seq,
+            curator_nonadmission: self.curator_nonadmission,
+            ..HistorySummarizerDurableState::default()
         }
     }
 }
@@ -797,6 +869,8 @@ pub struct HistorySummarizerPublishPredicate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistorySummarizerPublishResult {
     pub row_version: u64,
+    /// The nonadmission count after this publication; it grew by one exactly when the request carried a code.
+    pub curator_nonadmission_count: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -850,6 +924,8 @@ pub struct HistorySummarizerPublishRequest<'a> {
     pub user_memory_candidates: &'a [HistorySummarizerUserMemoryCandidate],
     pub publication_floor_ordinal: u64,
     pub chunk_transcript: Option<&'a str>,
+    /// Q31: the reason this firing's fact candidates were not admitted to Curator review, recorded in the same transaction that advances history. `None` for an intentional no-fact or extraction-free run.
+    pub curator_nonadmission: Option<CuratorNonadmissionCode>,
 }
 
 /// Typed publish failures. CAS and state mismatches are deliberately separate so a
@@ -10185,7 +10261,8 @@ impl MemoryStore {
             target_meta.coverage_ordinal = Some(placeholder_ordinal);
             target_meta.coverage_history_segment_seq = Some(placeholder_sequence);
             target_meta.newest_live_ordinal = prior_last;
-            target_meta.history_summarizer = HistorySummarizerDurableState::default();
+            // The descendant inherits the source's history, so it keeps the producer's sequence and nonadmission facts.
+            target_meta.history_summarizer = target_meta.history_summarizer.cleared_of_in_flight_firing();
             target_meta.pending_rewrite = None;
             target_meta.pending_rewrite_trip_count = 0;
             target_meta.pending_rewrite_ambiguous = false;
@@ -10606,7 +10683,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// The full-session form of the revert re-cut: history_segments and their recoverable transcripts are removed, while the cache row is replaced with an empty core and default meta carrying a bumped revert epoch. The epoch and row-version update share one fenced transaction, so an in-flight history_summarizer cannot publish against the retired history_segment set.
+    /// The full-session form of the revert re-cut: history_segments and their recoverable transcripts are removed, while the cache row is replaced with an empty core and default meta carrying a bumped revert epoch. The row itself survives, so the producer's sequence and nonadmission facts are carried over with in-flight firing state cleared. The epoch and row-version update share one fenced transaction, so an in-flight history_summarizer cannot publish against the retired history_segment set.
     pub fn reset_session_for_recomp(
         &self,
         session_id: &str,
@@ -10638,6 +10715,7 @@ impl MemoryStore {
                 last_recut: Some(format!(
                     "native recomp reset all history_segments; epoch {next_epoch}"
                 )),
+                history_summarizer: prior_meta.history_summarizer.cleared_of_in_flight_firing(),
                 ..ModuleMeta::default()
             };
             let core_json = match serde_json::to_string(&CoreState::empty()) {
@@ -11005,6 +11083,7 @@ impl MemoryStore {
                 } else {
                     history_summarizer.consecutive_publish_failures
                 },
+                curator_nonadmission: history_summarizer.curator_nonadmission,
                 ..HistorySummarizerDurableState::default()
             };
             let next = next_row_version(current)?;
@@ -11252,6 +11331,35 @@ impl MemoryStore {
                 )));
             }
 
+            // The metadata that publication commits does not depend on the rows it appends, so it is serialized first: a serialization failure then leaves nothing written instead of history without its floor, state, and nonadmission facts.
+            meta.publication_floor_ordinal = Some(
+                meta.publication_floor_ordinal
+                    .unwrap_or(1)
+                    .max(request.publication_floor_ordinal.max(1)),
+            );
+            meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing();
+            if let Some(code) = request.curator_nonadmission {
+                let nonadmission = &mut meta.history_summarizer.curator_nonadmission;
+                nonadmission.count = nonadmission.count.saturating_add(1);
+                nonadmission.latest = Some(RecordedNonadmission {
+                    firing_seq: meta.history_summarizer.firing_seq,
+                    code,
+                });
+            }
+            let curator_nonadmission_count = meta.history_summarizer.curator_nonadmission.count;
+            let next = next_row_version(current)?;
+            let scanned_meta_json = match serde_json::to_string(&meta) {
+                Ok(json) => json,
+                Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
+            };
+            coordinated
+                .prepared
+                .borrow_mut()
+                .transaction_content("meta", &scanned_meta_json)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let meta_json = prepare_transaction_json_preserving_identities(&scanned_meta_json)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+
             let first_appended_sequence = next_history_segment_sequence_tx(tx, session_id)?;
             match append_history_segments_tx(tx, session_id, &history_segments)? {
                 AppendHistorySegmentsTxnOutcome::Appended => {}
@@ -11277,26 +11385,7 @@ impl MemoryStore {
                 )?;
             }
             enqueue_history_summarizer_side_channels_tx(tx, session_id, &side_channel_items)?;
-
-            meta.publication_floor_ordinal = Some(
-                meta.publication_floor_ordinal
-                    .unwrap_or(1)
-                    .max(request.publication_floor_ordinal.max(1)),
-            );
-            meta.history_summarizer = idle_history_summarizer_after_success(meta.history_summarizer.firing_seq);
-
-            let next = next_row_version(current)?;
-            let meta_json = match serde_json::to_string(&meta) {
-                Ok(json) => json,
-                Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
-            };
-            coordinated
-                .prepared
-                .borrow_mut()
-                .transaction_content("meta", &meta_json)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            let meta_json = prepare_transaction_json_preserving_identities(&meta_json)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            // The `Ok` returns above commit the transaction, so the metadata write must follow every bail-out: an overlap must not advance the floor, the state, or the nonadmission facts.
             tx.execute(
                 "UPDATE cache_state SET row_version = ?2, meta = ?3
                  WHERE session_id = ?1 AND row_version = ?4",
@@ -11305,6 +11394,7 @@ impl MemoryStore {
 
             Ok(PublishTxnOutcome::Committed(HistorySummarizerPublishResult {
                 row_version: next,
+                curator_nonadmission_count,
             }))
             })()?;
             Ok(match outcome {
@@ -15512,13 +15602,6 @@ fn canonical_authority_value(value: &Value) -> String {
     }
 }
 
-fn idle_history_summarizer_after_success(firing_seq: u64) -> HistorySummarizerDurableState {
-    HistorySummarizerDurableState {
-        firing_seq,
-        ..HistorySummarizerDurableState::default()
-    }
-}
-
 fn wrapup_replaced_failure_summary(summary: &str, failed_created_at: i64) -> String {
     const SUMMARY_MAX_CHARS: usize = 500;
 
@@ -16544,6 +16627,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
+                curator_nonadmission: None,
             })
             .unwrap();
         let after_publish = scan_audit_rows(&store);
@@ -20241,6 +20325,7 @@ mod tests {
                 last_failure: None,
                 last_no_fire: None,
                 consecutive_publish_failures: 0,
+                curator_nonadmission: CuratorNonadmission::default(),
             },
             ..Default::default()
         }
@@ -20284,8 +20369,14 @@ mod tests {
             );
         }
 
-        let successful = idle_history_summarizer_after_success(predicate.firing_seq);
+        let successful = store
+            .load("publish-health")
+            .unwrap()
+            .meta
+            .history_summarizer
+            .cleared_of_in_flight_firing();
         assert_eq!(successful.consecutive_publish_failures, 0);
+        assert_eq!(successful.firing_seq, predicate.firing_seq);
     }
 
     fn publish_predicate() -> HistorySummarizerPublishPredicate {
@@ -20445,6 +20536,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
+                curator_nonadmission: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -20508,6 +20600,7 @@ mod tests {
                     user_memory_candidates: std::slice::from_ref(&observation),
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
+                    curator_nonadmission: None,
                 })
                 .unwrap();
 
@@ -20644,6 +20737,7 @@ mod tests {
                     user_memory_candidates: observations,
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
+                    curator_nonadmission: None,
                 })
                 .unwrap_err();
             assert!(
@@ -20719,6 +20813,7 @@ mod tests {
                 user_memory_candidates: std::slice::from_ref(&observation),
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
+                curator_nonadmission: None,
             })
             .unwrap();
         assert_eq!(
@@ -20866,6 +20961,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
+                curator_nonadmission: None,
             })
             .unwrap();
         assert_eq!(
@@ -20895,6 +20991,174 @@ mod tests {
         );
     }
 
+    /// Q31: the nonadmission code commits only with the history it accompanies, the count only grows, the latest reason is bound to the firing that produced it, and neither a failed publication nor a resent one moves them.
+    #[test]
+    fn publish_records_a_nonadmission_only_with_committed_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let code = CuratorNonadmissionCode::FactSetRejected {
+            failure: ExtractionFailure::InvalidSpan,
+        };
+        let publish =
+            |expected_row_version: Option<u64>,
+             predicate: &HistorySummarizerPublishPredicate,
+             code: Option<CuratorNonadmissionCode>,
+             segment: StoredHistorySegment|
+             -> Result<HistorySummarizerPublishResult, HistorySummarizerPublishError> {
+                store.publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
+                    session_id: "ses",
+                    expected_row_version,
+                    expected_revert_epoch: 0,
+                    predicate,
+                    project_path: "git:proj",
+                    history_segments: &[segment],
+                    events: &[],
+                    primer_candidates: &[],
+                    user_memory_candidates: &[],
+                    publication_floor_ordinal: 21,
+                    chunk_transcript: None,
+                    curator_nonadmission: code,
+                })
+            };
+        let nonadmission = || {
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .curator_nonadmission
+        };
+        // Puts the session into Publishing for `firing_seq` over the loaded row, with the state and the predicate carrying the same identity so the publication reaches the fence under test rather than the state-mismatch check.
+        let seed_publishing = |firing_seq: u64,
+                               generation: HistorySegmentSetGeneration,
+                               facts: CuratorNonadmission|
+         -> (u64, HistorySummarizerPublishPredicate) {
+            let loaded = store.load("ses").unwrap();
+            let mut meta = loaded.meta.clone();
+            meta.history_summarizer = publishing_meta().history_summarizer;
+            meta.history_summarizer.firing_seq = firing_seq;
+            meta.history_summarizer.history_segment_set_generation = generation;
+            meta.history_summarizer.curator_nonadmission = facts;
+            let rv = store
+                .commit("ses", loaded.row_version, &loaded.core, &meta)
+                .unwrap();
+            let mut predicate = publish_predicate();
+            predicate.firing_seq = firing_seq;
+            predicate.history_segment_set_generation = generation;
+            (rv, predicate)
+        };
+        let later_segment = || StoredHistorySegment {
+            start_message: 21,
+            end_message: 30,
+            end_message_id: "m30".into(),
+            ..publish_history_segment()
+        };
+        let one_row = HistorySegmentSetGeneration {
+            max_sequence: 1,
+            count: 1,
+        };
+
+        // A CAS conflict commits neither the floor nor the count.
+        let rv = store
+            .commit("ses", None, &CoreState::empty(), &publishing_meta())
+            .unwrap();
+        let conflict = publish(
+            Some(rv + 1),
+            &publish_predicate(),
+            Some(code),
+            publish_history_segment(),
+        );
+        assert!(matches!(
+            conflict,
+            Err(HistorySummarizerPublishError::CasConflict { .. })
+        ));
+        assert_eq!(
+            store.load("ses").unwrap().meta.publication_floor_ordinal,
+            None
+        );
+        assert_eq!(nonadmission(), CuratorNonadmission::default());
+
+        // The committed publication records the count and binds the reason to firing 7.
+        let published = publish(
+            Some(rv),
+            &publish_predicate(),
+            Some(code),
+            publish_history_segment(),
+        )
+        .unwrap();
+        assert_eq!(published.curator_nonadmission_count, 1);
+        let after = store.load("ses").unwrap();
+        assert_eq!(after.meta.publication_floor_ordinal, Some(21));
+        assert_eq!(
+            after.meta.history_summarizer.state,
+            HistorySummarizerPhase::Idle
+        );
+        assert_eq!(after.meta.history_summarizer.firing_seq, 7);
+        let recorded = CuratorNonadmission {
+            count: 1,
+            latest: Some(RecordedNonadmission {
+                firing_seq: 7,
+                code,
+            }),
+        };
+        assert_eq!(after.meta.history_summarizer.curator_nonadmission, recorded);
+
+        // Resending the original request after its outcome settled is refused by the row version it carried and counts nothing.
+        let resent = publish(
+            Some(rv),
+            &publish_predicate(),
+            Some(code),
+            publish_history_segment(),
+        );
+        assert!(matches!(
+            resent,
+            Err(HistorySummarizerPublishError::CasConflict { .. })
+        ));
+        assert_eq!(nonadmission(), recorded);
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
+
+        // A stale segment-set generation is fenced: no row, no floor change, no count.
+        let (rv, stale) = seed_publishing(8, HistorySegmentSetGeneration::default(), recorded);
+        let fenced = publish(Some(rv), &stale, Some(code), later_segment());
+        assert!(matches!(
+            fenced,
+            Err(HistorySummarizerPublishError::FenceRejected { reason }) if reason.contains("history_segment set changed")
+        ));
+        let after_fence = store.load("ses").unwrap();
+        assert_eq!(after_fence.meta.publication_floor_ordinal, Some(21));
+        assert_eq!(
+            after_fence.meta.history_summarizer.curator_nonadmission,
+            recorded
+        );
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
+
+        // Abandoning the next firing keeps the facts.
+        let (_, predicate) = seed_publishing(8, one_row, recorded);
+        store
+            .abandon_history_summarizer_run_if_matching_with_publish_failure(
+                "ses",
+                &predicate,
+                Some(5),
+                Some("fence"),
+                true,
+            )
+            .unwrap()
+            .expect("abandon applies");
+        let abandoned = store.load("ses").unwrap();
+        assert_eq!(
+            abandoned.meta.history_summarizer.state,
+            HistorySummarizerPhase::Idle
+        );
+        assert_eq!(nonadmission(), recorded);
+
+        // A later no-fact publication advances history and leaves the facts where they were.
+        let (rv, predicate) = seed_publishing(9, one_row, recorded);
+        let second = publish(Some(rv), &predicate, None, later_segment()).unwrap();
+        assert_eq!(second.curator_nonadmission_count, 1);
+        assert_eq!(nonadmission(), recorded);
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
+    }
+
     #[test]
     fn publish_history_summarizer_chunk_cas_conflict_leaves_no_transcript_row() {
         let dir = tempfile::tempdir().unwrap();
@@ -20920,6 +21184,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: Some("U: orphan"),
+                curator_nonadmission: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -20970,6 +21235,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: Some(&transcript),
+                curator_nonadmission: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -21017,6 +21283,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 25,
                 chunk_transcript: Some("U: bounded row"),
+                curator_nonadmission: None,
             })
             .unwrap();
 
@@ -21078,6 +21345,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 101,
                 chunk_transcript: Some(&oversized),
+                curator_nonadmission: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -22299,6 +22567,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
+                curator_nonadmission: None,
             })
             .unwrap_err();
         assert!(
@@ -22500,6 +22769,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
+                curator_nonadmission: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -25829,6 +26099,94 @@ mod lineage_descent_tests {
         let target = store.load("B").unwrap();
         assert_eq!(target.meta.coverage_ordinal, Some(11));
         assert_eq!(target.core.boundary_id, "ccm-0#1");
+    }
+
+    /// The descendant inherits the source's history, so it inherits the producer's sequence and Q31 nonadmission facts while in-flight firing state is cleared.
+    #[test]
+    fn descent_keeps_the_producer_sequence_and_nonadmission_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let loaded = store.load("A").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::Publishing,
+            firing_seq: 5,
+            producer_run_id: Some("run-5".into()),
+            curator_nonadmission: CuratorNonadmission {
+                count: 3,
+                latest: Some(RecordedNonadmission {
+                    firing_seq: 4,
+                    code: CuratorNonadmissionCode::CapacityFull,
+                }),
+            },
+            ..HistorySummarizerDurableState::default()
+        };
+        store
+            .commit("A", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let hops = direct_hop("A", "B", 2);
+        let anchor = anchor();
+        store
+            .descend_lineage(LineageDescentRequest {
+                target_key: "B",
+                expected_target_row_version: None,
+                edge_id: 42,
+                prior_key: "A",
+                prior_epoch: 1,
+                new_epoch: 2,
+                constituents: &hops,
+                compaction_observed: true,
+                anchor: Some(&anchor),
+                now_ms: 10,
+            })
+            .unwrap();
+        let target = store.load("B").unwrap().meta.history_summarizer;
+        assert_eq!(target.state, HistorySummarizerPhase::Idle);
+        assert_eq!(target.producer_run_id, None);
+        assert_eq!(target.firing_seq, 5);
+        assert_eq!(
+            target.curator_nonadmission,
+            meta.history_summarizer.curator_nonadmission
+        );
+    }
+
+    /// A full-session recomp retires the history_segment set and bumps the revert epoch, but the row stays alive, so the producer's sequence and Q31 nonadmission facts survive while in-flight firing state is cleared.
+    #[test]
+    fn recomp_reset_keeps_the_producer_sequence_and_nonadmission_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let loaded = store.load("A").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::Publishing,
+            firing_seq: 5,
+            producer_run_id: Some("run-5".into()),
+            curator_nonadmission: CuratorNonadmission {
+                count: 3,
+                latest: Some(RecordedNonadmission {
+                    firing_seq: 4,
+                    code: CuratorNonadmissionCode::CapacityFull,
+                }),
+            },
+            ..HistorySummarizerDurableState::default()
+        };
+        let row_version = store
+            .commit("A", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        store
+            .reset_session_for_recomp("A", Some(row_version))
+            .unwrap();
+        let reset = store.load("A").unwrap().meta;
+        assert_eq!(reset.revert_epoch, meta.revert_epoch + 1);
+        assert_eq!(reset.history_summarizer.state, HistorySummarizerPhase::Idle);
+        assert_eq!(reset.history_summarizer.producer_run_id, None);
+        assert_eq!(reset.history_summarizer.firing_seq, 5);
+        assert_eq!(
+            reset.history_summarizer.curator_nonadmission,
+            meta.history_summarizer.curator_nonadmission
+        );
     }
 
     #[test]

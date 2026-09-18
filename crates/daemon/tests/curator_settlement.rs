@@ -12,6 +12,7 @@ use daemon::curator::project_text::{InspectionBinding, ProjectText, ProtectedLoc
 use daemon::curator::settlement::{
     ReadRefusal, RunResult, SETTLEMENT_PRODUCER, SelectedProposal, Settled, Settlement,
     SettlementError, TaskClaim, list_review_outcomes, read_selected_proposal,
+    read_selected_proposal_with_hook_for_test,
 };
 use daemon::curator::steps::Step;
 use daemon::git_sources::{GitReadBounds, RepositoryBinding, read_selection};
@@ -1969,4 +1970,70 @@ fn a_selected_result_is_readable_only_through_its_live_review_hold() {
         fixture.receipt().terminal,
         Some(CuratorReceiptTerminal::Complete)
     );
+}
+
+/// A hold that ends between the review-hold lookup and the evidence validation under it is the same review expiry the lookup reports a moment later, whether it was released or degraded by a purge. Without this, one read in the window reports a dependency refusal that no read before or after it reports.
+#[test]
+fn a_hold_ended_between_lookup_and_validation_reads_as_the_review_expiring() {
+    for ending in ["release", "purge"] {
+        let fixture = Fixture::open();
+        let broker = fixture.broker(1);
+        let evidence = fixture.evidence_id();
+        let Settled::Published(reference) = fixture
+            .settle(
+                &broker,
+                RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+            )
+            .unwrap()
+        else {
+            panic!("published")
+        };
+        let review = fixture.review_hold_binding(1, &reference.candidate_id);
+        let hold = fixture
+            .store
+            .lookup_review_hold(&review, fixture.now + 6)
+            .unwrap()
+            .unwrap();
+        assert!(fixture.read(fixture.now + 6).is_ok());
+        let end_hold = || match ending {
+            "release" => fixture
+                .store
+                .release_review_hold(&hold.hold_id, &review)
+                .unwrap(),
+            "purge" => {
+                fixture
+                    .store
+                    .delete_artifact(kernel::ArtifactDeletionRequest {
+                        intent: intent("purge-mid-read"),
+                        identity: kernel::ArtifactDeletionIdentity::EvidenceId(evidence.clone()),
+                        kind: kernel::ArtifactDeletionKind::Purge,
+                        operator_id: Some("operator".to_string()),
+                        target_locator: Some("incident://purge".to_string()),
+                        reason: Some("retired".to_string()),
+                        deleted_at: fixture.now + 7,
+                    })
+                    .unwrap();
+            }
+            other => unreachable!("{other}"),
+        };
+        let mid_read = read_selected_proposal_with_hook_for_test(
+            &fixture.store,
+            &fixture.ledger,
+            PROJECT,
+            &fixture.identity,
+            &fixture.review_binding(),
+            fixture.now + 7,
+            &end_hold,
+        );
+        assert_eq!(
+            mid_read.map(|selected| selected.reference),
+            Err(ReadRefusal::ReviewExpired),
+            "a {ending} between the lookup and the validation reads as the review expiring"
+        );
+        assert_eq!(
+            fixture.read(fixture.now + 8),
+            Err(ReadRefusal::ReviewExpired),
+            "every later read reports the same refusal after a {ending}"
+        );
+    }
 }

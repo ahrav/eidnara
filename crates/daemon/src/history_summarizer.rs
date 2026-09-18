@@ -8,14 +8,15 @@ use std::fmt;
 use std::time::Duration;
 
 use memory_store::{
-    HistorySegmentSetGeneration, HistorySummarizerChunkRange, HistorySummarizerDurableState,
-    HistorySummarizerEventCandidate, HistorySummarizerPhase, HistorySummarizerPrimerCandidate,
-    HistorySummarizerPublishError, HistorySummarizerPublishPredicate,
-    HistorySummarizerPublishRequest, HistorySummarizerPublishResult,
-    HistorySummarizerSelectedMessageIdentity, HistorySummarizerUserMemoryCandidate, MemoryStore,
-    MemoryStoreError, StoredHistorySegment,
+    CuratorNonadmissionCode, HistorySegmentSetGeneration, HistorySummarizerChunkRange,
+    HistorySummarizerDurableState, HistorySummarizerEventCandidate, HistorySummarizerPhase,
+    HistorySummarizerPrimerCandidate, HistorySummarizerPublishError,
+    HistorySummarizerPublishPredicate, HistorySummarizerPublishRequest,
+    HistorySummarizerPublishResult, HistorySummarizerSelectedMessageIdentity,
+    HistorySummarizerUserMemoryCandidate, MemoryStore, MemoryStoreError, StoredHistorySegment,
 };
 
+use crate::history_summarizer_citations::ExtractionOutcome;
 use crate::history_summarizer_producer::{
     ErrorClass, ErrorClassification, HistorySummarizerProducer, HistorySummarizerProducerError,
     ProducerOutput, RunHandle, RunState, attach_cleanup,
@@ -241,6 +242,7 @@ pub fn fire(
         // A fire clears the prior skip reason.
         last_no_fire: None,
         consecutive_publish_failures: current.consecutive_publish_failures,
+        curator_nonadmission: current.curator_nonadmission,
     }))
 }
 
@@ -291,7 +293,7 @@ pub fn tx_committed(
     current: &HistorySummarizerDurableState,
 ) -> Result<HistorySummarizerDurableState, HistorySummarizerStateError> {
     require_phase(current, HistorySummarizerPhase::Publishing, "tx_committed")?;
-    let mut next = idle_after_success(current.firing_seq);
+    let mut next = current.cleared_of_in_flight_firing();
     next.consecutive_publish_failures = 0;
     Ok(next)
 }
@@ -327,6 +329,7 @@ pub fn abandon_with_detail(
         failure_backoff_at_ms: Some(failure_backoff_at_ms),
         last_failure: detail.or_else(|| current.last_failure.clone()),
         consecutive_publish_failures: current.consecutive_publish_failures,
+        curator_nonadmission: current.curator_nonadmission,
         ..HistorySummarizerDurableState::default()
     }
 }
@@ -402,6 +405,8 @@ pub struct ValidatedPublishRequest<'a> {
     pub boundary_dates: &'a BTreeMap<String, String>,
     pub failure_backoff_at_ms: i64,
     pub publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
+    /// Q31: why this firing's fact candidates were not admitted to Curator review, committed with the history. The caller decides it because the answer depends on what happened before publication (validation verdict, reservation refusal), not on the validated chunk alone.
+    pub curator_nonadmission: Option<CuratorNonadmissionCode>,
 }
 
 /// The commit re-checks the chunk fingerprint and abandons the matching firing before returning `HistorySummarizerStateError::FingerprintMismatch`.
@@ -491,6 +496,7 @@ pub fn publish_validated_chunk(
         user_memory_candidates: &user_memory_candidates,
         publication_floor_ordinal: request.publication_floor_ordinal,
         chunk_transcript: Some(request.chunk_transcript),
+        curator_nonadmission: request.curator_nonadmission,
     };
     let publish_result = match request.publication_fence {
         Some(fence) => fence.publish(store, publish_request),
@@ -633,7 +639,7 @@ pub struct HistorySummarizerRunSuccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HistorySummarizerDriveOutcome {
     Completed(HistorySummarizerRunSuccess),
-    Busy(HistorySummarizerDurableState),
+    Busy(Box<HistorySummarizerDurableState>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1208,7 +1214,9 @@ where
             request.history_segment_set_generation,
             request.now_ms,
         )? {
-            FireOutcome::Busy(state) => return Ok(HistorySummarizerDriveOutcome::Busy(state)),
+            FireOutcome::Busy(state) => {
+                return Ok(HistorySummarizerDriveOutcome::Busy(Box::new(state)));
+            }
             FireOutcome::Fired(state) => state,
         };
         persist_history_summarizer_state(request.store, request.session_id, fired.clone())?;
@@ -1629,6 +1637,7 @@ fn publish_output_from_awaiting(
     let publishing_row_version =
         persist_history_summarizer_state(store, session_id, publishing.clone())?;
     let predicate = publish_predicate(&publishing)?;
+    let curator_nonadmission = curator_nonadmission_before_reservation(&validated.extraction);
     let published = publish_validated_chunk(
         store,
         ValidatedPublishRequest {
@@ -1647,9 +1656,23 @@ fn publish_output_from_awaiting(
             created_at_ms,
             failure_backoff_at_ms,
             publication_fence,
+            curator_nonadmission,
         },
     )?;
     Ok(published.row_version)
+}
+
+/// Q31, before any reservation: a rejected optional fact set is a nonadmission with the validator's code; an accepted set has no Curator handoff to take it, so it is a nonadmission for an unavailable Curator; an intentional no-fact or extraction-free run is not a nonadmission.
+fn curator_nonadmission_before_reservation(
+    extraction: &ExtractionOutcome,
+) -> Option<CuratorNonadmissionCode> {
+    match extraction {
+        ExtractionOutcome::NotRequested | ExtractionOutcome::NoFacts => None,
+        ExtractionOutcome::Accepted { .. } => Some(CuratorNonadmissionCode::CuratorUnavailable),
+        ExtractionOutcome::Rejected { failure } => {
+            Some(CuratorNonadmissionCode::FactSetRejected { failure: *failure })
+        }
+    }
 }
 
 fn abandon_current_state(
@@ -1691,13 +1714,6 @@ fn require_phase(
             from: current.state.clone(),
             event,
         })
-    }
-}
-
-fn idle_after_success(firing_seq: u64) -> HistorySummarizerDurableState {
-    HistorySummarizerDurableState {
-        firing_seq,
-        ..HistorySummarizerDurableState::default()
     }
 }
 
@@ -2272,6 +2288,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            curator_nonadmission: Default::default(),
         }
     }
 
@@ -4046,6 +4063,7 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            curator_nonadmission: Default::default(),
         };
         let rv = store
             .commit(
@@ -4075,6 +4093,7 @@ mod tests {
                 created_at_ms: 123,
                 failure_backoff_at_ms: 0,
                 publication_fence: None,
+                curator_nonadmission: None,
             },
         )
         .expect("publish succeeds");
@@ -4095,6 +4114,263 @@ mod tests {
         assert_eq!(c2.p1.as_deref(), Some("second arc full and exact"));
         assert_eq!(c2.legacy, 0);
         assert_eq!(c2.created_at, 123);
+    }
+
+    /// Q31 before reservation: a rejected fact set records one nonadmission with the firing's identity in the same publication that advances history; a later no-fact success, an extraction-free run, a restart with the producer in flight, a validation failure, and a store reopen all leave the count and latest reason in place; an accepted set with no Curator handoff is recorded as an unavailable Curator.
+    #[test]
+    fn nonadmission_facts_survive_later_firings_failures_and_reopen() {
+        use crate::history_summarizer_citations::{FrozenAlias, FrozenAliasTable};
+        use crate::history_summarizer_validate::{
+            ChunkLine, HistorySummarizerChunk, StoredHistorySegmentRange, ValidateOptions,
+        };
+        use memory_store::{CuratorNonadmission, ExtractionFailure, RecordedNonadmission};
+
+        fn chunk(start: u64, end: u64) -> HistorySummarizerChunk {
+            let mut aliases = FrozenAliasTable::default();
+            for ordinal in start..=end {
+                aliases.issue(FrozenAlias {
+                    message_id: format!("m{ordinal}"),
+                    ordinal,
+                    block_ids: vec![format!("m{ordinal}#0")],
+                    block_hashes: vec!["0".repeat(64)],
+                    presented: "presented text".into(),
+                    ..Default::default()
+                });
+            }
+            HistorySummarizerChunk {
+                aliases,
+                start_index: start,
+                end_index: end,
+                lines: (start..=end)
+                    .map(|ordinal| ChunkLine {
+                        ordinal,
+                        message_id: format!("m{ordinal}#0"),
+                        anchorable: true,
+                    })
+                    .collect(),
+                present_ordinals: (start..=end).collect(),
+                tool_only_ranges: vec![],
+                completed_tool_arcs: vec![],
+            }
+        }
+        /// One segment `start..=end` plus `facts`, leaving `end + 1` unprocessed.
+        fn output(start: u64, end: u64, facts: &str) -> ProducerOutput {
+            let unprocessed_from = end + 1;
+            ProducerOutput {
+                text: format!(
+                    r#"<output><history_segments><history_segment start="{start}" end="{end}" title="arc" episode_type="feature" importance="60"><p1>arc</p1><p2>arc</p2><p3>arc</p3><p4 /></history_segment></history_segments>{facts}<meta><unprocessed_from>{unprocessed_from}</unprocessed_from></meta></output>"#
+                ),
+                length_capped: false,
+            }
+        }
+        /// The published ranges so far, as the validator's prior-coverage input.
+        fn prior(store: &MemoryStore) -> Vec<StoredHistorySegmentRange> {
+            store
+                .load_history_segments("ses")
+                .unwrap()
+                .iter()
+                .map(|segment| StoredHistorySegmentRange {
+                    start_message: segment.start_message as u64,
+                    end_message: segment.end_message as u64,
+                })
+                .collect()
+        }
+        let options = ValidateOptions {
+            in_emergency: true,
+            ..ValidateOptions::default()
+        };
+        const CITED: &str =
+            "<facts><PROJECT_RULES>\n* [s1:0-9] presented\n</PROJECT_RULES></facts>";
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        store
+            .replace_history_segments("ses", &[comp(1, 1, 1, "m1", "C1 summary")])
+            .unwrap();
+        seed_awaiting_history_summarizer(&store);
+        let nonadmission = || {
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .curator_nonadmission
+        };
+        let floor = || store.load("ses").unwrap().meta.publication_floor_ordinal;
+        // Fires `from..=to` from the idle state and marks the producer started, as the live path does.
+        let fire_next = |from: u64, to: u64| {
+            let loaded = store.load("ses").unwrap();
+            let segments = store.load_history_segments("ses").unwrap();
+            let generation = HistorySegmentSetGeneration {
+                max_sequence: segments.iter().map(|c| c.sequence).max().unwrap_or(0),
+                count: segments.len() as i64,
+            };
+            let fired = match fire(
+                &loaded.meta.history_summarizer,
+                from,
+                to,
+                "fp".into(),
+                test_selected_range_identities(),
+                0,
+                generation,
+                20,
+            )
+            .unwrap()
+            {
+                FireOutcome::Fired(state) => state,
+                FireOutcome::Busy(_) => unreachable!("idle after publication"),
+            };
+            let awaiting = producer_started(
+                &fired,
+                "producer-session".into(),
+                format!("run-{}", fired.firing_seq),
+                "pi".into(),
+            )
+            .unwrap();
+            let mut meta = loaded.meta.clone();
+            meta.history_summarizer = awaiting.clone();
+            store
+                .commit("ses", loaded.row_version, &loaded.core, &meta)
+                .unwrap();
+            awaiting
+        };
+        let publish_with = |awaiting: HistorySummarizerDurableState,
+                            output: ProducerOutput,
+                            validation_chunk: &HistorySummarizerChunk,
+                            validate_options: ValidateOptions| {
+            publish_output_from_awaiting(PublishOutputRequest {
+                store: &store,
+                session_id: "ses",
+                project_path: "git:proj",
+                awaiting,
+                output,
+                observed_chunk_fingerprint: "fp",
+                validation_chunk,
+                chunk_transcript: "U: transcript",
+                boundary_dates: empty_boundary_dates(),
+                prior_history_segments: &prior(&store),
+                validate_options,
+                created_at_ms: 10,
+                failure_started_at_ms: 10,
+                failure_backoff_at_ms: 0,
+                completion_now_ms: || 11,
+                publication_fence: None,
+            })
+        };
+        let publish = |awaiting: HistorySummarizerDurableState,
+                       output: ProducerOutput,
+                       validation_chunk: &HistorySummarizerChunk| {
+            publish_with(awaiting, output, validation_chunk, options)
+        };
+
+        // Firing 1 (2..=4): the fact cites an alias the chunk never issued; history publishes with the rejection recorded.
+        let awaiting = store.load("ses").unwrap().meta.history_summarizer;
+        publish(
+            awaiting,
+            output(
+                2,
+                3,
+                "<facts><PROJECT_RULES>\n* [s9:0-4] unknown alias\n</PROJECT_RULES></facts>",
+            ),
+            &chunk(2, 4),
+        )
+        .expect("history publishes beside the rejected set");
+        assert_eq!(floor(), Some(4));
+        assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
+        let recorded = CuratorNonadmission {
+            count: 1,
+            latest: Some(RecordedNonadmission {
+                firing_seq: 1,
+                code: CuratorNonadmissionCode::FactSetRejected {
+                    failure: ExtractionFailure::UnknownAlias,
+                },
+            }),
+        };
+        assert_eq!(nonadmission(), recorded);
+
+        // Firing 2 (4..=6): an intentional no-fact output is not a nonadmission.
+        let awaiting = fire_next(4, 6);
+        assert_eq!(awaiting.curator_nonadmission, recorded);
+        publish(
+            awaiting,
+            output(4, 5, "<facts><PROJECT_RULES>\n</PROJECT_RULES></facts>"),
+            &chunk(4, 6),
+        )
+        .expect("no-fact output publishes");
+        assert_eq!(floor(), Some(6));
+        assert_eq!(nonadmission(), recorded);
+
+        // Firing 3 (6..=8): a restart finds the producer in flight, abandons the firing, and keeps the facts.
+        fire_next(6, 8);
+        let mut loaded = store.load("ses").unwrap();
+        loaded.meta.history_summarizer.state = HistorySummarizerPhase::Publishing;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        assert!(matches!(
+            handle_restart_load(&store, "ses", 30).unwrap(),
+            RestartAction::AbandonedAndRefireEligible { firing_seq: 3 }
+        ));
+        let after_restart = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(after_restart.state, HistorySummarizerPhase::Idle);
+        assert_eq!(after_restart.curator_nonadmission, recorded);
+
+        // Firing 4 (6..=8): an extraction-free run (memory disabled) is not a nonadmission, whatever the model emitted.
+        let awaiting = fire_next(6, 8);
+        publish_with(
+            awaiting,
+            output(6, 7, CITED),
+            &chunk(6, 8),
+            ValidateOptions {
+                memory_enabled: false,
+                ..options
+            },
+        )
+        .expect("extraction-free output publishes");
+        assert_eq!(floor(), Some(8));
+        assert_eq!(nonadmission(), recorded);
+
+        // Firing 5 (8..=10): the envelope is invalid, so publication is rejected and the run abandoned; the facts survive the abandonment.
+        let awaiting = fire_next(8, 10);
+        let failure = publish(
+            awaiting,
+            ProducerOutput {
+                text: "<output>not a history</output>".into(),
+                length_capped: false,
+            },
+            &chunk(8, 10),
+        );
+        assert!(matches!(
+            failure,
+            Err(HistorySummarizerDriveError::Validation(_))
+        ));
+        let after_failure = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(after_failure.state, HistorySummarizerPhase::Idle);
+        assert!(after_failure.last_failure.is_some());
+        assert_eq!(floor(), Some(8));
+        assert_eq!(nonadmission(), recorded);
+
+        // Firing 6 (8..=10): an accepted set has no Curator handoff yet, so it is recorded against this firing as an unavailable Curator.
+        let awaiting = fire_next(8, 10);
+        let firing_seq = awaiting.firing_seq;
+        publish(awaiting, output(8, 9, CITED), &chunk(8, 10))
+            .expect("accepted set publishes its history");
+        drop(store);
+
+        // Reopening the store returns the same producer-owned facts.
+        let reopened = self::store(dir.path());
+        let loaded = reopened.load("ses").unwrap();
+        assert_eq!(
+            loaded.meta.history_summarizer.curator_nonadmission,
+            CuratorNonadmission {
+                count: 2,
+                latest: Some(RecordedNonadmission {
+                    firing_seq,
+                    code: CuratorNonadmissionCode::CuratorUnavailable,
+                }),
+            }
+        );
+        assert_eq!(loaded.meta.publication_floor_ordinal, Some(10));
     }
 
     #[test]
@@ -4230,6 +4506,7 @@ mod tests {
                 created_at_ms: 0,
                 failure_backoff_at_ms: 999,
                 publication_fence: None,
+                curator_nonadmission: None,
             },
         )
         .unwrap_err();
@@ -4316,6 +4593,7 @@ mod tests {
                 created_at_ms: 0,
                 failure_backoff_at_ms: 999,
                 publication_fence: None,
+                curator_nonadmission: None,
             },
         )
         .unwrap_err();
@@ -4397,6 +4675,7 @@ mod tests {
                 created_at_ms: 0,
                 failure_backoff_at_ms: 999,
                 publication_fence: None,
+                curator_nonadmission: None,
             },
         )
         .unwrap_err();
@@ -4559,6 +4838,7 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 5,
                 chunk_transcript: Some("U: transcript"),
+                curator_nonadmission: None,
             })
             .unwrap();
 

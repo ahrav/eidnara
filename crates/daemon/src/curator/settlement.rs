@@ -726,6 +726,40 @@ pub fn read_selected_proposal(
     binding: &ReviewBinding,
     now: i64,
 ) -> Result<SelectedProposal, ReadRefusal> {
+    read_selected_proposal_inner(store, ledger, project, causal_identity, binding, now, None)
+}
+
+/// [`read_selected_proposal`] with `after_hold_lookup` run between the review-hold lookup and the evidence validation under it, so a test can end the hold inside that window.
+#[cfg(any(test, feature = "test-support"))]
+pub fn read_selected_proposal_with_hook_for_test(
+    store: &KernelStore,
+    ledger: &MemoryStore,
+    project: &str,
+    causal_identity: &str,
+    binding: &ReviewBinding,
+    now: i64,
+    after_hold_lookup: &dyn Fn(),
+) -> Result<SelectedProposal, ReadRefusal> {
+    read_selected_proposal_inner(
+        store,
+        ledger,
+        project,
+        causal_identity,
+        binding,
+        now,
+        Some(after_hold_lookup),
+    )
+}
+
+fn read_selected_proposal_inner(
+    store: &KernelStore,
+    ledger: &MemoryStore,
+    project: &str,
+    causal_identity: &str,
+    binding: &ReviewBinding,
+    now: i64,
+    after_hold_lookup: Option<&dyn Fn()>,
+) -> Result<SelectedProposal, ReadRefusal> {
     let receipt = ledger
         .lookup_curator_receipt(project, causal_identity)
         .map_err(|error| ReadRefusal::Store(error.to_string()))?
@@ -783,6 +817,9 @@ pub fn read_selected_proposal(
             CuratorHoldError::Refused(_) => ReadRefusal::ReviewExpired,
         })?
         .ok_or(ReadRefusal::ReviewExpired)?;
+    if let Some(hook) = after_hold_lookup {
+        hook();
+    }
     // Every disclosed input, cited or not, must still be live under the review hold and eligible for a local reader.
     let evidence: Vec<String> = proposal
         .policy_dependencies
@@ -800,10 +837,11 @@ pub fn read_selected_proposal(
         )
         .map_err(|error| match error {
             CuratorHoldError::Store(error) => ReadRefusal::Store(error.to_string()),
-            // The hold ended between the lookup above and this validation: the same review expiry the lookup would have reported a moment later.
+            // The hold ended between the lookup above and this validation: the same review expiry the lookup would have reported a moment later, since the lookup excludes released, purge-degraded, and expired holds alike.
             CuratorHoldError::Refused(
                 CuratorHoldRefusal::Missing
                 | CuratorHoldRefusal::Released
+                | CuratorHoldRefusal::PurgeDegraded
                 | CuratorHoldRefusal::Expired,
             ) => ReadRefusal::ReviewExpired,
             CuratorHoldError::Refused(_) => ReadRefusal::Dependency(RefusalCode::HoldInvalid),
