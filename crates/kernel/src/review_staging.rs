@@ -31,7 +31,8 @@ pub const REVIEW_WITNESS_KIND: &str = "review";
 pub const REVIEW_PAYLOAD_VERSION: u32 = 1;
 /// Serialized payload bound, checked before per-field validation runs.
 pub const MAX_REVIEW_PAYLOAD_BYTES: usize = 64 * 1024;
-pub const MAX_REVIEW_IDENTITY_BYTES: usize = 256;
+/// Identity bound for every id a review payload names. A project-text capture id ([`crate::local_file_capture_id`]) is over 300 bytes, and a proposal must be able to cite one, so this is not the 256 the shorter Kernel ids fit in.
+pub const MAX_REVIEW_IDENTITY_BYTES: usize = 512;
 pub const MAX_REVIEW_TEXT_BYTES: usize = 32 * 1024;
 pub const MAX_REVIEW_REFERENCES: usize = 256;
 /// Optional starting references beside the subject source.

@@ -141,6 +141,97 @@ pub struct ResultSelection {
     pub payload_digest: String,
 }
 
+/// Why a review abstained, on the operator surface (Q28). `owner_sensitive`, `wrong_scope`, and `secret` are the Kernel's egress denial codes a revalidation can surface; the rest name settlement conditions under which no content may publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbstainReason {
+    /// A disclosed input's served class bars the run's destination.
+    OwnerSensitive,
+    /// A disclosed input left the project's scope.
+    WrongScope,
+    /// The model text carries a detected secret or redaction placeholder.
+    Secret,
+    /// A disclosed input no longer resolves as it did when rendered.
+    ExpectationChanged,
+    /// The proposal cites evidence the run never disclosed.
+    UndisclosedCitation,
+    /// A capacity refusal followed a disclosure, so the model reasoned over a truncated evidence set.
+    PartialDisclosure,
+    /// The model declined to conclude.
+    ModelDeclined,
+    /// The proposal breaks a payload rule the Kernel enforces at staging: a field shape, a bound, or an action that does not fit its target and text.
+    InvalidProposal,
+}
+
+impl AbstainReason {
+    pub const ALL: [Self; 8] = [
+        Self::OwnerSensitive,
+        Self::WrongScope,
+        Self::Secret,
+        Self::ExpectationChanged,
+        Self::UndisclosedCitation,
+        Self::PartialDisclosure,
+        Self::ModelDeclined,
+        Self::InvalidProposal,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OwnerSensitive => "owner_sensitive",
+            Self::WrongScope => "wrong_scope",
+            Self::Secret => "secret",
+            Self::ExpectationChanged => "expectation_changed",
+            Self::UndisclosedCitation => "undisclosed_citation",
+            Self::PartialDisclosure => "partial_disclosure",
+            Self::ModelDeclined => "model_declined",
+            Self::InvalidProposal => "invalid_proposal",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|reason| reason.as_str() == value)
+    }
+}
+
+/// How one receipt completes, as the worker reports it. `Complete` is the only completion that selects a Kernel result; `Abstained` is the only one that carries a reason. `Cancelled` and `Expired` are derived from the receipt itself at completion and refused when supplied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptCompletion {
+    Complete(ResultSelection),
+    Abstained(AbstainReason),
+    Failed,
+    Cancelled,
+    Unknown,
+    Expired,
+}
+
+impl ReceiptCompletion {
+    pub fn terminal(&self) -> CuratorReceiptTerminal {
+        match self {
+            Self::Complete(_) => CuratorReceiptTerminal::Complete,
+            Self::Abstained(_) => CuratorReceiptTerminal::Abstained,
+            Self::Failed => CuratorReceiptTerminal::Failed,
+            Self::Cancelled => CuratorReceiptTerminal::Cancelled,
+            Self::Unknown => CuratorReceiptTerminal::Unknown,
+            Self::Expired => CuratorReceiptTerminal::Expired,
+        }
+    }
+
+    fn selection(&self) -> Option<&ResultSelection> {
+        match self {
+            Self::Complete(selection) => Some(selection),
+            _ => None,
+        }
+    }
+
+    fn abstained_reason(&self) -> Option<AbstainReason> {
+        match self {
+            Self::Abstained(reason) => Some(*reason),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CuratorReceipt {
     pub project: String,
@@ -156,6 +247,7 @@ pub struct CuratorReceipt {
     pub execution_cutoff_ms: i64,
     pub cancelled_at_ms: Option<i64>,
     pub terminal: Option<CuratorReceiptTerminal>,
+    pub abstained_reason: Option<AbstainReason>,
     pub selected: Option<(u64, ResultSelection)>,
     pub created_at_ms: i64,
 }
@@ -264,11 +356,14 @@ fn generation_param(generation: u64) -> Result<i64, CuratorLedgerRefusal> {
     i64::try_from(generation).map_err(|_| CuratorLedgerRefusal::InvalidRequest)
 }
 
+/// Completed receipts one list call returns at most.
+pub const MAX_RECEIPT_PAGE: usize = 64;
+
 const RECEIPT_COLUMNS: &str =
     "project, causal_identity, database_incarnation_id, kernel_incarnation_id,
      authority_generation, state, generation, claim_id, run_deadline_ms, execution_cutoff_ms,
      cancelled_at_ms, terminal_kind, selected_generation, selected_candidate_id,
-     selected_payload_digest, created_at_ms, authority_context_store";
+     selected_payload_digest, created_at_ms, authority_context_store, abstained_reason";
 
 fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorReceipt> {
     let invalid = |column: usize, value: String| {
@@ -292,6 +387,13 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorReceipt>
         (None, None, None) => None,
         _ => return Err(invalid(13, "partial selection".to_string())),
     };
+    let abstained_reason: Option<String> = row.get(17)?;
+    let abstained_reason = abstained_reason
+        .map(|reason| AbstainReason::parse(&reason).ok_or_else(|| invalid(17, reason)))
+        .transpose()?;
+    if (terminal == Some(CuratorReceiptTerminal::Abstained)) != abstained_reason.is_some() {
+        return Err(invalid(17, "abstention without its reason".to_string()));
+    }
     Ok(CuratorReceipt {
         project: row.get(0)?,
         causal_identity: row.get(1)?,
@@ -305,6 +407,7 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorReceipt>
         execution_cutoff_ms: row.get(9)?,
         cancelled_at_ms: row.get(10)?,
         terminal,
+        abstained_reason,
         selected,
         created_at_ms: row.get(15)?,
     })
@@ -1146,7 +1249,7 @@ impl MemoryStore {
         })
     }
 
-    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` terminal selects exactly one Kernel result for that generation, requires an attempt this generation closed `complete`, and the job row records the matching outcome. A predecessor generation, a stale claim, another incarnation, or a job another owner already closed or that has passed its queue deadline writes nothing. A cancelled receipt records `cancelled`, and one at or after its run deadline records `expired`, whatever the worker reports: a durable cancellation is never overridden and a renewed claim never extends the fixed run budget.
+    /// Completes the task lease and the receipt in one fenced transaction. The receipt must be in progress at `generation` under `claim_id` and bound to the caller's Kernel incarnation and this store's own; a `Complete` completion selects exactly one Kernel result for that generation, requires an attempt this generation closed `complete`, and the job row records the matching outcome. A predecessor generation, a stale claim, another incarnation, or a job another owner already closed or that has passed its queue deadline writes nothing. A cancelled receipt records `cancelled`, and one at or after its run deadline records `expired`, whatever the worker reports: a durable cancellation is never overridden and a renewed claim never extends the fixed run budget. The caller reads the receipt back to learn which terminal was recorded.
     #[allow(clippy::too_many_arguments)]
     pub fn complete_curator_receipt(
         &self,
@@ -1158,22 +1261,20 @@ impl MemoryStore {
         slot: i64,
         generation: u64,
         kernel_incarnation_id: &str,
-        terminal: CuratorReceiptTerminal,
-        selection: Option<&ResultSelection>,
+        completion: &ReceiptCompletion,
         now_ms: i64,
     ) -> Result<LeaseCompleteOutcome, MemoryStoreError> {
+        let terminal = completion.terminal();
+        let selection = completion.selection();
         // `Cancelled` and `Expired` are derived from the receipt's own state below; a worker cannot supply them.
-        if (terminal == CuratorReceiptTerminal::Complete) != selection.is_some()
-            || matches!(
-                terminal,
-                CuratorReceiptTerminal::Cancelled | CuratorReceiptTerminal::Expired
-            )
-            || selection.is_some_and(|selection| {
-                !is_lower_hex(&selection.payload_digest, 64)
-                    || selection.candidate_id.is_empty()
-                    || selection.candidate_id.len() > 256
-            })
-        {
+        if matches!(
+            terminal,
+            CuratorReceiptTerminal::Cancelled | CuratorReceiptTerminal::Expired
+        ) || selection.is_some_and(|selection| {
+            !is_lower_hex(&selection.payload_digest, 64)
+                || selection.candidate_id.is_empty()
+                || selection.candidate_id.len() > 256
+        }) {
             return Ok(LeaseCompleteOutcome::Conflict { kind: "invalid" });
         }
         let generation = generation_param(generation).map_err(|_| {
@@ -1249,12 +1350,12 @@ impl MemoryStore {
                 let Some(receipt) = load_receipt(tx, project, causal_identity)? else {
                     return Ok(LeaseCompletion::Stale);
                 };
-                let (terminal, selection) = if receipt.cancelled_at_ms.is_some() {
-                    (CuratorReceiptTerminal::Cancelled, None)
+                let (terminal, selection, abstained_reason) = if receipt.cancelled_at_ms.is_some() {
+                    (CuratorReceiptTerminal::Cancelled, None, None)
                 } else if now_ms >= receipt.run_deadline_ms {
-                    (CuratorReceiptTerminal::Expired, None)
+                    (CuratorReceiptTerminal::Expired, None, None)
                 } else {
-                    (terminal, selection)
+                    (terminal, selection, completion.abstained_reason())
                 };
                 // The clock and evidence checks made before the lease are repeated here, serialized with the write: a dispatch that landed in between leaves a newer event, and a completion dated before it, or a publication no longer backed, is stale rather than written.
                 let backed: bool = tx.query_row(
@@ -1289,7 +1390,8 @@ impl MemoryStore {
                 let changed = tx.execute(
                     "UPDATE curator_receipts
                         SET state = 'complete', terminal_kind = ?5, selected_generation = ?6,
-                            selected_candidate_id = ?7, selected_payload_digest = ?8, updated_at_ms = ?9
+                            selected_candidate_id = ?7, selected_payload_digest = ?8, updated_at_ms = ?9,
+                            abstained_reason = ?11
                       WHERE project = ?1 AND causal_identity = ?2 AND state = 'in_progress'
                         AND generation = ?3 AND claim_id = ?4
                         AND kernel_incarnation_id = ?10
@@ -1309,6 +1411,7 @@ impl MemoryStore {
                         selection.map(|selection| selection.payload_digest.as_str()),
                         now_ms,
                         kernel_incarnation_id,
+                        abstained_reason.map(AbstainReason::as_str),
                     ],
                 )?;
                 // A job already closed by another owner, or past its queue deadline, leaves this completion stale with the receipt untouched; the update above requires the job to be open, so the job finish below cannot refuse it as terminal or expired.
@@ -1321,6 +1424,37 @@ impl MemoryStore {
                 })
             },
         )
+    }
+
+    /// Completed receipts of `project` in causal-identity order, at most `limit`, after `after` when given. A page is one bounded read; the caller copies it and releases this store before entering the Kernel.
+    pub fn list_completed_curator_receipts(
+        &self,
+        project: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CuratorReceipt>, MemoryStoreError> {
+        check_project(project)?;
+        // A cursor is the causal identity a page ended on; any other string is a lexical bound that would silently drop the identities ordered below it.
+        if after.is_some_and(|after| !is_lower_hex(after, 64)) {
+            return Err(MemoryStoreError::Serde(
+                "receipt page cursor must be a causal identity".to_string(),
+            ));
+        }
+        let limit = limit.clamp(1, MAX_RECEIPT_PAGE) as i64;
+        self.inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare_cached(&format!(
+                    "SELECT {RECEIPT_COLUMNS} FROM curator_receipts
+                      WHERE project = ?1 AND state = 'complete' AND causal_identity > ?2
+                      ORDER BY causal_identity LIMIT ?3"
+                ))?;
+                let rows = statement.query_map(
+                    params![project, after.unwrap_or(""), limit],
+                    receipt_from_row,
+                )?;
+                rows.collect()
+            })
+            .map_err(Into::into)
     }
 
     pub fn lookup_curator_receipt(

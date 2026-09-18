@@ -9,10 +9,10 @@ use memory_store::curator_jobs::{
     EvidenceAvailability, ProducerBinding, ReserveOutcome, ReviewTarget,
 };
 use memory_store::curator_ledger::{
-    AttemptMarker, CURATOR_ATTEMPT_MAX_MS, CURATOR_MAX_ATTEMPTS, CURATOR_RUN_DEADLINE_MS,
-    CURATOR_SETTLEMENT_RESERVE_MS, CURATOR_TASK_LEASE_MS, CuratorAttemptTerminal,
-    CuratorBeginOutcome, CuratorLedgerError, CuratorLedgerRefusal, CuratorReceiptTerminal,
-    DispatchOutcome, ResultSelection,
+    AbstainReason, AttemptMarker, CURATOR_ATTEMPT_MAX_MS, CURATOR_MAX_ATTEMPTS,
+    CURATOR_RUN_DEADLINE_MS, CURATOR_SETTLEMENT_RESERVE_MS, CURATOR_TASK_LEASE_MS,
+    CuratorAttemptTerminal, CuratorBeginOutcome, CuratorLedgerError, CuratorLedgerRefusal,
+    CuratorReceiptTerminal, DispatchOutcome, ReceiptCompletion, ResultSelection,
 };
 use memory_store::{LeaseAcquireOutcome, LeaseCompleteOutcome, MemoryStore, MemoryStoreError};
 use storage::StorageDescriptor;
@@ -332,8 +332,7 @@ fn first_claim_fixes_both_deadlines_and_a_takeover_inherits_them() {
                 0,
                 1,
                 KERNEL,
-                CuratorReceiptTerminal::Abstained,
-                None,
+                &ReceiptCompletion::Abstained(AbstainReason::ModelDeclined),
                 later
             )
             .unwrap(),
@@ -685,8 +684,7 @@ fn four_attempts_across_generations_exhaust_the_allowance_and_the_cutoff_starts_
             1,
             1,
             KERNEL,
-            CuratorReceiptTerminal::Abstained,
-            None,
+            &ReceiptCompletion::Abstained(AbstainReason::ModelDeclined),
             cutoff - 1,
         )
         .unwrap();
@@ -726,7 +724,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
         candidate_id: "review-result:abc".to_string(),
         payload_digest: "f".repeat(64),
     };
-    // A completion without a selection cannot claim `complete`, and vice versa.
+    // A selection that does not name a result is refused before the lease is touched.
     assert_eq!(
         fixture
             .store
@@ -739,8 +737,10 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 0,
                 1,
                 KERNEL,
-                CuratorReceiptTerminal::Complete,
-                None,
+                &ReceiptCompletion::Complete(ResultSelection {
+                    candidate_id: String::new(),
+                    payload_digest: "f".repeat(64),
+                }),
                 T0 + 1
             )
             .unwrap(),
@@ -759,8 +759,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 0,
                 2,
                 KERNEL,
-                CuratorReceiptTerminal::Complete,
-                Some(&selection),
+                &ReceiptCompletion::Complete(selection.clone()),
                 T0 + 1
             )
             .unwrap(),
@@ -786,8 +785,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
             0,
             1,
             KERNEL,
-            CuratorReceiptTerminal::Complete,
-            Some(&selection),
+            &ReceiptCompletion::Complete(selection.clone()),
             T0 + 2,
         )
         .unwrap();
@@ -825,8 +823,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 0,
                 1,
                 KERNEL,
-                CuratorReceiptTerminal::Complete,
-                Some(&selection),
+                &ReceiptCompletion::Complete(selection.clone()),
                 T0 + 3
             )
             .unwrap(),
@@ -844,8 +841,7 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
                 0,
                 1,
                 KERNEL,
-                CuratorReceiptTerminal::Failed,
-                None,
+                &ReceiptCompletion::Failed,
                 T0 + 4
             )
             .unwrap(),
@@ -859,6 +855,119 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
     assert_eq!(
         refusal(fixture.dispatch(1, &claim, T0 + 7).unwrap_err()),
         CuratorLedgerRefusal::Fenced
+    );
+}
+
+#[test]
+fn a_completed_receipt_page_refuses_a_cursor_that_is_not_a_causal_identity() {
+    // A cursor is the causal identity the last page ended on. Anything else is a lexical bound that silently drops every identity ordered below it.
+    let fixture = Fixture::open();
+    for cursor in ["f", &"F".repeat(64), &"a".repeat(63), "review-result:x"] {
+        assert!(
+            fixture
+                .store
+                .list_completed_curator_receipts(PROJECT, Some(cursor), 10)
+                .is_err(),
+            "{cursor:?} is not a causal identity"
+        );
+    }
+    assert!(
+        fixture
+            .store
+            .list_completed_curator_receipts(PROJECT, Some(&"a".repeat(64)), 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn an_in_progress_receipt_cannot_carry_a_selection_or_a_reason() {
+    // `terminal_kind` is NULL while the receipt is in progress, and a comparison with NULL is NULL, which a CHECK accepts; the shape checks must be total so a selection or an abstention reason cannot land before the terminal that owns it.
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    for (column, value) in [
+        ("selected_candidate_id", "review-result:early"),
+        ("abstained_reason", "model_declined"),
+    ] {
+        let planted = fixture.store.with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                &format!("UPDATE curator_receipts SET {column} = ?1 WHERE state = 'in_progress'"),
+                [value],
+            )
+        });
+        assert!(
+            planted.is_err(),
+            "{column} on an in-progress receipt must fail the column check, not write"
+        );
+    }
+    let receipt = receipt(&fixture);
+    assert_eq!(receipt.terminal, None);
+    assert_eq!(receipt.selected, None);
+    assert_eq!(receipt.abstained_reason, None);
+}
+
+#[test]
+fn every_abstain_reason_writes_under_the_column_check_and_reads_back() {
+    // The explicit match requires every `AbstainReason` variant; completing each `ALL` entry checks the column CHECK and the row parser cover it.
+    let listed = |reason: AbstainReason| match reason {
+        AbstainReason::OwnerSensitive
+        | AbstainReason::WrongScope
+        | AbstainReason::Secret
+        | AbstainReason::ExpectationChanged
+        | AbstainReason::UndisclosedCitation
+        | AbstainReason::PartialDisclosure
+        | AbstainReason::ModelDeclined
+        | AbstainReason::InvalidProposal => AbstainReason::ALL.contains(&reason),
+    };
+    for reason in AbstainReason::ALL {
+        assert!(listed(reason));
+        let fixture = Fixture::open();
+        let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+        let CuratorBeginOutcome::Begun(_) = fixture.begin(&claim, T0) else {
+            panic!("first claim begins")
+        };
+        let completed = fixture
+            .store
+            .complete_curator_receipt(
+                PROJECT,
+                &fixture.identity,
+                &claim,
+                "completion-1",
+                "worker-a",
+                0,
+                1,
+                KERNEL,
+                &ReceiptCompletion::Abstained(reason),
+                T0 + 1,
+            )
+            .unwrap();
+        assert!(
+            matches!(completed, LeaseCompleteOutcome::Applied { .. }),
+            "{reason:?}: {completed:?}"
+        );
+        let receipt = fixture
+            .store
+            .lookup_curator_receipt(PROJECT, &fixture.identity)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.terminal, Some(CuratorReceiptTerminal::Abstained));
+        assert_eq!(receipt.abstained_reason, Some(reason));
+        assert_eq!(receipt.selected, None);
+        let page = fixture
+            .store
+            .list_completed_curator_receipts(PROJECT, None, 10)
+            .unwrap();
+        assert_eq!(page.len(), 1, "{reason:?}");
+        assert_eq!(page[0].abstained_reason, Some(reason));
+    }
+    let mut names: Vec<&str> = AbstainReason::ALL.iter().map(|r| r.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        AbstainReason::ALL.len(),
+        "reason strings collide"
     );
 }
 
@@ -1020,8 +1129,7 @@ fn bounded_transition_sequences_preserve_allowance_deadlines_and_generation_fenc
                             0,
                             generation,
                             KERNEL,
-                            CuratorReceiptTerminal::Abstained,
-                            None,
+                            &ReceiptCompletion::Abstained(AbstainReason::ModelDeclined),
                             now,
                         )
                         .unwrap();
@@ -1167,8 +1275,7 @@ fn the_sweep_releases_a_job_whose_receipt_was_orphaned_by_a_crashed_worker() {
                 0,
                 1,
                 KERNEL,
-                CuratorReceiptTerminal::Abstained,
-                None,
+                &completion(CuratorReceiptTerminal::Abstained, None),
                 queue_deadline + 1,
             )
             .unwrap(),
@@ -1426,6 +1533,26 @@ fn selection() -> ResultSelection {
     }
 }
 
+/// The completion a worker reports for `terminal`. Only `Complete` carries a selection; an abstention here stands in for any reason, since these tests judge the terminal.
+fn completion(
+    terminal: CuratorReceiptTerminal,
+    selection: Option<&ResultSelection>,
+) -> ReceiptCompletion {
+    match (terminal, selection) {
+        (CuratorReceiptTerminal::Complete, Some(selection)) => {
+            ReceiptCompletion::Complete(selection.clone())
+        }
+        (CuratorReceiptTerminal::Abstained, None) => {
+            ReceiptCompletion::Abstained(AbstainReason::ModelDeclined)
+        }
+        (CuratorReceiptTerminal::Failed, None) => ReceiptCompletion::Failed,
+        (CuratorReceiptTerminal::Cancelled, None) => ReceiptCompletion::Cancelled,
+        (CuratorReceiptTerminal::Unknown, None) => ReceiptCompletion::Unknown,
+        (CuratorReceiptTerminal::Expired, None) => ReceiptCompletion::Expired,
+        (terminal, selection) => panic!("{terminal:?} does not take {selection:?}"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn complete(
     fixture: &Fixture,
@@ -1447,8 +1574,7 @@ fn complete(
         0,
         generation,
         KERNEL,
-        terminal,
-        selection,
+        &completion(terminal, selection),
         now,
     )
 }
@@ -3166,8 +3292,7 @@ fn a_kernel_binding_mismatch_is_refused_before_the_lease_is_spent() {
                 0,
                 1,
                 &"1b".repeat(16),
-                CuratorReceiptTerminal::Failed,
-                None,
+                &ReceiptCompletion::Failed,
                 T0 + 1,
             )
             .unwrap(),

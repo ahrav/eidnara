@@ -518,6 +518,9 @@ CREATE TABLE curator_receipts (
             selected_generation INTEGER CHECK (selected_generation IS NULL OR selected_generation >= 1),
             selected_candidate_id TEXT CHECK (selected_candidate_id IS NULL OR length(selected_candidate_id) BETWEEN 1 AND 256),
             selected_payload_digest TEXT CHECK (selected_payload_digest IS NULL OR length(selected_payload_digest) = 64),
+            abstained_reason TEXT CHECK (abstained_reason IS NULL OR abstained_reason IN (
+                'owner_sensitive', 'wrong_scope', 'secret', 'expectation_changed', 'undisclosed_citation',
+                'partial_disclosure', 'model_declined', 'invalid_proposal')),
             created_at_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
             PRIMARY KEY (project, causal_identity),
@@ -525,7 +528,8 @@ CREATE TABLE curator_receipts (
             CHECK ((state = 'complete') = (terminal_kind IS NOT NULL)),
             CHECK ((selected_candidate_id IS NULL) = (selected_payload_digest IS NULL)),
             CHECK ((selected_candidate_id IS NULL) = (selected_generation IS NULL)),
-            CHECK (terminal_kind IS NOT 'complete' OR selected_candidate_id IS NOT NULL)
+            CHECK ((terminal_kind IS 'complete') = (selected_candidate_id IS NOT NULL)),
+            CHECK ((terminal_kind IS 'abstained') = (abstained_reason IS NOT NULL))
         );
 
 -- Receipts survive for the store incarnation; the expiry sweep reads only the in-progress ones by deadline.

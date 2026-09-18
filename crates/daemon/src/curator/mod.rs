@@ -1,4 +1,4 @@
-//! The Curator investigation coordinator's daemon-owned pieces: the evidence broker, run-local aliases, accounting, provenance tags, the disclosure ledger, bounded related-memory discovery, confined project-text inspection, the verified one-use model sender with its bounded response decoding, and the authorized, durably charged disclosure of one prepared body.
+//! The Curator investigation coordinator's daemon-owned pieces: the evidence broker, run-local aliases, accounting, provenance tags, the disclosure ledger, bounded related-memory discovery, confined project-text inspection, the verified one-use model sender with its bounded response decoding, the authorized, durably charged disclosure of one prepared body, and the settlement that publishes a run's proposal only through its completed receipt.
 
 use std::ops::Range;
 
@@ -8,6 +8,7 @@ pub mod model_request;
 pub mod model_response;
 pub mod project_text;
 pub mod related_memories;
+pub mod settlement;
 
 /// Per-hit excerpt bound (Q19), in bytes of the referenced artifact.
 pub const MAX_EXCERPT_BYTES: usize = 512;

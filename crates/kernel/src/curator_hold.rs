@@ -264,6 +264,7 @@ impl KernelStore {
         let expected = provisional_result_identity(&execution.subject, execution.generation);
         if review.generation != execution.generation
             || review.subject != expected.candidate_id
+            || execution.generation != review.generation
             || execution.project_digest != review.project_digest
             || execution.kernel_incarnation != review.kernel_incarnation
             || execution.memstore_incarnation != review.memstore_incarnation
@@ -399,6 +400,30 @@ impl KernelStore {
         }
         tx.commit().map_err(sqlite)?;
         Ok(hold)
+    }
+
+    /// The review hold owned by `binding` that is unreleased and unexpired; released and expired holds return `None`. A purge-degraded hold is returned like [`Self::transfer_execution_to_review`] returns it: it protects nothing and validation under it refuses, but it is the binding's committed hold and the id its owner must release.
+    pub fn lookup_review_hold(
+        &self,
+        binding: &CuratorHoldBinding,
+        now: i64,
+    ) -> Result<Option<CuratorHold>, CuratorHoldError> {
+        binding.validate()?;
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sqlite)?;
+        self.check_incarnation(&tx, binding)?;
+        let found = live_hold_of(
+            &tx,
+            CuratorHoldKind::Review,
+            binding,
+            now.max(current_time_ms()),
+        )?;
+        let Some((hold_id, expires_at, _degraded)) = found else {
+            return Ok(None);
+        };
+        admit_totals(&tx, &hold_id, CuratorHoldKind::Review, expires_at).map(Some)
     }
 
     /// Releases an execution hold on a trusted terminal receipt for its job and generation.
