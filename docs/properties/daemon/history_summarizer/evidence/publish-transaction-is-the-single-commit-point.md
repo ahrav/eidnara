@@ -25,35 +25,35 @@ The publish path in `crates/daemon/src/history_summarizer.rs`:
 
 The transaction in `crates/memory-store/src/lib.rs`:
 
-- `:11198` `write.execute(&self.inner, |coordinated| { ... })` opens it through
+- `:11199` `write.execute(&self.inner, |coordinated| { ... })` opens it through
   the prepared-write wrapper.
-- `:11201-11222` reads `(row_version, meta)` and applies the row-version CAS.
-- `:11224-11247` deserializes meta, checks the phase, checks the five-field
+- `:11202-11223` reads `(row_version, meta)` and applies the row-version CAS.
+- `:11225-11248` deserializes meta, checks the phase, checks the five-field
   predicate.
-- `:11253-11265` the block-identity content fence.
-- `:11267-11274` the revert-epoch check.
-- `:11276-11295` re-reads `(MAX(sequence), COUNT(*))` and checks it against the
+- `:11254-11266` the block-identity content fence.
+- `:11268-11275` the revert-epoch check.
+- `:11277-11296` re-reads `(MAX(sequence), COUNT(*))` and checks it against the
   pinned history_segment-set generation.
-- `:11298-11302` raises `meta.publication_floor_ordinal` with a `max`.
-- `:11303` `meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing()`,
+- `:11299-11303` raises `meta.publication_floor_ordinal` with a `max`.
+- `:11304` `meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing()`,
   the idle state that keeps the sequence and the nonadmission facts.
-- `:11304-11311` increments the nonadmission count and binds the latest reason
+- `:11305-11312` increments the nonadmission count and binds the latest reason
   to the publishing `firing_seq` when the request carries a code.
-- `:11314-11324` serializes and secret-scans the metadata. This runs before any
+- `:11315-11325` serializes and secret-scans the metadata. This runs before any
   row is appended so that a serialization failure writes nothing; the serialized
   metadata depends on nothing the appends produce.
-- `:11326` `first_appended_sequence = next_history_segment_sequence_tx(...)`.
-- `:11327-11340` `append_history_segments_tx`, write 1. It validates the whole
+- `:11327` `first_appended_sequence = next_history_segment_sequence_tx(...)`.
+- `:11328-11341` `append_history_segments_tx`, write 1. It validates the whole
   batch before its first insert, so an overlap return writes nothing.
-- `:11341-11349` `insert_chunk_transcripts_tx`, write 2.
-- `:11350` `enqueue_history_summarizer_side_channels_tx`, write 3.
-- `:11352-11356` `UPDATE cache_state SET row_version = next, meta = ...
+- `:11342-11350` `insert_chunk_transcripts_tx`, write 2.
+- `:11351` `enqueue_history_summarizer_side_channels_tx`, write 3.
+- `:11353-11357` `UPDATE cache_state SET row_version = next, meta = ...
   WHERE session_id = ?1 AND row_version = ?4`, write 4, which carries the floor,
   the idle state, and the nonadmission facts in one row.
-- `:11358-11361` returns `PublishTxnOutcome::Committed`.
-- `:11371-11377` after the transaction, drains the queued side channels best
+- `:11359-11362` returns `PublishTxnOutcome::Committed`.
+- `:11372-11378` after the transaction, drains the queued side channels best
   effort. Failures stay queued for a later transform, per the comment at
-  `:11371-11372`.
+  `:11372-11373`.
 
 Correction: an earlier revision of this trail cited the transaction at
 `:9360-9517`, named `idle_history_summarizer_after_success`, and listed the floor
@@ -77,23 +77,25 @@ than an error, so the transaction commits in those cases too. That is deliberate
 for `Committed` and harmless for the rejection variants, which write nothing.
 
 Confirmation that the transaction touches no render state: the store's doc at
-`:11162-11167` states it "intentionally leaves render state (`CoreState`,
+`:11163-11168` states it "intentionally leaves render state (`CoreState`,
 `coverage_ordinal`, watermarks, and m1 revision) untouched", matching the module
 side at `history_summarizer.rs:415-417`. I read the closure body and found no write
 outside the four listed above.
 
 ## Failure scenario
 
-Suppose the history_segment append at `:11327` committed but the row-version bump at
-`:11352` did not. The session would hold a model-generated summary row while
+Suppose the history_segment append at `:11328` committed but the row-version bump at
+`:11353` did not. The session would hold a model-generated summary row while
 `meta.history_summarizer` still said `Publishing` and the publication floor had not
 moved. The next `handle_restart_load` would see `Publishing`, abandon, and make
-the session refire-eligible (`history_summarizer.rs:648-653`). The refire would assemble
-a chunk starting past `MAX(end_message)` (`history_summarizer_chunk.rs:629-642`), which
+the session refire-eligible (`history_summarizer.rs:592-629`, the `Publishing` arm at
+`:620-627`). The refire would assemble
+a chunk starting past `MAX(end_message)` (`history_summarizer_chunk.rs:635-648`), which
 now includes the orphaned history_segment, so the range would not be re-summarized.
 The orphaned history_segment would fold the range while the floor stayed behind it,
 and the boundary logic would treat those ordinals as still eligible for
-placement (`boundary.rs:1417-1426`). The symptom is a fold whose floor does not
+placement (`boundary.rs:448-452`, which raises the protected tail to
+`prior_boundary_ordinal` only while `publication_floor_active`). The symptom is a fold whose floor does not
 protect it, not lost content.
 
 The reverse partial, floor raised without history_segments appended, is worse: a
@@ -117,8 +119,8 @@ error can land in it. Dependencies:
 
 A configured model chain, a fired run driven to `Publishing`, and a fault inside
 the transaction. The blocker is that no such seam exists. The
-`#[cfg(test)] after_store_publish` hook (`lib.rs:3292-3293`, fired at
-`:3311-3319`) runs after `store.publish_history_summarizer_chunk` has returned, so it is
+`#[cfg(test)] after_store_publish` hook (`lib.rs:3432-3433`, fired at
+`:3453-3461`; its reattach twin at `:3470-3471` and `:3491-3499`) runs after `store.publish_history_summarizer_chunk` has returned, so it is
 outside the window by construction. Options, cheapest first:
 
 1. Assert the post-condition conjunction after a successful publish and after
@@ -135,13 +137,16 @@ outside the window by construction. Options, cheapest first:
 
 ### Q: Is there any intended fault-injection seam inside the publish transaction, or is the wrapper's atomicity taken on faith?
 
-- Sources examined: `crates/memory-store/src/lib.rs:9351-9546`; every `#[cfg(test)]`
+- Sources examined: `crates/memory-store/src/lib.rs:9351-9546` (the publish transaction at that revision; now `:11163-11378`); every `#[cfg(test)]`
   and `cfg(feature =` occurrence in `crates/memory-store/src/lib.rs`;
-  `crates/daemon/src/lib.rs:3286-3359` for the two publication fences;
-  `crates/daemon/src/lib.rs:13229-13337`, the `drive-fault` feature block.
+  `crates/daemon/src/lib.rs:3426-3503` for the two publication fences;
+  every `cfg(feature =` occurrence in `crates/daemon/src/lib.rs` (all
+  `test-support`; the former `drive-fault` feature block was deleted in
+  `06653606`).
 - Findings: the only test hook near the publish is
-  `after_store_publish`, which fires after the store call returns. The
-  `drive-fault` feature is scoped to the transform drive path, not the store. No
+  `after_store_publish`, which fires after the store call returns. No
+  `drive-fault` feature exists at HEAD, and no `cfg(feature)` item in
+  `crates/daemon/src/lib.rs` reaches the store. No
   `#[cfg(test)]` branch exists inside the publish closure.
 - Missing evidence: whether the sibling `storage` crate offers a fault
   hook. Its `with_conn_fenced` at `../commons/crates/storage/src/lib.rs:185-232` (source-catalog path, not present at HEAD)

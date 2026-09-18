@@ -10647,7 +10647,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// The full-session form of the revert re-cut: history_segments and their recoverable transcripts are removed, while the cache row is replaced with an empty core and default meta carrying a bumped revert epoch. The epoch and row-version update share one fenced transaction, so an in-flight history_summarizer cannot publish against the retired history_segment set.
+    /// The full-session form of the revert re-cut: history_segments and their recoverable transcripts are removed, while the cache row is replaced with an empty core and default meta carrying a bumped revert epoch. The row itself survives, so the producer's sequence and nonadmission facts are carried over with in-flight firing state cleared. The epoch and row-version update share one fenced transaction, so an in-flight history_summarizer cannot publish against the retired history_segment set.
     pub fn reset_session_for_recomp(
         &self,
         session_id: &str,
@@ -10679,6 +10679,7 @@ impl MemoryStore {
                 last_recut: Some(format!(
                     "native recomp reset all history_segments; epoch {next_epoch}"
                 )),
+                history_summarizer: prior_meta.history_summarizer.cleared_of_in_flight_firing(),
                 ..ModuleMeta::default()
             };
             let core_json = match serde_json::to_string(&CoreState::empty()) {
@@ -26110,6 +26111,44 @@ mod lineage_descent_tests {
         assert_eq!(target.firing_seq, 5);
         assert_eq!(
             target.curator_nonadmission,
+            meta.history_summarizer.curator_nonadmission
+        );
+    }
+
+    /// A full-session recomp retires the history_segment set and bumps the revert epoch, but the row stays alive, so the producer's sequence and Q31 nonadmission facts survive while in-flight firing state is cleared.
+    #[test]
+    fn recomp_reset_keeps_the_producer_sequence_and_nonadmission_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let loaded = store.load("A").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::Publishing,
+            firing_seq: 5,
+            producer_run_id: Some("run-5".into()),
+            curator_nonadmission: CuratorNonadmission {
+                count: 3,
+                latest: Some(RecordedNonadmission {
+                    firing_seq: 4,
+                    code: CuratorNonadmissionCode::CapacityFull,
+                }),
+            },
+            ..HistorySummarizerDurableState::default()
+        };
+        let row_version = store
+            .commit("A", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        store
+            .reset_session_for_recomp("A", Some(row_version))
+            .unwrap();
+        let reset = store.load("A").unwrap().meta;
+        assert_eq!(reset.revert_epoch, meta.revert_epoch + 1);
+        assert_eq!(reset.history_summarizer.state, HistorySummarizerPhase::Idle);
+        assert_eq!(reset.history_summarizer.producer_run_id, None);
+        assert_eq!(reset.history_summarizer.firing_seq, 5);
+        assert_eq!(
+            reset.history_summarizer.curator_nonadmission,
             meta.history_summarizer.curator_nonadmission
         );
     }
