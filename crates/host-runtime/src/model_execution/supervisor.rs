@@ -602,6 +602,13 @@ impl Supervisor {
         run
     }
 
+    /// Whether `key` names a live or retained internal run, which [`Self::launch_internal`] would refuse. A launch that never reached its ledger row is retained like any other, so a caller allocating attempt keys probes past them.
+    pub fn internal_run_exists(&self, key: &InternalRunKey) -> bool {
+        lock_index(&self.inner)
+            .sessions
+            .contains_key(&RunKey::Internal(key.clone()))
+    }
+
     /// Admits one Curator attempt as an internal run and spawns its launch under the same run slots, backend permits, retained bytes, task tracker, and shutdown as public runs. `request_bytes` is the prepared request's retained size, charged like a public request. The backend-permit wait ends at `cutoff`; a run that has not started by then terminates as cancelled without ever calling `launch`, and one that has started has its token cancelled at `cutoff`. An internal key admits exactly one run while that run is retained; a second launch under it is refused. No command permit is taken: internal admission must not consume the public callback budget, and the run slot is what bounds it.
     pub fn launch_internal(
         &self,

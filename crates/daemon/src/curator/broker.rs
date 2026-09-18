@@ -1016,9 +1016,22 @@ impl EvidenceBroker {
         Ok(())
     }
 
+    /// The refusal a hold failure renders for `alias`. A hold at capacity is a run bound like the byte and buffer bounds: after a disclosure it leaves the evidence set truncated, whichever path swallows the refusal afterwards.
+    pub(crate) fn hold_refused(
+        &mut self,
+        alias: Option<&Alias>,
+        error: CuratorHoldError,
+    ) -> Refusal {
+        let code = hold_refusal(error);
+        if code == RefusalCode::HoldLimit {
+            self.ledger.record_partial_disclosure();
+        }
+        refuse(alias, code)
+    }
+
     /// Grows the execution hold over the artifact before any byte is read, then returns the held facts.
     pub(crate) fn hold_evidence(
-        &self,
+        &mut self,
         store: &KernelStore,
         alias: Option<&Alias>,
         evidence_id: &str,
@@ -1030,7 +1043,7 @@ impl EvidenceBroker {
                 &self.binding.hold,
                 std::slice::from_ref(&evidence_id.to_string()),
             )
-            .map_err(|error| refuse(alias, hold_refusal(error)))?;
+            .map_err(|error| self.hold_refused(alias, error))?;
         let mut held = store
             .validate_held_evidence(
                 &self.binding.hold_id,
@@ -1039,7 +1052,7 @@ impl EvidenceBroker {
                 std::slice::from_ref(&evidence_id.to_string()),
                 now_ms,
             )
-            .map_err(|error| refuse(alias, hold_refusal(error)))?;
+            .map_err(|error| self.hold_refused(alias, error))?;
         let held = held
             .pop()
             .ok_or_else(|| refuse(alias, RefusalCode::HoldInvalid))?;

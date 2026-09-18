@@ -44,6 +44,8 @@ pub const MAX_ROUNDS: usize = 4;
 pub const MAX_ACTIVE_PER_HOST: usize = 4;
 /// The supervisor key's task kind for Curator attempts.
 pub const CURATOR_TASK_KIND: &str = "curator_review";
+/// Retained supervisor keys one attempt probes past before launching under a colliding one.
+const MAX_KEY_PROBES: u32 = 64;
 
 /// Host text sent with every request: the step schema the model must answer in. Content-free and fixed; it never carries source text.
 const STEP_INSTRUCTIONS: &str = "Answer with exactly one JSON object {\"v\":1,\"step\":{...}} and nothing else. step.kind is one of: \"read_batch\" with \"operations\" (at most 8) where each operation is {\"op\":\"read_reference\",\"alias\":\"ref-N\",\"range\":{\"start\":0,\"end\":N}?}, {\"op\":\"find_related\",\"cursor\":\"...\"?}, {\"op\":\"search_project\",\"by\":\"path\"|\"name\"|\"content\",\"literal\":\"...\"}, or {\"op\":\"read_project\",\"path\":\"relative/path\",\"range\":{...}?}; \"propose\" with \"action\" (create|revise|retain|retire|no_change), \"new_text\"?, \"support\" and \"contradictions\" as lists of {\"alias\":\"ref-N\",\"range\":{...}?}, \"limitations\" as a list of strings, and \"uncertainty\" (low|medium|high); or \"abstain\" with \"reason\". Cite only aliases you were given. Zero search results never prove absence.";
@@ -166,6 +168,7 @@ impl Coordinator {
             .try_acquire(project)
             .ok_or(InvestigationError::Capacity)?;
         let prepared = tokio::task::block_in_place(|| self.prepare(&context))?;
+        let hold_id = prepared.hold_id.clone();
         let broker = EvidenceBroker::new(
             RunBinding {
                 project: kernel::ProjectScope::new(project)
@@ -187,7 +190,6 @@ impl Coordinator {
             coordinator: self,
             context,
             hold_binding: prepared.hold_binding,
-            attempt_base: prepared.attempt_base,
             broker: Arc::new(tokio::sync::Mutex::new(broker)),
             transcript: Vec::new(),
             sent: 0,
@@ -195,8 +197,16 @@ impl Coordinator {
             discovery: RelatedMemoryDiscovery::new(""),
             cutoff,
         };
-        run.investigate(prepared.subject, prepared.starting, cancel)
-            .await
+        let settled = run
+            .investigate(prepared.subject, prepared.starting, cancel)
+            .await;
+        // Settlement releases the hold on every settled run. A run that exits unsettled leaves the receipt open for a retry that acquires its own hold, so this one is released now instead of holding project capacity until the cutoff.
+        if settled.is_err() && !hold_id.is_empty() {
+            let _ = self
+                .store
+                .release_execution_hold(&hold_id, &run.hold_binding);
+        }
+        settled
     }
 
     /// Resolves the subject and linked references and acquires the execution hold over their evidence. The hold is taken only for a run that will read: the Kernel refuses a hold expiring at or before its own clock, a refused subject sends nothing, and an evidence-free staged subject has nothing to protect. Each of those runs settles without a hold, so an empty `hold_id` reaches the broker for them.
@@ -245,20 +255,11 @@ impl Coordinator {
         } else {
             String::new()
         };
-        // A receipt resumed at its generation has attempts behind it; the supervisor retains their runs under their keys, so this run's keys start past them.
-        let attempt_base = self
-            .ledger
-            .list_curator_attempts(&context.job.project, &context.job.causal_identity)
-            .map_err(|_| InvestigationError::Kernel(RefusalCode::Store))?
-            .iter()
-            .filter(|attempt| attempt.generation == context.receipt.generation)
-            .count();
         Ok(Prepared {
             hold_binding,
             subject,
             starting,
             hold_id,
-            attempt_base: u32::try_from(attempt_base).unwrap_or(u32::MAX),
         })
     }
 }
@@ -269,8 +270,6 @@ struct Prepared {
     starting: Vec<ReferenceExpectation>,
     /// `hold_id` is empty when the run holds no evidence.
     hold_id: String,
-    /// Attempts already committed at this generation before the run began.
-    attempt_base: u32,
 }
 
 /// One investigation's state: the broker every disclosure goes through, the transcript resent each round, the related-memory cursors, and the cutoff every wait is bounded by.
@@ -278,8 +277,6 @@ struct Run<'a> {
     coordinator: &'a Coordinator,
     context: JobContext<'a>,
     hold_binding: CuratorHoldBinding,
-    /// Supervisor keys for this run's attempts start here, past the generation's earlier attempts.
-    attempt_base: u32,
     /// The broker is shared with the launch future, which must be `'static`; the coordinator is idle while an attempt runs, so the lock is never contended.
     broker: Arc<tokio::sync::Mutex<EvidenceBroker>>,
     transcript: Vec<RenderedBuffer>,
@@ -323,9 +320,7 @@ impl Run<'_> {
             if (self.coordinator.now_ms)() >= self.context.receipt.execution_cutoff_ms {
                 return self.settle_now(RunResult::Exhausted).await;
             }
-            let attempt_index = self
-                .attempt_base
-                .saturating_add(u32::try_from(round).unwrap_or(u32::MAX));
+            let attempt_index = u32::try_from(round).unwrap_or(u32::MAX);
             let text = match self.attempt(attempt_index, cancel).await? {
                 Attempt::Text(text) => text,
                 Attempt::Spent => continue,
@@ -494,7 +489,7 @@ impl Run<'_> {
                 Err(_) => return Err(InvestigationError::Kernel(RefusalCode::Unsupported)),
             }
         };
-        let key = InternalRunKey {
+        let mut key = InternalRunKey {
             task_kind: CURATOR_TASK_KIND.to_string(),
             project_digest: self.hold_binding.project_digest.clone(),
             job_id: self.hold_binding.subject.clone(),
@@ -503,6 +498,12 @@ impl Run<'_> {
             kernel_incarnation: self.hold_binding.kernel_incarnation.clone(),
             memstore_incarnation: self.hold_binding.memstore_incarnation.clone(),
         };
+        // An earlier run of this generation in the same daemon left its attempts retained under their keys, whether or not they reached the ledger; this attempt takes the first key past them. The probe is bounded, and a launch that still collides is refused as before.
+        let mut probes = 0;
+        while probes < MAX_KEY_PROBES && coordinator.supervisor.internal_run_exists(&key) {
+            key.attempt = key.attempt.saturating_add(1);
+            probes += 1;
+        }
         let cutoff = self.cutoff;
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(CURATOR_ATTEMPT_MAX_MS as u64))
@@ -1006,8 +1007,16 @@ fn bind_proposal(
             }
             Ok(references)
         };
-    let support = cite(outcome.support)?;
-    let contradictions = cite(outcome.contradictions)?;
+    let mut support = cite(outcome.support)?;
+    let mut contradictions = cite(outcome.contradictions)?;
+    // Expansion can repeat a span the model cited twice and can outgrow the count the step passed; the Kernel bound holds after expansion or the proposal is refused here, not at staging.
+    for references in [&mut support, &mut contradictions] {
+        let mut seen = BTreeSet::new();
+        references.retain(|reference| seen.insert(reference.clone()));
+    }
+    if support.len() + contradictions.len() > kernel::MAX_REVIEW_REFERENCES {
+        return Err(refuse(None, RefusalCode::TooLarge));
+    }
     let target = match &context.input.subject {
         ReviewTarget::StagedSubject { candidate_id, .. } => ProposalTarget::StagedCandidate {
             candidate_id: candidate_id.clone(),
@@ -1211,6 +1220,44 @@ mod tests {
             vec![(alias, 10..24)],
             "a citation of the read alias must be able to name the bytes the model was shown"
         );
+    }
+
+    #[test]
+    fn a_hold_capacity_refusal_marks_the_evidence_set_partial_at_the_broker() {
+        // Discovery and project search swallow a capacity refusal after a hit into a `CapacityBound` page, so the broker itself must record the truncation when the hold refuses.
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let (_store, mut broker) = local_broker(store_dir.path(), now);
+        let alias = broker
+            .aliases
+            .issue(ReferenceExpectation::TemporaryCapture {
+                evidence_id: "evidence-anchor".to_string(),
+                artifact_digest: format!("{:x}", Sha256::digest(b"anchor")),
+                byte_length: 6,
+                retain_until: now + 60_000,
+            });
+        broker.ledger.record_disclosure(
+            &alias,
+            context_core::curator_policy_union::PolicyUnionMember {
+                kind: "temporary_capture".to_string(),
+                id: "evidence-anchor".to_string(),
+                revision: "1".to_string(),
+                owner_id: None,
+                owner_revision: None,
+            },
+        );
+        assert!(!broker.ledger.is_partial());
+        broker.hold_refused(
+            None,
+            kernel::CuratorHoldError::Refused(kernel::CuratorHoldRefusal::ProjectBackingExhausted),
+        );
+        assert!(broker.ledger.is_partial());
     }
 
     #[test]

@@ -1634,3 +1634,153 @@ async fn a_resumed_generation_launches_under_fresh_supervisor_keys() {
     server.await.unwrap();
     assert_eq!(fixture.attempts().len(), 2);
 }
+
+/// A launch that failed before the ledger recorded an attempt (no approval) is still retained by the supervisor under its key; the retried generation must launch past it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_after_a_pre_ledger_failure_launches_under_a_fresh_supervisor_key() {
+    let fixture = Fixture::open(CASES[0].sources);
+    let peer = Peer::start().await;
+    assert_eq!(
+        fixture.run(&peer, None, &CancellationToken::new()).await,
+        Err(InvestigationError::Unavailable)
+    );
+    assert!(fixture.attempts().is_empty());
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(
+        r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+    )]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    server.await.unwrap();
+}
+
+/// The backing bytes one hold over `evidence` charges the project, measured and released.
+fn backing_bytes(fixture: &Fixture, evidence: &str) -> u64 {
+    let binding = kernel::CuratorHoldBinding {
+        project_digest: PROJECT.to_string(),
+        kernel_incarnation: fixture.kernel_incarnation(),
+        memstore_incarnation: fixture.ledger.curator_store_incarnation().unwrap(),
+        subject: "probe".to_string(),
+        generation: 1,
+    };
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, &[evidence.to_string()], now_ms() + 60_000)
+        .unwrap();
+    fixture
+        .store
+        .release_execution_hold(&hold.hold_id, &binding)
+        .unwrap();
+    hold.backing_bytes
+}
+
+/// A run that exits without settling releases the execution hold it acquired, so retries of an open receipt do not accumulate live holds against the project's cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_settling_exit_releases_the_execution_hold() {
+    let fixture = Fixture::open(CASES[0].sources);
+    let peer = Peer::start().await;
+    assert_eq!(
+        fixture.run(&peer, None, &CancellationToken::new()).await,
+        Err(InvestigationError::Unavailable)
+    );
+    // A hold over the linked reference under a quota of exactly its own bytes admits only if nothing else in the project is still held.
+    let other = fixture.evidence(1);
+    let quota = backing_bytes(&fixture, &other);
+    let binding = kernel::CuratorHoldBinding {
+        project_digest: PROJECT.to_string(),
+        kernel_incarnation: fixture.kernel_incarnation(),
+        memstore_incarnation: fixture.ledger.curator_store_incarnation().unwrap(),
+        subject: "probe".to_string(),
+        generation: 2,
+    };
+    let acquired = fixture.store.acquire_execution_hold_with_quota_for_test(
+        &binding,
+        &[other],
+        now_ms() + 60_000,
+        quota,
+        u64::MAX,
+    );
+    assert!(
+        acquired.is_ok(),
+        "the failed run's hold is still charged to the project: {acquired:?}"
+    );
+}
+
+/// Citations expanded to disclosed spans are deduplicated and still bounded by the Kernel's reference limit, so an over-long list settles as a refusal instead of failing at staging with the receipt open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expanded_citations_are_deduplicated_and_bounded() {
+    let fixture = Fixture::open(CASES[2].sources);
+    let mut peer = Peer::start().await;
+    // Two disjoint reads of the reference, then one rangeless citation twice: the proposal carries each disclosed span once.
+    let server = peer.serve_script(vec![
+        text_response(&fixture.expand(r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"read_reference","alias":"{alias:1}","range":{"start":0,"end":10}},{"op":"read_reference","alias":"{alias:1}","range":{"start":20,"end":30}}]}}"#)),
+        text_response(&fixture.expand(r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"revised","support":[{"alias":"{alias:1}"},{"alias":"{alias:1}"}],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#)),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let Settled::Published(_) = settled else {
+        panic!("{settled:?}")
+    };
+    let proposal = read_selected_proposal(
+        &fixture.store,
+        &fixture.ledger,
+        PROJECT,
+        &fixture.identity,
+        &fixture.binding(),
+        fixture.now + 6,
+    )
+    .unwrap()
+    .proposal;
+    let spans: Vec<(u64, u64)> = proposal
+        .support
+        .iter()
+        .map(|reference| {
+            let span = reference.span.as_ref().unwrap();
+            (span.start, span.end)
+        })
+        .collect();
+    assert_eq!(spans, vec![(0, 10), (20, 30)]);
+
+    // 255 distinct ranged citations plus one rangeless citation expanding to two spans pass the step's own count but exceed the Kernel limit after expansion.
+    let sources = [
+        CASES[0].sources[0],
+        large_source(
+            "build: the workspace builds with bun\n",
+            "more notes on bun ",
+            500,
+        ),
+    ];
+    let fixture = Fixture::open(&sources);
+    let mut peer = Peer::start().await;
+    let mut citations: Vec<String> = (2..=256)
+        .map(|end| format!(r#"{{"alias":"{{alias:1}}","range":{{"start":1,"end":{end}}}}}"#))
+        .collect();
+    citations.push(r#"{"alias":"{alias:1}"}"#.to_string());
+    let propose = format!(
+        r#"{{"v":1,"step":{{"kind":"propose","action":"revise","new_text":"revised","support":[{}],"contradictions":[],"limitations":[],"uncertainty":"low"}}}}"#,
+        citations.join(",")
+    );
+    let server = peer.serve_script(vec![
+        text_response(&fixture.expand(r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"read_reference","alias":"{alias:1}","range":{"start":0,"end":300}},{"op":"read_reference","alias":"{alias:1}","range":{"start":400,"end":410}}]}}"#)),
+        text_response(&fixture.expand(&propose)),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(
+        settled,
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(CuratorReceiptTerminal::Abstained)
+    );
+}
