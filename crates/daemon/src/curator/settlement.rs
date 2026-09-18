@@ -597,9 +597,11 @@ impl Verdict {
             RefusalCode::PolicyBlocked => Self::Abstain(AbstainReason::OwnerSensitive),
             RefusalCode::Scope => Self::Abstain(AbstainReason::WrongScope),
             RefusalCode::RenderCheck => Self::Abstain(AbstainReason::Secret),
-            RefusalCode::UnknownAlias
-            | RefusalCode::InvalidRange
-            | RefusalCode::ExpectationChanged
+            // A citation the coordinator could not bind names an alias never disclosed or bytes never shown: the model cited what it did not see, and nothing about the evidence changed.
+            RefusalCode::UnknownAlias | RefusalCode::InvalidRange => {
+                Self::Abstain(AbstainReason::UndisclosedCitation)
+            }
+            RefusalCode::ExpectationChanged
             | RefusalCode::OriginRevoked
             | RefusalCode::HoldInvalid
             | RefusalCode::Undecodable
