@@ -257,13 +257,15 @@ pub enum CuratorJobRefusal {
     Expired,
     #[error("the producer binding differs from the reservation")]
     ProducerMismatch,
+    #[error("the scheduler slot's lease was not the caller's to complete")]
+    SlotConflict,
     #[error("the frozen page exceeds its serialized bound")]
     PageTooLarge,
 }
 
 impl CuratorJobRefusal {
     #[cfg(any(test, feature = "test-support"))]
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::InvalidRequest,
         Self::ProjectCapacity,
         Self::HostCapacity,
@@ -275,6 +277,7 @@ impl CuratorJobRefusal {
         Self::Terminal,
         Self::Expired,
         Self::ProducerMismatch,
+        Self::SlotConflict,
         Self::PageTooLarge,
     ];
 }
@@ -295,7 +298,7 @@ impl From<rusqlite::Error> for CuratorJobError {
     }
 }
 
-fn refuse(refusal: CuratorJobRefusal) -> rusqlite::Error {
+pub(crate) fn refuse(refusal: CuratorJobRefusal) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(refusal))
 }
 
@@ -601,12 +604,21 @@ fn frozen_pages(conn: &GuardedConn<'_>, project: Option<&str>) -> rusqlite::Resu
     Ok(usize::try_from(count).unwrap_or(usize::MAX))
 }
 
-/// Refuses when adding `charge` bytes would exceed either metadata quota.
-fn check_quota(conn: &GuardedConn<'_>, project: &str, charge: u64) -> rusqlite::Result<()> {
-    if metadata_bytes(conn, Some(project))?.saturating_add(charge)
-        > MAX_CURATOR_METADATA_BYTES_PER_PROJECT
-        || metadata_bytes(conn, None)?.saturating_add(charge) > MAX_CURATOR_METADATA_BYTES_PER_HOST
-    {
+/// Refuses when adding `charge` bytes would exceed either metadata quota. `credit` is what the same transaction releases before it commits (a frozen page's allowance once its references become jobs), so headroom is judged against the committed state without writing anything first.
+fn check_quota(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    charge: u64,
+    credit: u64,
+) -> rusqlite::Result<()> {
+    let fits = |held: u64, bound: u64| held.saturating_sub(credit).saturating_add(charge) <= bound;
+    if !fits(
+        metadata_bytes(conn, Some(project))?,
+        MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+    ) || !fits(
+        metadata_bytes(conn, None)?,
+        MAX_CURATOR_METADATA_BYTES_PER_HOST,
+    ) {
         return Err(refuse(CuratorJobRefusal::MetadataQuota));
     }
     Ok(())
@@ -621,24 +633,52 @@ pub fn reserve_curator_job_in_tx(
     now_ms: i64,
 ) -> rusqlite::Result<ReserveOutcome> {
     check_identity(project).map_err(refuse)?;
-    let ordinal = producer.validate().map_err(refuse)?;
+    producer.validate().map_err(refuse)?;
     let inputs = inputs.clone().normalized().map_err(refuse)?;
     let causal_identity = inputs.causal_identity().map_err(refuse)?;
     inputs.reject_secrets()?;
     if let Some(existing) = load_curator_job(conn, project, &causal_identity)? {
         return Ok(ReserveOutcome::Existing(existing));
     }
-    if pending_jobs(conn, Some(project))? >= MAX_PENDING_CURATOR_JOBS_PER_PROJECT {
+    check_reservation_headroom(conn, project, 1, 0)?;
+    insert_reservation_in_tx(conn, project, producer, &inputs, &causal_identity, now_ms)
+        .map(ReserveOutcome::Reserved)
+}
+
+/// Refuses unless `count` new reservations fit under both pending-job caps and both metadata quotas, after `credit` bytes the same transaction releases. Capacity is judged before quota, so a caller sees the refusal that clears first.
+fn check_reservation_headroom(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    count: usize,
+    credit: u64,
+) -> rusqlite::Result<()> {
+    if pending_jobs(conn, Some(project))?.saturating_add(count)
+        > MAX_PENDING_CURATOR_JOBS_PER_PROJECT
+    {
         return Err(refuse(CuratorJobRefusal::ProjectCapacity));
     }
-    if pending_jobs(conn, None)? >= MAX_PENDING_CURATOR_JOBS_PER_HOST {
+    if pending_jobs(conn, None)?.saturating_add(count) > MAX_PENDING_CURATOR_JOBS_PER_HOST {
         return Err(refuse(CuratorJobRefusal::HostCapacity));
     }
     check_quota(
         conn,
         project,
-        CURATOR_RECEIPT_CHARGE_BYTES + CURATOR_JOB_ALLOWANCE_BYTES,
-    )?;
+        (CURATOR_RECEIPT_CHARGE_BYTES + CURATOR_JOB_ALLOWANCE_BYTES)
+            .saturating_mul(u64::try_from(count).unwrap_or(u64::MAX)),
+        credit,
+    )
+}
+
+/// Writes one `reserved` row for already-normalized `inputs`; the caller has checked headroom for it.
+fn insert_reservation_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    producer: &ProducerBinding,
+    inputs: &CausalInputs,
+    causal_identity: &str,
+    now_ms: i64,
+) -> rusqlite::Result<CuratorJob> {
+    let ordinal = producer.validate().map_err(refuse)?;
     let deadline = now_ms
         .checked_add(CURATOR_QUEUE_LIFETIME_MS)
         .ok_or_else(|| refuse(CuratorJobRefusal::InvalidRequest))?;
@@ -663,8 +703,7 @@ pub fn reserve_curator_job_in_tx(
             now_ms,
         ],
     )?;
-    load_curator_job(conn, project, &causal_identity)?
-        .map(ReserveOutcome::Reserved)
+    load_curator_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
@@ -705,6 +744,37 @@ pub fn activate_curator_job_in_tx(
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
+/// Rebinds a `Reserved` row to another firing of the same producer. Preserves its deadline, target, allowance, and ordinal: the ordinal names the source revision the row's subject was staged under, so the adopting firing reads and activates under it rather than its own. Refuses non-reserved, foreign-producer, or expired rows.
+pub fn rebind_reserved_curator_job_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    causal_identity: &str,
+    producer: &ProducerBinding,
+    now_ms: i64,
+) -> rusqlite::Result<CuratorJob> {
+    producer.validate().map_err(refuse)?;
+    let job = load_curator_job(conn, project, causal_identity)?
+        .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
+    match job.state {
+        CuratorJobState::Reserved => {}
+        CuratorJobState::Ready(_) => return Err(refuse(CuratorJobRefusal::NotReserved)),
+        CuratorJobState::Terminal(_) => return Err(refuse(CuratorJobRefusal::Terminal)),
+    }
+    if job.producer.producer != producer.producer {
+        return Err(refuse(CuratorJobRefusal::ProducerMismatch));
+    }
+    if job.queue_deadline_ms <= now_ms {
+        return Err(refuse(CuratorJobRefusal::Expired));
+    }
+    conn.execute(
+        "UPDATE curator_jobs SET firing_id = ?3, updated_at_ms = ?4
+         WHERE project = ?1 AND causal_identity = ?2 AND state = 'reserved'",
+        params![project, causal_identity, producer.firing_id, now_ms],
+    )?;
+    load_curator_job(conn, project, causal_identity)?
+        .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
+}
+
 /// Records one terminal outcome for a non-terminal row, drops its input, and releases its allowance; the compact receipt and its charge stay. A terminal row is never reopened, and a finish at or after the queue deadline is refused as expired so the permanent outcome does not depend on whether the sweep ran first.
 pub fn finish_curator_job_in_tx(
     conn: &GuardedConn<'_>,
@@ -730,6 +800,90 @@ pub fn finish_curator_job_in_tx(
         }));
     }
     Ok(job)
+}
+
+/// Closes every `Reserved` row of `causal_identity`, in any project, as a session reset drops the reservation that named it: expired past its deadline, not admitted otherwise. The identity carries the session, so no other session's job matches. Returns how many rows closed.
+pub(crate) fn close_reserved_jobs_of_identity_tx(
+    conn: &GuardedConn<'_>,
+    causal_identity: &str,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE curator_jobs
+            SET state = 'terminal',
+                outcome = CASE WHEN queue_deadline_ms <= ?2 THEN 'expired' ELSE 'nonadmitted' END,
+                allowance_bytes = 0, input_json = NULL, updated_at_ms = ?2
+          WHERE causal_identity = ?1 AND state = 'reserved'",
+        params![causal_identity, now_ms],
+    )
+}
+
+/// Closes a `Reserved` row whose queue deadline has passed with the same `expired` outcome the sweep would record, so an activation that finds its reservation expired can close it eagerly without the outcome depending on whether the sweep ran first. A row still inside its deadline, already terminal, or past reservation is refused.
+pub fn expire_reserved_curator_job_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    causal_identity: &str,
+    now_ms: i64,
+) -> rusqlite::Result<CuratorJob> {
+    let changed = conn.execute(
+        "UPDATE curator_jobs
+            SET state = 'terminal', outcome = 'expired', allowance_bytes = 0, input_json = NULL,
+                updated_at_ms = ?3
+          WHERE project = ?1 AND causal_identity = ?2 AND state = 'reserved'
+            AND queue_deadline_ms <= ?3",
+        params![project, causal_identity, now_ms],
+    )?;
+    let job = load_curator_job(conn, project, causal_identity)?
+        .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
+    if changed == 0 {
+        return Err(refuse(match job.state {
+            CuratorJobState::Terminal(_) => CuratorJobRefusal::Terminal,
+            CuratorJobState::Ready(_) => CuratorJobRefusal::NotReserved,
+            CuratorJobState::Reserved => CuratorJobRefusal::InvalidRequest,
+        }));
+    }
+    Ok(job)
+}
+
+/// One fenced write behind [`MemoryStore::settle_curator_reservation`]: the reservation and its retained publication go first, and the job it names closes in the same transaction, so no pass can observe a `Publishing` state without its reservation while the job is still open. A job that is no longer `Reserved` was closed by the sweep or activated by a publication that also cleared this reservation, so it is left alone.
+pub(crate) fn settle_curator_reservation(
+    store: &MemoryStore,
+    session_id: &str,
+    expected: &crate::CuratorReservation,
+    project: &str,
+    now_ms: i64,
+) -> Result<bool, CuratorJobError> {
+    store.curator_transaction(
+        project,
+        "settle",
+        |_| Ok(()),
+        |conn| {
+            if !crate::clear_curator_reservation_tx(conn, session_id, expected)? {
+                return Ok(WriteDisposition::Replay(false));
+            }
+            let reserved = load_curator_job(conn, project, &expected.causal_identity)?
+                .is_some_and(|job| job.state == CuratorJobState::Reserved);
+            if reserved {
+                if expected.queue_deadline_ms <= now_ms {
+                    expire_reserved_curator_job_in_tx(
+                        conn,
+                        project,
+                        &expected.causal_identity,
+                        now_ms,
+                    )?;
+                } else {
+                    finish_curator_job_in_tx(
+                        conn,
+                        project,
+                        &expected.causal_identity,
+                        CuratorJobOutcome::Nonadmitted,
+                        now_ms,
+                    )?;
+                }
+            }
+            Ok(WriteDisposition::Applied(true))
+        },
+    )
 }
 
 /// Freezes one selection page for a slot attempt. One frozen page per project and 32 per host; the page keeps its references and cursor until [`complete_frozen_selection_in_tx`] moves it out of `frozen`. An attempt identity freezes exactly one page: resubmitting that page replays the row, and a different page under the same identity is refused.
@@ -793,6 +947,7 @@ pub fn freeze_selection_in_tx(
         conn,
         project,
         FROZEN_PAGE_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
+        0,
     )?;
     let deadline = now_ms
         .checked_add(CURATOR_QUEUE_LIFETIME_MS)
@@ -839,14 +994,7 @@ pub fn complete_frozen_selection_in_tx(
     if existing.selection_deadline_ms <= now_ms {
         return Err(refuse(CuratorJobRefusal::Expired));
     }
-    conn.execute(
-        "UPDATE curator_frozen_selections
-            SET state = ?4, page_json = NULL, next_cursor = NULL, allowance_bytes = 0,
-                updated_at_ms = ?5
-          WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
-        params![project, slot_id, selection_attempt, state.as_str(), now_ms],
-    )?;
-    release_frozen_page_scans(conn, project, slot_id, selection_attempt)?;
+    retire_frozen_page_in_tx(conn, project, slot_id, selection_attempt, state, now_ms)?;
     Ok(FrozenSelection {
         state,
         page: existing
@@ -854,6 +1002,28 @@ pub fn complete_frozen_selection_in_tx(
             .filter(|_| state == FrozenSelectionState::Enqueued),
         ..existing
     })
+}
+
+/// The terminal write for one frozen row: `state`, references and cursor dropped, allowance released. The scan audit of the references is retired with them unless they became jobs (`Enqueued`), whose rows keep the same identities for the store incarnation and so keep their audit. Callers decide whether the deadline permits it.
+fn retire_frozen_page_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    slot_id: &str,
+    selection_attempt: &str,
+    state: FrozenSelectionState,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE curator_frozen_selections
+            SET state = ?4, page_json = NULL, next_cursor = NULL, allowance_bytes = 0,
+                updated_at_ms = ?5
+          WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
+        params![project, slot_id, selection_attempt, state.as_str(), now_ms],
+    )?;
+    if state == FrozenSelectionState::Enqueued {
+        return Ok(());
+    }
+    release_frozen_page_scans(conn, project, slot_id, selection_attempt)
 }
 
 /// The scan owner of one page's reference and cursor text; retired when the page goes terminal and that text leaves the row.
@@ -874,6 +1044,148 @@ fn release_frozen_page_scans(
         DurableWriteFamily::CuratorJobs.owner_kind(),
         &frozen_page_owner_key(slot_id, selection_attempt),
     )
+}
+
+/// How an enqueue attempt ended inside its transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    /// Every reference has a ready job; `jobs` were newly reserved and activated, `replayed` already existed at the same causal inputs.
+    Enqueued {
+        jobs: usize,
+        replayed: usize,
+        next_cursor: Option<String>,
+    },
+    /// Capacity or quota refused a reference; nothing was written and the page stays frozen.
+    Deferred(CuratorJobRefusal),
+    /// The page passed its selection deadline before it could be enqueued; the slot is recorded as failed.
+    Expired,
+    /// The slot's completion had already been recorded under this completion id; the earlier outcome stands and nothing was written.
+    Replayed,
+}
+
+/// Records where `slot_id`'s next selection resumes. A `None` cursor means the pass reached the end.
+pub fn advance_selection_cursor_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    slot_id: &str,
+    cursor: Option<&str>,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    check_identity(project).map_err(refuse)?;
+    check_identity(slot_id).map_err(refuse)?;
+    if cursor.is_some_and(|cursor| cursor.len() > 512) {
+        return Err(refuse(CuratorJobRefusal::InvalidRequest));
+    }
+    conn.execute(
+        "INSERT INTO curator_selection_cursors (project, slot_id, cursor, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(project, slot_id) DO UPDATE SET cursor = excluded.cursor, updated_at_ms = excluded.updated_at_ms",
+        params![project, slot_id, cursor, now_ms],
+    )?;
+    Ok(())
+}
+
+/// The transaction-local enqueue: reserve and activate every reference the page does not already have a row for, then move the page to `enqueued`. The page must be `frozen`; a capacity or quota refusal for the page's new rows surfaces as `Deferred` before any row is written, so the caller rolls the transaction back rather than completing the slot.
+pub fn enqueue_frozen_selection_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    selection: &FrozenSelection,
+    producer: &ProducerBinding,
+    now_ms: i64,
+) -> rusqlite::Result<EnqueueOutcome> {
+    let existing = load_selection(
+        conn,
+        project,
+        &selection.slot_id,
+        &selection.selection_attempt,
+    )?
+    .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
+    if existing.state != FrozenSelectionState::Frozen {
+        return Err(refuse(CuratorJobRefusal::Terminal));
+    }
+    // A page at or past its deadline is retired here the way the sweep retires it, since the pre-deadline completion refuses it: the slot records the failure instead of retrying an enqueue that can never succeed.
+    if existing.selection_deadline_ms <= now_ms {
+        retire_frozen_page_in_tx(
+            conn,
+            project,
+            &selection.slot_id,
+            &selection.selection_attempt,
+            FrozenSelectionState::FailedSlot,
+            now_ms,
+        )?;
+        return Ok(EnqueueOutcome::Expired);
+    }
+    // A frozen row carries its page; the row's own check enforces it.
+    let page = existing
+        .page
+        .as_ref()
+        .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
+    // Headroom is judged once for the whole page against the committed state, crediting the allowance the page releases when it leaves `frozen` later in this transaction; nothing is written before the judgement, so a `Deferred` outcome leaves the row untouched whatever the caller does with its transaction. A page either fits entirely or is deferred entirely.
+    producer.validate().map_err(refuse)?;
+    let mut fresh = Vec::with_capacity(page.references.len());
+    let mut replayed = 0usize;
+    for inputs in &page.references {
+        let inputs = inputs.clone().normalized().map_err(refuse)?;
+        let causal_identity = inputs.causal_identity().map_err(refuse)?;
+        if load_curator_job(conn, project, &causal_identity)?.is_some()
+            || fresh
+                .iter()
+                .any(|(_, fresh_id)| *fresh_id == causal_identity)
+        {
+            replayed += 1;
+        } else {
+            fresh.push((inputs, causal_identity));
+        }
+    }
+    if !fresh.is_empty()
+        && let Err(error) =
+            check_reservation_headroom(conn, project, fresh.len(), FROZEN_SELECTION_ALLOWANCE_BYTES)
+    {
+        return match refusal_of(&error) {
+            Some(
+                reason @ (CuratorJobRefusal::ProjectCapacity
+                | CuratorJobRefusal::HostCapacity
+                | CuratorJobRefusal::MetadataQuota),
+            ) => Ok(EnqueueOutcome::Deferred(reason)),
+            _ => Err(error),
+        };
+    }
+    let jobs = fresh.len();
+    for (inputs, causal_identity) in &fresh {
+        insert_reservation_in_tx(conn, project, producer, inputs, causal_identity, now_ms)?;
+        activate_curator_job_in_tx(
+            conn,
+            project,
+            causal_identity,
+            producer,
+            &CuratorJobInput {
+                subject: inputs.target.clone(),
+                starting_references: Vec::new(),
+                question_template: inputs.question_template.clone(),
+            },
+            now_ms,
+        )?;
+    }
+    complete_frozen_selection_in_tx(
+        conn,
+        project,
+        &selection.slot_id,
+        &selection.selection_attempt,
+        FrozenSelectionState::Enqueued,
+        now_ms,
+    )?;
+    advance_selection_cursor_in_tx(
+        conn,
+        project,
+        &selection.slot_id,
+        page.next_cursor.as_deref(),
+        now_ms,
+    )?;
+    Ok(EnqueueOutcome::Enqueued {
+        jobs,
+        replayed,
+        next_cursor: page.next_cursor.clone(),
+    })
 }
 
 fn load_selection(
@@ -1078,6 +1390,28 @@ impl MemoryStore {
             },
             |conn| {
                 activate_curator_job_in_tx(conn, project, causal_identity, producer, input, now_ms)
+                    .map(WriteDisposition::Applied)
+            },
+        )
+    }
+
+    pub fn rebind_reserved_curator_job(
+        &self,
+        project: &str,
+        causal_identity: &str,
+        producer: &ProducerBinding,
+        now_ms: i64,
+    ) -> Result<CuratorJob, CuratorJobError> {
+        self.curator_transaction(
+            project,
+            "rebind",
+            |write| {
+                write.identity("producer", &producer.producer)?;
+                write.identity("firing_id", &producer.firing_id)?;
+                Ok(())
+            },
+            |conn| {
+                rebind_reserved_curator_job_in_tx(conn, project, causal_identity, producer, now_ms)
                     .map(WriteDisposition::Applied)
             },
         )
@@ -1288,6 +1622,143 @@ impl MemoryStore {
                 .map(WriteDisposition::Applied)
             },
         )
+    }
+
+    /// Enqueues a frozen page and completes the scheduler slot that froze it in one fenced transaction: every reference is reserved and activated as a review job (identical causal inputs replay their existing row), the page moves to `enqueued`, the slot's continuation advances to the page's cursor, and the slot's lease completes. A pending-capacity or quota refusal on any reference rolls the whole transaction back: the page stays `frozen`, the lease stays claimed, and the cursor does not move, so a later attempt of the same slot serves the same page. An expired page completes the slot as `failed_slot` without advancing anything.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_frozen_selection(
+        &self,
+        project: &str,
+        claim_id: &str,
+        completion_id: &str,
+        scheduler_instance: &str,
+        slot: i64,
+        selection: &FrozenSelection,
+        producer: &ProducerBinding,
+        now_ms: i64,
+    ) -> Result<EnqueueOutcome, CuratorJobError> {
+        let applied = std::cell::Cell::new(None);
+        let outcome = self.complete_task_lease(
+            &crate::MEMORY_CLASSIFIER_TASK,
+            project,
+            claim_id,
+            completion_id,
+            scheduler_instance,
+            slot,
+            now_ms,
+            |coordinated, _claim| {
+                let conn = coordinated.tx();
+                let enqueue =
+                    enqueue_frozen_selection_in_tx(conn, project, selection, producer, now_ms)?;
+                let code = match &enqueue {
+                    EnqueueOutcome::Enqueued { .. } => "curator_selection_enqueued",
+                    EnqueueOutcome::Expired => "curator_selection_expired",
+                    // The refusal ends the transaction; nothing below it is written and no terminal is recorded.
+                    EnqueueOutcome::Deferred(reason) => {
+                        let reason = *reason;
+                        applied.set(Some(EnqueueOutcome::Deferred(reason)));
+                        return Err(refuse(reason));
+                    }
+                    EnqueueOutcome::Replayed => unreachable!("the transaction never replays"),
+                };
+                applied.set(Some(enqueue));
+                Ok(crate::task_lease::LeaseCompletion::Applied {
+                    response_json: serde_json::json!({"ok": code == "curator_selection_enqueued", "code": code})
+                        .to_string(),
+                })
+            },
+        );
+        match (outcome, applied.take()) {
+            (Ok(crate::LeaseCompleteOutcome::Applied { .. }), Some(enqueue)) => Ok(enqueue),
+            (Ok(crate::LeaseCompleteOutcome::Replayed { .. }), _) => Ok(EnqueueOutcome::Replayed),
+            (Ok(crate::LeaseCompleteOutcome::Conflict { kind }), _) => {
+                Err(CuratorJobError::Refused(if kind == "invalid" {
+                    CuratorJobRefusal::InvalidRequest
+                } else {
+                    CuratorJobRefusal::SlotConflict
+                }))
+            }
+            (Err(_), Some(deferred @ EnqueueOutcome::Deferred(_))) => Ok(deferred),
+            (Err(error), _) => Err(CuratorJobError::Store(error)),
+            (Ok(crate::LeaseCompleteOutcome::Applied { .. }), None) => {
+                Err(CuratorJobError::Refused(CuratorJobRefusal::InvalidRequest))
+            }
+        }
+    }
+
+    /// Completes a selection slot that froze nothing, advancing the slot's continuation to `cursor` in the same transaction; `response_json` is the slot's recorded reply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_selection_slot(
+        &self,
+        project: &str,
+        claim_id: &str,
+        completion_id: &str,
+        scheduler_instance: &str,
+        slot: i64,
+        slot_id: &str,
+        cursor: Option<&str>,
+        response_json: &str,
+        now_ms: i64,
+    ) -> Result<crate::LeaseCompleteOutcome, MemoryStoreError> {
+        self.complete_task_lease(
+            &crate::MEMORY_CLASSIFIER_TASK,
+            project,
+            claim_id,
+            completion_id,
+            scheduler_instance,
+            slot,
+            now_ms,
+            |coordinated, _claim| {
+                advance_selection_cursor_in_tx(coordinated.tx(), project, slot_id, cursor, now_ms)?;
+                Ok(crate::task_lease::LeaseCompletion::Applied {
+                    response_json: response_json.to_string(),
+                })
+            },
+        )
+    }
+
+    /// The one frozen page a project holds, if any: the page a deferred or interrupted slot resumes with.
+    pub fn frozen_selection_for_project(
+        &self,
+        project: &str,
+    ) -> Result<Option<FrozenSelection>, MemoryStoreError> {
+        check_project(project)?;
+        self.inner
+            .with_conn(|conn| {
+                let key: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT slot_id, selection_attempt FROM curator_frozen_selections
+                          WHERE project = ?1 AND state = 'frozen' ORDER BY created_at_ms LIMIT 1",
+                        [project],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                match key {
+                    Some((slot_id, attempt)) => load_selection(conn, project, &slot_id, &attempt),
+                    None => Ok(None),
+                }
+            })
+            .map_err(Into::into)
+    }
+
+    /// Where the project's selection under `slot_id` resumes: the cursor the last enqueued page or empty slot advanced to, or `None` at the start of a pass.
+    pub fn selection_cursor(
+        &self,
+        project: &str,
+        slot_id: &str,
+    ) -> Result<Option<String>, MemoryStoreError> {
+        check_project(project)?;
+        self.inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT cursor FROM curator_selection_cursors WHERE project = ?1 AND slot_id = ?2",
+                    params![project, slot_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map(Option::flatten)
+            })
+            .map_err(Into::into)
     }
 
     pub fn lookup_curator_job(

@@ -29,6 +29,7 @@ pub mod healing;
 pub(crate) mod history_segment_coverage;
 pub mod history_summarizer;
 pub mod history_summarizer_chunk;
+pub mod history_summarizer_citations;
 pub mod history_summarizer_producer;
 pub(crate) mod history_summarizer_prompt;
 pub(crate) mod history_summarizer_validate;
@@ -154,7 +155,7 @@ use classify::{
 use config::{ConfigCache, DaemonConfig, derive_history_summarizer_chunk_tokens};
 use healing::{SerializerProfile, tail_reclaim};
 use history_summarizer::{
-    HistorySummarizerProducerDriver, reattach_history_summarizer_producer,
+    HistorySummarizerProducerDriver, HoldsReservation, reattach_history_summarizer_producer,
     run_history_summarizer_firing,
 };
 use history_summarizer_chunk::{
@@ -182,6 +183,9 @@ mod transform_meta_bound;
 
 #[cfg(test)]
 mod differential_goldens;
+
+#[cfg(test)]
+mod history_summarizer_citations_golden;
 use transform::{
     HistorySummarizerDiagnostics, ProjectionCacheInput, SerializedOutputCache, TransformRequest,
     TransformWithProjection, transform_with_projection_cached,
@@ -3443,9 +3447,11 @@ impl history_summarizer::HistorySummarizerPublicationFence for WrapupSnapshotPub
         // The lock prevents a transform from retiring the cached raw snapshot between validation and additive writes.
         let snapshots = self.snapshots.lock().expect("transform snapshots mutex");
         if !snapshots.ready_generation_matches(&self.session_id, self.generation) {
-            return Err(memory_store::HistorySummarizerPublishError::FenceRejected {
-                reason: "transform snapshot generation changed before publication".to_string(),
-            });
+            return Err(
+                memory_store::HistorySummarizerPublishError::CallerFenceRejected {
+                    reason: "transform snapshot generation changed before publication".to_string(),
+                },
+            );
         }
         let published = store.publish_history_summarizer_chunk(request);
         #[cfg(test)]
@@ -3482,9 +3488,11 @@ impl history_summarizer::HistorySummarizerPublicationFence for ReattachSnapshotP
         // The lock prevents later transforms from replacing the request's selected messages before their history rows are stored.
         let snapshots = self.snapshots.lock().expect("transform snapshots mutex");
         if !snapshots.generation_present_in_flight_or_ready(&self.session_id, self.generation) {
-            return Err(memory_store::HistorySummarizerPublishError::FenceRejected {
-                reason: "transform snapshot state changed after reattach started".to_string(),
-            });
+            return Err(
+                memory_store::HistorySummarizerPublishError::CallerFenceRejected {
+                    reason: "transform snapshot state changed after reattach started".to_string(),
+                },
+            );
         }
         let published = store.publish_history_summarizer_chunk(request);
         #[cfg(test)]
@@ -3512,6 +3520,8 @@ struct HistorySummarizerFiringTask {
     connect_failure_commit_hook: ConnectFailureCommitHook,
     publication_fence: Option<Arc<dyn history_summarizer::HistorySummarizerPublicationFence>>,
     credential_fingerprints: std::collections::BTreeMap<String, String>,
+    /// The Curator handoff an accepted fact set is reserved and staged through; `None` when the Kernel is unavailable, which publication records as a nonadmission.
+    curator_handoff: Option<curator::handoff::HandoffTarget>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5262,6 +5272,17 @@ impl HandlerCore {
         if phase == HistorySummarizerPhase::Idle {
             return Some("recovered");
         }
+        // A reserved firing whose last recovery pass decided nothing armed a backoff; recovery runs on every transform pass, so the backoff is what keeps a stalled reservation from being reconciled once per request.
+        if phase == HistorySummarizerPhase::Publishing
+            && loaded.meta.history_summarizer.holds_reservation()
+            && loaded
+                .meta
+                .history_summarizer
+                .failure_backoff_at_ms
+                .is_some_and(|backoff_at_ms| now < backoff_at_ms)
+        {
+            return Some("backoff");
+        }
         if self
             .live_history_summarizer_sessions
             .lock()
@@ -5318,15 +5339,18 @@ impl HandlerCore {
                     drop(guard);
                     return Some("recovering");
                 };
-                let chunk = history_summarizer_chunk::build_history_summarizer_chunk(
+                // `usize::MAX` builds the full frozen ordinal range before `presented_input` truncates it to `token_budget` and withdraws the aliases the cut removes.
+                let mut chunk = history_summarizer_chunk::build_history_summarizer_chunk(
                     parsed.messages.as_slice(),
                     &live,
                     range.from_ordinal,
-                    derive_history_summarizer_chunk_tokens(
-                        config.history_summarizer_context_limit_tokens,
-                    ),
+                    usize::MAX,
                     range.to_ordinal.saturating_add(1),
                 );
+                let token_budget = derive_history_summarizer_chunk_tokens(
+                    config.history_summarizer_context_limit_tokens,
+                );
+                let _ = history_summarizer_chunk::presented_input(&mut chunk, token_budget);
                 let prior_history_segments = match store.load_history_segments(&session_id) {
                     Ok(cs) => cs
                         .iter()
@@ -5339,6 +5363,7 @@ impl HandlerCore {
                 let fingerprint_items: Vec<_> =
                     chunk.snapshot.iter().map(|item| item.as_item()).collect();
                 let observed = history_summarizer::compute_chunk_fingerprint(&fingerprint_items);
+                let curator_handoff = self.curator_handoff_target(&store, binding);
                 let spawned = self.spawn_module_task(async move {
                     let _guard = guard;
                     let result = async {
@@ -5355,6 +5380,23 @@ impl HandlerCore {
                                 return Ok(history_summarizer::HistorySummarizerReattachOutcome::RefireEligible {
                                     firing_seq,
                                 });
+                            }
+                            history_summarizer::RestartAction::RepublishReserved { .. } => {
+                                return history_summarizer::republish_reserved(
+                                    history_summarizer::RepublishRequest {
+                                        store: &store,
+                                        session_id: &session_id,
+                                        project_path: &project_path,
+                                        curator_handoff: curator_handoff.as_ref(),
+                                        now_ms: now,
+                                        failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
+                                        publication_fence: Some(publication_fence.as_ref()),
+                                        collect_user_memory_candidates: config
+                                            .user_memory_collection_enabled,
+                                        memory_enabled: config.memory_enabled,
+                                    },
+                                )
+                                .map(history_summarizer::HistorySummarizerReattachOutcome::Republished);
                             }
                             history_summarizer::RestartAction::ReattachProducer { .. } => {}
                         }
@@ -5394,6 +5436,7 @@ impl HandlerCore {
                                 failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                                 completion_now_ms: now_ms,
                                 publication_fence: Some(publication_fence.as_ref()),
+                                curator_handoff: curator_handoff.as_ref(),
                             },
                         );
                         tokio::select! {
@@ -5414,13 +5457,45 @@ impl HandlerCore {
             HistorySummarizerPhase::Firing
             | HistorySummarizerPhase::Validating
             | HistorySummarizerPhase::Publishing => {
+                let publication_fence = Arc::new(ReattachSnapshotPublicationFence {
+                    snapshots: Arc::clone(&self.transform_snapshots),
+                    session_id: session_id.clone(),
+                    generation: snapshot_generation,
+                    #[cfg(test)]
+                    after_store_publish: Arc::clone(&self.publication_fence_write_hook),
+                });
+                let curator_handoff = self.curator_handoff_target(&store, binding);
                 let spawned = self.spawn_module_task(async move {
                     let _guard = guard;
-                    if let Err(e) = history_summarizer::handle_restart_load(
+                    let result = match history_summarizer::handle_restart_load(
                         &store,
                         &session_id,
                         now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                     ) {
+                        // A reserved firing republishes its retained output under the same fences instead of refiring.
+                        Ok(history_summarizer::RestartAction::RepublishReserved { .. }) => {
+                            history_summarizer::republish_reserved(
+                                history_summarizer::RepublishRequest {
+                                    store: &store,
+                                    session_id: &session_id,
+                                    project_path: &project_path,
+                                    curator_handoff: curator_handoff.as_ref(),
+                                    now_ms: now,
+                                    failure_backoff_at_ms: now
+                                        + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
+                                    publication_fence: Some(publication_fence.as_ref()),
+                                    collect_user_memory_candidates: config
+                                        .user_memory_collection_enabled,
+                                    memory_enabled: config.memory_enabled,
+                                },
+                            )
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                        }
+                        Ok(_) => Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    if let Err(e) = result {
                         eprintln!(
                             "daemon: history_summarizer restart recovery failed for {session_id}: {e}"
                         );
@@ -5768,6 +5843,7 @@ impl HandlerCore {
                 };
             }
         };
+        let curator_handoff = self.curator_handoff_target(&store, binding);
         PreparedHistorySummarizerAction::FireReady(Box::new(PreparedHistorySummarizerFiring {
             diagnostics,
             task: HistorySummarizerFiringTask {
@@ -5782,8 +5858,34 @@ impl HandlerCore {
                 connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
                 credential_fingerprints: binding.credential_fingerprints.clone(),
                 publication_fence: None,
+                curator_handoff,
             },
         }))
+    }
+
+    /// The Kernel-side scope a firing hands accepted facts to Curator review under. Only a route whose memories authority is MODULE has a project the Curator dispatches jobs for, so an unmanaged route gets no target and its candidates are recorded as not admitted; the job row then lives under the authority project the publication itself commits under.
+    fn curator_handoff_target(
+        &self,
+        store: &MemoryStore,
+        binding: &SessionBinding,
+    ) -> Option<curator::handoff::HandoffTarget> {
+        let route_root = binding.project_root.to_string_lossy().to_string();
+        match memories_authority_for_route(store, &route_root) {
+            Ok(MemoriesAuthority::Module(_)) => {}
+            Ok(MemoriesAuthority::NotModule { .. }) | Err(_) => return None,
+        }
+        let kernel = self.memory_classifier.kernel.kernel_store().ok()?;
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+            Arc::default(),
+        );
+        let kernel_incarnation = kernel.database_incarnation_id_within_budget(&budget).ok()?;
+        Some(curator::handoff::HandoffTarget {
+            kernel,
+            project_digest: binding.kernel_project.digest().to_string(),
+            domain_id: canonical_memory::MEMORY_DOMAIN_ID.to_string(),
+            kernel_incarnation,
+        })
     }
 
     fn prepare_wrapup_fire(
@@ -5885,6 +5987,7 @@ impl HandlerCore {
                 return PreparedWrapupAction::Busy(completion);
             }
         };
+        let curator_handoff = self.curator_handoff_target(&store, binding);
         PreparedWrapupAction::FireReady(Box::new(HistorySummarizerFiringTask {
             store,
             session_id: parsed.session_id.clone(),
@@ -5897,6 +6000,7 @@ impl HandlerCore {
             connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
             credential_fingerprints: binding.credential_fingerprints.clone(),
             publication_fence: None,
+            curator_handoff,
         }))
     }
 
@@ -5948,6 +6052,7 @@ impl HandlerCore {
             connect_failure_commit_hook,
             publication_fence,
             credential_fingerprints,
+            curator_handoff,
         } = task;
         let cancel = live_guard.cancel.clone();
         let _guard = live_guard;
@@ -5969,6 +6074,7 @@ impl HandlerCore {
                     &harness,
                 );
                 request.publication_fence = publication_fence.as_deref();
+                request.curator_handoff = curator_handoff.as_ref();
                 tokio::select! {
                     () = cancel.cancelled() => Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
                     outcome = run_history_summarizer_firing(&mut *producer, request) => outcome,
@@ -6120,7 +6226,10 @@ impl HandlerCore {
                     history_summarizer::HistorySummarizerDriveError::State(
                         history_summarizer::HistorySummarizerStateError::Publish(
                             memory_store::HistorySummarizerPublishError::CasConflict { .. }
-                            | memory_store::HistorySummarizerPublishError::FenceRejected { .. },
+                            | memory_store::HistorySummarizerPublishError::FenceRejected { .. }
+                            | memory_store::HistorySummarizerPublishError::CallerFenceRejected {
+                                ..
+                            },
                         ),
                     )
                     | history_summarizer::HistorySummarizerDriveError::State(
@@ -14788,6 +14897,76 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
         &self.store
     }
 
+    /// The production selector: the project's live canonical descriptors, judged through the Kernel, minus targets that already have a review job. The Kernel scope is the bound route's; the ledger project is the authority project the slot is leased under. A missing binding or kernel and a transient selection error retry the slot, as `run_task` retains the same conditions; every other selection error completes it.
+    fn select_review_page(
+        &self,
+        project: &memory_classifier_scheduler::ScheduledProject,
+        cursor: Option<&str>,
+    ) -> Result<
+        memory_store::curator_jobs::FrozenSelectionPage,
+        memory_classifier_scheduler::SelectionFailure,
+    > {
+        use memory_classifier_scheduler::SelectionFailure;
+        // The lease names a project at a generation; a root that moved to another project or an authority that advanced since the snapshot must not select for the lease it left. The classify path refuses the same way.
+        let route_root = project.route_root.to_string_lossy().to_string();
+        match memories_authority_for_route(&self.store, &route_root) {
+            Ok(MemoriesAuthority::Module(authority))
+                if authority.project == project.project
+                    && authority.generation == project.authority_generation => {}
+            Ok(MemoriesAuthority::Module(authority)) => {
+                return Err(SelectionFailure::Failed(format!(
+                    "the route now resolves to {} at generation {}, the lease is on {} at generation {}",
+                    authority.project,
+                    authority.generation,
+                    project.project,
+                    project.authority_generation
+                )));
+            }
+            Ok(MemoriesAuthority::NotModule { message }) => {
+                return Err(SelectionFailure::Failed(message));
+            }
+            Err(error) => {
+                return Err(SelectionFailure::Retry(format!(
+                    "authority lookup failed: {error}"
+                )));
+            }
+        }
+        let binding = self.binding_for_root(&project.route_root).ok_or_else(|| {
+            SelectionFailure::Retry("no live route is bound to the project".to_string())
+        })?;
+        let kernel = self
+            .memory_classifier
+            .kernel
+            .kernel_store()
+            .map_err(|outcome| {
+                SelectionFailure::Retry(format!("kernel unavailable: {outcome:?}"))
+            })?;
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(30)),
+            Arc::default(),
+        );
+        let policy_versions = curator::handoff::review_policy_versions();
+        curator::selection::select_review_targets(
+            &kernel,
+            &self.store,
+            &curator::selection::SelectionScope {
+                project: binding.kernel_project.scope(),
+                project_digest: &project.project,
+                classes: curator::selection::MEMORY_CLASSES,
+                policy_versions: &policy_versions,
+            },
+            cursor,
+            &budget,
+        )
+        .map_err(|error| {
+            if error.is_transient() {
+                SelectionFailure::Retry(error.to_string())
+            } else {
+                SelectionFailure::Failed(error.to_string())
+            }
+        })
+    }
+
     /// The newest root speaks for a project: roots collapse by project before
     /// the winner's schedule is read, so a newest binding without a schedule
     /// unschedules the project.
@@ -14859,6 +15038,12 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
             memory_classifier_scheduler::ScheduledTask::MessageIndexCleanup => {
                 return memory_classifier_scheduler::TaskRunOutcome::NotRunnable {
                     reason: "message-index cleanup has no production enable path".to_string(),
+                };
+            }
+            // Selection runs through its own slot path, never through the classify protocol.
+            memory_classifier_scheduler::ScheduledTask::CuratorReviewSelection => {
+                return memory_classifier_scheduler::TaskRunOutcome::NotRunnable {
+                    reason: "curator selection is not a classify task".to_string(),
                 };
             }
             memory_classifier_scheduler::ScheduledTask::ReviewUserMemories => {}
@@ -18742,14 +18927,15 @@ mod tests {
                     replayed_unflagged
                 );
                 let (expected_text, expected_end) = match budget {
-                    1 => ("[1-2] U: α🙂e\u{301} 中文".to_string(), 2),
+                    1 => ("[1-2] U: «s1»α🙂e\u{301} 中文".to_string(), 2),
                     128 => (
-                        "[1-2] U: α🙂e\u{301} 中文\n[3-4] A: TC: bash / TC: bash".to_string(),
+                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash"
+                            .to_string(),
                         4,
                     ),
                     _ => (
                         format!(
-                            "[1-2] U: α🙂e\u{301} 中文\n[3-4] A: TC: bash / TC: bash\n[5] U: {}\n[8] A: kept reply",
+                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
                             "word ".repeat(2_000).trim_end(),
                         ),
                         8,
@@ -18781,8 +18967,8 @@ mod tests {
                 assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
                 let expected_digest = match budget {
                     1 => "0e0eb1f520ba2500bd1fdd653c805dc72fed78e64197f569294a9eb091c5ef34",
-                    128 => "7bf6893aeb58b953a0909165a4443ab0fb1b793faba4c8e9655058f38cd5727a",
-                    _ => "bafe4494e0de9038ac1a5fd14d432282bb17584600858b0dfad885ddb3ffac5d",
+                    128 => "92b29f62d5d0341b8421f53bf1169721ad6523a8a32045ccd5168cf144863d1d",
+                    _ => "48238b64939260eb768998bf3f2a9caa393857e6e006e3082526fb1afb7da207",
                 };
                 assert_eq!(
                     format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),
@@ -26236,7 +26422,7 @@ mod tests {
             let first_prompt = producer.prompts.lock().unwrap()[0].clone();
             assert_eq!(
                 format!("{:x}", Sha256::digest(first_prompt.as_bytes())),
-                "2aa6e502a048b0729b21fc7e3368476e1fc56bcab5280860f66c89e29c5f5466"
+                "813b4fd06c4cce739fd415892cb229086016b9a07fd1305fcb6cc4d0e9a90018"
             );
             assert_eq!(prompt_ordinal_range(&first_prompt).unwrap().0, 1);
             assert!(first_prompt.contains("message 3 "));
@@ -26358,7 +26544,7 @@ mod tests {
             let third_prompt = producer.prompts.lock().unwrap()[1].clone();
             assert_eq!(
                 format!("{:x}", Sha256::digest(third_prompt.as_bytes())),
-                "eb6233c471dc084858e31929e01d931e8542490bf4ad950365b81d02f00fef7f"
+                "c0377979d652d86253f19839ae3ee23e4396f57de73e0c39432cf77458a9094d"
             );
             assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
             assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
@@ -32912,6 +33098,40 @@ mod tests {
         }
     }
 
+    /// Selection combines the route's Kernel scope with the leased project, so a
+    /// root that moved to another project after the snapshot must not select for
+    /// the lease it left. Both projects share a generation, as in the classify case.
+    #[tokio::test(flavor = "current_thread")]
+    async fn memory_classifier_scheduler_bridge_refuses_to_select_for_a_root_that_moved_to_another_project()
+     {
+        use memory_classifier_scheduler::{ScheduledTask, SchedulerHost, SelectionFailure};
+        let producer = Arc::new(ProducerState::default());
+        let harness = MemoryClassifierHarness::start(&producer).await;
+        harness.schedule(Some("*/15 * * * *"));
+        let bridge = harness.scheduler_bridge();
+        let mut project = bridge.scheduled_projects().unwrap().remove(0);
+        project.task = ScheduledTask::CuratorReviewSelection;
+        assert!(
+            bridge.select_review_page(&project, None).is_ok(),
+            "the bound project selects"
+        );
+
+        activate_module_authority(
+            &harness.store,
+            "context",
+            "git:other",
+            &harness.route_root,
+            "memories",
+        );
+        match bridge.select_review_page(&project, None) {
+            Err(SelectionFailure::Failed(reason)) => assert!(
+                reason.contains("git:other") && reason.contains("git:identity"),
+                "{reason}"
+            ),
+            other => panic!("a moved root selected for its old lease: {other:?}"),
+        }
+    }
+
     /// A store failure inside the durable protocol is not the protocol's
     /// answer for the command: the bridge reports the store unavailable so the
     /// scheduler keeps the slot due instead of recording the failure on the
@@ -38859,6 +39079,8 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            curator_nonadmission: Default::default(),
+            curator_reservation: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -38892,6 +39114,8 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
+            curator_nonadmission: Default::default(),
+            curator_reservation: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -38996,6 +39220,85 @@ mod tests {
         ] {
             assert_seeded_phase_recovers_then_refires_after_backoff(phase).await;
         }
+    }
+
+    /// Records a reservation and a retained publication for the seeded firing, as the live path leaves them when publication fails after the handoff.
+    fn seed_retained_reservation(store: &MemoryStore) {
+        let loaded = store.load("ses").unwrap();
+        let reservation = memory_store::CuratorReservation {
+            firing_seq: loaded.meta.history_summarizer.firing_seq,
+            causal_identity: "c".repeat(64),
+            candidate_id: "hs-ses-candidate".to_string(),
+            payload_digest: "d".repeat(64),
+            kernel_incarnation: "k".repeat(64),
+            queue_deadline_ms: now_ms() + memory_store::curator_jobs::CURATOR_QUEUE_LIFETIME_MS,
+        };
+        store
+            .record_curator_reservation(
+                "ses",
+                loaded.row_version.unwrap(),
+                &reservation,
+                &memory_store::PendingPublication {
+                    validated_json: serde_json::to_string(
+                        &history_summarizer_validate::ValidatedChunk::default(),
+                    )
+                    .unwrap(),
+                    aliases_json: serde_json::to_string(
+                        &history_summarizer_citations::FrozenAliasTable::default(),
+                    )
+                    .unwrap(),
+                    chunk_transcript: "U: retained".to_string(),
+                    boundary_dates: BTreeMap::new(),
+                    publication_floor_ordinal: 3,
+                    collect_user_memory_candidates: false,
+                    created_at_ms: now_ms(),
+                },
+            )
+            .unwrap();
+    }
+
+    async fn wait_for_reattach_to_finish(handler: &Handler) {
+        let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+        while std::time::Instant::now() < deadline {
+            if handler.reattaching_sessions.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(TEST_WAIT_POLL).await;
+        }
+        panic!("the reattach did not finish");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retained_reserved_firing_waits_out_its_backoff_before_the_next_reattach() {
+        // The test route has no MODULE memories authority, so the reserved firing cannot be verified and every recovery pass retains it. Retaining must arm the backoff and the next transform must honor it instead of running the recovery again.
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+        seed_history_summarizer_phase(&store, HistorySummarizerPhase::Publishing);
+        seed_retained_reservation(&store);
+
+        let recovering = call_transform(&handler, messages.clone()).await;
+        assert_eq!(recovering["history_summarizer"]["no_fire"], "recovering");
+        wait_for_reattach_to_finish(&handler).await;
+        let retained = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
+        assert!(retained.curator_reservation.is_some());
+        assert!(
+            retained.failure_backoff_at_ms.is_some(),
+            "a retained pass arms the backoff"
+        );
+
+        let backed_off = call_transform(&handler, messages.clone()).await;
+        assert_eq!(backed_off["history_summarizer"]["no_fire"], "backoff");
+        assert!(handler.reattaching_sessions.lock().unwrap().is_empty());
+
+        expire_history_summarizer_backoff(&store);
+        let again = call_transform(&handler, messages).await;
+        assert_eq!(again["history_summarizer"]["no_fire"], "recovering");
+        wait_for_reattach_to_finish(&handler).await;
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -39146,6 +39449,57 @@ mod tests {
         assert_eq!(control_state.state, HistorySummarizerPhase::Idle);
     }
 
+    /// `chunk_range` fixes the messages the producer saw. The reattach must rebuild that range without applying the live chunk budget, which can otherwise drop messages the model's segments cover and abandon a completed producer run.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_rebuilds_the_frozen_range_regardless_of_the_live_budget() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(history_summarizer_output(
+                1,
+                3,
+                "reattached under a smaller budget",
+            ));
+        // Three alternating-role messages of roughly 4k tokens each render as three blocks that fit the default budget that fired them and exceed the 8k floor a 32k context limit derives.
+        let messages: Vec<IngressMessage> = (1..=3)
+            .map(|ordinal| {
+                wire_with_role(
+                    &format!("m{ordinal}"),
+                    ordinal,
+                    if ordinal % 2 == 1 {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    &format!("message {ordinal} {}", "word ".repeat(4_000)),
+                )
+            })
+            .collect();
+        let config = DaemonConfig {
+            history_summarizer_context_limit_tokens: 32_000,
+            ..default_test_config()
+        };
+        assert_eq!(
+            derive_history_summarizer_chunk_tokens(config.history_summarizer_context_limit_tokens),
+            crate::config::MIN_HISTORY_SUMMARIZER_CHUNK_TOKENS
+        );
+        let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
+        seed_awaiting(&store, &messages);
+
+        let response = call_transform(&handler, messages).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_idle(&store).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.last_failure, None, "{state:?}");
+        assert_eq!(state.failure_backoff_at_ms, None);
+        let history_segments = store.load_history_segments("ses").unwrap();
+        assert_eq!(history_segments.len(), 1);
+        assert_eq!(history_segments[0].end_message, 3);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn handler_reattach_publishes_under_the_memories_authority_project() {
         let producer = Arc::new(ProducerState::default());
@@ -39276,6 +39630,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
+                curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap();
 

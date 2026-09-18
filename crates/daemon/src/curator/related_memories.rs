@@ -2,7 +2,7 @@
 //!
 //! Discovery walks the Kernel's live canonical-claim and promoted-memory descriptors at one reusable snapshot in keyset order (Q17), examines a bounded number of candidates per call, and keeps the ones whose text, the bytes their descriptor's span selects from the artifact, contains a term of the subject. Relatedness is tested through the broker's read-only probe, which judges eligibility, applies the egress verdict, and render-checks the whole artifact; a probe-only candidate receives no alias, hold, retained bytes, or charge. A matching candidate is disclosed through the broker's ordinary read path, so every hit is held, revalidated, tagged, charged, and added to the disclosed-input union. Discovery commits no state and records no read repair.
 //!
-//! A page ends with a run-local continuation cursor or an explicit completeness code; zero hits never prove absence, and a cursor the run did not issue is refused rather than restarting discovery. Excerpts follow Q19: a half-open byte span on UTF-8 boundaries into the referenced artifact, at most [`MAX_EXCERPT_BYTES`] long.
+//! A page ends with a run-local continuation cursor or an explicit completeness code; zero hits never prove absence, and a cursor the run did not issue is refused rather than restarting discovery. Excerpts follow Q19: a half-open byte span on UTF-8 boundaries into the referenced artifact, at most [`super::MAX_EXCERPT_BYTES`] long.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;
@@ -12,7 +12,10 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{KernelStore, LiveDescriptor};
 
-use super::broker::{Alias, EvidenceBroker, Probed, ReferenceExpectation, Refusal, RefusalCode};
+use super::broker::{
+    Alias, EvidenceBroker, Probed, ReferenceExpectation, Refusal, RefusalCode, RenderedBuffer,
+};
+use super::{Completeness, EXCERPT_LEAD_BYTES, MAX_EXCERPT_BYTES, excerpt_window};
 
 /// Hits per page; one page fills at most one model batch.
 pub const MAX_RELATED_PAGE_HITS: usize = 8;
@@ -22,16 +25,12 @@ pub const MAX_RELATED_CANDIDATES_PER_PAGE: usize = 64;
 pub const MAX_PAGE_PROBE_BYTES: u64 = 4 * 1024 * 1024;
 /// Longest artifact worth probing: the render check refuses anything longer, so a longer candidate is skipped before any byte is read.
 pub const MAX_PROBE_ARTIFACT_BYTES: u64 = context_core::redaction::MAX_REDACTABLE_BYTES as u64;
-/// Per-hit excerpt bound (Q19), in bytes of the referenced artifact.
-pub const MAX_EXCERPT_BYTES: usize = 512;
 /// Cursors a run keeps resolvable; the oldest is forgotten first.
 pub const MAX_LIVE_CURSORS: usize = 64;
 /// Matcher terms per subject; the sorted surplus is counted in [`RelatedMemoryDiscovery::dropped_terms`] rather than matched.
 pub const MAX_QUERY_TERMS: usize = 32;
 /// Shortest subject token used as a matcher; shorter tokens match too much to locate anything.
 const MIN_TERM_BYTES: usize = 4;
-/// Bytes kept before the first matching term so an excerpt carries its lead-in.
-const EXCERPT_LEAD_BYTES: usize = 64;
 /// Longest subject token used as a matcher: the excerpt after its lead must hold the whole term.
 const MAX_TERM_BYTES: usize = MAX_EXCERPT_BYTES - EXCERPT_LEAD_BYTES;
 const CURSOR_PREFIX: &str = "cur-";
@@ -40,30 +39,14 @@ const CLASSES: [OccurrenceClass; 2] = [
     OccurrenceClass::PromotedMemory,
 ];
 
-/// Why a page stopped where it did. Only `Complete` means the inventory at the snapshot was exhausted; every other code comes with a cursor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Completeness {
-    /// Every candidate at the snapshot was examined.
-    Complete,
-    /// The candidate bound for this call was reached.
-    CandidateBound,
-    /// The probe byte bound for this call was reached.
-    ProbeBound,
-    /// The hit bound for this page was reached.
-    PageFull,
-    /// The model batch has no operation left, or a broker capacity bound stopped the page after at least one hit; the cursor resumes at the undelivered candidate.
-    CapacityBound,
-    /// The caller's budget expired or was cancelled after the page passed at least one candidate; the cursor resumes at the next.
-    BudgetBound,
-}
-
 /// One related memory, disclosed through the broker.
 #[derive(Debug)]
 pub struct RelatedHit {
     pub alias: Alias,
     /// Half-open byte span of the excerpt inside the referenced artifact, on UTF-8 boundaries.
     pub span: Range<u64>,
-    pub excerpt: Vec<u8>,
+    /// The excerpt as the broker rendered, checked, tagged, and charged it.
+    pub buffer: RenderedBuffer,
     /// The alias an earlier disclosure of the same originating decision was issued under, when there is one.
     pub shared_origin: Option<Alias>,
 }
@@ -324,7 +307,7 @@ impl RelatedMemoryDiscovery {
             hit: RelatedHit {
                 alias,
                 span,
-                excerpt: read.buffer.bytes,
+                buffer: read.buffer,
                 shared_origin,
             },
             probed_bytes,
@@ -339,10 +322,7 @@ impl RelatedMemoryDiscovery {
             .iter()
             .filter_map(|term| folded.find(term.as_str()))
             .min()?;
-        // Rounding the lead up keeps at least `MAX_EXCERPT_BYTES - EXCERPT_LEAD_BYTES` bytes after the match, which bounds every matcher.
-        let start = text.ceil_char_boundary(position.saturating_sub(EXCERPT_LEAD_BYTES));
-        let end = text.floor_char_boundary(start.saturating_add(MAX_EXCERPT_BYTES));
-        Some(start..end)
+        Some(excerpt_window(text, position))
     }
 }
 

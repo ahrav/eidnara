@@ -28,15 +28,18 @@ pub const REVIEW_PROPOSAL_KIND: &str = "review_proposal";
 /// `provenance_witness.kind` literal of every review row; admission rejects it.
 pub const REVIEW_WITNESS_KIND: &str = "review";
 /// Encoded payload schema version this build writes and reads.
-pub const REVIEW_PAYLOAD_VERSION: u32 = 1;
+pub const REVIEW_PAYLOAD_VERSION: u32 = 2;
 /// Serialized payload bound, checked before per-field validation runs.
 pub const MAX_REVIEW_PAYLOAD_BYTES: usize = 64 * 1024;
-pub const MAX_REVIEW_IDENTITY_BYTES: usize = 256;
+/// Identity bound for every id a review payload names. A project-text capture id ([`crate::local_file_capture_id`]) is over 300 bytes, and a proposal must be able to cite one, so this is not the 256 the shorter Kernel ids fit in.
+pub const MAX_REVIEW_IDENTITY_BYTES: usize = 512;
 pub const MAX_REVIEW_TEXT_BYTES: usize = 32 * 1024;
 pub const MAX_REVIEW_REFERENCES: usize = 256;
 /// Optional starting references beside the subject source.
 pub const MAX_REVIEW_REFERENCE_SOURCES: usize = 8;
 pub const MAX_REVIEW_FACTS: usize = 64;
+/// Spans one extracted fact may cite.
+pub const MAX_FACT_SPANS: usize = 8;
 pub const MAX_REVIEW_LIMITATIONS: usize = 16;
 const RESULT_ID_SEPARATOR: u8 = 0x1f;
 
@@ -88,18 +91,41 @@ pub struct SourceSpan {
     pub end: u64,
 }
 
+/// One extracted fact and the frozen-source spans that support it; at least one span, at most [`MAX_FACT_SPANS`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtractedFact {
     pub text: String,
-    pub span: SourceSpan,
+    pub spans: Vec<SourceSpan>,
 }
 
-/// A sealed extraction result that a review job investigates; its source is the binding's `subject_source`.
+/// Half-open byte range inside one origin's presented text.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ByteRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// The frozen native identity one cited alias resolves to: the message, the blocks whose text produced the presented part, their content hashes, and the distinct ranges the facts cite. Two facts citing one block share one origin; the block's bytes are not stored again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubjectOrigin {
+    pub alias: String,
+    pub message_id: String,
+    pub ordinal: u64,
+    pub block_ids: Vec<String>,
+    /// Lower-hex SHA-256 of each block's serialized bytes, aligned with `block_ids`.
+    pub block_hashes: Vec<String>,
+    pub ranges: Vec<ByteRange>,
+}
+
+/// A sealed extraction result that a review job investigates; its source is the binding's `subject_source`. Every cited alias resolves to exactly one origin that lists the cited range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewSubject {
     pub facts: Vec<ExtractedFact>,
+    pub origins: Vec<SubjectOrigin>,
 }
 
 /// Reference to retained evidence; the body stays in its evidence row.
@@ -119,6 +145,23 @@ pub enum ProposalAction {
     Retain,
     Retire,
     NoChange,
+}
+
+impl ProposalAction {
+    /// Whether the action is legal for its target kind and text: create targets a staged candidate and needs text; revise targets a memory and needs text; retain and retire target a memory without text; no-change takes either target without text.
+    pub const fn admits(self, targets_memory: bool, has_text: bool) -> bool {
+        let (needs_memory, needs_text) = match self {
+            Self::Create => (Some(false), true),
+            Self::Revise => (Some(true), true),
+            Self::Retain | Self::Retire => (Some(true), false),
+            Self::NoChange => (None, false),
+        };
+        let target_ok = match needs_memory {
+            Some(needs) => needs == targets_memory,
+            None => true,
+        };
+        target_ok && needs_text == has_text
+    }
 }
 
 /// A canonical memory named by object id, source revision, and the snapshot the proposer read; `commit_token` is the last change commit the proposer observed.
@@ -392,7 +435,21 @@ impl SourceDependency {
 impl SourceSpan {
     fn validate(&self) -> Result<(), ReviewStageRefusal> {
         check_identity(&self.alias)?;
-        if self.end < self.start {
+        self.range().validate()
+    }
+
+    /// The span's byte range without its alias.
+    pub fn range(&self) -> ByteRange {
+        ByteRange {
+            start: self.start,
+            end: self.end,
+        }
+    }
+}
+
+impl ByteRange {
+    fn validate(&self) -> Result<(), ReviewStageRefusal> {
+        if self.end <= self.start {
             return Err(ReviewStageRefusal::Invalid);
         }
         Ok(())
@@ -406,7 +463,68 @@ impl ReviewSubject {
         }
         for fact in &self.facts {
             check_text(&fact.text)?;
-            fact.span.validate()?;
+            if fact.spans.is_empty() || fact.spans.len() > MAX_FACT_SPANS {
+                return Err(ReviewStageRefusal::Invalid);
+            }
+            for span in &fact.spans {
+                span.validate()?;
+            }
+        }
+        if self.origins.is_empty() || self.origins.len() > MAX_REVIEW_FACTS * MAX_FACT_SPANS {
+            return Err(ReviewStageRefusal::Invalid);
+        }
+        for origin in &self.origins {
+            origin.validate()?;
+        }
+        let mut aliases = self.origins.iter().map(|origin| origin.alias.as_str());
+        let mut seen = std::collections::BTreeSet::new();
+        if !aliases.all(|alias| seen.insert(alias)) {
+            return Err(ReviewStageRefusal::Invalid);
+        }
+        for span in self.facts.iter().flat_map(|fact| &fact.spans) {
+            let listed = self
+                .origins
+                .iter()
+                .any(|origin| origin.alias == span.alias && origin.ranges.contains(&span.range()));
+            if !listed {
+                return Err(ReviewStageRefusal::Invalid);
+            }
+        }
+        // And the reverse: an origin or range no fact cites would assert provenance nothing supports.
+        for origin in &self.origins {
+            for range in &origin.ranges {
+                let cited = self
+                    .facts
+                    .iter()
+                    .flat_map(|fact| &fact.spans)
+                    .any(|span| span.alias == origin.alias && span.range() == *range);
+                if !cited {
+                    return Err(ReviewStageRefusal::Invalid);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SubjectOrigin {
+    fn validate(&self) -> Result<(), ReviewStageRefusal> {
+        check_identity(&self.alias)?;
+        check_identity(&self.message_id)?;
+        if self.block_ids.is_empty()
+            || self.block_ids.len() != self.block_hashes.len()
+            || self.ranges.is_empty()
+        {
+            return Err(ReviewStageRefusal::Invalid);
+        }
+        for block_id in &self.block_ids {
+            check_identity(block_id)?;
+        }
+        for hash in &self.block_hashes {
+            check_digest(hash)?;
+        }
+        for range in &self.ranges {
+            range.validate()?;
         }
         Ok(())
     }
@@ -423,7 +541,6 @@ impl EvidenceReference {
 }
 
 impl ReviewProposal {
-    /// Create targets a staged candidate and needs text; revise targets a memory and needs text; retain and retire target a memory without text; no-change takes either target without text.
     fn validate(&self) -> Result<(), ReviewStageRefusal> {
         let targets_memory = match &self.target {
             ProposalTarget::StagedCandidate { candidate_id } => {
@@ -438,15 +555,7 @@ impl ReviewProposal {
                 true
             }
         };
-        let (needs_memory, needs_text) = match self.action {
-            ProposalAction::Create => (Some(false), true),
-            ProposalAction::Revise => (Some(true), true),
-            ProposalAction::Retain | ProposalAction::Retire => (Some(true), false),
-            ProposalAction::NoChange => (None, false),
-        };
-        if needs_memory.is_some_and(|needs| needs != targets_memory)
-            || needs_text != self.new_text.is_some()
-        {
+        if !self.action.admits(targets_memory, self.new_text.is_some()) {
             return Err(ReviewStageRefusal::Invalid);
         }
         if let Some(text) = &self.new_text {

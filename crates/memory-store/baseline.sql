@@ -485,6 +485,25 @@ CREATE TABLE curator_frozen_selections (
 CREATE INDEX idx_curator_frozen_selections_state
             ON curator_frozen_selections(project, state, selection_deadline_ms);
 
+-- One keyset continuation per project and selection task: where the next
+-- selection resumes. It advances in the same transaction that enqueues a
+-- page or completes an empty slot, never on a deferred or expired page, and a
+-- NULL cursor means the last pass reached the end so the next one starts over.
+CREATE TABLE history_summarizer_pending_publications (
+            session_id          TEXT PRIMARY KEY,
+            firing_seq          INTEGER NOT NULL,
+            payload_deflate     BLOB NOT NULL,
+            created_at_ms       INTEGER NOT NULL
+        );
+
+CREATE TABLE curator_selection_cursors (
+            project TEXT NOT NULL CHECK (length(project) > 0),
+            slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),
+            cursor TEXT CHECK (cursor IS NULL OR length(cursor) <= 512),
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (project, slot_id)
+        );
+
 CREATE INDEX idx_curator_frozen_selections_deadline
             ON curator_frozen_selections(state, selection_deadline_ms);
 
@@ -495,6 +514,19 @@ BEGIN
            reject_transaction_text(NEW.selection_attempt),
            reject_transaction_text(COALESCE(NEW.page_json, ''));
 END;
+
+-- The slot id and cursor are caller text bound into the same family: a detected secret
+-- refuses the row on insert and on the upsert that advances the cursor.
+CREATE TRIGGER curator_selection_cursors_reject_secret_insert
+BEFORE INSERT ON curator_selection_cursors
+BEGIN
+    SELECT reject_transaction_text(NEW.slot_id),
+           reject_transaction_text(COALESCE(NEW.cursor, ''));
+END;
+
+CREATE TRIGGER curator_selection_cursors_reject_secret_update
+BEFORE UPDATE OF cursor ON curator_selection_cursors
+BEGIN SELECT reject_transaction_text(COALESCE(NEW.cursor, '')); END;
 
 -- One Curator receipt per admitted job: the run deadline and execution cutoff are
 -- written at the first claim and inherited unchanged by every takeover; the
@@ -518,6 +550,9 @@ CREATE TABLE curator_receipts (
             selected_generation INTEGER CHECK (selected_generation IS NULL OR selected_generation >= 1),
             selected_candidate_id TEXT CHECK (selected_candidate_id IS NULL OR length(selected_candidate_id) BETWEEN 1 AND 256),
             selected_payload_digest TEXT CHECK (selected_payload_digest IS NULL OR length(selected_payload_digest) = 64),
+            abstained_reason TEXT CHECK (abstained_reason IS NULL OR abstained_reason IN (
+                'owner_sensitive', 'wrong_scope', 'secret', 'expectation_changed', 'undisclosed_citation',
+                'partial_disclosure', 'model_declined', 'budget_exhausted', 'invalid_proposal')),
             created_at_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
             PRIMARY KEY (project, causal_identity),
@@ -525,7 +560,8 @@ CREATE TABLE curator_receipts (
             CHECK ((state = 'complete') = (terminal_kind IS NOT NULL)),
             CHECK ((selected_candidate_id IS NULL) = (selected_payload_digest IS NULL)),
             CHECK ((selected_candidate_id IS NULL) = (selected_generation IS NULL)),
-            CHECK (terminal_kind IS NOT 'complete' OR selected_candidate_id IS NOT NULL)
+            CHECK ((terminal_kind IS 'complete') = (selected_candidate_id IS NOT NULL)),
+            CHECK ((terminal_kind IS 'abstained') = (abstained_reason IS NOT NULL))
         );
 
 -- Receipts survive for the store incarnation; the expiry sweep reads only the in-progress ones by deadline.

@@ -621,6 +621,29 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
     let (_, _, _, execution_released, execution_refs) = fixture.pin(&hold.hold_id);
     assert!(execution_released.is_some());
     assert_eq!(execution_refs, 0);
+    // The review binding alone resolves the hold; the execution binding, another generation, and a clock past expiry resolve nothing.
+    assert_eq!(
+        fixture.store.lookup_review_hold(&review, now).unwrap(),
+        Some(review_hold.clone())
+    );
+    assert_eq!(
+        fixture.store.lookup_review_hold(&execution, now).unwrap(),
+        None
+    );
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(&fixture.binding(&review.subject, 2), now)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(&review, review_expires_at)
+            .unwrap(),
+        None
+    );
     assert_eq!(
         fixture.retain_until(&live_capture),
         Some(review_expires_at),
@@ -696,6 +719,10 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_curator_referen
         .release_review_hold(&review_hold.hold_id, &review)
         .unwrap();
     assert!(fixture.pin(&review_hold.hold_id).3.is_some());
+    assert_eq!(
+        fixture.store.lookup_review_hold(&review, now).unwrap(),
+        None
+    );
     assert_eq!(
         refusal(
             fixture
@@ -1520,6 +1547,15 @@ fn a_transfer_retry_recovers_a_purge_degraded_review_hold() {
         .transfer_execution_to_review(&hold.hold_id, &execution, &review, review_expires_at)
         .unwrap();
     assert_eq!(retried.hold_id, review_hold.hold_id);
+    // So does a settlement that recovers by lookup: the degraded pin is still the binding's committed hold, and validation under it is what refuses.
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(&review, now)
+            .unwrap()
+            .map(|found| found.hold_id),
+        Some(review_hold.hold_id.clone())
+    );
     assert_eq!(
         refusal(
             fixture

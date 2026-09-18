@@ -19,6 +19,7 @@ use crate::canonical_memory::CanonicalMemoryRead;
 use crate::history_summarizer::{
     ChunkSnapshotItem, HistorySummarizerFireRequest, compute_chunk_fingerprint,
 };
+use crate::history_summarizer_citations::{FrozenAlias, FrozenAliasTable};
 use crate::history_summarizer_prompt::{
     HistorySegmentPromptInputs, build_history_segment_agent_prompt,
     build_reference_blocks_from_stored, render_history_summarizer_memory_block,
@@ -26,7 +27,7 @@ use crate::history_summarizer_prompt::{
 use crate::history_summarizer_validate::{
     ChunkLine, HistorySummarizerChunk, MessageRange, StoredHistorySegmentRange, ValidateOptions,
 };
-use crate::wire::{BlockKind, FlatBlock, IngressMessage};
+use crate::wire::{BlockKind, FlatBlock, IngressMessage, fingerprint_digest};
 use std::sync::Arc;
 
 /// Stores block identity and UTF-8 byte length without retaining block content.
@@ -79,7 +80,8 @@ struct ChunkBlock {
     role: String,
     start_ordinal: u64,
     end_ordinal: u64,
-    parts: Vec<String>,
+    /// The rendered parts, as the alias table will freeze them; `alias` is assigned when the block is kept.
+    parts: Vec<FrozenAlias>,
     meta: Vec<MessageMeta>,
     commit_hashes: Vec<String>,
     is_tool_only: bool,
@@ -99,6 +101,7 @@ struct Builder {
     commit_cluster_count: usize,
     last_flushed_role: String,
     tool_call_summaries: HashMap<String, String>,
+    aliases: FrozenAliasTable,
 }
 
 impl Builder {
@@ -120,6 +123,34 @@ impl Builder {
             commit_cluster_count: 0,
             last_flushed_role: String::new(),
             tool_call_summaries,
+            aliases: FrozenAliasTable::default(),
+        }
+    }
+
+    /// Builds the frozen alias for one rendered part. `transformed` is false only for a single text block presented unchanged. Native marker brackets are escaped to plain quotes and count as transformed, so the rendered input holds exactly the issued markers and withdrawal matching cannot hit a forged one.
+    fn part(message: &FlatMessage<'_>, text: String, transformed: bool) -> FrozenAlias {
+        let escaped = text.replace([ALIAS_OPEN, ALIAS_CLOSE], ALIAS_ESCAPE);
+        let transformed = transformed || escaped != text;
+        FrozenAlias {
+            alias: String::new(),
+            message_id: message
+                .blocks
+                .first()
+                .map(|block| block.mid.clone())
+                .unwrap_or_default(),
+            ordinal: message.ordinal,
+            block_ids: message
+                .blocks
+                .iter()
+                .map(|block| block.id.clone())
+                .collect(),
+            block_hashes: message
+                .blocks
+                .iter()
+                .map(|block| fingerprint_digest(&block.content_hash))
+                .collect(),
+            presented: escaped,
+            transformed,
         }
     }
 
@@ -142,7 +173,7 @@ impl Builder {
                 self.pending_noise_meta.push(meta);
                 return true;
             }
-            return self.absorb_tool_only(meta, message.ordinal, summaries);
+            return self.absorb_tool_only(meta, message, summaries);
         }
 
         if message.role == "user" && !has_meaningful_user_text(message) {
@@ -151,7 +182,7 @@ impl Builder {
                 self.pending_noise_meta.push(meta);
                 return true;
             }
-            return self.absorb_tool_only(meta, message.ordinal, tc_summaries);
+            return self.absorb_tool_only(meta, message, tc_summaries);
         }
 
         let role = compact_role(message.role);
@@ -168,6 +199,11 @@ impl Builder {
             self.pending_noise_meta.push(meta);
             return true;
         }
+        // Verbatim means the presented bytes are the native bytes: a trimmed leading space already shifts every presented offset off the native block.
+        let verbatim = message.blocks.len() == 1
+            && text_parts.len() == 1
+            && matches!(message.blocks[0].wire.kind(), BlockKind::Text { text } if *text == compacted.text);
+        let part = Self::part(message, compacted.text, !verbatim);
 
         let msg_has_narrative = !text_parts.is_empty();
         if let Some(current) = self
@@ -176,7 +212,7 @@ impl Builder {
             .filter(|block| block.role == role)
         {
             current.end_ordinal = message.ordinal;
-            current.parts.push(compacted.text);
+            current.parts.push(part);
             current.meta.append(&mut self.pending_noise_meta);
             current.meta.push(meta);
             current.commit_hashes =
@@ -201,7 +237,7 @@ impl Builder {
             role,
             start_ordinal: start,
             end_ordinal: message.ordinal,
-            parts: vec![compacted.text],
+            parts: vec![part],
             meta: meta_list,
             commit_hashes: compacted.commit_hashes,
             is_tool_only: !msg_has_narrative,
@@ -212,9 +248,10 @@ impl Builder {
     fn absorb_tool_only(
         &mut self,
         meta: MessageMeta,
-        ordinal: u64,
+        message: &FlatMessage<'_>,
         summaries: Vec<String>,
     ) -> bool {
+        let ordinal = message.ordinal;
         let tc_text = if summaries.is_empty() {
             String::new()
         } else {
@@ -227,7 +264,7 @@ impl Builder {
         {
             current.end_ordinal = ordinal;
             if !tc_text.is_empty() {
-                current.parts.push(tc_text);
+                current.parts.push(Self::part(message, tc_text, true));
             }
             current.meta.append(&mut self.pending_noise_meta);
             current.meta.push(meta);
@@ -247,7 +284,7 @@ impl Builder {
             self.pending_noise_meta = meta_list;
             return true;
         }
-        let parts = vec![tc_text];
+        let parts = vec![Self::part(message, tc_text, true)];
         self.current_block = Some(ChunkBlock {
             role: "A".to_string(),
             start_ordinal: start,
@@ -264,7 +301,14 @@ impl Builder {
         let Some(block) = self.current_block.take() else {
             return true;
         };
-        let block_text = format_block(&block);
+        // Aliases are issued before rendering so the text measured against the budget carries the markers it keeps; a block that does not fit hands its aliases back.
+        let issued_before = self.aliases.aliases.len();
+        let markers: Vec<Option<String>> = block
+            .parts
+            .iter()
+            .map(|part| self.aliases.issue(part.clone()))
+            .collect();
+        let block_text = format_block(&block, &markers);
         let separator_tokens = if self.lines.is_empty() {
             0
         } else {
@@ -272,6 +316,7 @@ impl Builder {
         };
         let block_tokens = estimate_tokens(&block_text) + separator_tokens;
         if self.total_tokens + block_tokens > self.budget && self.total_tokens > 0 {
+            self.aliases.aliases.truncate(issued_before);
             self.current_block = Some(block);
             return false;
         }
@@ -414,6 +459,8 @@ pub fn build_history_summarizer_chunk(
     let _ = builder.flush_current_block();
     let tool_only_ranges = merge_tool_only_ranges(&builder.tool_only_ranges);
     let end = builder.last_ordinal;
+    let text = builder.lines.join("\n");
+    let aliases = builder.aliases;
     // System-role messages still advance the scanned ordinal.
     // Using the last rendered ordinal would repeatedly offer a filtered tail to the history_summarizer.
     let present_ordinals = input_ordinals;
@@ -432,11 +479,12 @@ pub fn build_history_summarizer_chunk(
         })
         .collect();
     HistorySummarizerBuiltChunk {
-        text: builder.lines.join("\n"),
+        text,
         chunk: HistorySummarizerChunk {
             start_index: start,
             end_index: end,
             lines: builder.line_meta,
+            aliases,
             present_ordinals,
             tool_only_ranges,
             completed_tool_arcs: completed_tool_arc_ranges(blocks),
@@ -548,6 +596,7 @@ impl AssembledHistorySummarizerFiring {
             failure_backoff_at_ms: self.failure_backoff_at_ms,
             completion_now_ms: crate::now_ms,
             publication_fence: None,
+            curator_handoff: None,
         }
     }
 }
@@ -621,13 +670,14 @@ pub fn assemble_history_summarizer_firing(
             },
         ));
     }
-    let chunk = build_history_summarizer_chunk(
+    let mut chunk = build_history_summarizer_chunk(
         messages,
         live,
         chunk_start,
         config.token_budget,
         eligible_end,
     );
+    let input_source = presented_input(&mut chunk, config.token_budget);
     if chunk.text.is_empty() || chunk.chunk.lines.is_empty() {
         return Ok(AssembleHistorySummarizerFiringOutcome::NoFire(
             HistorySummarizerNoFireReason::EmptyChunk,
@@ -681,10 +731,7 @@ pub fn assemble_history_summarizer_firing(
         seed_examples: &reference_blocks.seed_examples,
         session_references: &reference_blocks.session_references,
         project_memory: &memory_block,
-        input_source: &truncate_history_summarizer_input_if_needed(
-            &chunk.text,
-            config.token_budget,
-        ),
+        input_source: &input_source,
         memory_enabled: config.memory_enabled,
         extraction_free: config.extraction_free,
     });
@@ -917,14 +964,70 @@ fn format_tool_summary(name: &str, input: &Value) -> String {
     }
 }
 
-fn format_block(block: &ChunkBlock) -> String {
+/// Renders a block with each part prefixed by the marker of its issued alias; a part the full table could not alias renders bare.
+fn format_block(block: &ChunkBlock, markers: &[Option<String>]) -> String {
+    let parts: Vec<String> = block
+        .parts
+        .iter()
+        .zip(markers)
+        .map(|(part, alias)| match alias {
+            Some(alias) => format!("{}{}", alias_marker(alias), part.presented),
+            None => part.presented.clone(),
+        })
+        .collect();
     format_block_line(
         &block.role,
         block.start_ordinal,
         block.end_ordinal,
         &block.commit_hashes,
-        &block.parts,
+        &parts,
     )
+}
+
+/// The text the prompt presents for `built` under `token_budget`. Truncation cuts the joined text after the fact, so every alias whose marker and presented bytes do not both survive inside the kept prefix is withdrawn from the chunk: a citation can only name bytes the model saw whole.
+pub fn presented_input(built: &mut HistorySummarizerBuiltChunk, token_budget: usize) -> String {
+    let truncated = truncate_history_summarizer_input_if_needed(&built.text, token_budget);
+    if truncated != built.text {
+        let kept_len = truncated
+            .strip_suffix(HISTORY_SUMMARIZER_TRUNCATION_MARKER)
+            .unwrap_or(&truncated)
+            .len();
+        let kept = &truncated[..kept_len];
+        // Marker brackets are escaped out of native text, so the marker followed by the presented bytes occurs in the rendered input exactly when the model saw that part whole. Aliases are issued in rendering order and `kept` is a prefix of the rendered text, so one forward cursor finds each alias after the previous one, and the first alias not found whole is the cut: every later alias lies beyond it.
+        let mut cursor = 0usize;
+        let kept_count = built
+            .chunk
+            .aliases
+            .aliases
+            .iter()
+            .take_while(|alias| {
+                let marker = alias_marker(&alias.alias);
+                let Some(at) = kept[cursor..].find(&marker) else {
+                    return false;
+                };
+                let end = cursor + at + marker.len();
+                if kept[end..].starts_with(&alias.presented) {
+                    cursor = end + alias.presented.len();
+                    true
+                } else {
+                    false
+                }
+            })
+            .count();
+        built.chunk.aliases.aliases.truncate(kept_count);
+    }
+    truncated
+}
+
+/// Marker brackets: U+00AB and U+00BB, each a single vocabulary token, so a marker costs the alias plus two tokens. Native occurrences are escaped to [`ALIAS_ESCAPE`] before rendering.
+const ALIAS_OPEN: char = '\u{ab}';
+const ALIAS_CLOSE: char = '\u{bb}';
+/// What a native marker bracket becomes in presented text: a plain double quote, which cannot open a marker.
+const ALIAS_ESCAPE: &str = "\"";
+
+/// The marker that precedes an aliased part in the rendered input: `«sN»`. The brackets are reserved for markers; the builder escapes them out of native text.
+pub fn alias_marker(alias: &str) -> String {
+    format!("{ALIAS_OPEN}{alias}{ALIAS_CLOSE}")
 }
 
 fn merge_tool_only_ranges(ranges: &[MessageRange]) -> Vec<MessageRange> {
@@ -1087,8 +1190,8 @@ mod tests {
         let built = project_and_build(&messages, 1, 1_000, 4);
         assert!(!built.text.contains("identity"));
         assert!(!built.text.contains("second pinned block"));
-        assert!(built.text.contains("U: hello"));
-        assert!(built.text.contains("A: done"));
+        assert!(built.text.contains("U: «s1»hello"));
+        assert!(built.text.contains("A: «s2»done"));
         assert_eq!(built.chunk.start_index, 1);
         let ordinals: Vec<u64> = built.chunk.lines.iter().map(|line| line.ordinal).collect();
         assert_eq!(ordinals, vec![1, 2, 3]);
@@ -1144,7 +1247,7 @@ mod tests {
         let projection = project_messages(&messages).unwrap();
         assert!(!projection.blocks.iter().any(|block| block.mid == "empty1"));
         let built = build_history_summarizer_chunk(&messages, &projection.blocks, 1, 1_000, 3);
-        assert_eq!(built.text, "[1-2] U: real user text");
+        assert_eq!(built.text, "[1-2] U: «s1»real user text");
         assert_eq!(
             built
                 .chunk
@@ -1181,7 +1284,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
-        assert!(built.text.contains("[2-4] A: second arc"));
+        assert!(built.text.contains("[2-4] A: «s2»second arc"));
 
         let output = r#"<output><history_segments>
 <history_segment start="1" end="1" title="first" episode_type="feature" importance="50"><p1>first</p1><p2>first</p2><p3>first</p3><p4 /></history_segment>
@@ -1254,7 +1357,7 @@ mod tests {
         let built = project_and_build(&messages, 1, 1_000, 5);
         assert_eq!(
             built.text,
-            "[1-4] A: TC: read(one.rs) / TC: read(one.rs) / TC: read(two.rs) / TC: read(two.rs)"
+            "[1-4] A: «s1»TC: read(one.rs) / «s2»TC: read(one.rs) / «s3»TC: read(two.rs) / «s4»TC: read(two.rs)"
         );
         assert_eq!(
             built.chunk.completed_tool_arcs,
@@ -1300,7 +1403,7 @@ mod tests {
         let built = project_and_build(&messages, 1, 1_000, 4);
         assert_eq!(
             built.text,
-            "[1-2] A: I will inspect it / TC: read(src/lib.rs)\n[3] U: thanks"
+            "[1-2] A: «s1»I will inspect it / «s2»TC: read(src/lib.rs)\n[3] U: «s3»thanks"
         );
         assert_eq!(built.chunk.lines[0].message_id, "a1#1");
         assert_eq!(built.chunk.lines[1].message_id, "t2#0");
@@ -1729,14 +1832,29 @@ mod tests {
         let built = project_and_build(&messages, 1, budget, 3_001);
         let joined_tokens = estimate_tokens(&built.text);
 
-        assert_eq!(built.chunk.lines.len(), 706);
-        assert_eq!(built.token_estimate, 31_992);
+        // Every rendered message carries its alias marker, so the same budget admits fewer messages than the unmarked rendering did.
+        assert_eq!(built.chunk.lines.len(), 649);
+        assert_eq!(built.chunk.aliases.aliases.len(), 649);
         assert_eq!(joined_tokens, built.token_estimate);
         assert!(joined_tokens <= budget);
         assert_eq!(
             truncate_history_summarizer_input_if_needed(&built.text, budget),
             built.text
         );
+    }
+
+    #[test]
+    fn alias_markers_cost_one_token_per_bracket() {
+        // The marker is paid once per rendered part inside the chunk budget, so each bracket must be a single vocabulary token; a bracket outside the vocabulary falls back to one token per UTF-8 byte and triples the cost.
+        for alias in ["s1", "s42", "s4096"] {
+            let marker = alias_marker(alias);
+            let bare = estimate_tokens(alias);
+            assert_eq!(
+                estimate_tokens(&marker),
+                bare + 2,
+                "{marker:?} must add exactly one token per bracket"
+            );
+        }
     }
 
     #[test]
@@ -1865,7 +1983,7 @@ mod tests {
         let fixture = FixtureBuilder::session_with_boundary();
         let messages: crate::wire::IngressMessages = fixture.messages.clone().into_iter().collect();
         let built = project_and_build(&messages, 1, 1_000, 3);
-        assert!(built.text.contains("U: before boundary"));
+        assert!(built.text.contains("U: «s1»before boundary"));
         assert_eq!(fixture.call_transform()["kind"], "transform");
     }
 }

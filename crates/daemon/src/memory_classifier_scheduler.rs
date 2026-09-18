@@ -16,6 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use memory_store::curator_jobs::{
+    CuratorJobError, CuratorJobRefusal, EnqueueOutcome, FrozenSelection, FrozenSelectionPage,
+    FrozenSelectionState, ProducerBinding,
+};
 use memory_store::{LeaseAcquireOutcome, LeaseClaim, LeaseCompleteOutcome, MemoryStore};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -29,6 +33,11 @@ pub(crate) const REVIEW_USER_MEMORIES_TASK_ID: i64 = 1;
 /// The bounded reclamation of obsolete message-index state.
 pub(crate) const MESSAGE_INDEX_CLEANUP_TASK: &str = "message-index-cleanup";
 pub(crate) const MESSAGE_INDEX_CLEANUP_TASK_ID: i64 = 2;
+/// Selection of review targets for the Curator: freezes one page of eligible memories and enqueues them as review jobs.
+pub(crate) const CURATOR_REVIEW_SELECTION_TASK: &str = "curator-review-selection";
+pub(crate) const CURATOR_REVIEW_SELECTION_TASK_ID: i64 = 3;
+/// The producer every scheduler-selected review job is reserved under.
+pub(crate) const CURATOR_SELECTION_PRODUCER: &str = "memory-classifier-selection";
 
 /// The task a scheduled slot runs. Every kind is leased through the same ledger under its own task identity and its own ledger slot, so a claim a dead scheduler left on one kind is recovered by that kind's next acquisition and never consumes another kind's slot; the host decides what a kind does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -37,6 +46,8 @@ pub(crate) enum ScheduledTask {
     /// No production host returns this kind: message-index cleanup has no enable path until its evidence gates exist, so only test hosts schedule it.
     #[cfg_attr(not(test), expect(dead_code))]
     MessageIndexCleanup,
+    /// No production host returns this kind yet: Curator selection is enabled by the deployment activation gate, which does not exist until the lifecycle owner installs it, so only test hosts schedule it.
+    CuratorReviewSelection,
 }
 
 impl ScheduledTask {
@@ -44,6 +55,7 @@ impl ScheduledTask {
         match self {
             Self::ReviewUserMemories => REVIEW_USER_MEMORIES_TASK,
             Self::MessageIndexCleanup => MESSAGE_INDEX_CLEANUP_TASK,
+            Self::CuratorReviewSelection => CURATOR_REVIEW_SELECTION_TASK,
         }
     }
 
@@ -51,6 +63,7 @@ impl ScheduledTask {
         match self {
             Self::ReviewUserMemories => REVIEW_USER_MEMORIES_TASK_ID,
             Self::MessageIndexCleanup => MESSAGE_INDEX_CLEANUP_TASK_ID,
+            Self::CuratorReviewSelection => CURATOR_REVIEW_SELECTION_TASK_ID,
         }
     }
 
@@ -59,6 +72,7 @@ impl ScheduledTask {
         match self {
             Self::ReviewUserMemories => SCHEDULER_SLOT,
             Self::MessageIndexCleanup => SCHEDULER_SLOT + 1,
+            Self::CuratorReviewSelection => SCHEDULER_SLOT + 2,
         }
     }
 }
@@ -135,6 +149,22 @@ pub(crate) trait SchedulerHost: Send + Sync {
         task: &str,
         command_id: &str,
     ) -> TaskRunOutcome;
+
+    /// Selects the next page of review targets for `project` from `cursor` through the Kernel.
+    fn select_review_page(
+        &self,
+        project: &ScheduledProject,
+        cursor: Option<&str>,
+    ) -> Result<FrozenSelectionPage, SelectionFailure>;
+}
+
+/// How a selection failed, by what the scheduler does with the slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SelectionFailure {
+    /// The store could not be read; the slot keeps its claim and due instant, and the next tick retries the same selection.
+    Retry(String),
+    /// The inventory cannot be walked from this cursor until the store changes; the slot completes as failed with the cursor unchanged, and the next cron slot selects again.
+    Failed(String),
 }
 
 /// Events emitted by a tick, ordered by execution.
@@ -165,6 +195,12 @@ pub(crate) enum TickEvent {
     /// The host could not report its projects, so nothing ran and no due
     /// instant moved; the next tick sees the same slots.
     Deferred { reason: String },
+    /// The slot's frozen page could not be enqueued because pending review capacity is full. The page stays frozen in its slot, the claim stays live, and the due instant does not move; the next tick offers the same page again, and the capacity drains as jobs finish or expire. The due table is this instance's memory: after a restart the page is durable but its slot is not, so the project's next cron slot resumes it, and a page older than its 24-hour lifetime by then records `curator_selection_expired` and the slot after that re-selects from the unchanged cursor.
+    CapacityDeferred {
+        project: String,
+        due_at_ms: i64,
+        reason: String,
+    },
 }
 
 /// The command id of one scheduled slot: the task and the instant it was due,
@@ -238,6 +274,16 @@ impl MemoryClassifierScheduler {
                             "daemon: memory_classifier scheduler could not read its projects: {reason}"
                         );
                     }
+                    TickEvent::CapacityDeferred {
+                        project,
+                        due_at_ms,
+                        reason,
+                    } => {
+                        store_failed = true;
+                        eprintln!(
+                            "daemon: memory_classifier scheduler holds {project} selection slot {due_at_ms} until capacity returns: {reason}"
+                        );
+                    }
                 }
             }
             let wait = if store_failed {
@@ -288,7 +334,10 @@ impl MemoryClassifierScheduler {
         let mut events = Vec::new();
         for (due_at_ms, project) in due {
             let event = self.run_slot(host, project, due_at_ms).await;
-            if !matches!(event, TickEvent::Retained { .. }) {
+            if !matches!(
+                event,
+                TickEvent::Retained { .. } | TickEvent::CapacityDeferred { .. }
+            ) {
                 // The floor prevents a clock step backward during the run from selecting an earlier slot.
                 self.advance(project, self.clock.now_ms().max(due_at_ms));
             }
@@ -406,6 +455,22 @@ impl MemoryClassifierScheduler {
         // this slot's for a fresh claim, an earlier one for a rebound claim.
         let leased_due_at_ms = claim.source_revision;
         let command_id = slot_command_id(project.task.name(), leased_due_at_ms);
+        if project.task == ScheduledTask::CuratorReviewSelection {
+            // The selection slot completes inside the enqueue transaction, so the lease, the page, and the jobs move together or not at all.
+            return match self.run_selection_slot(host, project, &claim, &command_id) {
+                Ok(SelectionStep::Ran(outcome)) => TickEvent::Ran {
+                    project: project.project.clone(),
+                    due_at_ms: leased_due_at_ms,
+                    outcome,
+                },
+                Ok(SelectionStep::CapacityDeferred(reason)) => TickEvent::CapacityDeferred {
+                    project: project.project.clone(),
+                    due_at_ms: leased_due_at_ms,
+                    reason,
+                },
+                Err(reason) => retained(reason),
+            };
+        }
         let outcome = host
             .run_task(project, project.task.name(), &command_id)
             .await;
@@ -445,6 +510,222 @@ impl MemoryClassifierScheduler {
             project: project.project.clone(),
             due_at_ms: leased_due_at_ms,
             outcome,
+        }
+    }
+}
+
+/// How one selection slot ended: it ran to a recorded outcome, or pending capacity deferred it with the page retained.
+enum SelectionStep {
+    Ran(TaskRunOutcome),
+    CapacityDeferred(String),
+}
+
+/// Whether a refusal clears on its own as pending jobs finish or expire. Only those refusals are worth re-offering a frozen page at the idle-poll cadence; the metadata quota is a ceiling for the store incarnation and the selection caps are cleared by slots, not jobs.
+fn drains_as_jobs_finish(refusal: CuratorJobRefusal) -> bool {
+    matches!(
+        refusal,
+        CuratorJobRefusal::ProjectCapacity | CuratorJobRefusal::HostCapacity
+    )
+}
+
+impl MemoryClassifierScheduler {
+    /// One Curator selection slot: resume the project's frozen page if one exists, else select a page from the last enqueued cursor and freeze it under this slot's attempt, then enqueue it and complete the slot in one transaction. An empty selection completes the slot with nothing frozen; a frozen page that pending-job capacity refuses stays frozen with the slot claimed for a later tick; every other refusal, an expired page, and a walk the inventory refuses complete the slot as failed without moving the cursor, so the next cron slot tries again. `Err` keeps the slot due.
+    fn run_selection_slot(
+        &self,
+        host: &dyn SchedulerHost,
+        project: &ScheduledProject,
+        claim: &LeaseClaim,
+        command_id: &str,
+    ) -> Result<SelectionStep, String> {
+        let store = host.store();
+        let now_ms = self.clock.now_ms();
+        let producer = ProducerBinding {
+            producer: CURATOR_SELECTION_PRODUCER.to_string(),
+            firing_id: command_id.to_string(),
+            ordinal: 0,
+        };
+        // The sweep runs before any page is looked up or retried: it is the only production writer that retires jobs and pages past their deadlines, so a page deferred by pending capacity sees the capacity its expired blockers held, and frozen pages of projects no slot runs any more stop holding the host's frozen-page cap.
+        store
+            .expire_curator_work(now_ms)
+            .map_err(|error| format!("expiring curator work failed: {error}"))?;
+        // This slot's own page first: a page it froze and could not enqueue resumes; one that expired or was already enqueued records that outcome and selects nothing new under this attempt.
+        if let Some(own) = store
+            .lookup_frozen_selection(&project.project, project.task.name(), command_id)
+            .map_err(|error| format!("frozen selection lookup failed: {error}"))?
+            && own.state != FrozenSelectionState::Frozen
+        {
+            let enqueued = own.state == FrozenSelectionState::Enqueued;
+            let code = if enqueued {
+                "curator_selection_enqueued"
+            } else {
+                "curator_selection_expired"
+            };
+            return self.complete_selection_slot(
+                store,
+                project,
+                claim,
+                command_id,
+                None,
+                json!({"ok": enqueued, "code": code}),
+            );
+        }
+        let frozen = match store
+            .frozen_selection_for_project(&project.project)
+            .map_err(|error| format!("frozen selection lookup failed: {error}"))?
+        {
+            Some(frozen) => frozen,
+            None => {
+                let cursor = store
+                    .selection_cursor(&project.project, project.task.name())
+                    .map_err(|error| format!("selection cursor lookup failed: {error}"))?;
+                let page = match host.select_review_page(project, cursor.as_deref()) {
+                    Ok(page) => page,
+                    Err(SelectionFailure::Retry(reason)) => return Err(reason),
+                    Err(SelectionFailure::Failed(reason)) => {
+                        return self.complete_selection_slot(
+                            store,
+                            project,
+                            claim,
+                            command_id,
+                            None,
+                            json!({"ok": false, "code": "curator_selection_failed", "reason": reason}),
+                        );
+                    }
+                };
+                if page.references.is_empty() {
+                    // Nothing to freeze, but the walk moved: the continuation advances with the slot so the next slot examines new rows.
+                    return self.complete_selection_slot(
+                        store,
+                        project,
+                        claim,
+                        command_id,
+                        Some(page.next_cursor.as_deref()),
+                        json!({"ok": true, "code": "curator_selection_empty", "next_cursor": page.next_cursor}),
+                    );
+                }
+                match store.freeze_selection(
+                    &project.project,
+                    project.task.name(),
+                    command_id,
+                    &page,
+                    now_ms,
+                ) {
+                    Ok(frozen) => frozen,
+                    // Nothing was persisted, so holding the slot due would repeat the whole selection every idle poll; the cron slot selects from the same cursor once headroom returns, and the metadata quota never returns.
+                    Err(CuratorJobError::Refused(refusal)) => {
+                        return self.complete_selection_slot(
+                            store,
+                            project,
+                            claim,
+                            command_id,
+                            None,
+                            json!({"ok": false, "code": "curator_selection_refused", "refusal": refusal.to_string()}),
+                        );
+                    }
+                    Err(CuratorJobError::Store(error)) => {
+                        return Err(format!("freezing the selection failed: {error}"));
+                    }
+                }
+            }
+        };
+        if frozen.state != FrozenSelectionState::Frozen {
+            return Err(format!(
+                "the project's selection page is {:?}",
+                frozen.state
+            ));
+        }
+        self.enqueue_selection(store, project, claim, command_id, &frozen, &producer)
+    }
+
+    fn enqueue_selection(
+        &self,
+        store: &MemoryStore,
+        project: &ScheduledProject,
+        claim: &LeaseClaim,
+        command_id: &str,
+        frozen: &FrozenSelection,
+        producer: &ProducerBinding,
+    ) -> Result<SelectionStep, String> {
+        match store.enqueue_frozen_selection(
+            &project.project,
+            &claim.claim_id,
+            &format!("{command_id}:complete"),
+            SCHEDULER_INSTANCE,
+            project.task.ledger_slot(),
+            frozen,
+            producer,
+            self.clock.now_ms(),
+        ) {
+            Ok(EnqueueOutcome::Enqueued {
+                jobs,
+                replayed,
+                next_cursor,
+            }) => Ok(SelectionStep::Ran(TaskRunOutcome::Ran {
+                response: json!({"ok": true, "code": "curator_selection_enqueued", "jobs": jobs, "replayed": replayed, "next_cursor": next_cursor}),
+            })),
+            Ok(EnqueueOutcome::Expired) => Ok(SelectionStep::Ran(TaskRunOutcome::Ran {
+                response: json!({"ok": false, "code": "curator_selection_expired"}),
+            })),
+            Ok(EnqueueOutcome::Replayed) => Ok(SelectionStep::Ran(TaskRunOutcome::Ran {
+                response: json!({"ok": true, "code": "curator_selection_replayed"}),
+            })),
+            // Nothing moved and the page stays frozen. Pending capacity drains as jobs finish, so the claim stays live for the next tick; the metadata quota does not, so the slot completes and the next cron slot offers the same page.
+            Ok(EnqueueOutcome::Deferred(refusal)) if drains_as_jobs_finish(refusal) => {
+                Ok(SelectionStep::CapacityDeferred(refusal.to_string()))
+            }
+            Ok(EnqueueOutcome::Deferred(refusal)) => self.complete_selection_slot(
+                store,
+                project,
+                claim,
+                command_id,
+                None,
+                json!({"ok": false, "code": "curator_selection_refused", "refusal": refusal.to_string()}),
+            ),
+            Err(error) => Err(format!("enqueue failed: {error}")),
+        }
+    }
+
+    /// Completes a selection slot that froze nothing. `advance` carries the continuation the slot moved to when the walk itself moved; `None` leaves the cursor where it was.
+    fn complete_selection_slot(
+        &self,
+        store: &MemoryStore,
+        project: &ScheduledProject,
+        claim: &LeaseClaim,
+        command_id: &str,
+        advance: Option<Option<&str>>,
+        response: Value,
+    ) -> Result<SelectionStep, String> {
+        let completion_id = format!("{command_id}:complete");
+        let completed = match advance {
+            Some(cursor) => store.complete_selection_slot(
+                &project.project,
+                &claim.claim_id,
+                &completion_id,
+                SCHEDULER_INSTANCE,
+                project.task.ledger_slot(),
+                project.task.name(),
+                cursor,
+                &response.to_string(),
+                self.clock.now_ms(),
+            ),
+            None => store.complete_memory_classifier_task(
+                &project.project,
+                &claim.claim_id,
+                &completion_id,
+                SCHEDULER_INSTANCE,
+                project.task.ledger_slot(),
+                &response.to_string(),
+                self.clock.now_ms(),
+            ),
+        };
+        match completed {
+            Ok(LeaseCompleteOutcome::Applied { .. } | LeaseCompleteOutcome::Replayed { .. }) => {
+                Ok(SelectionStep::Ran(TaskRunOutcome::Ran { response }))
+            }
+            Ok(LeaseCompleteOutcome::Conflict { kind }) => {
+                Err(format!("selection slot completion was {kind}"))
+            }
+            Err(error) => Err(format!("selection slot completion failed: {error}")),
         }
     }
 }
@@ -546,6 +827,9 @@ mod tests {
         fail_projects_once: Mutex<Option<String>>,
         /// Every run parks on this until it is notified.
         block_runs: Option<Arc<tokio::sync::Notify>>,
+        /// Selection pages served in order to `select_review_page`, with the cursor each call received recorded in `selection_cursors`; an exhausted script selects nothing.
+        selections: Mutex<Vec<Result<FrozenSelectionPage, SelectionFailure>>>,
+        selection_cursors: Mutex<Vec<Option<String>>>,
     }
 
     #[async_trait]
@@ -589,6 +873,25 @@ mod tests {
                     reason: "scripted".to_string(),
                 }
             }
+        }
+
+        fn select_review_page(
+            &self,
+            _project: &ScheduledProject,
+            cursor: Option<&str>,
+        ) -> Result<FrozenSelectionPage, SelectionFailure> {
+            self.selection_cursors
+                .lock()
+                .unwrap()
+                .push(cursor.map(str::to_string));
+            let mut selections = self.selections.lock().unwrap();
+            if selections.is_empty() {
+                return Ok(FrozenSelectionPage {
+                    references: Vec::new(),
+                    next_cursor: None,
+                });
+            }
+            selections.remove(0)
         }
     }
 
@@ -643,6 +946,8 @@ mod tests {
             run_steps_back: None,
             fail_projects_once: Mutex::new(None),
             block_runs: None,
+            selections: Mutex::new(Vec::new()),
+            selection_cursors: Mutex::new(Vec::new()),
         }
     }
 
@@ -661,7 +966,8 @@ mod tests {
                 } => Some((project.as_str(), *due_at_ms)),
                 TickEvent::Skipped { .. }
                 | TickEvent::Retained { .. }
-                | TickEvent::Deferred { .. } => None,
+                | TickEvent::Deferred { .. }
+                | TickEvent::CapacityDeferred { .. } => None,
             })
             .collect()
     }
@@ -1465,5 +1771,782 @@ mod tests {
         ] {
             assert!(holds_no_live_claim(&store, "git:a", task), "{task:?}");
         }
+    }
+
+    /// A selection page of `count` memory targets whose object ids start at `first`, continuing at `next`.
+    fn selection_page(first: usize, count: usize, next: Option<&str>) -> FrozenSelectionPage {
+        FrozenSelectionPage {
+            references: (first..first + count)
+                .map(|index| memory_store::curator_jobs::CausalInputs {
+                    target: memory_store::curator_jobs::ReviewTarget::Memory {
+                        object_id: format!("memory-{index}"),
+                        source_revision: 1,
+                    },
+                    question_template: "extracted_facts".to_string(),
+                    signals: Vec::new(),
+                    required_evidence: vec![memory_store::curator_jobs::EvidenceAvailability {
+                        evidence_id: format!("evidence-{index}"),
+                        available: true,
+                    }],
+                    policy_versions: std::collections::BTreeMap::new(),
+                })
+                .collect(),
+            next_cursor: next.map(str::to_string),
+        }
+    }
+
+    fn selection_project(store: &MemoryStore, identity: &str) -> ScheduledProject {
+        ScheduledProject {
+            task: ScheduledTask::CuratorReviewSelection,
+            ..project(store, identity, "*/15 * * * *")
+        }
+    }
+
+    fn ready_jobs(store: &MemoryStore, identity: &str) -> usize {
+        store.ready_curator_jobs(identity, 256, 0).unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn a_selection_slot_freezes_enqueues_and_completes_in_one_pass_and_advances_its_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        *host.selections.lock().unwrap() = vec![
+            Ok(selection_page(0, 3, Some("cursor-3"))),
+            // The same three targets again plus two new ones: the three replay their rows, two jobs are new.
+            Ok(selection_page(0, 5, None)),
+        ];
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert_eq!(ran(&events), vec![("git:a", T0 + 15 * MINUTE_MS)]);
+        let TickEvent::Ran { outcome, .. } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            *outcome,
+            TaskRunOutcome::Ran {
+                response: json!({"ok": true, "code": "curator_selection_enqueued", "jobs": 3, "replayed": 0, "next_cursor": "cursor-3"})
+            }
+        );
+        assert_eq!(
+            ready_jobs(&store, "git:a"),
+            3,
+            "every reference is a ready job"
+        );
+        assert_eq!(store.frozen_selection_for_project("git:a").unwrap(), None);
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap()
+                .as_deref(),
+            Some("cursor-3")
+        );
+        assert!(host.runs.lock().unwrap().is_empty(), "classify never ran");
+        // The slot is complete on the lease ledger; a replay of its acquisition reports the terminal.
+        let terminal = store
+            .acquire_memory_classifier_task(
+                "git:a",
+                &slot_command_id(CURATOR_REVIEW_SELECTION_TASK, T0 + 15 * MINUTE_MS),
+                SCHEDULER_INSTANCE,
+                ScheduledTask::CuratorReviewSelection.ledger_slot(),
+                i64::MAX,
+                CURATOR_REVIEW_SELECTION_TASK_ID,
+                T0 + 15 * MINUTE_MS,
+                T0 + 16 * MINUTE_MS,
+            )
+            .unwrap();
+        assert!(
+            matches!(terminal, LeaseAcquireOutcome::Terminal { .. }),
+            "{terminal:?}"
+        );
+        // The next slot resumes from the advanced cursor; duplicates replay, new targets enqueue.
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        let TickEvent::Ran { outcome, .. } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            *outcome,
+            TaskRunOutcome::Ran {
+                response: json!({"ok": true, "code": "curator_selection_enqueued", "jobs": 2, "replayed": 3, "next_cursor": null})
+            }
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 5);
+        assert_eq!(
+            *host.selection_cursors.lock().unwrap(),
+            vec![None, Some("cursor-3".to_string())]
+        );
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap(),
+            None
+        );
+        // An empty selection completes its slot without freezing anything.
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        let TickEvent::Ran { outcome, .. } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            *outcome,
+            TaskRunOutcome::Ran {
+                response: json!({"ok": true, "code": "curator_selection_empty", "next_cursor": null})
+            }
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 5);
+    }
+
+    #[tokio::test]
+    async fn full_capacity_rolls_the_whole_page_back_and_retains_page_slot_and_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        clock.advance(15 * MINUTE);
+        // Fill the project to one job short of its pending capacity through another producer, then offer a page of three.
+        let producer = ProducerBinding {
+            producer: "filler".to_string(),
+            firing_id: "f".to_string(),
+            ordinal: 0,
+        };
+        let mut filled = 0;
+        while filled < memory_store::curator_jobs::MAX_PENDING_CURATOR_JOBS_PER_PROJECT - 1 {
+            let page = selection_page(1_000 + filled, 1, None);
+            store
+                .reserve_curator_job("git:a", &producer, &page.references[0], T0)
+                .unwrap();
+            filled += 1;
+        }
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 3, Some("cursor-3")))];
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::CapacityDeferred { .. }),
+            "capacity deferral is its own event, not a store failure: {events:?}"
+        );
+        // Nothing of the page was written: not the two references that fit, not the cursor, and the page is still frozen in its slot.
+        assert_eq!(ready_jobs(&store, "git:a"), 0);
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap(),
+            None
+        );
+        let frozen = store
+            .frozen_selection_for_project("git:a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(frozen.state, FrozenSelectionState::Frozen);
+        assert_eq!(frozen.page.as_ref().unwrap().references.len(), 3);
+        // The slot stays due and claimed: the next tick retries the same page without selecting again.
+        clock.advance(MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::CapacityDeferred { .. }),
+            "{events:?}"
+        );
+        assert_eq!(
+            host.selection_cursors.lock().unwrap().len(),
+            1,
+            "no second selection"
+        );
+        // Capacity returns as filler jobs finish; the retry enqueues the retained page and completes the slot.
+        for index in 0..3 {
+            let inputs = &selection_page(1_000 + index, 1, None).references[0];
+            store
+                .finish_curator_job(
+                    "git:a",
+                    &inputs.causal_identity().unwrap(),
+                    memory_store::curator_jobs::CuratorJobOutcome::Nonadmitted,
+                    T0 + 1,
+                )
+                .unwrap();
+        }
+        clock.advance(MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(matches!(&events[0], TickEvent::Ran { .. }), "{events:?}");
+        assert_eq!(ready_jobs(&store, "git:a"), 3);
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap()
+                .as_deref(),
+            Some("cursor-3")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deferred_page_is_enqueued_once_the_blocking_jobs_pass_their_deadline() {
+        use memory_store::curator_jobs::{
+            CURATOR_QUEUE_LIFETIME_MS, MAX_PENDING_CURATOR_JOBS_PER_PROJECT,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        // Another producer holds the project's whole pending capacity with jobs whose queue deadline passes one minute after the page is first offered; nobody but the selection slot sweeps them.
+        let producer = ProducerBinding {
+            producer: "filler".to_string(),
+            firing_id: "f".to_string(),
+            ordinal: 0,
+        };
+        let reserved_at = T0 + 16 * MINUTE_MS - CURATOR_QUEUE_LIFETIME_MS;
+        for index in 0..MAX_PENDING_CURATOR_JOBS_PER_PROJECT {
+            let page = selection_page(1_000 + index, 1, None);
+            store
+                .reserve_curator_job("git:a", &producer, &page.references[0], reserved_at)
+                .unwrap();
+        }
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 3, Some("cursor-3")))];
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::CapacityDeferred { .. }),
+            "{events:?}"
+        );
+        // The blocking jobs are past their deadline now; the retry must see the capacity they held as free.
+        clock.advance(MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued" && response["jobs"] == 3),
+            "{events:?}"
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 3);
+        assert_eq!(
+            store.curator_headroom("git:a").unwrap().pending_jobs,
+            3,
+            "the expired jobs left the pending count"
+        );
+        assert_eq!(
+            host.selection_cursors.lock().unwrap().len(),
+            1,
+            "no second selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_resumes_the_frozen_page_and_an_expired_page_records_a_failed_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        // A scheduler froze a page and died before enqueueing it.
+        let due = T0 + 15 * MINUTE_MS;
+        let command = slot_command_id(CURATOR_REVIEW_SELECTION_TASK, due);
+        store
+            .freeze_selection(
+                "git:a",
+                CURATOR_REVIEW_SELECTION_TASK,
+                &command,
+                &selection_page(0, 2, Some("c")),
+                due,
+            )
+            .unwrap();
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(matches!(&events[0], TickEvent::Ran { .. }), "{events:?}");
+        assert!(
+            host.selection_cursors.lock().unwrap().is_empty(),
+            "the frozen page is enqueued without selecting again"
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 2);
+        // A page left frozen past its 24-hour selection deadline is expired by the sweep; the next slot records a failed slot, enqueues nothing, and leaves the cursor untouched.
+        let later = due + 15 * MINUTE_MS;
+        let command = slot_command_id(CURATOR_REVIEW_SELECTION_TASK, later);
+        store
+            .freeze_selection(
+                "git:a",
+                CURATOR_REVIEW_SELECTION_TASK,
+                &command,
+                &selection_page(10, 2, Some("stale")),
+                later,
+            )
+            .unwrap();
+        clock.advance(Duration::from_millis(25 * 60 * MINUTE_MS as u64));
+        store.expire_curator_work(clock.now_ms()).unwrap();
+        // The slot whose page expired records that and enqueues nothing; the cursor stays at the last enqueued page.
+        assert_eq!(store.frozen_selection_for_project("git:a").unwrap(), None);
+        let events = scheduler.tick(&host).await;
+        let TickEvent::Ran { outcome, .. } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            *outcome,
+            TaskRunOutcome::Ran {
+                response: json!({"ok": false, "code": "curator_selection_expired"})
+            }
+        );
+        // The first page's jobs reached their own 24-hour deadline and expired with the sweep; the expired page's targets never had a job at all.
+        assert_eq!(ready_jobs(&store, "git:a"), 0);
+        for inputs in &selection_page(10, 2, None).references {
+            assert_eq!(
+                store
+                    .lookup_curator_job("git:a", &inputs.causal_identity().unwrap())
+                    .unwrap(),
+                None,
+                "the expired page's targets were never enqueued"
+            );
+        }
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap()
+                .as_deref(),
+            Some("c")
+        );
+        // The next slot selects afresh from that cursor.
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(20, 1, None))];
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued"),
+            "{events:?}"
+        );
+        assert_eq!(
+            host.selection_cursors.lock().unwrap().as_slice(),
+            [Some("c".to_string())],
+            "continuation is the last enqueued page's cursor, never the expired page's"
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_selection_advances_the_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        // The first 256 descriptors all have jobs: the page is empty but the walk moved, so the next slot resumes past them rather than re-examining the same rows forever.
+        *host.selections.lock().unwrap() = vec![
+            Ok(FrozenSelectionPage {
+                references: Vec::new(),
+                next_cursor: Some("0\u{1f}object-256".to_string()),
+            }),
+            Ok(selection_page(0, 1, None)),
+        ];
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_empty"),
+            "{events:?}"
+        );
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap()
+                .as_deref(),
+            Some("0\u{1f}object-256")
+        );
+        clock.advance(15 * MINUTE);
+        scheduler.tick(&host).await;
+        assert_eq!(
+            *host.selection_cursors.lock().unwrap(),
+            vec![None, Some("0\u{1f}object-256".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_host_completes_the_slot_without_freezing_and_stale_pages_are_swept_before_the_next_freeze()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        // Thirty-two frozen pages across other projects fill the host. Nothing drains that cap as jobs finish, so the slot completes as refused at the cron cadence rather than holding the slot due and re-selecting every idle poll.
+        for index in 0..memory_store::curator_jobs::MAX_FROZEN_SELECTIONS_PER_HOST {
+            store
+                .freeze_selection(
+                    &format!("other:{index}"),
+                    "slot",
+                    "attempt",
+                    &selection_page(index * 10, 1, None),
+                    T0,
+                )
+                .unwrap();
+        }
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(50, 1, Some("c")))];
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["ok"] == false && response["code"] == "curator_selection_refused"),
+            "{events:?}"
+        );
+        assert_eq!(store.frozen_selection_for_project("git:a").unwrap(), None);
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap(),
+            None,
+            "the cursor stays where the last completed slot left it"
+        );
+        assert!(
+            holds_no_live_claim(&store, "git:a", ScheduledTask::CuratorReviewSelection),
+            "the refused slot is complete on the ledger"
+        );
+        // The slot advanced to its next cron instant: an idle poll later runs nothing.
+        clock.advance(MINUTE);
+        assert!(scheduler.tick(&host).await.is_empty());
+        assert_eq!(host.selection_cursors.lock().unwrap().len(), 1);
+        // The other projects are never scheduled again, so nothing else retires their pages. Past their 24-hour deadline the next freeze sweeps them first and the host cap counts only live pages.
+        clock.advance(Duration::from_millis(25 * 60 * MINUTE_MS as u64));
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(50, 1, Some("c")))];
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued"),
+            "{events:?}"
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 1);
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap()
+                .as_deref(),
+            Some("c")
+        );
+        for index in 0..memory_store::curator_jobs::MAX_FROZEN_SELECTIONS_PER_HOST {
+            assert_eq!(
+                store
+                    .lookup_frozen_selection(&format!("other:{index}"), "slot", "attempt")
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                FrozenSelectionState::Expired
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_selection_the_inventory_refuses_completes_the_slot_and_a_store_failure_retains_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        *host.selections.lock().unwrap() = vec![
+            Ok(selection_page(0, 1, Some("c"))),
+            // The inventory cannot be walked past this cursor until the store changes: the slot completes as failed without moving the cursor, and the next cron slot tries again.
+            Err(SelectionFailure::Failed(
+                "kernel canonical row is corrupt".to_string(),
+            )),
+            // A store failure keeps the slot due and claimed for the next idle poll.
+            Err(SelectionFailure::Retry(
+                "kernel store lock was not acquired".to_string(),
+            )),
+            Ok(selection_page(1, 1, None)),
+        ];
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued"),
+            "{events:?}"
+        );
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["ok"] == false && response["code"] == "curator_selection_failed"),
+            "{events:?}"
+        );
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap()
+                .as_deref(),
+            Some("c"),
+            "a refused walk leaves the continuation where the last enqueued page put it"
+        );
+        assert!(holds_no_live_claim(
+            &store,
+            "git:a",
+            ScheduledTask::CuratorReviewSelection
+        ));
+        clock.advance(MINUTE);
+        assert!(
+            scheduler.tick(&host).await.is_empty(),
+            "the failed slot advanced to the next cron instant"
+        );
+        clock.advance(14 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Retained { .. }),
+            "{events:?}"
+        );
+        // The retained slot runs again at the next idle poll and enqueues from the same cursor.
+        clock.advance(MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { due_at_ms, outcome: TaskRunOutcome::Ran { response }, .. } if *due_at_ms == T0 + 45 * MINUTE_MS && response["code"] == "curator_selection_enqueued"),
+            "{events:?}"
+        );
+        assert_eq!(
+            *host.selection_cursors.lock().unwrap(),
+            vec![
+                None,
+                Some("c".to_string()),
+                Some("c".to_string()),
+                Some("c".to_string())
+            ]
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 2);
+    }
+
+    #[test]
+    fn only_pending_job_capacity_defers_a_frozen_page() {
+        for refusal in CuratorJobRefusal::ALL {
+            assert_eq!(
+                drains_as_jobs_finish(refusal),
+                matches!(
+                    refusal,
+                    CuratorJobRefusal::ProjectCapacity | CuratorJobRefusal::HostCapacity
+                ),
+                "{refusal:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn references_that_already_have_a_job_take_no_headroom_from_the_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        // With cap - 1 pending jobs, the page replays one reference and adds one, so it fits.
+        let producer = ProducerBinding {
+            producer: "filler".to_string(),
+            firing_id: "f".to_string(),
+            ordinal: 0,
+        };
+        let cap = memory_store::curator_jobs::MAX_PENDING_CURATOR_JOBS_PER_PROJECT;
+        for index in 0..cap - 2 {
+            let page = selection_page(1_000 + index, 1, None);
+            store
+                .reserve_curator_job("git:a", &producer, &page.references[0], T0)
+                .unwrap();
+        }
+        store
+            .reserve_curator_job(
+                "git:a",
+                &producer,
+                &selection_page(0, 1, None).references[0],
+                T0,
+            )
+            .unwrap();
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 2, Some("c")))];
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        let TickEvent::Ran { outcome, .. } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            *outcome,
+            TaskRunOutcome::Ran {
+                response: json!({"ok": true, "code": "curator_selection_enqueued", "jobs": 1, "replayed": 1, "next_cursor": "c"})
+            }
+        );
+        assert_eq!(store.curator_headroom("git:a").unwrap().pending_jobs, cap);
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_metadata_quota_completes_the_slot_and_keeps_the_page_for_the_next_cron_slot()
+     {
+        use memory_store::curator_jobs::{
+            CURATOR_JOB_ALLOWANCE_BYTES, FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+            FROZEN_SELECTION_ALLOWANCE_BYTES, MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        // A receipt charge near the project quota stands in for a long history of admitted work: the frozen page fits exactly, and once its allowance is released exactly one more reservation fits beside its receipt, so a page of two is refused.
+        let producer = ProducerBinding {
+            producer: "filler".to_string(),
+            firing_id: "f".to_string(),
+            ordinal: 0,
+        };
+        let filler = selection_page(1_000, 1, None).references[0].clone();
+        store
+            .reserve_curator_job("git:a", &producer, &filler, T0)
+            .unwrap();
+        let near_quota = i64::try_from(
+            MAX_CURATOR_METADATA_BYTES_PER_PROJECT
+                - CURATOR_JOB_ALLOWANCE_BYTES
+                - FROZEN_SELECTION_ALLOWANCE_BYTES
+                - FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+        )
+        .unwrap();
+        store
+            .with_fenced_conn_for_test(|conn| {
+                conn.execute(
+                    "UPDATE curator_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
+                    rusqlite::params![near_quota, filler.causal_identity().unwrap()],
+                )
+            })
+            .unwrap();
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 2, Some("c")))];
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        // The quota is a ceiling for the store incarnation, so the slot completes rather than holding the claim: the page stays frozen, no reference is written, and the cursor does not move.
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["ok"] == false && response["code"] == "curator_selection_refused" && response["refusal"].as_str().unwrap().contains("quota")),
+            "{events:?}"
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 0);
+        assert_eq!(store.curator_headroom("git:a").unwrap().pending_jobs, 1);
+        let frozen = store
+            .frozen_selection_for_project("git:a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(frozen.state, FrozenSelectionState::Frozen);
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap(),
+            None
+        );
+        assert!(holds_no_live_claim(
+            &store,
+            "git:a",
+            ScheduledTask::CuratorReviewSelection
+        ));
+        // An idle poll later nothing runs; the next cron slot offers the same frozen page again without selecting.
+        clock.advance(MINUTE);
+        assert!(scheduler.tick(&host).await.is_empty());
+        clock.advance(14 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_refused"),
+            "{events:?}"
+        );
+        assert_eq!(host.selection_cursors.lock().unwrap().len(), 1);
+        assert_eq!(
+            store.frozen_selection_for_project("git:a").unwrap(),
+            Some(frozen)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_that_fits_once_its_own_allowance_is_released_is_enqueued() {
+        use memory_store::curator_jobs::{
+            CURATOR_JOB_ALLOWANCE_BYTES, CURATOR_RECEIPT_CHARGE_BYTES,
+            MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        // After the filler's receipt and allowance and the page's own permanent receipt, exactly the page's two jobs fit under the quota: the allowance the frozen page holds is released by the same transaction, so it must not count against them.
+        let producer = ProducerBinding {
+            producer: "filler".to_string(),
+            firing_id: "f".to_string(),
+            ordinal: 0,
+        };
+        let filler = selection_page(1_000, 1, None).references[0].clone();
+        store
+            .reserve_curator_job("git:a", &producer, &filler, T0)
+            .unwrap();
+        let near_quota = i64::try_from(
+            MAX_CURATOR_METADATA_BYTES_PER_PROJECT
+                - CURATOR_JOB_ALLOWANCE_BYTES
+                - memory_store::curator_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES
+                - 2 * (CURATOR_JOB_ALLOWANCE_BYTES + CURATOR_RECEIPT_CHARGE_BYTES),
+        )
+        .unwrap();
+        store
+            .with_fenced_conn_for_test(|conn| {
+                conn.execute(
+                    "UPDATE curator_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
+                    rusqlite::params![near_quota, filler.causal_identity().unwrap()],
+                )
+            })
+            .unwrap();
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 2, Some("c")))];
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued" && response["jobs"] == 2),
+            "{events:?}"
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 2);
+        assert_eq!(
+            store
+                .curator_headroom("git:a")
+                .unwrap()
+                .project_metadata_remaining,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successor_resumes_a_predecessors_selection_slot_under_its_own_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let scheduled = selection_project(&store, "git:a");
+        let due = T0 + 15 * MINUTE_MS;
+        let command = slot_command_id(CURATOR_REVIEW_SELECTION_TASK, due);
+        // A predecessor leased the slot, froze its page, and died with the claim live and the page frozen.
+        match store
+            .acquire_memory_classifier_task(
+                "git:a",
+                &command,
+                SCHEDULER_INSTANCE,
+                ScheduledTask::CuratorReviewSelection.ledger_slot(),
+                7,
+                CURATOR_REVIEW_SELECTION_TASK_ID,
+                due,
+                due,
+            )
+            .unwrap()
+        {
+            LeaseAcquireOutcome::Claim { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        store
+            .freeze_selection(
+                "git:a",
+                CURATOR_REVIEW_SELECTION_TASK,
+                &command,
+                &selection_page(0, 2, Some("c")),
+                due,
+            )
+            .unwrap();
+        // The successor's generation outranks the live claim; it rebinds the slot, finds the frozen page, and enqueues it without selecting.
+        let clock = ManualClock::at(T0);
+        let host = scripted(&store, vec![scheduled]);
+        let mut successor = MemoryClassifierScheduler::new(clock.shared());
+        assert!(successor.tick(&host).await.is_empty());
+        clock.advance(15 * MINUTE);
+        let events = successor.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { due_at_ms, outcome: TaskRunOutcome::Ran { response }, .. } if *due_at_ms == due && response["code"] == "curator_selection_enqueued"),
+            "{events:?}"
+        );
+        assert!(host.selection_cursors.lock().unwrap().is_empty());
+        assert_eq!(ready_jobs(&store, "git:a"), 2);
+        assert_eq!(
+            store
+                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .unwrap()
+                .as_deref(),
+            Some("c")
+        );
     }
 }

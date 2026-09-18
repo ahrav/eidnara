@@ -21,6 +21,7 @@ mod durable_fs;
 mod eligibility;
 mod envelope;
 mod facts;
+mod local_file;
 mod object_write;
 pub(crate) mod open;
 mod outbox;
@@ -64,7 +65,7 @@ pub use cas::{
     ArtifactDeletionRequest, ArtifactDeletionResult, ArtifactDestination, ArtifactEgressFacts,
     ArtifactEligibility, ArtifactError, ArtifactErrorKind, ArtifactGcResult, ArtifactHandle,
     ArtifactIngestRequest, BarrierConsumerStatus, DeletionBarrierStatus, EligibilityDeniedReason,
-    MAX_PAYLOAD_BYTES, ProviderEgress,
+    MAX_PAYLOAD_BYTES, MAX_TEXT_FIELD_BYTES, ProviderEgress,
 };
 #[cfg(feature = "test-support")]
 pub use cas::{
@@ -109,21 +110,25 @@ pub use envelope::{
     StagingCandidateSpec, TokenCheck, TokenConflict,
 };
 pub use facts::{ArtifactBudgetFacts, KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};
+pub use local_file::{
+    LOCAL_FILE_DETAIL_VERSION, LOCAL_FILE_KIND, LOCAL_FILE_SOURCE_KIND, LocalFileCapture,
+    LocalFileCaptureRequest, LocalFileDetail, MAX_EXPIRED_CAPTURES_PER_CALL, local_file_capture_id,
+};
 #[cfg(feature = "test-support")]
 pub use open::OpenPhase;
 pub use open::{KernelError, KernelStore};
 pub use outbox::{ConsumerAbandonment, OutboxEntry, OutboxPruneResult};
 pub use retention::{STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState};
 pub use review_staging::{
-    CanonicalTarget, EvidenceReference, ExtractedFact, MAX_REVIEW_FACTS, MAX_REVIEW_IDENTITY_BYTES,
-    MAX_REVIEW_LIMITATIONS, MAX_REVIEW_PAYLOAD_BYTES, MAX_REVIEW_REFERENCE_SOURCES,
-    MAX_REVIEW_REFERENCES, MAX_REVIEW_TEXT_BYTES, ManifestReference, PolicyDependencies,
-    ProposalAction, ProposalTarget, ProvisionalResultIdentity, REVIEW_PAYLOAD_VERSION,
-    REVIEW_PROPOSAL_KIND, REVIEW_QUEUE_LIFETIME_MS, REVIEW_SUBJECT_KIND, REVIEW_WITNESS_KIND,
-    ReviewBinding, ReviewLifecycle, ReviewOwner, ReviewPayload, ReviewProposal,
-    ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal, ReviewStageError,
+    ByteRange, CanonicalTarget, EvidenceReference, ExtractedFact, MAX_FACT_SPANS, MAX_REVIEW_FACTS,
+    MAX_REVIEW_IDENTITY_BYTES, MAX_REVIEW_LIMITATIONS, MAX_REVIEW_PAYLOAD_BYTES,
+    MAX_REVIEW_REFERENCE_SOURCES, MAX_REVIEW_REFERENCES, MAX_REVIEW_TEXT_BYTES, ManifestReference,
+    PolicyDependencies, ProposalAction, ProposalTarget, ProvisionalResultIdentity,
+    REVIEW_PAYLOAD_VERSION, REVIEW_PROPOSAL_KIND, REVIEW_QUEUE_LIFETIME_MS, REVIEW_SUBJECT_KIND,
+    REVIEW_WITNESS_KIND, ReviewBinding, ReviewLifecycle, ReviewOwner, ReviewPayload,
+    ReviewProposal, ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal, ReviewStageError,
     ReviewStageRefusal, ReviewStagedReference, ReviewStagedRow, ReviewStagingSpec, ReviewSubject,
-    SourceDependency, SourceSpan, Uncertainty, provisional_result_identity,
+    SourceDependency, SourceSpan, SubjectOrigin, Uncertainty, provisional_result_identity,
 };
 pub use scope::{
     CanonicalScope, Dimension, GraphOracle, MatchOutcome, ScopeFormError, ScopeMatchContext,

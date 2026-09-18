@@ -4,9 +4,10 @@ use daemon::curator::broker::{
     EvidenceBroker, MAX_OPERATIONS_PER_BATCH, QuestionTemplate, RefusalCode, RunBinding,
 };
 use daemon::curator::related_memories::{
-    Completeness, MAX_EXCERPT_BYTES, MAX_PAGE_PROBE_BYTES, MAX_PROBE_ARTIFACT_BYTES,
-    MAX_RELATED_CANDIDATES_PER_PAGE, MAX_RELATED_PAGE_HITS, RelatedHit, RelatedMemoryDiscovery,
+    MAX_PAGE_PROBE_BYTES, MAX_PROBE_ARTIFACT_BYTES, MAX_RELATED_CANDIDATES_PER_PAGE,
+    MAX_RELATED_PAGE_HITS, RelatedHit, RelatedMemoryDiscovery,
 };
+use daemon::curator::{Completeness, MAX_EXCERPT_BYTES};
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, Span};
 use kernel::{
@@ -318,7 +319,7 @@ fn admission(object: &str) -> kernel::AdmissionRequest {
 }
 
 fn text_of(hit: &RelatedHit) -> String {
-    String::from_utf8(hit.excerpt.clone()).unwrap()
+    String::from_utf8(hit.buffer.bytes().to_vec()).unwrap()
 }
 
 /// `count` admitted decisions: canonical claims that mention the subject terms except index 1, and a promoted memory holding the contradiction last. Promoted memories are walked after every canonical claim, so the contradiction is always on the final page.
@@ -884,8 +885,8 @@ fn a_span_descriptor_is_matched_and_excerpted_within_its_span() {
         "the excerpt stays inside the descriptor's span"
     );
     assert_eq!(
-        hit.excerpt,
-        text.as_bytes()[hit.span.start as usize..hit.span.end as usize]
+        hit.buffer.bytes(),
+        &text.as_bytes()[hit.span.start as usize..hit.span.end as usize]
     );
     assert!(text_of(hit).contains("workspace"));
 }
@@ -1089,7 +1090,7 @@ fn ineligible_and_unrenderable_candidates_are_withheld_without_disclosure() {
     let start = usize::try_from(multibyte.span.start).unwrap();
     let end = usize::try_from(multibyte.span.end).unwrap();
     assert!(utf8.is_char_boundary(start) && utf8.is_char_boundary(end));
-    assert_eq!(multibyte.excerpt, utf8.as_bytes()[start..end]);
+    assert_eq!(multibyte.buffer.bytes(), &utf8.as_bytes()[start..end]);
     assert!(
         start > 0 && start < 50 * 2,
         "the lead-in cut lands inside the multibyte prefix"

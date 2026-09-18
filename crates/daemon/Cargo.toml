@@ -63,6 +63,13 @@ base64-simd = "0.8"
 # timezone-lookup crates.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 libc = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki-roots = { workspace = true }
+zeroize = { workspace = true }
 
 [features]
 direct-host-fixture = []
@@ -82,3 +89,4 @@ host-runtime = { workspace = true, features = ["test-support"] }
 daemon = { path = ".", features = ["test-support"] }
 tempfile = { workspace = true }
 filetime = "0.2"
+rcgen = { workspace = true }

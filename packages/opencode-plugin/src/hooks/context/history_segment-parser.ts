@@ -15,9 +15,22 @@ export interface ParsedHistorySegment {
     episodeType?: string;
 }
 
+/**
+ * One frozen-alias citation a fact carries: the alias of a presented message part and a
+ * half-open UTF-8 byte range inside that part's exact presented text.
+ */
+export interface ParsedCitation {
+    alias: string;
+    start: number;
+    end: number;
+}
+
 export interface ParsedFact {
     category: string;
+    /** The fact text with its citation prefix removed. */
     content: string;
+    /** Citations in the order written; empty when the item carried none. */
+    citations: ParsedCitation[];
 }
 
 /**
@@ -45,6 +58,30 @@ export interface ParsedHistorySegmentOutput {
     unprocessedFrom: number | null;
     userObservations: string[];
     primerCandidates: ParsedPrimerCandidate[];
+}
+
+// Reads the citation prefix the daemon's `split_citations` defines: a leading run of `[sN:start-end]`
+// is the fact's citations and a bracket that is not citation-shaped belongs to the text. This is a
+// diagnostic reader, not the validator: where the daemon rejects a malformed citation, this keeps
+// the bracket in the text so a dump shows what the model wrote.
+const CITATION_PREFIX_REGEX = /^\[(s\d+):(\d+)-(\d+)\]\s*/;
+
+export function splitCitations(item: string): { citations: ParsedCitation[]; rest: string } {
+    const citations: ParsedCitation[] = [];
+    let rest = item.trimStart();
+    for (;;) {
+        const match = CITATION_PREFIX_REGEX.exec(rest);
+        if (!match) {
+            break;
+        }
+        citations.push({
+            alias: match[1],
+            start: Number.parseInt(match[2], 10),
+            end: Number.parseInt(match[3], 10),
+        });
+        rest = rest.slice(match[0].length);
+    }
+    return { citations, rest };
 }
 
 // HISTORY_SEGMENT_REGEX captures attributes separately so attribute order does not affect parsing.
@@ -187,9 +224,10 @@ export function parseHistorySegmentOutput(text: string): ParsedHistorySegmentOut
         const category = categoryMatch[1];
         const blockContent = categoryMatch[2];
         for (const itemMatch of blockContent.matchAll(FACT_ITEM_REGEX)) {
-            const content = unescapeXml(itemMatch[1].trim());
-            if (content) {
-                facts.push({ category, content });
+            const { citations, rest } = splitCitations(unescapeXml(itemMatch[1].trim()));
+            // A citation with no text still counts as an item: the daemon rejects it as malformed rather than dropping it.
+            if (rest || citations.length > 0) {
+                facts.push({ category, content: rest, citations });
             }
         }
     }
