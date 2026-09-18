@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use memory_store::curator_jobs::{CuratorJobError, CuratorJobRefusal};
+use memory_store::curator_jobs::{
+    CuratorJobError, CuratorJobOutcome, CuratorJobRefusal, CuratorJobState,
+};
 use memory_store::{
     CuratorActivation, CuratorNonadmissionCode, HistorySegmentSetGeneration,
     HistorySummarizerChunkRange, HistorySummarizerDurableState, HistorySummarizerEventCandidate,
@@ -867,6 +869,23 @@ pub fn republish_reserved(
             });
         }
     };
+    // Recovery publishes only against the job the reservation names, as this firing reserved it. A job that is gone under the current authority, reserved for another firing (which adopted it), or already past reservation is not replaced, rebound, or waited for: the reservation settles and the firing refires under the current configuration. Past the deadline a job the sweep already closed still publishes, recording the expiry.
+    let names_reserved_job = match store
+        .lookup_curator_job(project_path, &reservation.causal_identity)
+        .map_err(HistorySummarizerStateError::Store)?
+    {
+        Some(job) => match job.state {
+            CuratorJobState::Reserved => {
+                handoff::firing_id_names(&job.producer, reservation.firing_seq)
+            }
+            CuratorJobState::Terminal(CuratorJobOutcome::Expired) => expired,
+            _ => false,
+        },
+        None => false,
+    };
+    if !names_reserved_job {
+        return settle("the reservation no longer names a job this firing can publish");
+    }
     // The retained output must be this firing's and must still read as the types this daemon publishes; anything else can never publish.
     let pending = match store.load_pending_publication(session_id) {
         Ok(Some((firing_seq, pending))) if firing_seq == reservation.firing_seq => pending,

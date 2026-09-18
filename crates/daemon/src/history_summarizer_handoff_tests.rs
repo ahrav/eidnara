@@ -2024,8 +2024,8 @@ fn a_retained_publication_the_scanner_would_rewrite_is_a_nonadmission_before_any
 }
 
 #[test]
-fn a_reservation_made_under_an_earlier_memories_authority_republishes_under_the_current_one() {
-    // The route was rebound between the reservation and recovery: the job was reserved under "git:other", recovery runs under PROJECT.
+fn a_reservation_made_under_an_earlier_memories_authority_settles_instead_of_migrating() {
+    // The route was rebound between the reservation and recovery: the job was reserved under "git:other", recovery runs under PROJECT. Recovery republishes only under the job the reservation names; a job it cannot find under the current authority is not replaced, the reservation settles, and the firing refires under the current authority.
     let rig = Rig::open();
     let handoff = reserve_and_stage(
         &rig.target(),
@@ -2042,18 +2042,19 @@ fn a_reservation_made_under_an_earlier_memories_authority_republishes_under_the_
     )
     .unwrap();
     let earlier = activation(handoff);
-    let reservation = rig.reservation();
+    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
     let target = rig.target();
     assert_eq!(
         rig.republish(Some(&target), t0() + 1),
-        RepublishOutcome::Published
+        RepublishOutcome::Settled
     );
-    // The retained output is published once, activating a job of the same identity under the current authority; the earlier project's job is left to its expiry sweep.
-    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
-    assert!(matches!(
-        rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Ready(_)
-    ));
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+    assert_eq!(
+        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        headroom_before.pending_jobs,
+        "no replacement job is reserved under the current authority"
+    );
+    // The earlier project's job is left to its expiry sweep.
     assert_eq!(
         rig.store
             .lookup_curator_job("git:other", &earlier.causal_identity)
@@ -2062,8 +2063,39 @@ fn a_reservation_made_under_an_earlier_memories_authority_republishes_under_the_
             .state,
         CuratorJobState::Reserved
     );
-    assert_eq!(rig.state().state, HistorySummarizerPhase::Idle);
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
     assert_eq!(rig.pending(), None);
+}
+
+#[test]
+fn a_reservation_whose_job_is_no_longer_reserved_for_its_firing_settles() {
+    // The job the reservation names is already terminal under the current project (another firing's publication under the same identity closed it). Recovery cannot activate it and does not wait for the deadline: the reservation settles and the firing refires.
+    let rig = Rig::open();
+    let prepared = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    rig.store
+        .finish_curator_job(
+            PROJECT,
+            &prepared.causal_identity,
+            CuratorJobOutcome::Nonadmitted,
+            t0() + 1,
+        )
+        .unwrap();
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 2),
+        RepublishOutcome::Settled
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
 }
 
 #[test]

@@ -359,6 +359,14 @@ fn causal_inputs(
     (key, candidate_id, inputs)
 }
 
+/// Whether `producer` is the binding firing `firing_seq` of some session reserved under: the firing id is `{key}#{firing_seq}`, so the sequence after the last `#` is the firing's.
+pub fn firing_id_names(producer: &ProducerBinding, firing_seq: u64) -> bool {
+    producer
+        .firing_id
+        .rsplit_once('#')
+        .is_some_and(|(_, seq)| seq == firing_seq.to_string())
+}
+
 /// Whether `reservation` names the job this daemon would reserve for `facts` now: the same subject bytes and Kernel incarnation under the current review policies. A reservation recorded under other policy versions names a job the current publication could never activate.
 pub fn reservation_is_current(
     target: &HandoffTarget,
