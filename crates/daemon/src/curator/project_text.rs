@@ -70,6 +70,8 @@ impl ProtectedLocations {
 
 #[derive(Debug, Clone)]
 pub struct InspectionBinding {
+    /// The project whose root this inspection opens; a broker for another project is refused before any path is read.
+    pub project_digest: String,
     pub domain_id: String,
     pub scope_id: Option<String>,
     /// Each capture is created with this finite acquisition reference.
@@ -182,7 +184,7 @@ impl ProjectText {
         range: Option<Range<u64>>,
         now_ms: i64,
     ) -> Result<EvidenceRead, Refusal> {
-        admit_destination(broker)?;
+        admit(&self.binding, broker)?;
         let probed = self.probe(relative_path)?;
         let file = self.read_file(relative_path, &probed, &mut 0)?;
         let alias = self.capture(store, broker, &file, now_ms)?;
@@ -197,7 +199,7 @@ impl ProjectText {
         query: SearchQuery<'_>,
         now_ms: i64,
     ) -> Result<SearchOutcome, Refusal> {
-        admit_destination(broker)?;
+        admit(&self.binding, broker)?;
         let literal = match query {
             SearchQuery::Path(text) | SearchQuery::Name(text) | SearchQuery::Content(text) => text,
         };
@@ -456,29 +458,39 @@ impl ProjectText {
                 if handle.digest != digest {
                     return Err(refusal(RefusalCode::Store));
                 }
-                store
-                    .commit(
-                        intent(&format!("{evidence_id}:observation"), &digest),
-                        |envelope| {
-                            envelope.record_local_file_capture(&LocalFileCaptureRequest {
-                                project_digest: &broker.binding().hold.project_digest,
-                                relative_path: &file.relative,
-                                captured_at: now_ms,
-                                domain_id: &self.binding.domain_id,
-                                scope_id: self.binding.scope_id.as_deref(),
-                                evidence_id: &evidence_id,
-                                artifact_digest: &digest,
-                                byte_length,
-                            })?;
-                            Ok(String::new())
-                        },
-                    )
-                    .map_err(|error| {
-                        refusal(match error {
-                            KernelError::InvalidInput => RefusalCode::RenderCheck,
-                            _ => RefusalCode::Store,
-                        })
-                    })?;
+                // The typed detail is what makes the evidence a project capture. An earlier run of this job already recorded it when a live detail exists; otherwise this commit must be the one that records it. A receipt that replays without a live detail was seated by someone else under this intent and proves nothing, so the capture is refused rather than disclosed without provenance.
+                let recorded = store
+                    .local_file_capture(&evidence_id)
+                    .map_err(|_| refusal(RefusalCode::Store))?
+                    .is_some();
+                if !recorded {
+                    let receipt = store
+                        .commit(
+                            intent(&format!("{evidence_id}:observation"), &digest),
+                            |envelope| {
+                                envelope.record_local_file_capture(&LocalFileCaptureRequest {
+                                    project_digest: &self.binding.project_digest,
+                                    relative_path: &file.relative,
+                                    captured_at: now_ms,
+                                    domain_id: &self.binding.domain_id,
+                                    scope_id: self.binding.scope_id.as_deref(),
+                                    evidence_id: &evidence_id,
+                                    artifact_digest: &digest,
+                                    byte_length,
+                                })?;
+                                Ok(String::new())
+                            },
+                        )
+                        .map_err(|error| {
+                            refusal(match error {
+                                KernelError::InvalidInput => RefusalCode::RenderCheck,
+                                _ => RefusalCode::Store,
+                            })
+                        })?;
+                    if receipt.replayed {
+                        return Err(refusal(RefusalCode::Store));
+                    }
+                }
                 // Ownership is charged to the run's reservation at first capture, not deferred to the first disclosure. The held facts, not the request, define the alias: a replayed ingest keeps the row's original `retain_until`.
                 let held = broker.hold_evidence(store, None, &evidence_id, &digest, now_ms)?;
                 let captured = Captured {
@@ -526,8 +538,11 @@ fn metadata(handle: &OwnedFd) -> Result<std::fs::Metadata, Refusal> {
     .map_err(|_| refusal(RefusalCode::Unavailable))
 }
 
-/// A capture is Sensitive by construction, so a remote destination can never disclose one; refusing at entry reads nothing for a run that could not be shown it.
-fn admit_destination(broker: &EvidenceBroker) -> Result<(), Refusal> {
+/// A capture is Sensitive by construction, so a remote destination can never disclose one; refusing at entry reads nothing for a run that could not be shown it. A broker whose hold belongs to another project is refused the same way: this root's files are that project's, and its captures would carry the wrong provenance.
+fn admit(binding: &InspectionBinding, broker: &EvidenceBroker) -> Result<(), Refusal> {
+    if broker.binding().hold.project_digest != binding.project_digest {
+        return Err(refusal(RefusalCode::Scope));
+    }
     if broker.binding().destination == kernel::ArtifactDestination::Remote {
         return Err(refusal(RefusalCode::PolicyBlocked));
     }
@@ -630,6 +645,7 @@ mod tests {
             root.path(),
             &ProtectedLocations::default(),
             InspectionBinding {
+                project_digest: "a".repeat(64),
                 domain_id: "domain".to_string(),
                 scope_id: None,
                 retain_until: 1,

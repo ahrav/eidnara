@@ -170,7 +170,12 @@ impl Fixture {
     }
 
     fn binding(&self) -> InspectionBinding {
+        self.binding_for(PROJECT)
+    }
+
+    fn binding_for(&self, project: &str) -> InspectionBinding {
         InspectionBinding {
+            project_digest: project.to_string(),
             domain_id: DOMAIN.to_string(),
             scope_id: None,
             retain_until: self.now + HOUR_MS,
@@ -1252,8 +1257,12 @@ fn captures_of_identical_bytes_by_two_projects_are_two_captures() {
         .unwrap();
     // A second project whose run shares the first's job subject and generation captures the same bytes under another path.
     let other_project = "b".repeat(64);
-    let mut other_text =
-        ProjectText::open(other_root.path(), &protected, fixture.binding()).unwrap();
+    let mut other_text = ProjectText::open(
+        other_root.path(),
+        &protected,
+        fixture.binding_for(&other_project),
+    )
+    .unwrap();
     let mut other_broker = fixture.broker_for(&other_project, ArtifactDestination::Local);
     other_text
         .read(
@@ -1436,4 +1445,79 @@ fn a_root_inside_a_refused_component_is_protected() {
         fixture.binding(),
     )
     .unwrap();
+}
+
+#[test]
+fn a_broker_of_another_project_is_refused_before_any_path_is_read() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"bun in project a");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut other = fixture.broker_for(&"b".repeat(64), ArtifactDestination::Local);
+    let tip = fixture.store.tip().unwrap();
+    assert_eq!(
+        text.read(&fixture.store, &mut other, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Scope
+    );
+    assert_eq!(
+        text.search(
+            &fixture.store,
+            &mut other,
+            SearchQuery::Content("bun"),
+            fixture.now
+        )
+        .unwrap_err()
+        .code,
+        RefusalCode::Scope
+    );
+    assert_eq!(fixture.store.tip().unwrap(), tip, "nothing was captured");
+    assert!(fixture.capture_rows().is_empty());
+    assert_eq!(other.ledger.disclosed().count(), 0);
+}
+
+#[test]
+fn a_seated_observation_receipt_cannot_stand_in_for_the_capture_detail() {
+    let fixture = Fixture::open();
+    let body = b"bytes whose capture identity is predictable";
+    fixture.write("a.txt", body);
+    let digest = format!("{:x}", Sha256::digest(body));
+    let hold = fixture.hold_binding();
+    let evidence_id = format!(
+        "curcap:{}:{}:{}:{digest}",
+        hold.project_digest, hold.subject, hold.generation
+    );
+    // A caller seats a receipt under the capture's observation intent before the run captures the file.
+    fixture
+        .store
+        .commit(
+            CommitIntent {
+                producer: "curator".to_string(),
+                operation_key: format!("{evidence_id}:observation"),
+                request_digest: digest.clone(),
+                actor: "curator".to_string(),
+                cause: "project_text_capture".to_string(),
+            },
+            |_| Ok(String::new()),
+        )
+        .unwrap();
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Store,
+        "a capture without its typed detail is not disclosed"
+    );
+    assert!(
+        fixture
+            .store
+            .local_file_capture(&evidence_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(broker.ledger.disclosed().count(), 0);
 }
