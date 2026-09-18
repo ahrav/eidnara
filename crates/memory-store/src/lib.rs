@@ -11362,56 +11362,15 @@ impl MemoryStore {
         )))
     }
 
-    /// Drops `expected`, a reservation whose publication can never commit, together with its retained publication, in one fenced write. A state that records a different reservation, or none, belongs to a firing this caller did not settle and is left untouched with `None`. The state's in-flight fields are left as they are; the caller decides the phase.
-    pub fn clear_curator_reservation(
+    /// Settles `expected`, a reservation whose publication can never commit, in one fenced write: the reservation and its retained publication are dropped and the job it names is closed, as expired when its queue deadline has passed and as not admitted otherwise. A state that records a different reservation, or none, belongs to a firing this caller did not settle: nothing is touched and `false` is returned. A job already closed, gone, or no longer `Reserved` is left as it is; the reservation is dropped either way. The state's in-flight fields are left as they are; the caller decides the phase.
+    pub fn settle_curator_reservation(
         &self,
         session_id: &str,
         expected: &CuratorReservation,
-    ) -> Result<Option<u64>, MemoryStoreError> {
-        let outcome = self.inner.with_conn_fenced(|tx| {
-            let row = tx
-                .query_row(
-                    CACHE_STATE_META_SELECT,
-                    params![session_id],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()?;
-            let Some((current, meta_json)) = row else {
-                return Ok(AbandonHistorySummarizerTxnOutcome::Unchanged);
-            };
-            let mut meta: ModuleMeta = match serde_json::from_str(&meta_json) {
-                Ok(meta) => meta,
-                Err(error) => return Ok(AbandonHistorySummarizerTxnOutcome::Serde(error.to_string())),
-            };
-            if meta.history_summarizer.curator_reservation.as_ref() != Some(expected) {
-                return Ok(AbandonHistorySummarizerTxnOutcome::Unchanged);
-            }
-            meta.history_summarizer.curator_reservation = None;
-            delete_pending_publication_tx(tx, session_id)?;
-            let next = next_row_version(current)?;
-            let meta_json = match serde_json::to_string(&meta) {
-                Ok(json) => json,
-                Err(error) => return Ok(AbandonHistorySummarizerTxnOutcome::Serde(error.to_string())),
-            };
-            let meta_json = match prepare_transaction_json_preserving_identities(&meta_json) {
-                Ok(json) => json,
-                Err(_) => {
-                    return Ok(AbandonHistorySummarizerTxnOutcome::Serde(
-                        "history_summarizer metadata failed secret scanning".to_string(),
-                    ))
-                }
-            };
-            tx.execute(
-                "UPDATE cache_state SET row_version = ?2, meta = ?3 WHERE session_id = ?1 AND row_version = ?4",
-                params![session_id, next as i64, meta_json, current],
-            )?;
-            Ok(AbandonHistorySummarizerTxnOutcome::Committed(next))
-        })?;
-        match outcome {
-            AbandonHistorySummarizerTxnOutcome::Unchanged => Ok(None),
-            AbandonHistorySummarizerTxnOutcome::Committed(row_version) => Ok(Some(row_version)),
-            AbandonHistorySummarizerTxnOutcome::Serde(error) => Err(MemoryStoreError::Serde(error)),
-        }
+        project: &str,
+        now_ms: i64,
+    ) -> Result<bool, curator_jobs::CuratorJobError> {
+        curator_jobs::settle_curator_reservation(self, session_id, expected, project, now_ms)
     }
 
     pub fn record_history_summarizer_publish_failure_if_matching(
@@ -15045,6 +15004,45 @@ fn prepare_pending_publication(
         return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
     }
     Ok((write, payload_deflate))
+}
+
+/// Drops `expected` from the session's durable state together with its retained publication, bumping the row version; a state that records anything else is left untouched with `Ok(false)`. Unreadable metadata is reported through `refuse_serde`.
+fn clear_curator_reservation_tx(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    expected: &CuratorReservation,
+) -> rusqlite::Result<bool> {
+    let row = tx
+        .query_row(CACHE_STATE_META_SELECT, params![session_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?;
+    let Some((current, meta_json)) = row else {
+        return Ok(false);
+    };
+    let mut meta: ModuleMeta =
+        serde_json::from_str(&meta_json).map_err(|error| refuse_serde(error.to_string()))?;
+    if meta.history_summarizer.curator_reservation.as_ref() != Some(expected) {
+        return Ok(false);
+    }
+    meta.history_summarizer.curator_reservation = None;
+    delete_pending_publication_tx(tx, session_id)?;
+    let next = next_row_version(current)?;
+    let meta_json =
+        serde_json::to_string(&meta).map_err(|error| refuse_serde(error.to_string()))?;
+    let meta_json = prepare_transaction_json_preserving_identities(&meta_json).map_err(|_| {
+        refuse_serde("history_summarizer metadata failed secret scanning".to_string())
+    })?;
+    tx.execute(
+        "UPDATE cache_state SET row_version = ?2, meta = ?3 WHERE session_id = ?1 AND row_version = ?4",
+        params![session_id, next as i64, meta_json, current],
+    )?;
+    Ok(true)
+}
+
+/// Carries a metadata encoding failure out of a transaction body as the `MemoryStoreError::Serde` the caller reports.
+fn refuse_serde(message: String) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(message)))
 }
 
 fn delete_pending_publication_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {

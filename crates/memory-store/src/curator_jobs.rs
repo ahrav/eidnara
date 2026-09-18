@@ -829,6 +829,47 @@ pub fn expire_reserved_curator_job_in_tx(
     Ok(job)
 }
 
+/// One fenced write behind [`MemoryStore::settle_curator_reservation`]: the reservation and its retained publication go first, and the job it names closes in the same transaction, so no pass can observe a `Publishing` state without its reservation while the job is still open. A job that is no longer `Reserved` was closed by the sweep or activated by a publication that also cleared this reservation, so it is left alone.
+pub(crate) fn settle_curator_reservation(
+    store: &MemoryStore,
+    session_id: &str,
+    expected: &crate::CuratorReservation,
+    project: &str,
+    now_ms: i64,
+) -> Result<bool, CuratorJobError> {
+    store.curator_transaction(
+        project,
+        "settle",
+        |_| Ok(()),
+        |conn| {
+            if !crate::clear_curator_reservation_tx(conn, session_id, expected)? {
+                return Ok(WriteDisposition::Replay(false));
+            }
+            let reserved = load_curator_job(conn, project, &expected.causal_identity)?
+                .is_some_and(|job| job.state == CuratorJobState::Reserved);
+            if reserved {
+                if expected.queue_deadline_ms <= now_ms {
+                    expire_reserved_curator_job_in_tx(
+                        conn,
+                        project,
+                        &expected.causal_identity,
+                        now_ms,
+                    )?;
+                } else {
+                    finish_curator_job_in_tx(
+                        conn,
+                        project,
+                        &expected.causal_identity,
+                        CuratorJobOutcome::Nonadmitted,
+                        now_ms,
+                    )?;
+                }
+            }
+            Ok(WriteDisposition::Applied(true))
+        },
+    )
+}
+
 /// Freezes one selection page for a slot attempt. One frozen page per project and 32 per host; the page keeps its references and cursor until [`complete_frozen_selection_in_tx`] moves it out of `frozen`. An attempt identity freezes exactly one page: resubmitting that page replays the row, and a different page under the same identity is refused.
 pub fn freeze_selection_in_tx(
     conn: &GuardedConn<'_>,

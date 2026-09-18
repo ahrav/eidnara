@@ -1903,7 +1903,7 @@ fn a_retain_that_loses_the_row_to_a_publication_writes_nothing_back() {
     let prepared = activation(rig.handoff(t0()).unwrap());
     let reservation = rig.reservation();
     // The retain checks a Publishing state that holds the reservation; before it writes, another pass publishes the firing, activates the job, and drops the retained publication.
-    let outcome = retain_republish(&rig.store, SESSION, |current| {
+    let outcome = retain_republish(&rig.store, SESSION, 3, |current| {
         rig.publish(Some(&prepared), None, t0() + 1).unwrap();
         retain_with_detail(current, t0() + 60_000, Some("stale pass".to_string()))
     })
@@ -2444,4 +2444,86 @@ fn a_recut_firing_adopts_the_reservation_under_the_staged_binding() {
         result.curator_activation,
         Some(CuratorActivationOutcome::Activated)
     );
+}
+
+#[test]
+fn an_unpublishable_reservation_settled_past_its_deadline_records_expiry_and_frees_the_firing() {
+    // The retained payload cannot be read and the queue deadline has passed: the job closes as expired, the way the sweep would close it, and the firing returns to Idle in the same pass.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    rig.retain(
+        &reservation,
+        &memory_store::PendingPublication {
+            validated_json: r#"{"schema":"a shape this daemon does not read"}"#.to_string(),
+            ..pending_publication(&validated_range(2, 4))
+        },
+    );
+    let late = reservation.queue_deadline_ms + 1;
+    let outcome = republish_reserved(RepublishRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        curator_handoff: None,
+        now_ms: late,
+        failure_backoff_at_ms: late + 60_000,
+        publication_fence: None,
+        collect_user_memory_candidates: false,
+    });
+    assert!(
+        matches!(outcome, Ok(RepublishOutcome::Settled)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+}
+
+#[test]
+fn a_stale_retain_leaves_a_later_firing_untouched() {
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    // The pass snapshotted firing 3; before its refusal is handled, another path abandons firing 3, fires 4 over the same chunk, and firing 4 adopts the job under its own reservation.
+    struct MoveOnThenRetire<'a>(&'a Rig);
+    impl HistorySummarizerPublicationFence for MoveOnThenRetire<'_> {
+        fn publish(
+            &self,
+            _store: &MemoryStore,
+            _request: memory_store::HistorySummarizerPublishRequest<'_>,
+        ) -> Result<memory_store::HistorySummarizerPublishResult, HistorySummarizerPublishError>
+        {
+            let rig = self.0;
+            rig.persist(abandon_with_detail(&rig.state(), t0() + 1, None));
+            rig.persist(next_publishing_firing(rig, 2, 4));
+            let _ = activation(rig.handoff(t0() + 2).unwrap());
+            Err(HistorySummarizerPublishError::CallerFenceRejected {
+                reason: "snapshot retired".to_string(),
+            })
+        }
+    }
+    let target = rig.target();
+    let fence = MoveOnThenRetire(&rig);
+    let outcome = republish_reserved(RepublishRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        curator_handoff: Some(&target),
+        now_ms: t0() + 3,
+        failure_backoff_at_ms: t0() + 3 + 60_000,
+        publication_fence: Some(&fence),
+        collect_user_memory_candidates: false,
+    })
+    .unwrap();
+    assert_eq!(outcome, RepublishOutcome::Retained);
+    // Firing 4's state carries no failure or backoff the stale pass for firing 3 decided.
+    let later = rig.state();
+    assert_eq!(later.firing_seq, 4);
+    assert_eq!(later.state, HistorySummarizerPhase::Publishing);
+    assert_eq!(later.last_failure, None);
+    assert_eq!(later.failure_backoff_at_ms, None);
 }
