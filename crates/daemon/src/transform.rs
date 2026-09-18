@@ -20189,6 +20189,7 @@ pub(crate) mod tests {
                             publication_floor_ordinal: 2_441,
                             chunk_transcript: None,
                             curator_nonadmission: None,
+                            curator_activation: None,
                         },
                     )
                     .unwrap();
@@ -20294,6 +20295,7 @@ pub(crate) mod tests {
                     publication_floor_ordinal: 2_441,
                     chunk_transcript: None,
                     curator_nonadmission: None,
+                    curator_activation: None,
                 })
                 .unwrap();
         }));

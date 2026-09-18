@@ -50,6 +50,11 @@ impl ProjectBinding {
         &self.scope
     }
 
+    /// `sha256(root)` as lower hex: the project identity Kernel review inputs and Curator holds are scoped under.
+    pub(crate) fn digest(&self) -> &str {
+        &self.digest
+    }
+
     /// A request's `project_root` is compared after the same canonicalization
     /// the binding went through, so a symlinked spelling of the bound root passes.
     pub(crate) fn accepts(&self, requested: &Path) -> bool {

@@ -3,16 +3,16 @@
 //! Real-store proofs for the review-staging input path: immutable references, replay comparison, decode refusal, scope and digest mismatch, deadline boundaries, and canonical invisibility.
 
 use kernel::{
-    AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, CanonicalTarget, CommitIntent,
-    DomainSpec, EventKind, EvidenceReference, ExtractedFact, KernelError, KernelStore,
-    MAX_REVIEW_FACTS, MAX_REVIEW_LIMITATIONS, MAX_REVIEW_PAYLOAD_BYTES,
-    MAX_REVIEW_REFERENCE_SOURCES, MAX_REVIEW_TEXT_BYTES, ManifestReference, PolicyDependencies,
-    ProposalAction, ProposalTarget, REVIEW_PROPOSAL_KIND, REVIEW_QUEUE_LIFETIME_MS,
-    REVIEW_SUBJECT_KIND, REVIEW_WITNESS_KIND, ReviewBinding, ReviewOwner, ReviewPayload,
-    ReviewProposal, ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal, ReviewStageError,
-    ReviewStageRefusal, ReviewStagedReference, ReviewStagingSpec, ReviewSubject,
+    AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, ByteRange, CanonicalTarget,
+    CommitIntent, DomainSpec, EventKind, EvidenceReference, ExtractedFact, KernelError,
+    KernelStore, MAX_FACT_SPANS, MAX_REVIEW_FACTS, MAX_REVIEW_LIMITATIONS,
+    MAX_REVIEW_PAYLOAD_BYTES, MAX_REVIEW_REFERENCE_SOURCES, MAX_REVIEW_TEXT_BYTES,
+    ManifestReference, PolicyDependencies, ProposalAction, ProposalTarget, REVIEW_PROPOSAL_KIND,
+    REVIEW_QUEUE_LIFETIME_MS, REVIEW_SUBJECT_KIND, REVIEW_WITNESS_KIND, ReviewBinding, ReviewOwner,
+    ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal,
+    ReviewStageError, ReviewStageRefusal, ReviewStagedReference, ReviewStagingSpec, ReviewSubject,
     STAGING_RETENTION_MS, Sensitivity, SourceClass, SourceDependency, SourceSpan,
-    StagingCandidateSpec, StagingTerminalState, TaintClass, Uncertainty,
+    StagingCandidateSpec, StagingTerminalState, SubjectOrigin, TaintClass, Uncertainty,
     provisional_result_identity,
 };
 use rusqlite::{Connection, OpenFlags, params};
@@ -103,17 +103,30 @@ fn job_binding() -> ReviewBinding {
 fn fact(text: &str) -> ExtractedFact {
     ExtractedFact {
         text: text.to_string(),
-        span: SourceSpan {
+        spans: vec![SourceSpan {
             alias: "s1".to_string(),
             start: 0,
             end: 12,
-        },
+        }],
+    }
+}
+
+/// The origin every test fact cites: alias `s1` at bytes 0..12 of message `m1`.
+fn origin_s1() -> SubjectOrigin {
+    SubjectOrigin {
+        alias: "s1".to_string(),
+        message_id: "m1".to_string(),
+        ordinal: 1,
+        block_ids: vec!["m1#0".to_string()],
+        block_hashes: vec!["0".repeat(64)],
+        ranges: vec![ByteRange { start: 0, end: 12 }],
     }
 }
 
 fn subject(text: &str) -> ReviewPayload {
     ReviewPayload::Subject(ReviewSubject {
         facts: vec![fact(text)],
+        origins: vec![origin_s1()],
     })
 }
 
@@ -488,7 +501,7 @@ fn stored_bytes_that_no_longer_decode_are_refused_by_a_real_store_read() {
     seal(&store, "run-1", origin + 1);
     drop(store);
 
-    let future_schema = br#"{"version":2,"body":{"kind":"review_subject","facts":[{"text":"t","span":{"alias":"s","start":0,"end":1}}]}}"#;
+    let future_schema = br#"{"version":3,"body":{"kind":"review_subject","facts":[{"text":"t","spans":[{"alias":"s","start":0,"end":1}]}],"origins":[{"alias":"s","message_id":"m","ordinal":1,"block_ids":["m#0"],"block_hashes":["0000000000000000000000000000000000000000000000000000000000000000"],"ranges":[{"start":0,"end":1}]}]}}"#;
     mutate(
         directory.path(),
         "UPDATE candidates SET payload=?1 WHERE candidate_id='subject-1'",
@@ -796,17 +809,17 @@ fn schema_illegal_proposals_are_refused_at_decode() {
             .stage_review_input(proposal_spec("job-1", generation, proposal))
             .unwrap();
     }
-    let stale = br#"{"version":2,"body":{"kind":"review_subject","facts":[{"text":"t","span":{"alias":"s","start":0,"end":1}}]}}"#;
+    let stale = br#"{"version":1,"body":{"kind":"review_subject","facts":[{"text":"t","span":{"alias":"s","start":0,"end":1}}]}}"#;
     assert_eq!(
         ReviewPayload::decode(stale).unwrap_err(),
         ReviewStageRefusal::Invalid
     );
-    let unknown_field = br#"{"version":1,"body":{"kind":"review_subject","facts":[{"text":"t","span":{"alias":"s","start":0,"end":1}}],"extra":1}}"#;
+    let unknown_field = br#"{"version":2,"body":{"kind":"review_subject","facts":[{"text":"t","spans":[{"alias":"s","start":0,"end":1}]}],"origins":[{"alias":"s","message_id":"m","ordinal":1,"block_ids":["m#0"],"block_hashes":["0000000000000000000000000000000000000000000000000000000000000000"],"ranges":[{"start":0,"end":1}]}],"extra":1}}"#;
     assert_eq!(
         ReviewPayload::decode(unknown_field).unwrap_err(),
         ReviewStageRefusal::Invalid
     );
-    let current = br#"{"version":1,"body":{"kind":"review_subject","facts":[{"text":"t","span":{"alias":"s","start":0,"end":1}}]}}"#;
+    let current = br#"{"version":2,"body":{"kind":"review_subject","facts":[{"text":"t","spans":[{"alias":"s","start":0,"end":1}]}],"origins":[{"alias":"s","message_id":"m","ordinal":1,"block_ids":["m#0"],"block_hashes":["0000000000000000000000000000000000000000000000000000000000000000"],"ranges":[{"start":0,"end":1}]}]}}"#;
     ReviewPayload::decode(current).unwrap();
 }
 
@@ -816,27 +829,77 @@ fn payload_bounds_are_enforced_at_the_boundary() {
     let refused = |payload: ReviewPayload| {
         assert_eq!(payload.encode().unwrap_err(), ReviewStageRefusal::Invalid);
     };
-    refused(ReviewPayload::Subject(ReviewSubject { facts: vec![] }));
+    refused(ReviewPayload::Subject(ReviewSubject {
+        facts: vec![],
+        origins: vec![origin_s1()],
+    }));
     ok(ReviewPayload::Subject(ReviewSubject {
         facts: vec![fact("f"); MAX_REVIEW_FACTS],
+        origins: vec![origin_s1()],
     }));
     refused(ReviewPayload::Subject(ReviewSubject {
         facts: vec![fact("f"); MAX_REVIEW_FACTS + 1],
+        origins: vec![origin_s1()],
     }));
     ok(subject(&"x".repeat(MAX_REVIEW_TEXT_BYTES)));
     refused(subject(&"x".repeat(MAX_REVIEW_TEXT_BYTES + 1)));
     let mut reversed = fact("f");
-    reversed.span.end = 0;
-    reversed.span.start = 1;
+    reversed.spans[0].end = 0;
+    reversed.spans[0].start = 1;
     refused(ReviewPayload::Subject(ReviewSubject {
         facts: vec![reversed],
+        origins: vec![origin_s1()],
+    }));
+    let mut uncited = fact("f");
+    uncited.spans.clear();
+    refused(ReviewPayload::Subject(ReviewSubject {
+        facts: vec![uncited],
+        origins: vec![origin_s1()],
+    }));
+    let mut crowded = fact("f");
+    crowded.spans = vec![crowded.spans[0].clone(); MAX_FACT_SPANS + 1];
+    refused(ReviewPayload::Subject(ReviewSubject {
+        facts: vec![crowded],
+        origins: vec![origin_s1()],
+    }));
+    // Origins: every cited span must be listed under exactly one origin whose blocks and hashes align.
+    let origin = |ranges: Vec<ByteRange>| SubjectOrigin {
+        alias: "s1".to_string(),
+        message_id: "m1".to_string(),
+        ordinal: 1,
+        block_ids: vec!["m1#0".to_string()],
+        block_hashes: vec!["0".repeat(64)],
+        ranges,
+    };
+    ok(ReviewPayload::Subject(ReviewSubject {
+        facts: vec![fact("f")],
+        origins: vec![origin(vec![ByteRange { start: 0, end: 12 }])],
+    }));
+    refused(ReviewPayload::Subject(ReviewSubject {
+        facts: vec![fact("f")],
+        origins: vec![origin(vec![ByteRange { start: 0, end: 11 }])],
+    }));
+    refused(ReviewPayload::Subject(ReviewSubject {
+        facts: vec![fact("f")],
+        origins: vec![
+            origin(vec![ByteRange { start: 0, end: 12 }]),
+            origin(vec![ByteRange { start: 0, end: 12 }]),
+        ],
+    }));
+    let mut misaligned = origin(vec![ByteRange { start: 0, end: 12 }]);
+    misaligned.block_hashes.clear();
+    refused(ReviewPayload::Subject(ReviewSubject {
+        facts: vec![fact("f")],
+        origins: vec![misaligned],
     }));
     // Two facts at the per-field text bound exceed the serialized payload bound.
     refused(ReviewPayload::Subject(ReviewSubject {
         facts: vec![fact(&"x".repeat(MAX_REVIEW_TEXT_BYTES)); 2],
+        origins: vec![origin_s1()],
     }));
     let wide = ReviewPayload::Subject(ReviewSubject {
         facts: vec![fact(&"x".repeat(MAX_REVIEW_TEXT_BYTES)); 3],
+        origins: vec![origin_s1()],
     });
     assert!(serde_json::to_vec(&wide).unwrap().len() > MAX_REVIEW_PAYLOAD_BYTES);
     let mut limits = proposal(ProposalAction::Retain, memory_target(), None);

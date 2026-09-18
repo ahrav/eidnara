@@ -10,8 +10,10 @@ use crate::history_summarizer_validate::FactCandidate;
 
 /// Aliases a chunk may issue; a chunk renders far fewer messages than this.
 pub const MAX_ALIASES: usize = 4096;
-/// Cited spans per fact, at most.
-pub const MAX_CITATIONS_PER_FACT: usize = 8;
+/// Cited spans per fact, at most; the Kernel refuses a staged subject past the same bound.
+pub const MAX_CITATIONS_PER_FACT: usize = kernel::MAX_FACT_SPANS;
+/// Facts per set, at most; the Kernel refuses a staged subject past the same bound.
+pub const MAX_FACTS_PER_SET: usize = kernel::MAX_REVIEW_FACTS;
 
 /// One presented message part and the native identity behind it. `alias` is empty until [`FrozenAliasTable::issue`] assigns it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +124,9 @@ pub fn check_fact_set(
     table: &FrozenAliasTable,
     accepted: Option<RangeInclusive<u64>>,
 ) -> Result<(), ExtractionFailure> {
+    if facts.len() > MAX_FACTS_PER_SET {
+        return Err(ExtractionFailure::TooManyFacts);
+    }
     for fact in facts {
         if fact.citations.is_empty() {
             return Err(ExtractionFailure::MissingCitation);

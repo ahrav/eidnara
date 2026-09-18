@@ -27,7 +27,7 @@ pub const REVIEW_PROPOSAL_KIND: &str = "review_proposal";
 /// `provenance_witness.kind` literal of every review row; admission rejects it.
 pub const REVIEW_WITNESS_KIND: &str = "review";
 /// Encoded payload schema version this build writes and reads.
-pub const REVIEW_PAYLOAD_VERSION: u32 = 1;
+pub const REVIEW_PAYLOAD_VERSION: u32 = 2;
 /// Serialized payload bound, checked before per-field validation runs.
 pub const MAX_REVIEW_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const MAX_REVIEW_IDENTITY_BYTES: usize = 256;
@@ -36,6 +36,8 @@ pub const MAX_REVIEW_REFERENCES: usize = 256;
 /// Optional starting references beside the subject source.
 pub const MAX_REVIEW_REFERENCE_SOURCES: usize = 8;
 pub const MAX_REVIEW_FACTS: usize = 64;
+/// Spans one extracted fact may cite.
+pub const MAX_FACT_SPANS: usize = 8;
 pub const MAX_REVIEW_LIMITATIONS: usize = 16;
 const DIGEST_HEX_LEN: usize = 64;
 const RESULT_ID_SEPARATOR: u8 = 0x1f;
@@ -88,18 +90,41 @@ pub struct SourceSpan {
     pub end: u64,
 }
 
+/// One extracted fact and the frozen-source spans that support it; at least one span, at most [`MAX_FACT_SPANS`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtractedFact {
     pub text: String,
-    pub span: SourceSpan,
+    pub spans: Vec<SourceSpan>,
 }
 
-/// A sealed extraction result that a review job investigates; its source is the binding's `subject_source`.
+/// Half-open byte range inside one origin's presented text.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ByteRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// The frozen native identity one cited alias resolves to: the message, the blocks whose text produced the presented part, their content hashes, and the distinct ranges the facts cite. Two facts citing one block share one origin; the block's bytes are not stored again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubjectOrigin {
+    pub alias: String,
+    pub message_id: String,
+    pub ordinal: u64,
+    pub block_ids: Vec<String>,
+    /// Lower-hex SHA-256 of each block's serialized bytes, aligned with `block_ids`.
+    pub block_hashes: Vec<String>,
+    pub ranges: Vec<ByteRange>,
+}
+
+/// A sealed extraction result that a review job investigates; its source is the binding's `subject_source`. Every cited alias resolves to exactly one origin that lists the cited range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewSubject {
     pub facts: Vec<ExtractedFact>,
+    pub origins: Vec<SubjectOrigin>,
 }
 
 /// Reference to retained evidence; the body stays in its evidence row.
@@ -386,7 +411,21 @@ impl SourceDependency {
 impl SourceSpan {
     fn validate(&self) -> Result<(), ReviewStageRefusal> {
         check_identity(&self.alias)?;
-        if self.end < self.start {
+        self.range().validate()
+    }
+
+    /// The span's byte range without its alias.
+    pub fn range(&self) -> ByteRange {
+        ByteRange {
+            start: self.start,
+            end: self.end,
+        }
+    }
+}
+
+impl ByteRange {
+    fn validate(&self) -> Result<(), ReviewStageRefusal> {
+        if self.end <= self.start {
             return Err(ReviewStageRefusal::Invalid);
         }
         Ok(())
@@ -400,7 +439,55 @@ impl ReviewSubject {
         }
         for fact in &self.facts {
             check_text(&fact.text)?;
-            fact.span.validate()?;
+            if fact.spans.is_empty() || fact.spans.len() > MAX_FACT_SPANS {
+                return Err(ReviewStageRefusal::Invalid);
+            }
+            for span in &fact.spans {
+                span.validate()?;
+            }
+        }
+        if self.origins.is_empty() || self.origins.len() > MAX_REVIEW_FACTS * MAX_FACT_SPANS {
+            return Err(ReviewStageRefusal::Invalid);
+        }
+        for origin in &self.origins {
+            origin.validate()?;
+        }
+        let mut aliases = self.origins.iter().map(|origin| origin.alias.as_str());
+        let mut seen = std::collections::BTreeSet::new();
+        if !aliases.all(|alias| seen.insert(alias)) {
+            return Err(ReviewStageRefusal::Invalid);
+        }
+        for span in self.facts.iter().flat_map(|fact| &fact.spans) {
+            let listed = self
+                .origins
+                .iter()
+                .any(|origin| origin.alias == span.alias && origin.ranges.contains(&span.range()));
+            if !listed {
+                return Err(ReviewStageRefusal::Invalid);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SubjectOrigin {
+    fn validate(&self) -> Result<(), ReviewStageRefusal> {
+        check_identity(&self.alias)?;
+        check_identity(&self.message_id)?;
+        if self.block_ids.is_empty()
+            || self.block_ids.len() != self.block_hashes.len()
+            || self.ranges.is_empty()
+        {
+            return Err(ReviewStageRefusal::Invalid);
+        }
+        for block_id in &self.block_ids {
+            check_identity(block_id)?;
+        }
+        for hash in &self.block_hashes {
+            check_digest(hash)?;
+        }
+        for range in &self.ranges {
+            range.validate()?;
         }
         Ok(())
     }

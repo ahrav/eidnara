@@ -289,12 +289,12 @@ impl From<rusqlite::Error> for CuratorJobError {
     }
 }
 
-fn refuse(refusal: CuratorJobRefusal) -> rusqlite::Error {
+pub(crate) fn refuse(refusal: CuratorJobRefusal) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(refusal))
 }
 
 /// Reads the refusal a transaction body raised through `refuse` before the storage layer flattens the error to text.
-fn refusal_of(error: &rusqlite::Error) -> Option<CuratorJobRefusal> {
+pub(crate) fn refusal_of(error: &rusqlite::Error) -> Option<CuratorJobRefusal> {
     match error {
         rusqlite::Error::ToSqlConversionFailure(inner) => {
             inner.downcast_ref::<CuratorJobRefusal>().copied()

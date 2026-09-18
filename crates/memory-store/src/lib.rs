@@ -545,6 +545,9 @@ pub enum ExtractionFailure {
     /// A fact carries more citations than the validator allows.
     #[error("too_many_citations")]
     TooManyCitations,
+    /// The set carries more facts than a staged subject may hold.
+    #[error("too_many_facts")]
+    TooManyFacts,
     /// A citation's syntax did not parse, or a fact item was citations with no text.
     #[error("malformed_citation")]
     MalformedCitation,
@@ -568,6 +571,8 @@ pub enum CuratorNonadmissionCode {
     EvidenceUnavailable,
     /// The validator rejected the optional fact set as a whole.
     FactSetRejected { failure: ExtractionFailure },
+    /// The Kernel refuses the accepted set as a review subject (a bound or a secret in fact text), so nothing can be staged for it.
+    SubjectRefused,
 }
 
 /// The latest recorded nonadmission, bound to the firing that produced it.
@@ -575,6 +580,18 @@ pub enum CuratorNonadmissionCode {
 pub struct RecordedNonadmission {
     pub firing_seq: u64,
     pub code: CuratorNonadmissionCode,
+}
+
+/// The Curator job a firing reserved for its accepted facts before staging them (KTD3). Recorded in the durable state so a failed publication retains the reservation and its candidate identity without progress, and so recovery reconciles against it instead of reserving again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CuratorReservation {
+    pub firing_seq: u64,
+    pub causal_identity: String,
+    pub candidate_id: String,
+    /// Lower-hex SHA-256 of the subject payload the reservation names; staging must reproduce it byte for byte.
+    pub payload_digest: String,
+    pub kernel_incarnation: String,
+    pub queue_deadline_ms: i64,
 }
 
 /// Producer-owned nonadmission facts. `count` only grows; both survive every phase transition, abandonment, and reset of the producer state within the session's store lifetime, and are written only by the fenced publication that also advances history.
@@ -650,6 +667,9 @@ pub struct HistorySummarizerDurableState {
     /// Q31 nonadmission count and latest reason. Unlike the fields above, these are not cleared by any transition: every constructor carries them from the prior state.
     #[serde(default)]
     pub curator_nonadmission: CuratorNonadmission,
+    /// The reservation the current or last firing made for its accepted facts. Cleared when the publication that activates it commits; kept through abandonment so the reservation is never downgraded to a pre-reservation refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curator_reservation: Option<CuratorReservation>,
 }
 
 impl Default for HistorySummarizerDurableState {
@@ -671,6 +691,7 @@ impl Default for HistorySummarizerDurableState {
             last_no_fire: None,
             consecutive_publish_failures: 0,
             curator_nonadmission: CuratorNonadmission::default(),
+            curator_reservation: None,
         }
     }
 }
@@ -871,6 +892,8 @@ pub struct HistorySummarizerPublishResult {
     pub row_version: u64,
     /// The nonadmission count after this publication; it grew by one exactly when the request carried a code.
     pub curator_nonadmission_count: u64,
+    /// Present exactly when the request carried an activation.
+    pub curator_activation: Option<CuratorActivationOutcome>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -926,6 +949,25 @@ pub struct HistorySummarizerPublishRequest<'a> {
     pub chunk_transcript: Option<&'a str>,
     /// Q31: the reason this firing's fact candidates were not admitted to Curator review, recorded in the same transaction that advances history. `None` for an intentional no-fact or extraction-free run.
     pub curator_nonadmission: Option<CuratorNonadmissionCode>,
+    /// KTD3: the reserved Curator job this publication activates with its reference-only input, in the same transaction as the history. A reservation past its queue deadline is finished as expired instead, and the publication still commits.
+    pub curator_activation: Option<CuratorActivation<'a>>,
+}
+
+/// The reserved job a History Summarizer publication moves to `Ready`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CuratorActivation<'a> {
+    pub causal_identity: &'a str,
+    pub producer: &'a curator_jobs::ProducerBinding,
+    pub input: &'a curator_jobs::CuratorJobInput,
+    pub now_ms: i64,
+}
+
+/// What the publication did with its reserved job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CuratorActivationOutcome {
+    Activated,
+    /// The queue deadline had passed; the job was finished as expired and nothing was resurrected.
+    Expired,
 }
 
 /// Typed publish failures. CAS and state mismatches are deliberately separate so a
@@ -964,6 +1006,9 @@ pub enum HistorySummarizerPublishError {
     },
     #[error("history_summarizer publish invalid state: {state}")]
     InvalidState { state: String },
+    /// The reserved Curator job could not be activated; nothing was written. The reservation stays as it was.
+    #[error("curator activation refused: {0}")]
+    CuratorActivation(curator_jobs::CuratorJobRefusal),
     #[error("serde: {0}")]
     Serde(String),
 }
@@ -11047,6 +11092,7 @@ impl MemoryStore {
                     history_summarizer.consecutive_publish_failures
                 },
                 curator_nonadmission: history_summarizer.curator_nonadmission,
+                curator_reservation: history_summarizer.curator_reservation.clone(),
                 ..HistorySummarizerDurableState::default()
             };
             let next = next_row_version(current)?;
@@ -11195,6 +11241,7 @@ impl MemoryStore {
             .map_err(|error| {
                 MemoryStoreError::Serde(format!("chunk transcript compression failed: {error}"))
             })?;
+        let activation_refusal = std::cell::Cell::new(None);
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx;
             let outcome = (|| -> rusqlite::Result<PublishTxnOutcome> {
@@ -11300,6 +11347,20 @@ impl MemoryStore {
                     .unwrap_or(1)
                     .max(request.publication_floor_ordinal.max(1)),
             );
+            // KTD3: the durable reservation and the request's activation must name the same job, or neither is touched; the activation itself runs after every other bail-out below so it commits only with the history.
+            match (
+                meta.history_summarizer.curator_reservation.as_ref(),
+                request.curator_activation.as_ref(),
+            ) {
+                (None, None) => {}
+                (Some(reservation), Some(activation))
+                    if reservation.causal_identity == activation.causal_identity => {}
+                _ => {
+                    return Err(curator_jobs::refuse(
+                        curator_jobs::CuratorJobRefusal::InvalidRequest,
+                    ));
+                }
+            }
             meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing();
             if let Some(code) = request.curator_nonadmission {
                 let nonadmission = &mut meta.history_summarizer.curator_nonadmission;
@@ -11348,6 +11409,51 @@ impl MemoryStore {
                 )?;
             }
             enqueue_history_summarizer_side_channels_tx(tx, session_id, &side_channel_items)?;
+            // The reserved job moves to Ready here, past every `Ok` bail-out, so activation and progress commit together or not at all; a refusal is raised as an error and rolls the whole publication back. A reservation past its deadline is closed as expired with progress and never resurrected; one the sweep already closed reads the same way.
+            let curator_activation = match request.curator_activation.as_ref() {
+                None => None,
+                Some(activation) => {
+                    let now_ms = activation.now_ms.max(current_time_ms());
+                    match curator_jobs::activate_curator_job_in_tx(
+                        coordinated.tx(),
+                        request.project_path,
+                        activation.causal_identity,
+                        activation.producer,
+                        activation.input,
+                        now_ms,
+                    ) {
+                        Ok(_) => Some(CuratorActivationOutcome::Activated),
+                        Err(error) => match curator_jobs::refusal_of(&error) {
+                            Some(curator_jobs::CuratorJobRefusal::Expired) => {
+                                curator_jobs::finish_curator_job_in_tx(
+                                    coordinated.tx(),
+                                    request.project_path,
+                                    activation.causal_identity,
+                                    curator_jobs::CuratorJobOutcome::Expired,
+                                    now_ms,
+                                )?;
+                                Some(CuratorActivationOutcome::Expired)
+                            }
+                            Some(curator_jobs::CuratorJobRefusal::Terminal)
+                                if curator_jobs::load_curator_job(
+                                    coordinated.tx(),
+                                    request.project_path,
+                                    activation.causal_identity,
+                                )?
+                                .is_some_and(|job| {
+                                    job.state
+                                        == curator_jobs::CuratorJobState::Terminal(
+                                            curator_jobs::CuratorJobOutcome::Expired,
+                                        )
+                                }) =>
+                            {
+                                Some(CuratorActivationOutcome::Expired)
+                            }
+                            _ => return Err(error),
+                        },
+                    }
+                }
+            };
             // The `Ok` returns above commit the transaction, so the metadata write must follow every bail-out: an overlap must not advance the floor, the state, or the nonadmission facts.
             tx.execute(
                 "UPDATE cache_state SET row_version = ?2, meta = ?3
@@ -11358,13 +11464,21 @@ impl MemoryStore {
             Ok(PublishTxnOutcome::Committed(HistorySummarizerPublishResult {
                 row_version: next,
                 curator_nonadmission_count,
+                curator_activation,
             }))
-            })()?;
+            })()
+            .inspect_err(|error| activation_refusal.set(curator_jobs::refusal_of(error)))?;
             Ok(match outcome {
                 PublishTxnOutcome::Committed(_) => WriteDisposition::Applied(outcome),
                 _ => WriteDisposition::Replay(outcome),
             })
-        })?;
+        });
+        let outcome = match (outcome, activation_refusal.get()) {
+            (Err(_), Some(refusal)) => {
+                return Err(HistorySummarizerPublishError::CuratorActivation(refusal));
+            }
+            (outcome, _) => outcome?,
+        };
 
         match outcome {
             PublishTxnOutcome::Committed(result) => {
@@ -16591,6 +16705,7 @@ mod tests {
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap();
         let after_publish = scan_audit_rows(&store);
@@ -20289,6 +20404,7 @@ mod tests {
                 last_no_fire: None,
                 consecutive_publish_failures: 0,
                 curator_nonadmission: CuratorNonadmission::default(),
+                curator_reservation: None,
             },
             ..Default::default()
         }
@@ -20500,6 +20616,7 @@ mod tests {
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -20564,6 +20681,7 @@ mod tests {
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
                     curator_nonadmission: None,
+                    curator_activation: None,
                 })
                 .unwrap();
 
@@ -20701,6 +20819,7 @@ mod tests {
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
                     curator_nonadmission: None,
+                    curator_activation: None,
                 })
                 .unwrap_err();
             assert!(
@@ -20777,6 +20896,7 @@ mod tests {
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap();
         assert_eq!(
@@ -20925,6 +21045,7 @@ mod tests {
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap();
         assert_eq!(
@@ -20981,6 +21102,7 @@ mod tests {
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
                     curator_nonadmission: code,
+                    curator_activation: None,
                 })
             };
         let nonadmission = || {
@@ -21148,6 +21270,7 @@ mod tests {
                 publication_floor_ordinal: 21,
                 chunk_transcript: Some("U: orphan"),
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -21199,6 +21322,7 @@ mod tests {
                 publication_floor_ordinal: 21,
                 chunk_transcript: Some(&transcript),
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -21247,6 +21371,7 @@ mod tests {
                 publication_floor_ordinal: 25,
                 chunk_transcript: Some("U: bounded row"),
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap();
 
@@ -21309,6 +21434,7 @@ mod tests {
                 publication_floor_ordinal: 101,
                 chunk_transcript: Some(&oversized),
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -22531,6 +22657,7 @@ mod tests {
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap_err();
         assert!(
@@ -22733,6 +22860,7 @@ mod tests {
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap_err();
         assert!(matches!(
