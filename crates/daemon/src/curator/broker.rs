@@ -1279,7 +1279,7 @@ fn staged_refusal(error: ReviewReadError) -> RefusalCode {
     }
 }
 
-fn hold_refusal(error: CuratorHoldError) -> RefusalCode {
+pub(crate) fn hold_refusal(error: CuratorHoldError) -> RefusalCode {
     match error {
         CuratorHoldError::Refused(kernel::CuratorHoldRefusal::UnavailableEvidence)
         | CuratorHoldError::Refused(kernel::CuratorHoldRefusal::NotCovered) => {

@@ -275,6 +275,20 @@ impl Fixture {
         ProtectedLocations::new([self.store_dir.path().to_path_buf()]).unwrap()
     }
 
+    fn hold_references(&self, hold_id: &str) -> i64 {
+        rusqlite::Connection::open_with_flags(
+            self.store_dir.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM capture_pin_refs WHERE capture_pin_id=?1 AND released_at IS NULL",
+            [hold_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
     fn capture_rows(&self) -> Vec<(String, String, Option<i64>, String, String)> {
         let connection = rusqlite::Connection::open_with_flags(
             self.store_dir.path().join("kernel.sqlite"),
@@ -1955,4 +1969,172 @@ fn a_capture_whose_detail_cannot_be_recorded_leaves_no_evidence_behind() {
         "evidence without its detail is not left live"
     );
     assert!(broker.aliases.is_empty());
+    // The hold carries no reference for it either: a later capture has the whole hold to use.
+    fixture.write("b.txt", b"a capture that must still fit");
+    let mut sound = fixture.text(&protected);
+    sound
+        .read(&fixture.store, &mut broker, "b.txt", None, fixture.now)
+        .unwrap();
+    fixture
+        .store
+        .validate_held_evidence(
+            broker.hold_id(),
+            CuratorHoldKind::Execution,
+            &fixture.hold_binding(),
+            &[],
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.hold_references(broker.hold_id()),
+        2,
+        "the anchor and the sound capture; nothing for the abandoned one"
+    );
+}
+
+/// The capture identity `capture` derives for `relative` holding `body` under the fixture's run.
+fn predicted_capture_id(fixture: &Fixture, relative: &str, body: &[u8]) -> String {
+    let hold = fixture.hold_binding();
+    format!(
+        "curcap:{}:{}:{}:{}:{:x}:{:x}",
+        hold.project_digest,
+        hold.memstore_incarnation,
+        hold.subject,
+        hold.generation,
+        Sha256::digest(body),
+        Sha256::digest(relative.as_bytes())
+    )
+}
+
+#[test]
+fn a_seated_detail_that_does_not_describe_this_capture_is_not_reused() {
+    let fixture = Fixture::open();
+    let body = b"bytes whose detail someone else recorded first";
+    fixture.write("a.txt", body);
+    let evidence_id = predicted_capture_id(&fixture, "a.txt", body);
+    let digest = format!("{:x}", Sha256::digest(body));
+    // A caller ingests the predictable capture row under the capture's own ingest intent, so the run's ingest replays it, and records a detail naming another project.
+    fixture
+        .store
+        .ingest_exact_artifact(ArtifactIngestRequest {
+            intent: CommitIntent {
+                producer: "curator".to_string(),
+                operation_key: evidence_id.clone(),
+                request_digest: digest.clone(),
+                actor: "curator".to_string(),
+                cause: "project_text_capture".to_string(),
+            },
+            payload: body.to_vec(),
+            evidence_id: evidence_id.clone(),
+            object_id: format!("curcapobj:{evidence_id}"),
+            object_kind: "evidence".to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: kernel::LOCAL_FILE_SOURCE_KIND.to_string(),
+            source_id: "a.txt".to_string(),
+            source_revision: 1,
+            media_type: "text/plain; charset=utf-8".to_string(),
+            retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+            retain_until: Some(fixture.now + HOUR_MS),
+            asserted_sensitivity: Sensitivity::Sensitive,
+            provider_egress: ProviderEgress::LocalOnly,
+            provenance: None,
+        })
+        .unwrap();
+    fixture
+        .store
+        .commit(intent("seat-detail"), |envelope| {
+            envelope.record_local_file_capture(&kernel::LocalFileCaptureRequest {
+                project_digest: &"b".repeat(64),
+                relative_path: "a.txt",
+                captured_at: 1,
+                domain_id: DOMAIN,
+                scope_id: None,
+                evidence_id: &evidence_id,
+                artifact_digest: &digest,
+                byte_length: u64::try_from(body.len()).unwrap(),
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Store,
+        "a detail that names another project is not this run's provenance"
+    );
+    assert_eq!(broker.ledger.disclosed().count(), 0);
+}
+
+#[test]
+fn a_seated_receipt_cannot_keep_a_refused_capture_alive() {
+    let fixture = Fixture::open();
+    let body = b"bytes the hold has no room for";
+    fixture.write("a.txt", body);
+    let evidence_id = predicted_capture_id(&fixture, "a.txt", body);
+    // A caller seats a receipt under the daemon's compensating intent before the capture is attempted.
+    fixture
+        .store
+        .commit(
+            CommitIntent {
+                producer: "curator".to_string(),
+                operation_key: format!("{evidence_id}:abandoned"),
+                request_digest: format!("{:x}", Sha256::digest(body)),
+                actor: "curator".to_string(),
+                cause: "project_text_capture".to_string(),
+            },
+            |_| Ok(String::new()),
+        )
+        .unwrap();
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker_with_references(
+        PROJECT,
+        ArtifactDestination::Local,
+        kernel::MAX_CURATOR_HOLD_REFERENCES,
+    );
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::HoldLimit
+    );
+    assert!(
+        fixture.capture_rows().is_empty(),
+        "the refused capture is retired whatever receipts a caller seated"
+    );
+}
+
+#[test]
+fn a_run_whose_hold_has_ended_may_not_inspect() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"bun");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    fixture
+        .store
+        .release_execution_hold(broker.hold_id(), &fixture.hold_binding())
+        .unwrap();
+    assert_eq!(
+        text.search(
+            &fixture.store,
+            &mut broker,
+            SearchQuery::Content("zzz"),
+            fixture.now
+        )
+        .unwrap_err()
+        .code,
+        RefusalCode::HoldInvalid,
+        "a search under an ended hold is refused before any file is read"
+    );
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::HoldInvalid
+    );
 }

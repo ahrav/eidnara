@@ -23,6 +23,8 @@ const OBJECT_ID_PREFIX: &str = "localfileobj:";
 pub const MAX_EXPIRED_CAPTURES_PER_CALL: usize = 64;
 /// The reserved producer expiry receipts are written under; a caller cannot commit under it, so a receipt found under an expiry key was written by this sweep.
 const EXPIRY_PRODUCER: &str = "local-file-expiry";
+/// The reserved producer under which a run abandons a capture it could not complete.
+const ABANDON_PRODUCER: &str = "local-file-abandon";
 
 /// The typed detail stored with a local-file capture observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +187,60 @@ impl KernelStore {
             }
         }
         Ok(retired)
+    }
+
+    /// Retires a capture its run could not complete: the capture's own observations, then the evidence unless another live row cites it. For a run whose capture was ingested but could not be held or described, so the row does not stay live until its acquisition reference lapses. The commit runs under the reserved producer, so no caller can seat a receipt in its place. Idempotent for one evidence id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Conflict`] when a live hold pins the evidence (it belongs to a run and is left alone) or another live row cites it after its own observations are retired; [`KernelError::NotFound`] when no live Curator-capture evidence row has this id; and storage, lock, or fence errors otherwise.
+    pub fn abandon_local_file_capture(&self, evidence_id: &str) -> Result<(), KernelError> {
+        let mut writer = self.lock_writer()?;
+        commit_with_writer(
+            &mut writer,
+            self.lease_epoch(),
+            CommitIntent {
+                producer: format!(
+                    "{}{ABANDON_PRODUCER}",
+                    CommitIntent::RESERVED_PRODUCER_PREFIX
+                ),
+                operation_key: evidence_id.to_string(),
+                request_digest: format!("{:x}", sha2::Sha256::digest(evidence_id.as_bytes())),
+                actor: ABANDON_PRODUCER.to_string(),
+                cause: "capture abandoned by its run".to_string(),
+            },
+            |envelope| {
+                let (evidence_object, pinned): (String, bool) = envelope
+                    .tx
+                    .query_row_cached(
+                        "SELECT e.object_id,EXISTS(SELECT 1 FROM capture_pin_refs r
+                                 JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
+                                 WHERE r.evidence_id=e.evidence_id AND r.released_at IS NULL
+                                   AND p.released_at IS NULL)
+                         FROM evidence_meta e
+                         WHERE e.evidence_id=?1 AND e.retention_class=?2
+                           AND e.invalidated_commit_seq IS NULL",
+                        params![evidence_id, super::cas::CURATOR_CAPTURE_RETENTION_CLASS],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(map_sqlite)?
+                    .ok_or(KernelError::NotFound)?;
+                if pinned {
+                    return Err(KernelError::Conflict);
+                }
+                for observation in live_capture_observations(envelope, evidence_id)? {
+                    envelope.retire_capture_observation(&observation)?;
+                }
+                if cited_elsewhere(envelope, evidence_id)? {
+                    return Err(KernelError::Conflict);
+                }
+                envelope.retire_evidence(&evidence_object)?;
+                Ok("abandoned".to_string())
+            },
+            || Ok(()),
+        )
+        .map(|_| ())
     }
 
     /// The typed detail of the live capture observation citing `evidence_id`, or `None` when no such observation is live.

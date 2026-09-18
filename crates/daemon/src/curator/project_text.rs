@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 
 use super::broker::{
     Alias, EvidenceBroker, EvidenceRead, ReferenceExpectation, Refusal, RefusalCode, check_render,
-    check_whole_artifact,
+    check_whole_artifact, hold_refusal,
 };
 use super::{Completeness, excerpt_window};
 
@@ -185,7 +185,7 @@ impl ProjectText {
         range: Option<Range<u64>>,
         now_ms: i64,
     ) -> Result<EvidenceRead, Refusal> {
-        admit(&self.binding, broker)?;
+        admit(store, &self.binding, broker, now_ms)?;
         let probed = self.probe(relative_path)?;
         let file = self.read_file(relative_path, &probed, &mut 0)?;
         let alias = self.capture(store, broker, &file, now_ms)?;
@@ -200,7 +200,7 @@ impl ProjectText {
         query: SearchQuery<'_>,
         now_ms: i64,
     ) -> Result<SearchOutcome, Refusal> {
-        admit(&self.binding, broker)?;
+        admit(store, &self.binding, broker, now_ms)?;
         let literal = match query {
             SearchQuery::Path(text) | SearchQuery::Name(text) | SearchQuery::Content(text) => text,
         };
@@ -353,7 +353,7 @@ impl ProjectText {
         metadata(&handle)
     }
 
-    /// Reads one ordinary file under confinement. `probed` comes from [`Self::probe`]; the file is opened again for reading and must be the same object, so a swap between the two opens is refused rather than read. A file with more than one hard link is not ordinary: a link can name a protected file the identity set does not list. Only UTF-8 bytes of at most [`MAX_CAPTURE_BYTES`] that pass the render check, under a path that passes it too, are returned. Every byte the read takes is charged to `scanned` before any refusal about the bytes, so a refused file, or one larger than its probed size said, costs what it read; the read itself stops one byte past the capture size or the remaining scan headroom, whichever is smaller.
+    /// Reads one ordinary file under confinement. `probed` comes from [`Self::probe`]; the file is opened again for reading and must be the same object, so a swap between the two opens is refused rather than read. A file with more than one hard link is not ordinary: a link can name a protected file the identity set does not list. Only UTF-8 bytes of at most [`MAX_CAPTURE_BYTES`] that pass the render check, under a path that passes it too, are returned. Every byte the read takes is charged to `scanned` before any refusal about the bytes, so a refused file, or one whose size changed since its probe, costs exactly what it read; the read itself stops one byte past the capture size or the remaining scan headroom, whichever is smaller.
     fn read_file(
         &self,
         relative: &str,
@@ -368,7 +368,6 @@ impl ProjectText {
         }
         // The read is bounded by the capture size and by what the scan bound still admits, so a file that grew past its probe cannot be read past either by more than the one byte that detects it.
         let limit = MAX_CAPTURE_BYTES.min(MAX_SCAN_BYTES.saturating_sub(*scanned));
-        *scanned = scanned.saturating_add(probed.len());
         let handle = self.open_beneath(relative, OFlags::RDONLY | OFlags::NONBLOCK)?;
         let opened = metadata(&handle)?;
         if (opened.dev(), opened.ino()) != (probed.dev(), probed.ino())
@@ -381,12 +380,12 @@ impl ProjectText {
         }
         let mut bytes = Vec::new();
         // The size is checked again on the bytes read: the file can grow between the stat and the read.
-        // A read that fails part-way leaves what it read in `bytes`; those bytes are charged before the failure is reported.
+        // The charge is the bytes read, whatever the probe said and however the read ended: a read that fails part-way leaves what it read in `bytes`, and those bytes are charged before the failure is reported.
         let outcome = File::from(handle)
             .take(limit.saturating_add(1))
             .read_to_end(&mut bytes);
         let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        *scanned = scanned.saturating_add(read.saturating_sub(probed.len()));
+        *scanned = scanned.saturating_add(read);
         outcome.map_err(|_| refusal(RefusalCode::Unavailable))?;
         if read > limit {
             return Err(refusal(RefusalCode::TooLarge));
@@ -473,28 +472,29 @@ impl ProjectText {
                 if handle.digest != digest {
                     return Err(refusal(RefusalCode::Store));
                 }
-                let recorded = store
+                // The typed detail is what makes the evidence a project capture. A live detail that describes exactly this capture is an earlier run's record of it and is reused; one that describes anything else was seated by someone under this identity and proves nothing, so the capture is refused rather than disclosed under borrowed provenance. With no detail, this run's commit must be the one that records it, and a receipt that replays without a live detail is refused for the same reason.
+                let recorded = match store
                     .local_file_capture(&evidence_id)
                     .map_err(|_| refusal(RefusalCode::Store))?
-                    .is_some();
-                // Ownership is charged to the run's reservation at first capture, not deferred to the first disclosure, and before the detail is written: a capture the hold cannot carry must not stay live until expiry, so a fresh evidence row (no earlier run's detail cites it) is retired again in that case. The held facts, not the request, define the alias: a replayed ingest keeps the row's original `retain_until`.
-                // A fresh evidence row (no earlier run's detail cites it) that this capture cannot complete is retired again rather than left live until expiry. Best effort: an unreferenced row expires on its own if this fails.
+                {
+                    None => false,
+                    Some(detail)
+                        if detail.project_digest == self.binding.hold.project_digest
+                            && detail.relative_path == file.relative
+                            && detail.buffer_digest == digest
+                            && detail.range == (0, byte_length) =>
+                    {
+                        true
+                    }
+                    Some(_) => return Err(refusal(RefusalCode::Store)),
+                };
+                // A fresh capture (no earlier run's detail cites it) that cannot be completed is abandoned through the store rather than left live until expiry: the detail and evidence are retired under a producer no caller can seat a receipt for. Best effort; an unheld row expires on its own if this fails.
                 let abandon = |refused: Refusal| {
                     if !recorded {
-                        let _ = store.commit(
-                            intent(&format!("{evidence_id}:abandoned"), &digest),
-                            |envelope| {
-                                envelope.retire_evidence(&format!("curcapobj:{evidence_id}"))?;
-                                Ok(String::new())
-                            },
-                        );
+                        let _ = store.abandon_local_file_capture(&evidence_id);
                     }
                     refused
                 };
-                let held = broker
-                    .hold_evidence(store, None, &evidence_id, &digest, now_ms)
-                    .map_err(abandon)?;
-                // The typed detail is what makes the evidence a project capture. An earlier run of this job already recorded it when a live detail exists; otherwise this commit must be the one that records it. A receipt that replays without a live detail was seated by someone else under this intent and proves nothing, so the capture is refused rather than disclosed without provenance. The hold reference taken above stays with the hold until it expires: the store has no per-reference release, and a run whose details cannot be recorded cannot capture anyway.
                 if !recorded {
                     let receipt = store
                         .commit(
@@ -523,6 +523,10 @@ impl ProjectText {
                         return Err(abandon(refusal(RefusalCode::Store)));
                     }
                 }
+                // Ownership is charged to the run's reservation at first capture, not deferred to the first disclosure, and after the detail exists, so a hold refusal leaves nothing to undo but the rows this run created. The held facts, not the request, define the alias: a replayed ingest keeps the row's original `retain_until`.
+                let held = broker
+                    .hold_evidence(store, None, &evidence_id, &digest, now_ms)
+                    .map_err(abandon)?;
                 let captured = Captured {
                     evidence_id,
                     byte_length: held.byte_length,
@@ -568,14 +572,28 @@ fn metadata(handle: &OwnedFd) -> Result<std::fs::Metadata, Refusal> {
     .map_err(|_| refusal(RefusalCode::Unavailable))
 }
 
-/// A capture is Sensitive by construction, so a remote destination can never disclose one; refusing at entry reads nothing for a run that could not be shown it. A broker whose hold binding is not the inspection's is refused the same way: another project's run would take this root's files with the wrong provenance, and another run of the same project would mix its identity with this inspection's acquisition reference.
-fn admit(binding: &InspectionBinding, broker: &EvidenceBroker) -> Result<(), Refusal> {
+/// A capture is Sensitive by construction, so a remote destination can never disclose one; refusing at entry reads nothing for a run that could not be shown it. A broker whose hold binding is not the inspection's is refused the same way: another project's run would take this root's files with the wrong provenance, and another run of the same project would mix its identity with this inspection's acquisition reference. The hold itself must be live: a run whose hold has expired, been released, or been degraded has no authority to read a file, match a literal, or learn whether one matched.
+fn admit(
+    store: &KernelStore,
+    binding: &InspectionBinding,
+    broker: &EvidenceBroker,
+    now_ms: i64,
+) -> Result<(), Refusal> {
     if broker.binding().hold != binding.hold {
         return Err(refusal(RefusalCode::Scope));
     }
     if broker.binding().destination == kernel::ArtifactDestination::Remote {
         return Err(refusal(RefusalCode::PolicyBlocked));
     }
+    store
+        .validate_held_evidence(
+            broker.hold_id(),
+            kernel::CuratorHoldKind::Execution,
+            &binding.hold,
+            &[],
+            now_ms,
+        )
+        .map_err(|error| refusal(hold_refusal(error)))?;
     Ok(())
 }
 
@@ -711,6 +729,35 @@ mod tests {
         };
         assert_eq!(refused.code, RefusalCode::Undecodable);
         assert_eq!(scanned, 4);
+    }
+
+    #[test]
+    fn a_file_truncated_after_its_probe_is_charged_only_what_was_read() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("shrink.txt"),
+            b"a long line before truncation",
+        )
+        .unwrap();
+        let text = ProjectText::open(
+            root.path(),
+            &ProtectedLocations::default(),
+            InspectionBinding {
+                hold: hold_binding(),
+                domain_id: "domain".to_string(),
+                scope_id: None,
+                retain_until: 1,
+            },
+        )
+        .unwrap();
+        let probed = text.probe("shrink.txt").unwrap();
+        std::fs::write(root.path().join("shrink.txt"), b"short").unwrap();
+        let mut scanned = 0;
+        text.read_file("shrink.txt", &probed, &mut scanned).unwrap();
+        assert_eq!(
+            scanned, 5,
+            "the charge is the bytes read, not the probed size"
+        );
     }
 
     #[test]
