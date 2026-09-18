@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 use kernel::{
     ExtractedFact, KernelStore, ReviewBinding, ReviewOwner, ReviewPayload, ReviewStageError,
     ReviewStagedReference, ReviewStagingSpec, ReviewSubject, SourceDependency, SourceSpan,
@@ -94,6 +96,30 @@ pub fn review_policy_versions() -> BTreeMap<String, String> {
     ])
 }
 
+/// The fixed-width key the handoff's Kernel and job identities carry: the Kernel scope, the session, and the review policies. Kernel candidate and run ids are global to the Kernel, so one session id routed under two project roots (V27) and one subject reviewed under two policy versions (Q25/Q29) each need their own row. The wire protocol admits 256 session bytes and the store bounds every identity at 256, so the id itself never appears in one. The first 32 lower-hex digits of a SHA-256 over the unit-separated parts.
+pub fn handoff_key(
+    project_digest: &str,
+    session_id: &str,
+    policy_versions: &BTreeMap<String, String>,
+) -> String {
+    let mut hasher = Sha256::new();
+    for part in [
+        project_digest,
+        session_id,
+        QuestionTemplate::ExtractedFacts.id(),
+    ] {
+        hasher.update(part.as_bytes());
+        hasher.update([0x1f]);
+    }
+    for (name, version) in policy_versions {
+        hasher.update(name.as_bytes());
+        hasher.update([0x1f]);
+        hasher.update(version.as_bytes());
+        hasher.update([0x1f]);
+    }
+    format!("{:x}", hasher.finalize())[..32].to_string()
+}
+
 /// The binding a staged History Summarizer subject is read under. `chunk_ordinal` is the first message of the chunk that presented the facts, the job's `producer.ordinal`, so the coordinator reconstructs the binding from the job row alone and a firing that adopts the reservation reads under the same binding.
 pub fn review_binding(
     project_digest: &str,
@@ -156,6 +182,8 @@ pub fn review_subject(
             spans,
         });
     }
+    extracted.sort_by(|a, b| (&a.text, &a.spans).cmp(&(&b.text, &b.spans)));
+    extracted.dedup();
     let origins = origins
         .into_values()
         .map(|mut origin| {
@@ -187,28 +215,10 @@ pub fn subject_payload(
     Ok((payload, digest))
 }
 
-/// The producer identity one firing reserves under: the session and firing sequence, at the chunk's first ordinal.
-pub fn producer_binding(
-    session_id: &str,
-    firing: &HistorySummarizerDurableState,
-) -> Result<ProducerBinding, HandoffError> {
-    Ok(ProducerBinding {
-        producer: PRODUCER.to_string(),
-        firing_id: format!("{session_id}#{}", firing.firing_seq),
-        ordinal: firing
-            .chunk_range
-            .as_ref()
-            .ok_or(HandoffError::NoChunkRange)?
-            .from_ordinal,
-    })
-}
-
-/// The activation for a recorded reservation whose queue deadline has passed. Nothing is staged: the Kernel refuses a deadline already behind it, and the publication records the job as expired rather than activating it.
+/// The activation for a recorded reservation whose queue deadline has passed. Nothing is staged: the Kernel refuses a deadline already behind it, and the publication records the job as expired rather than activating it. The job row's own producer binding is presented, since the store compares it before it judges the deadline.
 pub fn expired_activation(
     store: &MemoryStore,
     project: &str,
-    session_id: &str,
-    firing: &HistorySummarizerDurableState,
     reservation: &CuratorReservation,
     row_version: u64,
 ) -> Result<PreparedActivation, HandoffError> {
@@ -218,7 +228,7 @@ pub fn expired_activation(
         .ok_or(CuratorJobError::Refused(CuratorJobRefusal::Missing))?;
     Ok(PreparedActivation {
         causal_identity: job.causal_identity,
-        producer: producer_binding(session_id, firing)?,
+        producer: job.producer,
         input: CuratorJobInput {
             subject: job.target,
             starting_references: Vec::new(),
@@ -250,17 +260,14 @@ fn reserved_row(
     request: &HandoffRequest<'_>,
     producer: &ProducerBinding,
     inputs: &CausalInputs,
-    payload_digest: &str,
-    kernel_incarnation: &str,
 ) -> Result<ReservedRow, HandoffError> {
-    // A recorded reservation names the job only when its payload digest and kernel incarnation match this firing's; `adopt` decides whether the firing can activate it.
+    // A recorded reservation names the job only when it is the job this firing would reserve now: same subject bytes, Kernel incarnation, and review policies. One recorded under other policy versions is left to expire and the current policy gets its own job (Q25/Q29); `adopt` decides whether the firing can activate the named job.
+    let causal_identity = inputs.causal_identity().map_err(CuratorJobError::Refused)?;
     let held = request
         .firing
         .curator_reservation
         .as_ref()
-        .filter(|held| {
-            held.payload_digest == payload_digest && held.kernel_incarnation == kernel_incarnation
-        })
+        .filter(|held| held.causal_identity == causal_identity)
         .map(|held| {
             request
                 .store
@@ -353,10 +360,21 @@ pub fn reserve_and_stage(
             ));
         }
     };
-    // The candidate and its run are named by the subject bytes, not the firing, so a later firing that adopts the reservation restages the same row under the same identity.
-    let candidate_id = format!("hs-{session_id}-{}", &payload_digest[..32]);
-    let extraction_run_id = format!("hs-run-{session_id}-{}", &payload_digest[..32]);
-    let producer = producer_binding(session_id, firing)?;
+    // The candidate and its run are named by the scope, session, policies, and subject bytes, not the firing, so a later firing that adopts the reservation restages the same row under the same identity.
+    let policy_versions = review_policy_versions();
+    let key = handoff_key(&target.project_digest, session_id, &policy_versions);
+    let candidate_id = format!("hs-{key}-{}", &payload_digest[..32]);
+    let extraction_run_id = format!("hs-run-{key}-{}", &payload_digest[..32]);
+    let chunk_ordinal = firing
+        .chunk_range
+        .as_ref()
+        .ok_or(HandoffError::NoChunkRange)?
+        .from_ordinal;
+    let producer = ProducerBinding {
+        producer: PRODUCER.to_string(),
+        firing_id: format!("{key}#{}", firing.firing_seq),
+        ordinal: chunk_ordinal,
+    };
     let inputs = CausalInputs {
         target: ReviewTarget::StagedSubject {
             kernel_incarnation: target.kernel_incarnation.clone(),
@@ -366,15 +384,9 @@ pub fn reserve_and_stage(
         question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
         signals: Vec::new(),
         required_evidence: Vec::new(),
-        policy_versions: review_policy_versions(),
+        policy_versions,
     };
-    let job = match reserved_row(
-        request,
-        &producer,
-        &inputs,
-        &payload_digest,
-        &target.kernel_incarnation,
-    )? {
+    let job = match reserved_row(request, &producer, &inputs)? {
         ReservedRow::Job(job) => *job,
         ReservedRow::Done(handoff) => return Ok(handoff),
     };
@@ -392,7 +404,7 @@ pub fn reserve_and_stage(
         &target.project_digest,
         &target.domain_id,
         session_id,
-        producer.ordinal,
+        chunk_ordinal,
         &job.causal_identity,
     );
     let reference = ReviewStagedReference {

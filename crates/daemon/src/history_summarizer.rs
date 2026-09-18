@@ -875,15 +875,8 @@ pub fn republish_reserved(
         return settle("the retained publication is unreadable");
     };
     let plan = match target {
-        None => handoff::expired_activation(
-            store,
-            project_path,
-            session_id,
-            &publishing,
-            &reservation,
-            row_version,
-        )
-        .map(Box::new),
+        None => handoff::expired_activation(store, project_path, &reservation, row_version)
+            .map(Box::new),
         Some(target) => {
             // The reservation names its subject by digest and Kernel incarnation. A retained output that reproduces neither would reserve a second job under a name the publication refuses, so it is settled before anything is reserved or staged.
             let reproduces_reservation = target.kernel_incarnation
@@ -2125,7 +2118,6 @@ fn publish_output_from_awaiting(
             created_at_ms,
         },
         curator_handoff,
-        created_at_ms,
         failure_started_at_ms,
         failure_backoff_at_ms,
         completion_now_ms,
@@ -2185,7 +2177,6 @@ struct CuratorDecisionRequest<'a> {
     /// Retained with the reservation so a local retry republishes the same output.
     pending: PendingPublication,
     curator_handoff: Option<&'a HandoffTarget>,
-    created_at_ms: i64,
     failure_started_at_ms: i64,
     failure_backoff_at_ms: i64,
     completion_now_ms: fn() -> i64,
@@ -2212,7 +2203,6 @@ fn curator_decision_before_publish(
         aliases,
         pending,
         curator_handoff,
-        created_at_ms,
         failure_started_at_ms,
         failure_backoff_at_ms,
         completion_now_ms,
@@ -2234,6 +2224,7 @@ fn curator_decision_before_publish(
             publishing_row_version,
         });
     }
+    // The reservation is clocked at completion, not at the firing's start: the producer wait can reach ten minutes, and the queue lifetime begins when capacity is reserved.
     let handoff = handoff::reserve_and_stage(
         target,
         &HandoffRequest {
@@ -2243,7 +2234,7 @@ fn curator_decision_before_publish(
             firing: publishing,
             facts: &validated.facts,
             aliases,
-            now_ms: created_at_ms,
+            now_ms: completion_now_ms(),
         },
         |reservation| {
             persist_reservation(
@@ -2272,21 +2263,31 @@ fn curator_decision_before_publish(
             publishing_row_version,
         }),
         Err(error) => {
-            // After the reservation exists the firing stays in Publishing with the failure recorded, so recovery reconciles it against the reservation instead of abandoning and refiring.
             let failure_backoff_at_ms = completion_failure_backoff_at_ms(
                 failure_started_at_ms,
                 failure_backoff_at_ms,
                 completion_now_ms(),
             );
+            // After the reservation exists the firing stays in Publishing with the failure recorded, committed only over the row that was checked, so recovery reconciles it against the reservation instead of abandoning and refiring. Without one it is abandoned, fenced on this firing's predicate: a persist that lost its row-version race means another writer moved the session on, and that writer's state is not this firing's to abandon.
             let loaded = store.load(session_id)?;
             let current = &loaded.meta.history_summarizer;
             let detail = Some(format!("curator handoff failed: {error}"));
-            let next = if current.holds_reservation() {
-                retain_with_detail(current, failure_backoff_at_ms, detail)
+            if current.holds_reservation() {
+                persist_history_summarizer_state_if_unmoved(
+                    store,
+                    session_id,
+                    &loaded,
+                    retain_with_detail(current, failure_backoff_at_ms, detail),
+                )?;
             } else {
-                abandon_with_detail(current, failure_backoff_at_ms, detail)
-            };
-            persist_history_summarizer_state_if_unmoved(store, session_id, &loaded, next)?;
+                abandon_matching_run_with_detail(
+                    store,
+                    session_id,
+                    &publish_predicate(publishing)?,
+                    failure_backoff_at_ms,
+                    detail,
+                )?;
+            }
             Err(HistorySummarizerDriveError::CuratorHandoff(error))
         }
     }

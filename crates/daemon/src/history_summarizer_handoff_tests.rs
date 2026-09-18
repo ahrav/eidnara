@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::*;
 use crate::curator::handoff::{
     Handoff, HandoffError, HandoffRequest, HandoffTarget, PRODUCER, SUBJECT_SOURCE_KIND,
-    reserve_and_stage, review_binding, review_subject,
+    handoff_key, reserve_and_stage, review_binding, review_policy_versions, review_subject,
 };
 use crate::history_summarizer::{ValidatedPublishRequest, publish_validated_chunk};
 use crate::history_summarizer_citations::{Citation, FrozenAlias, FrozenAliasTable};
@@ -191,7 +191,7 @@ impl Rig {
         let payload_digest = payload.digest().unwrap();
         ReviewStagedReference {
             database_incarnation_id: self.kernel_incarnation.clone(),
-            candidate_id: format!("hs-{SESSION}-{}", &payload_digest[..32]),
+            candidate_id: format!("hs-{}-{}", rig_key(), &payload_digest[..32]),
             payload_digest,
         }
     }
@@ -293,6 +293,11 @@ impl Rig {
     }
 }
 
+/// The key the rig's handoffs derive their Kernel and job identities from.
+fn rig_key() -> String {
+    handoff_key(PROJECT_DIGEST, SESSION, &review_policy_versions())
+}
+
 fn selected_range_identities() -> Vec<HistorySummarizerSelectedMessageIdentity> {
     vec![HistorySummarizerSelectedMessageIdentity {
         mid: "m2".to_string(),
@@ -354,7 +359,6 @@ fn facts() -> Vec<FactCandidate> {
         FactCandidate {
             category: "PROJECT_RULES".to_string(),
             content: "Run bun install before building.".to_string(),
-            origin_history_segment_index: None,
             citations: vec![
                 citation("s1", 0, 11),
                 citation("s1", 12, 35),
@@ -364,7 +368,6 @@ fn facts() -> Vec<FactCandidate> {
         FactCandidate {
             category: "CONFIG_VALUES".to_string(),
             content: "The package manager is bun.".to_string(),
-            origin_history_segment_index: None,
             citations: vec![citation("s1", 0, 11)],
         },
     ]
@@ -490,7 +493,7 @@ fn identical_facts_from_the_next_firing_adopt_the_orphaned_reservation() {
     let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
     let adopted = activation(rig.handoff(t0() + 10).unwrap());
     assert_eq!(adopted.causal_identity, first.causal_identity);
-    assert_eq!(adopted.producer.firing_id, format!("{SESSION}#4"));
+    assert_eq!(adopted.producer.firing_id, format!("{}#4", rig_key()));
     assert_eq!(
         rig.store.curator_headroom(PROJECT).unwrap(),
         headroom_before,
@@ -512,7 +515,13 @@ fn identical_facts_from_the_next_firing_adopt_the_orphaned_reservation() {
         result.curator_activation,
         Some(CuratorActivationOutcome::Activated)
     );
-    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0() + 11)
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(rig.state().curator_reservation, None);
 }
 
@@ -587,7 +596,7 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
         job.producer,
         ProducerBinding {
             producer: PRODUCER.to_string(),
-            firing_id: format!("{SESSION}#3"),
+            firing_id: format!("{}#3", rig_key()),
             ordinal: 2,
         }
     );
@@ -640,7 +649,13 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
     assert_eq!(after.meta.history_summarizer.curator_reservation, None);
     assert_eq!(after.meta.history_summarizer.curator_nonadmission.count, 0);
     assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
-    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0() + 2)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -723,7 +738,13 @@ fn every_interruption_between_reservation_and_publication_converges_on_one_job()
         result.curator_activation,
         Some(CuratorActivationOutcome::Activated)
     );
-    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0() + 41)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -764,7 +785,12 @@ fn a_fence_refusal_after_the_reservation_settles_the_job_without_progress() {
     assert_eq!(after.meta.history_summarizer.curator_reservation, None);
     assert_eq!(rig.pending(), None);
     assert_eq!(after.meta.history_summarizer.curator_nonadmission.count, 0);
-    assert!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().is_empty());
+    assert!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0())
+            .unwrap()
+            .is_empty()
+    );
     // A competing publication that moved the segment set on settles the same way.
     let rig = Rig::open();
     let prepared = activation(rig.handoff(t0()).unwrap());
@@ -835,7 +861,12 @@ fn a_late_publication_records_expiry_and_never_resurrects_the_reservation() {
         rig.read_subject(&reservation, late),
         Err(ReviewReadError::Refused(ReviewReadRefusal::Expired))
     ));
-    assert!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().is_empty());
+    assert!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, late)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -847,13 +878,19 @@ fn identical_inputs_neither_duplicate_a_job_nor_reopen_a_settled_one() {
     rig.persist(publishing_state(4));
     assert_eq!(rig.handoff(t0() + 2).unwrap(), Handoff::Settled);
     assert_eq!(rig.state().curator_reservation, None);
-    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0() + 2)
+            .unwrap()
+            .len(),
+        1
+    );
     // Once the job is terminal, the same inputs stay settled.
     rig.store
         .finish_curator_job(
             PROJECT,
             &prepared.causal_identity,
-            CuratorJobOutcome::Completed,
+            CuratorJobOutcome::Failed,
             t0() + 3,
         )
         .unwrap();
@@ -1040,10 +1077,10 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     );
     assert_eq!(after.meta.history_summarizer.curator_reservation, None);
     assert_eq!(after.meta.history_summarizer.curator_nonadmission.count, 0);
-    let ready = rig.store.ready_curator_jobs(PROJECT, 8).unwrap();
+    let ready = rig.store.ready_curator_jobs(PROJECT, 8, t0()).unwrap();
     assert_eq!(ready.len(), 1);
     let job = &ready[0];
-    assert_eq!(job.producer.firing_id, format!("{SESSION}#3"));
+    assert_eq!(job.producer.firing_id, format!("{}#3", rig_key()));
     let CuratorJobState::Ready(input) = &job.state else {
         panic!("{:?}", job.state);
     };
@@ -1133,7 +1170,13 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
         })
     );
     assert_eq!(state.curator_reservation, None);
-    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0())
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -1782,10 +1825,9 @@ fn a_retained_publication_the_store_refuses_is_a_nonadmission_before_any_reserva
             aliases: &aliases(),
             pending,
             curator_handoff: Some(&target),
-            created_at_ms: t0(),
             failure_started_at_ms: t0(),
             failure_backoff_at_ms: t0() + 60_000,
-            completion_now_ms: || 0,
+            completion_now_ms: t0,
         })
     };
     // A chunk transcript inside its own envelope, retained beside the alias table that presents the same text again, exceeds the transcript envelope alone but fits the publication's.
@@ -1814,10 +1856,9 @@ fn a_retained_publication_the_store_refuses_is_a_nonadmission_before_any_reserva
         aliases: &aliases(),
         pending,
         curator_handoff: Some(&target),
-        created_at_ms: t0(),
         failure_started_at_ms: t0(),
         failure_backoff_at_ms: t0() + 60_000,
-        completion_now_ms: || 0,
+        completion_now_ms: t0,
     })
     .unwrap();
     assert_eq!(
@@ -1961,10 +2002,9 @@ fn a_retained_publication_the_scanner_would_rewrite_is_a_nonadmission_before_any
         aliases: &aliases(),
         pending,
         curator_handoff: Some(&target),
-        created_at_ms: t0(),
         failure_started_at_ms: t0(),
         failure_backoff_at_ms: t0() + 60_000,
-        completion_now_ms: || 0,
+        completion_now_ms: t0,
     })
     .unwrap();
     assert_eq!(
@@ -2061,4 +2101,215 @@ fn a_fence_refusal_still_abandons_the_firing_when_its_job_is_not_under_the_curre
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
     assert_eq!(after.curator_reservation, None);
     assert_eq!(rig.pending(), None);
+}
+
+/// Equal fact sets encode to equal bytes whatever order the model emitted them in, so a reordered retry names the same candidate and adopts the same reservation.
+#[test]
+fn the_subject_is_the_same_whatever_order_the_facts_arrive_in() {
+    let mut reversed = facts();
+    reversed.reverse();
+    assert_eq!(
+        review_subject(&facts(), &aliases()).unwrap(),
+        review_subject(&reversed, &aliases()).unwrap()
+    );
+}
+
+/// The wire protocol admits a 256-byte session id; every identity the handoff derives from it stays inside the store's identity bound.
+#[test]
+fn a_session_id_at_the_wire_bound_still_hands_off() {
+    let rig = Rig::open();
+    let session_id = "s".repeat(256);
+    let firing = publishing_state(3);
+    let handoff = reserve_and_stage(
+        &rig.target(),
+        &HandoffRequest {
+            store: &rig.store,
+            project: PROJECT,
+            session_id: &session_id,
+            firing: &firing,
+            facts: &facts(),
+            aliases: &aliases(),
+            now_ms: t0(),
+        },
+        |_| Ok(1),
+    )
+    .unwrap();
+    assert!(matches!(handoff, Handoff::Activate(_)), "{handoff:?}");
+}
+
+/// A recorded reservation names this firing's job only when it is the job this firing would reserve now. One made under other policy versions, as before a process upgrade, is left to expire and the new policy gets its own job (Q25/Q29).
+#[test]
+fn a_reservation_under_other_policy_versions_is_not_adopted() {
+    use crate::curator::broker::QuestionTemplate;
+
+    let rig = Rig::open();
+    let reference = rig.staged_reference();
+    let inputs = |policy_versions: BTreeMap<String, String>| CausalInputs {
+        target: ReviewTarget::StagedSubject {
+            kernel_incarnation: rig.kernel_incarnation.clone(),
+            candidate_id: reference.candidate_id.clone(),
+            payload_digest: reference.payload_digest.clone(),
+        },
+        question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
+        signals: Vec::new(),
+        required_evidence: Vec::new(),
+        policy_versions,
+    };
+    let current = inputs(review_policy_versions()).causal_identity().unwrap();
+    // A prior firing reserved the same subject under an older step schema and never published.
+    let prior = ProducerBinding {
+        producer: PRODUCER.to_string(),
+        firing_id: "prior-firing".to_string(),
+        ordinal: 2,
+    };
+    let previous_policy = inputs(BTreeMap::from([(
+        "step_schema".to_string(),
+        "previous".to_string(),
+    )]));
+    let previous = match rig
+        .store
+        .reserve_curator_job(PROJECT, &prior, &previous_policy, t0())
+        .unwrap()
+    {
+        memory_store::curator_jobs::ReserveOutcome::Reserved(job) => job,
+        other => panic!("{other:?}"),
+    };
+    assert_ne!(previous.causal_identity, current);
+    let mut state = publishing_state(3);
+    state.curator_reservation = Some(memory_store::CuratorReservation {
+        firing_seq: 2,
+        causal_identity: previous.causal_identity.clone(),
+        candidate_id: reference.candidate_id,
+        payload_digest: reference.payload_digest,
+        kernel_incarnation: rig.kernel_incarnation.clone(),
+        queue_deadline_ms: previous.queue_deadline_ms,
+    });
+    rig.persist(state);
+    let adopted = activation(rig.handoff(t0() + 1).unwrap());
+    assert_eq!(
+        adopted.causal_identity, current,
+        "the firing reserves under the policy it runs, not the one it recorded"
+    );
+    assert_eq!(
+        rig.job(&previous.causal_identity).state,
+        CuratorJobState::Reserved,
+        "the previous policy's reservation is left for the sweep"
+    );
+}
+
+/// A handoff failure abandons the firing that reserved, fenced on its publish predicate; a newer firing that moved the session on is untouched.
+#[test]
+fn a_handoff_failure_abandons_only_the_firing_that_reserved() {
+    let rig = Rig::open();
+    let publishing = rig.state();
+    let publishing_row_version = rig.store.load(SESSION).unwrap().row_version.unwrap();
+    // Another writer moved the session on to firing 4 before the reservation was recorded.
+    let mut next = publishing_state(4);
+    next.state = HistorySummarizerPhase::AwaitingProducer;
+    rig.persist(next.clone());
+    let mut validated = validated_range(2, 4);
+    validated.extraction = ExtractionOutcome::Accepted { count: 2 };
+    let target = rig.target();
+    let result = curator_decision_before_publish(CuratorDecisionRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        publishing: &publishing,
+        publishing_row_version,
+        validated: &validated,
+        aliases: &aliases(),
+        pending: pending_publication(&validated),
+        curator_handoff: Some(&target),
+        failure_started_at_ms: t0(),
+        failure_backoff_at_ms: 0,
+        completion_now_ms: t0,
+    });
+    assert!(
+        matches!(
+            result,
+            Err(HistorySummarizerDriveError::CuratorHandoff(
+                HandoffError::Persist(HistorySummarizerStateError::Publish(
+                    HistorySummarizerPublishError::CasConflict { .. }
+                ))
+            ))
+        ),
+        "{:?}",
+        result.err()
+    );
+    assert_eq!(
+        rig.state(),
+        next,
+        "the newer firing is not abandoned by the one that lost the race"
+    );
+}
+
+/// V27: one session id routed under two project roots is two sessions. Equal facts from both stage as distinct Kernel rows instead of the second colliding with the first's witness.
+#[test]
+fn the_same_session_under_two_project_roots_stages_two_subjects() {
+    let rig = Rig::open();
+    let firing = publishing_state(3);
+    let mut other_root = rig.target();
+    other_root.project_digest = "b".repeat(64);
+    for (project, target) in [(PROJECT, rig.target()), ("git:other", other_root)] {
+        let handoff = reserve_and_stage(
+            &target,
+            &HandoffRequest {
+                store: &rig.store,
+                project,
+                session_id: SESSION,
+                firing: &firing,
+                facts: &facts(),
+                aliases: &aliases(),
+                now_ms: t0(),
+            },
+            |_| Ok(1),
+        )
+        .unwrap();
+        assert!(matches!(handoff, Handoff::Activate(_)), "{handoff:?}");
+    }
+}
+
+/// Q25/Q29: a policy change permits one new job at an unchanged subject, and the Kernel row it stages must be its own, so the policies are part of the row's identity.
+#[test]
+fn the_handoff_key_separates_projects_sessions_and_policies() {
+    let current = review_policy_versions();
+    let mut previous = current.clone();
+    previous.insert("step_schema".to_string(), "previous".to_string());
+    let key = handoff_key(PROJECT_DIGEST, SESSION, &current);
+    assert_eq!(key.len(), 32);
+    assert_ne!(key, handoff_key(&"b".repeat(64), SESSION, &current));
+    assert_ne!(key, handoff_key(PROJECT_DIGEST, "other", &current));
+    assert_ne!(key, handoff_key(PROJECT_DIGEST, SESSION, &previous));
+}
+
+/// The producer wait can reach ten minutes; the queue lifetime starts when capacity is reserved, not when the firing started.
+#[test]
+fn the_queue_deadline_starts_at_the_reservation_not_the_firing() {
+    let rig = Rig::open();
+    let publishing = rig.state();
+    let publishing_row_version = rig.store.load(SESSION).unwrap().row_version.unwrap();
+    let mut validated = validated_range(2, 4);
+    validated.extraction = ExtractionOutcome::Accepted { count: 2 };
+    let target = rig.target();
+    let decision = curator_decision_before_publish(CuratorDecisionRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        publishing: &publishing,
+        publishing_row_version,
+        validated: &validated,
+        aliases: &aliases(),
+        pending: pending_publication(&validated),
+        curator_handoff: Some(&target),
+        // The firing started ten minutes before its producer completed.
+        failure_started_at_ms: t0() - 600_000,
+        failure_backoff_at_ms: 0,
+        completion_now_ms: t0,
+    })
+    .unwrap();
+    assert!(decision.curator_activation.is_some());
+    assert_eq!(
+        rig.reservation().queue_deadline_ms,
+        t0() + CURATOR_QUEUE_LIFETIME_MS
+    );
 }
