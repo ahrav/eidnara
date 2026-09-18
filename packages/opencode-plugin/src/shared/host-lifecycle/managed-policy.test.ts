@@ -245,6 +245,31 @@ describe("managed authenticated compatibility probe", () => {
         expect(calls).toEqual(["catalog.list"]);
     });
 
+    test("detachment during the first-snapshot wait sends no further host status request", async () => {
+        const calls: string[] = [];
+        const controller = new AbortController();
+        const starting: ManagedCompatibilityClient = {
+            authenticated: peer(),
+            catalogList: async () => {
+                calls.push("catalog.list");
+                return catalog;
+            },
+            hostStatus: async () => {
+                calls.push("host.status");
+                // The abort lands while the probe sleeps before its next read.
+                setTimeout(() => controller.abort(new Error("detached")), 5);
+                return { health: "degraded", metrics: { components: {} } };
+            },
+        };
+        const startedAt = performance.now();
+        await expect(
+            readCompatibilitySnapshot(starting, startedAt + 1_000, controller.signal),
+        ).rejects.toThrow("detached");
+        expect(calls).toEqual(["catalog.list", "host.status"]);
+        // The sleep ended on the abort, not on the 50 ms poll cadence.
+        expect(performance.now() - startedAt).toBeLessThan(45);
+    });
+
     test("an expired probe deadline sends no host status request", async () => {
         const calls: string[] = [];
         const expired = client({ calls });

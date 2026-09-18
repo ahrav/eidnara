@@ -32,6 +32,29 @@ import {
 const MAX_PARENT_WALK = 8;
 const READINESS_POLL_MS = 50;
 
+/**
+ * Sleeps one poll interval, or until `deadline`, or until `signal` aborts, whichever comes
+ * first. Both readiness loops call this so an abort ends the wait at once instead of after the
+ * next request.
+ */
+function sleepUntilPollOrAbort(deadline: number, signal: AbortSignal | undefined): Promise<void> {
+    return new Promise<void>((resolve) => {
+        const onAbort = (): void => {
+            clearTimeout(timer);
+            resolve();
+        };
+        const timer = setTimeout(
+            () => {
+                // `once` removes the listener only when abort fires; the timer path must remove it too or every poll iteration leaves one behind.
+                signal?.removeEventListener("abort", onAbort);
+                resolve();
+            },
+            Math.min(READINESS_POLL_MS, Math.max(1, deadline - monotonicNow())),
+        );
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
 export function buildManagedCredentialEnvelope(
     env: Record<string, string | undefined>,
 ): NativeStartupEnvelope {
@@ -168,21 +191,7 @@ async function probeManagedStorage(
             const state = storageState(snapshot.metrics);
             // An abort means no waiter remains; the observation is left indeterminate rather than polled to the deadline.
             if (state !== "starting" || monotonicNow() >= deadline || signal?.aborted) return state;
-            await new Promise<void>((resolve) => {
-                const onAbort = (): void => {
-                    clearTimeout(timer);
-                    resolve();
-                };
-                const timer = setTimeout(
-                    () => {
-                        // `once` removes the listener only when abort fires; the timer path must remove it too or every poll iteration leaves one behind.
-                        signal?.removeEventListener("abort", onAbort);
-                        resolve();
-                    },
-                    Math.min(READINESS_POLL_MS, Math.max(1, deadline - monotonicNow())),
-                );
-                signal?.addEventListener("abort", onAbort, { once: true });
-            });
+            await sleepUntilPollOrAbort(deadline, signal);
             if (signal?.aborted) return "starting";
         }
     } catch (error) {
@@ -282,9 +291,9 @@ async function readCompatibilityProbe(
         }
         if (signal?.aborted) throw signal.reason ?? new Error("compatibility probe aborted");
         if (componentRecord(status.metrics, "context") !== null) break;
-        const waitMs = Math.min(READINESS_POLL_MS, deadline - monotonicNow());
-        if (waitMs <= 0) break;
-        await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+        if (deadline - monotonicNow() <= 0) break;
+        await sleepUntilPollOrAbort(deadline, signal);
+        if (signal?.aborted) throw signal.reason ?? new Error("compatibility probe aborted");
         // The budget ran out while waiting: the last read stands as the observation.
         if (monotonicNow() >= deadline) break;
     }
