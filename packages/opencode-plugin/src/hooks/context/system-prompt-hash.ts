@@ -3,7 +3,10 @@ import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import { type PromptSurfaceConfig, resolvePromptSurface } from "../../shared/prompt-surface";
-import { promptSurfaceHashMaterial } from "../../shared/prompt-surface-runtime";
+import {
+    guidanceMarkerCount,
+    promptSurfaceHashMaterial,
+} from "../../shared/prompt-surface-runtime";
 import { resolveEidnaraReduceAvailability } from "./eidnara-reduce-availability";
 import {
     EIDNARA_INTERNAL_AGENT_SIGNATURES,
@@ -31,8 +34,7 @@ interface SessionTracking {
 /** One entry per tracked session; the LRU bound matches the eidnara_reduce verdict caches. */
 const SYSTEM_PROMPT_STATE_CAPACITY = 1000;
 
-/** The daemon renders the guidance block under this heading; a prompt that already carries it is not injected twice. */
-const GUIDANCE_MARKER = "## Eidnara";
+/** Appended between the host system prompt and the daemon-rendered guidance block, which opens with its own `## Eidnara` heading line. */
 const SYSTEM_PROMPT_GUIDANCE_SEPARATOR = "\n\n";
 
 /** Inputs the daemon's `guidance.get` route needs to select and pin the guidance block for one call. */
@@ -173,10 +175,12 @@ export function createSystemPromptHashHandler(deps: {
         // The guidance block explains the tags, `<session-history>`, and memory tools the
         // transform serves; without it the model meets that structure unannounced. OpenAI-
         // compatible templates allow one system message, so it is appended to the host entry.
+        // A prompt that already carries the heading line is not injected twice; prose that
+        // mentions the marker does not count.
         if (
             deps.fetchGuidance &&
             output.system.length > 0 &&
-            !fullPromptForDetection.includes(GUIDANCE_MARKER)
+            guidanceMarkerCount(fullPromptForDetection) === 0
         ) {
             try {
                 const guidance = await deps.fetchGuidance({

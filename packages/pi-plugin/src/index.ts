@@ -67,8 +67,8 @@ const PREFIX = "[eidnara][pi]";
  * The Pi plugin has no message transform: nothing folds history or serves `§N§` tags, so
  * owning compaction would only cancel Pi's native compaction and leave the session to
  * overflow. While this is false, every compaction-on path in this file is skipped, whatever
- * the compaction setting says; `docs/specifications/pi-context-transform.md` describes the
- * transform that flips it.
+ * the compaction setting says. The Pi transform that flips it is tracked in the issue tracker
+ * (`docs/agents/issue-tracker.md`).
  */
 export const PI_TRANSFORM_AVAILABLE: boolean = false;
 const managedDemandStart = createLazyManagedDemandStart({

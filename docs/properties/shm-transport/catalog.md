@@ -1937,26 +1937,20 @@ Open questions:
 - An earlier draft asserted that the code's step order differs from the
   document's numbering. That is **not supported**: steps one through eight appear
   in documented order. Two real divergences replace it. At HEAD
-  `probeCapabilities` (`packages/shm-native/index.ts:319-443`) refuses in the
-  order `addon_unavailable` (`:331-332`), `node_detachment_unavailable`
-  (`:333-334`), `napi_8_unavailable` (`:338-345`),
-  `external_exact_bounds_unavailable` (`:353-360`),
-  `transfer_prevention_unavailable` (`:373-382`), `detachment_unavailable`
-  (`:397-407`), `cleanup_hooks_unavailable` (`:415-426`), then the catch-all
-  `runtime_mechanism_unavailable` (`:436-442`); the addon-load gate precedes the
-  Node detachment gate so an unavailable addon is not reported as a detachment
-  failure (`:328-329`). Whether the enumeration is meant to be one gate per
-  documented step is the open question. (needs human input)
-- Superseded at the commit that starts the channel on Node: the probe no longer
-  refuses on `node_detachment_unavailable` or `transfer_prevention_unavailable`.
   `probeCapabilities` (`packages/shm-native/index.ts:441-555`) refuses in the
   order `addon_unavailable` (`:454`), `napi_8_unavailable` (`:462`),
   `external_exact_bounds_unavailable` (`:478`), `detachment_unavailable`
   (`:514`), `cleanup_hooks_unavailable` (`:534`), then the catch-all
-  `runtime_mechanism_unavailable` (`:552`). Transfer prevention is measured
-  (`transferPreventionMechanism` of `intrinsic`, `marked`, or `none`, `:489-490`)
-  and reported on the capability object rather than gated, because no shipped
-  runtime offers both marking and detachment; the evidence file
+  `runtime_mechanism_unavailable` (`:552`); the addon-load gate precedes every
+  other gate so an unavailable addon is not reported as a detachment failure
+  (`:452-454`). Whether the enumeration is meant to be one gate per documented
+  step is the open question. (needs human input)
+- Since the commit that starts the channel on Node, the probe no longer refuses
+  on `node_detachment_unavailable` or `transfer_prevention_unavailable`.
+  Transfer prevention is measured (`transferPreventionMechanism` of
+  `intrinsic`, `marked`, or `none`, `:489-490`) and reported on the capability
+  object rather than gated, because no shipped runtime offers both marking and
+  detachment; the evidence file
   `capability-probe-gates-every-advertised-mechanism.md` describes the earlier
   gating order and is stale for those two reasons. Whether a reported rather
   than gated mechanism still satisfies this record's guarantee is open.

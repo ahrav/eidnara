@@ -96,7 +96,8 @@ function resolveUserConfigDirectory(
     return sharedBase === undefined ? undefined : dirname(sharedBase);
 }
 
-function markerCount(content: string): number {
+/** Number of `## Eidnara` heading lines in `content`; prose that mentions the marker does not count. */
+export function guidanceMarkerCount(content: string): number {
     return content.match(GUIDANCE_MARKER_LINE)?.length ?? 0;
 }
 
@@ -197,7 +198,7 @@ export function createPromptSurfaceRuntime(
             return undefined;
         }
 
-        const markers = markerCount(content);
+        const markers = guidanceMarkerCount(content);
         if (markers !== 1) {
             warnOnce(
                 `guidance-marker-count:${path}:${markers}`,

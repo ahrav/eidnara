@@ -606,6 +606,26 @@ describe("system-prompt-hash guidance injection", () => {
         expect(calls).toHaveLength(1);
     });
 
+    it("injects when the prompt only mentions the marker in prose, not as a heading line", async () => {
+        useTempDataHome("sph-guidance-prose-marker-");
+        let calls = 0;
+        const { handler } = buildHandler({
+            fetchGuidance: async () => {
+                calls += 1;
+                return "## Eidnara\n\nGuidance block.";
+            },
+        });
+
+        const output = { system: ["Never emit a `## Eidnara` heading yourself; it is reserved."] };
+        await handler({ sessionID: "ses-guidance-prose" }, output);
+        expect(calls).toBe(1);
+        expect(output.system[0]).toEndWith("\n\n## Eidnara\n\nGuidance block.");
+
+        // Now the heading line is present: no second fetch.
+        await handler({ sessionID: "ses-guidance-prose" }, output);
+        expect(calls).toBe(1);
+    });
+
     it("keeps the prompt unchanged and warns once per session when the fetch fails", async () => {
         useTempDataHome("sph-guidance-fail-open-");
         const sessionId = "ses-guidance-fail";
