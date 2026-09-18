@@ -241,20 +241,28 @@ fn validation_error(message: impl Into<String>) -> HistorySummarizerValidationEr
 pub fn parse_history_segment_output(
     text: &str,
 ) -> Result<ParsedHistorySegmentOutput, HistorySummarizerValidationError> {
+    // Models wrap the document in a Markdown fence or add a sentence after it; the one
+    // complete root is still required, and everything outside it is ignored rather than fatal.
     let Some(root) = output_document_regex().captures(text) else {
         return Err(validation_error(
             "HistorySummarizer output must be one complete <output> root document.",
         ));
     };
+    let root_span = root.get(0).expect("whole match");
     let root_body = root
         .name("body")
         .map(|capture| capture.as_str())
         .unwrap_or_default();
-    if output_tag_regex().is_match(root_body) {
+    if output_tag_regex().is_match(root_body)
+        || output_tag_regex().is_match(&text[..root_span.start()])
+        || output_tag_regex().is_match(&text[root_span.end()..])
+    {
         return Err(validation_error(
             "HistorySummarizer output must contain exactly one <output> root document.",
         ));
     }
+    // Every structure below is read from the root document only.
+    let text = root_body;
 
     let mut history_segments = Vec::new();
     let mut facts = Vec::new();
@@ -1147,9 +1155,10 @@ fn unescape_xml(s: &str) -> String {
 
 fn output_document_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?is)\A\s*<output(?:\s[^>]*)?>(?P<body>.*)</output\s*>\s*\z").unwrap()
-    })
+    // Unanchored and lazy: the first complete root wins, and the caller rejects any other
+    // `output` tag before or after it, so a fenced or prose-wrapped document parses while two
+    // documents still fail.
+    RE.get_or_init(|| Regex::new(r"(?is)<output(?:\s[^>]*)?>(?P<body>.*?)</output\s*>").unwrap())
 }
 
 fn output_tag_regex() -> &'static Regex {
@@ -1608,6 +1617,30 @@ full narrative
             let error = parse_history_segment_output(malformed).expect_err("invalid root rejected");
             assert!(error.message.contains("<output> root document"));
         }
+        // Two complete documents are still two, wherever the second one sits.
+        let doubled = format!(
+            "{}\n{}",
+            xml(&[(1, 1, "first")], 2, ""),
+            xml(&[(1, 1, "second")], 2, "")
+        );
+        let error = parse_history_segment_output(&doubled).expect_err("two roots rejected");
+        assert!(error.message.contains("exactly one <output>"));
+    }
+
+    /// A model that fences the document in Markdown or adds a sentence after it still
+    /// delivered one complete root; the parser reads that root and ignores the wrapper.
+    #[test]
+    fn parser_ignores_a_markdown_fence_and_prose_around_the_single_root() {
+        let document = xml(&[(1, 1, "fenced")], 2, "");
+        let wrapped = format!(
+            "Here is the summary:\n```xml\n{document}\n```\n\nACK. Message [1] processed; nothing else was extracted."
+        );
+        let parsed = parse_history_segment_output(&wrapped).expect("fenced root parses");
+        assert_eq!(parsed.history_segments.len(), 1);
+        assert_eq!(parsed.history_segments[0].title, "fenced");
+        assert_eq!(parsed.unprocessed_from, Some(2));
+        let bare = parse_history_segment_output(&document).expect("bare root parses");
+        assert_eq!(parsed.history_segments, bare.history_segments);
     }
 
     #[test]
