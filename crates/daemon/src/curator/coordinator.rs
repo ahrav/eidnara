@@ -98,7 +98,7 @@ pub struct Coordinator {
     pub credential_id: String,
     pub permits: Arc<InvestigationPermits>,
     pub now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
-    /// Issued inspections per job; production passes [`super::broker::MAX_ISSUED_INSPECTIONS`], tests lower it (Q23).
+    /// Issued inspections per job; production passes [`super::broker::MAX_ISSUED_INSPECTIONS`], tests lower it (Q23). Applied only under the `test-support` feature.
     pub inspection_limit: usize,
 }
 
@@ -176,8 +176,10 @@ impl Coordinator {
             },
             context.question,
         )
-        .map_err(|_| InvestigationError::Kernel(RefusalCode::Scope))?
-        .with_inspection_limit(self.inspection_limit);
+        .map_err(|_| InvestigationError::Kernel(RefusalCode::Scope))?;
+        // The ceiling is lowered only under `test-support`; production runs at the broker's own bound whatever the field says.
+        #[cfg(feature = "test-support")]
+        let broker = broker.with_inspection_limit(self.inspection_limit);
         // The cutoff as a monotonic instant: the ledger's absolute millisecond mapped through the same clock the run reads.
         let remaining = context
             .receipt
