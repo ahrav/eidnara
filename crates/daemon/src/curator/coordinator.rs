@@ -125,7 +125,7 @@ pub enum InvestigationError {
     /// The receipt is not this run's to settle.
     #[error("fenced")]
     Fenced,
-    /// The subject cannot be resolved for a remote run; the caller settles the run on this refusal.
+    /// The subject or a linked reference cannot be resolved for this run; the caller settles the run on this refusal.
     #[error("refused {0}")]
     Refused(RefusalCode),
     #[error("supervisor {0}")]
@@ -150,7 +150,7 @@ enum Attempt {
 }
 
 impl Coordinator {
-    /// Runs one investigation to its settlement. `cancel` stops admission of new rounds, signals the live attempt, and joins it before the permit is released.
+    /// Runs one investigation to its settlement. `cancel` stops admission of new rounds, signals the live attempt, and joins it before the permit is released. Store reads, hold acquisition, and settlement are synchronous Kernel work run under [`tokio::task::block_in_place`], so the caller needs a multi-threaded runtime.
     pub async fn investigate(
         &self,
         context: JobContext<'_>,
@@ -161,12 +161,47 @@ impl Coordinator {
             .permits
             .try_acquire(project)
             .ok_or(InvestigationError::Capacity)?;
+        let prepared = tokio::task::block_in_place(|| self.prepare(&context))?;
+        let broker = EvidenceBroker::new(
+            RunBinding {
+                project: kernel::ProjectScope::new(project)
+                    .map_err(|_| InvestigationError::Kernel(RefusalCode::Scope))?,
+                hold: prepared.hold_binding.clone(),
+                hold_id: prepared.hold_id,
+                destination: kernel::ArtifactDestination::Remote,
+            },
+            context.question,
+        )
+        .with_inspection_limit(self.inspection_limit);
+        // The cutoff as a monotonic instant: the ledger's absolute millisecond mapped through the same clock the run reads.
+        let remaining = context
+            .receipt
+            .execution_cutoff_ms
+            .saturating_sub((self.now_ms)());
+        let cutoff = Instant::now() + Duration::from_millis(u64::try_from(remaining).unwrap_or(0));
+        let mut run = Run {
+            coordinator: self,
+            context,
+            hold_binding: prepared.hold_binding,
+            broker: Arc::new(tokio::sync::Mutex::new(broker)),
+            transcript: Vec::new(),
+            sent: 0,
+            disclosed_spans: BTreeMap::new(),
+            discovery: RelatedMemoryDiscovery::new(""),
+            cutoff,
+        };
+        run.investigate(prepared.subject, prepared.starting, cancel)
+            .await
+    }
+
+    /// Resolves the subject and linked references and acquires the execution hold over their evidence. The hold is taken only for a run that will read: the Kernel refuses a hold expiring at or before its own clock, a refused subject sends nothing, and an evidence-free staged subject has nothing to protect. Each of those runs settles without a hold, so an empty `hold_id` reaches the broker for them.
+    fn prepare(&self, context: &JobContext<'_>) -> Result<Prepared, InvestigationError> {
         let memstore_incarnation = self
             .ledger
             .curator_store_incarnation()
             .map_err(|_| InvestigationError::Kernel(RefusalCode::Store))?;
         let hold_binding = CuratorHoldBinding {
-            project_digest: project.clone(),
+            project_digest: context.job.project.clone(),
             kernel_incarnation: context.receipt.kernel_incarnation_id.clone(),
             memstore_incarnation,
             subject: context.job.causal_identity.clone(),
@@ -192,44 +227,34 @@ impl Coordinator {
         };
         protected.sort();
         protected.dedup();
-        let hold = self
-            .store
-            .acquire_execution_hold(
-                &hold_binding,
-                &protected,
-                context.receipt.execution_cutoff_ms,
-            )
-            .map_err(|error| InvestigationError::Kernel(super::broker::hold_refusal(error)))?;
-        let broker = EvidenceBroker::new(
-            RunBinding {
-                project: kernel::ProjectScope::new(project)
-                    .map_err(|_| InvestigationError::Kernel(RefusalCode::Scope))?,
-                hold: hold_binding.clone(),
-                hold_id: hold.hold_id,
-                destination: kernel::ArtifactDestination::Remote,
-            },
-            context.question,
-        )
-        .with_inspection_limit(self.inspection_limit);
-        // The cutoff as a monotonic instant: the ledger's absolute millisecond mapped through the same clock the run reads.
-        let remaining = context
-            .receipt
-            .execution_cutoff_ms
-            .saturating_sub((self.now_ms)());
-        let cutoff = Instant::now() + Duration::from_millis(u64::try_from(remaining).unwrap_or(0));
-        let mut run = Run {
-            coordinator: self,
-            context,
-            hold_binding,
-            broker: Arc::new(tokio::sync::Mutex::new(broker)),
-            transcript: Vec::new(),
-            sent: 0,
-            disclosed_spans: BTreeMap::new(),
-            discovery: RelatedMemoryDiscovery::new(""),
-            cutoff,
+        let before_cutoff = (self.now_ms)() < context.receipt.execution_cutoff_ms;
+        let hold_id = if before_cutoff && subject.is_ok() && !protected.is_empty() {
+            self.store
+                .acquire_execution_hold(
+                    &hold_binding,
+                    &protected,
+                    context.receipt.execution_cutoff_ms,
+                )
+                .map_err(|error| InvestigationError::Kernel(super::broker::hold_refusal(error)))?
+                .hold_id
+        } else {
+            String::new()
         };
-        run.investigate(subject, starting, cancel).await
+        Ok(Prepared {
+            hold_binding,
+            subject,
+            starting,
+            hold_id,
+        })
     }
+}
+
+struct Prepared {
+    hold_binding: CuratorHoldBinding,
+    subject: Result<ReferenceExpectation, RefusalCode>,
+    starting: Vec<ReferenceExpectation>,
+    /// `hold_id` is empty when the run holds no evidence.
+    hold_id: String,
 }
 
 /// One investigation's state: the broker every disclosure goes through, the transcript resent each round, the related-memory cursors, and the cutoff every wait is bounded by.
@@ -267,32 +292,11 @@ impl Run<'_> {
                 Ok(subject) => subject,
                 Err(code) => return self.settle(&broker, RunResult::Refused(code)),
             };
-            let alias = broker.aliases.issue(subject);
-            match broker.read(&self.coordinator.store, alias.as_str(), None, now) {
-                Ok(read) => {
-                    self.discovery = RelatedMemoryDiscovery::new(
-                        std::str::from_utf8(read.buffer.bytes()).unwrap_or(""),
-                    );
-                    self.record_span(&alias, 0..read.buffer.bytes().len() as u64);
-                    self.push_labeled(&broker, read.buffer);
-                }
-                Err(refusal) => return self.settle(&broker, RunResult::Refused(refusal.code)),
+            if let Err(result) =
+                tokio::task::block_in_place(|| self.open(&mut broker, subject, starting, now))?
+            {
+                return self.settle(&broker, result);
             }
-            // The opening disclosure is the host's, not a batch the model issued.
-            broker.accounting.end_batch();
-            let issued: Vec<String> = starting
-                .into_iter()
-                .map(|expectation| broker.aliases.issue(expectation).as_str().to_string())
-                .collect();
-            let notice = if issued.is_empty() {
-                "no linked references".to_string()
-            } else {
-                format!("linked references: {}", issued.join(", "))
-            };
-            let notice = broker
-                .render_host_text(&notice)
-                .map_err(|refusal| InvestigationError::Kernel(refusal.code))?;
-            self.transcript.push(notice);
         }
         for round in 0..MAX_ROUNDS {
             if cancel.is_cancelled() {
@@ -320,37 +324,89 @@ impl Run<'_> {
             };
             match step {
                 Step::ReadBatch { operations } => {
-                    for operation in operations {
-                        if cancel.is_cancelled() {
-                            return Err(InvestigationError::Cancelled);
+                    let ended = tokio::task::block_in_place(|| {
+                        for operation in operations {
+                            if cancel.is_cancelled() {
+                                return Err(InvestigationError::Cancelled);
+                            }
+                            let now = (self.coordinator.now_ms)();
+                            if now >= self.context.receipt.execution_cutoff_ms {
+                                return Ok(Some(RunResult::Exhausted));
+                            }
+                            self.execute(&mut broker, operation, now);
                         }
-                        let now = (self.coordinator.now_ms)();
-                        if now >= self.context.receipt.execution_cutoff_ms {
-                            return self.settle(&broker, RunResult::Exhausted);
-                        }
-                        self.execute(&mut broker, operation, now);
+                        broker.accounting.end_batch();
+                        Ok(None)
+                    })?;
+                    if let Some(result) = ended {
+                        return self.settle(&broker, result);
                     }
-                    broker.accounting.end_batch();
                 }
                 Step::Propose(outcome) => {
-                    let proposal = match bind_proposal(
-                        &self.coordinator.store,
-                        &mut broker,
-                        &self.context,
-                        &self.disclosed_spans,
-                        *outcome,
-                    ) {
-                        Ok(proposal) => proposal,
-                        Err(refusal) => {
-                            return self.settle(&broker, RunResult::Refused(refusal.code));
+                    let bound = tokio::task::block_in_place(|| {
+                        bind_proposal(
+                            &self.coordinator.store,
+                            &mut broker,
+                            &self.context,
+                            &self.disclosed_spans,
+                            *outcome,
+                        )
+                    });
+                    return match bound {
+                        Ok(proposal) => {
+                            self.settle(&broker, RunResult::Proposal(Box::new(proposal)))
                         }
+                        Err(refusal) => self.settle(&broker, RunResult::Refused(refusal.code)),
                     };
-                    return self.settle(&broker, RunResult::Proposal(Box::new(proposal)));
                 }
                 Step::Abstain { .. } => return self.settle(&broker, RunResult::Declined),
             }
         }
         self.settle_now(RunResult::Exhausted).await
+    }
+
+    fn open(
+        &mut self,
+        broker: &mut EvidenceBroker,
+        subject: ReferenceExpectation,
+        starting: Vec<ReferenceExpectation>,
+        now: i64,
+    ) -> Result<Result<(), RunResult>, InvestigationError> {
+        let alias = broker.aliases.issue(subject);
+        match broker.read(&self.coordinator.store, alias.as_str(), None, now) {
+            Ok(read) => {
+                self.discovery = RelatedMemoryDiscovery::new(
+                    std::str::from_utf8(read.buffer.bytes()).unwrap_or(""),
+                );
+                self.record_span(&alias, 0..read.buffer.bytes().len() as u64);
+                self.push_labeled(broker, read.buffer);
+            }
+            Err(Refusal {
+                code:
+                    RefusalCode::ByteLimit
+                    | RefusalCode::BufferLimit
+                    | RefusalCode::InspectionLimit
+                    | RefusalCode::BatchLimit,
+                ..
+            }) => return Ok(Err(RunResult::Exhausted)),
+            Err(refusal) => return Ok(Err(RunResult::Refused(refusal.code))),
+        }
+        // The opening disclosure is the host's, not a batch the model issued.
+        broker.accounting.end_batch();
+        let issued: Vec<String> = starting
+            .into_iter()
+            .map(|expectation| broker.aliases.issue(expectation).as_str().to_string())
+            .collect();
+        let notice = if issued.is_empty() {
+            "no linked references".to_string()
+        } else {
+            format!("linked references: {}", issued.join(", "))
+        };
+        let notice = broker
+            .render_host_text(&notice)
+            .map_err(|refusal| InvestigationError::Kernel(refusal.code))?;
+        self.transcript.push(notice);
+        Ok(Ok(()))
     }
 
     async fn settle_now(&self, result: RunResult) -> Result<Settled, InvestigationError> {
@@ -365,16 +421,18 @@ impl Run<'_> {
         result: RunResult,
     ) -> Result<Settled, InvestigationError> {
         let now_ms = Arc::clone(&self.coordinator.now_ms);
-        Settlement {
-            store: &self.coordinator.store,
-            ledger: &self.coordinator.ledger,
-            binding: self.context.binding,
-            claim: self.context.claim,
-            now_ms: &move || now_ms(),
-            #[cfg(any(test, feature = "test-support"))]
-            before_completion_for_test: None,
-        }
-        .settle(broker, result)
+        tokio::task::block_in_place(|| {
+            Settlement {
+                store: &self.coordinator.store,
+                ledger: &self.coordinator.ledger,
+                binding: self.context.binding,
+                claim: self.context.claim,
+                now_ms: &move || now_ms(),
+                #[cfg(any(test, feature = "test-support"))]
+                before_completion_for_test: None,
+            }
+            .settle(broker, result)
+        })
         .map_err(InvestigationError::from)
     }
 
@@ -385,18 +443,15 @@ impl Run<'_> {
         cancel: &CancellationToken,
     ) -> Result<Attempt, InvestigationError> {
         let coordinator = self.coordinator;
+        // Every previously sent buffer is charged again before the resend is prepared, so an over-budget resend is refused before any request byte is sent.
+        let resend: u64 = self.transcript[..self.sent]
+            .iter()
+            .map(|buffer| buffer.tag().charged_bytes)
+            .fold(0, u64::saturating_add);
         let prepared = {
             let mut guard = self.broker.lock().await;
-            // Q22: a buffer was charged when it was read; every later send charges it again.
-            for buffer in &self.transcript[..self.sent] {
-                let tag = buffer.tag();
-                if guard
-                    .accounting
-                    .charge_render(tag.alias.as_ref(), tag.charged_bytes)
-                    .is_err()
-                {
-                    return Ok(Attempt::Exhausted);
-                }
+            if guard.accounting.charge_render(None, resend).is_err() {
+                return Ok(Attempt::Exhausted);
             }
             let system = guard
                 .render_host_text(&format!(
@@ -404,16 +459,19 @@ impl Run<'_> {
                     self.context.question.text()
                 ))
                 .map_err(|refusal| InvestigationError::Kernel(refusal.code))?;
-            prepare_body(
+            match prepare_body(
                 &guard,
                 &coordinator.profile,
                 system,
                 self.transcript.clone(),
-            )
-            .map_err(|refusal| match refusal {
-                DisclosureRefusal::Send { .. } => InvestigationError::Kernel(RefusalCode::TooLarge),
-                _ => InvestigationError::Kernel(RefusalCode::Store),
-            })?
+            ) {
+                Ok(prepared) => prepared,
+                Err(DisclosureRefusal::Send { .. }) => {
+                    guard.accounting.refund_render(resend);
+                    return Ok(Attempt::Exhausted);
+                }
+                Err(_) => return Err(InvestigationError::Kernel(RefusalCode::Unsupported)),
+            }
         };
         let key = InternalRunKey {
             task_kind: CURATOR_TASK_KIND.to_string(),
@@ -497,7 +555,7 @@ impl Run<'_> {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .take();
-        // Buffers count as sent once a request byte left the host; a refusal before the handoff leaves them uncharged for the next send.
+        // Buffers count as sent once a request byte left the host; a refusal before the handoff returns the resend charge, so only sends that happened are charged.
         let left_host = matches!(
             &disclosed,
             Some(Ok(_))
@@ -507,6 +565,8 @@ impl Run<'_> {
         );
         if left_host {
             self.sent = self.transcript.len();
+        } else {
+            self.broker.lock().await.accounting.refund_render(resend);
         }
         // The supervisor's verdict comes first: text that arrives at the cutoff is not admitted, whatever the disclosure recorded for the attempt.
         match (settled, disclosed) {
@@ -582,98 +642,21 @@ fn ledger_verdict(reason: CuratorLedgerRefusal) -> Result<Attempt, Investigation
 impl Run<'_> {
     /// Executes one admitted operation and appends its rendered results, or a refusal notice, to the transcript. Refused-after-admission operations count against the job (Q23); a refusal is a host-authored code, never provider or source text.
     fn execute(&mut self, broker: &mut EvidenceBroker, operation: Operation, now: i64) {
-        let store = &self.coordinator.store;
-        let unavailable = || refuse(None, RefusalCode::Unavailable);
-        let mut spans: Vec<(Alias, std::ops::Range<u64>)> = Vec::new();
-        // Every read below is admitted and charged by the broker (Q23); the coordinator adds nothing to that accounting.
-        let outcome: Result<Vec<RenderedBuffer>, Refusal> = match operation {
-            Operation::ReadReference { alias, range } => broker
-                .read(store, &alias, range.map(|range| range.to_range()), now)
-                .map(|read| {
-                    let end = read.buffer.bytes().len() as u64;
-                    let span = range.map_or(0..end, |range| range.start..range.start + end);
-                    spans.push((read.alias.clone(), span));
-                    vec![read.buffer]
-                }),
-            Operation::FindRelated { cursor } => {
-                let budget = EvalBudget::new(Some(self.cutoff.into_std()), Arc::default());
-                self.discovery
-                    .page(store, broker, cursor.as_deref(), &budget, now)
-                    .and_then(|page| {
-                        spans.extend(
-                            page.hits
-                                .iter()
-                                .map(|hit| (hit.alias.clone(), hit.span.clone())),
-                        );
-                        let summary = format!(
-                            "related search: {} hits, completeness {:?}{}{}",
-                            page.hits.len(),
-                            page.completeness,
-                            withheld(page.withheld),
-                            page.next_cursor
-                                .as_deref()
-                                .map(|cursor| format!(", cursor {cursor}"))
-                                .unwrap_or_default()
-                        );
-                        let hits = page
-                            .hits
-                            .into_iter()
-                            .map(|hit| (hit.alias, hit.buffer, hit.shared_origin));
-                        render_hits(broker, hits, &summary)
-                    })
-            }
-            Operation::SearchProject { by, literal } => {
-                match self.context.project_root.as_deref_mut() {
-                    None => Err(unavailable()),
-                    Some(root) => {
-                        let query = match by {
-                            SearchBy::Path => SearchQuery::Path(&literal),
-                            SearchBy::Name => SearchQuery::Name(&literal),
-                            SearchBy::Content => SearchQuery::Content(&literal),
-                        };
-                        root.search(store, broker, query, now).and_then(|outcome| {
-                            spans.extend(
-                                outcome
-                                    .hits
-                                    .iter()
-                                    .map(|hit| (hit.alias.clone(), hit.span.clone())),
-                            );
-                            let summary = format!(
-                                "project search: {} hits, completeness {:?}{}",
-                                outcome.hits.len(),
-                                outcome.completeness,
-                                withheld(outcome.withheld)
-                            );
-                            let hits = outcome
-                                .hits
-                                .into_iter()
-                                .map(|hit| (hit.alias, hit.buffer, None));
-                            render_hits(broker, hits, &summary)
-                        })
-                    }
-                }
-            }
-            Operation::ReadProject { path, range } => {
-                match self.context.project_root.as_deref_mut() {
-                    None => Err(unavailable()),
-                    Some(root) => root
-                        .read(
-                            store,
-                            broker,
-                            &path,
-                            range.map(|range| range.to_range()),
-                            now,
-                        )
-                        .map(|read| vec![read.buffer]),
-                }
-            }
-        };
+        let outcome = run_operation(
+            &self.coordinator.store,
+            self.context.project_root.as_deref_mut(),
+            &mut self.discovery,
+            self.cutoff,
+            broker,
+            operation,
+            now,
+        );
         match outcome {
-            Ok(buffers) => {
-                for (alias, span) in spans {
+            Ok(executed) => {
+                for (alias, span) in executed.spans {
                     self.record_span(&alias, span);
                 }
-                for buffer in buffers {
+                for buffer in executed.buffers {
                     self.push_labeled(broker, buffer);
                 }
             }
@@ -694,6 +677,106 @@ impl Run<'_> {
             }
         }
     }
+}
+
+/// The buffers one operation rendered for the transcript and the byte range of each alias they disclosed.
+struct Executed {
+    buffers: Vec<RenderedBuffer>,
+    spans: Vec<(Alias, std::ops::Range<u64>)>,
+}
+
+/// Runs one operation through the broker, related-memory discovery, or the confined project root. Every read is admitted and charged by the broker (Q23); nothing here adds to that accounting.
+fn run_operation(
+    store: &KernelStore,
+    project_root: Option<&mut ProjectText>,
+    discovery: &mut RelatedMemoryDiscovery,
+    cutoff: Instant,
+    broker: &mut EvidenceBroker,
+    operation: Operation,
+    now: i64,
+) -> Result<Executed, Refusal> {
+    let unavailable = || refuse(None, RefusalCode::Unavailable);
+    let mut spans: Vec<(Alias, std::ops::Range<u64>)> = Vec::new();
+    let buffers = match operation {
+        Operation::ReadReference { alias, range } => broker
+            .read(store, &alias, range.map(|range| range.to_range()), now)
+            .map(|read| {
+                spans.push((read.alias.clone(), disclosed_span(range, &read.buffer)));
+                vec![read.buffer]
+            })?,
+        Operation::FindRelated { cursor } => {
+            let budget = EvalBudget::new(Some(cutoff.into_std()), Arc::default());
+            let page = discovery.page(store, broker, cursor.as_deref(), &budget, now)?;
+            spans.extend(
+                page.hits
+                    .iter()
+                    .map(|hit| (hit.alias.clone(), hit.span.clone())),
+            );
+            let summary = format!(
+                "related search: {} hits, completeness {:?}{}{}",
+                page.hits.len(),
+                page.completeness,
+                withheld(page.withheld),
+                page.next_cursor
+                    .as_deref()
+                    .map(|cursor| format!(", cursor {cursor}"))
+                    .unwrap_or_default()
+            );
+            let hits = page
+                .hits
+                .into_iter()
+                .map(|hit| (hit.alias, hit.buffer, hit.shared_origin));
+            render_hits(broker, hits, &summary)?
+        }
+        Operation::SearchProject { by, literal } => {
+            let root = project_root.ok_or_else(unavailable)?;
+            let query = match by {
+                SearchBy::Path => SearchQuery::Path(&literal),
+                SearchBy::Name => SearchQuery::Name(&literal),
+                SearchBy::Content => SearchQuery::Content(&literal),
+            };
+            let outcome = root.search(store, broker, query, now)?;
+            spans.extend(
+                outcome
+                    .hits
+                    .iter()
+                    .map(|hit| (hit.alias.clone(), hit.span.clone())),
+            );
+            let summary = format!(
+                "project search: {} hits, completeness {:?}{}",
+                outcome.hits.len(),
+                outcome.completeness,
+                withheld(outcome.withheld)
+            );
+            let hits = outcome
+                .hits
+                .into_iter()
+                .map(|hit| (hit.alias, hit.buffer, None));
+            render_hits(broker, hits, &summary)?
+        }
+        Operation::ReadProject { path, range } => {
+            let root = project_root.ok_or_else(unavailable)?;
+            let read = root.read(
+                store,
+                broker,
+                &path,
+                range.map(|range| range.to_range()),
+                now,
+            )?;
+            spans.push((read.alias.clone(), disclosed_span(range, &read.buffer)));
+            vec![read.buffer]
+        }
+    };
+    Ok(Executed { buffers, spans })
+}
+
+/// The artifact bytes `buffer` carries: the requested range, or the whole artifact when none was asked for. The broker returns exactly the requested range or refuses, so the buffer's length is the range's.
+fn disclosed_span(
+    range: Option<super::steps::ByteRange>,
+    buffer: &RenderedBuffer,
+) -> std::ops::Range<u64> {
+    let len = buffer.bytes().len() as u64;
+    range.map_or(0..len, |range| range.start..range.start + len)
 }
 
 /// Whether `range` lies inside the union of `spans`: adjacent or overlapping disclosures cover a citation across their seam.
@@ -788,37 +871,34 @@ fn resolve_subject(
     }
 }
 
-/// The expectation for one native source descriptor at its live revision, or at `expected_revision` when the job bound one.
+/// The expectation for one native source descriptor at its live revision, or at `expected_revision` when the job bound one. A store failure is the caller's error; a descriptor that is missing, undecodable, or of an unsupported class is a refusal the run settles on, since another generation would meet it identically.
 fn resolve_descriptor(
     store: &KernelStore,
     object_id: &str,
     expected_revision: Option<i64>,
 ) -> Result<(ReferenceExpectation, Vec<String>), InvestigationError> {
-    let kernel = |code| InvestigationError::Kernel(code);
-    let tip = store.tip().map_err(|_| kernel(RefusalCode::Store))?;
+    let store_error = |_| InvestigationError::Kernel(RefusalCode::Store);
+    let tip = store.tip().map_err(store_error)?;
     let row = store
         .observation_for_object_as_of(object_id, tip)
-        .map_err(|_| kernel(RefusalCode::Store))?
-        .ok_or(kernel(RefusalCode::NotFound))?;
+        .map_err(store_error)?
+        .ok_or(InvestigationError::Refused(RefusalCode::NotFound))?;
+    let unsupported = || InvestigationError::Refused(RefusalCode::Unsupported);
     let detail: SourceDescriptorDetail = row
         .payload
         .detail
         .as_deref()
         .and_then(|detail| serde_json::from_str(detail).ok())
-        .ok_or(kernel(RefusalCode::Unsupported))?;
-    let class =
-        OccurrenceClass::from_code(&detail.class).ok_or(kernel(RefusalCode::Unsupported))?;
+        .ok_or_else(unsupported)?;
+    let class = OccurrenceClass::from_code(&detail.class).ok_or_else(unsupported)?;
     let source_revision = match expected_revision {
         Some(revision) => revision,
-        None => detail
-            .revision
-            .parse()
-            .map_err(|_| kernel(RefusalCode::Unsupported))?,
+        None => detail.revision.parse().map_err(|_| unsupported())?,
     };
-    // Canonical and promoted descriptors resolve through their originating decision (Q21); no producer targets one yet, so the class is refused rather than resolved untested. The run settles on the refusal.
+    // Canonical and promoted descriptors resolve through their originating decision (Q21); no producer targets one, so the class is refused rather than resolved untested.
     let expectation = match class {
         OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory => {
-            return Err(InvestigationError::Refused(RefusalCode::Unsupported));
+            return Err(unsupported());
         }
         OccurrenceClass::Messages | OccurrenceClass::GitCommits | OccurrenceClass::RawToolSpans => {
             ReferenceExpectation::NativeSource {
@@ -921,4 +1001,150 @@ fn bind_proposal(
             ancestry: vec![],
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use kernel::{
+        ArtifactIngestRequest, CommitIntent, DomainSpec, ProjectScope, ProviderEgress, Sensitivity,
+    };
+
+    use super::*;
+    use crate::curator::project_text::{InspectionBinding, ProtectedLocations};
+    use crate::curator::steps::ByteRange;
+
+    const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DOMAIN: &str = "domain";
+
+    fn intent(key: &str) -> CommitIntent {
+        CommitIntent {
+            producer: "coordinator-unit-test".to_string(),
+            operation_key: key.to_string(),
+            request_digest: format!("{:x}", Sha256::digest(key.as_bytes())),
+            actor: "test".to_string(),
+            cause: "proof".to_string(),
+        }
+    }
+
+    fn kernel_incarnation(root: &std::path::Path) -> String {
+        rusqlite::Connection::open_with_flags(
+            root.join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT database_incarnation_id FROM kernel_format_marker",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A Kernel store with one domain, and a broker disclosing locally under an execution hold over an anchor artifact.
+    fn local_broker(store_dir: &std::path::Path, now: i64) -> (KernelStore, EvidenceBroker) {
+        let store = KernelStore::open(store_dir).unwrap();
+        store
+            .commit(intent("seed"), |envelope| {
+                envelope.insert_domain(DomainSpec {
+                    domain_id: DOMAIN.to_string(),
+                    object_id: "domain-object".to_string(),
+                    name: "fixture".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: DOMAIN.to_string(),
+                    source_revision: 1,
+                    sensitivity: Sensitivity::Normal,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let anchor = store
+            .ingest_artifact(ArtifactIngestRequest {
+                intent: intent("anchor"),
+                payload: b"anchor".to_vec(),
+                evidence_id: "evidence-anchor".to_string(),
+                object_id: "evidence-object-anchor".to_string(),
+                object_kind: "evidence".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "conversation".to_string(),
+                source_id: "src/anchor".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: "canonical".to_string(),
+                retain_until: None,
+                asserted_sensitivity: Sensitivity::Normal,
+                provider_egress: ProviderEgress::RemoteAllowed,
+                provenance: None,
+            })
+            .unwrap();
+        let binding = CuratorHoldBinding {
+            project_digest: PROJECT.to_string(),
+            kernel_incarnation: kernel_incarnation(store_dir),
+            memstore_incarnation: "m".repeat(32),
+            subject: "job-1".to_string(),
+            generation: 1,
+        };
+        let hold = store
+            .acquire_execution_hold(&binding, &[anchor.evidence_id], now + 60 * 60 * 1_000)
+            .unwrap();
+        let broker = EvidenceBroker::new(
+            RunBinding {
+                project: ProjectScope::new(PROJECT).unwrap(),
+                hold: binding,
+                hold_id: hold.hold_id,
+                destination: kernel::ArtifactDestination::Local,
+            },
+            QuestionTemplate::ExtractedFacts,
+        );
+        (store, broker)
+    }
+
+    #[test]
+    fn a_project_file_read_records_the_disclosed_span_under_its_alias() {
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("README.md"),
+            b"# Project\nbun builds the workspace\n",
+        )
+        .unwrap();
+        let (store, mut broker) = local_broker(store_dir.path(), now);
+        let mut root = ProjectText::open(
+            project.path(),
+            &ProtectedLocations::new([store_dir.path().to_path_buf()]).unwrap(),
+            InspectionBinding {
+                domain_id: DOMAIN.to_string(),
+                scope_id: None,
+                retain_until: now + 60 * 60 * 1_000,
+            },
+        )
+        .unwrap();
+        let mut discovery = RelatedMemoryDiscovery::new("");
+        let executed = run_operation(
+            &store,
+            Some(&mut root),
+            &mut discovery,
+            Instant::now() + Duration::from_secs(60),
+            &mut broker,
+            Operation::ReadProject {
+                path: "README.md".to_string(),
+                range: Some(ByteRange { start: 10, end: 24 }),
+            },
+            now,
+        )
+        .unwrap();
+        assert_eq!(executed.buffers.len(), 1);
+        let alias = executed.buffers[0].tag().alias.clone().unwrap();
+        assert_eq!(
+            executed.spans,
+            vec![(alias, 10..24)],
+            "a citation of the read alias must be able to name the bytes the model was shown"
+        );
+    }
 }

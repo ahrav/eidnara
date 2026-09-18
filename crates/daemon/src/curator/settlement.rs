@@ -273,6 +273,7 @@ impl Settlement<'_> {
         }
         match recovered {
             Some((review, hold)) => self.release_review_hold(run, review, hold),
+            None if broker.binding().hold_id.is_empty() => {}
             None => match self
                 .store
                 .release_execution_hold(&broker.binding().hold_id, run)

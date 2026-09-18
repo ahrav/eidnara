@@ -205,6 +205,13 @@ impl Peer {
     }
 }
 
+pub enum Scripted {
+    /// The peer reads the request, then answers with these bytes.
+    Respond(Vec<u8>),
+    /// The peer closes the socket before the TLS handshake, so the client's connect fails and no request byte leaves it.
+    Refuse,
+}
+
 impl Peer {
     /// Serves one scripted response per accepted connection, in order, and reports what each connection carried. The task ends after the last response; a client that connects fewer times leaves the remaining script unserved and the report short.
     pub fn serve_script(
@@ -218,6 +225,18 @@ impl Peer {
     pub fn serve_script_with(
         &mut self,
         responses: Vec<Vec<u8>>,
+        before_respond: impl FnMut(usize) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static,
+    ) -> tokio::task::JoinHandle<Vec<Observed>> {
+        self.serve_turns(
+            responses.into_iter().map(Scripted::Respond).collect(),
+            before_respond,
+        )
+    }
+
+    /// One scripted turn per accepted connection: a response, or a refusal that drops the socket before the handshake. Refused connections are counted but carry no request, so the report holds one entry per answered connection.
+    pub fn serve_turns(
+        &mut self,
+        turns: Vec<Scripted>,
         mut before_respond: impl FnMut(usize) -> Pin<Box<dyn Future<Output = ()> + Send>>
         + Send
         + 'static,
@@ -226,14 +245,21 @@ impl Peer {
         let acceptor = self.acceptor.clone();
         let connections = self.connections.clone();
         tokio::spawn(async move {
-            let mut observations = Vec::with_capacity(responses.len());
-            for (index, response) in responses.into_iter().enumerate() {
+            let mut observations = Vec::with_capacity(turns.len());
+            for (index, turn) in turns.into_iter().enumerate() {
                 let Ok(Ok((tcp, _))) =
                     tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
                 else {
                     return observations;
                 };
                 connections.fetch_add(1, Ordering::SeqCst);
+                let response = match turn {
+                    Scripted::Respond(response) => response,
+                    Scripted::Refuse => {
+                        drop(tcp);
+                        continue;
+                    }
+                };
                 let counting = Counting {
                     inner: tcp,
                     received: Arc::new(AtomicUsize::new(0)),
