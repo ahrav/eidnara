@@ -6,6 +6,7 @@
 
 import { createHash } from "node:crypto";
 import { Deadline, isConnectTransient, isHostCallError, type MonotonicClock } from "../host-client";
+import { sessionLog } from "../logger";
 import { isRecord } from "../record-type-guard";
 import { stableStringify } from "../stable-json";
 import { cancelled, conflict, disabled, invalid, type MemoryState, unavailable } from "./state";
@@ -326,6 +327,19 @@ export class KernelClient {
     private readonly clock: MonotonicClock | undefined;
     readonly tokens: TokenStore;
 
+    /** The `invalid:internal` guidance points the operator at the plugin log, so the cause lands there, bounded. */
+    private internal(method: string, error: unknown): MemoryState {
+        const code = isHostCallError(error)
+            ? `${error.kind}${error.code ? `/${error.code}` : ""}`
+            : "";
+        const message = error instanceof Error ? error.message : String(error);
+        sessionLog.warn(
+            this.sessionId,
+            `memory ${method} failed as invalid:internal${code ? ` (${code})` : ""}: ${message.slice(0, 300)}`,
+        );
+        return invalid("internal");
+    }
+
     constructor(options: KernelClientOptions) {
         this.transport = options.transport;
         this.enabled = options.enabled;
@@ -459,11 +473,11 @@ export class KernelClient {
                     if (error.code === INVALID_PARAMS_CODE) {
                         return failed(invalid("invalid_input"));
                     }
-                    return failed(invalid("internal"));
+                    return failed(this.internal(method, error));
                 }
                 if (isDaemonAbsent(error)) return absent();
                 if (error instanceof StoreLifecycleError) return failed(unavailable(error.reason));
-                return failed(invalid("internal"));
+                return failed(this.internal(method, error));
             }
         }
     }
