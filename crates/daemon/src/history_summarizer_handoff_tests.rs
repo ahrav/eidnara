@@ -2415,3 +2415,33 @@ fn the_retained_boundary_dates_are_those_of_the_validated_segments() {
         BTreeMap::from([("m2".to_string(), "2026-01-02".to_string())])
     );
 }
+
+/// A re-cut chunk that starts at another ordinal but yields the same facts adopts the orphaned reservation and reads the sealed subject under the binding it was staged with: the job's ordinal, not the adopting firing's.
+#[test]
+fn a_recut_firing_adopts_the_reservation_under_the_staged_binding() {
+    let rig = Rig::open();
+    let first = activation(rig.handoff(t0()).unwrap());
+    let orphaned = rig.reservation();
+    rig.persist(abandon_with_detail(
+        &rig.state(),
+        t0() + 1,
+        Some("crash".to_string()),
+    ));
+    // Firing 4 re-cuts the chunk to 3..=4 and extracts the same facts from the same messages.
+    rig.persist(next_publishing_firing(&rig, 3, 4));
+    let adopted = activation(rig.handoff(t0() + 10).unwrap());
+    assert_eq!(adopted.causal_identity, first.causal_identity);
+    assert_eq!(adopted.producer.firing_id, format!("{}#4", rig_key()));
+    assert_eq!(
+        adopted.producer.ordinal, 2,
+        "the job keeps the ordinal the subject was staged under"
+    );
+    assert!(rig.read_subject(&orphaned, t0() + 11).is_ok());
+    let result = rig
+        .publish_range(Some(&adopted), None, t0() + 12, 3, 4)
+        .unwrap();
+    assert_eq!(
+        result.curator_activation,
+        Some(CuratorActivationOutcome::Activated)
+    );
+}

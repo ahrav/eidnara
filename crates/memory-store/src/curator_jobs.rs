@@ -744,7 +744,7 @@ pub fn activate_curator_job_in_tx(
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
-/// Rebinds a `Reserved` row to another firing of the same producer. Preserves its deadline, target, and allowance. Refuses non-reserved, foreign-producer, or expired rows.
+/// Rebinds a `Reserved` row to another firing of the same producer. Preserves its deadline, target, allowance, and ordinal: the ordinal names the source revision the row's subject was staged under, so the adopting firing reads and activates under it rather than its own. Refuses non-reserved, foreign-producer, or expired rows.
 pub fn rebind_reserved_curator_job_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -752,7 +752,7 @@ pub fn rebind_reserved_curator_job_in_tx(
     producer: &ProducerBinding,
     now_ms: i64,
 ) -> rusqlite::Result<CuratorJob> {
-    let ordinal = producer.validate().map_err(refuse)?;
+    producer.validate().map_err(refuse)?;
     let job = load_curator_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
     match job.state {
@@ -767,15 +767,9 @@ pub fn rebind_reserved_curator_job_in_tx(
         return Err(refuse(CuratorJobRefusal::Expired));
     }
     conn.execute(
-        "UPDATE curator_jobs SET firing_id = ?3, ordinal = ?4, updated_at_ms = ?5
+        "UPDATE curator_jobs SET firing_id = ?3, updated_at_ms = ?4
          WHERE project = ?1 AND causal_identity = ?2 AND state = 'reserved'",
-        params![
-            project,
-            causal_identity,
-            producer.firing_id,
-            ordinal,
-            now_ms
-        ],
+        params![project, causal_identity, producer.firing_id, now_ms],
     )?;
     load_curator_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
