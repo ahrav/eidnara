@@ -201,6 +201,7 @@ impl Settlement<'_> {
         let selection = ResultSelection {
             candidate_id: reference.candidate_id.clone(),
             payload_digest: reference.payload_digest.clone(),
+            project_digest: run.project_digest.clone(),
         };
         match self.complete(run, ReceiptCompletion::Complete(selection.clone()))? {
             LeaseCompleteOutcome::Applied { .. } => Ok(Settled::Published(reference)),
@@ -651,13 +652,13 @@ pub fn list_review_outcomes(
     Ok(ReviewOutcomePage { outcomes, next })
 }
 
-/// Reads the proposal the job's completed receipt selects. `binding` is the job's staging binding; its owner is replaced by the selected generation's proposal owner.
+/// Reads the proposal the job's completed receipt selects. `binding` builds the job's staging binding from the Kernel project digest the selection records; its owner is replaced by the selected generation's proposal owner.
 pub fn read_selected_proposal(
     store: &KernelStore,
     ledger: &MemoryStore,
     project: &str,
     causal_identity: &str,
-    binding: &ReviewBinding,
+    binding: impl FnOnce(&str) -> ReviewBinding,
     now: i64,
 ) -> Result<SelectedProposal, ReadRefusal> {
     let receipt = ledger
@@ -687,14 +688,15 @@ pub fn read_selected_proposal(
         payload_digest: selection.payload_digest.clone(),
     };
     let run = CuratorHoldBinding {
-        project_digest: binding.project_digest.clone(),
+        project_digest: selection.project_digest.clone(),
         kernel_incarnation: receipt.kernel_incarnation_id.clone(),
         memstore_incarnation: receipt.database_incarnation_id.clone(),
         subject: causal_identity.to_string(),
         generation: receipt.generation,
     };
+    let binding = binding(&selection.project_digest);
     let row = store
-        .read_review_input(&reference, &proposal_binding(binding, &run), now)
+        .read_review_input(&reference, &proposal_binding(&binding, &run), now)
         .map_err(|error| match error {
             ReviewReadError::Refused(ReviewReadRefusal::IncarnationMismatch) => {
                 ReadRefusal::IncarnationMismatch
@@ -703,7 +705,7 @@ pub fn read_selected_proposal(
             ReviewReadError::Invalid => ReadRefusal::SelectionMismatch,
             ReviewReadError::Store(error) => ReadRefusal::Store(error.to_string()),
         })?;
-    // Review rows are classified `Sensitive` by construction; a row the Kernel classifies `Secret` (including a stored class this build does not recognize) is refused as a local read, not decoded on the strength of that construction.
+    // Review rows are classified `Sensitive` by construction; a row the Kernel classifies `Secret` (including a stored class this build does not recognize) is refused as a local read rather than returned on the strength of that construction.
     if row.sensitivity == kernel::Sensitivity::Secret {
         return Err(ReadRefusal::Dependency(RefusalCode::PolicyBlocked));
     }

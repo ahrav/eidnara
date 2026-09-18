@@ -510,6 +510,7 @@ CREATE TABLE curator_receipts (
             selected_generation INTEGER CHECK (selected_generation IS NULL OR selected_generation >= 1),
             selected_candidate_id TEXT CHECK (selected_candidate_id IS NULL OR length(selected_candidate_id) BETWEEN 1 AND 256),
             selected_payload_digest TEXT CHECK (selected_payload_digest IS NULL OR length(selected_payload_digest) = 64),
+            selected_project_digest TEXT CHECK (selected_project_digest IS NULL OR length(selected_project_digest) = 64),
             abstained_reason TEXT CHECK (abstained_reason IS NULL OR abstained_reason IN (
                 'owner_sensitive', 'wrong_scope', 'secret', 'expectation_changed', 'undisclosed_citation',
                 'partial_disclosure', 'model_declined', 'budget_exhausted')),
@@ -519,6 +520,7 @@ CREATE TABLE curator_receipts (
             FOREIGN KEY (project, causal_identity) REFERENCES curator_jobs(project, causal_identity),
             CHECK ((state = 'complete') = (terminal_kind IS NOT NULL)),
             CHECK ((selected_candidate_id IS NULL) = (selected_payload_digest IS NULL)),
+            CHECK ((selected_candidate_id IS NULL) = (selected_project_digest IS NULL)),
             CHECK ((selected_candidate_id IS NULL) = (selected_generation IS NULL)),
             CHECK ((terminal_kind = 'complete') = (selected_candidate_id IS NOT NULL)),
             CHECK ((terminal_kind = 'abstained') = (abstained_reason IS NOT NULL))

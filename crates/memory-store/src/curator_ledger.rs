@@ -133,6 +133,8 @@ impl CuratorAttemptTerminal {
 pub struct ResultSelection {
     pub candidate_id: String,
     pub payload_digest: String,
+    /// The Kernel project digest the result was staged under; a reader binds to this digest, not to whichever root of the project is bound newest when it reads.
+    pub project_digest: String,
 }
 
 /// Why a review abstained, on the operator surface (Q28). `owner_sensitive`, `wrong_scope`, and `secret` are the Kernel's egress denial codes a revalidation can surface; the rest name settlement conditions under which no content may publish.
@@ -347,7 +349,7 @@ const RECEIPT_COLUMNS: &str =
     "project, causal_identity, database_incarnation_id, kernel_incarnation_id,
      authority_generation, state, generation, claim_id, run_deadline_ms, execution_cutoff_ms,
      cancelled_at_ms, terminal_kind, selected_generation, selected_candidate_id,
-     selected_payload_digest, created_at_ms, abstained_reason";
+     selected_payload_digest, created_at_ms, abstained_reason, selected_project_digest";
 
 fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorReceipt> {
     let invalid = |column: usize, value: String| {
@@ -360,15 +362,24 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorReceipt>
     let selected_generation: Option<i64> = row.get(12)?;
     let candidate_id: Option<String> = row.get(13)?;
     let payload_digest: Option<String> = row.get(14)?;
-    let selected = match (selected_generation, candidate_id, payload_digest) {
-        (Some(generation), Some(candidate_id), Some(payload_digest)) => Some((
-            u64::try_from(generation).map_err(|_| invalid(12, generation.to_string()))?,
-            ResultSelection {
-                candidate_id,
-                payload_digest,
-            },
-        )),
-        (None, None, None) => None,
+    let project_digest: Option<String> = row.get(17)?;
+    let selected = match (
+        selected_generation,
+        candidate_id,
+        payload_digest,
+        project_digest,
+    ) {
+        (Some(generation), Some(candidate_id), Some(payload_digest), Some(project_digest)) => {
+            Some((
+                u64::try_from(generation).map_err(|_| invalid(12, generation.to_string()))?,
+                ResultSelection {
+                    candidate_id,
+                    payload_digest,
+                    project_digest,
+                },
+            ))
+        }
+        (None, None, None, None) => None,
         _ => return Err(invalid(13, "partial selection".to_string())),
     };
     let abstained_reason: Option<String> = row.get(16)?;
@@ -1037,6 +1048,7 @@ impl MemoryStore {
         let selection = completion.selection();
         if selection.is_some_and(|selection| {
             selection.payload_digest.len() != 64
+                || selection.project_digest.len() != 64
                 || selection.candidate_id.is_empty()
                 || selection.candidate_id.len() > 256
         }) {
@@ -1070,7 +1082,7 @@ impl MemoryStore {
                     "UPDATE curator_receipts
                         SET state = 'complete', terminal_kind = ?5, selected_generation = ?6,
                             selected_candidate_id = ?7, selected_payload_digest = ?8, updated_at_ms = ?9,
-                            abstained_reason = ?11
+                            abstained_reason = ?11, selected_project_digest = ?12
                       WHERE project = ?1 AND causal_identity = ?2 AND state = 'in_progress'
                         AND generation = ?3 AND claim_id = ?4
                         AND kernel_incarnation_id = ?10
@@ -1088,6 +1100,7 @@ impl MemoryStore {
                         now_ms,
                         kernel_incarnation_id,
                         completion.abstained_reason().map(AbstainReason::as_str),
+                        selection.map(|selection| selection.project_digest.as_str()),
                     ],
                 )?;
                 if changed == 0 {

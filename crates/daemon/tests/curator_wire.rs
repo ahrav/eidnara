@@ -252,6 +252,39 @@ fn publish(
     proposal()
 }
 
+/// Kernel holds pin the commit snapshot, so the fixture domain commits before any job exists; returns the Kernel incarnation.
+fn commit_memory_domain(kernel: &KernelStore) -> String {
+    kernel
+        .commit(
+            kernel::CommitIntent {
+                producer: "curator-wire-test".to_string(),
+                operation_key: "domain".to_string(),
+                request_digest: "0".repeat(64),
+                actor: "test".to_string(),
+                cause: "fixture".to_string(),
+            },
+            |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "memory".to_string(),
+                    object_id: "domain-memory".to_string(),
+                    name: "memory".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: "memory".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                Ok("domain".to_string())
+            },
+        )
+        .unwrap();
+    kernel
+        .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::new(
+            None,
+            Arc::default(),
+        ))
+        .unwrap()
+}
+
 #[tokio::test]
 async fn review_operations_are_disabled_without_module_authority_and_list_and_read_receipts_under_it()
  {
@@ -278,36 +311,7 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
     }
 
     let generation = activate_module_authority(&store, &project);
-    // Holds pin the commit snapshot; a production Kernel has committed its domains long before a job exists.
-    kernel
-        .commit(
-            kernel::CommitIntent {
-                producer: "curator-wire-test".to_string(),
-                operation_key: "domain".to_string(),
-                request_digest: "0".repeat(64),
-                actor: "test".to_string(),
-                cause: "fixture".to_string(),
-            },
-            |envelope| {
-                envelope.insert_domain(kernel::DomainSpec {
-                    domain_id: "memory".to_string(),
-                    object_id: "domain-memory".to_string(),
-                    name: "memory".to_string(),
-                    source_kind: "fixture".to_string(),
-                    source_id: "memory".to_string(),
-                    source_revision: 1,
-                    sensitivity: kernel::Sensitivity::Normal,
-                })?;
-                Ok("domain".to_string())
-            },
-        )
-        .unwrap();
-    let kernel_incarnation = kernel
-        .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::new(
-            None,
-            Arc::default(),
-        ))
-        .unwrap();
+    let kernel_incarnation = commit_memory_domain(&kernel);
     assert_eq!(
         daemon
             .call(envelope("review.list", &project, json!({})))
@@ -475,5 +479,51 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
             PreparedOutcome::Error { code, .. } => assert_eq!(code, "invalid_params", "{body}"),
             other => panic!("{method} {body}: {other:?}"),
         }
+    }
+}
+
+/// Proposal reads use the digest recorded when the proposal was staged, not the newest bound root's.
+#[tokio::test]
+async fn a_published_proposal_reads_from_every_root_after_a_newer_root_binds() {
+    let daemon = KernelDaemon::start().await;
+    let first_root = daemon.project().to_path_buf();
+    let store = daemon
+        .memory_store()
+        .expect("the daemon installed its store");
+    let kernel = daemon.store();
+    let generation = activate_module_authority(&store, &first_root);
+    let kernel_incarnation = commit_memory_domain(&kernel);
+    let now = now_ms();
+    let published = begin_job(&store, &kernel_incarnation, generation, 1, now);
+    publish(
+        &kernel,
+        &store,
+        &daemon.project_digest(),
+        &kernel_incarnation,
+        &published,
+        now,
+    );
+
+    let second_root = daemon.data_home().join("project-second");
+    std::fs::create_dir_all(&second_root).unwrap();
+    let second_route = daemon.bind_root(8, &second_root).await;
+    store
+        .bind_authority_route("ctx", PROJECT, second_root.to_str().unwrap())
+        .unwrap();
+
+    let body = json!({ "causal_identity": published.job.causal_identity });
+    for (route, root) in [(None, &first_root), (Some(second_route), &second_root)] {
+        let request = envelope("review.read", root, body.clone());
+        let read = match route {
+            Some(route) => daemon.call_on(route, request).await,
+            None => daemon.call(request).await,
+        };
+        assert_eq!(
+            read["kind"],
+            json!("proposal"),
+            "{}: {read}",
+            root.display()
+        );
+        assert_eq!(read["causal_identity"], body["causal_identity"]);
     }
 }

@@ -497,7 +497,7 @@ impl Fixture {
             &self.ledger,
             PROJECT,
             &self.identity,
-            &self.review_binding(),
+            |_| self.review_binding(),
             now,
         )
     }
@@ -1211,8 +1211,15 @@ fn a_selected_result_is_readable_only_through_its_live_review_hold() {
             barrier.wait();
             (0..200)
                 .map(|_| {
-                    read_selected_proposal(&store, &ledger, PROJECT, &identity, &binding, now)
-                        .map(|selected| selected.reference)
+                    read_selected_proposal(
+                        &store,
+                        &ledger,
+                        PROJECT,
+                        &identity,
+                        |_| binding.clone(),
+                        now,
+                    )
+                    .map(|selected| selected.reference)
                 })
                 .collect::<Vec<_>>()
         })

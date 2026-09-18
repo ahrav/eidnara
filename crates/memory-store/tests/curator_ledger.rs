@@ -654,29 +654,39 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
     let selection = ResultSelection {
         candidate_id: "review-result:abc".to_string(),
         payload_digest: "f".repeat(64),
+        project_digest: "d".repeat(64),
     };
-    // A selection that does not name a result is refused before the lease is touched.
-    assert_eq!(
-        fixture
-            .store
-            .complete_curator_receipt(
-                PROJECT,
-                &fixture.identity,
-                &claim,
-                "c-0",
-                "worker-a",
-                0,
-                1,
-                KERNEL,
-                &ReceiptCompletion::Complete(ResultSelection {
-                    candidate_id: String::new(),
-                    payload_digest: "f".repeat(64),
-                }),
-                T0 + 1
-            )
-            .unwrap(),
-        LeaseCompleteOutcome::Conflict { kind: "invalid" }
-    );
+    // A selection that does not name a result, or names it under a malformed project digest, is refused before the lease is touched.
+    for invalid in [
+        ResultSelection {
+            candidate_id: String::new(),
+            ..selection.clone()
+        },
+        ResultSelection {
+            project_digest: "d".repeat(63),
+            ..selection.clone()
+        },
+    ] {
+        assert_eq!(
+            fixture
+                .store
+                .complete_curator_receipt(
+                    PROJECT,
+                    &fixture.identity,
+                    &claim,
+                    "c-0",
+                    "worker-a",
+                    0,
+                    1,
+                    KERNEL,
+                    &ReceiptCompletion::Complete(invalid.clone()),
+                    T0 + 1
+                )
+                .unwrap(),
+            LeaseCompleteOutcome::Conflict { kind: "invalid" },
+            "{invalid:?}"
+        );
+    }
     // The wrong generation writes nothing.
     assert_eq!(
         fixture
