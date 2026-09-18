@@ -382,3 +382,58 @@ async fn a_cancelled_worker_loop_returns_before_the_stores_are_released() {
         ActivationState::Closed("missing")
     );
 }
+
+#[tokio::test]
+async fn a_receipt_left_in_progress_is_taken_over_at_the_next_generation_and_settled() {
+    // Another worker's run began the receipt a minute ago and never settled: its claim has lapsed, its receipt is in progress at generation 1. While that claim was live the job was fenced; once it lapsed, the next pass takes the receipt over under its own claim at generation 2 and settles it, so an abandoned run never wedges a job behind a stale fence.
+    let rig = Rig::open().await;
+    let now = now_ms() - 60_000;
+    let identity = rig.ready_history_summarizer_job(now);
+    let memory_store::LeaseAcquireOutcome::Claim { claim, .. } = rig
+        .store
+        .acquire_curator_task(
+            PROJECT,
+            "acq-other",
+            "worker-b",
+            0,
+            i64::try_from(rig.generation).unwrap(),
+            &identity,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("the job is claimed")
+    };
+    let memory_store::curator_ledger::CuratorBeginOutcome::Begun(abandoned) = rig
+        .store
+        .begin_curator_receipt(
+            PROJECT,
+            &identity,
+            &rig.kernel_incarnation,
+            &claim.claim_id,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("the receipt begins")
+    };
+    assert_eq!(abandoned.generation, 1);
+    let worker = rig.worker();
+    rig.write_activation();
+    assert_eq!(worker.pass(&CancellationToken::new()).await, 1);
+    let receipt = rig
+        .store
+        .lookup_curator_receipt(PROJECT, &identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receipt.generation, 2,
+        "the takeover advanced the generation"
+    );
+    assert_ne!(
+        receipt.claim_id, claim.claim_id,
+        "under the taker's own claim"
+    );
+    assert_eq!(receipt.terminal, Some(CuratorReceiptTerminal::Abstained));
+    assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
+}
