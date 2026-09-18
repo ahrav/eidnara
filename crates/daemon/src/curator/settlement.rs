@@ -509,14 +509,14 @@ fn bind_dependencies(
     }) {
         return Err(AbstainReason::UndisclosedCitation);
     }
-    // A span names the alias the model saw the bytes under: it must be an alias this run disclosed, and that alias must resolve to the evidence the citation names. The ledger does not record which byte ranges of an alias were rendered, so the offsets are not judged here.
+    // A span names the alias the model saw the bytes under: it must be an alias this run disclosed, that alias must resolve to the evidence the citation names, and the offsets must lie within one range rendered under it.
     let anchored = |reference: &EvidenceReference| {
         reference.span.as_ref().is_none_or(|span| {
             broker
                 .aliases
                 .resolve(&span.alias)
                 .ok()
-                .filter(|(alias, _)| broker.ledger.is_disclosed(alias))
+                .filter(|(alias, _)| broker.ledger.covers(alias, span.start, span.end))
                 .is_some_and(|(_, expectation)| {
                     expectation.evidence_id() == Some(reference.evidence_id.as_str())
                 })

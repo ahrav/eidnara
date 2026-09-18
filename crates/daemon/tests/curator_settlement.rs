@@ -839,6 +839,7 @@ fn the_staged_dependencies_are_the_brokers_union_including_uncited_inputs_and_an
                 owner_id: Some("decision-a".to_string()),
                 owner_revision: Some("1".to_string()),
             },
+            0..0,
         );
     }
     let Settled::Published(reference) = fixture
@@ -1305,6 +1306,58 @@ fn a_citation_span_must_name_the_disclosed_alias_of_its_evidence() {
         alias: disclosed,
         start: 0,
         end: 4,
+    });
+    assert!(matches!(
+        fixture
+            .settle(&broker, RunResult::Proposal(Box::new(proposal)))
+            .unwrap(),
+        Settled::Published(_)
+    ));
+}
+
+#[test]
+fn a_citation_span_must_lie_within_the_bytes_rendered_under_its_alias() {
+    // An excerpt read discloses a byte range, not the artifact. A span outside every range rendered under the alias cites bytes the model never saw.
+    let fixture = Fixture::open();
+    let mut broker = fixture.broker(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let second = fixture.second.1.evidence_id.clone();
+    let alias = broker.aliases.issue(Fixture::expectation(&fixture.second));
+    broker
+        .read(&fixture.store, alias.as_str(), Some(0..8), fixture.now + 2)
+        .unwrap();
+    let cite = |start: u64, end: u64| {
+        let mut proposal = fixture.proposal(&[&second]);
+        proposal.support[0].span = Some(SourceSpan {
+            alias: alias.as_str().to_string(),
+            start,
+            end,
+        });
+        proposal
+    };
+    let binding = fixture.review_binding();
+    let now = fixture.now + 5;
+    let clock = move || now;
+    assert_eq!(
+        fixture
+            .settlement(&binding, &fixture.claim, &clock)
+            .settle(&broker, RunResult::Proposal(Box::new(cite(2, 40)))),
+        Ok(Settled::Abstained(AbstainReason::UndisclosedCitation)),
+        "a span past the rendered excerpt is not a citation to disclosed bytes"
+    );
+    let fixture = Fixture::open();
+    let mut broker = fixture.broker(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let second = fixture.second.1.evidence_id.clone();
+    let alias = broker.aliases.issue(Fixture::expectation(&fixture.second));
+    broker
+        .read(&fixture.store, alias.as_str(), Some(0..8), fixture.now + 2)
+        .unwrap();
+    let mut proposal = fixture.proposal(&[&second]);
+    proposal.support[0].span = Some(SourceSpan {
+        alias: alias.as_str().to_string(),
+        start: 2,
+        end: 8,
     });
     assert!(matches!(
         fixture

@@ -384,6 +384,8 @@ impl AliasTable {
 pub struct DisclosureLedger {
     inspected: BTreeSet<Alias>,
     disclosed: BTreeSet<Alias>,
+    /// The byte ranges of each disclosed alias the model was shown, one per render; a citation span must lie within one of them.
+    rendered: BTreeMap<Alias, Vec<Range<u64>>>,
     cited: BTreeSet<Alias>,
     /// Set when any attempt's outcome is unknown: bytes may have reached the model without a recorded disclosure.
     uncertain: bool,
@@ -410,9 +412,27 @@ impl DisclosureLedger {
     }
 
     /// A disclosure adds the alias and its lineage member to the union whether or not the model later cites it.
-    pub fn record_disclosure(&mut self, alias: &Alias, member: PolicyUnionMember) {
+    pub fn record_disclosure(
+        &mut self,
+        alias: &Alias,
+        member: PolicyUnionMember,
+        rendered: Range<u64>,
+    ) {
         self.disclosed.insert(alias.clone());
+        self.rendered
+            .entry(alias.clone())
+            .or_default()
+            .push(rendered);
         self.union.insert(member);
+    }
+
+    /// Whether `start..end` lies within one range rendered under `alias`.
+    pub fn covers(&self, alias: &Alias, start: u64, end: u64) -> bool {
+        self.rendered.get(alias).is_some_and(|ranges| {
+            ranges
+                .iter()
+                .any(|range| range.start <= start && end <= range.end)
+        })
     }
 
     /// The marker-derived scalar (Q20): any unknown attempt terminal makes every later conclusion unusable.
@@ -798,7 +818,7 @@ impl EvidenceBroker {
         if range.as_ref().is_some_and(|range| range.end <= range.start) {
             return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
         }
-        let (bytes, verdict, sensitivity, member, origin_key) = match &expectation {
+        let (bytes, rendered, verdict, sensitivity, member, origin_key) = match &expectation {
             ReferenceExpectation::StagedSubject { reference, binding } => {
                 // A staged row is protected by the run's live execution hold like every artifact, and belongs to the job the hold names.
                 if binding.project_digest != self.binding.hold.project_digest
@@ -830,11 +850,15 @@ impl EvidenceBroker {
                         return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                     }
                 };
+                let rendered = range
+                    .clone()
+                    .unwrap_or(0..u64::try_from(text.len()).unwrap_or(u64::MAX));
                 let bytes = slice_range(text.as_bytes(), range.as_ref())
                     .ok_or_else(|| refuse(Some(&alias), RefusalCode::InvalidRange))?;
                 self.charge(&alias, bytes.len())?;
                 (
                     bytes,
+                    rendered,
                     None,
                     row.sensitivity,
                     expectation.policy_member(None),
@@ -861,11 +885,11 @@ impl EvidenceBroker {
                 {
                     return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
                 }
-                let bytes = self
-                    .load_range(store, &alias, &mut held, range.clone(), now_ms)?
-                    .0;
+                let (bytes, _, rendered) =
+                    self.load_range(store, &alias, &mut held, range.clone(), now_ms)?;
                 (
                     bytes,
+                    rendered,
                     None,
                     held.sensitivity,
                     expectation.policy_member(None),
@@ -883,7 +907,8 @@ impl EvidenceBroker {
                 let range = span_range(&alias, detail.span, range)?;
                 let mut held =
                     self.hold_evidence(store, Some(&alias), evidence_id, artifact_digest, now_ms)?;
-                let (bytes, loaded) = self.load_range(store, &alias, &mut held, range, now_ms)?;
+                let (bytes, loaded, rendered) =
+                    self.load_range(store, &alias, &mut held, range, now_ms)?;
                 let judged = if loaded {
                     self.judge_native_source(store, Some(&alias), &expectation)?
                         .0
@@ -892,6 +917,7 @@ impl EvidenceBroker {
                 };
                 (
                     bytes,
+                    rendered,
                     Some(judged),
                     held.sensitivity.restrictive(descriptor_class),
                     expectation.policy_member(None),
@@ -909,7 +935,8 @@ impl EvidenceBroker {
                 let range = span_range(&alias, judgement.detail.span, range)?;
                 let mut held =
                     self.hold_evidence(store, Some(&alias), evidence_id, artifact_digest, now_ms)?;
-                let (bytes, loaded) = self.load_range(store, &alias, &mut held, range, now_ms)?;
+                let (bytes, loaded, rendered) =
+                    self.load_range(store, &alias, &mut held, range, now_ms)?;
                 let judgement = if loaded {
                     self.judge_canonical_source(store, Some(&alias), &expectation)?
                 } else {
@@ -917,6 +944,7 @@ impl EvidenceBroker {
                 };
                 (
                     bytes,
+                    rendered,
                     Some(judgement.judged),
                     held.sensitivity.restrictive(judgement.sensitivity),
                     expectation.policy_member(Some(*decision_source_revision)),
@@ -926,7 +954,8 @@ impl EvidenceBroker {
         };
         check_render(&bytes, Some(&alias))?;
         let charged = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        self.ledger.record_disclosure(&alias, member.clone());
+        self.ledger
+            .record_disclosure(&alias, member.clone(), rendered);
         self.origins
             .entry(origin_key.clone())
             .or_insert_with(|| alias.clone());
@@ -1320,7 +1349,7 @@ impl EvidenceBroker {
         held: &mut HeldEvidence,
         range: Option<Range<u64>>,
         now_ms: i64,
-    ) -> Result<(Vec<u8>, bool), Refusal> {
+    ) -> Result<(Vec<u8>, bool, Range<u64>), Refusal> {
         let range = range.unwrap_or(0..held.byte_length);
         if range.end > held.byte_length {
             return Err(refuse(Some(alias), RefusalCode::InvalidRange));
@@ -1389,8 +1418,8 @@ impl EvidenceBroker {
             self.checked_artifacts.insert(held.artifact_digest.clone());
         }
         self.buffers
-            .slice(&held.artifact_digest, range)
-            .map(|bytes| (bytes.to_vec(), loaded))
+            .slice(&held.artifact_digest, range.clone())
+            .map(|bytes| (bytes.to_vec(), loaded, range))
             .map_err(|_| refuse(Some(alias), RefusalCode::InvalidRange))
     }
 
