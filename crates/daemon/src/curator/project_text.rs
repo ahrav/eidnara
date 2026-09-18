@@ -482,6 +482,13 @@ impl ProjectText {
                             && detail.buffer_digest == digest
                             && detail.range == (0, byte_length) =>
                     {
+                        // A reused row keeps its original acquisition reference, which may be earlier than this inspection's; one that would outlive the inspection's reference was not created by a run under it and is refused here, before the row is pinned, so it costs the hold nothing.
+                        let reference = store
+                            .local_file_capture_reference(&evidence_id)
+                            .map_err(|_| refusal(RefusalCode::Store))?;
+                        if reference.is_none_or(|reference| reference > self.binding.retain_until) {
+                            return Err(refusal(RefusalCode::Store));
+                        }
                         true
                     }
                     Some(_) => return Err(refusal(RefusalCode::Store)),
@@ -531,7 +538,7 @@ impl ProjectText {
                 let held = broker
                     .hold_evidence(store, None, &evidence_id, &digest, now_ms)
                     .map_err(abandon)?;
-                // A reused row keeps its original acquisition reference, which may be earlier than this inspection's; one that would outlive the inspection's reference was not created by a run under it and is refused.
+                // The held facts define the alias; a reused row's reference was checked above, and a fresh row's is the inspection's own.
                 let retain_until = held
                     .retain_until
                     .filter(|retain_until| *retain_until <= self.binding.retain_until)

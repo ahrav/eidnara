@@ -2251,4 +2251,9 @@ fn a_reused_capture_may_not_outlive_the_inspections_reference() {
         "a row that would outlive the inspection's reference is not this run's capture"
     );
     assert_eq!(broker.ledger.disclosed().count(), 0);
+    assert_eq!(
+        fixture.hold_references(broker.hold_id()),
+        1,
+        "the refused row was never pinned; only the anchor is held"
+    );
 }

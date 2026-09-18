@@ -277,6 +277,28 @@ impl KernelStore {
         .map(|_| ())
     }
 
+    /// The acquisition reference (`retain_until`) of the live Curator-capture evidence row `evidence_id`, or `None` when no such row is live. A run reusing a capture checks this before pinning the row, so a row that would outlive the run's own reference is refused without ever joining its hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage errors.
+    pub fn local_file_capture_reference(
+        &self,
+        evidence_id: &str,
+    ) -> Result<Option<i64>, KernelError> {
+        let reader = self.lock_reader()?;
+        reader
+            .query_row(
+                "SELECT retain_until FROM evidence_meta
+                 WHERE evidence_id=?1 AND retention_class=?2 AND retain_until IS NOT NULL
+                   AND invalidated_commit_seq IS NULL",
+                params![evidence_id, super::cas::CURATOR_CAPTURE_RETENTION_CLASS],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)
+    }
+
     /// The typed detail of the live capture observation citing `evidence_id`, or `None` when no such observation is live.
     ///
     /// # Errors
