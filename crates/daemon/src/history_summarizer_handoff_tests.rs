@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::*;
 use crate::curator::handoff::{
     Handoff, HandoffError, HandoffRequest, HandoffTarget, PRODUCER, SUBJECT_SOURCE_KIND,
-    reserve_and_stage, review_binding, review_policy_versions, review_subject, session_key,
+    handoff_key, reserve_and_stage, review_binding, review_policy_versions, review_subject,
 };
 use crate::history_summarizer::{ValidatedPublishRequest, publish_validated_chunk};
 use crate::history_summarizer_citations::{Citation, FrozenAlias, FrozenAliasTable};
@@ -144,7 +144,7 @@ impl Rig {
         let payload_digest = payload.digest().unwrap();
         ReviewStagedReference {
             database_incarnation_id: self.kernel_incarnation.clone(),
-            candidate_id: format!("hs-{}-{}", session_key(SESSION), &payload_digest[..32]),
+            candidate_id: format!("hs-{}-{}", rig_key(), &payload_digest[..32]),
             payload_digest,
         }
     }
@@ -220,6 +220,11 @@ impl Rig {
             now_ms,
         )
     }
+}
+
+/// The key the rig's handoffs derive their Kernel and job identities from.
+fn rig_key() -> String {
+    handoff_key(PROJECT_DIGEST, SESSION, &review_policy_versions())
 }
 
 fn selected_range_identities() -> Vec<HistorySummarizerSelectedMessageIdentity> {
@@ -408,10 +413,7 @@ fn identical_facts_from_the_next_firing_adopt_the_orphaned_reservation() {
     let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
     let adopted = activation(rig.handoff(t0() + 10).unwrap());
     assert_eq!(adopted.causal_identity, first.causal_identity);
-    assert_eq!(
-        adopted.producer.firing_id,
-        format!("{}#4", session_key(SESSION))
-    );
+    assert_eq!(adopted.producer.firing_id, format!("{}#4", rig_key()));
     assert_eq!(
         rig.store.curator_headroom(PROJECT).unwrap(),
         headroom_before,
@@ -514,7 +516,7 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
         job.producer,
         ProducerBinding {
             producer: PRODUCER.to_string(),
-            firing_id: format!("{}#3", session_key(SESSION)),
+            firing_id: format!("{}#3", rig_key()),
             ordinal: 2,
         }
     );
@@ -926,10 +928,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     let ready = rig.store.ready_curator_jobs(PROJECT, 8, t0()).unwrap();
     assert_eq!(ready.len(), 1);
     let job = &ready[0];
-    assert_eq!(
-        job.producer.firing_id,
-        format!("{}#3", session_key(SESSION))
-    );
+    assert_eq!(job.producer.firing_id, format!("{}#3", rig_key()));
     let CuratorJobState::Ready(input) = &job.state else {
         panic!("{:?}", job.state);
     };
@@ -1256,4 +1255,43 @@ fn a_handoff_failure_abandons_only_the_firing_that_reserved() {
         next,
         "the newer firing is not abandoned by the one that lost the race"
     );
+}
+
+/// V27: one session id routed under two project roots is two sessions. Equal facts from both stage as distinct Kernel rows instead of the second colliding with the first's witness.
+#[test]
+fn the_same_session_under_two_project_roots_stages_two_subjects() {
+    let rig = Rig::open();
+    let firing = publishing_state(3);
+    let mut other_root = rig.target();
+    other_root.project_digest = "b".repeat(64);
+    for (project, target) in [(PROJECT, rig.target()), ("git:other", other_root)] {
+        let handoff = reserve_and_stage(
+            &target,
+            &HandoffRequest {
+                store: &rig.store,
+                project,
+                session_id: SESSION,
+                firing: &firing,
+                facts: &facts(),
+                aliases: &aliases(),
+                now_ms: t0(),
+            },
+            |_| Ok(1),
+        )
+        .unwrap();
+        assert!(matches!(handoff, Handoff::Activate(_)), "{handoff:?}");
+    }
+}
+
+/// Q25/Q29: a policy change permits one new job at an unchanged subject, and the Kernel row it stages must be its own, so the policies are part of the row's identity.
+#[test]
+fn the_handoff_key_separates_projects_sessions_and_policies() {
+    let current = review_policy_versions();
+    let mut previous = current.clone();
+    previous.insert("step_schema".to_string(), "previous".to_string());
+    let key = handoff_key(PROJECT_DIGEST, SESSION, &current);
+    assert_eq!(key.len(), 32);
+    assert_ne!(key, handoff_key(&"b".repeat(64), SESSION, &current));
+    assert_ne!(key, handoff_key(PROJECT_DIGEST, "other", &current));
+    assert_ne!(key, handoff_key(PROJECT_DIGEST, SESSION, &previous));
 }

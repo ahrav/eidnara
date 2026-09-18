@@ -96,10 +96,28 @@ pub fn review_policy_versions() -> BTreeMap<String, String> {
     ])
 }
 
-/// The fixed-width stand-in for a session id inside the identities the handoff derives: the wire protocol admits 256 session bytes, the store bounds every identity at 256, so the id itself never appears in one. The first 32 lower-hex digits of its SHA-256.
-pub fn session_key(session_id: &str) -> String {
-    let digest = Sha256::digest(session_id.as_bytes());
-    format!("{digest:x}")[..32].to_string()
+/// The fixed-width key the handoff's Kernel and job identities carry: the Kernel scope, the session, and the review policies. Kernel candidate and run ids are global to the Kernel, so one session id routed under two project roots (V27) and one subject reviewed under two policy versions (Q25/Q29) each need their own row. The wire protocol admits 256 session bytes and the store bounds every identity at 256, so the id itself never appears in one. The first 32 lower-hex digits of a SHA-256 over the unit-separated parts.
+pub fn handoff_key(
+    project_digest: &str,
+    session_id: &str,
+    policy_versions: &BTreeMap<String, String>,
+) -> String {
+    let mut hasher = Sha256::new();
+    for part in [
+        project_digest,
+        session_id,
+        QuestionTemplate::ExtractedFacts.id(),
+    ] {
+        hasher.update(part.as_bytes());
+        hasher.update([0x1f]);
+    }
+    for (name, version) in policy_versions {
+        hasher.update(name.as_bytes());
+        hasher.update([0x1f]);
+        hasher.update(version.as_bytes());
+        hasher.update([0x1f]);
+    }
+    format!("{:x}", hasher.finalize())[..32].to_string()
 }
 
 /// The binding a staged History Summarizer subject is read under. `chunk_ordinal` is the first message of the chunk that presented the facts, the job's `producer.ordinal`, so the coordinator reconstructs the binding from the job row alone and a firing that adopts the reservation reads under the same binding.
@@ -300,10 +318,11 @@ pub fn reserve_and_stage(
             CuratorNonadmissionCode::SubjectRefused,
         ));
     };
-    // The candidate and its run are named by the subject bytes, not the firing, so a later firing that adopts the reservation restages the same row under the same identity.
-    let session_key = session_key(session_id);
-    let candidate_id = format!("hs-{session_key}-{}", &payload_digest[..32]);
-    let extraction_run_id = format!("hs-run-{session_key}-{}", &payload_digest[..32]);
+    // The candidate and its run are named by the scope, session, policies, and subject bytes, not the firing, so a later firing that adopts the reservation restages the same row under the same identity.
+    let policy_versions = review_policy_versions();
+    let key = handoff_key(&target.project_digest, session_id, &policy_versions);
+    let candidate_id = format!("hs-{key}-{}", &payload_digest[..32]);
+    let extraction_run_id = format!("hs-run-{key}-{}", &payload_digest[..32]);
     let chunk_ordinal = firing
         .chunk_range
         .as_ref()
@@ -311,7 +330,7 @@ pub fn reserve_and_stage(
         .from_ordinal;
     let producer = ProducerBinding {
         producer: PRODUCER.to_string(),
-        firing_id: format!("{session_key}#{}", firing.firing_seq),
+        firing_id: format!("{key}#{}", firing.firing_seq),
         ordinal: chunk_ordinal,
     };
     let inputs = CausalInputs {
@@ -323,7 +342,7 @@ pub fn reserve_and_stage(
         question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
         signals: Vec::new(),
         required_evidence: Vec::new(),
-        policy_versions: review_policy_versions(),
+        policy_versions,
     };
     let job = match reserved_row(request, &producer, &inputs)? {
         ReservedRow::Job(job) => *job,
