@@ -592,6 +592,87 @@ fn sanitize_kernel_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(block))
 }
 
+pub(crate) const CURATOR_KEY: &str = "curator";
+const CURATOR_STATE_KEY: &str = "curator_state";
+const CURATOR_STATES: [&str; 3] = ["ready", STATE_STARTING, STATE_UNAVAILABLE];
+/// Every Curator counter the wire contract names (`docs/host-wire-protocol.md`, `metrics.curator`); an unknown field is dropped.
+const CURATOR_COUNTERS: [&str; 36] = [
+    "swept_jobs",
+    "swept_selections",
+    "jobs_reserved",
+    "jobs_ready",
+    "jobs_expired",
+    "jobs_expired_unseen",
+    "jobs_nonadmitted",
+    "jobs_failed",
+    "jobs_unknown",
+    "jobs_completed",
+    "jobs_abstained",
+    "selections_frozen",
+    "selections_enqueued",
+    "selections_expired",
+    "selections_failed_slot",
+    "attempts_attempted",
+    "attempts_acknowledged",
+    "attempts_failed",
+    "attempts_cancelled",
+    "attempts_unknown",
+    "attempts_not_dispatched",
+    "attempts_open",
+    "receipts_in_progress",
+    "receipts_complete",
+    "receipt_charge_bytes",
+    "allowance_bytes",
+    "metadata_bytes",
+    "metadata_quota_bytes",
+    "metadata_headroom_bytes",
+    "nonadmissions",
+    "sessions_with_reservation",
+    "latest_nonadmission_curator_unavailable",
+    "latest_nonadmission_capacity_full",
+    "latest_nonadmission_evidence_unavailable",
+    "latest_nonadmission_fact_set_rejected",
+    "latest_nonadmission_subject_refused",
+];
+
+/// Retains only Curator counters with declared types and ranges, field by field, the way the kernel block is kept. A block without a recognized `curator_state` is dropped whole; every counter is an unsigned integer no greater than 2^53 or it is dropped to absent; `sampled_at_ms` alone may be `null`.
+fn sanitize_curator_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
+    const MAX_COUNTER: u64 = 1 << 53;
+    let raw = raw.as_object()?;
+    let state = raw
+        .get(CURATOR_STATE_KEY)
+        .and_then(serde_json::Value::as_str)?;
+    if !CURATOR_STATES.contains(&state) {
+        return None;
+    }
+    let mut block = serde_json::Map::new();
+    block.insert(
+        CURATOR_STATE_KEY.to_owned(),
+        serde_json::Value::String(state.to_owned()),
+    );
+    match raw.get("sampled_at_ms") {
+        Some(serde_json::Value::Null) => {
+            block.insert("sampled_at_ms".to_owned(), serde_json::Value::Null);
+        }
+        Some(value) => {
+            if let Some(value) = value.as_u64().filter(|value| *value <= MAX_COUNTER) {
+                block.insert("sampled_at_ms".to_owned(), serde_json::Value::from(value));
+            }
+        }
+        None => {}
+    }
+    for name in CURATOR_COUNTERS {
+        if let Some(value) = raw
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .filter(|value| *value <= MAX_COUNTER)
+        {
+            block.insert(name.to_owned(), serde_json::Value::from(value));
+        }
+    }
+    Some(serde_json::Value::Object(block))
+}
+
 /// The epoch set is all-or-nothing: an unexpected key or an out-of-range value drops the whole `epochs` object so a consumer never compares a partial epoch vector.
 fn sanitize_context_metrics(
     metrics: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -633,6 +714,12 @@ fn sanitize_context_metrics(
         .and_then(sanitize_kernel_block)
     {
         sanitized_metrics.insert(KERNEL_KEY.to_owned(), kernel);
+    }
+    if let Some(curator) = metrics
+        .and_then(|metrics| metrics.get(CURATOR_KEY))
+        .and_then(sanitize_curator_block)
+    {
+        sanitized_metrics.insert(CURATOR_KEY.to_owned(), curator);
     }
 }
 
@@ -1538,5 +1625,86 @@ mod tests {
         );
         let unknown: serde_json::Value = serde_json::from_slice(unknown_body).unwrap();
         assert_eq!(unknown["modules"].as_array().unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod curator_block_tests {
+    use super::*;
+
+    fn report(curator: serde_json::Value) -> crate::handler::HealthReport {
+        crate::handler::HealthReport {
+            status: crate::handler::HealthStatus::Ok,
+            detail: None,
+            metrics: Some(serde_json::json!({
+                "components": {
+                    "context": {
+                        "status": "ok",
+                        "metrics": { "storage_state": "ready", "curator": curator }
+                    }
+                }
+            })),
+        }
+    }
+
+    fn curator_of(report: &crate::handler::HealthReport) -> Option<serde_json::Value> {
+        let response: serde_json::Value = serde_json::from_slice(&host_status_response_json(
+            report,
+            serde_json::json!({"state": "healthy"}),
+        ))
+        .expect("status JSON");
+        response["metrics"]["components"]["context"]["metrics"]
+            .as_object()
+            .expect("context metrics object")
+            .get("curator")
+            .cloned()
+    }
+
+    /// Every declared counter passes; unknown, negative, oversized, string, and `null` counters are dropped to absent; `sampled_at_ms` alone may be `null`; a block without a valid state is dropped whole.
+    #[test]
+    fn curator_block_is_sanitized_field_by_field() {
+        let mut full = serde_json::Map::new();
+        full.insert("curator_state".into(), "ready".into());
+        full.insert("sampled_at_ms".into(), 1_700_000_000_000_u64.into());
+        for (index, name) in CURATOR_COUNTERS.iter().enumerate() {
+            full.insert((*name).to_owned(), (index as u64).into());
+        }
+        full.insert("job_ids".into(), serde_json::json!(["a", "b"]));
+        let kept = curator_of(&report(serde_json::Value::Object(full.clone()))).expect("kept");
+        let kept = kept.as_object().unwrap();
+        assert_eq!(kept.len(), 2 + CURATOR_COUNTERS.len());
+        assert!(kept.get("job_ids").is_none(), "unknown fields are dropped");
+        for (index, name) in CURATOR_COUNTERS.iter().enumerate() {
+            assert_eq!(kept[*name], serde_json::Value::from(index as u64), "{name}");
+        }
+
+        let partial = curator_of(&report(serde_json::json!({
+            "curator_state": "starting",
+            "sampled_at_ms": null,
+            "jobs_ready": -1,
+            "jobs_reserved": "many",
+            "nonadmissions": 1_u64 << 60,
+            "attempts_open": null,
+            "metadata_headroom_bytes": 1_u64 << 53,
+        })))
+        .expect("kept");
+        assert_eq!(
+            partial,
+            serde_json::json!({
+                "curator_state": "starting",
+                "sampled_at_ms": null,
+                "metadata_headroom_bytes": 1_u64 << 53,
+            })
+        );
+
+        assert!(curator_of(&report(serde_json::json!({ "curator_state": "broken" }))).is_none());
+        assert!(curator_of(&report(serde_json::json!({ "jobs_ready": 1 }))).is_none());
+        assert!(curator_of(&report(serde_json::json!("ready"))).is_none());
+        assert_eq!(
+            curator_of(&report(
+                serde_json::json!({ "curator_state": "unavailable" })
+            )),
+            Some(serde_json::json!({ "curator_state": "unavailable" }))
+        );
     }
 }

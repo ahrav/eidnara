@@ -2910,6 +2910,8 @@ pub struct HandlerCore {
     /// The kernel store opens after the cache store under the same managed
     /// directory; routes read it through `kernel_store()`, never the slot.
     kernel: Arc<kernel_routes::KernelOpenCoordinator>,
+    /// The Curator sampler's published block; `health()` and status read it and never touch the ledger.
+    curator_status: Arc<curator::lifecycle::CuratorStatus>,
     /// `initialize` decodes the storage descriptor, and `activate` consumes it: malformed descriptors fail before publication, while storage opens after transport publication.
     pending_storage: Mutex<Option<StorageDescriptor>>,
     /// `spawn_gate` serializes the task-admission check against shutdown.
@@ -3826,6 +3828,7 @@ impl Handler {
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::clone(&kernel),
+            curator_status: Arc::default(),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
             cancel,
@@ -3966,6 +3969,7 @@ impl HandlerCore {
         let task_coordinator = Arc::clone(&coordinator);
         let cancel = self.cancel.clone();
         let store_slot = Arc::clone(&self.store);
+        let curator_status = Arc::clone(&self.curator_status);
         let bindings = Arc::clone(&self.bindings);
         let memory_classifier = Arc::clone(&self.memory_classifier);
         let search_lifecycle = Arc::clone(&self.search_lifecycle);
@@ -3990,6 +3994,16 @@ impl HandlerCore {
                 let opened =
                     Self::run_store_open(store, task_coordinator, &descriptor, cancel.clone())
                         .await;
+                // The Curator sampler and cleanup start as soon as the store is installed; the Kernel joins its passes only while it is ready.
+                if opened && let Some(store) = store_slot.lock().expect("store slot mutex").clone()
+                {
+                    task_admission.spawn(curator::lifecycle::run(
+                        Arc::clone(&curator_status),
+                        store,
+                        Arc::clone(&kernel),
+                        cancel.clone(),
+                    ));
+                }
                 // The scheduler needs only the memory store; it starts once
                 // that store is installed, whatever the kernel does next, and
                 // holds the store until shutdown joins it.
@@ -4269,6 +4283,7 @@ impl Handler {
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::clone(&kernel),
+            curator_status: Arc::default(),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
             cancel: CancellationToken::new(),
@@ -8373,6 +8388,7 @@ impl HandlerCore {
                     },
                     "memory_holders": self.memory_holder_metrics(),
                     "kernel": kernel,
+                    "curator": self.curator_status.reported().to_json(),
                 })),
                 Err(e) => PreparedOutcome::Error {
                     code: "store_load_failed".to_string(),
@@ -12698,6 +12714,10 @@ impl CompositeComponent for Handler {
             });
         }
         metrics.insert("kernel".to_owned(), kernel.to_json());
+        metrics.insert(
+            "curator".to_owned(),
+            self.curator_status.reported().to_json(),
+        );
         metrics.insert(
             "epochs".to_owned(),
             json!({

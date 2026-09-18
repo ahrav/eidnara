@@ -503,7 +503,10 @@ pub(crate) fn load_curator_job(
 }
 
 /// Receipt charges of every row plus allowances of non-terminal rows and frozen pages.
-fn metadata_bytes(conn: &GuardedConn<'_>, project: Option<&str>) -> rusqlite::Result<u64> {
+pub(crate) fn metadata_bytes(
+    conn: &GuardedConn<'_>,
+    project: Option<&str>,
+) -> rusqlite::Result<u64> {
     let project = project.unwrap_or("");
     let jobs: i64 = conn.query_row(
         "SELECT COALESCE(SUM(receipt_charge_bytes + allowance_bytes), 0) FROM curator_jobs

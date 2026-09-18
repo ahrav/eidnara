@@ -594,6 +594,166 @@ pub struct CuratorReservation {
     pub queue_deadline_ms: i64,
 }
 
+/// Content-free, low-cardinality facts about Curator work in this store incarnation, sampled for the operator surface. Every field is a count or a byte total from the ledger tables and the producers' durable state; nothing here carries an identity, a payload, or a reason string outside the closed code sets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CuratorStatusFacts {
+    pub jobs_reserved: u64,
+    pub jobs_ready: u64,
+    pub jobs_expired: u64,
+    /// Expired jobs that no receipt ever claimed: work that expired unseen.
+    pub jobs_expired_unseen: u64,
+    pub jobs_nonadmitted: u64,
+    pub jobs_failed: u64,
+    pub jobs_unknown: u64,
+    pub jobs_completed: u64,
+    pub jobs_abstained: u64,
+    pub selections_frozen: u64,
+    pub selections_enqueued: u64,
+    pub selections_expired: u64,
+    pub selections_failed_slot: u64,
+    /// Attempt rows consumed, whatever they ended as.
+    pub attempts_attempted: u64,
+    /// Attempts whose provider response was acknowledged as complete.
+    pub attempts_acknowledged: u64,
+    pub attempts_failed: u64,
+    pub attempts_cancelled: u64,
+    pub attempts_unknown: u64,
+    pub attempts_not_dispatched: u64,
+    pub attempts_open: u64,
+    pub receipts_in_progress: u64,
+    pub receipts_complete: u64,
+    /// Permanent receipt charges every admitted job keeps; these never shrink for the incarnation.
+    pub receipt_charge_bytes: u64,
+    /// Temporary allowances still held by non-terminal jobs and frozen selection pages; released when the work is terminal.
+    pub allowance_bytes: u64,
+    pub metadata_bytes: u64,
+    pub metadata_quota_bytes: u64,
+    pub metadata_headroom_bytes: u64,
+    /// Producer-owned facts summed over every session: nonadmissions recorded, sessions with a recorded reservation, and the latest reason per session by closed code.
+    pub nonadmissions: u64,
+    pub sessions_with_reservation: u64,
+    pub latest_nonadmission_curator_unavailable: u64,
+    pub latest_nonadmission_capacity_full: u64,
+    pub latest_nonadmission_evidence_unavailable: u64,
+    pub latest_nonadmission_fact_set_rejected: u64,
+    pub latest_nonadmission_subject_refused: u64,
+}
+
+impl MemoryStore {
+    /// Samples the Curator facts with a handful of bounded aggregate queries; the producer facts read the sessions' metadata through SQLite's JSON functions, so a large session table costs one scan.
+    pub fn curator_status_facts(&self) -> Result<CuratorStatusFacts, MemoryStoreError> {
+        fn count(conn: &GuardedConn<'_>, sql: &str) -> rusqlite::Result<u64> {
+            let value: i64 = conn.query_row(sql, [], |row| row.get(0))?;
+            Ok(u64::try_from(value).unwrap_or_default())
+        }
+        fn job_outcome(conn: &GuardedConn<'_>, outcome: &str) -> rusqlite::Result<u64> {
+            let value: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM curator_jobs WHERE state = 'terminal' AND outcome = ?1",
+                [outcome],
+                |row| row.get(0),
+            )?;
+            Ok(u64::try_from(value).unwrap_or_default())
+        }
+        fn selection_state(conn: &GuardedConn<'_>, state: &str) -> rusqlite::Result<u64> {
+            let value: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM curator_frozen_selections WHERE state = ?1",
+                [state],
+                |row| row.get(0),
+            )?;
+            Ok(u64::try_from(value).unwrap_or_default())
+        }
+        fn attempt_kind(conn: &GuardedConn<'_>, kind: &str) -> rusqlite::Result<u64> {
+            let value: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM curator_attempts WHERE terminal_kind = ?1",
+                [kind],
+                |row| row.get(0),
+            )?;
+            Ok(u64::try_from(value).unwrap_or_default())
+        }
+        fn latest_code(conn: &GuardedConn<'_>, code: &str) -> rusqlite::Result<u64> {
+            let value: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM cache_state
+                 WHERE json_extract(meta, '$.history_summarizer.curator_nonadmission.latest.code.code') = ?1",
+                [code],
+                |row| row.get(0),
+            )?;
+            Ok(u64::try_from(value).unwrap_or_default())
+        }
+        self.inner
+            .with_conn(|conn| {
+                let receipt_charge_bytes = count(
+                    conn,
+                    "SELECT COALESCE(SUM(receipt_charge_bytes), 0) FROM curator_jobs",
+                )?;
+                let metadata_bytes = curator_jobs::metadata_bytes(conn, None)?;
+                // Everything charged that is not a permanent receipt is a temporary allowance: job allowances plus the frozen pages' charges.
+                let allowance_bytes = metadata_bytes.saturating_sub(receipt_charge_bytes);
+                Ok(CuratorStatusFacts {
+                    jobs_reserved: count(conn, "SELECT COUNT(*) FROM curator_jobs WHERE state = 'reserved'")?,
+                    jobs_ready: count(conn, "SELECT COUNT(*) FROM curator_jobs WHERE state = 'ready'")?,
+                    jobs_expired: job_outcome(conn, "expired")?,
+                    jobs_expired_unseen: count(
+                        conn,
+                        "SELECT COUNT(*) FROM curator_jobs job
+                         WHERE job.state = 'terminal' AND job.outcome = 'expired'
+                           AND NOT EXISTS (SELECT 1 FROM curator_receipts receipt
+                                           WHERE receipt.project = job.project
+                                             AND receipt.causal_identity = job.causal_identity)",
+                    )?,
+                    jobs_nonadmitted: job_outcome(conn, "nonadmitted")?,
+                    jobs_failed: job_outcome(conn, "failed")?,
+                    jobs_unknown: job_outcome(conn, "unknown")?,
+                    jobs_completed: job_outcome(conn, "completed")?,
+                    jobs_abstained: job_outcome(conn, "abstained")?,
+                    selections_frozen: selection_state(conn, "frozen")?,
+                    selections_enqueued: selection_state(conn, "enqueued")?,
+                    selections_expired: selection_state(conn, "expired")?,
+                    selections_failed_slot: selection_state(conn, "failed_slot")?,
+                    attempts_attempted: count(conn, "SELECT COUNT(*) FROM curator_attempts")?,
+                    attempts_acknowledged: attempt_kind(conn, "complete")?,
+                    attempts_failed: attempt_kind(conn, "failed")?,
+                    attempts_cancelled: attempt_kind(conn, "cancelled")?,
+                    attempts_unknown: attempt_kind(conn, "unknown")?,
+                    attempts_not_dispatched: attempt_kind(conn, "not_dispatched")?,
+                    attempts_open: count(
+                        conn,
+                        "SELECT COUNT(*) FROM curator_attempts WHERE terminal_kind IS NULL",
+                    )?,
+                    receipts_in_progress: count(
+                        conn,
+                        "SELECT COUNT(*) FROM curator_receipts WHERE state = 'in_progress'",
+                    )?,
+                    receipts_complete: count(
+                        conn,
+                        "SELECT COUNT(*) FROM curator_receipts WHERE state = 'complete'",
+                    )?,
+                    receipt_charge_bytes,
+                    allowance_bytes,
+                    metadata_bytes,
+                    metadata_quota_bytes: curator_jobs::MAX_CURATOR_METADATA_BYTES_PER_HOST,
+                    metadata_headroom_bytes: curator_jobs::MAX_CURATOR_METADATA_BYTES_PER_HOST
+                        .saturating_sub(metadata_bytes),
+                    nonadmissions: count(
+                        conn,
+                        "SELECT COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_nonadmission.count')), 0)
+                         FROM cache_state",
+                    )?,
+                    sessions_with_reservation: count(
+                        conn,
+                        "SELECT COUNT(*) FROM cache_state
+                         WHERE json_extract(meta, '$.history_summarizer.curator_reservation') IS NOT NULL",
+                    )?,
+                    latest_nonadmission_curator_unavailable: latest_code(conn, "curator_unavailable")?,
+                    latest_nonadmission_capacity_full: latest_code(conn, "capacity_full")?,
+                    latest_nonadmission_evidence_unavailable: latest_code(conn, "evidence_unavailable")?,
+                    latest_nonadmission_fact_set_rejected: latest_code(conn, "fact_set_rejected")?,
+                    latest_nonadmission_subject_refused: latest_code(conn, "subject_refused")?,
+                })
+            })
+            .map_err(Into::into)
+    }
+}
+
 /// Everything a reserved firing's publication needs to run again locally after an interruption, so recovery neither reruns the model nor reconstructs the validated output: the validated chunk as the daemon serializes it, and the publication inputs beside it. Stored compressed in its own row, written and cleared with the reservation it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingPublication {
@@ -21453,6 +21613,12 @@ mod tests {
             }),
         };
         assert_eq!(after.meta.history_summarizer.curator_nonadmission, recorded);
+        // The sampler reads the same producer facts through the session metadata.
+        let facts = store.curator_status_facts().unwrap();
+        assert_eq!(facts.nonadmissions, 1);
+        assert_eq!(facts.latest_nonadmission_fact_set_rejected, 1);
+        assert_eq!(facts.latest_nonadmission_capacity_full, 0);
+        assert_eq!(facts.sessions_with_reservation, 0);
 
         // Resending the original request after its outcome settled is refused by the row version it carried and counts nothing.
         let resent = publish(

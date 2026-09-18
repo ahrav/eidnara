@@ -6,6 +6,7 @@ pub mod broker;
 pub mod coordinator;
 pub mod disclosure;
 pub mod handoff;
+pub mod lifecycle;
 pub mod model_request;
 pub mod model_response;
 pub mod project_text;
