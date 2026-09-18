@@ -241,6 +241,16 @@ impl Rig {
     }
 
     fn ready_history_summarizer_job_under(&self, now: i64, project_digest: &str) -> String {
+        self.ready_history_summarizer_job_tagged(now, project_digest, "ses-3")
+    }
+
+    /// `tag` distinguishes the staged payload and its staging run, so several jobs can coexist.
+    fn ready_history_summarizer_job_tagged(
+        &self,
+        now: i64,
+        project_digest: &str,
+        tag: &str,
+    ) -> String {
         let producer = ProducerBinding {
             producer: "history_summarizer".to_string(),
             firing_id: "ses#3".to_string(),
@@ -248,7 +258,7 @@ impl Rig {
         };
         let payload = kernel::ReviewPayload::Subject(kernel::ReviewSubject {
             facts: vec![kernel::ExtractedFact {
-                text: "bun builds the workspace".to_string(),
+                text: format!("bun builds the workspace {tag}"),
                 spans: vec![kernel::SourceSpan {
                     alias: "s1".to_string(),
                     start: 0,
@@ -286,7 +296,7 @@ impl Rig {
         };
         self.kernel
             .stage_review_input(kernel::ReviewStagingSpec {
-                extraction_run_id: "hs-run-ses-3".to_string(),
+                extraction_run_id: format!("hs-run-{tag}"),
                 candidate_id,
                 producer: "history_summarizer".to_string(),
                 binding: review_binding(project_digest, "memory", "ses", 3, &job.causal_identity),
@@ -296,7 +306,11 @@ impl Rig {
             })
             .unwrap();
         self.kernel
-            .finish_staging_run("hs-run-ses-3", kernel::StagingTerminalState::Completed, now)
+            .finish_staging_run(
+                &format!("hs-run-{tag}"),
+                kernel::StagingTerminalState::Completed,
+                now,
+            )
             .unwrap();
         self.store
             .activate_curator_job(
@@ -423,6 +437,30 @@ async fn a_subject_staged_from_an_older_root_of_the_project_is_read_under_that_r
         "the subject was read under the root that staged it and settled on its own sensitivity, not on a scope refusal"
     );
     assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn ready_jobs_no_bound_root_owns_do_not_starve_the_jobs_behind_them() {
+    // Unroutable jobs stay Ready for their queue deadline and sort first by deadline. A pass must still reach the routable job behind a full page of them.
+    let rig = Rig::open().await;
+    let now = now_ms();
+    let unbound = "c".repeat(64);
+    for index in 0..daemon::curator::worker::JOBS_PER_PASS {
+        rig.ready_history_summarizer_job_tagged(now, &unbound, &format!("orphan-{index}"));
+    }
+    let identity = rig.ready_history_summarizer_job_tagged(now + 1, PROJECT_DIGEST, "routable");
+    let worker = rig.worker();
+    rig.write_activation();
+
+    assert_eq!(worker.pass(&CancellationToken::new()).await, 1);
+    assert_eq!(
+        rig.store
+            .lookup_curator_receipt(PROJECT, &identity)
+            .unwrap()
+            .expect("the routable job ran")
+            .terminal,
+        Some(CuratorReceiptTerminal::Abstained)
+    );
 }
 
 #[tokio::test]

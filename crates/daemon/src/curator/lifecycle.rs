@@ -121,8 +121,8 @@ struct Published {
 /// The sampler's published projection; `health()` reads it and never touches the store. The activation state is the worker's, published beside the sampler's block.
 pub struct CuratorStatus {
     snapshot: ArcSwap<Published>,
-    /// The worker's latest gate evaluation and when it stops being current: a worker that stopped evaluating must not keep reporting `open`.
-    activation: ArcSwap<(ActivationState, Instant)>,
+    /// The worker's latest gate evaluation and when it stops being current: a worker that stopped evaluating must not keep reporting `open`. `None` until the first evaluation, which nothing can age.
+    activation: ArcSwap<Option<(ActivationState, Instant)>>,
 }
 
 impl Default for CuratorStatus {
@@ -132,10 +132,7 @@ impl Default for CuratorStatus {
                 block: CuratorHealthBlock::starting(),
                 stale_at: Instant::now() + SAMPLE_STALE_AFTER,
             }),
-            activation: ArcSwap::from_pointee((
-                ActivationState::Closed("unknown"),
-                Instant::now() + SAMPLE_STALE_AFTER,
-            )),
+            activation: ArcSwap::from_pointee(None),
         }
     }
 }
@@ -151,18 +148,17 @@ impl CuratorStatus {
             } else {
                 published.block.clone()
             };
-        let (activation, stale_at) = **self.activation.load();
-        block.activation_state = ActivationStateText(if now >= stale_at {
-            ActivationState::Closed("stale")
-        } else {
-            activation
+        block.activation_state = ActivationStateText(match **self.activation.load() {
+            None => ActivationState::Closed("unknown"),
+            Some((_, stale_at)) if now >= stale_at => ActivationState::Closed("stale"),
+            Some((activation, _)) => activation,
         });
         block
     }
 
     pub fn set_activation(&self, state: ActivationState) {
         self.activation
-            .store(Arc::new((state, Instant::now() + SAMPLE_STALE_AFTER)));
+            .store(Arc::new(Some((state, Instant::now() + SAMPLE_STALE_AFTER))));
     }
 
     fn last_sampled_at_ms(&self) -> Option<i64> {
@@ -176,13 +172,15 @@ impl CuratorStatus {
         }));
     }
 
-    /// Moves the current block's stale deadline to now.
+    /// Moves the current block's and the activation's stale deadlines to now.
     #[cfg(any(test, feature = "test-support"))]
     pub fn expire_for_test(&self) {
         self.snapshot.rcu(|current| Published {
             block: current.block.clone(),
             stale_at: Instant::now(),
         });
+        self.activation
+            .rcu(|current| current.map(|(state, _)| (state, Instant::now())));
     }
 }
 
@@ -520,6 +518,24 @@ mod tests {
                 .state,
             CuratorJobState::Terminal(CuratorJobOutcome::Expired),
             "the expired reservation keeps its recorded outcome and is not reopened"
+        );
+    }
+
+    /// Before the worker's first evaluation nothing can go stale: `unknown` outlives the staleness bound. An evaluation does age into `stale`.
+    #[test]
+    fn an_unevaluated_gate_stays_unknown_while_an_evaluation_ages_into_stale() {
+        let status = CuratorStatus::default();
+        status.expire_for_test();
+        assert_eq!(
+            status.reported().activation_state.0,
+            ActivationState::Closed("unknown")
+        );
+        status.set_activation(ActivationState::Open);
+        assert_eq!(status.reported().activation_state.0, ActivationState::Open);
+        status.expire_for_test();
+        assert_eq!(
+            status.reported().activation_state.0,
+            ActivationState::Closed("stale")
         );
     }
 

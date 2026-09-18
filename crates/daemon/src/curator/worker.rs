@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use host_runtime::model_execution::subprocess::CREDENTIAL_VALUE_CAP_BYTES;
 use host_runtime::model_execution::supervisor::Supervisor;
 use kernel::{
     ReviewBinding, ReviewOwner, ReviewReadError, ReviewReadRefusal, ReviewStagedReference,
     SourceDependency,
 };
-use memory_store::curator_jobs::{CuratorJob, CuratorJobState, ReviewTarget};
+use memory_store::curator_jobs::{
+    CuratorJob, CuratorJobState, MAX_PENDING_CURATOR_JOBS_PER_PROJECT, ReviewTarget,
+};
 use memory_store::curator_ledger::{CuratorBeginOutcome, CuratorReceipt};
 use memory_store::{LeaseAcquireOutcome, LeaseClaim, MemoryStore};
 use tokio_util::sync::CancellationToken;
@@ -32,10 +35,15 @@ use super::settlement::TaskClaim;
 
 /// Idle interval between passes when no job was run.
 pub const IDLE_INTERVAL: Duration = Duration::from_secs(30);
-/// Ready jobs claimed per project per pass.
+/// Runs per project per pass. Ready jobs the pass skips (no bound root owns the subject, another worker holds it, already settled) do not count, so a deadline-ordered prefix of them cannot starve the jobs behind it.
 pub const JOBS_PER_PASS: usize = 8;
 /// Output budget and sampling every Curator request carries; the model id comes from the activation record.
 pub const MAX_TOKENS: u32 = 4096;
+/// Credential names the host may hand the daemon; `eidnara_host` asserts its name list against this.
+pub const MAX_CREDENTIALS: usize = 3;
+/// Bytes [`CuratorHost`] retains for the process lifetime: one value under [`CREDENTIAL_VALUE_CAP_BYTES`] per credential, its name, and its keyed identity. Declared under the daemon's retained-resident bytes.
+pub const RETAINED_CREDENTIAL_BYTES: u64 =
+    MAX_CREDENTIALS as u64 * (CREDENTIAL_VALUE_CAP_BYTES as u64 + 256);
 
 pub struct CuratorHost {
     pub supervisor: Arc<Supervisor>,
@@ -215,7 +223,7 @@ impl Worker {
                 let project = route.project.clone();
                 tokio::task::spawn_blocking(move || {
                     store
-                        .ready_curator_jobs(&project, JOBS_PER_PASS)
+                        .ready_curator_jobs(&project, MAX_PENDING_CURATOR_JOBS_PER_PROJECT)
                         .map_err(|error| error.to_string())
                 })
                 .await
@@ -231,18 +239,22 @@ impl Worker {
                 }
             };
             let route = Arc::new(route);
+            let mut runs = 0;
             for job in ready {
-                if cancel.is_cancelled() {
+                if cancel.is_cancelled() || runs == JOBS_PER_PASS {
                     break;
                 }
                 // The owner can withdraw the record between jobs; a gate that closed or changed since the pass began admits no further run under the pass's approval.
                 if self.gate_off_runtime(&kernel).await.as_ref() != Ok(&activation) {
                     return settled;
                 }
-                match self
+                let outcome = self
                     .run_job(&coordinator, &kernel, &route, Arc::new(job), cancel)
-                    .await
-                {
+                    .await;
+                if !matches!(outcome, Ok(false)) {
+                    runs += 1;
+                }
+                match outcome {
                     Ok(true) => settled += 1,
                     Ok(false) => {}
                     Err(InvestigationError::Capacity) => break,
