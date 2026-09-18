@@ -5360,6 +5360,7 @@ impl HandlerCore {
                                         publication_fence: Some(publication_fence.as_ref()),
                                         collect_user_memory_candidates: config
                                             .user_memory_collection_enabled,
+                                        memory_enabled: config.memory_enabled,
                                     },
                                 )
                                 .map(history_summarizer::HistorySummarizerReattachOutcome::Republished);
@@ -5452,6 +5453,7 @@ impl HandlerCore {
                                     publication_fence: Some(publication_fence.as_ref()),
                                     collect_user_memory_candidates: config
                                         .user_memory_collection_enabled,
+                                    memory_enabled: config.memory_enabled,
                                 },
                             )
                             .map(|_| ())

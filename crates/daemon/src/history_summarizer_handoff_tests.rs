@@ -181,6 +181,7 @@ impl Rig {
             failure_backoff_at_ms: now_ms + 60_000,
             publication_fence: None,
             collect_user_memory_candidates: false,
+            memory_enabled: true,
         })
         .unwrap()
     }
@@ -1637,6 +1638,7 @@ fn an_unreadable_retained_publication_settles_the_reservation_instead_of_strandi
         failure_backoff_at_ms: t0() + 60_000,
         publication_fence: None,
         collect_user_memory_candidates: false,
+        memory_enabled: true,
     });
     assert!(
         matches!(outcome, Ok(RepublishOutcome::Settled)),
@@ -1729,6 +1731,7 @@ fn every_retained_republish_arms_the_backoff() {
         failure_backoff_at_ms: t0() + 1 + 60_000,
         publication_fence: Some(&fence),
         collect_user_memory_candidates: false,
+        memory_enabled: true,
     })
     .unwrap();
     assert_eq!(outcome, RepublishOutcome::Retained);
@@ -1778,6 +1781,7 @@ fn a_settle_from_a_stale_snapshot_spares_a_later_firing_and_the_job_the_publicat
         failure_backoff_at_ms: t0() + 1 + 60_000,
         publication_fence: Some(&fence),
         collect_user_memory_candidates: false,
+        memory_enabled: true,
     })
     .unwrap();
     // The activated job, the later firing, and its retained publication are all someone else's now.
@@ -2469,6 +2473,7 @@ fn an_unpublishable_reservation_settled_past_its_deadline_records_expiry_and_fre
         failure_backoff_at_ms: late + 60_000,
         publication_fence: None,
         collect_user_memory_candidates: false,
+        memory_enabled: true,
     });
     assert!(
         matches!(outcome, Ok(RepublishOutcome::Settled)),
@@ -2517,6 +2522,7 @@ fn a_stale_retain_leaves_a_later_firing_untouched() {
         failure_backoff_at_ms: t0() + 3 + 60_000,
         publication_fence: Some(&fence),
         collect_user_memory_candidates: false,
+        memory_enabled: true,
     })
     .unwrap();
     assert_eq!(outcome, RepublishOutcome::Retained);
@@ -2607,4 +2613,84 @@ fn a_publication_without_an_activation_drops_a_retained_publication_no_reservati
     rig.publish_range(None, None, t0() + 10, 5, 6).unwrap();
     assert_eq!(rig.state().state, HistorySummarizerPhase::Idle);
     assert_eq!(rig.pending(), None);
+}
+
+#[test]
+fn a_handoff_failure_retains_only_the_firing_whose_handoff_failed() {
+    let rig = Rig::open();
+    let publishing = rig.state();
+    let publishing_row_version = rig.store.load(SESSION).unwrap().row_version.unwrap();
+    // Another path moved the session on: firing 3 was abandoned, firing 4 fired and holds its own reservation with its retained publication.
+    rig.persist(abandon_with_detail(&rig.state(), t0() + 1, None));
+    rig.persist(next_publishing_firing(&rig, 5, 6));
+    rig.retain(
+        &later_reservation(),
+        &pending_publication(&validated_range(5, 6)),
+    );
+    let before = rig.state();
+    assert_eq!(before.firing_seq, 4);
+    assert_eq!(before.last_failure, None);
+    // Firing 3's handoff fails at persistence: its row version is stale.
+    let target = rig.target();
+    let result = curator_decision_before_publish(CuratorDecisionRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        publishing: &publishing,
+        publishing_row_version,
+        validated: &accepted_range(2, 4),
+        aliases: &aliases(),
+        pending: pending_publication(&validated_range(2, 4)),
+        curator_handoff: Some(&target),
+        failure_started_at_ms: t0(),
+        failure_backoff_at_ms: t0() + 60_000,
+        completion_now_ms: t0,
+    });
+    assert!(
+        matches!(result, Err(HistorySummarizerDriveError::CuratorHandoff(_))),
+        "{:?}",
+        result.err()
+    );
+    // Firing 4 carries nothing of firing 3's failure.
+    let after = rig.state();
+    assert_eq!(after.firing_seq, 4);
+    assert_eq!(after.state, HistorySummarizerPhase::Publishing);
+    assert_eq!(after.curator_reservation, Some(later_reservation()));
+    assert_eq!(after.last_failure, None);
+    assert_eq!(after.failure_backoff_at_ms, None);
+    assert_eq!(
+        after.consecutive_publish_failures,
+        before.consecutive_publish_failures
+    );
+}
+
+#[test]
+fn a_republication_with_memory_disabled_settles_instead_of_activating() {
+    // Memory was disabled after the firing retained its accepted facts; recovery does not hand them to the Curator. The reservation settles and the firing refires under the current configuration.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    let target = rig.target();
+    let outcome = republish_reserved(RepublishRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        curator_handoff: Some(&target),
+        now_ms: t0() + 1,
+        failure_backoff_at_ms: t0() + 60_000,
+        publication_fence: None,
+        collect_user_memory_candidates: false,
+        memory_enabled: false,
+    })
+    .unwrap();
+    assert_eq!(outcome, RepublishOutcome::Settled);
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
 }

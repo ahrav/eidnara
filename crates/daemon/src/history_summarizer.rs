@@ -793,6 +793,8 @@ pub struct RepublishRequest<'a> {
     pub publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
     /// The privacy gate as configured now; user observations the firing retained are written only if it was open then and is open still.
     pub collect_user_memory_candidates: bool,
+    /// The memory gate as configured now. Facts accepted under a configuration that has since disabled memory are not handed to the Curator: the reservation settles and the firing refires under the current configuration, as the producer reattach drops them through its validation options.
+    pub memory_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -818,6 +820,7 @@ pub fn republish_reserved(
         failure_backoff_at_ms,
         publication_fence,
         collect_user_memory_candidates,
+        memory_enabled,
     } = request;
     let loaded = store.load(session_id)?;
     let publishing = loaded.meta.history_summarizer.clone();
@@ -846,6 +849,9 @@ pub fn republish_reserved(
             detail,
         )
     };
+    if !memory_enabled {
+        return settle("memory is disabled");
+    }
     let expired = reservation.queue_deadline_ms <= now_ms;
     // Before the deadline the subject must be verified through the Kernel, so without a target nothing can be decided and the payload is not worth reading.
     let target = match (expired, curator_handoff) {
@@ -1869,6 +1875,7 @@ where
                 collect_user_memory_candidates: request
                     .validate_options
                     .user_memory_collection_enabled,
+                memory_enabled: request.validate_options.memory_enabled,
             })
             .map(HistorySummarizerReattachOutcome::Republished),
             RestartAction::ReattachProducer { .. } => unreachable!(),
@@ -2273,11 +2280,11 @@ fn curator_decision_before_publish(
                 failure_backoff_at_ms,
                 completion_now_ms(),
             );
-            // After the reservation exists the firing stays in Publishing with the failure recorded, committed only over the row that was checked, so recovery reconciles it against the reservation instead of abandoning and refiring. Without one it is abandoned, fenced on this firing's predicate: a persist that lost its row-version race means another writer moved the session on, and that writer's state is not this firing's to abandon.
+            // After the reservation exists the firing stays in Publishing with the failure recorded, committed only over the row that was checked and only while that row is still this firing, so recovery reconciles it against the reservation instead of abandoning and refiring. Otherwise it is abandoned, fenced on this firing's predicate: a persist that lost its row-version race means another writer moved the session on, and that writer's state is not this firing's to mark or abandon.
             let loaded = store.load(session_id)?;
             let current = &loaded.meta.history_summarizer;
             let detail = Some(format!("curator handoff failed: {error}"));
-            if current.holds_reservation() {
+            if current.firing_seq == publishing.firing_seq && current.holds_reservation() {
                 persist_history_summarizer_state_if_unmoved(
                     store,
                     session_id,
