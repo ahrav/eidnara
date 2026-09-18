@@ -250,7 +250,7 @@ impl KernelStore {
                         "SELECT e.object_id,EXISTS(SELECT 1 FROM capture_pin_refs r
                                  JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
                                  WHERE r.evidence_id=e.evidence_id AND r.released_at IS NULL
-                                   AND p.released_at IS NULL)
+                                   AND p.released_at IS NULL AND p.purge_degraded_at IS NULL)
                          FROM evidence_meta e
                          WHERE e.evidence_id=?1 AND e.retention_class=?2
                            AND e.invalidated_commit_seq IS NULL",
@@ -390,13 +390,14 @@ fn is_relative_path(path: &str) -> bool {
             .all(|component| !matches!(component, "" | "." | ".."))
 }
 
-/// SQL predicate over an `evidence_meta` row aliased `e`: a live Curator capture (`?1` the retention class) whose acquisition reference has passed at `?2` and that no live hold pins at `?2`. The candidate query and the per-capture recheck evaluate this same text.
+/// SQL predicate over an `evidence_meta` row aliased `e`: a live Curator capture (`?1` the retention class) whose acquisition reference has passed at `?2` and that no live hold pins at `?2`. A live hold is unreleased, not purge-degraded, and unexpired, the same three conditions a hold must meet to be used. The candidate query and the per-capture recheck evaluate this same text.
 const EXPIRED_UNPINNED_SQL: &str = "e.retention_class=?1 AND e.invalidated_commit_seq IS NULL
            AND e.retain_until IS NOT NULL AND e.retain_until<=?2
            AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
                             JOIN capture_pins p ON p.capture_pin_id=r.capture_pin_id
                             WHERE r.evidence_id=e.evidence_id
                               AND r.released_at IS NULL AND p.released_at IS NULL
+                              AND p.purge_degraded_at IS NULL
                               AND (p.expires_at IS NULL OR p.expires_at>?2))";
 
 /// Live Curator captures whose acquisition reference has passed, that no live hold pins, whose registry object is a live evidence object, and that the sweep still has work for: `(evidence_id, evidence object id)`, oldest expiry first. A capture whose observation is already retired and whose evidence another live row cites has nothing left to retire until that citation goes, so it is not a candidate.
@@ -726,6 +727,40 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    /// A capture whose only pin was degraded by a purge is a candidate: no run can use that pin, so it holds nothing.
+    #[test]
+    fn a_purge_degraded_pin_does_not_keep_a_lapsed_capture() {
+        let conn = store_with_retired_captures(0);
+        conn.execute_batch(
+            "INSERT INTO deletion_backfill_barriers(barrier_id,artifact_digest,artifact_reference,
+                 delete_commit_seq,created_at,completed_at) VALUES ('barrier','live','object',2,0,NULL);
+             INSERT INTO capture_pins(capture_pin_id,pin_kind,owner_id,commit_seq,lease_epoch,writer_epoch,
+                 created_at,expires_at,released_at,purge_degraded_at,purge_barrier_id)
+             VALUES ('pin','curator_execution_hold','owner',1,1,1,0,1000000,NULL,5,'barrier');
+             INSERT INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at) VALUES ('pin','live',1000000);",
+        )
+        .unwrap();
+        let mut statement = conn.prepare(&expired_captures_sql()).unwrap();
+        let found: Vec<String> = statement
+            .query_map(
+                params![
+                    CURATOR_CAPTURE_RETENTION_CLASS,
+                    NOW,
+                    i64::try_from(MAX_EXPIRED_CAPTURES_PER_CALL).unwrap(),
+                    LOCAL_FILE_KIND
+                ],
+                |row| row.get(0),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            found,
+            ["live"],
+            "a degraded pin is not a live pin; the capture is a candidate"
+        );
     }
 
     /// SQLite VM steps the candidate query spends finding the one live expired capture.

@@ -365,7 +365,10 @@ fn a_read_captures_exact_bytes_once_with_typed_detail_and_a_charged_hold() {
     assert_eq!(detail.detail_version, kernel::LOCAL_FILE_DETAIL_VERSION);
     assert_eq!(detail.project_digest, PROJECT);
     assert_eq!(detail.relative_path, "src/main.rs");
-    assert_eq!(detail.captured_at, fixture.now);
+    assert!(
+        detail.captured_at >= fixture.now,
+        "the capture is dated at the read, never before the run clock"
+    );
     assert_eq!(detail.buffer_digest, digest);
     assert_eq!(detail.range, (0, body.len() as u64));
     // Ownership was charged to the run's execution hold at capture, before the disclosing read.
@@ -926,21 +929,17 @@ fn an_empty_file_that_matches_by_name_is_a_hit_with_an_empty_excerpt() {
 #[test]
 fn a_capture_is_charged_to_the_hold_before_any_disclosure() {
     let fixture = Fixture::open();
-    fixture.write("a.txt", b"twelve bytes");
+    // More than one render may show the model: the disclosing read is refused after the capture is charged.
+    let oversized = usize::try_from(daemon::curator::broker::MAX_MODEL_VISIBLE_BYTES).unwrap() + 1;
+    fixture.write("a.txt", &vec![b'x'; oversized]);
     let protected = fixture.protected();
     let mut text = fixture.text(&protected);
     let mut broker = fixture.broker(ArtifactDestination::Local);
     assert_eq!(
-        text.read(
-            &fixture.store,
-            &mut broker,
-            "a.txt",
-            Some(0..13),
-            fixture.now
-        )
-        .unwrap_err()
-        .code,
-        RefusalCode::InvalidRange
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::ByteLimit
     );
     let rows = fixture.capture_rows();
     assert_eq!(rows.len(), 1);
@@ -2256,4 +2255,70 @@ fn a_reused_capture_may_not_outlive_the_inspections_reference() {
         1,
         "the refused row was never pinned; only the anchor is held"
     );
+}
+
+#[test]
+fn a_capture_is_dated_no_earlier_than_the_wall_clock() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"bytes read now, whatever the run clock says");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    let before = now_ms();
+    // A run clock far in the past: the hold check clamps it to the wall clock, and so must the capture time.
+    text.read(&fixture.store, &mut broker, "a.txt", None, 1)
+        .unwrap();
+    let evidence_id = fixture.capture_rows()[0].0.clone();
+    let detail = fixture
+        .store
+        .local_file_capture(&evidence_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        detail.captured_at >= before,
+        "captured_at {} predates the read at {before}",
+        detail.captured_at
+    );
+}
+
+#[test]
+fn an_invalid_range_is_refused_before_anything_is_captured() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"twelve bytes");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    let tip = fixture.store.tip().unwrap();
+    // Reversed, empty, past the end, and starting at the end.
+    let reversed = std::ops::Range { start: 5, end: 3 };
+    for range in [reversed, 3..3, 0..13, 12..13] {
+        assert_eq!(
+            text.read(
+                &fixture.store,
+                &mut broker,
+                "a.txt",
+                Some(range.clone()),
+                fixture.now
+            )
+            .unwrap_err()
+            .code,
+            RefusalCode::InvalidRange,
+            "{range:?}"
+        );
+    }
+    assert_eq!(fixture.store.tip().unwrap(), tip, "nothing was captured");
+    assert!(fixture.capture_rows().is_empty());
+    assert!(broker.aliases.is_empty());
+    assert_eq!(broker.accounting.issued_inspections(), 0);
+    // A valid range still discloses.
+    let read = text
+        .read(
+            &fixture.store,
+            &mut broker,
+            "a.txt",
+            Some(0..6),
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(read.buffer.bytes, b"twelve");
 }

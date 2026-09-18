@@ -190,6 +190,13 @@ impl ProjectText {
         admit(store, &self.binding, broker, now_ms)?;
         let probed = self.probe(relative_path)?;
         let file = self.read_file(relative_path, &probed, &mut 0)?;
+        // A range the broker would refuse is refused here, before the file is captured, so an invalid read costs the run nothing.
+        if range.as_ref().is_some_and(|range| {
+            range.end <= range.start
+                || range.end > u64::try_from(file.bytes.len()).unwrap_or(u64::MAX)
+        }) {
+            return Err(refusal(RefusalCode::InvalidRange));
+        }
         let alias = self.capture(store, broker, &file, now_ms)?;
         broker.read(store, alias.as_str(), range, now_ms)
     }
@@ -255,6 +262,8 @@ impl ProjectText {
             if scanned.saturating_add(probed.len()) > MAX_SCAN_BYTES {
                 return Ok(finish(outcome, Completeness::ProbeBound));
             }
+            // The run's authority is checked again before every file is read: a hold that ended during a long traversal ends the search rather than letting the run keep reading files and learning what matched.
+            admit(store, &self.binding, broker, now_ms)?;
             // Deliverability is decided before any literal is applied, for every query kind: a file that cannot be read or rendered is withheld whether or not its path, name, or text would have matched. The read charges the bytes it takes to `scanned`, accepted or refused.
             let Ok(file) = self.read_file(&relative, &probed, &mut scanned) else {
                 outcome.withheld = true;
@@ -514,7 +523,8 @@ impl ProjectText {
                                 envelope.record_local_file_capture(&LocalFileCaptureRequest {
                                     project_digest: &self.binding.hold.project_digest,
                                     relative_path: &file.relative,
-                                    captured_at: now_ms,
+                                    // The file was read now; a stale run clock must not date it earlier, as the broker's reads already refuse to.
+                                    captured_at: now_ms.max(crate::now_ms()),
                                     domain_id: &self.binding.domain_id,
                                     scope_id: self.binding.scope_id.as_deref(),
                                     evidence_id: &evidence_id,
