@@ -313,8 +313,12 @@ pub enum CuratorLedgerError {
 /// What happened after the marker committed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchOutcome<H> {
-    /// The handoff consumed the prepared request.
-    Handed { attempt_index: u32, handoff: H },
+    /// The handoff consumed the prepared request. `attempt_deadline_ms` is the committed marker's absolute deadline, already clamped to the cutoff and the claim expiry, which the dispatched work must not outlive.
+    Handed {
+        attempt_index: u32,
+        attempt_deadline_ms: i64,
+        handoff: H,
+    },
     /// The recheck immediately before handoff failed; nothing was sent and the attempt is charged. It is finished `not_dispatched` when `finished` is true; otherwise it stays unterminated and counts as unknown.
     ChargedNotDispatched {
         attempt_index: u32,
@@ -968,6 +972,7 @@ impl MemoryStore {
             (Err(error), None) => Err(CuratorLedgerError::Store(error.into())),
             (Ok((attempt, Ok(handoff))), _) => Ok(DispatchOutcome::Handed {
                 attempt_index: attempt.attempt_index,
+                attempt_deadline_ms: attempt.attempt_deadline_ms,
                 handoff,
             }),
             (Ok((attempt, Err(reason))), _) => {

@@ -33,6 +33,7 @@ use super::disclosure::{
     prepare_body,
 };
 use super::is_capacity;
+use super::model_request::SendError;
 use super::model_response::StopReason;
 use super::project_text::{ProjectText, SearchQuery};
 use super::related_memories::RelatedMemoryDiscovery;
@@ -482,9 +483,13 @@ impl Run<'_> {
                 self.transcript.clone(),
             ) {
                 Ok(prepared) => prepared,
-                Err(DisclosureRefusal::Send { .. }) => {
+                // A body over the wire bound spends the budget; a profile the encoder refuses is a configuration fault that leaves the receipt open for a corrected deployment.
+                Err(DisclosureRefusal::Send { error, .. }) => {
                     guard.accounting.refund_render(resend);
-                    return Ok(Attempt::Exhausted);
+                    return match error {
+                        SendError::RequestTooLarge => Ok(Attempt::Exhausted),
+                        _ => Err(InvestigationError::Unavailable),
+                    };
                 }
                 Err(_) => return Err(InvestigationError::Kernel(RefusalCode::Unsupported)),
             }

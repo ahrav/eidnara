@@ -280,7 +280,7 @@ impl Disclosure<'_> {
                 CuratorLedgerError::Refused(reason) => DisclosureRefusal::Ledger(reason),
                 CuratorLedgerError::Store(error) => DisclosureRefusal::Store(error.to_string()),
             })?;
-        let (attempt_index, in_flight) = match outcome {
+        let (attempt_index, attempt_deadline_ms, in_flight) = match outcome {
             DispatchOutcome::ChargedNotDispatched {
                 attempt_index,
                 reason,
@@ -294,6 +294,7 @@ impl Disclosure<'_> {
             DispatchOutcome::Handed {
                 attempt_index,
                 handoff: Err(error),
+                ..
             } => {
                 return Err(self.end(
                     attempt_index,
@@ -307,9 +308,16 @@ impl Disclosure<'_> {
             }
             DispatchOutcome::Handed {
                 attempt_index,
+                attempt_deadline_ms,
                 handoff: Ok(in_flight),
-            } => (attempt_index, in_flight),
+            } => (attempt_index, attempt_deadline_ms, in_flight),
         };
+        // The network wait ends at the marker's deadline, which the claim expiry and cutoff bound: dispatched work never outlives the authority that must record its terminal.
+        let remaining = attempt_deadline_ms.saturating_sub((self.now_ms)());
+        let deadline = deadline.min(
+            Instant::now()
+                + std::time::Duration::from_millis(u64::try_from(remaining).unwrap_or(0)),
+        );
         let completed = tokio::select! {
             biased;
             () = cancel.cancelled() => {

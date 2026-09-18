@@ -175,6 +175,7 @@ struct Fixture {
     permits: Arc<InvestigationPermits>,
     clock: Arc<AtomicI64>,
     inspection_limit: usize,
+    max_tokens: u32,
     /// A confined project directory the run may inspect, when the test gives it one.
     project_root: Option<tempfile::TempDir>,
 }
@@ -344,6 +345,7 @@ impl Fixture {
             permits: Arc::new(InvestigationPermits::default()),
             clock: Arc::new(AtomicI64::new(now + 5)),
             inspection_limit: MAX_ISSUED_INSPECTIONS,
+            max_tokens: 1024,
             project_root: None,
         }
     }
@@ -404,7 +406,7 @@ impl Fixture {
             approval,
             profile: ModelProfile {
                 model: MODEL.to_string(),
-                max_tokens: 1024,
+                max_tokens: self.max_tokens,
                 temperature: None,
             },
             credential_id: CREDENTIAL_ID.to_string(),
@@ -1783,4 +1785,56 @@ async fn expanded_citations_are_deduplicated_and_bounded() {
         fixture.receipt().terminal,
         Some(CuratorReceiptTerminal::Abstained)
     );
+}
+
+/// The network wait ends at the ledger's attempt deadline, which the claim expiry bounds, so a dispatched request cannot outlive the authority that must record it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dispatched_request_ends_at_the_attempt_deadline_the_claim_bounds() {
+    let fixture = Fixture::open(CASES[0].sources);
+    // One second before the claim lapses: the attempt deadline is the claim expiry, well under the 30-second request bound.
+    fixture.clock.store(
+        fixture.now + memory_store::curator_ledger::CURATOR_TASK_LEASE_MS - 1_000,
+        Ordering::SeqCst,
+    );
+    let mut peer = Peer::start().await;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = peer.serve(
+        Box::new(move |_, _| {
+            Box::pin(async move {
+                release_rx.await.ok();
+            })
+        }),
+        |_| text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"late"}}"#),
+    );
+    // The peer is released once the first attempt has lapsed, so its listener closes and the remaining rounds fail to connect at once; only the first wait measures the deadline.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+        release_tx.send(()).ok();
+    });
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        fixture.run(&peer, Some(fixture.approval()), &CancellationToken::new()),
+    )
+    .await;
+    let _ = server.await;
+    let settled = outcome
+        .expect("every attempt ends at the claim-bounded deadline, not the 30-second request bound")
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+}
+
+/// A model profile the request encoder refuses is a configuration fault: the run reports it unavailable and leaves the receipt open, instead of durably abstaining the job as budget exhaustion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_invalid_model_profile_is_unavailable_not_budget_exhaustion() {
+    let mut fixture = Fixture::open(CASES[0].sources);
+    fixture.max_tokens = 0;
+    let peer = Peer::start().await;
+    assert_eq!(
+        fixture
+            .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+            .await,
+        Err(InvestigationError::Unavailable)
+    );
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.receipt().terminal, None);
 }
