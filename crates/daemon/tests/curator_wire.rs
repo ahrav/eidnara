@@ -1,16 +1,27 @@
-//! The context application protocol's review operations against a real daemon: `disabled` until the route's project holds MODULE memories authority, a bounded receipt page that lists an abstention from its row with its reason and no payload, a read that answers `not_selected` for an abstained or unknown receipt, and strict bodies.
+//! The context application protocol's review operations against a real daemon: `disabled` until the route's project holds MODULE memories authority, a bounded outcome page that lists an abstention from its row with its reason and no payload and omits a receipt still in progress, a keyset walk, a read that answers `not_selected` for an abstained, in-progress, or unknown receipt, the selected proposal of a published settlement field for field, and strict bodies.
 
 mod support;
 
 use std::path::Path;
+use std::sync::Arc;
 
+use daemon::curator::broker::{EvidenceBroker, QuestionTemplate, RunBinding};
 use daemon::curator::handoff::review_policy_versions;
+use daemon::curator::settlement::{RunResult, Settled, Settlement, TaskClaim};
+use daemon::curator::worker::job_binding;
 use daemon::dispatch::PreparedOutcome;
-use memory_store::LeaseAcquireOutcome;
-use memory_store::curator_jobs::{
-    CausalInputs, CuratorJobInput, ProducerBinding, ReserveOutcome, ReviewTarget,
+use kernel::{
+    CuratorHoldBinding, KernelStore, ManifestReference, PolicyDependencies, ProjectScope,
+    ProposalAction, ProposalTarget, ReviewProposal, ReviewQuestionTemplate, Uncertainty,
 };
-use memory_store::curator_ledger::{AbstainReason, CuratorBeginOutcome, ReceiptCompletion};
+use memory_store::LeaseAcquireOutcome;
+use memory_store::MemoryStore;
+use memory_store::curator_jobs::{
+    CausalInputs, CuratorJob, CuratorJobInput, ProducerBinding, ReserveOutcome, ReviewTarget,
+};
+use memory_store::curator_ledger::{
+    AbstainReason, CuratorBeginOutcome, CuratorReceipt, ReceiptCompletion,
+};
 use serde_json::{Value, json};
 use support::kernel_daemon::{KernelDaemon, SESSION};
 
@@ -37,7 +48,7 @@ fn now_ms() -> i64 {
 }
 
 /// The route's project becomes the MODULE memories authority `PROJECT`, as the operator's prepare/verify/ack sequence leaves it.
-fn activate_module_authority(store: &memory_store::MemoryStore, root: &Path) -> u64 {
+fn activate_module_authority(store: &MemoryStore, root: &Path) -> u64 {
     let preparing = store
         .authority_begin_prepare("ctx", PROJECT, "memories")
         .unwrap();
@@ -64,23 +75,30 @@ fn activate_module_authority(store: &memory_store::MemoryStore, root: &Path) -> 
     module.generation
 }
 
-/// A History Summarizer job whose run abstained on a Sensitive subject, recorded in the ledger alone.
-fn abstained_receipt(
-    store: &memory_store::MemoryStore,
+/// One History Summarizer job at firing `firing`, claimed by `worker-a` with its receipt begun; the claim id and the receipt come back with the job.
+struct BegunJob {
+    job: CuratorJob,
+    claim_id: String,
+    receipt: CuratorReceipt,
+}
+
+fn begin_job(
+    store: &MemoryStore,
     kernel_incarnation: &str,
     generation: u64,
+    firing: u64,
     now: i64,
-) -> String {
+) -> BegunJob {
     let producer = ProducerBinding {
         producer: "history_summarizer".to_string(),
-        firing_id: "ses#1".to_string(),
-        ordinal: 1,
+        firing_id: format!("ses#{firing}"),
+        ordinal: firing,
     };
     let inputs = CausalInputs {
         target: ReviewTarget::StagedSubject {
             kernel_incarnation: kernel_incarnation.to_string(),
-            candidate_id: "hs-ses-candidate".to_string(),
-            payload_digest: "d".repeat(64),
+            candidate_id: format!("hs-ses-candidate-{firing}"),
+            payload_digest: format!("{firing:064}"),
         },
         question_template: "extracted_facts".to_string(),
         signals: Vec::new(),
@@ -109,9 +127,9 @@ fn abstained_receipt(
     let LeaseAcquireOutcome::Claim { claim, .. } = store
         .acquire_curator_task(
             PROJECT,
-            "acq-1",
+            &format!("acq-{firing}"),
             "worker-a",
-            0,
+            i64::try_from(firing).unwrap(),
             i64::try_from(generation).unwrap(),
             &job.causal_identity,
             now,
@@ -132,21 +150,106 @@ fn abstained_receipt(
     else {
         panic!("the receipt begins")
     };
+    let job = store
+        .lookup_curator_job(PROJECT, &job.causal_identity)
+        .unwrap()
+        .unwrap();
+    BegunJob {
+        job,
+        claim_id: claim.claim_id,
+        receipt,
+    }
+}
+
+/// The run abstained on a Sensitive subject, recorded in the ledger alone.
+fn abstain(store: &MemoryStore, kernel_incarnation: &str, begun: &BegunJob, now: i64) {
     store
         .complete_curator_receipt(
             PROJECT,
-            &job.causal_identity,
-            &claim.claim_id,
-            "completion-1",
+            &begun.job.causal_identity,
+            &begun.claim_id,
+            &format!("completion-{}", begun.job.causal_identity),
             "worker-a",
-            0,
-            receipt.generation,
+            begun.job.producer.ordinal as i64,
+            begun.receipt.generation,
             kernel_incarnation,
             &ReceiptCompletion::Abstained(AbstainReason::OwnerSensitive),
             now,
         )
         .unwrap();
-    job.causal_identity
+}
+
+fn proposal() -> ReviewProposal {
+    ReviewProposal {
+        action: ProposalAction::Create,
+        target: ProposalTarget::StagedCandidate {
+            candidate_id: "subject-1".to_string(),
+        },
+        new_text: Some("the workspace builds with bun".to_string()),
+        support: vec![],
+        contradictions: vec![],
+        limitations: vec!["only the subject itself was available".to_string()],
+        uncertainty: Uncertainty::Medium,
+        manifest: ManifestReference {
+            manifest_id: "manifest-1".to_string(),
+            digest: "ab".repeat(32),
+        },
+        policy_dependencies: PolicyDependencies {
+            question_template: ReviewQuestionTemplate::ExtractedFacts,
+            disclosed_inputs: vec![],
+            uncited_disclosed_inputs: vec![],
+            ancestry: vec![],
+        },
+    }
+}
+
+/// The run settled a proposal with nothing disclosed, exactly as the coordinator would after a model proposed from the subject alone: an empty execution hold, the staged proposal, the review transfer, and the fenced completion selecting it.
+fn publish(
+    kernel: &KernelStore,
+    store: &MemoryStore,
+    digest: &str,
+    kernel_incarnation: &str,
+    begun: &BegunJob,
+    now: i64,
+) -> ReviewProposal {
+    let hold_binding = CuratorHoldBinding {
+        project_digest: digest.to_string(),
+        kernel_incarnation: kernel_incarnation.to_string(),
+        memstore_incarnation: store.curator_store_incarnation().unwrap(),
+        subject: begun.job.causal_identity.clone(),
+        generation: begun.receipt.generation,
+    };
+    let hold = kernel
+        .acquire_execution_hold(&hold_binding, &[], begun.receipt.execution_cutoff_ms)
+        .unwrap();
+    let broker = EvidenceBroker::new(
+        RunBinding {
+            project: ProjectScope::new(digest).unwrap(),
+            hold: hold_binding,
+            hold_id: hold.hold_id,
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        QuestionTemplate::ExtractedFacts,
+    );
+    let claim = TaskClaim {
+        claim_id: begun.claim_id.clone(),
+        worker_instance: "worker-a".to_string(),
+        slot: begun.job.producer.ordinal as i64,
+    };
+    let binding = job_binding(digest, &begun.job);
+    let settled = Settlement {
+        store: kernel,
+        ledger: store,
+        project: PROJECT,
+        binding: &binding,
+        claim: &claim,
+        now_ms: &move || now,
+        before_completion_for_test: None,
+    }
+    .settle(&broker, RunResult::Proposal(Box::new(proposal())))
+    .unwrap();
+    assert!(matches!(settled, Settled::Published(_)), "{settled:?}");
+    proposal()
 }
 
 #[tokio::test]
@@ -157,6 +260,8 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
     let store = daemon
         .memory_store()
         .expect("the daemon installed its store");
+    let kernel = daemon.store();
+    let digest = daemon.project_digest();
 
     // No MODULE authority for the route's root: both operations are disabled, and nothing else is answered.
     for method in ["review.list", "review.read"] {
@@ -173,11 +278,34 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
     }
 
     let generation = activate_module_authority(&store, &project);
-    let kernel_incarnation = daemon
-        .store()
+    // Holds pin the commit snapshot; a production Kernel has committed its domains long before a job exists.
+    kernel
+        .commit(
+            kernel::CommitIntent {
+                producer: "curator-wire-test".to_string(),
+                operation_key: "domain".to_string(),
+                request_digest: "0".repeat(64),
+                actor: "test".to_string(),
+                cause: "fixture".to_string(),
+            },
+            |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "memory".to_string(),
+                    object_id: "domain-memory".to_string(),
+                    name: "memory".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: "memory".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                Ok("domain".to_string())
+            },
+        )
+        .unwrap();
+    let kernel_incarnation = kernel
         .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::new(
             None,
-            std::sync::Arc::default(),
+            Arc::default(),
         ))
         .unwrap();
     assert_eq!(
@@ -186,50 +314,142 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
             .await,
         json!({ "kind": "page", "items": [], "next": null })
     );
-    let identity = abstained_receipt(&store, &kernel_incarnation, generation, now_ms());
+    let now = now_ms();
+    let abstained = begin_job(&store, &kernel_incarnation, generation, 1, now);
+    abstain(&store, &kernel_incarnation, &abstained, now);
+    let in_progress = begin_job(&store, &kernel_incarnation, generation, 2, now);
+    let published = begin_job(&store, &kernel_incarnation, generation, 3, now);
+    let expected_proposal = publish(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        &published,
+        now,
+    );
 
-    // The abstention lists from its row: identity, generation, outcome, reason, and nothing of the subject.
-    let page = daemon
-        .call(envelope("review.list", &project, json!({ "limit": 1 })))
-        .await;
-    assert_eq!(
-        page,
-        json!({
-            "kind": "page",
-            "items": [{
+    // The two completed receipts list in causal-identity order, one per page at limit 1; the receipt still in progress is not an outcome; the abstention carries its reason and nothing else does; no payload appears anywhere.
+    let mut identities = [
+        (abstained.job.causal_identity.clone(), "abstained", true),
+        (published.job.causal_identity.clone(), "complete", false),
+    ];
+    identities.sort();
+    let expected_items: Vec<Value> = identities
+        .iter()
+        .map(|(identity, outcome, abstained)| {
+            let mut item = json!({
                 "causal_identity": identity,
                 "generation": 1,
-                "outcome": "abstained",
-                "reason": "owner_sensitive",
-                "selected": false,
-            }],
-            "next": identity,
+                "outcome": outcome,
+                "selected": *outcome == "complete",
+            });
+            if *abstained {
+                item["reason"] = json!("owner_sensitive");
+            }
+            item
         })
+        .collect();
+    let first = daemon
+        .call(envelope("review.list", &project, json!({ "limit": 1 })))
+        .await;
+    assert_eq!(first["kind"], json!("page"));
+    assert_eq!(first["items"], json!(expected_items[..1]));
+    assert_eq!(first["next"], json!(identities[0].0));
+    let second = daemon
+        .call(envelope(
+            "review.list",
+            &project,
+            json!({ "limit": 1, "after": identities[0].0 }),
+        ))
+        .await;
+    assert_eq!(second["items"], json!(expected_items[1..]));
+    assert_eq!(
+        second["next"],
+        json!(identities[1].0),
+        "a full page always carries a cursor"
     );
     assert_eq!(
         daemon
             .call(envelope(
                 "review.list",
                 &project,
-                json!({ "after": identity })
+                json!({ "limit": 1, "after": identities[1].0 })
             ))
             .await,
         json!({ "kind": "page", "items": [], "next": null })
     );
-    // An oversized limit is clamped, not refused; a full page under the clamp still ends when the rows do.
-    assert_eq!(
-        daemon
-            .call(envelope(
-                "review.list",
-                &project,
-                json!({ "limit": 10_000 })
-            ))
-            .await["next"],
-        Value::Null
+    // An oversized limit is clamped, not refused; the whole set fits one clamped page, so it ends.
+    let all = daemon
+        .call(envelope(
+            "review.list",
+            &project,
+            json!({ "limit": 10_000 }),
+        ))
+        .await;
+    assert_eq!(all["items"], json!(expected_items));
+    assert_eq!(all["next"], Value::Null);
+    let listed = serde_json::to_string(&all).unwrap();
+    assert!(!listed.contains("bun"), "no payload text lists");
+    assert!(
+        !listed.contains(&in_progress.job.causal_identity),
+        "a receipt in progress is not an outcome"
     );
 
-    // Nothing was selected, so nothing is readable; an unknown identity answers the same.
-    for causal_identity in [identity.clone(), "b".repeat(64)] {
+    // Only the published receipt reads: its selected proposal as staged, its reference, and the live review hold's expiry. An abstained receipt, one in progress, and an unknown identity are all `not_selected`.
+    let read = daemon
+        .call(envelope(
+            "review.read",
+            &project,
+            json!({ "causal_identity": published.job.causal_identity }),
+        ))
+        .await;
+    assert_eq!(read["kind"], json!("proposal"));
+    assert_eq!(
+        read["causal_identity"],
+        json!(published.job.causal_identity)
+    );
+    assert_eq!(
+        read["reference"]["database_incarnation_id"],
+        json!(kernel_incarnation)
+    );
+    assert_eq!(
+        read["reference"]["payload_digest"].as_str().unwrap().len(),
+        64
+    );
+    assert!(read["reference"]["candidate_id"].is_string());
+    let staged: ReviewProposal = serde_json::from_value(read["proposal"].clone()).unwrap();
+    assert_eq!(
+        (
+            staged.action,
+            staged.target,
+            staged.new_text,
+            staged.limitations,
+            staged.uncertainty
+        ),
+        (
+            expected_proposal.action,
+            expected_proposal.target,
+            expected_proposal.new_text,
+            expected_proposal.limitations,
+            expected_proposal.uncertainty
+        )
+    );
+    assert!(read["review_expires_at"].as_i64().unwrap() > now);
+    assert_eq!(
+        read.as_object().unwrap().keys().collect::<Vec<_>>(),
+        [
+            "causal_identity",
+            "kind",
+            "proposal",
+            "reference",
+            "review_expires_at"
+        ]
+    );
+    for causal_identity in [
+        abstained.job.causal_identity.clone(),
+        in_progress.job.causal_identity.clone(),
+        "b".repeat(64),
+    ] {
         assert_eq!(
             daemon
                 .call(envelope(

@@ -343,9 +343,6 @@ fn generation_param(generation: u64) -> Result<i64, CuratorLedgerRefusal> {
 /// Completed receipts one list call returns at most.
 pub const MAX_RECEIPT_PAGE: usize = 64;
 
-/// The most receipts one list page returns; a caller asking for more gets this many.
-pub const CURATOR_RECEIPT_PAGE_MAX: usize = 32;
-
 const RECEIPT_COLUMNS: &str =
     "project, causal_identity, database_incarnation_id, kernel_incarnation_id,
      authority_generation, state, generation, claim_id, run_deadline_ms, execution_cutoff_ms,
@@ -1158,30 +1155,6 @@ impl MemoryStore {
     ) -> Result<Vec<CuratorAttempt>, MemoryStoreError> {
         self.inner
             .with_conn(|conn| list_curator_attempts_in_tx(conn, project, causal_identity))
-            .map_err(Into::into)
-    }
-
-    /// One keyset page of a project's receipts in causal-identity order, the rows after `after`, at most `limit` and never more than [`CURATOR_RECEIPT_PAGE_MAX`]. A receipt lists from its row alone: an abstention carries its reason with no Kernel read.
-    pub fn list_curator_receipts(
-        &self,
-        project: &str,
-        after: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<CuratorReceipt>, MemoryStoreError> {
-        let limit = i64::try_from(limit.min(CURATOR_RECEIPT_PAGE_MAX)).unwrap_or(0);
-        self.inner
-            .with_conn(|conn| {
-                let mut statement = conn.prepare(&format!(
-                    "SELECT {RECEIPT_COLUMNS} FROM curator_receipts
-                      WHERE project = ?1 AND causal_identity > ?2
-                      ORDER BY causal_identity LIMIT ?3"
-                ))?;
-                let rows = statement.query_map(
-                    params![project, after.unwrap_or(""), limit],
-                    receipt_from_row,
-                )?;
-                rows.collect()
-            })
             .map_err(Into::into)
     }
 }

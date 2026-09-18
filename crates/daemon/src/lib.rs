@@ -13407,6 +13407,14 @@ impl HandlerCore {
         self.store()
     }
 
+    /// The Kernel project digest a bound route stages and reads review inputs under.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn project_digest_for_test(&self, channel: RouteHandle) -> Option<String> {
+        self.facade_binding(channel)
+            .ok()
+            .map(|binding| binding.kernel_project.digest().to_string())
+    }
+
     /// Runs one health sample at `now_ms` instead of waiting for the sampler tick.
     #[cfg(feature = "test-support")]
     pub async fn sample_kernel_health_for_test(&self, now_ms: i64) {

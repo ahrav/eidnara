@@ -703,6 +703,10 @@ pub fn read_selected_proposal(
             ReviewReadError::Invalid => ReadRefusal::SelectionMismatch,
             ReviewReadError::Store(error) => ReadRefusal::Store(error.to_string()),
         })?;
+    // Review rows are classified `Sensitive` by construction; a row the Kernel classifies `Secret` (including a stored class this build does not recognize) is refused as a local read, not decoded on the strength of that construction.
+    if row.sensitivity == kernel::Sensitivity::Secret {
+        return Err(ReadRefusal::Dependency(RefusalCode::PolicyBlocked));
+    }
     let ReviewPayload::Proposal(proposal) = row.payload else {
         return Err(ReadRefusal::Kernel(ReviewReadRefusal::DecodeRefused));
     };

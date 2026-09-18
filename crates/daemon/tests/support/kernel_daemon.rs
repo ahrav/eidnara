@@ -250,6 +250,11 @@ impl KernelDaemon {
         self.handler.memory_store_for_test()
     }
 
+    /// The Kernel project digest the bound route stages review inputs under.
+    pub fn project_digest(&self) -> String {
+        self.handler.project_digest_for_test(self.route).unwrap()
+    }
+
     pub fn tip(&self) -> i64 {
         self.store().tip().unwrap()
     }
