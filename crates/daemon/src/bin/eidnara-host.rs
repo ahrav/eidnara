@@ -1134,7 +1134,7 @@ fn payload_sources(
     }
     Ok(PayloadSources {
         sources: unqualified_payload_sources(dir)?,
-        inputs_lock_sha256: "unqualified-dev-inputs".to_owned(),
+        inputs_lock_sha256: host_runtime::generation::UNQUALIFIED_INPUTS_LOCK_SHA256.to_owned(),
     })
 }
 

@@ -319,7 +319,7 @@ function normalizedEnvelope(envelope: NativeStartupEnvelope | undefined): {
 }
 
 /**
- * Native `start` answers `harness_unavailable` for a changed harness or credential set on a running daemon, so demands with different envelopes are different requests and must not share one result.
+ * Native `start` answers `harness_unavailable` for a changed harness or direct API key set on a running daemon, so demands with different envelopes are different requests and must not share one result.
  * Keys are normalized so wire-identical envelopes coalesce however their callers built the object.
  */
 function envelopeIdentity(envelope: NativeStartupEnvelope | undefined): string {

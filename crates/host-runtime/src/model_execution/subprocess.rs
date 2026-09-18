@@ -93,6 +93,32 @@ pub fn canonical_provider(
 struct ProviderRowSpec {
     order: &'static [&'static str],
     optional: &'static [&'static str],
+    mechanism: CredentialMechanism,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialMechanism {
+    DirectApiKey,
+    /// `StaticCredentials` uses explicit AWS credentials and a region; an STS session token is optional.
+    StaticCredentials,
+}
+
+pub const CREDENTIAL_VARIABLES: [&str; 7] = [
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_REGION",
+];
+
+pub fn credential_variable_mechanism(variable: &str) -> Option<CredentialMechanism> {
+    EnvSnapshot::SUPPORTED_PROVIDERS
+        .iter()
+        .filter_map(|provider| provider_row_spec(provider))
+        .find(|spec| spec.order.contains(&variable))
+        .map(|spec| spec.mechanism)
 }
 
 fn provider_row_spec(canonical: &str) -> Option<ProviderRowSpec> {
@@ -100,14 +126,17 @@ fn provider_row_spec(canonical: &str) -> Option<ProviderRowSpec> {
         "anthropic" => Some(ProviderRowSpec {
             order: &["ANTHROPIC_API_KEY"],
             optional: &[],
+            mechanism: CredentialMechanism::DirectApiKey,
         }),
         "google" => Some(ProviderRowSpec {
             order: &["GEMINI_API_KEY"],
             optional: &[],
+            mechanism: CredentialMechanism::DirectApiKey,
         }),
         "openai" => Some(ProviderRowSpec {
             order: &["OPENAI_API_KEY"],
             optional: &[],
+            mechanism: CredentialMechanism::DirectApiKey,
         }),
         // Explicit static or session credentials plus the region the SDK needs; `AWS_PROFILE`
         // and the shared credential files stay forbidden, so no ambient chain is consulted.
@@ -119,6 +148,7 @@ fn provider_row_spec(canonical: &str) -> Option<ProviderRowSpec> {
                 "AWS_REGION",
             ],
             optional: &["AWS_SESSION_TOKEN"],
+            mechanism: CredentialMechanism::StaticCredentials,
         }),
         _ => None,
     }
@@ -2615,8 +2645,38 @@ mod tests {
 
     use super::{
         CREDENTIAL_FINGERPRINT_CANONICALIZATION, CREDENTIAL_FINGERPRINT_DOMAIN,
-        CREDENTIAL_VALUE_CAP_BYTES, CredentialRowError, EnvSnapshot,
+        CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, CredentialRowError,
+        EnvSnapshot, credential_variable_mechanism, provider_row_spec,
     };
+
+    #[test]
+    fn credential_variables_are_the_union_of_every_supported_row() {
+        let mut from_rows: Vec<&str> = EnvSnapshot::SUPPORTED_PROVIDERS
+            .iter()
+            .flat_map(|provider| provider_row_spec(provider).expect("supported row").order)
+            .copied()
+            .collect();
+        let mut declared = CREDENTIAL_VARIABLES.to_vec();
+        from_rows.sort_unstable();
+        declared.sort_unstable();
+        assert_eq!(declared, from_rows);
+        for variable in CREDENTIAL_VARIABLES {
+            assert!(credential_variable_mechanism(variable).is_some());
+        }
+        assert_eq!(credential_variable_mechanism("AWS_PROFILE"), None);
+        assert_eq!(
+            credential_variable_mechanism("ANTHROPIC_API_KEY"),
+            Some(CredentialMechanism::DirectApiKey)
+        );
+        assert_eq!(
+            credential_variable_mechanism("AWS_SESSION_TOKEN"),
+            Some(CredentialMechanism::StaticCredentials)
+        );
+        assert_eq!(
+            credential_variable_mechanism("AWS_REGION"),
+            Some(CredentialMechanism::StaticCredentials)
+        );
+    }
 
     /// A task that exits between `open` and `read` of its `/proc` stat fails with `ESRCH`, not `ENOENT`; both prove the PID is gone.
     #[test]

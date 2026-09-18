@@ -3,7 +3,8 @@ use std::ffi::OsString;
 use host_runtime::harness_closure::{ClosureManifest, manifest_digest};
 use host_runtime::model_execution::subprocess::{
     CREDENTIAL_FINGERPRINT_CANONICALIZATION, CREDENTIAL_FINGERPRINT_DOMAIN,
-    CREDENTIAL_VALUE_CAP_BYTES, EnvSnapshot,
+    CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, EnvSnapshot,
+    credential_variable_mechanism,
 };
 
 fn release_file(name: &str) -> serde_json::Value {
@@ -131,6 +132,18 @@ fn provider_credential_matrix_matches_the_published_doc() {
                         .collect()
                 })
                 .unwrap_or_default();
+            let mechanism = row["mechanism"].as_str().expect("mechanism is published");
+            for name in &published {
+                let published_mechanism = match credential_variable_mechanism(name) {
+                    Some(CredentialMechanism::DirectApiKey) => "direct_api_key",
+                    Some(CredentialMechanism::StaticCredentials) => "static_credentials",
+                    None => panic!("{harness}/{provider} publishes unknown variable {name}"),
+                };
+                assert_eq!(
+                    published_mechanism, mechanism,
+                    "{harness}/{provider} mechanism must match the runtime row for {name}"
+                );
+            }
             for absent in &published {
                 let snapshot = EnvSnapshot::capture_from(
                     published
@@ -158,6 +171,17 @@ fn provider_credential_matrix_matches_the_published_doc() {
                 }
             }
         }
+        let published_variables: std::collections::BTreeSet<&str> = providers
+            .values()
+            .flat_map(|row| row["credential_variables"].as_array())
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert_eq!(
+            published_variables,
+            CREDENTIAL_VARIABLES.iter().copied().collect(),
+            "every launcher-admitted credential variable for {harness} is a published row variable"
+        );
         let aliases = spec["aliases"]
             .as_object()
             .expect("aliases object is published");

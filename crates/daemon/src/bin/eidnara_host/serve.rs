@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
-use host_runtime::generation::{GenerationStore, ValidatedGeneration};
+use host_runtime::generation::{
+    GenerationStore, UNQUALIFIED_INPUTS_LOCK_SHA256, ValidatedGeneration,
+};
 use host_runtime::harness_closure::{
     ClosureCandidate, ClosureManifest, HarnessClosureStore, ValidatedHarnessClosure,
     manifest_digest,
@@ -31,7 +33,10 @@ use host_runtime::model_execution::backend::{
 use host_runtime::model_execution::opencode::{OpenCodeBackend, OpenCodeRuntime};
 use host_runtime::model_execution::pi::{PiBackend, PiRuntimeDescriptor};
 use host_runtime::model_execution::subprocess::group_registry::StateRoot;
-use host_runtime::model_execution::subprocess::{CREDENTIAL_VALUE_CAP_BYTES, EnvSnapshot};
+use host_runtime::model_execution::subprocess::{
+    CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, EnvSnapshot,
+    credential_variable_mechanism,
+};
 use host_runtime::{CancellationToken, HostConfig, HostHandler, HostInit, StaticComposite};
 use sha2::Sha256;
 
@@ -46,15 +51,6 @@ pub const UNSUPPORTED_SELECTION_SCHEMA: &str = "unsupported active harness selec
 const ACTIVE_SELECTION_CREDENTIAL_DOMAIN: &[u8] = b"eidnara-active-selection-credential-v1";
 const MAX_DESCRIPTOR_ITEMS: usize = 32;
 const MAX_DESCRIPTOR_ITEM_BYTES: usize = 4096;
-const CREDENTIAL_NAMES: [&str; 7] = [
-    "ANTHROPIC_API_KEY",
-    "GEMINI_API_KEY",
-    "OPENAI_API_KEY",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_REGION",
-];
 
 /// The startup envelope is size-capped before decoding.
 /// Startup-envelope decoding rejects unknown fields and requires absolute paths.
@@ -393,6 +389,10 @@ fn credential_identities(
     let derived = hmac_sha256(connection_key, &[ACTIVE_SELECTION_CREDENTIAL_DOMAIN]);
     credentials
         .iter()
+        // Static AWS credentials rotate; keying on them would refuse a start with rotated values.
+        .filter(|(name, _)| {
+            credential_variable_mechanism(name) == Some(CredentialMechanism::DirectApiKey)
+        })
         .map(|(name, value)| {
             let name_len = (name.len() as u64).to_be_bytes();
             let value_len = (value.len() as u64).to_be_bytes();
@@ -432,7 +432,7 @@ pub fn credential_identity_key(publication: &Path) -> Result<[u8; 32], &'static 
 
 fn validate_credentials(credentials: &BTreeMap<String, String>) -> Result<(), &'static str> {
     for (name, value) in credentials {
-        if !CREDENTIAL_NAMES.contains(&name.as_str()) {
+        if !CREDENTIAL_VARIABLES.contains(&name.as_str()) {
             return Err("credential source contains an unsupported variable");
         }
         if value.is_empty() {
@@ -682,7 +682,7 @@ fn read_selection_file(closure_root: &Path) -> Result<SelectionFile, &'static st
             .credential_identities
             .iter()
             .any(|(name, identity)| {
-                !CREDENTIAL_NAMES.contains(&name.as_str())
+                !CREDENTIAL_VARIABLES.contains(&name.as_str())
                     || !host_runtime::is_canonical_payload_digest(identity)
             })
     {
@@ -1045,22 +1045,28 @@ fn local_embeddings_component(generation: &ValidatedGeneration) -> LocalEmbeddin
         local_embeddings_from_manifest(
             &generation.manifest.files,
             &generation.descriptor_root_path(),
+            &generation.manifest.inputs_lock_sha256,
         )
     }
 }
 
-/// A generation without the ORT library (the development payload) is a build without local
-/// embeddings: `unsupported`, which status and doctor skip. A generation that ships ORT but not
-/// the bundle manifest is a broken payload: `degraded`, which they surface.
+/// An unqualified generation without the ORT library (the development payload) is a build
+/// without local embeddings: `unsupported`, which status and doctor skip. A qualified
+/// generation pins ORT in its production inputs lock, so one that lacks it, or ships it without
+/// the bundle manifest, is a broken payload: `degraded`, which they surface.
 #[cfg(not(target_os = "macos"))]
 fn local_embeddings_from_manifest(
     files: &[host_runtime::generation::ManifestFile],
     descriptor_root: &Path,
+    inputs_lock_sha256: &str,
 ) -> LocalEmbeddingsComponent {
     const BUNDLE_DIR: &str = "payload/model/gte-modernbert-base-f16";
     const ORT_LIBRARY: &str = "payload/ort/libonnxruntime.so";
     let Some(ort) = files.iter().find(|entry| entry.path == ORT_LIBRARY) else {
-        return LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported");
+        if inputs_lock_sha256 == UNQUALIFIED_INPUTS_LOCK_SHA256 {
+            return LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported");
+        }
+        return LocalEmbeddingsComponent::new(None);
     };
     let bundle_dir = descriptor_root.join(BUNDLE_DIR);
     // The generation manifest carries `bundle_manifest.sha256` forward because it authenticates the bundle; otherwise, a replaced bundle can remain self-consistent while serving different embeddings.
@@ -1224,10 +1230,23 @@ mod tests {
             }
         };
         let root = Path::new("/generation");
-        let absent = local_embeddings_from_manifest(&[file("payload/other")], root);
+        let qualified = "cd".repeat(32);
+        let absent = local_embeddings_from_manifest(
+            &[file("payload/other")],
+            root,
+            UNQUALIFIED_INPUTS_LOCK_SHA256,
+        );
         assert_eq!(reason(absent).await, "local_embeddings_unsupported");
-        let incomplete =
-            local_embeddings_from_manifest(&[file("payload/ort/libonnxruntime.so")], root);
+        // A qualified payload pins ORT in the production inputs lock, so its absence is a
+        // packaging regression on a supported platform, not a build without the lane.
+        let missing_from_qualified =
+            local_embeddings_from_manifest(&[file("payload/other")], root, &qualified);
+        assert_eq!(reason(missing_from_qualified).await, "no bundle configured");
+        let incomplete = local_embeddings_from_manifest(
+            &[file("payload/ort/libonnxruntime.so")],
+            root,
+            UNQUALIFIED_INPUTS_LOCK_SHA256,
+        );
         assert_eq!(reason(incomplete).await, "no bundle configured");
         let complete = local_embeddings_from_manifest(
             &[
@@ -1235,6 +1254,7 @@ mod tests {
                 file("payload/model/gte-modernbert-base-f16/manifest.json"),
             ],
             root,
+            &qualified,
         );
         SecondaryComponent::initialize(&complete)
             .await
@@ -1399,6 +1419,74 @@ mod tests {
                 true,
             )
             .is_err()
+        );
+    }
+
+    /// AWS credentials do not identify a running daemon because they can rotate.
+    #[test]
+    fn rotating_static_credentials_do_not_enter_the_active_selection_identity() {
+        let key = [13; 32];
+        let owned = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+        let previous_credentials = BTreeMap::from([
+            owned("ANTHROPIC_API_KEY", "shared-secret"),
+            owned("AWS_ACCESS_KEY_ID", "ASIA-first"),
+            owned("AWS_SECRET_ACCESS_KEY", "first-secret"),
+            owned("AWS_SESSION_TOKEN", "first-token"),
+            owned("AWS_REGION", "us-west-2"),
+        ]);
+        let identities = credential_identities(&previous_credentials, &key);
+        assert_eq!(
+            identities.keys().collect::<Vec<_>>(),
+            ["ANTHROPIC_API_KEY"],
+            "only direct API keys form the daemon's identity"
+        );
+        let previous = HarnessSelection {
+            schema: 1,
+            opencode: Some("a".repeat(64)),
+            pi: None,
+            credential_identities: identities,
+        };
+        let rotated = BTreeMap::from([
+            owned("ANTHROPIC_API_KEY", "shared-secret"),
+            owned("AWS_ACCESS_KEY_ID", "ASIA-second"),
+            owned("AWS_SECRET_ACCESS_KEY", "second-secret"),
+            owned("AWS_SESSION_TOKEN", "second-token"),
+            owned("AWS_REGION", "eu-west-1"),
+        ]);
+        let (merged, changed) = merge_selection(
+            &previous,
+            None,
+            None,
+            credential_identities(&rotated, &key),
+            false,
+        )
+        .expect("rotated AWS credentials merge with the running daemon");
+        assert!(
+            !changed,
+            "rotated AWS credentials are not a selection change"
+        );
+        assert_eq!(merged.credential_identities, previous.credential_identities);
+        let without_aws = BTreeMap::from([owned("ANTHROPIC_API_KEY", "shared-secret")]);
+        let (_, changed) = merge_selection(
+            &previous,
+            None,
+            None,
+            credential_identities(&without_aws, &key),
+            false,
+        )
+        .expect("dropping AWS credentials merges with the running daemon");
+        assert!(!changed);
+        let rotated_api_key = BTreeMap::from([owned("ANTHROPIC_API_KEY", "other-secret")]);
+        assert!(
+            merge_selection(
+                &previous,
+                None,
+                None,
+                credential_identities(&rotated_api_key, &key),
+                false,
+            )
+            .is_err(),
+            "a changed direct API key is still refused"
         );
     }
 
