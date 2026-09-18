@@ -13,9 +13,9 @@ use host_runtime::model_execution::supervisor::{InternalOutcome, InternalRunKey,
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    CuratorHoldBinding, EvidenceReference, KernelStore, ManifestReference, PolicyDependencies,
-    ProposalTarget, ReviewBinding, ReviewProposal, ReviewQuestionTemplate, ReviewStagedReference,
-    SourceDescriptorDetail, SourceSpan,
+    CuratorHoldBinding, CuratorHoldError, CuratorHoldRefusal, EvidenceReference, KernelStore,
+    ManifestReference, PolicyDependencies, ProposalTarget, ReviewBinding, ReviewProposal,
+    ReviewQuestionTemplate, ReviewStagedReference, SourceDescriptorDetail, SourceSpan,
 };
 use memory_store::MemoryStore;
 use memory_store::curator_jobs::{CuratorJob, CuratorJobInput, ReviewTarget};
@@ -165,8 +165,9 @@ impl Coordinator {
             .ledger
             .curator_store_incarnation()
             .map_err(|_| InvestigationError::Kernel(RefusalCode::Store))?;
+        // The hold is scoped by the Kernel project digest the binding carries; the ledger project is the authority key the job row lives under and need not be a digest.
         let hold_binding = CuratorHoldBinding {
-            project_digest: project.clone(),
+            project_digest: context.binding.project_digest.clone(),
             kernel_incarnation: context.receipt.kernel_incarnation_id.clone(),
             memstore_incarnation,
             subject: context.job.causal_identity.clone(),
@@ -202,10 +203,10 @@ impl Coordinator {
             .map_err(|error| InvestigationError::Kernel(super::broker::hold_refusal(error)))?;
         let broker = EvidenceBroker::new(
             RunBinding {
-                project: kernel::ProjectScope::new(project)
+                project: kernel::ProjectScope::new(&context.binding.project_digest)
                     .map_err(|_| InvestigationError::Kernel(RefusalCode::Scope))?,
                 hold: hold_binding.clone(),
-                hold_id: hold.hold_id,
+                hold_id: hold.hold_id.clone(),
                 destination: kernel::ArtifactDestination::Remote,
             },
             context.question,
@@ -217,6 +218,7 @@ impl Coordinator {
             .execution_cutoff_ms
             .saturating_sub((self.now_ms)());
         let cutoff = Instant::now() + Duration::from_millis(u64::try_from(remaining).unwrap_or(0));
+        let hold_id = hold.hold_id;
         let mut run = Run {
             coordinator: self,
             context,
@@ -228,7 +230,24 @@ impl Coordinator {
             discovery: RelatedMemoryDiscovery::new(""),
             cutoff,
         };
-        run.investigate(subject, starting, cancel).await
+        let outcome = run.investigate(subject, starting, cancel).await;
+        // A run that ends without settling (cancelled, fenced, a store or supervisor failure) owns no result; the execution hold it acquired is released here rather than left to its cutoff, so a job retried each pass never accumulates holds toward the project's limit. Settlement moved or released the hold on every other path.
+        if outcome.is_err() {
+            match self
+                .store
+                .release_execution_hold(&hold_id, &run.hold_binding)
+            {
+                Ok(())
+                | Err(CuratorHoldError::Refused(
+                    CuratorHoldRefusal::Released | CuratorHoldRefusal::Expired,
+                )) => {}
+                Err(error) => eprintln!(
+                    "daemon: curator run could not release its execution hold for {}/{} generation {}: {error}",
+                    run.context.job.project, run.hold_binding.subject, run.hold_binding.generation
+                ),
+            }
+        }
+        outcome
     }
 }
 
@@ -249,6 +268,27 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
+    /// The task lease is shorter than a run: one attempt plus the settlement reserve. A live worker renews before each attempt; a lease that will not renew is another worker's fence, and the run ends without settling.
+    fn renew_claim(&self) -> Result<(), InvestigationError> {
+        let claim = self.context.claim;
+        match self
+            .coordinator
+            .ledger
+            .renew_curator_task(
+                &self.context.job.project,
+                &claim.claim_id,
+                &claim.worker_instance,
+                claim.slot,
+                i64::try_from(self.context.receipt.authority_generation).unwrap_or(i64::MAX),
+                (self.coordinator.now_ms)(),
+            )
+            .map_err(|error| InvestigationError::Store(error.to_string()))?
+        {
+            memory_store::NoteEvalRenewOutcome::Renewed { .. } => Ok(()),
+            _ => Err(InvestigationError::Fenced),
+        }
+    }
+
     async fn investigate(
         &mut self,
         subject: Result<ReferenceExpectation, RefusalCode>,
@@ -301,6 +341,7 @@ impl Run<'_> {
             if (self.coordinator.now_ms)() >= self.context.receipt.execution_cutoff_ms {
                 return self.settle_now(RunResult::Exhausted).await;
             }
+            self.renew_claim()?;
             let attempt_index = u32::try_from(round).unwrap_or(u32::MAX);
             let text = match self.attempt(attempt_index, cancel).await? {
                 Attempt::Text(text) => text,
@@ -368,6 +409,7 @@ impl Run<'_> {
         Settlement {
             store: &self.coordinator.store,
             ledger: &self.coordinator.ledger,
+            project: &self.context.job.project,
             binding: self.context.binding,
             claim: self.context.claim,
             now_ms: &move || now_ms(),
@@ -439,7 +481,7 @@ impl Run<'_> {
             let approval = coordinator.approval.clone();
             let now_ms = Arc::clone(&coordinator.now_ms);
             let binding = AttemptBinding {
-                project: self.hold_binding.project_digest.clone(),
+                project: self.context.job.project.clone(),
                 causal_identity: self.hold_binding.subject.clone(),
                 generation: self.hold_binding.generation,
                 claim_id: self.context.claim.claim_id.clone(),

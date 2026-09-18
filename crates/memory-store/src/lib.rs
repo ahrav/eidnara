@@ -331,6 +331,11 @@ pub enum MediaKind {
 /// store identity `storage::open_sqlite` checks on every open.
 const BASELINE: &str = include_str!("../baseline.sql");
 
+/// The lowercase SHA-256 of the shipped baseline schema: the identity a deployment record names when it binds itself to one Memory Store baseline.
+pub fn baseline_digest() -> String {
+    format!("{:x}", sha2::Sha256::digest(BASELINE.as_bytes()))
+}
+
 /// Bytes of page cache the store connection holds; `PRAGMA cache_size` is derived from
 /// this and the file's measured page size, so a file with a different page size holds the
 /// same bytes. The daemon counts this budget in its retained-resident declaration. The

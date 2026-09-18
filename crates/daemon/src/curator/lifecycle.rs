@@ -20,10 +20,53 @@ pub const SAMPLE_STALE_AFTER: Duration = Duration::from_secs(300);
 /// Staging maintenance passes per slice; each deletes at most one batch of aged runs.
 pub const MAINTENANCE_PASSES_PER_SLICE: usize = 4;
 
+/// Whether the deployment owner's activation record admits Curator disclosure, from a closed set: `open`, or the closed reason's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationState {
+    Open,
+    Closed(&'static str),
+}
+
+impl Serialize for ActivationStateText {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0.as_str())
+    }
+}
+
+/// The wire spelling of an activation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivationStateText(pub ActivationState);
+
+impl ActivationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed(reason) => reason,
+        }
+    }
+}
+
+impl From<&super::activation::Closed> for ActivationState {
+    fn from(closed: &super::activation::Closed) -> Self {
+        use super::activation::Closed;
+        Self::Closed(match closed {
+            Closed::Missing => "missing",
+            Closed::Refused(_) => "refused",
+            Closed::Unreadable(_) => "unreadable",
+            Closed::Malformed => "malformed",
+            Closed::IdentityMismatch(_) => "identity_mismatch",
+            Closed::Unacknowledged => "unacknowledged",
+            Closed::UnknownCredential => "unknown_credential",
+        })
+    }
+}
+
 /// The `curator` block under the context component's metrics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CuratorHealthBlock {
     pub curator_state: CuratorState,
+    /// The activation gate as the worker last evaluated it; `unknown` until the worker's first pass, `stale` once that evaluation has outlived [`SAMPLE_STALE_AFTER`].
+    pub activation_state: ActivationStateText,
     /// Milliseconds since the epoch when the facts were last sampled; `None` until the first sample lands.
     pub sampled_at_ms: Option<i64>,
     /// Jobs and selections the last sweep closed as expired.
@@ -49,6 +92,7 @@ impl CuratorHealthBlock {
     fn starting() -> Self {
         Self {
             curator_state: CuratorState::Starting,
+            activation_state: ActivationStateText(ActivationState::Closed("unknown")),
             sampled_at_ms: None,
             swept_jobs: 0,
             swept_selections: 0,
@@ -60,6 +104,7 @@ impl CuratorHealthBlock {
     fn unavailable(sampled_at_ms: Option<i64>) -> Self {
         Self {
             curator_state: CuratorState::Unavailable,
+            activation_state: ActivationStateText(ActivationState::Closed("unknown")),
             sampled_at_ms,
             swept_jobs: 0,
             swept_selections: 0,
@@ -73,9 +118,11 @@ struct Published {
     stale_at: Instant,
 }
 
-/// The sampler's published projection; `health()` reads it and never touches the store.
+/// The sampler's published projection; `health()` reads it and never touches the store. The activation state is the worker's, published beside the sampler's block.
 pub struct CuratorStatus {
     snapshot: ArcSwap<Published>,
+    /// The worker's latest gate evaluation and when it stops being current: a worker that stopped evaluating must not keep reporting `open`.
+    activation: ArcSwap<(ActivationState, Instant)>,
 }
 
 impl Default for CuratorStatus {
@@ -85,21 +132,37 @@ impl Default for CuratorStatus {
                 block: CuratorHealthBlock::starting(),
                 stale_at: Instant::now() + SAMPLE_STALE_AFTER,
             }),
+            activation: ArcSwap::from_pointee((
+                ActivationState::Closed("unknown"),
+                Instant::now() + SAMPLE_STALE_AFTER,
+            )),
         }
     }
 }
 
 impl CuratorStatus {
-    /// The block a reader reports: the published block, or its unavailable projection once a `ready` block has outlived [`SAMPLE_STALE_AFTER`].
+    /// The block a reader reports: the published block, or its unavailable projection once a `ready` block has outlived [`SAMPLE_STALE_AFTER`], carrying the worker's latest activation state either way. An activation older than [`SAMPLE_STALE_AFTER`] reports `stale`: the worker stopped evaluating the gate, so nothing vouches for `open`.
     pub fn reported(&self) -> CuratorHealthBlock {
+        let now = Instant::now();
         let published = self.snapshot.load();
-        if published.block.curator_state == CuratorState::Ready
-            && Instant::now() >= published.stale_at
-        {
-            CuratorHealthBlock::unavailable(published.block.sampled_at_ms)
+        let mut block =
+            if published.block.curator_state == CuratorState::Ready && now >= published.stale_at {
+                CuratorHealthBlock::unavailable(published.block.sampled_at_ms)
+            } else {
+                published.block.clone()
+            };
+        let (activation, stale_at) = **self.activation.load();
+        block.activation_state = ActivationStateText(if now >= stale_at {
+            ActivationState::Closed("stale")
         } else {
-            published.block.clone()
-        }
+            activation
+        });
+        block
+    }
+
+    pub fn set_activation(&self, state: ActivationState) {
+        self.activation
+            .store(Arc::new((state, Instant::now() + SAMPLE_STALE_AFTER)));
     }
 
     fn last_sampled_at_ms(&self) -> Option<i64> {
@@ -182,6 +245,7 @@ pub fn sweep_and_sample(
         Ok(facts) => Pass {
             block: CuratorHealthBlock {
                 curator_state: CuratorState::Ready,
+                activation_state: ActivationStateText(ActivationState::Closed("unknown")),
                 sampled_at_ms: Some(now_ms),
                 swept_jobs,
                 swept_selections,
@@ -467,6 +531,7 @@ mod tests {
         status.publish(
             CuratorHealthBlock {
                 curator_state: CuratorState::Ready,
+                activation_state: ActivationStateText(ActivationState::Open),
                 sampled_at_ms: Some(7),
                 swept_jobs: 0,
                 swept_selections: 0,
@@ -483,6 +548,7 @@ mod tests {
         // The JSON shape flattens the facts beside the state so the wire sanitizer reads one flat block.
         let json = CuratorHealthBlock {
             curator_state: CuratorState::Ready,
+            activation_state: ActivationStateText(ActivationState::Open),
             sampled_at_ms: Some(1),
             swept_jobs: 2,
             swept_selections: 0,
@@ -500,8 +566,9 @@ mod tests {
     /// The serialized block carries exactly the counters the wire contract lists, so a field added on one side cannot drift silently past the host sanitizer.
     #[test]
     fn the_block_carries_exactly_the_documented_counters() {
-        const DOCUMENTED: [&str; 38] = [
+        const DOCUMENTED: [&str; 39] = [
             "curator_state",
+            "activation_state",
             "sampled_at_ms",
             "swept_jobs",
             "swept_selections",
@@ -542,6 +609,7 @@ mod tests {
         ];
         let json = CuratorHealthBlock {
             curator_state: CuratorState::Ready,
+            activation_state: ActivationStateText(ActivationState::Open),
             sampled_at_ms: Some(1),
             swept_jobs: 0,
             swept_selections: 0,

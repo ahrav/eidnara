@@ -184,7 +184,7 @@ struct StoredHold {
 }
 
 impl KernelStore {
-    /// Pins `evidence_ids` for one job until `expires_at`, the job's run cutoff, after validating every id, the reference count, the active-hold counts, and the distinct backing bytes the project and host would hold. Nothing is written when any check fails.
+    /// Pins `evidence_ids` for one job until `expires_at`, the job's run cutoff, after validating every id, the reference count, the active-hold counts, and the distinct backing bytes the project and host would hold. Nothing is written when any check fails. `evidence_ids` may be empty: a job whose subject is a staged review input, which staging itself retains until its queue deadline, starts with no captured evidence and grows the hold through [`Self::extend_execution_hold`] as the investigation reads.
     pub fn acquire_execution_hold(
         &self,
         binding: &CuratorHoldBinding,
@@ -473,7 +473,7 @@ impl KernelStore {
     ) -> Result<CuratorHold, CuratorHoldError> {
         binding.validate()?;
         let now = current_time_ms();
-        if expires_at <= now || evidence_ids.is_empty() {
+        if expires_at <= now {
             return Err(CuratorHoldRefusal::InvalidRequest.into());
         }
         let mut writer = self.lock_writer()?;

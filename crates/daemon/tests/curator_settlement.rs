@@ -472,6 +472,7 @@ impl Fixture {
         Settlement {
             store: &self.store,
             ledger: &self.ledger,
+            project: PROJECT,
             binding,
             claim,
             now_ms: now,

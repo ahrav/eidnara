@@ -68,8 +68,10 @@ pub enum SelectionError {
 
 /// What one project's selection is scoped and fingerprinted by.
 pub struct SelectionScope<'a> {
+    /// The Kernel scope eligibility is judged in: the only Kernel-scoped member.
     pub project: &'a ProjectScope,
-    pub project_digest: &'a str,
+    /// The Memory Store project the review jobs live under: the authority key, not the Kernel digest.
+    pub ledger_project: &'a str,
     /// Descriptor classes walked, in order; production passes [`MEMORY_CLASSES`].
     pub classes: &'a [OccurrenceClass],
     /// The policies the review depends on, so a policy change permits one new job at an unchanged target.
@@ -86,7 +88,7 @@ pub fn select_review_targets(
 ) -> Result<FrozenSelectionPage, SelectionError> {
     let SelectionScope {
         project,
-        project_digest,
+        ledger_project,
         classes,
         policy_versions,
     } = *scope;
@@ -146,7 +148,7 @@ pub fn select_review_targets(
                 && let Some(inputs) = causal_inputs(row, policy_versions)
                 && ledger
                     .lookup_curator_job(
-                        project_digest,
+                        ledger_project,
                         &inputs
                             .causal_identity()
                             .map_err(|error| SelectionError::Ledger(error.to_string()))?,

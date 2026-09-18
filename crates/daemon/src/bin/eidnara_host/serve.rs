@@ -1124,11 +1124,25 @@ pub fn run() -> Result<(), &'static str> {
         // A failed commit fails initialization, so the host never publishes an incarnation whose selection is not on disk.
         write_selection(&selection_root, &selection)
     });
+    // Curator runs launch under the same Model Execution supervisor as every other internal run and dial with the envelope's credentials; the activation record under the data home names which one.
+    let curator_host = daemon::curator::worker::CuratorHost {
+        supervisor: model_execution.supervisor(),
+        credentials: envelope
+            .credentials
+            .iter()
+            .map(|(name, value)| (name.clone(), zeroize::Zeroizing::new(value.clone())))
+            .collect(),
+        worker_instance: format!(
+            "curator-worker:{}",
+            &envelope.payload_manifest_digest[..envelope.payload_manifest_digest.len().min(16)]
+        ),
+    };
     let composite = StaticComposite::new(
         daemon::Handler::new_with_connection_file(Some(publication))
             .with_connection_key_hook(commit_selection)
             .with_capability_source(capability_source)
-            .with_local_embeddings(local_embeddings.clone()),
+            .with_local_embeddings(local_embeddings.clone())
+            .with_curator_host(curator_host),
         local_embeddings,
         model_execution,
     )

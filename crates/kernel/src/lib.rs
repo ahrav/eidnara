@@ -116,7 +116,7 @@ pub use local_file::{
 };
 #[cfg(feature = "test-support")]
 pub use open::OpenPhase;
-pub use open::{KernelError, KernelStore};
+pub use open::{KernelError, KernelStore, kernel_baseline_digest};
 pub use outbox::{ConsumerAbandonment, OutboxEntry, OutboxPruneResult};
 pub use retention::{STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState};
 pub use review_staging::{

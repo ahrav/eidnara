@@ -266,7 +266,7 @@ impl RouteBindings {
     }
 
     /// The returned sequence orders bindings by insertion time.
-    fn latest_per_root(&self) -> BTreeMap<&Path, (u64, &SessionBinding)> {
+    pub(crate) fn latest_per_root(&self) -> BTreeMap<&Path, (u64, &SessionBinding)> {
         let mut latest: BTreeMap<&Path, (u64, &SessionBinding)> = BTreeMap::new();
         for (seq, binding) in self.by_route.values() {
             let entry = latest
@@ -2977,6 +2977,9 @@ pub struct HandlerCore {
     search_lifecycle: Arc<Mutex<Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>>>>,
     /// The lane the projection's identity and embedding work come from; attached by the daemon binary before activation.
     local_embeddings: Mutex<Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>>,
+    /// The Model Execution supervisor and startup credentials Curator runs use; without them the worker never starts and accepted candidates stay recorded as not admitted.
+    curator_host: Mutex<Option<Arc<curator::worker::CuratorHost>>>,
+    curator_permits: Arc<curator::coordinator::InvestigationPermits>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
     /// Evaluator registrations exist only in memory and are keyed by notes-authority project.
@@ -3812,6 +3815,15 @@ impl Handler {
         self
     }
 
+    /// Attaches the supervisor and credentials the Curator worker runs review jobs under. The credentials are the startup envelope's, by name; the activation record names which one the sender dials with.
+    pub fn with_curator_host(self, host: curator::worker::CuratorHost) -> Self {
+        *self
+            .curator_host
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(host));
+        self
+    }
+
     pub fn new_with_connection_file(connection_file: Option<PathBuf>) -> Self {
         let cancel = CancellationToken::new();
         let producer_factory: Arc<dyn HistorySummarizerProducerFactory> = match connection_file {
@@ -3829,6 +3841,8 @@ impl Handler {
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::clone(&kernel),
             curator_status: Arc::default(),
+            curator_host: Mutex::new(None),
+            curator_permits: Arc::default(),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
             cancel,
@@ -3970,6 +3984,12 @@ impl HandlerCore {
         let cancel = self.cancel.clone();
         let store_slot = Arc::clone(&self.store);
         let curator_status = Arc::clone(&self.curator_status);
+        let curator_host = self
+            .curator_host
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let curator_permits = Arc::clone(&self.curator_permits);
         let bindings = Arc::clone(&self.bindings);
         let memory_classifier = Arc::clone(&self.memory_classifier);
         let search_lifecycle = Arc::clone(&self.search_lifecycle);
@@ -4014,6 +4034,7 @@ impl HandlerCore {
                             store,
                             bindings: Arc::clone(&bindings),
                             memory_classifier,
+                            curator_status: Arc::clone(&curator_status),
                         });
                     let scheduler = memory_classifier_scheduler::MemoryClassifierScheduler::new(
                         Arc::new(memory_classifier_scheduler::WallClock),
@@ -4038,6 +4059,36 @@ impl HandlerCore {
                         {
                             task_admission
                                 .spawn(search_lifecycle_owner::run_slices(owner, cancel.clone()));
+                        }
+                        if kernel.state() == kernel_routes::KernelState::Ready
+                            && let Some(host) = curator_host
+                            && let Some(home) = curator::worker::Worker::home_of(path)
+                            && let Some(store) =
+                                store_slot.lock().expect("store slot mutex").clone()
+                        {
+                            let kernel_source = Arc::clone(&kernel);
+                            let project_store = Arc::clone(&store);
+                            let project_bindings = Arc::clone(&bindings);
+                            task_admission.spawn(curator::worker::run(
+                                Arc::new(curator::worker::Worker {
+                                    host,
+                                    home,
+                                    store,
+                                    kernel: Arc::new(move || {
+                                        curator::worker::ready_kernel(&kernel_source)
+                                    }),
+                                    projects: Arc::new(move || {
+                                        curator::worker::module_projects(
+                                            &project_store,
+                                            &project_bindings,
+                                        )
+                                    }),
+                                    status: Arc::clone(&curator_status),
+                                    permits: curator_permits,
+                                    endpoint: curator::model_request::Endpoint::anthropic(),
+                                }),
+                                cancel.clone(),
+                            ));
                         }
                         if kernel.state() == kernel_routes::KernelState::Ready
                             && kernel.background_sampler_enabled()
@@ -4284,6 +4335,8 @@ impl Handler {
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::clone(&kernel),
             curator_status: Arc::default(),
+            curator_host: Mutex::new(None),
+            curator_permits: Arc::default(),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
             cancel: CancellationToken::new(),
@@ -14737,21 +14790,21 @@ fn classification_object_id(operation_key: &str, memory_object_id: &str) -> Stri
     format!("memory-classification:{:x}", hasher.finalize())
 }
 
-enum MemoriesAuthority {
+pub(crate) enum MemoriesAuthority {
     Module(ModuleMemoriesAuthority),
     NotModule { message: String },
 }
 
 /// The identity a run under `MODULE` memories authority writes against.
-struct ModuleMemoriesAuthority {
-    context_store_uuid: String,
-    project: String,
-    generation: u64,
+pub(crate) struct ModuleMemoriesAuthority {
+    pub(crate) context_store_uuid: String,
+    pub(crate) project: String,
+    pub(crate) generation: u64,
 }
 
 /// Store failures propagate to callers instead of being treated as an
 /// unscheduled route.
-fn memories_authority_for_route(
+pub(crate) fn memories_authority_for_route(
     store: &MemoryStore,
     route_root: &str,
 ) -> Result<MemoriesAuthority, MemoryStoreError> {
@@ -14835,6 +14888,8 @@ struct SchedulerBridge {
     store: Arc<MemoryStore>,
     bindings: Arc<Mutex<RouteBindings>>,
     memory_classifier: Arc<MemoryClassifierRuntime>,
+    /// The Curator worker's published activation state; Memory Classifier selection is scheduled only while the gate is open, so review capacity is not filled with jobs nothing may run.
+    curator_status: Arc<curator::lifecycle::CuratorStatus>,
 }
 
 impl SchedulerBridge {
@@ -14877,7 +14932,7 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
             &self.store,
             &curator::selection::SelectionScope {
                 project: binding.kernel_project.scope(),
-                project_digest: &project.project,
+                ledger_project: &project.project,
                 classes: curator::selection::MEMORY_CLASSES,
                 policy_versions: &policy_versions,
             },
@@ -14931,19 +14986,33 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
                 std::collections::btree_map::Entry::Occupied(_) => {}
             }
         }
+        // Curator review selection rides the same schedule as the review of user memories and only while the deployment owner's activation record admits disclosure.
+        let curator_open = self.curator_status.reported().activation_state.0
+            == curator::lifecycle::ActivationState::Open;
         Ok(by_project
             .into_iter()
-            .filter_map(
+            .flat_map(
                 |(project, (_, route_root, schedule, authority_generation))| {
-                    Some(memory_classifier_scheduler::ScheduledProject {
-                        project,
-                        task: memory_classifier_scheduler::ScheduledTask::ReviewUserMemories,
-                        route_root,
+                    let schedule = schedule?;
+                    let scheduled = |task| memory_classifier_scheduler::ScheduledProject {
+                        project: project.clone(),
+                        task,
+                        route_root: route_root.clone(),
                         authority_generation,
-                        schedule: schedule?,
-                    })
+                        schedule: schedule.clone(),
+                    };
+                    let mut tasks = vec![scheduled(
+                        memory_classifier_scheduler::ScheduledTask::ReviewUserMemories,
+                    )];
+                    if curator_open {
+                        tasks.push(scheduled(
+                            memory_classifier_scheduler::ScheduledTask::CuratorReviewSelection,
+                        ));
+                    }
+                    Some(tasks)
                 },
             )
+            .flatten()
             .collect())
     }
 
@@ -32501,6 +32570,7 @@ mod tests {
                 store: Arc::clone(&self.store),
                 bindings: Arc::clone(&self.handler.bindings),
                 memory_classifier: Arc::clone(&self.handler.memory_classifier),
+                curator_status: Arc::clone(&self.handler.curator_status),
             }
         }
 

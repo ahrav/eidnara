@@ -450,6 +450,61 @@ fn extension_grows_the_union_without_moving_the_deadline_or_double_charging() {
     assert!(fixture.pin(&hold.hold_id).3.is_some());
 }
 
+/// A staged-subject job has nothing captured when it starts: the hold is acquired empty, counts toward the project's active holds, keeps its expiry, and grows through extension like any other.
+#[test]
+fn an_empty_execution_hold_is_admitted_counts_as_active_and_grows_by_extension() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let binding = fixture.binding("job-empty", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, &[], now + HOUR_MS)
+        .unwrap();
+    assert_eq!((hold.references, hold.backing_bytes), (0, 0));
+    assert_eq!(fixture.pins(), 1);
+    let (_, _, expires_at, released_at, refs) = fixture.pin(&hold.hold_id);
+    assert_eq!(
+        (expires_at, released_at, refs),
+        (Some(now + HOUR_MS), None, 0)
+    );
+    let evidence = fixture.ingest("later", b"read during the run", None);
+    let extended = fixture
+        .store
+        .extend_execution_hold(&hold.hold_id, &binding, std::slice::from_ref(&evidence))
+        .unwrap();
+    assert_eq!(extended.references, 1);
+    assert_eq!(extended.expires_at, hold.expires_at);
+    assert_eq!(extended.backing_bytes, 19);
+    assert_eq!(
+        fixture
+            .store
+            .validate_held_evidence(
+                &hold.hold_id,
+                CuratorHoldKind::Execution,
+                &binding,
+                std::slice::from_ref(&evidence),
+                now,
+            )
+            .unwrap()
+            .len(),
+        1
+    );
+    // An expiry already behind the clock is still refused, empty or not.
+    assert_eq!(
+        refusal(
+            fixture
+                .store
+                .acquire_execution_hold(&fixture.binding("job-late", 1), &[], now - 1)
+                .unwrap_err()
+        ),
+        CuratorHoldRefusal::InvalidRequest
+    );
+    fixture
+        .store
+        .release_execution_hold(&hold.hold_id, &binding)
+        .unwrap();
+}
+
 #[test]
 fn quota_refusal_retains_nothing_and_admits_exactly_at_the_bound() {
     let fixture = Fixture::open();

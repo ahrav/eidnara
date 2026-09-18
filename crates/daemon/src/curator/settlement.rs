@@ -70,6 +70,8 @@ pub enum SettlementError {
 pub struct Settlement<'a> {
     pub store: &'a KernelStore,
     pub ledger: &'a MemoryStore,
+    /// The Memory Store project the job, receipt, and attempt rows live under: the authority key, which is not the Kernel project digest the hold and binding are scoped by.
+    pub project: &'a str,
     /// The job's staging binding; its owner is replaced by the proposal owner for this generation.
     pub binding: &'a ReviewBinding,
     pub claim: &'a TaskClaim,
@@ -91,7 +93,7 @@ impl Settlement<'_> {
         // Q8: the staged proposal keeps the job's immutable queue deadline until selection moves it to the review expiry.
         let queue_deadline_at = self
             .ledger
-            .lookup_curator_job(&run.project_digest, &run.subject)
+            .lookup_curator_job(self.project, &run.subject)
             .map_err(store)?
             .ok_or(SettlementError::Fenced)?
             .queue_deadline_ms;
@@ -174,7 +176,7 @@ impl Settlement<'_> {
     ) -> Result<bool, SettlementError> {
         let attempts = self
             .ledger
-            .list_curator_attempts(&run.project_digest, &run.subject)
+            .list_curator_attempts(self.project, &run.subject)
             .map_err(store)?;
         Ok(attempts.iter().any(|attempt| {
             matches!(
@@ -206,7 +208,7 @@ impl Settlement<'_> {
             LeaseCompleteOutcome::Replayed { .. } => {
                 let receipt = self
                     .ledger
-                    .lookup_curator_receipt(&run.project_digest, &run.subject)
+                    .lookup_curator_receipt(self.project, &run.subject)
                     .map_err(store)?;
                 let selected = receipt.and_then(|receipt| receipt.selected);
                 if selected == Some((run.generation, selection)) {
@@ -226,7 +228,7 @@ impl Settlement<'_> {
     fn copy_receipt(&self, run: &CuratorHoldBinding) -> Result<(), SettlementError> {
         let receipt = self
             .ledger
-            .lookup_curator_receipt(&run.project_digest, &run.subject)
+            .lookup_curator_receipt(self.project, &run.subject)
             .map_err(store)?
             .ok_or(SettlementError::Fenced)?;
         if receipt.terminal.is_some()
@@ -262,7 +264,7 @@ impl Settlement<'_> {
             LeaseCompleteOutcome::Replayed { .. } => {
                 let recorded = self
                     .ledger
-                    .lookup_curator_receipt(&run.project_digest, &run.subject)
+                    .lookup_curator_receipt(self.project, &run.subject)
                     .map_err(store)?
                     .and_then(|receipt| receipt.terminal);
                 if recorded != Some(terminal) {
@@ -284,7 +286,7 @@ impl Settlement<'_> {
                 Err(error) => {
                     eprintln!(
                         "daemon: curator settlement could not release execution hold for {}/{} generation {}: {error}",
-                        run.project_digest, run.subject, run.generation
+                        self.project, run.subject, run.generation
                     );
                 }
             },
@@ -301,7 +303,7 @@ impl Settlement<'_> {
         if let Err(error) = self.store.release_review_hold(&hold.hold_id, review) {
             eprintln!(
                 "daemon: curator settlement could not release review hold for {}/{} generation {}: {error}",
-                run.project_digest, run.subject, run.generation
+                self.project, run.subject, run.generation
             );
         }
     }
@@ -314,7 +316,7 @@ impl Settlement<'_> {
     ) -> Result<LeaseCompleteOutcome, SettlementError> {
         self.ledger
             .complete_curator_receipt(
-                &run.project_digest,
+                self.project,
                 &run.subject,
                 &self.claim.claim_id,
                 &format!("curator-settlement:{}:{}", run.subject, run.generation),
@@ -685,7 +687,7 @@ pub fn read_selected_proposal(
         payload_digest: selection.payload_digest.clone(),
     };
     let run = CuratorHoldBinding {
-        project_digest: project.to_string(),
+        project_digest: binding.project_digest.clone(),
         kernel_incarnation: receipt.kernel_incarnation_id.clone(),
         memstore_incarnation: receipt.database_incarnation_id.clone(),
         subject: causal_identity.to_string(),

@@ -1204,7 +1204,7 @@ async fn a_selected_eligible_memory_becomes_a_published_proposal_through_the_sha
         &fixture.ledger,
         &SelectionScope {
             project: &kernel::ProjectScope::new(PROJECT).unwrap(),
-            project_digest: PROJECT,
+            ledger_project: PROJECT,
             classes: &[kernel::source_identity::OccurrenceClass::GitCommits],
             policy_versions: &BTreeMap::new(),
         },
@@ -1296,7 +1296,7 @@ async fn a_selected_eligible_memory_becomes_a_published_proposal_through_the_sha
         &fixture.ledger,
         &SelectionScope {
             project: &kernel::ProjectScope::new(PROJECT).unwrap(),
-            project_digest: PROJECT,
+            ledger_project: PROJECT,
             classes: &[kernel::source_identity::OccurrenceClass::GitCommits],
             policy_versions: &BTreeMap::new(),
         },
