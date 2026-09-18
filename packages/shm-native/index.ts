@@ -956,6 +956,11 @@ export class NativeChannel {
         }
     }
 
+    /**
+     * Delivers one frame and returns true, or returns false when the ring is empty, including
+     * after the peer hung up on a drained ring; `peerClosed()` tells the two apart. Any other
+     * receive failure throws.
+     */
     drainOne(deliver: (lease: NativeReceiveLease) => void): boolean {
         this.assertOpen();
         let escaped: NativeReceiveLease | undefined;
@@ -985,8 +990,8 @@ export class NativeChannel {
 
     /**
      * True once the host has dropped the setup socket that scopes this channel's
-     * lifetime. A ring that has simply gone quiet is indistinguishable from a
-     * dead peer without this signal.
+     * lifetime, or once a receive saw the peer's doorbell end close. A ring that
+     * has simply gone quiet is indistinguishable from a dead peer without this signal.
      */
     peerClosed(): boolean {
         if (this.liveness.closed) return true;

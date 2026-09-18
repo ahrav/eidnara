@@ -248,15 +248,12 @@ pub fn parse_history_segment_output(
             "HistorySummarizer output must be one complete <output> root document.",
         ));
     };
-    let root_span = root.get(0).expect("whole match");
     let root_body = root
         .name("body")
         .map(|capture| capture.as_str())
         .unwrap_or_default();
-    if output_tag_regex().is_match(root_body)
-        || output_tag_regex().is_match(&text[..root_span.start()])
-        || output_tag_regex().is_match(&text[root_span.end()..])
-    {
+    // The root's own open and close tags are the only `output` tags allowed anywhere.
+    if output_tag_regex().find_iter(text).count() != 2 {
         return Err(validation_error(
             "HistorySummarizer output must contain exactly one <output> root document.",
         ));
@@ -1624,6 +1621,10 @@ full narrative
             xml(&[(1, 1, "second")], 2, "")
         );
         let error = parse_history_segment_output(&doubled).expect_err("two roots rejected");
+        assert!(error.message.contains("exactly one <output>"));
+        // A stray tag before the root counts too.
+        let prefixed = format!("</output>\n{}", xml(&[(1, 1, "first")], 2, ""));
+        let error = parse_history_segment_output(&prefixed).expect_err("stray prefix tag rejected");
         assert!(error.message.contains("exactly one <output>"));
     }
 

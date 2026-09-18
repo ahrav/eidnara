@@ -340,18 +340,9 @@ pub fn spawn_detached(
     let exe_path = CString::new("/dev/fd/3").expect("static exe path");
     // The daemon's environment is otherwise empty: credentials travel in the envelope and
     // the data root in the lifecycle record. Only the two variables that name the user
-    // configuration file pass through, and only with absolute values, because
-    // `daemon::config` resolves `eidnara.jsonc` from them and nothing else.
-    let config_env: Vec<CString> = CONFIG_ENV_NAMES
-        .iter()
-        .filter_map(|name| {
-            let value = std::env::var(name).ok()?;
-            let absolute = !value.is_empty() && Path::new(&value).is_absolute();
-            absolute
-                .then(|| CString::new(format!("{name}={value}")).ok())
-                .flatten()
-        })
-        .collect();
+    // configuration file pass through, because `daemon::config` resolves `eidnara.jsonc` from
+    // them and nothing else.
+    let config_env = config_env(CONFIG_ENV_NAMES.map(|name| (name, std::env::var(name).ok())));
     let mut envp: Vec<*const libc::c_char> =
         config_env.iter().map(|entry| entry.as_ptr()).collect();
     envp.push(std::ptr::null());
@@ -515,9 +506,44 @@ pub fn glibc_version() -> Option<String> {
     None
 }
 
+/// The `NAME=value` entries the served daemon inherits: only the configured names, only when
+/// set to an absolute path, in the order given.
+fn config_env(vars: [(&str, Option<String>); CONFIG_ENV_NAMES.len()]) -> Vec<CString> {
+    vars.into_iter()
+        .filter_map(|(name, value)| {
+            let value = value?;
+            let absolute = !value.is_empty() && Path::new(&value).is_absolute();
+            absolute
+                .then(|| CString::new(format!("{name}={value}")).ok())
+                .flatten()
+        })
+        .collect()
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_env_forwards_only_absolute_values_in_declared_order() {
+        let forwarded = config_env([
+            ("XDG_CONFIG_HOME", Some("/etc/xdg".to_owned())),
+            ("HOME", Some("/home/user".to_owned())),
+        ]);
+        assert_eq!(
+            forwarded,
+            [
+                CString::new("XDG_CONFIG_HOME=/etc/xdg").unwrap(),
+                CString::new("HOME=/home/user").unwrap()
+            ]
+        );
+        let dropped = config_env([
+            ("XDG_CONFIG_HOME", Some("relative/xdg".to_owned())),
+            ("HOME", Some(String::new())),
+        ]);
+        assert!(dropped.is_empty());
+        assert!(config_env([("XDG_CONFIG_HOME", None), ("HOME", None)]).is_empty());
+    }
 
     #[test]
     fn descriptors_above_lists_only_open_descriptors_past_the_ceiling() {

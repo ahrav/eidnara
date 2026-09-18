@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     modelKeyLookupOrder,
+    promptSurfaceConfigIdentity,
     resolveModelConfigOrDefault,
     resolvePromptSurface,
 } from "./prompt-surface";
@@ -12,6 +13,8 @@ import {
     createPromptSurfaceRuntime,
     LIGHT_TOOL_DESCRIPTIONS,
     MAX_GUIDANCE_OVERRIDE_BYTES,
+    type PromptSurfaceRuntime,
+    promptSurfaceWireFields,
 } from "./prompt-surface-runtime";
 
 const tempDirs: string[] = [];
@@ -311,5 +314,39 @@ describe("prompt-surface runtime", () => {
         );
         expect(guidance.preset).toBe("light");
         expect(warnings).toEqual([]);
+    });
+});
+
+describe("prompt-surface wire fields", () => {
+    const config = { default: "light", tool_descriptions: { eidnara_search: "x" } } as const;
+
+    it("takes the preset and override from the runtime and the rest from the config", () => {
+        const runtime = {
+            resolveRegistration: () => {
+                throw new Error("not used");
+            },
+            resolveGuidance: () => ({ preset: "full", primaryOverride: "## Eidnara\n\nO" }),
+        } satisfies PromptSurfaceRuntime;
+        expect(promptSurfaceWireFields(runtime, config, "provider/model")).toEqual({
+            prompt_surface_preset: "full",
+            prompt_surface_model_key: "provider/model",
+            prompt_surface_config_identity: promptSurfaceConfigIdentity(config),
+            prompt_surface_tool_descriptions: { eidnara_search: "x" },
+            prompt_surface_guidance_override: "## Eidnara\n\nO",
+        });
+    });
+
+    it("falls back to the configured preset without a runtime and passes a null model key through", () => {
+        expect(promptSurfaceWireFields(undefined, config, null)).toEqual({
+            prompt_surface_preset: "light",
+            prompt_surface_model_key: null,
+            prompt_surface_config_identity: promptSurfaceConfigIdentity(config),
+            prompt_surface_tool_descriptions: { eidnara_search: "x" },
+            prompt_surface_guidance_override: undefined,
+        });
+        expect(promptSurfaceWireFields(undefined, undefined, undefined)).toMatchObject({
+            prompt_surface_preset: "full",
+            prompt_surface_tool_descriptions: {},
+        });
     });
 });

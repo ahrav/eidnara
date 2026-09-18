@@ -13,12 +13,12 @@ import {
 import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { log } from "../../shared/logger";
+import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import {
-    type PromptSurfaceConfig,
-    promptSurfaceConfigIdentity,
-    resolvePromptSurface,
-} from "../../shared/prompt-surface";
-import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
+    type PromptSurfaceRuntime,
+    promptSurfaceWireFields,
+} from "../../shared/prompt-surface-runtime";
+import { isRecord } from "../../shared/record-type-guard";
 import { createEidnaraCommandHandler } from "./command-handler";
 import { invalidateToolPermissionDenied } from "./eidnara-reduce-availability";
 import { type ContextUsageEntry, createEventHandler } from "./event-handler";
@@ -45,6 +45,9 @@ import { createTextCompleteHandler } from "./text-complete";
 import { readOwnDataProperty } from "./transform-capture";
 
 export type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
+
+/** The transform's prompt-path budget (`TRANSFORM_SEND_TIMEOUT_MS`); guidance never outlives it. */
+const GUIDANCE_FETCH_TIMEOUT_MS = 5_000;
 
 export interface EidnaraDeps {
     client: PluginContext["client"];
@@ -289,7 +292,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     // Guidance is fetched only in rust mode: there the daemon is already on the prompt path and
     // its transform serves the tags and blocks the guidance explains. Bytes are cached per
     // session and variant; a cache-busting pass refetches because the daemon may advance the
-    // pinned date only on such a pass.
+    // pinned date only on such a pass. The fetch shares the transform's 5 s prompt-path budget
+    // (`TRANSFORM_SEND_TIMEOUT_MS` in module-transport.ts); a timeout is fail-open upstream.
     const guidanceBySession = new BoundedSessionMap<{ key: string; bytes: string }>(1000);
     const fetchGuidance = rustMode
         ? async (args: GuidanceFetchArgs): Promise<string | undefined> => {
@@ -297,39 +301,29 @@ export function createEidnaraHook(deps: EidnaraDeps) {
               const cached = guidanceBySession.get(args.sessionId);
               if (cached && cached.key === key && !args.isCacheBusting) return cached.bytes;
               const projectRoot = await projectRootForLiveSession(args.sessionId);
-              const promptSurfaceGuidance = deps.promptSurfaceRuntime?.resolveGuidance(
-                  deps.config.prompt_surface,
-                  args.modelKey,
-              );
-              const preset =
-                  promptSurfaceGuidance?.preset ??
-                  resolvePromptSurface(deps.config.prompt_surface, args.modelKey).preset;
               const response = await moduleClient.call({
                   sessionId: args.sessionId,
                   projectRoot,
                   method: "guidance.get",
+                  signal: AbortSignal.timeout(GUIDANCE_FETCH_TIMEOUT_MS),
                   body: {
                       method: "guidance.get",
                       v: 1,
                       session_id: args.sessionId,
                       tool_present: args.toolPresent,
                       serializer_profile: "opencode-aisdk",
-                      prompt_surface_preset: preset,
-                      prompt_surface_model_key: args.modelKey,
-                      prompt_surface_config_identity: promptSurfaceConfigIdentity(
+                      ...promptSurfaceWireFields(
+                          deps.promptSurfaceRuntime,
                           deps.config.prompt_surface,
+                          args.modelKey,
                       ),
-                      prompt_surface_guidance_override: promptSurfaceGuidance?.primaryOverride,
                       language: deps.config.language,
                   },
               });
-              const bytes =
-                  typeof response === "object" &&
-                  response !== null &&
-                  typeof (response as { bytes?: unknown }).bytes === "string"
-                      ? (response as { bytes: string }).bytes
-                      : undefined;
-              if (bytes === undefined) throw new Error("guidance.get returned no bytes");
+              if (!isRecord(response) || typeof response.bytes !== "string") {
+                  throw new Error("guidance.get returned no bytes");
+              }
+              const bytes = response.bytes;
               guidanceBySession.set(args.sessionId, { key, bytes });
               return bytes;
           }

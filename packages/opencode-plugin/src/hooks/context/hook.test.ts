@@ -35,7 +35,13 @@ import type { RustModeModuleClient } from "./rust-mode-transform";
 import type { MessageLike } from "./tag-content-primitives";
 import { defaultTransformCaptureAdmission } from "./transform-capture";
 
-type RecordedCall = { sessionId: string; projectRoot: string; method: string; body: unknown };
+type RecordedCall = {
+    sessionId: string;
+    projectRoot: string;
+    method: string;
+    body: unknown;
+    signal?: AbortSignal;
+};
 
 type FakeModuleClient = {
     client: RustModeModuleClient;
@@ -127,11 +133,11 @@ function createFakeModuleClient(
     const deleteSession = mock(async () => {});
     const closeSession = mock(() => {});
     const client: RustModeModuleClient = {
-        call: async ({ sessionId, projectRoot, method, body }) => {
+        call: async ({ sessionId, projectRoot, method, body, signal }) => {
             if (!isModuleCallBodyValid(method, body)) {
                 throw new TypeError(`invalid fake module body for ${method}`);
             }
-            const call = { sessionId, projectRoot, method, body };
+            const call = { sessionId, projectRoot, method, body, signal };
             calls.push(call);
             return respond(call);
         },
@@ -1738,4 +1744,73 @@ it("sends a serialized body carrier from the live transform hook", async () => {
     expect(text).toBeString();
     expect(JSON.parse(text!)).toMatchObject({ method: "transform", session_id: sessionId });
     expect(Object.isFrozen(calls[0]!.body)).toBe(true);
+});
+
+describe("rust-mode guidance fetch", () => {
+    it("sends guidance.get with the transform's prompt-surface fields, a 5 s budget, and appends the bytes", async () => {
+        useTempDataHome("hook-guidance-parity-");
+        const fake = createFakeModuleClient(({ method, body }) => {
+            if (method === "transform")
+                return recipeResponse(body, [], { decision: "PASSTHROUGH" });
+            if (method === "guidance.get") return { bytes: "## Eidnara\n\nGuidance block." };
+            return { ok: true };
+        });
+        const hook = requireHook(
+            createEidnaraHook(
+                createDeps({
+                    rustModeModuleClient: fake.client,
+                    config: {
+                        protected_tags: 3,
+                        cache_ttl: "5m",
+                        transform_mode: "rust",
+                        prompt_surface: {
+                            default: "light",
+                            tool_descriptions: { eidnara_search: "x" },
+                        },
+                    },
+                }),
+            ),
+        );
+        const sessionId = "ses-guidance-parity";
+        await hook["chat.message"]({
+            sessionID: sessionId,
+            model: { providerID: "provider", modelID: "model" },
+        });
+        const messages = installOneRawMessage(sessionId);
+        await hook["experimental.chat.messages.transform"]({}, { messages: [...messages] });
+        const output = { system: ["host prompt"] };
+        await hook["experimental.chat.system.transform"]({ sessionID: sessionId }, output);
+
+        const transform = fake.calls.find((call) => call.method === "transform");
+        const guidance = fake.calls.find((call) => call.method === "guidance.get");
+        if (!transform || !guidance) throw new Error("both routes must have been called");
+        const transformBody = transform.body as Record<string, unknown>;
+        const guidanceBody = guidance.body as Record<string, unknown>;
+        // The daemon freezes the first prompt-surface selection per session, so both routes
+        // must describe the same one.
+        const surfaceKeys = Object.keys(transformBody).filter((key) =>
+            key.startsWith("prompt_surface_"),
+        );
+        expect(surfaceKeys.sort()).toEqual([
+            "prompt_surface_config_identity",
+            "prompt_surface_guidance_override",
+            "prompt_surface_model_key",
+            "prompt_surface_preset",
+            "prompt_surface_tool_descriptions",
+        ]);
+        // The fixture's raw message names no model, so the transform reports none; the
+        // system-prompt path resolves the live model selected by `chat.message`.
+        for (const key of surfaceKeys) {
+            if (key === "prompt_surface_model_key") continue;
+            expect(guidanceBody[key]).toEqual(transformBody[key]);
+        }
+        expect(guidanceBody.prompt_surface_tool_descriptions).toEqual({ eidnara_search: "x" });
+        expect(guidanceBody).toMatchObject({
+            prompt_surface_model_key: "provider/model",
+            tool_present: transformBody.tool_present,
+            serializer_profile: "opencode-aisdk",
+        });
+        expect(guidance.signal).toBeInstanceOf(AbortSignal);
+        expect(output.system).toEqual(["host prompt\n\n## Eidnara\n\nGuidance block."]);
+    });
 });

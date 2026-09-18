@@ -206,6 +206,43 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
         ).toEqual(["check-a3-transform-served"]);
     });
 
+    it("counts SOFT+ passes after the two initial render passes and rejects a third", () => {
+        // The live shape: first_render, then the epoch_change re-render, then pure defer.
+        expect(
+            verifyFirstRenderPureDeferStability(
+                a1Observation({ deferredPassCount: 4, renderPassCount: 2 }),
+            ).verdict,
+        ).toBe("pass");
+        expect(
+            verifyAgedEidnaraReduceSurvival(
+                a3Observation({ deferredPassCount: 7, renderPassCount: 2 }),
+            ).verdict,
+        ).toBe("pass");
+        // A third HARD render pass is a real bust, whatever the defer count says.
+        expect(
+            failedCheckIds(
+                verifyFirstRenderPureDeferStability(
+                    a1Observation({ deferredPassCount: 3, renderPassCount: 3 }),
+                ),
+            ),
+        ).toEqual(["check-a1-pure-defer"]);
+        expect(
+            failedCheckIds(
+                verifyAgedEidnaraReduceSurvival(
+                    a3Observation({ deferredPassCount: 6, renderPassCount: 3 }),
+                ),
+            ),
+        ).toEqual(["check-a3-pure-defer"]);
+        // Render passes are not defer passes: the two counts must add up to every pass.
+        expect(
+            failedCheckIds(
+                verifyFirstRenderPureDeferStability(
+                    a1Observation({ deferredPassCount: 6, renderPassCount: 2 }),
+                ),
+            ),
+        ).toEqual(["check-a1-pure-defer"]);
+    });
+
     it("passes a surviving aged eidnara_reduce arc and emits the catalog check ids", () => {
         const result = verifyAgedEidnaraReduceSurvival(a3Observation());
         expect(result.verdict).toBe("pass");
@@ -319,6 +356,12 @@ describe("thinking-block successor verifiers", () => {
                 ),
             ),
         ).toEqual(["check-thinking-a-signature-byte-stable"]);
+        // A surviving block that reached the provider byte-identical is the accepted shape.
+        expect(
+            verifyThinkingNudgeAnchor(
+                nudgeObservation({ thinkingBlockCount: 1, thinkingBlockMutations: 0 }),
+            ).verdict,
+        ).toBe("pass");
     });
 
     it("passes a clean dropped-shell observation and rejects crafted invalid states", () => {

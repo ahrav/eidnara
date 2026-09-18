@@ -55,11 +55,11 @@ pub(crate) const MAX_SESSION_LEN: usize = 256;
 pub(crate) const MAX_LAUNCH_NONCE_LEN: usize = 256;
 pub(crate) const MAX_CAPABILITY_LEN: usize = 64;
 pub(crate) const MAX_CAPABILITIES: usize = 32;
-/// One entry per model-execution provider the host admits: `amazon-bedrock`, `anthropic`, `google`, `openai`.
-pub(crate) const MAX_CREDENTIAL_FINGERPRINTS: usize = 4;
 /// Provider keys `identity.credential_fingerprints` may carry, matching `EnvSnapshot::SUPPORTED_PROVIDERS`.
 pub(crate) const CREDENTIAL_FINGERPRINT_PROVIDERS: [&str; 4] =
     ["amazon-bedrock", "anthropic", "google", "openai"];
+/// One entry per admitted provider.
+pub(crate) const MAX_CREDENTIAL_FINGERPRINTS: usize = CREDENTIAL_FINGERPRINT_PROVIDERS.len();
 pub(crate) const MAX_ADMISSION_FACTS_BYTES: usize = 8192;
 pub(crate) const MAX_ADMISSION_FACTS_DEPTH: usize = 32;
 /// Whole-request nesting bound: the root object plus a maximal
@@ -883,6 +883,11 @@ mod tests {
 
     #[test]
     fn credential_fingerprints_are_closed_and_bounded() {
+        assert_eq!(
+            CREDENTIAL_FINGERPRINT_PROVIDERS,
+            crate::model_execution::subprocess::EnvSnapshot::SUPPORTED_PROVIDERS,
+            "route.open admits exactly the providers a credential row can be built for"
+        );
         let mut request = minimal_route_open();
         request["identity"]["credential_fingerprints"] = serde_json::json!({
             "amazon-bedrock": "0".repeat(64),

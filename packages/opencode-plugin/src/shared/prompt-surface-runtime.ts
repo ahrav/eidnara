@@ -261,6 +261,33 @@ interface GuidanceEpoch {
     selection: PromptSurfaceGuidanceSelection;
 }
 
+/**
+ * The `prompt_surface_*` fields every daemon route that selects guidance receives. The daemon
+ * freezes the first selection it sees for a session, so the transform and `guidance.get` must
+ * send the same fields; `model_key` is passed through as given so a transform body is unchanged.
+ */
+export function promptSurfaceWireFields(
+    runtime: PromptSurfaceRuntime | undefined,
+    config: PromptSurfaceConfig | undefined,
+    modelKey: string | null | undefined,
+): {
+    prompt_surface_preset: PromptSurfacePreset;
+    prompt_surface_model_key: string | null | undefined;
+    prompt_surface_config_identity: string;
+    prompt_surface_tool_descriptions: Readonly<Record<string, string>>;
+    prompt_surface_guidance_override: string | undefined;
+} {
+    const guidance = runtime?.resolveGuidance(config, modelKey ?? undefined);
+    return {
+        prompt_surface_preset: (guidance ?? resolvePromptSurface(config, modelKey ?? undefined))
+            .preset,
+        prompt_surface_model_key: modelKey,
+        prompt_surface_config_identity: promptSurfaceConfigIdentity(config),
+        prompt_surface_tool_descriptions: config?.tool_descriptions ?? {},
+        prompt_surface_guidance_override: guidance?.primaryOverride,
+    };
+}
+
 /** Each model-key epoch retains its preset selection and materialized override bytes. */
 export function createPromptSurfaceGuidanceEpochCache(runtime: PromptSurfaceRuntime): {
     resolve: (

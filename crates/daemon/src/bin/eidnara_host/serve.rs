@@ -1038,45 +1038,46 @@ fn local_embeddings_component(generation: &ValidatedGeneration) -> LocalEmbeddin
     #[cfg(target_os = "macos")]
     {
         let _ = generation;
-        return LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported");
+        LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported")
     }
     #[cfg(not(target_os = "macos"))]
     {
-        const BUNDLE_DIR: &str = "payload/model/gte-modernbert-base-f16";
-        const ORT_LIBRARY: &str = "payload/ort/libonnxruntime.so";
-        // A generation that ships no ORT library or bundle (the development payload) is a build
-        // without local embeddings, not a configured lane that failed: it reports `unsupported`,
-        // which status and doctor skip, rather than `degraded`, which they fail.
-        let Some(ort) = generation
-            .manifest
-            .files
-            .iter()
-            .find(|entry| entry.path == ORT_LIBRARY)
-        else {
-            return LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported");
-        };
-        let descriptor_root = generation.descriptor_root_path();
-        let bundle_dir = descriptor_root.join(BUNDLE_DIR);
-        // The generation manifest carries `bundle_manifest.sha256` forward because it authenticates the bundle; otherwise, a replaced bundle can remain self-consistent while serving different embeddings.
-        // The generation manifest carries `bundle_manifest.sha256` forward because it authenticates the bundle; otherwise, a replaced bundle can remain self-consistent while serving different embeddings.
-        // The generation manifest carries `bundle_manifest.sha256` forward because it authenticates the bundle; otherwise, a replaced bundle can remain self-consistent while serving different embeddings.
-        let bundle_manifest_path = format!("{BUNDLE_DIR}/manifest.json");
-        let Some(bundle_manifest) = generation
-            .manifest
-            .files
-            .iter()
-            .find(|entry| entry.path == bundle_manifest_path)
-        else {
-            return LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported");
-        };
-        LocalEmbeddingsComponent::new(Some(LocalEmbeddingsConfig {
-            bundle_dir,
-            ort_library: descriptor_root.join(ORT_LIBRARY),
-            bundle_manifest_sha256: Some(bundle_manifest.sha256.clone()),
-            ort_library_sha256: ort.sha256.clone(),
-            limits: LocalEmbeddingsLimits::default(),
-        }))
+        local_embeddings_from_manifest(
+            &generation.manifest.files,
+            &generation.descriptor_root_path(),
+        )
     }
+}
+
+/// A generation without the ORT library (the development payload) is a build without local
+/// embeddings: `unsupported`, which status and doctor skip. A generation that ships ORT but not
+/// the bundle manifest is a broken payload: `degraded`, which they surface.
+#[cfg(not(target_os = "macos"))]
+fn local_embeddings_from_manifest(
+    files: &[host_runtime::generation::ManifestFile],
+    descriptor_root: &Path,
+) -> LocalEmbeddingsComponent {
+    const BUNDLE_DIR: &str = "payload/model/gte-modernbert-base-f16";
+    const ORT_LIBRARY: &str = "payload/ort/libonnxruntime.so";
+    let Some(ort) = files.iter().find(|entry| entry.path == ORT_LIBRARY) else {
+        return LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported");
+    };
+    let bundle_dir = descriptor_root.join(BUNDLE_DIR);
+    // The generation manifest carries `bundle_manifest.sha256` forward because it authenticates the bundle; otherwise, a replaced bundle can remain self-consistent while serving different embeddings.
+    let bundle_manifest_path = format!("{BUNDLE_DIR}/manifest.json");
+    let Some(bundle_manifest) = files
+        .iter()
+        .find(|entry| entry.path == bundle_manifest_path)
+    else {
+        return LocalEmbeddingsComponent::new(None);
+    };
+    LocalEmbeddingsComponent::new(Some(LocalEmbeddingsConfig {
+        bundle_dir,
+        ort_library: descriptor_root.join(ORT_LIBRARY),
+        bundle_manifest_sha256: Some(bundle_manifest.sha256.clone()),
+        ort_library_sha256: ort.sha256.clone(),
+        limits: LocalEmbeddingsLimits::default(),
+    }))
 }
 
 /// Revalidates startup state and runs the fixed host profile until shutdown.
@@ -1197,6 +1198,49 @@ pub fn run() -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The development payload ships neither ORT nor a bundle: the lane is unsupported and
+    /// status skips it. A payload with ORT but no bundle manifest is degraded, so a packaging
+    /// regression surfaces instead of hiding behind `unsupported`.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn local_embeddings_manifest_distinguishes_absent_from_incomplete_payloads() {
+        use host_runtime::SecondaryComponent;
+        use host_runtime::generation::ManifestFile;
+        use host_runtime::local_embeddings::LocalEmbeddingsStatus;
+        let file = |path: &str| ManifestFile {
+            path: path.to_owned(),
+            mode: 0o644,
+            size: 1,
+            sha256: "ab".repeat(32),
+        };
+        let reason = |component: LocalEmbeddingsComponent| async move {
+            SecondaryComponent::initialize(&component)
+                .await
+                .expect("disabled lane initializes");
+            match component.status() {
+                LocalEmbeddingsStatus::Disabled { reason } => reason,
+                other => panic!("expected a disabled lane, got {other:?}"),
+            }
+        };
+        let root = Path::new("/generation");
+        let absent = local_embeddings_from_manifest(&[file("payload/other")], root);
+        assert_eq!(reason(absent).await, "local_embeddings_unsupported");
+        let incomplete =
+            local_embeddings_from_manifest(&[file("payload/ort/libonnxruntime.so")], root);
+        assert_eq!(reason(incomplete).await, "no bundle configured");
+        let complete = local_embeddings_from_manifest(
+            &[
+                file("payload/ort/libonnxruntime.so"),
+                file("payload/model/gte-modernbert-base-f16/manifest.json"),
+            ],
+            root,
+        );
+        SecondaryComponent::initialize(&complete)
+            .await
+            .expect("configured lane initializes");
+        assert!(matches!(complete.status(), LocalEmbeddingsStatus::Starting));
+    }
 
     #[test]
     fn the_daemon_commits_its_selection_when_the_host_installs_the_key() {

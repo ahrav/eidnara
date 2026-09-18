@@ -5855,6 +5855,14 @@ mod tests {
                 .code(),
             "invalid_identity"
         );
+        // Every admitted provider at once is the documented maximum (§7.1: at most 4 entries).
+        let mut identity = identity_fixture();
+        for provider in crate::control::CREDENTIAL_FINGERPRINT_PROVIDERS {
+            identity
+                .credential_fingerprints
+                .insert(provider.to_owned(), "a".repeat(64));
+        }
+        route_open_body(&target, &identity).expect("one fingerprint per admitted provider");
     }
 
     #[test]

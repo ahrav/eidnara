@@ -120,6 +120,43 @@ fn provider_credential_matrix_matches_the_published_doc() {
                 selected, published,
                 "published variables for {harness}/{provider} must match the runtime row selection"
             );
+            // Each published optional variable is one the runtime row forms without; dropping
+            // a required one leaves no row.
+            let optional: Vec<&str> = row["optional_variables"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for absent in &published {
+                let snapshot = EnvSnapshot::capture_from(
+                    published
+                        .iter()
+                        .filter(|name| name != &absent)
+                        .map(|name| (OsString::from(name), OsString::from("secret"))),
+                )
+                .expect("published variables fit the snapshot ceiling");
+                let row = snapshot.provider_row(harness, provider);
+                if optional.contains(absent) {
+                    let selected: Vec<String> = row
+                        .expect("a row forms without an optional variable")
+                        .into_iter()
+                        .map(|(name, _)| name.into_string().expect("variable name is UTF-8"))
+                        .collect();
+                    assert!(
+                        !selected.iter().any(|name| name == absent),
+                        "{harness}/{provider} row must omit the absent optional {absent}"
+                    );
+                } else {
+                    assert!(
+                        row.is_err(),
+                        "{harness}/{provider} must not form a row without required {absent}"
+                    );
+                }
+            }
         }
         let aliases = spec["aliases"]
             .as_object()

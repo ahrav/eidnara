@@ -85,46 +85,44 @@ pub fn canonical_provider(
     }
 }
 
-/// The variables one canonical provider's credential row is built from, in row order.
-/// `required` variables must all be present and non-empty; an `optional` variable joins the
-/// row only when present and non-empty, so a static Bedrock key pair and an STS session
-/// triple each form one row without the ambient credential chain or profile files.
+/// The variables one canonical provider's credential row is built from, in row order, mirrored
+/// by `PROVIDER_ROWS` in `packages/opencode-plugin/src/shared/host-client/credential-fingerprint.ts`.
+/// Every variable in `order` must be present and non-empty unless it is listed in `optional`,
+/// which joins the row only when present and non-empty, so a static Bedrock key pair and an STS
+/// session triple each form one row without the ambient credential chain or profile files.
 struct ProviderRowSpec {
-    required: &'static [&'static str],
+    order: &'static [&'static str],
     optional: &'static [&'static str],
 }
 
 fn provider_row_spec(canonical: &str) -> Option<ProviderRowSpec> {
     match canonical {
         "anthropic" => Some(ProviderRowSpec {
-            required: &["ANTHROPIC_API_KEY"],
+            order: &["ANTHROPIC_API_KEY"],
             optional: &[],
         }),
         "google" => Some(ProviderRowSpec {
-            required: &["GEMINI_API_KEY"],
+            order: &["GEMINI_API_KEY"],
             optional: &[],
         }),
         "openai" => Some(ProviderRowSpec {
-            required: &["OPENAI_API_KEY"],
+            order: &["OPENAI_API_KEY"],
             optional: &[],
         }),
         // Explicit static or session credentials plus the region the SDK needs; `AWS_PROFILE`
         // and the shared credential files stay forbidden, so no ambient chain is consulted.
         "amazon-bedrock" => Some(ProviderRowSpec {
-            required: &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
+            order: &[
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_SESSION_TOKEN",
+                "AWS_REGION",
+            ],
             optional: &["AWS_SESSION_TOKEN"],
         }),
         _ => None,
     }
 }
-
-/// Row order is fixed by the specification so both fingerprint sides encode the same sequence.
-const AMAZON_BEDROCK_ROW_ORDER: [&str; 4] = [
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_REGION",
-];
 
 impl EnvSnapshot {
     /// The constructor builds a bounded snapshot from explicit startup variables.
@@ -199,13 +197,8 @@ impl EnvSnapshot {
             }
             Ok(Some((name.clone(), value.clone())))
         };
-        let order: &[&str] = if canonical == "amazon-bedrock" {
-            &AMAZON_BEDROCK_ROW_ORDER
-        } else {
-            spec.required
-        };
-        let mut row = Vec::with_capacity(order.len());
-        for variable in order {
+        let mut row = Vec::with_capacity(spec.order.len());
+        for variable in spec.order {
             match lookup(variable)? {
                 Some(entry) => row.push(entry),
                 None if spec.optional.contains(variable) => {}
@@ -2880,11 +2873,20 @@ mod tests {
                 "AWS_REGION"
             ]
         );
-        let key = [0x11u8; 32];
-        assert_ne!(
-            static_row.credential_fingerprint(&key, "opencode", "amazon-bedrock"),
-            session_row.credential_fingerprint(&key, "opencode", "amazon-bedrock"),
-            "a session token changes the row and its fingerprint"
+        // Vectors pinned byte-for-byte in `credential-fingerprint.test.ts`, so either side
+        // changing its row layout fails here or there.
+        let key = std::array::from_fn(|index| index as u8);
+        assert_eq!(
+            static_row
+                .credential_fingerprint(&key, "opencode", "amazon-bedrock")
+                .expect("static fingerprint"),
+            "3c280e8e1a20d873f48a4b582e4776bdc5bd5d1534f80726d07df077da28fbda"
+        );
+        assert_eq!(
+            session_row
+                .credential_fingerprint(&key, "opencode", "amazon-bedrock")
+                .expect("session fingerprint"),
+            "773c92ad5ea4c9d06abfdd75263014f161d81a413e6ddbe4f3610027b6df80ef"
         );
         let no_region = EnvSnapshot::capture_from(vec![
             (OsString::from("AWS_ACCESS_KEY_ID"), OsString::from("k")),
