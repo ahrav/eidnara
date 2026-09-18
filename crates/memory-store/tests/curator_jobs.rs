@@ -10,7 +10,7 @@ use memory_store::curator_jobs::{
     FrozenSelectionState, MAX_CURATOR_METADATA_BYTES_PER_PROJECT, MAX_FROZEN_SELECTIONS_PER_HOST,
     MAX_PENDING_CURATOR_JOBS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_PROJECT,
     MAX_SELECTION_REFERENCES, ProducerBinding, ReserveOutcome, ReviewTarget,
-    activate_curator_job_in_tx, reserve_curator_job_in_tx,
+    activate_curator_job_in_tx, advance_selection_cursor_in_tx, reserve_curator_job_in_tx,
 };
 use memory_store::{MemoryStore, MemoryStoreError};
 use storage::StorageDescriptor;
@@ -978,4 +978,36 @@ fn identities_and_inputs_reject_secrets_and_stay_reference_only() {
     assert_eq!(stored.len(), 1, "only the clean reservation exists");
     assert!(stored.iter().all(|text| !text.contains(AWS_KEY)));
     assert!(stored[0].contains("cand-1"));
+}
+
+/// A selection cursor is caller text bound into the same durable family as a job row: a detected secret refuses the write on a fresh row and on the upsert over an existing one, and the clean cursor stays.
+#[test]
+fn a_selection_cursor_carrying_a_secret_is_refused_on_insert_and_upsert() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let secret = format!("0\u{1f}object-{AWS_KEY}");
+    let fresh: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        advance_selection_cursor_in_tx(conn, "proj", "slot-1", Some(&secret), NOW)
+    });
+    assert!(
+        fresh.is_err(),
+        "a fresh cursor row carrying a secret is refused"
+    );
+    store
+        .with_fenced_conn_for_test(|conn| {
+            advance_selection_cursor_in_tx(conn, "proj", "slot-1", Some("0\u{1f}object-1"), NOW)
+        })
+        .unwrap();
+    let upsert: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        advance_selection_cursor_in_tx(conn, "proj", "slot-1", Some(&secret), NOW + 1)
+    });
+    assert!(upsert.is_err(), "an upsert carrying a secret is refused");
+    let stored: Vec<String> = store
+        .with_conn_for_test(|conn| {
+            let mut rows = conn.prepare("SELECT cursor FROM curator_selection_cursors")?;
+            rows.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+    assert_eq!(stored, vec!["0\u{1f}object-1".to_string()]);
 }

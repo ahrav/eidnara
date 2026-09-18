@@ -154,14 +154,9 @@ pub fn select_review_targets(
                 return Ok(finish(references, Some(cursor)));
             }
             if verdict.permits()
-                && let Some(inputs) = causal_inputs(row, policy_versions)
+                && let Some((inputs, causal_identity)) = causal_inputs(row, policy_versions)
                 && ledger
-                    .lookup_curator_job(
-                        project_digest,
-                        &inputs
-                            .causal_identity()
-                            .map_err(|error| SelectionError::Ledger(error.to_string()))?,
-                    )
+                    .lookup_curator_job(project_digest, &causal_identity)
                     .map_err(|error| SelectionError::Ledger(error.to_string()))?
                     .is_none()
             {
@@ -188,12 +183,12 @@ fn finish(references: Vec<CausalInputs>, cursor: Option<Cursor>) -> FrozenSelect
     }
 }
 
-/// The causal inputs one live descriptor is reviewed under: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available, and the caller's policy versions.
+/// The causal inputs one live descriptor is reviewed under, with their identity: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available, and the caller's policy versions. `None` when the ledger cannot bind them (an unparseable revision, an id past the ledger's identity bound): such a descriptor has no job to look up or reserve, so it is passed rather than held as a ledger failure the slot would retry every poll.
 fn causal_inputs(
     row: &LiveDescriptor,
     policy_versions: &std::collections::BTreeMap<String, String>,
-) -> Option<CausalInputs> {
-    Some(CausalInputs {
+) -> Option<(CausalInputs, String)> {
+    let inputs = CausalInputs {
         target: ReviewTarget::Memory {
             object_id: row.object_id.clone(),
             source_revision: row.detail.revision.parse().ok()?,
@@ -207,12 +202,47 @@ fn causal_inputs(
             available: true,
         }],
         policy_versions: policy_versions.clone(),
-    })
+    };
+    let causal_identity = inputs.causal_identity().ok()?;
+    Some((inputs, causal_identity))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, SelectionError};
+    use super::{Cursor, SelectionError, causal_inputs};
+
+    /// A live descriptor the Kernel admits with an id past the ledger's identity bound has no job to look up or reserve; it is passed like an ineligible row instead of holding the walk on a refusal that never clears.
+    #[test]
+    fn a_descriptor_the_ledger_cannot_bind_is_passed_not_retried() {
+        let row = |evidence_id: String| kernel::LiveDescriptor {
+            object_id: "object-1".to_string(),
+            domain_id: "domain".to_string(),
+            sensitivity: kernel::Sensitivity::Normal,
+            created_commit_seq: 1,
+            detail: kernel::SourceDescriptorDetail {
+                descriptor_version: kernel::SOURCE_DESCRIPTOR_DETAIL_VERSION,
+                source_policy: kernel::SourceDescriptorPolicy::Native,
+                class: "git_commits".to_string(),
+                identity: Vec::new(),
+                revision: "1".to_string(),
+                representation: "summary".to_string(),
+                span: None,
+                occurrence_id: "occurrence".to_string(),
+                occurrence_tuple: Vec::new(),
+                lineage_id: "lineage".to_string(),
+                payload_id: "payload".to_string(),
+                artifact_digest: "0d".repeat(32),
+                evidence_id,
+            },
+        };
+        let versions = std::collections::BTreeMap::new();
+        assert!(causal_inputs(&row("evidence-1".to_string()), &versions).is_some());
+        // The Kernel accepts text fields up to 1024 bytes; the ledger binds identities up to 256.
+        assert!(
+            causal_inputs(&row("e".repeat(300)), &versions).is_none(),
+            "an evidence id the ledger refuses yields no inputs"
+        );
+    }
 
     #[test]
     fn only_a_busy_reader_or_an_exhausted_budget_is_transient() {

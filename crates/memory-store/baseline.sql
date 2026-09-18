@@ -482,6 +482,16 @@ CREATE TRIGGER curator_frozen_selections_reject_secret_insert
 BEFORE INSERT ON curator_frozen_selections
 BEGIN SELECT reject_transaction_text(NEW.page_json); END;
 
+-- The cursor is caller text bound into the same family: a detected secret refuses the
+-- row on insert and on the upsert that advances it.
+CREATE TRIGGER curator_selection_cursors_reject_secret_insert
+BEFORE INSERT ON curator_selection_cursors
+BEGIN SELECT reject_transaction_text(COALESCE(NEW.cursor, '')); END;
+
+CREATE TRIGGER curator_selection_cursors_reject_secret_update
+BEFORE UPDATE OF cursor ON curator_selection_cursors
+BEGIN SELECT reject_transaction_text(COALESCE(NEW.cursor, '')); END;
+
 -- One Curator receipt per admitted job: the run deadline and execution cutoff are
 -- written at the first claim and inherited unchanged by every takeover; the
 -- generation fences every later write; completion selects exactly one Kernel result.

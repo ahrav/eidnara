@@ -102,6 +102,8 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "curator_jobs_reject_secret_update"),
     ("trigger", "curator_receipts_deadlines_immutable"),
     ("trigger", "curator_receipts_no_delete"),
+    ("trigger", "curator_selection_cursors_reject_secret_insert"),
+    ("trigger", "curator_selection_cursors_reject_secret_update"),
     ("trigger", "curator_store_identity_no_delete"),
     ("trigger", "curator_store_identity_no_update"),
     ("trigger", "notes_facade_authority_delete"),
