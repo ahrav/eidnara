@@ -140,7 +140,7 @@ pub enum DisclosureRefusal {
     /// The provider answered under another model than the one requested, or none; the text is withheld.
     #[error("model_mismatch")]
     ModelMismatch { attempt_index: u32 },
-    /// The provider answered under the requested model but the ledger did not record the attempt complete; the text is withheld because nothing durable says the attempt finished.
+    /// The ledger did not record the attempt's terminal, so the attempt is unknown: nothing durable says whether it completed, failed, or was cancelled. Any text is withheld, and the cause that would have ended the attempt is logged rather than returned, because an unknown attempt outranks its provider outcome (Q20).
     #[error("terminal_not_recorded {error}")]
     TerminalNotRecorded { attempt_index: u32, error: String },
 }
@@ -318,32 +318,36 @@ impl Disclosure<'_> {
                     terminal_recorded: finished,
                 });
             }
-            // The sender knows the connection never took the request, but `NotDispatched` is the ledger's proof of no disclosure and only the dispatch path may write it; the attempt is charged and ends `Failed`, and `sent: false` reports what the sender saw.
             DispatchOutcome::Handed {
                 attempt_index,
-                handoff: Err(error),
-                release,
-                ..
-            } => {
-                self.released(attempt_index, release);
-                return Err(self.end(
-                    attempt_index,
-                    CuratorAttemptTerminal::Failed,
-                    DisclosureRefusal::Send {
-                        attempt_index: Some(attempt_index),
-                        error,
-                        sent: false,
-                    },
-                ));
-            }
-            DispatchOutcome::Handed {
-                attempt_index,
-                handoff: Ok(in_flight),
+                handoff,
                 attempt_deadline_ms,
                 release,
             } => {
-                self.released(attempt_index, release);
-                (attempt_index, in_flight, attempt_deadline_ms)
+                // No request byte has been written yet. A ledger that could not restore its view after the handoff may refuse this attempt's terminal, so the unwritten request is dropped rather than sent under a store that cannot record its outcome.
+                if let Err(error) = release {
+                    drop(handoff);
+                    return Err(self.end(
+                        attempt_index,
+                        CuratorAttemptTerminal::Failed,
+                        DisclosureRefusal::Store(error.to_string()),
+                    ));
+                }
+                match handoff {
+                    // The sender knows the connection never took the request, but `NotDispatched` is the ledger's proof of no disclosure and only the dispatch path may write it; the attempt is charged and ends `Failed`, and `sent: false` reports what the sender saw.
+                    Err(error) => {
+                        return Err(self.end(
+                            attempt_index,
+                            CuratorAttemptTerminal::Failed,
+                            DisclosureRefusal::Send {
+                                attempt_index: Some(attempt_index),
+                                error,
+                                sent: false,
+                            },
+                        ));
+                    }
+                    Ok(in_flight) => (attempt_index, in_flight, attempt_deadline_ms),
+                }
             }
         };
         // The ledger bounded the attempt when it committed the marker; a response after that bound is not this attempt's.
@@ -471,32 +475,27 @@ impl Disclosure<'_> {
             .map_err(|error| DisclosureRefusal::Hold(hold_refusal(error)))
     }
 
-    /// The ledger restored its read-only view after the handoff, or did not. A failure cannot recall the handoff and does not end the attempt, but this store may refuse the terminal later; it is logged here so a `TerminalNotRecorded` that follows has its cause on record.
-    fn released(&self, attempt_index: u32, release: Result<(), memory_store::MemoryStoreError>) {
-        if let Err(error) = release {
-            let hold = &self.broker.binding().hold;
-            eprintln!(
-                "daemon: curator disclosure ledger release failed for {}/{} attempt {attempt_index}: {error}",
-                hold.project_digest, hold.subject
-            );
-        }
-    }
-
-    /// Records a non-complete terminal and returns the refusal that caused it. A terminal the ledger refuses leaves the attempt unknown, which nothing redispatches; the cause still reaches the caller, so the ledger failure is logged here.
+    /// Records a non-complete terminal and returns the refusal that caused it. A terminal the ledger refuses leaves the attempt unknown, which outranks the cause: the caller gets `TerminalNotRecorded`, as on the complete path, and the cause is logged so it is not lost.
     fn end(
         &self,
         attempt_index: u32,
         terminal: CuratorAttemptTerminal,
         refusal: DisclosureRefusal,
     ) -> DisclosureRefusal {
-        if let Err(error) = self.finish(attempt_index, terminal) {
-            let hold = &self.broker.binding().hold;
-            eprintln!(
-                "daemon: curator disclosure terminal {terminal:?} not recorded for {}/{} attempt {attempt_index}: {error}",
-                hold.project_digest, hold.subject
-            );
+        match self.finish(attempt_index, terminal) {
+            Ok(()) => refusal,
+            Err(error) => {
+                let hold = &self.broker.binding().hold;
+                eprintln!(
+                    "daemon: curator disclosure terminal {terminal:?} not recorded for {}/{} attempt {attempt_index} ({refusal}): {error}",
+                    hold.project_digest, hold.subject
+                );
+                DisclosureRefusal::TerminalNotRecorded {
+                    attempt_index,
+                    error,
+                }
+            }
         }
-        refusal
     }
 
     fn finish(&self, attempt_index: u32, terminal: CuratorAttemptTerminal) -> Result<(), String> {

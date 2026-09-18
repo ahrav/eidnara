@@ -1283,3 +1283,58 @@ async fn the_committed_attempt_deadline_bounds_the_response_wait() {
         Some(CuratorAttemptTerminal::Failed)
     );
 }
+
+#[tokio::test]
+async fn a_failed_attempt_whose_terminal_cannot_be_recorded_reports_it() {
+    let fixture = Fixture::open();
+    let (broker, turn) = fixture.broker();
+    let prepared = fixture.prepared(&broker, turn);
+    // The provider fails the attempt; the clock then reads behind the marker it committed, so the ledger refuses the `Failed` terminal as `ClockBehind`. The flag flips inside the peer's respond closure, before any response byte is written, so every clock read after the response is behind.
+    let behind = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flip = Arc::clone(&behind);
+    let now = fixture.now + 3;
+    let clock = move || {
+        if behind.load(Ordering::SeqCst) {
+            now - 1
+        } else {
+            now
+        }
+    };
+    let mut peer = Peer::start().await;
+    let server = peer.serve(no_wait(), move |_| {
+        flip.store(true, Ordering::SeqCst);
+        json_response(
+            "529 Overloaded",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#,
+            "",
+        )
+    });
+    let refusal = attempt(
+        &fixture,
+        &peer,
+        &broker,
+        &prepared,
+        Some(&fixture.approval()),
+        &clock,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    server.await.unwrap();
+    let attempts = fixture.attempts();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].terminal, None,
+        "the attempt is left unterminated"
+    );
+    assert!(
+        matches!(
+            refusal,
+            DisclosureRefusal::TerminalNotRecorded {
+                attempt_index: 0,
+                ..
+            }
+        ),
+        "an unterminated attempt is reported as unknown, not as its provider failure: {refusal:?}"
+    );
+}
