@@ -14741,20 +14741,26 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
         &self.store
     }
 
-    /// The production selector: the project's live canonical descriptors, judged through the Kernel, minus targets that already have a review job. The Kernel scope is the bound route's; the ledger project is the authority project the slot is leased under.
+    /// The production selector: the project's live canonical descriptors, judged through the Kernel, minus targets that already have a review job. The Kernel scope is the bound route's; the ledger project is the authority project the slot is leased under. A missing binding or kernel and a transient selection error retry the slot, as `run_task` retains the same conditions; every other selection error completes it.
     fn select_review_page(
         &self,
         project: &memory_classifier_scheduler::ScheduledProject,
         cursor: Option<&str>,
-    ) -> Result<memory_store::curator_jobs::FrozenSelectionPage, String> {
-        let binding = self
-            .binding_for_root(&project.route_root)
-            .ok_or_else(|| "no live route is bound to the project".to_string())?;
+    ) -> Result<
+        memory_store::curator_jobs::FrozenSelectionPage,
+        memory_classifier_scheduler::SelectionFailure,
+    > {
+        use memory_classifier_scheduler::SelectionFailure;
+        let binding = self.binding_for_root(&project.route_root).ok_or_else(|| {
+            SelectionFailure::Retry("no live route is bound to the project".to_string())
+        })?;
         let kernel = self
             .memory_classifier
             .kernel
             .kernel_store()
-            .map_err(|outcome| format!("kernel unavailable: {outcome:?}"))?;
+            .map_err(|outcome| {
+                SelectionFailure::Retry(format!("kernel unavailable: {outcome:?}"))
+            })?;
         let budget = kernel::applicability::EvalBudget::new(
             Some(std::time::Instant::now() + std::time::Duration::from_secs(30)),
             Arc::default(),
@@ -14782,7 +14788,13 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
             cursor,
             &budget,
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            if error.is_transient() {
+                SelectionFailure::Retry(error.to_string())
+            } else {
+                SelectionFailure::Failed(error.to_string())
+            }
+        })
     }
 
     /// The newest root speaks for a project: roots collapse by project before

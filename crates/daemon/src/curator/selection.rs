@@ -57,13 +57,23 @@ impl Cursor {
     }
 }
 
-/// Why no page could be selected; a store failure keeps the slot due, and nothing else refuses.
+/// A failed selection. `Kernel` retains its error class because retryability depends on it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SelectionError {
     #[error("kernel {0}")]
-    Kernel(String),
+    Kernel(kernel::KernelError),
     #[error("ledger {0}")]
     Ledger(String),
+}
+
+impl SelectionError {
+    /// Returns whether retrying the unchanged selection may succeed: a busy reader, an exhausted budget, or a ledger read failure. A corrupt row or a refused request at this cursor cannot clear until the store changes.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Kernel(error) => error.is_retryable() || *error == kernel::KernelError::Deadline,
+            Self::Ledger(_) => true,
+        }
+    }
 }
 
 /// What one project's selection is scoped and fingerprinted by.
@@ -90,7 +100,7 @@ pub fn select_review_targets(
         classes,
         policy_versions,
     } = *scope;
-    let kernel = |error: kernel::KernelError| SelectionError::Kernel(error.to_string());
+    let kernel = SelectionError::Kernel;
     if classes.is_empty() {
         return Ok(finish(Vec::new(), None));
     }
@@ -201,7 +211,24 @@ fn causal_inputs(
 
 #[cfg(test)]
 mod tests {
-    use super::Cursor;
+    use super::{Cursor, SelectionError};
+
+    #[test]
+    fn only_a_busy_reader_or_an_exhausted_budget_is_transient() {
+        for error in kernel::KernelError::ALL {
+            assert_eq!(
+                SelectionError::Kernel(*error).is_transient(),
+                matches!(
+                    error,
+                    kernel::KernelError::Busy
+                        | kernel::KernelError::Held
+                        | kernel::KernelError::Deadline
+                ),
+                "{error}"
+            );
+        }
+        assert!(SelectionError::Ledger("locked".to_string()).is_transient());
+    }
 
     #[test]
     fn cursors_round_trip_and_malformed_tokens_restart() {

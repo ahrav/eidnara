@@ -563,23 +563,49 @@ pub fn reserve_curator_job_in_tx(
     inputs: &CausalInputs,
     now_ms: i64,
 ) -> rusqlite::Result<ReserveOutcome> {
-    let ordinal = producer.validate().map_err(refuse)?;
+    producer.validate().map_err(refuse)?;
     let inputs = inputs.clone().normalized().map_err(refuse)?;
     let causal_identity = inputs.causal_identity().map_err(refuse)?;
     if let Some(existing) = load_curator_job(conn, project, &causal_identity)? {
         return Ok(ReserveOutcome::Existing(existing));
     }
-    if pending_jobs(conn, Some(project))? >= MAX_PENDING_CURATOR_JOBS_PER_PROJECT {
+    check_reservation_headroom(conn, project, 1)?;
+    insert_reservation_in_tx(conn, project, producer, &inputs, &causal_identity, now_ms)
+        .map(ReserveOutcome::Reserved)
+}
+
+/// Refuses unless `count` new reservations fit under both pending-job caps and both metadata quotas. Capacity is judged before quota, so a caller sees the refusal that clears first.
+fn check_reservation_headroom(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    count: usize,
+) -> rusqlite::Result<()> {
+    if pending_jobs(conn, Some(project))?.saturating_add(count)
+        > MAX_PENDING_CURATOR_JOBS_PER_PROJECT
+    {
         return Err(refuse(CuratorJobRefusal::ProjectCapacity));
     }
-    if pending_jobs(conn, None)? >= MAX_PENDING_CURATOR_JOBS_PER_HOST {
+    if pending_jobs(conn, None)?.saturating_add(count) > MAX_PENDING_CURATOR_JOBS_PER_HOST {
         return Err(refuse(CuratorJobRefusal::HostCapacity));
     }
     check_quota(
         conn,
         project,
-        CURATOR_RECEIPT_CHARGE_BYTES + CURATOR_JOB_ALLOWANCE_BYTES,
-    )?;
+        (CURATOR_RECEIPT_CHARGE_BYTES + CURATOR_JOB_ALLOWANCE_BYTES)
+            .saturating_mul(u64::try_from(count).unwrap_or(u64::MAX)),
+    )
+}
+
+/// Writes one `reserved` row for already-normalized `inputs`; the caller has checked headroom for it.
+fn insert_reservation_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    producer: &ProducerBinding,
+    inputs: &CausalInputs,
+    causal_identity: &str,
+    now_ms: i64,
+) -> rusqlite::Result<CuratorJob> {
+    let ordinal = producer.validate().map_err(refuse)?;
     let deadline = now_ms
         .checked_add(CURATOR_QUEUE_LIFETIME_MS)
         .ok_or_else(|| refuse(CuratorJobRefusal::InvalidRequest))?;
@@ -602,8 +628,7 @@ pub fn reserve_curator_job_in_tx(
             now_ms,
         ],
     )?;
-    load_curator_job(conn, project, &causal_identity)?
-        .map(ReserveOutcome::Reserved)
+    load_curator_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
@@ -803,7 +828,7 @@ pub fn advance_selection_cursor_in_tx(
     Ok(())
 }
 
-/// The transaction-local enqueue: reserve and activate every reference, then move the page to `enqueued`. The page must be `frozen`; capacity and quota refusals surface as `Deferred` so the caller rolls the transaction back rather than completing the slot.
+/// The transaction-local enqueue: reserve and activate every reference the page does not already have a row for, then move the page to `enqueued`. The page must be `frozen`; a capacity or quota refusal for the page's new rows surfaces as `Deferred` before any row is written, so the caller rolls the transaction back rather than completing the slot.
 pub fn enqueue_frozen_selection_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -832,33 +857,42 @@ pub fn enqueue_frozen_selection_in_tx(
         )?;
         return Ok(EnqueueOutcome::Expired);
     }
-    let mut jobs = 0usize;
+    // Headroom is judged once for the whole page: the capacity and quota aggregates scan the incarnation's permanent receipts, and a page either fits entirely or is deferred entirely.
+    producer.validate().map_err(refuse)?;
+    let mut fresh = Vec::with_capacity(existing.page.references.len());
     let mut replayed = 0usize;
     for inputs in &existing.page.references {
-        let job = match reserve_curator_job_in_tx(conn, project, producer, inputs, now_ms) {
-            Ok(ReserveOutcome::Reserved(job)) => {
-                jobs += 1;
-                job
-            }
-            Ok(ReserveOutcome::Existing(_)) => {
-                replayed += 1;
-                continue;
-            }
-            Err(error) => {
-                return match refusal_of(&error) {
-                    Some(
-                        reason @ (CuratorJobRefusal::ProjectCapacity
-                        | CuratorJobRefusal::HostCapacity
-                        | CuratorJobRefusal::MetadataQuota),
-                    ) => Ok(EnqueueOutcome::Deferred(reason)),
-                    _ => Err(error),
-                };
-            }
+        let inputs = inputs.clone().normalized().map_err(refuse)?;
+        let causal_identity = inputs.causal_identity().map_err(refuse)?;
+        if load_curator_job(conn, project, &causal_identity)?.is_some()
+            || fresh
+                .iter()
+                .any(|(_, fresh_id)| *fresh_id == causal_identity)
+        {
+            replayed += 1;
+        } else {
+            fresh.push((inputs, causal_identity));
+        }
+    }
+    if !fresh.is_empty()
+        && let Err(error) = check_reservation_headroom(conn, project, fresh.len())
+    {
+        return match refusal_of(&error) {
+            Some(
+                reason @ (CuratorJobRefusal::ProjectCapacity
+                | CuratorJobRefusal::HostCapacity
+                | CuratorJobRefusal::MetadataQuota),
+            ) => Ok(EnqueueOutcome::Deferred(reason)),
+            _ => Err(error),
         };
+    }
+    let jobs = fresh.len();
+    for (inputs, causal_identity) in &fresh {
+        insert_reservation_in_tx(conn, project, producer, inputs, causal_identity, now_ms)?;
         activate_curator_job_in_tx(
             conn,
             project,
-            &job.causal_identity,
+            causal_identity,
             producer,
             &CuratorJobInput {
                 subject: inputs.target.clone(),
