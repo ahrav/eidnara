@@ -1338,3 +1338,16 @@ async fn a_failed_attempt_whose_terminal_cannot_be_recorded_reports_it() {
         "an unterminated attempt is reported as unknown, not as its provider failure: {refusal:?}"
     );
 }
+
+#[test]
+fn the_system_buffer_must_be_host_authored() {
+    let fixture = Fixture::open();
+    let (broker, mut turn) = fixture.broker();
+    // The disclosed commit message is evidence; placed as the system buffer it would speak with the host's authority.
+    let evidence = turn.pop().unwrap();
+    assert_eq!(evidence.tag().origin, OriginClass::NativeSource);
+    assert_eq!(
+        prepare_body(&broker, &profile(), evidence, Vec::new()).unwrap_err(),
+        DisclosureRefusal::SystemNotHostAuthored
+    );
+}

@@ -101,6 +101,9 @@ pub enum DisclosureRefusal {
     DestinationNotRemote,
     #[error("broker_mismatch")]
     BrokerMismatch,
+    /// The system buffer was not host-authored text; evidence never speaks with the host's authority.
+    #[error("system_not_host_authored")]
+    SystemNotHostAuthored,
     #[error("cancelled")]
     Cancelled,
     #[error("prompt_not_utf8")]
@@ -164,7 +167,7 @@ pub struct Disclosure<'a> {
     pub now_ms: &'a (dyn Fn() -> i64 + Sync),
 }
 
-/// Assembles the body from `system` (host-authored) and the `turn` buffers, in order, recording each buffer's range in the prompt text. Every buffer keeps the tag the broker gave it; the union is the broker's complete disclosed-input union, encoded canonically. Buffers are consumed: a rendered buffer enters one body once, so the assembled evidence bytes are the bytes the broker charged.
+/// Assembles the body from `system` (which must be host-authored, or the body is refused) and the `turn` buffers, in order, recording each buffer's range in the prompt text. Every buffer keeps the tag the broker gave it; the union is the broker's complete disclosed-input union, encoded canonically. Buffers are consumed: a rendered buffer enters one body once, so the assembled evidence bytes are the bytes the broker charged.
 pub fn prepare_body(
     broker: &EvidenceBroker,
     profile: &ModelProfile,
@@ -180,6 +183,10 @@ pub fn prepare_body(
         // Aliases are broker-local, so a buffer from another broker could resolve to a different reference than the one that produced its bytes.
         if buffer.broker != id {
             return Err(DisclosureRefusal::BrokerMismatch);
+        }
+        // The system field carries the host's instructions; a disclosed buffer there would let evidence instruct the model.
+        if index == 0 && buffer.tag.origin != OriginClass::HostAuthored {
+            return Err(DisclosureRefusal::SystemNotHostAuthored);
         }
         let range: Range<usize> = prompt_end..prompt_end + buffer.bytes.len();
         prompt_end = range.end;
