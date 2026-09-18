@@ -10,7 +10,9 @@ use crate::curator::handoff::{
 };
 use crate::history_summarizer::{ValidatedPublishRequest, publish_validated_chunk};
 use crate::history_summarizer_citations::{Citation, FrozenAlias, FrozenAliasTable};
-use crate::history_summarizer_validate::{FactCandidate, ValidatedChunk, ValidatedHistorySegment};
+use crate::history_summarizer_validate::{
+    FactCandidate, UserObservationCandidate, ValidatedChunk, ValidatedHistorySegment,
+};
 use kernel::{
     ByteRange, KernelStore, ReviewPayload, ReviewReadError, ReviewReadRefusal,
     ReviewStagedReference,
@@ -178,6 +180,7 @@ impl Rig {
             now_ms,
             failure_backoff_at_ms: now_ms + 60_000,
             publication_fence: None,
+            collect_user_memory_candidates: false,
         })
         .unwrap()
     }
@@ -1590,6 +1593,7 @@ fn an_unreadable_retained_publication_settles_the_reservation_instead_of_strandi
         now_ms: t0() + 1,
         failure_backoff_at_ms: t0() + 60_000,
         publication_fence: None,
+        collect_user_memory_candidates: false,
     });
     assert!(
         matches!(outcome, Ok(RepublishOutcome::Settled)),
@@ -1681,6 +1685,7 @@ fn every_retained_republish_arms_the_backoff() {
         now_ms: t0() + 1,
         failure_backoff_at_ms: t0() + 1 + 60_000,
         publication_fence: Some(&fence),
+        collect_user_memory_candidates: false,
     })
     .unwrap();
     assert_eq!(outcome, RepublishOutcome::Retained);
@@ -1729,6 +1734,7 @@ fn a_settle_from_a_stale_snapshot_spares_a_later_firing_and_the_job_the_publicat
         now_ms: t0() + 1,
         failure_backoff_at_ms: t0() + 1 + 60_000,
         publication_fence: Some(&fence),
+        collect_user_memory_candidates: false,
     })
     .unwrap();
     // The activated job, the later firing, and its retained publication are all someone else's now.
@@ -1890,4 +1896,128 @@ fn a_republished_publication_keeps_the_time_it_was_first_attempted() {
     let segments = rig.store.load_history_segments(SESSION).unwrap();
     assert_eq!(segments.len(), 1);
     assert_eq!(segments[0].created_at, t0());
+}
+
+#[test]
+fn a_republication_honors_the_current_user_memory_gate() {
+    let rig = Rig::open();
+    // The firing was retained while collection was enabled and produced an observation; the setting is off by the time recovery runs.
+    let mut validated = validated_range(2, 4);
+    validated.user_observations = vec![UserObservationCandidate {
+        content: "prefers short answers".to_string(),
+        origin_history_segment_index: Some(0),
+    }];
+    let mut pending = pending_publication(&validated);
+    pending.collect_user_memory_candidates = true;
+    let handoff = reserve_and_stage(
+        &rig.target(),
+        &HandoffRequest {
+            store: &rig.store,
+            project: PROJECT,
+            session_id: SESSION,
+            firing: &rig.state(),
+            facts: &facts(),
+            aliases: &aliases(),
+            now_ms: t0(),
+        },
+        |reservation| Ok(rig.retain(reservation, &pending)),
+    )
+    .unwrap();
+    let _ = activation(handoff);
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 1),
+        RepublishOutcome::Published
+    );
+    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
+    assert!(
+        rig.store
+            .load_user_memory_candidates(SESSION)
+            .unwrap()
+            .is_empty(),
+        "collection is off now, so the retained observation is not written"
+    );
+}
+
+#[test]
+fn a_retained_publication_the_scanner_would_rewrite_is_a_nonadmission_before_any_reservation() {
+    // The alias table presents a secret outside every cited range: the subject digests clean, but the store would retain the table with the secret substituted, and recovery would rebuild a different subject from it.
+    let rig = Rig::open();
+    let target = rig.target();
+    let mut pending = pending_publication(&validated_range(2, 4));
+    pending.aliases_json = serde_json::to_string(&serde_json::json!({
+        "aliases": [{"presented": "the user typed password=hunter-two and moved on"}]
+    }))
+    .unwrap();
+    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
+    let loaded = rig.store.load(SESSION).unwrap();
+    let decision = curator_decision_before_publish(CuratorDecisionRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        publishing: &loaded.meta.history_summarizer,
+        publishing_row_version: loaded.row_version.unwrap(),
+        validated: &accepted_range(2, 4),
+        aliases: &aliases(),
+        pending,
+        curator_handoff: Some(&target),
+        created_at_ms: t0(),
+        failure_started_at_ms: t0(),
+        failure_backoff_at_ms: t0() + 60_000,
+        completion_now_ms: || 0,
+    })
+    .unwrap();
+    assert_eq!(
+        decision.curator_nonadmission,
+        Some(CuratorNonadmissionCode::SubjectRefused)
+    );
+    assert!(decision.curator_activation.is_none());
+    assert_eq!(
+        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        headroom_before.pending_jobs
+    );
+    assert_eq!(rig.pending(), None);
+}
+
+#[test]
+fn a_reservation_made_under_an_earlier_memories_authority_republishes_under_the_current_one() {
+    // The route was rebound between the reservation and recovery: the job was reserved under "git:other", recovery runs under PROJECT.
+    let rig = Rig::open();
+    let handoff = reserve_and_stage(
+        &rig.target(),
+        &HandoffRequest {
+            store: &rig.store,
+            project: "git:other",
+            session_id: SESSION,
+            firing: &rig.state(),
+            facts: &facts(),
+            aliases: &aliases(),
+            now_ms: t0(),
+        },
+        |reservation| Ok(rig.retain(reservation, &pending_publication(&validated_range(2, 4)))),
+    )
+    .unwrap();
+    let earlier = activation(handoff);
+    let reservation = rig.reservation();
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 1),
+        RepublishOutcome::Published
+    );
+    // The retained output is published once, activating a job of the same identity under the current authority; the earlier project's job is left to its expiry sweep.
+    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
+    assert!(matches!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Ready(_)
+    ));
+    assert_eq!(
+        rig.store
+            .lookup_curator_job("git:other", &earlier.causal_identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        CuratorJobState::Reserved
+    );
+    assert_eq!(rig.state().state, HistorySummarizerPhase::Idle);
+    assert_eq!(rig.pending(), None);
 }

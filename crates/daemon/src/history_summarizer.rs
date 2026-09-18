@@ -785,6 +785,8 @@ pub struct RepublishRequest<'a> {
     pub now_ms: i64,
     pub failure_backoff_at_ms: i64,
     pub publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
+    /// The privacy gate as configured now; user observations the firing retained are written only if it was open then and is open still.
+    pub collect_user_memory_candidates: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -809,6 +811,7 @@ pub fn republish_reserved(
         now_ms,
         failure_backoff_at_ms,
         publication_fence,
+        collect_user_memory_candidates,
     } = request;
     let loaded = store.load(session_id)?;
     let publishing = loaded.meta.history_summarizer.clone();
@@ -945,7 +948,8 @@ pub fn republish_reserved(
             predicate: &predicate,
             observed_chunk_fingerprint: &publishing.chunk_fingerprint,
             validated: &validated,
-            collect_user_memory_candidates: pending.collect_user_memory_candidates,
+            collect_user_memory_candidates: pending.collect_user_memory_candidates
+                && collect_user_memory_candidates,
             publication_floor_ordinal: pending.publication_floor_ordinal,
             chunk_transcript: &pending.chunk_transcript,
             boundary_dates: &pending.boundary_dates,
@@ -1877,6 +1881,9 @@ where
                 now_ms: request.now_ms,
                 failure_backoff_at_ms: request.failure_backoff_at_ms,
                 publication_fence: request.publication_fence,
+                collect_user_memory_candidates: request
+                    .validate_options
+                    .user_memory_collection_enabled,
             })
             .map(HistorySummarizerReattachOutcome::Republished),
             RestartAction::ReattachProducer { .. } => unreachable!(),

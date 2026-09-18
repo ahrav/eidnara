@@ -5358,6 +5358,8 @@ impl HandlerCore {
                                         now_ms: now,
                                         failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                                         publication_fence: Some(publication_fence.as_ref()),
+                                        collect_user_memory_candidates: config
+                                            .user_memory_collection_enabled,
                                     },
                                 )
                                 .map(history_summarizer::HistorySummarizerReattachOutcome::Republished);
@@ -5448,6 +5450,8 @@ impl HandlerCore {
                                     failure_backoff_at_ms: now
                                         + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                                     publication_fence: Some(publication_fence.as_ref()),
+                                    collect_user_memory_candidates: config
+                                        .user_memory_collection_enabled,
                                 },
                             )
                             .map(|_| ())

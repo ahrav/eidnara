@@ -10796,6 +10796,8 @@ impl MemoryStore {
                 "DELETE FROM history_summarizer_side_channel_outbox WHERE session_id = ?1",
                 params![session_id],
             )?;
+            // The reset metadata records no reservation, so nothing could consume the retained publication.
+            delete_pending_publication_tx(tx, session_id)?;
             let next_version = current as u64 + 1;
             tx.execute(
                 "UPDATE cache_state
@@ -14967,7 +14969,7 @@ fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlit
 /// Compressed bound of one retained publication: the chunk transcript envelope for the transcript and its serialized siblings (the validated output and the alias table, which presents the same text again), the same multiple `decompress_bytes` allows inflated.
 const MAX_PENDING_PUBLICATION_COMPRESSED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES * 4;
 
-/// Scans, serializes, and compresses a retained publication as `record_curator_reservation` stores it. A field the durable scan rejects, or a payload past `MAX_PENDING_PUBLICATION_COMPRESSED_BYTES`, is `MemoryStoreError::Redaction`: the store refuses to retain it.
+/// Scans, serializes, and compresses a retained publication as `record_curator_reservation` stores it. A field the durable scan rejects or would rewrite in the subject-bearing fields, or a payload past `MAX_PENDING_PUBLICATION_COMPRESSED_BYTES`, is `MemoryStoreError::Redaction`: the store refuses to retain it.
 fn prepare_pending_publication(
     session_id: &str,
     pending: &PendingPublication,
@@ -14992,6 +14994,12 @@ fn prepare_pending_publication(
         collect_user_memory_candidates: pending.collect_user_memory_candidates,
         created_at_ms: pending.created_at_ms,
     };
+    // The reserved subject is rebuilt from the retained facts and alias table, so a substitution in either would retain bytes the reservation does not name; the transcript is not part of the subject and is stored as the scan leaves it, as the publication stores it.
+    if write.recorded_detections(&["pending_validated", "pending_aliases"]) {
+        return Err(MemoryStoreError::Redaction(
+            RedactionErrorKind::SecretDetected,
+        ));
+    }
     let payload =
         serde_json::to_vec(&scanned).map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
     let payload_deflate = compress_bytes(&payload).map_err(|error| {
@@ -21406,6 +21414,60 @@ mod tests {
         }
         let reencoded = serde_json::to_value(CuratorNonadmissionCode::Unrecognized).unwrap();
         assert_eq!(reencoded, serde_json::json!({"code": "unrecognized"}));
+    }
+
+    /// A full-session reset drops the retained publication with the reservation pointer it belonged to; nothing can consume the row once the metadata is reset.
+    #[test]
+    fn a_session_reset_drops_the_retained_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            history_summarizer: HistorySummarizerDurableState {
+                state: HistorySummarizerPhase::Publishing,
+                firing_seq: 1,
+                ..HistorySummarizerDurableState::default()
+            },
+            ..ModuleMeta::default()
+        };
+        let row_version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        store
+            .record_curator_reservation(
+                "ses",
+                row_version,
+                &CuratorReservation {
+                    firing_seq: 1,
+                    causal_identity: "job".to_string(),
+                    candidate_id: "hs-ses-job".to_string(),
+                    payload_digest: "digest".to_string(),
+                    kernel_incarnation: "kernel".to_string(),
+                    queue_deadline_ms: 10,
+                },
+                &PendingPublication {
+                    validated_json: "{}".to_string(),
+                    aliases_json: "{}".to_string(),
+                    chunk_transcript: "U: retained".to_string(),
+                    boundary_dates: BTreeMap::new(),
+                    publication_floor_ordinal: 3,
+                    collect_user_memory_candidates: false,
+                    created_at_ms: 1,
+                },
+            )
+            .unwrap();
+        assert!(store.load_pending_publication("ses").unwrap().is_some());
+        let row_version = store.load("ses").unwrap().row_version;
+        store.reset_session_for_recomp("ses", row_version).unwrap();
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .curator_reservation,
+            None
+        );
+        assert_eq!(store.load_pending_publication("ses").unwrap(), None);
     }
 
     /// Q31: the nonadmission code commits only with the history it accompanies, the count only grows, the latest reason is bound to the firing that produced it, and neither a failed publication nor a resent one moves them.
