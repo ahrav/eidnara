@@ -29,7 +29,11 @@ The package is private and never published.
 entry is `tier: "rust-only"` and the Pi entry is `tier: "pi-smoke"`, all with
 `contract_refs: ["U5-PORT"]`, and
 `validate-mode-manifest` fails when a test file lacks an entry or an entry
-lacks a file. The retained set is:
+lacks a file. A file whose every test is `it.skip` must carry a
+`quarantined` reason in its entry; the validator refuses a fully skipped
+file without one, refuses a marked file that has live tests again, and
+prints the quarantines it validated so a green `test:rust` never hides
+them. The retained set is:
 
 ```
 cache-invariants            rust-fm-oc-2                 rust-park-self-heal

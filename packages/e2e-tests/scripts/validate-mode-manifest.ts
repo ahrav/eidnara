@@ -18,6 +18,12 @@ export interface ModeManifestEntry {
     tier: Tier;
     rationale: string;
     contract_refs: string[];
+    /**
+     * Why every test in the file is skipped. Required exactly when the file has no live test,
+     * so `bun test` exiting 0 on the file is a recorded decision rather than silent coverage
+     * loss, and the marker leaves with the skips.
+     */
+    quarantined?: string;
 }
 
 export interface ModeManifest {
@@ -52,11 +58,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function validateEntry(value: unknown, index: number): ModeManifestEntry {
     if (!isRecord(value)) throw new Error(`entry ${index} is not an object`);
-    const expectedKeys = ["path", "tier", "rationale", "contract_refs"];
+    const requiredKeys = ["path", "tier", "rationale", "contract_refs"];
+    const optionalKeys = ["quarantined"];
     const actualKeys = Object.keys(value).sort();
-    if (actualKeys.join("\0") !== expectedKeys.slice().sort().join("\0")) {
+    if (
+        requiredKeys.some((key) => !actualKeys.includes(key)) ||
+        actualKeys.some((key) => !requiredKeys.includes(key) && !optionalKeys.includes(key))
+    ) {
         throw new Error(
-            `entry ${index} must contain exactly ${expectedKeys.join(", ")}; got ${actualKeys.join(", ")}`,
+            `entry ${index} must contain ${requiredKeys.join(", ")} and at most ${optionalKeys.join(", ")}; got ${actualKeys.join(", ")}`,
         );
     }
 
@@ -83,12 +93,74 @@ function validateEntry(value: unknown, index: number): ModeManifestEntry {
         );
     }
 
+    const quarantined = value.quarantined;
+    if (
+        quarantined !== undefined &&
+        (typeof quarantined !== "string" || quarantined.trim() === "")
+    ) {
+        throw new Error(`entry ${index} (${path}) quarantined must be a non-empty reason`);
+    }
+
     return {
         path,
         tier: tier as Tier,
         rationale,
         contract_refs: [...contractRefs] as string[],
+        ...(quarantined === undefined ? {} : { quarantined }),
     };
+}
+
+const TEST_CALLEES = new Set(["it", "test"]);
+const SUITE_CALLEES = new Set(["describe"]);
+/** Unconditional disabling only: `skipIf` is the tier's documented environment gate, not a quarantine. */
+const DISABLING_MODIFIERS = new Set(["skip", "todo"]);
+
+/** The bare name plus any modifier chain of a `bun:test` callee, or `null` for anything else. */
+function testCallee(callee: ts.Expression): { name: string; modifiers: string[] } | null {
+    const modifiers: string[] = [];
+    let current: ts.Expression = callee;
+    // `it.each([...])("name", fn)` calls the result of `each`; the callee is the inner expression.
+    if (ts.isCallExpression(current)) current = current.expression;
+    while (ts.isPropertyAccessExpression(current)) {
+        modifiers.unshift(current.name.text);
+        current = current.expression;
+    }
+    if (!ts.isIdentifier(current)) return null;
+    return { name: current.text, modifiers };
+}
+
+/**
+ * Whether `source` registers at least one test `bun test` may run: an `it`/`test` call not
+ * under an unconditional `skip`/`todo` and not inside a `describe.skip`/`describe.todo` suite.
+ */
+export function hasLiveTests(path: string, source: string): boolean {
+    const parsed = ts.createSourceFile(
+        path,
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS,
+    );
+    let live = false;
+    const visit = (node: ts.Node): void => {
+        if (live) return;
+        if (ts.isCallExpression(node)) {
+            const callee = testCallee(node.expression);
+            if (callee !== null) {
+                const disabled = callee.modifiers.some((modifier) =>
+                    DISABLING_MODIFIERS.has(modifier),
+                );
+                if (SUITE_CALLEES.has(callee.name) && disabled) return;
+                if (TEST_CALLEES.has(callee.name) && !disabled) {
+                    live = true;
+                    return;
+                }
+            }
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(parsed);
+    return live;
 }
 
 /**
@@ -156,7 +228,17 @@ export function validateManifestDocument(
         if (seen.get(entry.path)! > 1) {
             throw new Error(`duplicate manifest entry: ${entry.path}`);
         }
-        validateTestSource(entry.path, readSource(entry.path));
+        const source = readSource(entry.path);
+        validateTestSource(entry.path, source);
+        const live = hasLiveTests(entry.path, source);
+        if (!live && entry.quarantined === undefined) {
+            throw new Error(
+                `${entry.path} has no live tests and no quarantined reason; every case is skipped`,
+            );
+        }
+        if (live && entry.quarantined !== undefined) {
+            throw new Error(`${entry.path} is marked quarantined but has live tests`);
+        }
     }
 
     const missing = expectedFiles.filter((path) => !seen.has(path));
@@ -208,7 +290,15 @@ if (import.meta.main) {
         if (mode) {
             for (const path of filesForMode(validation, mode)) console.log(path);
         } else {
-            console.log(`validated ${validation.files.length} e2e test entries`);
+            const quarantined = validation.manifest.entries.filter(
+                (entry) => entry.quarantined !== undefined,
+            );
+            console.log(
+                `validated ${validation.files.length} e2e test entries, ${quarantined.length} quarantined`,
+            );
+            for (const entry of quarantined) {
+                console.log(`  quarantined ${entry.path}: ${entry.quarantined}`);
+            }
         }
     } catch (error) {
         console.error(`mode manifest validation failed: ${String(error)}`);
