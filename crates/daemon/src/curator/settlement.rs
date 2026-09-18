@@ -1,6 +1,6 @@
 //! Settlement of one Curator run across the Kernel and Memory Store, and the read that follows it.
 //!
-//! Settlement copies the run's attempt terminals out of the Memory Store, releases that read, and derives the unknown-disclosure scalar before anything else; an unknown attempt or a truncated disclosure permits only a content-free terminal. It then revalidates the full disclosed union through the Kernel at the current clock, stages the proposal at the provisional identity the run reserved, moves retention from the execution hold to a review hold in one Kernel envelope, and only then completes the task lease and receipt in the Memory Store's fenced transaction. A receipt that another generation already owns writes nothing, so a late worker's staged result stays private and expires under its original queue deadline: completed staging is not selection.
+//! Settlement copies the run's attempt terminals out of the Memory Store, releases that read, and derives the unknown-disclosure scalar before anything else; an unknown attempt or a truncated disclosure permits only a content-free terminal. It then revalidates the full disclosed union through the Kernel at the current clock, stages the proposal at the provisional identity the run reserved, moves retention from the execution hold to a review hold in one Kernel envelope, and only then completes the task lease and receipt in the Memory Store's fenced transaction. That completion is the store's to decide: a receipt cancelled before it, or completed at or after its run deadline, records `cancelled` or `expired` in place of whatever the run produced, and settlement reads the receipt back to report what was recorded. A receipt that another generation already owns writes nothing, so a late worker's staged result stays private: fenced before its hold transfer, the row expires under its original queue deadline; fenced after it, the row's deadline has already moved to the review expiry and only moves later, so the loser releases the review hold and the unselected row lapses there. Completed staging is not selection.
 //!
 //! Reads follow the same copy-then-enter order in reverse: the completed receipt is copied and the Memory Store released before the Kernel is entered; the Kernel row must match every selected field and both incarnations; the review hold must be live; and every disclosed input is revalidated before content is returned. Completion never freezes eligibility.
 
@@ -46,6 +46,10 @@ pub enum Settled {
     Abstained(AbstainReason),
     /// An attempt's outcome is unknown; the receipt records that and nothing publishes.
     Unknown,
+    /// The receipt was cancelled before this completion; the Memory Store recorded that in place of what the run produced.
+    Cancelled,
+    /// The completion came at or after the run deadline; the Memory Store recorded that in place of what the run produced.
+    Expired,
 }
 
 /// Why a settlement wrote no completion. Nothing here carries proposal content.
@@ -74,7 +78,7 @@ pub struct Settlement<'a> {
     pub now_ms: &'a (dyn Fn() -> i64 + Sync),
     /// Runs after the Kernel work and before the Memory Store completion, so a test can interleave a takeover in the crash window between the two stores.
     #[cfg(any(test, feature = "test-support"))]
-    pub before_completion_for_test: Option<&'a (dyn Fn() + Sync)>,
+    pub before_completion_for_test: Option<&'a dyn Fn()>,
 }
 
 impl Settlement<'_> {
@@ -168,7 +172,7 @@ impl Settlement<'_> {
         }) || broker.ledger.is_uncertain())
     }
 
-    /// The Memory Store's fenced completion selecting `reference`. A fenced completion means another generation owns the receipt: the staged row stays private, and the retention this generation moved to review is released so a losing result holds nothing past its own settlement.
+    /// The Memory Store's fenced completion selecting `reference`. A fenced completion means another generation owns the receipt: the staged row stays private, and the retention this generation moved to review is released so a losing result holds nothing past its own settlement. A completion the store recorded as cancelled or expired selected nothing either, and releases the same hold.
     fn publish(
         &self,
         run: &CuratorHoldBinding,
@@ -180,25 +184,58 @@ impl Settlement<'_> {
             candidate_id: reference.candidate_id.clone(),
             payload_digest: reference.payload_digest.clone(),
         };
-        match self.complete(run, ReceiptCompletion::Complete(selection.clone()))? {
-            LeaseCompleteOutcome::Applied { .. } => Ok(Settled::Published(reference)),
-            // A replayed completion id proves an earlier completion, not which result it selected.
-            LeaseCompleteOutcome::Replayed { .. } => {
-                let receipt = self
-                    .ledger
-                    .lookup_curator_receipt(&run.project_digest, &run.subject)
-                    .map_err(store)?;
-                let selected = receipt.and_then(|receipt| receipt.selected);
-                if selected == Some((run.generation, selection)) {
-                    Ok(Settled::Published(reference))
-                } else {
-                    Err(SettlementError::ConflictingContent)
+        match self.complete(run, ReceiptCompletion::Complete(selection))? {
+            // The completion id proves this claim completed the receipt, not what it recorded: a replay may have selected other content, and the store may have recorded a cancellation or the deadline instead of the selection.
+            LeaseCompleteOutcome::Applied { .. } | LeaseCompleteOutcome::Replayed { .. } => {
+                // Whatever the receipt recorded, if it is not this reference the hold protects a row nothing selects.
+                let settled = self.recorded(run, Some(reference));
+                if !matches!(settled, Ok(Settled::Published(_))) {
+                    self.release_review_hold(run, review, review_hold);
                 }
+                settled
             }
-            LeaseCompleteOutcome::Conflict { .. } => {
+            LeaseCompleteOutcome::Conflict { kind } => {
+                if !conflict_ends_claim(kind) {
+                    return Err(retry_later(kind));
+                }
                 self.release_review_hold(run, review, review_hold);
                 Err(SettlementError::Fenced)
             }
+        }
+    }
+
+    /// What the receipt records once this run's completion id has completed it, by this write or an earlier one. A selection must be this generation's `published` reference; any other content at a publication, or content where a content-free terminal was reported, conflicts. `cancelled` and `expired` are the store's own terminals and stand whatever the run produced.
+    fn recorded(
+        &self,
+        run: &CuratorHoldBinding,
+        published: Option<ReviewStagedReference>,
+    ) -> Result<Settled, SettlementError> {
+        let receipt = self
+            .ledger
+            .lookup_curator_receipt(&run.project_digest, &run.subject)
+            .map_err(store)?
+            .ok_or(SettlementError::ConflictingContent)?;
+        let selects = |reference: &ReviewStagedReference| {
+            receipt
+                .selected
+                .as_ref()
+                .is_some_and(|(generation, selection)| {
+                    *generation == run.generation
+                        && selection.candidate_id == reference.candidate_id
+                        && selection.payload_digest == reference.payload_digest
+                })
+        };
+        match (receipt.terminal, receipt.abstained_reason, published) {
+            (Some(CuratorReceiptTerminal::Complete), _, Some(reference)) if selects(&reference) => {
+                Ok(Settled::Published(reference))
+            }
+            (Some(CuratorReceiptTerminal::Abstained), Some(reason), None) => {
+                Ok(Settled::Abstained(reason))
+            }
+            (Some(CuratorReceiptTerminal::Unknown), _, None) => Ok(Settled::Unknown),
+            (Some(CuratorReceiptTerminal::Cancelled), _, _) => Ok(Settled::Cancelled),
+            (Some(CuratorReceiptTerminal::Expired), _, _) => Ok(Settled::Expired),
+            _ => Err(SettlementError::ConflictingContent),
         }
     }
 
@@ -228,40 +265,26 @@ impl Settlement<'_> {
         recovered: Option<(&CuratorHoldBinding, &CuratorHold)>,
     ) -> Result<Settled, SettlementError> {
         let run = &broker.binding().hold;
-        let (mut settled, completion) = match completion {
-            ContentFree::Unknown => (Settled::Unknown, ReceiptCompletion::Unknown),
-            ContentFree::Abstained(reason) => (
-                Settled::Abstained(reason),
-                ReceiptCompletion::Abstained(reason),
-            ),
+        let completion = match completion {
+            ContentFree::Unknown => ReceiptCompletion::Unknown,
+            ContentFree::Abstained(reason) => ReceiptCompletion::Abstained(reason),
         };
-        let terminal = completion.terminal();
-        match self.complete(run, completion)? {
-            LeaseCompleteOutcome::Applied { .. } => {}
-            // The completion id is the run's, whatever it recorded; a replay must have recorded this terminal before any retention is released on its strength, and the reason it recorded is the one reported.
-            LeaseCompleteOutcome::Replayed { .. } => {
-                let receipt = self
-                    .ledger
-                    .lookup_curator_receipt(&run.project_digest, &run.subject)
-                    .map_err(store)?;
-                if receipt.as_ref().and_then(|receipt| receipt.terminal) != Some(terminal) {
-                    return Err(SettlementError::ConflictingContent);
-                }
-                if let (Settled::Abstained(reason), Some(recorded)) = (
-                    &mut settled,
-                    receipt.and_then(|receipt| receipt.abstained_reason),
-                ) {
-                    *reason = recorded;
-                }
+        let settled = match self.complete(run, completion)? {
+            // The completion id is the run's, whatever it recorded: a replay reports the reason the earlier write recorded, and the store's own cancelled or expired terminal stands over what the run derived. Any of those is a trusted terminal to release retention on; recorded content is not.
+            LeaseCompleteOutcome::Applied { .. } | LeaseCompleteOutcome::Replayed { .. } => {
+                self.recorded(run, None)?
             }
             // Another generation owns the receipt: this one can never complete, so the review hold it had moved retention to is released as the publication path does. Its execution hold ends only on a trusted terminal or at the run cutoff.
-            LeaseCompleteOutcome::Conflict { .. } => {
+            LeaseCompleteOutcome::Conflict { kind } => {
+                if !conflict_ends_claim(kind) {
+                    return Err(retry_later(kind));
+                }
                 if let Some((review, hold)) = recovered {
                     self.release_review_hold(run, review, hold);
                 }
                 return Err(SettlementError::Fenced);
             }
-        }
+        };
         match recovered {
             Some((review, hold)) => self.release_review_hold(run, review, hold),
             None => match self
@@ -422,6 +445,17 @@ impl Settlement<'_> {
     }
 }
 
+/// The ledger dates every write at or after its newest event and leaves a completion dated before that for the worker to repeat once its clock has caught up; that claim is still live. Every other conflict means this claim can never complete the receipt.
+fn conflict_ends_claim(kind: &str) -> bool {
+    kind != "clock_behind"
+}
+
+fn retry_later(kind: &str) -> SettlementError {
+    SettlementError::Store(format!(
+        "completion refused: {kind}; retry once the clock has caught up"
+    ))
+}
+
 /// The two completions settlement records without staging anything.
 enum ContentFree {
     Unknown,
@@ -439,7 +473,7 @@ fn proposal_binding(job: &ReviewBinding, run: &CuratorHoldBinding) -> ReviewBind
     }
 }
 
-/// The model text is render-checked, every citation must name disclosed evidence, and the policy dependencies are the broker's, never the model's. The bound payload must then encode under the Kernel's rules: its field scan catches a secret in any model-controlled identity, and its serialized bound catches a proposal the step schema admitted by decoded length. Either is the model's abstention, not a staging refusal that leaves the receipt in progress behind a Kernel failure no retry can pass.
+/// The model text is render-checked, every citation must name disclosed evidence under a disclosed alias, and the policy dependencies are the broker's, never the model's. The bound payload must then encode under the Kernel's rules: its field scan catches a secret in any model-controlled identity, and its serialized bound catches a proposal the step schema admitted by decoded length. Either is the model's abstention, not a staging refusal that leaves the receipt in progress behind a Kernel failure no retry can pass.
 fn bind_dependencies(
     broker: &EvidenceBroker,
     mut proposal: ReviewProposal,
@@ -461,6 +495,27 @@ fn bind_dependencies(
             .binary_search_by(|d| d.as_str().cmp(evidence_id))
             .is_err()
     }) {
+        return Err(AbstainReason::UndisclosedCitation);
+    }
+    // A span names the alias the model saw the bytes under: it must be an alias this run disclosed, and that alias must resolve to the evidence the citation names. The ledger does not record which byte ranges of an alias were rendered, so the offsets are not judged here.
+    let anchored = |reference: &EvidenceReference| {
+        reference.span.as_ref().is_none_or(|span| {
+            broker
+                .aliases
+                .resolve(&span.alias)
+                .ok()
+                .filter(|(alias, _)| broker.ledger.is_disclosed(alias))
+                .is_some_and(|(_, expectation)| {
+                    expectation.evidence_id() == Some(reference.evidence_id.as_str())
+                })
+        })
+    };
+    if !proposal
+        .support
+        .iter()
+        .chain(&proposal.contradictions)
+        .all(anchored)
+    {
         return Err(AbstainReason::UndisclosedCitation);
     }
     let disclosed_inputs: Vec<EvidenceReference> = disclosed

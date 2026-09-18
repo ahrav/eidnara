@@ -9,10 +9,10 @@ use daemon::curator::related_memories::{
 };
 use daemon::curator::{Completeness, MAX_EXCERPT_BYTES};
 use kernel::applicability::EvalBudget;
-use kernel::source_identity::Occurrence;
+use kernel::source_identity::{Occurrence, Span};
 use kernel::{
     ArtifactIngestRequest, CURATOR_CAPTURE_RETENTION_CLASS, CommitIntent, CuratorHoldBinding,
-    DecisionPayload, DecisionSpec, Dimension, DomainSpec, KernelStore, ProjectScope,
+    DecisionPayload, DecisionSpec, Dimension, DomainSpec, KernelStore, MAX_CURATOR_HOLD_REFERENCES,
     ProviderEgress, ScopeSpec, ScopeTermSpec, Sensitivity, SourceDescriptorPolicy,
     SourceDescriptorRequest,
 };
@@ -155,13 +155,13 @@ impl Fixture {
             .unwrap();
         EvidenceBroker::new(
             RunBinding {
-                project: ProjectScope::new(project).unwrap(),
                 hold: binding,
                 hold_id: hold.hold_id,
                 destination: kernel::ArtifactDestination::Local,
             },
             QuestionTemplate::ExtractedFacts,
         )
+        .unwrap()
     }
 
     fn decision(&self, object: &str) {
@@ -204,7 +204,7 @@ impl Fixture {
         )
     }
 
-    /// Publishes one descriptor over `buffer` and returns its object id.
+    /// Publishes one descriptor over the whole of `buffer` and returns its object id.
     fn descriptor(
         &self,
         key: &str,
@@ -213,6 +213,21 @@ impl Fixture {
         identity: &[(&str, &str)],
         evidence: &(String, String),
         buffer: &str,
+    ) -> String {
+        self.spanned_descriptor(key, class, representation, identity, evidence, buffer, None)
+    }
+
+    /// Publishes one descriptor selecting `span` of `buffer` and returns its object id.
+    #[allow(clippy::too_many_arguments)]
+    fn spanned_descriptor(
+        &self,
+        key: &str,
+        class: &str,
+        representation: &str,
+        identity: &[(&str, &str)],
+        evidence: &(String, String),
+        buffer: &str,
+        span: Option<Span>,
     ) -> String {
         let mut published = None;
         self.store
@@ -224,7 +239,7 @@ impl Fixture {
                             identity,
                             revision: "1",
                             representation,
-                            span: None,
+                            span,
                         },
                         source_policy: SourceDescriptorPolicy::Native,
                         domain_id: DOMAIN,
@@ -622,6 +637,44 @@ fn batch_headroom_ends_a_page_without_marking_the_run_partial() {
 }
 
 #[test]
+fn hold_reference_limit_after_a_disclosure_marks_the_run_partial() {
+    let fixture = Fixture::open();
+    seed(&fixture, 4);
+    // A hold one reference short of its ceiling: the first hit's extension fills it, the second is refused as a hold limit.
+    let anchors: Vec<String> = (0..MAX_CURATOR_HOLD_REFERENCES - 1)
+        .map(|index| {
+            fixture
+                .ingest(&format!("anchor-{index:03}"), b"anchor", false)
+                .0
+        })
+        .collect();
+    let mut broker = fixture.broker(PROJECT, &anchors);
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let page = fixture.page(&mut discovery, &mut broker, None).unwrap();
+    assert_eq!(page.completeness, Completeness::CapacityBound);
+    assert_eq!(
+        page.hits.len(),
+        1,
+        "the hit disclosed before the limit is delivered"
+    );
+    assert!(page.next_cursor.is_some());
+    assert_eq!(broker.ledger.disclosed().count(), 1);
+    assert!(
+        !broker.ledger.conclusions_usable(),
+        "a hold limit after a disclosure truncates the evidence set like every other capacity refusal"
+    );
+    // With nothing delivered, the same limit is a refusal, not a page.
+    broker.accounting.end_batch();
+    assert_eq!(
+        fixture
+            .page(&mut discovery, &mut broker, page.next_cursor.as_deref())
+            .unwrap_err()
+            .code,
+        RefusalCode::HoldLimit
+    );
+}
+
+#[test]
 fn probe_bound_and_oversized_artifacts_are_reported_not_scanned() {
     let fixture = Fixture::open();
     let artifact = usize::try_from(MAX_PROBE_ARTIFACT_BYTES).unwrap();
@@ -684,6 +737,301 @@ fn probe_bound_and_oversized_artifacts_are_reported_not_scanned() {
         1,
         "probing retains nothing; the disclosed artifact alone is loaded"
     );
+}
+
+#[test]
+fn refused_probes_count_against_the_page_probe_budget() {
+    let fixture = Fixture::open();
+    let artifact = usize::try_from(MAX_PROBE_ARTIFACT_BYTES).unwrap();
+    let page_budget = usize::try_from(MAX_PAGE_PROBE_BYTES).unwrap();
+    // Near-maximal artifacts that pass ingest but fail the render check: each is read in full before it is refused, so one more than a page's budget holds must spill onto a second page.
+    let refused = page_budget / artifact + 1;
+    let marker = kernel::OPERATOR_REDACTION_PLACEHOLDER;
+    let filler = "filler words ".repeat((artifact - 64 - marker.len()) / 13);
+    for index in 0..refused {
+        let object = format!("decision-m{index}");
+        fixture.decision(&object);
+        fixture.claim(&format!("m{index}"), &object, &format!("{filler}{marker}"));
+    }
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let page = fixture.page(&mut discovery, &mut broker, None).unwrap();
+    assert_eq!(
+        page.completeness,
+        Completeness::ProbeBound,
+        "bytes read for an artifact the render check refuses are probe bytes"
+    );
+    assert!(page.hits.is_empty() && page.withheld);
+    let rest = fixture
+        .page(&mut discovery, &mut broker, page.next_cursor.as_deref())
+        .unwrap();
+    assert_eq!(rest.completeness, Completeness::Complete);
+    assert!(rest.hits.is_empty() && rest.withheld);
+    assert!(broker.aliases.is_empty(), "nothing was disclosed");
+}
+
+#[test]
+fn a_page_waits_for_its_first_reader_no_longer_than_the_budget_allows() {
+    let fixture = Fixture::open();
+    seed(&fixture, 2);
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let (done, wait) = std::sync::mpsc::channel();
+    let observed = std::thread::scope(|scope| {
+        fixture.store.with_readers_held_for_test(|| {
+            scope.spawn(|| {
+                let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+                let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+                let budget = EvalBudget::new(
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(40)),
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                );
+                let outcome =
+                    discovery.page(&fixture.store, &mut broker, None, &budget, fixture.now);
+                done.send(outcome.map(|_| ()).unwrap_err().code).unwrap();
+            });
+            wait.recv_timeout(std::time::Duration::from_secs(3))
+        })
+    });
+    assert_eq!(
+        observed.expect("the page refuses while every reader is still held"),
+        RefusalCode::Store
+    );
+}
+
+#[test]
+fn skipped_reads_that_spend_the_batch_still_advance_the_cursor() {
+    let fixture = Fixture::open();
+    // Nine related canonical claims and one related promoted memory.
+    seed(&fixture, 11);
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    // Past the hold's expiry every probe still passes but every disclosure read is refused after it was admitted to the batch, so eight matching candidates spend the batch without a hit.
+    let expired = fixture.now + 3 * HOUR_MS;
+    let budget = EvalBudget::unbounded();
+    let page = discovery
+        .page(&fixture.store, &mut broker, None, &budget, expired)
+        .unwrap();
+    assert_eq!(page.completeness, Completeness::CapacityBound);
+    assert!(page.hits.is_empty() && page.withheld);
+    assert!(
+        page.next_cursor.is_some(),
+        "candidates the page passed are not examined again"
+    );
+    assert_eq!(broker.accounting.batch_headroom(), 0);
+    broker.accounting.end_batch();
+    let rest = discovery
+        .page(
+            &fixture.store,
+            &mut broker,
+            page.next_cursor.as_deref(),
+            &budget,
+            expired,
+        )
+        .unwrap();
+    assert_eq!(rest.completeness, Completeness::Complete);
+    assert!(rest.hits.is_empty() && rest.withheld);
+    assert!(broker.ledger.conclusions_usable());
+}
+
+#[test]
+fn a_span_descriptor_is_matched_and_excerpted_within_its_span() {
+    let fixture = Fixture::open();
+    // One artifact backs two claims: the first selects the bytes where the subject occurs, the second selects bytes where it does not.
+    let text = "outside: bun builds the workspace | inside: nothing to see here";
+    let split = u64::try_from(text.find('|').unwrap()).unwrap();
+    let evidence = fixture.ingest("shared", text.as_bytes(), false);
+    fixture.decision("decision-front");
+    fixture.spanned_descriptor(
+        "front",
+        "canonical_claims",
+        "decision_summary",
+        &[("object_id", "decision-front")],
+        &evidence,
+        text,
+        Some(Span {
+            start: 0,
+            end: split,
+        }),
+    );
+    fixture.decision("decision-back");
+    fixture.spanned_descriptor(
+        "back",
+        "canonical_claims",
+        "decision_summary",
+        &[("object_id", "decision-back")],
+        &evidence,
+        text,
+        Some(Span {
+            start: split,
+            end: u64::try_from(text.len()).unwrap(),
+        }),
+    );
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let page = fixture.page(&mut discovery, &mut broker, None).unwrap();
+    assert_eq!(page.completeness, Completeness::Complete);
+    assert_eq!(
+        page.hits.len(),
+        1,
+        "only the span carrying the subject is related; the other selection of the same artifact is not"
+    );
+    assert!(!page.withheld);
+    let hit = &page.hits[0];
+    assert!(
+        hit.span.end <= split,
+        "the excerpt stays inside the descriptor's span"
+    );
+    assert_eq!(
+        hit.excerpt,
+        text.as_bytes()[hit.span.start as usize..hit.span.end as usize]
+    );
+    assert!(text_of(hit).contains("workspace"));
+}
+
+#[test]
+fn a_budget_spent_after_a_disclosure_ends_the_page_with_its_hits() {
+    let fixture = Fixture::open();
+    seed(&fixture, 8);
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let budget = EvalBudget::unbounded();
+    let reads_before = fixture.store.verified_object_reads_for_test();
+    // Cancel the budget once the store has served the first disclosure's object read (the probe read it once, the disclosure a second time); the page is mid-way through its candidates.
+    let store = &fixture.store;
+    let page = std::thread::scope(|scope| {
+        let watcher = budget.clone();
+        scope.spawn(move || {
+            while store.verified_object_reads_for_test() < reads_before + 2 {
+                std::thread::yield_now();
+            }
+            watcher.cancel();
+        });
+        discovery.page(store, &mut broker, None, &budget, fixture.now)
+    });
+    let disclosed = broker.ledger.disclosed().count();
+    assert!(
+        disclosed >= 1,
+        "at least one hit was disclosed before the budget went"
+    );
+    let page = page.expect("a page that disclosed something is delivered, not refused");
+    assert_eq!(page.completeness, Completeness::BudgetBound);
+    assert_eq!(
+        page.hits.len(),
+        disclosed,
+        "every disclosed hit reaches the caller"
+    );
+    assert!(page.next_cursor.is_some());
+    // The rest of the inventory follows on a live budget without disclosing any decision twice.
+    broker.accounting.end_batch();
+    let rest = fixture
+        .page(&mut discovery, &mut broker, page.next_cursor.as_deref())
+        .unwrap();
+    assert_eq!(rest.completeness, Completeness::Complete);
+    let mut delivered = owners(&broker);
+    delivered.sort();
+    delivered.dedup();
+    assert_eq!(delivered.len(), page.hits.len() + rest.hits.len());
+    assert_eq!(
+        delivered.len(),
+        7,
+        "seven of the eight seeded decisions are related"
+    );
+}
+
+#[test]
+fn a_span_probe_is_charged_the_whole_artifact_it_read() {
+    let fixture = Fixture::open();
+    let artifact = usize::try_from(MAX_PROBE_ARTIFACT_BYTES).unwrap();
+    let page_budget = usize::try_from(MAX_PAGE_PROBE_BYTES).unwrap();
+    // Unrelated one-byte spans over near-maximal artifacts: each probe reads and checks the whole artifact, so one more than a page's budget holds must spill onto a second page.
+    let probes = page_budget / artifact + 1;
+    let filler = "filler words ".repeat((artifact - 64) / 13);
+    for index in 0..probes {
+        let object = format!("decision-s{index}");
+        fixture.decision(&object);
+        let text = format!("{filler}{index}");
+        let evidence = fixture.ingest(&format!("s{index}"), text.as_bytes(), false);
+        fixture.spanned_descriptor(
+            &format!("s{index}"),
+            "canonical_claims",
+            "decision_summary",
+            &[("object_id", object.as_str())],
+            &evidence,
+            &text,
+            Some(Span { start: 0, end: 1 }),
+        );
+    }
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let page = fixture.page(&mut discovery, &mut broker, None).unwrap();
+    assert_eq!(
+        page.completeness,
+        Completeness::ProbeBound,
+        "the bytes a span probe costs are the artifact's, not the span's"
+    );
+    assert!(page.hits.is_empty() && !page.withheld);
+    let rest = fixture
+        .page(&mut discovery, &mut broker, page.next_cursor.as_deref())
+        .unwrap();
+    assert_eq!(rest.completeness, Completeness::Complete);
+}
+
+#[test]
+fn a_subject_without_matchers_completes_without_touching_the_store() {
+    let fixture = Fixture::open();
+    seed(&fixture, 2);
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new("a to be or");
+    assert!(discovery.terms().is_empty());
+    let budget = EvalBudget::unbounded();
+    budget.cancel();
+    let page = discovery
+        .page(&fixture.store, &mut broker, None, &budget, fixture.now)
+        .expect("nothing to find needs no snapshot, so a spent budget is not consulted");
+    assert_eq!(page.completeness, Completeness::Complete);
+    assert!(page.hits.is_empty() && !page.withheld && page.next_cursor.is_none());
+    // A cursor this run never issued is still refused.
+    assert_eq!(
+        discovery
+            .page(
+                &fixture.store,
+                &mut broker,
+                Some("cur-1"),
+                &budget,
+                fixture.now
+            )
+            .unwrap_err()
+            .code,
+        RefusalCode::InvalidCursor
+    );
+}
+
+#[test]
+fn an_exhausted_budget_refuses_the_page_without_probing_or_disclosing() {
+    let fixture = Fixture::open();
+    seed(&fixture, 4);
+    let anchor = fixture.ingest("anchor", b"anchor", false);
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&anchor.0));
+    let mut discovery = RelatedMemoryDiscovery::new(SUBJECT);
+    let budget = EvalBudget::unbounded();
+    budget.cancel();
+    let refusal = discovery
+        .page(&fixture.store, &mut broker, None, &budget, fixture.now)
+        .unwrap_err();
+    assert_eq!(refusal.code, RefusalCode::Store);
+    assert_eq!(broker.accounting.issued_inspections(), 0);
+    assert_eq!(broker.buffers.loaded(), 0);
+    assert!(broker.aliases.is_empty(), "no candidate was disclosed");
+    // The same run continues normally once the caller supplies a live budget.
+    let page = fixture.page(&mut discovery, &mut broker, None).unwrap();
+    assert_eq!(page.completeness, Completeness::Complete);
+    assert_eq!(page.hits.len(), 3);
 }
 
 #[test]

@@ -233,6 +233,14 @@ pub(crate) fn stored_detail(payload: &[u8]) -> Result<SourceDescriptorDetail, Ke
     Ok(detail)
 }
 
+impl SourceDescriptorDetail {
+    /// Whether the stored identity re-encodes to itself and names `object_id`. Publication derived every field from one encoding, so `false` is corruption of the stored row, and every Kernel read refuses such a row; a reader outside the Kernel applies the same test before trusting a span or tuple.
+    pub fn is_consistent_with(&self, object_id: &str) -> bool {
+        reencoded_identity(self).is_some()
+            && descriptor_object_id(&self.lineage_id, &self.revision) == object_id
+    }
+}
+
 /// Publication derived the stored tuple, ids, span, payload id, and policy from
 /// one encoding of one request, so `None` here is corruption of the stored row.
 pub(crate) fn reencoded_identity(detail: &SourceDescriptorDetail) -> Option<EncodedOccurrence> {

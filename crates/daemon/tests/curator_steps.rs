@@ -8,8 +8,8 @@ use daemon::curator::steps::{Operation, Step};
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     CanonicalTarget, CuratorHoldBinding, MAX_REVIEW_TEXT_BYTES, ManifestReference,
-    PolicyDependencies, ProjectScope, ProposalAction, ProposalTarget, ReviewPayload,
-    ReviewProposal, ReviewQuestionTemplate, Uncertainty,
+    PolicyDependencies, ProposalAction, ProposalTarget, ReviewPayload, ReviewProposal,
+    ReviewQuestionTemplate, Uncertainty,
 };
 
 const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -18,7 +18,6 @@ const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 fn broker() -> EvidenceBroker {
     let mut broker = EvidenceBroker::new(
         RunBinding {
-            project: ProjectScope::new(PROJECT).unwrap(),
             hold: CuratorHoldBinding {
                 project_digest: PROJECT.to_string(),
                 kernel_incarnation: "k".repeat(32),
@@ -30,7 +29,8 @@ fn broker() -> EvidenceBroker {
             destination: kernel::ArtifactDestination::Remote,
         },
         QuestionTemplate::ExtractedFacts,
-    );
+    )
+    .unwrap();
     broker.aliases.issue(ReferenceExpectation::NativeSource {
         object_id: "descriptor-1".to_string(),
         class: OccurrenceClass::GitCommits,
