@@ -180,6 +180,7 @@ export class RustTestHarness {
         }
 
         const sdk = await import("@opencode-ai/sdk");
+        // SAFETY: `SdkClient` names only the `session.*` methods the harness calls; the real client provides them.
         const client = sdk.createOpencodeClient({
             baseUrl: opencode.url,
         }) as unknown as SdkClient;
@@ -196,7 +197,7 @@ export class RustTestHarness {
         });
     }
 
-    /** The connection file makes the runner write user-tier rust consent and the project's `transform_mode`. */
+    /** The connection file the runner writes into the user-tier `host` block. */
     private static spawnServe(args: {
         env: IsolatedEnv;
         mockURL: string;

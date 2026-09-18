@@ -169,6 +169,7 @@ const server: Plugin = async (ctx) => {
     // Desktop has no dialog surface, so `sendConflictWarning` covers Desktop.
     if (conflictResult?.hasConflict) {
         // The handler sends the warning to the project's last active session without awaiting it.
+        // SAFETY: the conflict helpers read only `session.*` methods off the SDK client by name.
         void sendConflictWarning(
             ctx.client as unknown as Record<string, unknown>,
             ctx.directory,
@@ -179,6 +180,7 @@ const server: Plugin = async (ctx) => {
         const serverUrl = (ctx as Record<string, unknown>).serverUrl;
         const serverUrlStr =
             serverUrl instanceof URL ? serverUrl.toString().replace(/\/$/, "") : undefined;
+        // SAFETY: same narrowed SDK-client shape as `sendConflictWarning`.
         void cleanupConflictWarnings(
             ctx.client as unknown as Record<string, unknown>,
             ctx.directory,
@@ -214,11 +216,10 @@ const server: Plugin = async (ctx) => {
                 );
             },
         }),
+        // SAFETY: the wrapper matches the hook's runtime call shape; only its declared input type is narrower than the SDK's.
         "experimental.chat.messages.transform": createMessagesTransformHandler({
             eidnara,
             getEidnara: () => eidnara,
-            transformMode: pluginConfig.transform_mode,
-            // SAFETY: wrapper matches the hook's runtime call shape.
         }) as unknown as NonNullable<Hooks["experimental.chat.messages.transform"]>,
         "experimental.chat.system.transform": async (input, output) => {
             await eidnara?.["experimental.chat.system.transform"]?.(input, output);

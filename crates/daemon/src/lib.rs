@@ -11181,8 +11181,9 @@ impl HandlerCore {
 
         // A transform accepted on this root proves the session, and a session with lineage
         // under another root cannot be rebound here. A session without any transform lineage
-        // (Pi has no transform; OpenCode in TypeScript transform mode never sends one) has
-        // nothing to contradict the route-bound identity, and the plugins bind their harness's
+        // (Pi has no transform; an OpenCode session before its first accepted transform, or
+        // one running compaction-off, has sent none) has nothing to contradict the route-bound
+        // identity, and the plugins bind their harness's
         // own session id, so the bound session is the conversation. The same predicate applies
         // to both harnesses: `harness` is a client claim, not authority (§7.2).
         let harness_session_is_conversation = match binding.harness.as_str() {
@@ -29308,9 +29309,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn opencode_session_without_transform_lineage_is_keyed_by_the_bound_session() {
-        // TypeScript transform mode never sends a transform, so no lineage exists to contradict
-        // the route-bound identity; the bound session is the conversation and no resolver runs.
-        let resolver = FakeSessionResolver::with(&[("ses-ts-mode", FakeResolve::None)]);
+        // A session that has not yet sent a transform (first facade call, or compaction-off) has
+        // no lineage to contradict the route-bound identity; the bound session is the
+        // conversation and no resolver runs.
+        let resolver = FakeSessionResolver::with(&[("ses-no-lineage", FakeResolve::None)]);
         let (handler, store, _dir, project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
             default_test_config(),
@@ -29318,7 +29320,11 @@ mod tests {
         );
         handler.bind_route(
             test_route(7),
-            binding_with_harness(project.to_str().unwrap(), OPENCODE_HARNESS, "ses-ts-mode"),
+            binding_with_harness(
+                project.to_str().unwrap(),
+                OPENCODE_HARNESS,
+                "ses-no-lineage",
+            ),
         );
         let outcome = call_facade(
             &handler,
@@ -29330,7 +29336,7 @@ mod tests {
         assert!(resolver.calls().is_empty());
         assert!(
             !store
-                .search_notes_like(project.to_str().unwrap(), "ses-ts-mode", "bound session")
+                .search_notes_like(project.to_str().unwrap(), "ses-no-lineage", "bound session")
                 .unwrap()
                 .is_empty()
         );

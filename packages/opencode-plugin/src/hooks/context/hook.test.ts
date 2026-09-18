@@ -165,7 +165,7 @@ function createDeps(overrides: Partial<EidnaraDeps> = {}): EidnaraDeps {
     return {
         client: createClientMock(),
         directory: "/tmp",
-        config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "rust" },
+        config: { protected_tags: 3, cache_ttl: "5m" },
         rustModeModuleClient: createFakeModuleClient().client,
         ...overrides,
     };
@@ -210,7 +210,6 @@ describe("eidnara hook", () => {
             if (entry === "wrapper") {
                 const wrapper = createMessagesTransformHandler({
                     eidnara: hook,
-                    transformMode: "rust",
                 });
                 const result: unknown = await wrapper({}, output as never);
                 expect(result).toBe(messages);
@@ -271,7 +270,6 @@ describe("eidnara hook", () => {
                 if (entry === "wrapper") {
                     const wrapper = createMessagesTransformHandler({
                         eidnara: hook,
-                        transformMode: "rust",
                     });
                     const returned: unknown = await wrapper({}, argument as never);
                     if (
@@ -307,7 +305,6 @@ describe("eidnara hook", () => {
             if (entry === "wrapper") {
                 const wrapper = createMessagesTransformHandler({
                     eidnara: hook,
-                    transformMode: "rust",
                 });
                 expect((await wrapper({}, output as never)) as unknown[]).toBe(messages);
             } else await hook["experimental.chat.messages.transform"]({}, output);
@@ -799,36 +796,6 @@ describe("eidnara hook", () => {
         expect("noteEvaluationAvailable" in hook.rustToolBackends).toBe(false);
     });
 
-    it("attaches the daemon tool backends in ts mode and leaves the messages transform a no-op", async () => {
-        useTempDataHome("hook-ts-mode-");
-        const fake = createFakeModuleClient();
-        const hook = requireHook(
-            createEidnaraHook(
-                createDeps({
-                    rustModeModuleClient: fake.client,
-                    config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "ts" },
-                }),
-            ),
-        );
-
-        expect(Object.keys(hook).sort()).toEqual(HOOK_KEYS);
-        expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
-
-        await hook.rustToolBackends.reduce?.({
-            sessionId: "ses-ts",
-            projectRoot: "/repo",
-            drop: "1",
-            commandId: "cmd-ts",
-        });
-        expect(fake.calls.map((call) => call.method)).toEqual(["agent_drops.append"]);
-
-        const messages = [{ info: { sessionID: "ses-ts" } }];
-        const output = { messages: [...messages] };
-        await hook["experimental.chat.messages.transform"]({}, output);
-        expect(output.messages).toEqual(messages);
-        expect(fake.calls).toHaveLength(1);
-    });
-
     it("returns null and records no_project when no project identity resolves", () => {
         useTempDataHome("hook-no-project-");
         const home = process.env.HOME ?? process.env.USERPROFILE ?? "/";
@@ -839,7 +806,6 @@ describe("eidnara hook", () => {
                 config: {
                     protected_tags: 3,
                     cache_ttl: "5m",
-                    transform_mode: "rust",
                     allow_home_project: false,
                 },
             }),
@@ -1209,7 +1175,9 @@ describe("eidnara hook", () => {
             limit: 5,
         });
 
-        const args = (fake.calls[0]?.body as { arguments: Record<string, unknown> }).arguments;
+        const first = fake.calls[0];
+        if (!first) throw new Error("expected one note call");
+        const args = (first.body as { arguments: Record<string, unknown> }).arguments;
         expect("command_id" in args).toBe(false);
         expect("compile_status" in args).toBe(false);
         expect(args).toEqual(
@@ -1431,7 +1399,6 @@ describe("eidnara hook", () => {
                     config: {
                         protected_tags: 3,
                         cache_ttl: "5m",
-                        transform_mode: "rust",
                         ...kernelConfig,
                     },
                 }),
@@ -1542,57 +1509,6 @@ describe("eidnara hook", () => {
         await Bun.sleep(0);
 
         expect(fake.deleteSession).toHaveBeenCalledWith("ses-delete-pinned", "/pinned/repo");
-    });
-
-    it("closes local route state without invoking daemon deletion in ts mode", async () => {
-        useTempDataHome("hook-session-deleted-ts-");
-        const fake = createFakeModuleClient();
-        const hook = requireHook(
-            createEidnaraHook(
-                createDeps({
-                    rustModeModuleClient: fake.client,
-                    config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "ts" },
-                }),
-            ),
-        );
-
-        await hook.event({
-            event: {
-                type: "session.deleted",
-                properties: { info: { id: "ses-delete-ts", directory: "/actual/repo" } },
-            },
-        });
-        await Bun.sleep(0);
-
-        expect(fake.deleteSession).not.toHaveBeenCalled();
-        expect(fake.closeSession).toHaveBeenCalledWith("ses-delete-ts");
-    });
-
-    it("deletes daemon state for a ts-mode session with an existing route", async () => {
-        useTempDataHome("hook-session-deleted-ts-route-");
-        const fake = createFakeModuleClient();
-        fake.client.hasSessionRoute = (sessionId) => sessionId === "ses-delete-ts-routed";
-        const hook = requireHook(
-            createEidnaraHook(
-                createDeps({
-                    rustModeModuleClient: fake.client,
-                    config: { protected_tags: 3, cache_ttl: "5m", transform_mode: "ts" },
-                }),
-            ),
-        );
-
-        await hook.event({
-            event: {
-                type: "session.deleted",
-                properties: {
-                    info: { id: "ses-delete-ts-routed", directory: "/actual/repo" },
-                },
-            },
-        });
-        await Bun.sleep(0);
-
-        expect(fake.deleteSession).toHaveBeenCalledWith("ses-delete-ts-routed", "/actual/repo");
-        expect(fake.closeSession).toHaveBeenCalledWith("ses-delete-ts-routed");
     });
 
     it("forwards /eidnara-flush to session.flush and throws the sentinel", async () => {

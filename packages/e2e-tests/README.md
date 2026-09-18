@@ -9,9 +9,9 @@ The package is private and never published.
   with the built plugin bundle (`packages/opencode-plugin/dist/index.js`,
   loaded by `file://` URL) against the daemon's `direct_host_fixture`
   (`crates/daemon`, built with `--features direct-host-fixture`). The runner
-  writes user-tier consent for `transform_mode: "rust"` plus the fixture's
-  `host.connection_file`, so the plugin routes every transform through the
-  daemon. There is no TypeScript transform mode and no plugin database; the
+  writes the fixture's `host.connection_file` into the user tier, and the
+  plugin routes every transform through the daemon. There is no other
+  transform mode and no plugin database; the
   harness reads nothing but OpenCode's own session store and the daemon's
   `session.status` route.
 - **Pi load smoke.** `pi-smoke` starts a Pi RPC process with the built Pi
