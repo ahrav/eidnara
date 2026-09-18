@@ -155,7 +155,7 @@ use classify::{
 use config::{ConfigCache, DaemonConfig, derive_history_summarizer_chunk_tokens};
 use healing::{SerializerProfile, tail_reclaim};
 use history_summarizer::{
-    HistorySummarizerProducerDriver, reattach_history_summarizer_producer,
+    HistorySummarizerProducerDriver, HoldsReservation, reattach_history_summarizer_producer,
     run_history_summarizer_firing,
 };
 use history_summarizer_chunk::{
@@ -3445,9 +3445,11 @@ impl history_summarizer::HistorySummarizerPublicationFence for WrapupSnapshotPub
         // The lock prevents a transform from retiring the cached raw snapshot between validation and additive writes.
         let snapshots = self.snapshots.lock().expect("transform snapshots mutex");
         if !snapshots.ready_generation_matches(&self.session_id, self.generation) {
-            return Err(memory_store::HistorySummarizerPublishError::FenceRejected {
-                reason: "transform snapshot generation changed before publication".to_string(),
-            });
+            return Err(
+                memory_store::HistorySummarizerPublishError::CallerFenceRejected {
+                    reason: "transform snapshot generation changed before publication".to_string(),
+                },
+            );
         }
         let published = store.publish_history_summarizer_chunk(request);
         #[cfg(test)]
@@ -3484,9 +3486,11 @@ impl history_summarizer::HistorySummarizerPublicationFence for ReattachSnapshotP
         // The lock prevents later transforms from replacing the request's selected messages before their history rows are stored.
         let snapshots = self.snapshots.lock().expect("transform snapshots mutex");
         if !snapshots.generation_present_in_flight_or_ready(&self.session_id, self.generation) {
-            return Err(memory_store::HistorySummarizerPublishError::FenceRejected {
-                reason: "transform snapshot state changed after reattach started".to_string(),
-            });
+            return Err(
+                memory_store::HistorySummarizerPublishError::CallerFenceRejected {
+                    reason: "transform snapshot state changed after reattach started".to_string(),
+                },
+            );
         }
         let published = store.publish_history_summarizer_chunk(request);
         #[cfg(test)]
@@ -5235,6 +5239,17 @@ impl HandlerCore {
         if phase == HistorySummarizerPhase::Idle {
             return Some("recovered");
         }
+        // A reserved firing whose last recovery pass decided nothing armed a backoff; recovery runs on every transform pass, so the backoff is what keeps a stalled reservation from being reconciled once per request.
+        if phase == HistorySummarizerPhase::Publishing
+            && loaded.meta.history_summarizer.holds_reservation()
+            && loaded
+                .meta
+                .history_summarizer
+                .failure_backoff_at_ms
+                .is_some_and(|backoff_at_ms| now < backoff_at_ms)
+        {
+            return Some("backoff");
+        }
         if self
             .live_history_summarizer_sessions
             .lock()
@@ -5333,6 +5348,23 @@ impl HandlerCore {
                                     firing_seq,
                                 });
                             }
+                            history_summarizer::RestartAction::RepublishReserved { .. } => {
+                                return history_summarizer::republish_reserved(
+                                    history_summarizer::RepublishRequest {
+                                        store: &store,
+                                        session_id: &session_id,
+                                        project_path: &project_path,
+                                        curator_handoff: curator_handoff.as_ref(),
+                                        now_ms: now,
+                                        failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
+                                        publication_fence: Some(publication_fence.as_ref()),
+                                        collect_user_memory_candidates: config
+                                            .user_memory_collection_enabled,
+                                        memory_enabled: config.memory_enabled,
+                                    },
+                                )
+                                .map(history_summarizer::HistorySummarizerReattachOutcome::Republished);
+                            }
                             history_summarizer::RestartAction::ReattachProducer { .. } => {}
                         }
                         let mut producer = tokio::select! {
@@ -5392,13 +5424,45 @@ impl HandlerCore {
             HistorySummarizerPhase::Firing
             | HistorySummarizerPhase::Validating
             | HistorySummarizerPhase::Publishing => {
+                let publication_fence = Arc::new(ReattachSnapshotPublicationFence {
+                    snapshots: Arc::clone(&self.transform_snapshots),
+                    session_id: session_id.clone(),
+                    generation: snapshot_generation,
+                    #[cfg(test)]
+                    after_store_publish: Arc::clone(&self.publication_fence_write_hook),
+                });
+                let curator_handoff = self.curator_handoff_target(&store, binding);
                 let spawned = self.spawn_module_task(async move {
                     let _guard = guard;
-                    if let Err(e) = history_summarizer::handle_restart_load(
+                    let result = match history_summarizer::handle_restart_load(
                         &store,
                         &session_id,
                         now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                     ) {
+                        // A reserved firing republishes its retained output under the same fences instead of refiring.
+                        Ok(history_summarizer::RestartAction::RepublishReserved { .. }) => {
+                            history_summarizer::republish_reserved(
+                                history_summarizer::RepublishRequest {
+                                    store: &store,
+                                    session_id: &session_id,
+                                    project_path: &project_path,
+                                    curator_handoff: curator_handoff.as_ref(),
+                                    now_ms: now,
+                                    failure_backoff_at_ms: now
+                                        + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
+                                    publication_fence: Some(publication_fence.as_ref()),
+                                    collect_user_memory_candidates: config
+                                        .user_memory_collection_enabled,
+                                    memory_enabled: config.memory_enabled,
+                                },
+                            )
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                        }
+                        Ok(_) => Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    if let Err(e) = result {
                         eprintln!(
                             "daemon: history_summarizer restart recovery failed for {session_id}: {e}"
                         );
@@ -6129,7 +6193,10 @@ impl HandlerCore {
                     history_summarizer::HistorySummarizerDriveError::State(
                         history_summarizer::HistorySummarizerStateError::Publish(
                             memory_store::HistorySummarizerPublishError::CasConflict { .. }
-                            | memory_store::HistorySummarizerPublishError::FenceRejected { .. },
+                            | memory_store::HistorySummarizerPublishError::FenceRejected { .. }
+                            | memory_store::HistorySummarizerPublishError::CallerFenceRejected {
+                                ..
+                            },
                         ),
                     )
                     | history_summarizer::HistorySummarizerDriveError::State(
@@ -38960,6 +39027,85 @@ mod tests {
         ] {
             assert_seeded_phase_recovers_then_refires_after_backoff(phase).await;
         }
+    }
+
+    /// Records a reservation and a retained publication for the seeded firing, as the live path leaves them when publication fails after the handoff.
+    fn seed_retained_reservation(store: &MemoryStore) {
+        let loaded = store.load("ses").unwrap();
+        let reservation = memory_store::CuratorReservation {
+            firing_seq: loaded.meta.history_summarizer.firing_seq,
+            causal_identity: "c".repeat(64),
+            candidate_id: "hs-ses-candidate".to_string(),
+            payload_digest: "d".repeat(64),
+            kernel_incarnation: "k".repeat(64),
+            queue_deadline_ms: now_ms() + memory_store::curator_jobs::CURATOR_QUEUE_LIFETIME_MS,
+        };
+        store
+            .record_curator_reservation(
+                "ses",
+                loaded.row_version.unwrap(),
+                &reservation,
+                &memory_store::PendingPublication {
+                    validated_json: serde_json::to_string(
+                        &history_summarizer_validate::ValidatedChunk::default(),
+                    )
+                    .unwrap(),
+                    aliases_json: serde_json::to_string(
+                        &history_summarizer_citations::FrozenAliasTable::default(),
+                    )
+                    .unwrap(),
+                    chunk_transcript: "U: retained".to_string(),
+                    boundary_dates: BTreeMap::new(),
+                    publication_floor_ordinal: 3,
+                    collect_user_memory_candidates: false,
+                    created_at_ms: now_ms(),
+                },
+            )
+            .unwrap();
+    }
+
+    async fn wait_for_reattach_to_finish(handler: &Handler) {
+        let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+        while std::time::Instant::now() < deadline {
+            if handler.reattaching_sessions.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(TEST_WAIT_POLL).await;
+        }
+        panic!("the reattach did not finish");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retained_reserved_firing_waits_out_its_backoff_before_the_next_reattach() {
+        // The test route has no MODULE memories authority, so the reserved firing cannot be verified and every recovery pass retains it. Retaining must arm the backoff and the next transform must honor it instead of running the recovery again.
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+        seed_history_summarizer_phase(&store, HistorySummarizerPhase::Publishing);
+        seed_retained_reservation(&store);
+
+        let recovering = call_transform(&handler, messages.clone()).await;
+        assert_eq!(recovering["history_summarizer"]["no_fire"], "recovering");
+        wait_for_reattach_to_finish(&handler).await;
+        let retained = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
+        assert!(retained.curator_reservation.is_some());
+        assert!(
+            retained.failure_backoff_at_ms.is_some(),
+            "a retained pass arms the backoff"
+        );
+
+        let backed_off = call_transform(&handler, messages.clone()).await;
+        assert_eq!(backed_off["history_summarizer"]["no_fire"], "backoff");
+        assert!(handler.reattaching_sessions.lock().unwrap().is_empty());
+
+        expire_history_summarizer_backoff(&store);
+        let again = call_transform(&handler, messages).await;
+        assert_eq!(again["history_summarizer"]["no_fire"], "recovering");
+        wait_for_reattach_to_finish(&handler).await;
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]

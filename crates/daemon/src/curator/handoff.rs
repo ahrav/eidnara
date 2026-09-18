@@ -198,6 +198,46 @@ pub fn review_subject(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubjectRefusal {
+    /// A citation names an alias the chunk never issued.
+    UnknownAlias,
+    Unencodable,
+}
+
+pub fn subject_payload(
+    facts: &[FactCandidate],
+    aliases: &FrozenAliasTable,
+) -> Result<(ReviewPayload, String), SubjectRefusal> {
+    let subject = review_subject(facts, aliases).map_err(|_| SubjectRefusal::UnknownAlias)?;
+    let payload = ReviewPayload::Subject(subject);
+    let digest = payload.digest().map_err(|_| SubjectRefusal::Unencodable)?;
+    Ok((payload, digest))
+}
+
+/// The activation for a recorded reservation whose queue deadline has passed. Nothing is staged: the Kernel refuses a deadline already behind it, and the publication records the job as expired rather than activating it. The job row's own producer binding is presented, since the store compares it before it judges the deadline.
+pub fn expired_activation(
+    store: &MemoryStore,
+    project: &str,
+    reservation: &CuratorReservation,
+    row_version: u64,
+) -> Result<PreparedActivation, HandoffError> {
+    let job = store
+        .lookup_curator_job(project, &reservation.causal_identity)
+        .map_err(CuratorJobError::Store)?
+        .ok_or(CuratorJobError::Refused(CuratorJobRefusal::Missing))?;
+    Ok(PreparedActivation {
+        causal_identity: job.causal_identity,
+        producer: job.producer,
+        input: CuratorJobInput {
+            subject: job.target,
+            starting_references: Vec::new(),
+            question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
+        },
+        row_version,
+    })
+}
+
 /// One firing's accepted facts and the store they publish under.
 pub struct HandoffRequest<'a> {
     pub store: &'a MemoryStore,
@@ -221,7 +261,7 @@ fn reserved_row(
     producer: &ProducerBinding,
     inputs: &CausalInputs,
 ) -> Result<ReservedRow, HandoffError> {
-    // A recorded reservation names the job only when it is the job this firing would reserve now: same subject bytes, Kernel incarnation, and review policies. One recorded under other policy versions is left to expire and the current policy gets its own job (Q25/Q29); `adopt` decides whether the firing can activate the named job.
+    // A recorded reservation names the job only when it is the job this firing would reserve now: same subject bytes, Kernel incarnation, and review policies. One recorded under other policy versions is left to expire and the current policy gets its own job (Q25/Q29). A firing that holds its reservation reuses the job only while it is still bound to this firing: a job another firing has adopted since is not taken back, so the holder answers `Settled` and its recovery settles or retains on that. Only a firing without a reservation adopts, through `adopt`.
     let causal_identity = inputs.causal_identity().map_err(CuratorJobError::Refused)?;
     let held = request
         .firing
@@ -236,14 +276,19 @@ fn reserved_row(
         })
         .transpose()?
         .flatten();
-    let existing = match held {
-        Some(job) => job,
-        None => match request.store.reserve_curator_job(
-            request.project,
-            producer,
-            inputs,
-            request.now_ms,
-        ) {
+    if let Some(job) = held {
+        return Ok(match job.state {
+            CuratorJobState::Reserved if job.producer == *producer => {
+                ReservedRow::Job(Box::new(job))
+            }
+            _ => ReservedRow::Done(Handoff::Settled),
+        });
+    }
+    let existing =
+        match request
+            .store
+            .reserve_curator_job(request.project, producer, inputs, request.now_ms)
+        {
             Ok(ReserveOutcome::Reserved(job)) => return Ok(ReservedRow::Job(Box::new(job))),
             Ok(ReserveOutcome::Existing(job)) => job,
             Err(CuratorJobError::Refused(
@@ -261,8 +306,7 @@ fn reserved_row(
                 )));
             }
             Err(error) => return Err(error.into()),
-        },
-    };
+        };
     adopt(request, producer, existing)
 }
 
@@ -296,6 +340,53 @@ fn adopt(
     }
 }
 
+/// The handoff key, the candidate id, and the causal inputs a subject with `payload_digest` is reserved under now. The candidate and its run are named by the scope, session, policies, and subject bytes, not the firing, so a later firing that adopts the reservation restages the same row under the same identity.
+fn causal_inputs(
+    target: &HandoffTarget,
+    session_id: &str,
+    payload_digest: &str,
+) -> (String, String, CausalInputs) {
+    let policy_versions = review_policy_versions();
+    let key = handoff_key(&target.project_digest, session_id, &policy_versions);
+    let candidate_id = format!("hs-{key}-{}", &payload_digest[..32]);
+    let inputs = CausalInputs {
+        target: ReviewTarget::StagedSubject {
+            kernel_incarnation: target.kernel_incarnation.clone(),
+            candidate_id: candidate_id.clone(),
+            payload_digest: payload_digest.to_string(),
+        },
+        question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
+        signals: Vec::new(),
+        required_evidence: Vec::new(),
+        policy_versions,
+    };
+    (key, candidate_id, inputs)
+}
+
+/// Whether `producer` is the binding firing `firing_seq` of some session reserved under: the firing id is `{key}#{firing_seq}`, so the sequence after the last `#` is the firing's.
+pub fn firing_id_names(producer: &ProducerBinding, firing_seq: u64) -> bool {
+    producer
+        .firing_id
+        .rsplit_once('#')
+        .is_some_and(|(_, seq)| seq == firing_seq.to_string())
+}
+
+/// Whether `reservation` names the job this daemon would reserve for `facts` now: the same subject bytes and Kernel incarnation under the current review policies. A reservation recorded under other policy versions names a job the current publication could never activate.
+pub fn reservation_is_current(
+    target: &HandoffTarget,
+    session_id: &str,
+    facts: &[FactCandidate],
+    aliases: &FrozenAliasTable,
+    reservation: &CuratorReservation,
+) -> bool {
+    subject_payload(facts, aliases).is_ok_and(|(_, digest)| {
+        causal_inputs(target, session_id, &digest)
+            .2
+            .causal_identity()
+            .is_ok_and(|identity| identity == reservation.causal_identity)
+    })
+}
+
 /// Reserves the review, records the reservation through `persist`, then stages and seals the subject and reads it back. Capacity and quota refusals before the reservation exists are returned as the nonadmission code the publication records; a firing that already holds a matching reservation reuses it instead of reserving again. `persist` returns the session row version after the reservation is written.
 pub fn reserve_and_stage(
     target: &HandoffTarget,
@@ -310,18 +401,17 @@ pub fn reserve_and_stage(
         now_ms,
         ..
     } = *request;
-    let subject = review_subject(facts, aliases).map_err(|_| HandoffError::UnknownAlias)?;
-    let payload = ReviewPayload::Subject(subject);
-    // Refused before any reservation exists: the publication records it and advances.
-    let Ok(payload_digest) = payload.digest() else {
-        return Ok(Handoff::Nonadmission(
-            CuratorNonadmissionCode::SubjectRefused,
-        ));
+    let (payload, payload_digest) = match subject_payload(facts, aliases) {
+        Ok(subject) => subject,
+        Err(SubjectRefusal::UnknownAlias) => return Err(HandoffError::UnknownAlias),
+        // Refused before any reservation exists: the publication records it and advances.
+        Err(SubjectRefusal::Unencodable) => {
+            return Ok(Handoff::Nonadmission(
+                CuratorNonadmissionCode::SubjectRefused,
+            ));
+        }
     };
-    // The candidate and its run are named by the scope, session, policies, and subject bytes, not the firing, so a later firing that adopts the reservation restages the same row under the same identity.
-    let policy_versions = review_policy_versions();
-    let key = handoff_key(&target.project_digest, session_id, &policy_versions);
-    let candidate_id = format!("hs-{key}-{}", &payload_digest[..32]);
+    let (key, candidate_id, inputs) = causal_inputs(target, session_id, &payload_digest);
     let extraction_run_id = format!("hs-run-{key}-{}", &payload_digest[..32]);
     let chunk_ordinal = firing
         .chunk_range
@@ -332,17 +422,6 @@ pub fn reserve_and_stage(
         producer: PRODUCER.to_string(),
         firing_id: format!("{key}#{}", firing.firing_seq),
         ordinal: chunk_ordinal,
-    };
-    let inputs = CausalInputs {
-        target: ReviewTarget::StagedSubject {
-            kernel_incarnation: target.kernel_incarnation.clone(),
-            candidate_id: candidate_id.clone(),
-            payload_digest: payload_digest.clone(),
-        },
-        question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
-        signals: Vec::new(),
-        required_evidence: Vec::new(),
-        policy_versions,
     };
     let job = match reserved_row(request, &producer, &inputs)? {
         ReservedRow::Job(job) => *job,

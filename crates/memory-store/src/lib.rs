@@ -571,7 +571,7 @@ pub enum CuratorNonadmissionCode {
     EvidenceUnavailable,
     /// The validator rejected the optional fact set as a whole.
     FactSetRejected { failure: ExtractionFailure },
-    /// The Kernel refuses the accepted set as a review subject (a bound or a secret in fact text), so nothing can be staged for it.
+    /// The Kernel refuses the accepted set as a review subject (a bound or a secret in fact text), or the Memory Store refuses to retain its publication for recovery, so nothing can be staged for it.
     SubjectRefused,
     /// A recorded code this build cannot read; only deserialization produces it.
     Unrecognized,
@@ -607,6 +607,20 @@ pub struct CuratorReservation {
     pub payload_digest: String,
     pub kernel_incarnation: String,
     pub queue_deadline_ms: i64,
+}
+
+/// Everything a reserved firing's publication needs to run again locally after an interruption, so recovery neither reruns the model nor reconstructs the validated output: the validated chunk as the daemon serializes it, and the publication inputs beside it. Stored compressed in its own row, written and cleared with the reservation it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPublication {
+    pub validated_json: String,
+    /// The frozen alias table the accepted facts cite, as the daemon serializes it; the reservation's subject is rebuilt from it.
+    pub aliases_json: String,
+    pub chunk_transcript: String,
+    pub boundary_dates: BTreeMap<String, String>,
+    pub publication_floor_ordinal: u64,
+    pub collect_user_memory_candidates: bool,
+    /// When the publication was first attempted; a republication dates its rows by it, not by the pass that recovers it.
+    pub created_at_ms: i64,
 }
 
 /// Producer-owned nonadmission facts. `count` only grows; both survive every phase transition, abandonment, and reset of the producer state within the session's store lifetime, and are written only by the fenced publication that also advances history.
@@ -997,12 +1011,12 @@ pub enum HistorySummarizerPublishError {
         found: u64,
         reason: Option<String>,
     },
-    /// A caller-supplied publication fence refused the publish before any write.
-    /// Distinct from CasConflict so callers can abandon the run WITHOUT arming a
-    /// model-failure cooldown: a fence rejection is a fast local race, not a
-    /// producer failure, and an immediate retry with a fresh snapshot is valid.
+    /// The store's own fence refused the publish before any write: the selected input or the segment set no longer matches the firing's snapshot. Distinct from CasConflict so callers can abandon the run WITHOUT arming a model-failure cooldown.
     #[error("publication fence rejected: {reason}")]
     FenceRejected { reason: String },
+    /// A caller-supplied publication fence refused before the store was reached: a fast local race, not a property of the stored history, so a retry with a fresh snapshot is valid.
+    #[error("caller publication fence rejected: {reason}")]
+    CallerFenceRejected { reason: String },
     /// An appended history_summarizer history_segment intersects an already durable range. This
     /// is a publish rejection rather than a SQLite failure so callers can abandon the
     /// stale firing and leave the session immediately reusable.
@@ -10398,6 +10412,7 @@ impl MemoryStore {
             }
             for table in [
                 "chunk_transcripts",
+                "history_summarizer_pending_publications",
                 "history_segments",
                 "tags",
                 "temporal_marks",
@@ -10818,6 +10833,15 @@ impl MemoryStore {
                 "DELETE FROM history_summarizer_side_channel_outbox WHERE session_id = ?1",
                 params![session_id],
             )?;
+            // The reset metadata records no reservation, so nothing could consume the retained publication or find the job it named; both go with the reset.
+            delete_pending_publication_tx(tx, session_id)?;
+            if let Some(reservation) = prior_meta.history_summarizer.curator_reservation.as_ref() {
+                curator_jobs::close_reserved_jobs_of_identity_tx(
+                    tx,
+                    &reservation.causal_identity,
+                    current_time_ms(),
+                )?;
+            }
             let next_version = current as u64 + 1;
             tx.execute(
                 "UPDATE cache_state
@@ -11198,6 +11222,164 @@ impl MemoryStore {
     /// Increment publication health without changing the in-flight state. This covers
     /// failures before a publish transaction can safely abandon the producer run, such
     /// as side-channel outbox preparation errors.
+    /// Records a firing's Curator reservation and the publication it retains in one fenced write: the session row must still be at `expected_row_version` in `Publishing` for `reservation.firing_seq`, the retained payload is scanned and stored compressed in its own row, and the reservation lands in the durable state. Returns the new row version.
+    pub fn record_curator_reservation(
+        &self,
+        session_id: &str,
+        expected_row_version: u64,
+        reservation: &CuratorReservation,
+        pending: &PendingPublication,
+    ) -> Result<u64, HistorySummarizerPublishError> {
+        let (write, payload_deflate) = prepare_pending_publication(session_id, pending)?;
+        let now_ms = current_time_ms();
+        let outcome = write.execute(&self.inner, |coordinated| {
+            let tx = coordinated.tx;
+            let row = tx
+                .query_row(CACHE_STATE_META_SELECT, params![session_id], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .optional()?;
+            let Some((current, meta_json)) = row else {
+                return Ok(WriteDisposition::Replay(PublishTxnOutcome::InvalidState(
+                    "missing".to_string(),
+                )));
+            };
+            if current != expected_row_version as i64 {
+                return Ok(WriteDisposition::Replay(PublishTxnOutcome::CasConflict {
+                    found: current.max(0) as u64,
+                    reason: None,
+                }));
+            }
+            let mut meta: ModuleMeta = match serde_json::from_str(&meta_json) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    return Ok(WriteDisposition::Replay(PublishTxnOutcome::Serde(
+                        e.to_string(),
+                    )));
+                }
+            };
+            if meta.history_summarizer.state != HistorySummarizerPhase::Publishing
+                || meta.history_summarizer.firing_seq != reservation.firing_seq
+            {
+                return Ok(WriteDisposition::Replay(PublishTxnOutcome::InvalidState(
+                    meta.history_summarizer.state.as_str().to_string(),
+                )));
+            }
+            meta.history_summarizer.curator_reservation = Some(reservation.clone());
+            let next = next_row_version(current)?;
+            let meta_json = match serde_json::to_string(&meta) {
+                Ok(json) => json,
+                Err(e) => {
+                    return Ok(WriteDisposition::Replay(PublishTxnOutcome::Serde(
+                        e.to_string(),
+                    )));
+                }
+            };
+            coordinated
+                .prepared
+                .borrow_mut()
+                .transaction_content("meta", &meta_json)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let meta_json = prepare_transaction_json_preserving_identities(&meta_json)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            tx.execute(
+                "INSERT OR REPLACE INTO history_summarizer_pending_publications
+                   (session_id, firing_seq, payload_deflate, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    session_id,
+                    i64::try_from(reservation.firing_seq).unwrap_or(i64::MAX),
+                    payload_deflate,
+                    now_ms
+                ],
+            )?;
+            tx.execute(
+                "UPDATE cache_state SET row_version = ?2, meta = ?3
+                 WHERE session_id = ?1 AND row_version = ?4",
+                params![session_id, next as i64, meta_json, current],
+            )?;
+            Ok(WriteDisposition::Applied(PublishTxnOutcome::Committed(
+                HistorySummarizerPublishResult {
+                    row_version: next,
+                    curator_nonadmission_count: meta.history_summarizer.curator_nonadmission.count,
+                    curator_activation: None,
+                },
+            )))
+        })?;
+        match outcome {
+            PublishTxnOutcome::Committed(result) => Ok(result.row_version),
+            PublishTxnOutcome::CasConflict { found, reason } => {
+                Err(HistorySummarizerPublishError::CasConflict {
+                    expected: Some(expected_row_version),
+                    found,
+                    reason,
+                })
+            }
+            PublishTxnOutcome::InvalidState(state) => {
+                Err(HistorySummarizerPublishError::InvalidState { state })
+            }
+            PublishTxnOutcome::Serde(e) => Err(HistorySummarizerPublishError::Serde(e)),
+            PublishTxnOutcome::FenceRejected(reason) => {
+                Err(HistorySummarizerPublishError::FenceRejected { reason })
+            }
+            PublishTxnOutcome::HistorySegmentOverlap { .. }
+            | PublishTxnOutcome::StateMismatch(_) => Err(HistorySummarizerPublishError::Serde(
+                "unexpected reservation outcome".to_string(),
+            )),
+        }
+    }
+
+    /// Whether [`Self::record_curator_reservation`] would store `pending`: every field passes the durable scan and the compressed payload fits the retention envelope. `Ok(false)` is a payload the store refuses, so the caller records a nonadmission instead of reserving a job whose publication it could never retain.
+    pub fn pending_publication_retainable(
+        &self,
+        session_id: &str,
+        pending: &PendingPublication,
+    ) -> Result<bool, MemoryStoreError> {
+        match prepare_pending_publication(session_id, pending) {
+            Ok(_) => Ok(true),
+            Err(MemoryStoreError::Redaction(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The retained publication recorded with the session's reservation, with the firing it belongs to.
+    pub fn load_pending_publication(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(u64, PendingPublication)>, MemoryStoreError> {
+        let row: Option<(i64, Vec<u8>)> = self.inner.with_conn(|conn| {
+            conn.query_row(
+                "SELECT firing_seq, payload_deflate FROM history_summarizer_pending_publications
+                 WHERE session_id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+        })?;
+        let Some((firing_seq, blob)) = row else {
+            return Ok(None);
+        };
+        let bytes = decompress_bytes(&blob)
+            .map_err(|error| MemoryStoreError::Serde(format!("pending publication: {error}")))?;
+        let pending: PendingPublication = serde_json::from_slice(&bytes)
+            .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
+        Ok(Some((
+            u64::try_from(firing_seq).unwrap_or_default(),
+            pending,
+        )))
+    }
+
+    /// Settles `expected`, a reservation whose publication can never commit, in one fenced write: the reservation and its retained publication are dropped and the job it names is closed, as expired when its queue deadline has passed and as not admitted otherwise. A state that records a different reservation, or none, belongs to a firing this caller did not settle: nothing is touched and `false` is returned. A job already closed, gone, or no longer `Reserved` is left as it is; the reservation is dropped either way. The state's in-flight fields are left as they are; the caller decides the phase.
+    pub fn settle_curator_reservation(
+        &self,
+        session_id: &str,
+        expected: &CuratorReservation,
+        project: &str,
+        now_ms: i64,
+    ) -> Result<bool, curator_jobs::CuratorJobError> {
+        curator_jobs::settle_curator_reservation(self, session_id, expected, project, now_ms)
+    }
+
     pub fn record_history_summarizer_publish_failure_if_matching(
         &self,
         session_id: &str,
@@ -11463,6 +11645,8 @@ impl MemoryStore {
                 )?;
             }
             enqueue_history_summarizer_side_channels_tx(tx, session_id, &side_channel_items)?;
+            // The publication ends the firing and clears its reservation, so no reservation names a retained publication after it: the row this firing retained, or one a dropped reservation left behind, goes with it.
+            delete_pending_publication_tx(tx, session_id)?;
             // The reserved job moves to Ready here, past every `Ok` bail-out, so activation and progress commit together or not at all; a refusal is raised as an error and rolls the whole publication back. A reservation past its deadline is closed as expired with progress and never resurrected; one the sweep already closed reads the same way.
             let curator_activation = match request.curator_activation.as_ref() {
                 None => None,
@@ -14783,10 +14967,129 @@ fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlit
     }
 }
 
+/// Compressed bound of one retained publication: the chunk transcript envelope for the transcript and its serialized siblings (the validated output and the alias table, which presents the same text again), the same multiple `decompress_bytes` allows inflated.
+const MAX_PENDING_PUBLICATION_COMPRESSED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES * 4;
+
+/// Scans, serializes, and compresses a retained publication as `record_curator_reservation` stores it. A field the durable scan rejects or would rewrite in the subject-bearing fields, or a payload past `MAX_PENDING_PUBLICATION_INFLATED_BYTES` serialized or `MAX_PENDING_PUBLICATION_COMPRESSED_BYTES` deflated, is `MemoryStoreError::Redaction`: the store refuses to retain it.
+fn prepare_pending_publication(
+    session_id: &str,
+    pending: &PendingPublication,
+) -> Result<(PreparedWrite, Vec<u8>), MemoryStoreError> {
+    let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
+    write.domain_owner("session", session_id, "history_summarizer");
+    write.existing_identity("session_id", session_id)?;
+    let scanned = PendingPublication {
+        validated_json: write.json_content(
+            "pending_validated",
+            &pending.validated_json,
+            JsonScanPolicy::DurableRejectProtected,
+        )?,
+        aliases_json: write.json_content(
+            "pending_aliases",
+            &pending.aliases_json,
+            JsonScanPolicy::DurableRejectProtected,
+        )?,
+        chunk_transcript: write.content("pending_transcript", &pending.chunk_transcript)?,
+        boundary_dates: pending.boundary_dates.clone(),
+        publication_floor_ordinal: pending.publication_floor_ordinal,
+        collect_user_memory_candidates: pending.collect_user_memory_candidates,
+        created_at_ms: pending.created_at_ms,
+    };
+    // The reserved subject is rebuilt from the retained facts and alias table, so a substitution in either would retain bytes the reservation does not name; the transcript is not part of the subject and is stored as the scan leaves it, as the publication stores it.
+    if write.recorded_detections(&["pending_validated", "pending_aliases"]) {
+        return Err(MemoryStoreError::Redaction(
+            RedactionErrorKind::SecretDetected,
+        ));
+    }
+    let payload =
+        serde_json::to_vec(&scanned).map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
+    // JSON encoding can more than double a field, so the serialized payload is bounded by what the reader inflates, not only by the fields.
+    if payload.len() > MAX_PENDING_PUBLICATION_INFLATED_BYTES {
+        return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
+    }
+    let payload_deflate = compress_bytes(&payload).map_err(|error| {
+        MemoryStoreError::Serde(format!("pending publication compression failed: {error}"))
+    })?;
+    if payload_deflate.len() > MAX_PENDING_PUBLICATION_COMPRESSED_BYTES {
+        return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
+    }
+    Ok((write, payload_deflate))
+}
+
+/// Drops `expected` from the session's durable state together with its retained publication, bumping the row version; a state that records anything else is left untouched with `Ok(false)`. Unreadable metadata is reported through `refuse_serde`.
+fn clear_curator_reservation_tx(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    expected: &CuratorReservation,
+) -> rusqlite::Result<bool> {
+    let row = tx
+        .query_row(CACHE_STATE_META_SELECT, params![session_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?;
+    let Some((current, meta_json)) = row else {
+        return Ok(false);
+    };
+    let mut meta: ModuleMeta =
+        serde_json::from_str(&meta_json).map_err(|error| refuse_serde(error.to_string()))?;
+    if meta.history_summarizer.curator_reservation.as_ref() != Some(expected) {
+        return Ok(false);
+    }
+    meta.history_summarizer.curator_reservation = None;
+    delete_pending_publication_tx(tx, session_id)?;
+    let next = next_row_version(current)?;
+    let meta_json =
+        serde_json::to_string(&meta).map_err(|error| refuse_serde(error.to_string()))?;
+    let meta_json = prepare_transaction_json_preserving_identities(&meta_json).map_err(|_| {
+        refuse_serde("history_summarizer metadata failed secret scanning".to_string())
+    })?;
+    tx.execute(
+        "UPDATE cache_state SET row_version = ?2, meta = ?3 WHERE session_id = ?1 AND row_version = ?4",
+        params![session_id, next as i64, meta_json, current],
+    )?;
+    Ok(true)
+}
+
+/// Carries a metadata encoding failure out of a transaction body as the `MemoryStoreError::Serde` the caller reports.
+fn refuse_serde(message: String) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(message)))
+}
+
+fn delete_pending_publication_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM history_summarizer_pending_publications WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
 fn compress_transcript(transcript: &str) -> std::io::Result<Vec<u8>> {
+    compress_bytes(transcript.as_bytes())
+}
+
+fn compress_bytes(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(transcript.as_bytes())?;
+    encoder.write_all(bytes)?;
     encoder.finish()
+}
+
+/// Inflated bound of one retained publication: the inflated transcript envelope and its serialized siblings. `prepare_pending_publication` refuses a serialized payload past it, so a row that does not inflate inside it was not written by this store.
+const MAX_PENDING_PUBLICATION_INFLATED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_INFLATED_BYTES * 4;
+
+/// Inflates a retained publication, bounded by `MAX_PENDING_PUBLICATION_INFLATED_BYTES`; a payload that would grow past it is refused rather than read.
+fn decompress_bytes(blob: &[u8]) -> std::io::Result<Vec<u8>> {
+    let bound = MAX_PENDING_PUBLICATION_INFLATED_BYTES as u64;
+    let mut out = Vec::new();
+    DeflateDecoder::new(blob)
+        .take(bound + 1)
+        .read_to_end(&mut out)?;
+    if out.len() as u64 > bound {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "pending publication inflates past its bound",
+        ));
+    }
+    Ok(out)
 }
 
 fn decompress_durable_text_exact(blob: &[u8], limit: usize) -> std::io::Result<String> {
@@ -17759,6 +18062,11 @@ mod tests {
             "history_segments",
             "INSERT INTO history_segments(session_id, sequence, start_message, end_message, title, content)
              VALUES (?1, 1, 1, 2, 't', 'c')",
+        ),
+        (
+            "history_summarizer_pending_publications",
+            "INSERT INTO history_summarizer_pending_publications(session_id, firing_seq, payload_deflate, created_at_ms)
+             VALUES (?1, 1, x'00', 1)",
         ),
         (
             "history_summarizer_side_channel_outbox",
@@ -21153,6 +21461,204 @@ mod tests {
         }
         let reencoded = serde_json::to_value(CuratorNonadmissionCode::Unrecognized).unwrap();
         assert_eq!(reencoded, serde_json::json!({"code": "unrecognized"}));
+    }
+
+    /// A full-session reset drops the retained publication with the reservation pointer it belonged to; nothing can consume the row once the metadata is reset.
+    #[test]
+    fn a_session_reset_drops_the_retained_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            history_summarizer: HistorySummarizerDurableState {
+                state: HistorySummarizerPhase::Publishing,
+                firing_seq: 1,
+                ..HistorySummarizerDurableState::default()
+            },
+            ..ModuleMeta::default()
+        };
+        let row_version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        store
+            .record_curator_reservation(
+                "ses",
+                row_version,
+                &CuratorReservation {
+                    firing_seq: 1,
+                    causal_identity: "job".to_string(),
+                    candidate_id: "hs-ses-job".to_string(),
+                    payload_digest: "digest".to_string(),
+                    kernel_incarnation: "kernel".to_string(),
+                    queue_deadline_ms: 10,
+                },
+                &PendingPublication {
+                    validated_json: "{}".to_string(),
+                    aliases_json: "{}".to_string(),
+                    chunk_transcript: "U: retained".to_string(),
+                    boundary_dates: BTreeMap::new(),
+                    publication_floor_ordinal: 3,
+                    collect_user_memory_candidates: false,
+                    created_at_ms: 1,
+                },
+            )
+            .unwrap();
+        assert!(store.load_pending_publication("ses").unwrap().is_some());
+        let row_version = store.load("ses").unwrap().row_version;
+        store.reset_session_for_recomp("ses", row_version).unwrap();
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .curator_reservation,
+            None
+        );
+        assert_eq!(store.load_pending_publication("ses").unwrap(), None);
+    }
+
+    /// A full-session reset closes the job the dropped reservation named, so a reset during a retained firing does not hold a Curator slot until the queue deadline.
+    #[test]
+    fn a_session_reset_closes_the_reserved_job() {
+        use curator_jobs::{
+            CausalInputs, CuratorJobOutcome, CuratorJobState, ProducerBinding, ReserveOutcome,
+            ReviewTarget,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            history_summarizer: HistorySummarizerDurableState {
+                state: HistorySummarizerPhase::Publishing,
+                firing_seq: 1,
+                ..HistorySummarizerDurableState::default()
+            },
+            ..ModuleMeta::default()
+        };
+        let row_version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let producer = ProducerBinding {
+            producer: "history_summarizer".to_string(),
+            firing_id: "ses#1".to_string(),
+            ordinal: 1,
+        };
+        let inputs = CausalInputs {
+            target: ReviewTarget::StagedSubject {
+                kernel_incarnation: "0a".repeat(16),
+                candidate_id: "hs-ses-candidate".to_string(),
+                payload_digest: "0d".repeat(32),
+            },
+            question_template: "extracted_facts".to_string(),
+            signals: Vec::new(),
+            required_evidence: Vec::new(),
+            policy_versions: BTreeMap::from([("disclosure".to_string(), "3".to_string())]),
+        };
+        let ReserveOutcome::Reserved(job) = store
+            .reserve_curator_job("proj", &producer, &inputs, current_time_ms())
+            .unwrap()
+        else {
+            panic!("a fresh reservation");
+        };
+        store
+            .record_curator_reservation(
+                "ses",
+                row_version,
+                &CuratorReservation {
+                    firing_seq: 1,
+                    causal_identity: job.causal_identity.clone(),
+                    candidate_id: "hs-ses-candidate".to_string(),
+                    payload_digest: "0d".repeat(32),
+                    kernel_incarnation: "0a".repeat(16),
+                    queue_deadline_ms: job.queue_deadline_ms,
+                },
+                &PendingPublication {
+                    validated_json: "{}".to_string(),
+                    aliases_json: "{}".to_string(),
+                    chunk_transcript: "U: retained".to_string(),
+                    boundary_dates: BTreeMap::new(),
+                    publication_floor_ordinal: 3,
+                    collect_user_memory_candidates: false,
+                    created_at_ms: 1,
+                },
+            )
+            .unwrap();
+        let row_version = store.load("ses").unwrap().row_version;
+        store.reset_session_for_recomp("ses", row_version).unwrap();
+        assert_eq!(store.load_pending_publication("ses").unwrap(), None);
+        assert_eq!(
+            store
+                .lookup_curator_job("proj", &job.causal_identity)
+                .unwrap()
+                .unwrap()
+                .state,
+            CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+        );
+    }
+
+    /// JSON encoding of the retained fields can more than double them (a `"` becomes `\"`, and again when the JSON text is embedded as a string), so three fields inside the durable text limit can serialize past what the reader inflates. The writer refuses the serialized payload, not only its fields.
+    #[test]
+    fn a_retained_publication_whose_encoding_exceeds_the_inflated_bound_is_not_retainable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        // A JSON string of 250 K quotes: 500 KiB as JSON text, inside the field bound; 1 MiB once embedded.
+        let quotes = serde_json::to_string(&"\"".repeat(250 * 1024)).unwrap();
+        assert!(quotes.len() <= MAX_DURABLE_TEXT_BYTES);
+        let pending = PendingPublication {
+            validated_json: quotes.clone(),
+            aliases_json: quotes.clone(),
+            chunk_transcript: "\"".repeat(500 * 1024),
+            boundary_dates: BTreeMap::new(),
+            publication_floor_ordinal: 3,
+            collect_user_memory_candidates: false,
+            created_at_ms: 1,
+        };
+        let payload = serde_json::to_vec(&pending).unwrap();
+        assert!(payload.len() > MAX_PENDING_PUBLICATION_INFLATED_BYTES);
+        assert!(compress_bytes(&payload).unwrap().len() < MAX_PENDING_PUBLICATION_COMPRESSED_BYTES);
+        assert!(
+            !store
+                .pending_publication_retainable("ses", &pending)
+                .unwrap()
+        );
+    }
+
+    /// A field past the durable text limit is refused before the payload is serialized, so recovery never finds a row it must settle as unreadable.
+    #[test]
+    fn a_retained_publication_past_the_inflated_bound_is_not_retainable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        // Many small, repetitive alias entries: far past the inflated bound, well inside the compressed one.
+        let aliases: Vec<serde_json::Value> = (0..40_000)
+            .map(|index| serde_json::json!({"alias": format!("s{index}"), "presented": "the same sentence again and again"}))
+            .collect();
+        let pending = PendingPublication {
+            validated_json: "{}".to_string(),
+            aliases_json: serde_json::to_string(&aliases).unwrap(),
+            chunk_transcript: "U: retained".to_string(),
+            boundary_dates: BTreeMap::new(),
+            publication_floor_ordinal: 3,
+            collect_user_memory_candidates: false,
+            created_at_ms: 1,
+        };
+        assert!(pending.aliases_json.len() > MAX_PENDING_PUBLICATION_INFLATED_BYTES);
+        assert!(
+            compress_bytes(&serde_json::to_vec(&pending).unwrap())
+                .unwrap()
+                .len()
+                < MAX_PENDING_PUBLICATION_COMPRESSED_BYTES
+        );
+        assert!(
+            !store
+                .pending_publication_retainable("ses", &pending)
+                .unwrap()
+        );
     }
 
     /// Q31: the nonadmission code commits only with the history it accompanies, the count only grows, the latest reason is bound to the firing that produced it, and neither a failed publication nor a resent one moves them.

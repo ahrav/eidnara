@@ -489,6 +489,13 @@ CREATE INDEX idx_curator_frozen_selections_state
 -- selection resumes. It advances in the same transaction that enqueues a
 -- page or completes an empty slot, never on a deferred or expired page, and a
 -- NULL cursor means the last pass reached the end so the next one starts over.
+CREATE TABLE history_summarizer_pending_publications (
+            session_id          TEXT PRIMARY KEY,
+            firing_seq          INTEGER NOT NULL,
+            payload_deflate     BLOB NOT NULL,
+            created_at_ms       INTEGER NOT NULL
+        );
+
 CREATE TABLE curator_selection_cursors (
             project TEXT NOT NULL CHECK (length(project) > 0),
             slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),
