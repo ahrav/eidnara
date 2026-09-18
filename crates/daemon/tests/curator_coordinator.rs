@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use daemon::curator::broker::{MAX_ISSUED_INSPECTIONS, QuestionTemplate};
 use daemon::curator::coordinator::{
     Coordinator, InvestigationError, InvestigationPermits, JobContext, MAX_ACTIVE_PER_HOST,
+    MAX_ROUNDS,
 };
 use daemon::curator::disclosure::{DisclosureApproval, ModelProfile};
 use daemon::curator::model_request::{ANTHROPIC_VERSION, MESSAGES_PATH};
@@ -1382,4 +1383,98 @@ async fn a_request_body_over_the_wire_bound_abstains_as_budget_exhausted() {
     assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
     assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
     assert!(fixture.attempts().is_empty());
+}
+
+/// A ranged read disclosed bytes 0..40 of the reference; a citation that names no range binds to those bytes, not to the whole artifact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rangeless_citation_of_a_partial_disclosure_binds_to_the_disclosed_bytes() {
+    let fixture = Fixture::open(CASES[2].sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![
+        text_response(&fixture.expand(CASES[2].turns[0].0)),
+        text_response(&fixture.expand(r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"revised","support":[{"alias":"{alias:1}"}],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#)),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let Settled::Published(_) = settled else {
+        panic!("{settled:?}")
+    };
+    let proposal = read_selected_proposal(
+        &fixture.store,
+        &fixture.ledger,
+        PROJECT,
+        &fixture.identity,
+        &fixture.binding(),
+        fixture.now + 6,
+    )
+    .unwrap()
+    .proposal;
+    assert_eq!(
+        proposal.support,
+        vec![kernel::EvidenceReference {
+            evidence_id: fixture.evidence(1),
+            span: Some(kernel::SourceSpan {
+                alias: fixture.expand("{alias:1}"),
+                start: 0,
+                end: 40,
+            }),
+        }]
+    );
+}
+
+/// A complete proposal that cites nothing: accepted as a step, it publishes.
+const RETAIN_WITHOUT_CITATIONS: &str = r#"{"v":1,"step":{"kind":"propose","action":"retain","new_text":null,"support":[],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#;
+
+/// A response the provider cut at `max_tokens` is not a step, even when the truncated text parses: the round is spent with a notice and the next answer decides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_length_truncated_response_spends_the_round_instead_of_being_accepted_as_a_step() {
+    let fixture = Fixture::open(CASES[0].sources);
+    let mut peer = Peer::start().await;
+    let truncated = serde_json::to_string(RETAIN_WITHOUT_CITATIONS).unwrap();
+    let server = peer.serve_script(vec![
+        json_response(
+            "200 OK",
+            &format!(
+                r#"{{"id":"msg_1","type":"message","role":"assistant","model":"{MODEL}","content":[{{"type":"text","text":{truncated}}}],"stop_reason":"max_tokens","usage":{{"input_tokens":3,"output_tokens":4}}}}"#
+            ),
+            "",
+        ),
+        text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    let observed = server.await.unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(
+        user_text(&prompts(&observed)[1]).contains("refused: too_large"),
+        "the model is told its answer was cut"
+    );
+}
+
+/// A supervisor whose retained replay cannot take the answer closes the sink and records the run failed; the coordinator must not settle on text the supervisor rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_the_supervisor_rejected_is_not_accepted_as_a_step() {
+    let mut fixture = Fixture::open(CASES[0].sources);
+    fixture.supervisor = Arc::new(Supervisor::with_limits(
+        Arc::new(NoPublicModel),
+        host_runtime::model_execution::config::ModelExecutionLimits {
+            max_run_replay_bytes: host_runtime::model_execution::config::TERMINAL_HEADROOM_BYTES,
+            ..Default::default()
+        },
+    ));
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(RETAIN_WITHOUT_CITATIONS); MAX_ROUNDS]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+    assert_eq!(server.await.unwrap().len(), MAX_ROUNDS);
+    assert_eq!(fixture.receipt().selected, None);
 }

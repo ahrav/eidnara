@@ -32,6 +32,8 @@ use super::disclosure::{
     AttemptBinding, Disclosed, Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile,
     prepare_body,
 };
+use super::is_capacity;
+use super::model_response::StopReason;
 use super::project_text::{ProjectText, SearchQuery};
 use super::related_memories::RelatedMemoryDiscovery;
 use super::settlement::{RunResult, Settled, Settlement, SettlementError, TaskClaim};
@@ -519,13 +521,18 @@ impl Run<'_> {
                     let disclosed = disclosure.disclose(&prepared, &token, deadline).await;
                     let terminal = match &disclosed {
                         Ok(disclosed) => {
+                            // A provider stop at the token limit is a cut answer, not a completed one; the run record says so.
+                            let finish_reason =
+                                if disclosed.text.stop_reason == Some(StopReason::MaxTokens) {
+                                    FinishReason::Length
+                                } else {
+                                    FinishReason::Completed
+                                };
                             sink.emit(BackendEvent::AssistantText {
                                 text: disclosed.text.text.clone(),
-                                finish_reason: Some(FinishReason::Completed),
+                                finish_reason: Some(finish_reason),
                             });
-                            BackendTerminal::Completed {
-                                finish_reason: FinishReason::Completed,
-                            }
+                            BackendTerminal::Completed { finish_reason }
                         }
                         Err(refusal) => BackendTerminal::Failed(BackendError {
                             class: ErrorClass::Permanent,
@@ -575,6 +582,16 @@ impl Run<'_> {
                 Err(InvestigationError::Cancelled)
             }
             (InternalOutcome::Lost, _) => Err(InvestigationError::Supervisor("lost".to_string())),
+            // The supervisor closed its sink on the answer (retained budget or replay cap) and recorded the run failed: the request was charged, the text is not admitted.
+            (InternalOutcome::Failed, Some(Ok(_))) => Ok(Attempt::Spent),
+            // A cut answer is not a step even when its prefix parses; the model is told and the budget decides whether another is made.
+            (_, Some(Ok(disclosed)))
+                if disclosed.text.stop_reason == Some(StopReason::MaxTokens) =>
+            {
+                let broker = self.broker.lock().await;
+                push_notice(&broker, &mut self.transcript, None, RefusalCode::TooLarge);
+                Ok(Attempt::Spent)
+            }
             (_, Some(Ok(disclosed))) => Ok(Attempt::Text(disclosed.text.text)),
             (_, Some(Err(refusal))) => Ok(match refusal {
                 DisclosureRefusal::Unavailable => return Err(InvestigationError::Unavailable),
@@ -660,23 +677,17 @@ impl Run<'_> {
                     self.push_labeled(broker, buffer);
                 }
             }
-            Err(refusal) => {
-                // The broker marks the disclosure partial when it refuses admission itself; a byte or buffer bound hit inside a read is the same truncation.
-                if matches!(
-                    refusal.code,
-                    RefusalCode::ByteLimit | RefusalCode::BufferLimit
-                ) {
-                    broker.ledger.record_partial_disclosure();
-                }
-                push_notice(
-                    broker,
-                    &mut self.transcript,
-                    refusal.alias.as_ref(),
-                    refusal.code,
-                );
-            }
+            Err(refusal) => refused(broker, &mut self.transcript, &refusal),
         }
     }
+}
+
+/// Records a refused operation in the transcript. A capacity bound hit inside a read (bytes, buffers, or the execution hold's backing) truncates the evidence set the same way a refused admission does, so the disclosure is marked partial.
+fn refused(broker: &mut EvidenceBroker, transcript: &mut Vec<RenderedBuffer>, refusal: &Refusal) {
+    if is_capacity(refusal.code) {
+        broker.ledger.record_partial_disclosure();
+    }
+    push_notice(broker, transcript, refusal.alias.as_ref(), refusal.code);
 }
 
 /// The buffers one operation rendered for the transcript and the byte range of each alias they disclosed.
@@ -779,26 +790,25 @@ fn disclosed_span(
     range.map_or(0..len, |range| range.start..range.start + len)
 }
 
-/// Whether `range` lies inside the union of `spans`: adjacent or overlapping disclosures cover a citation across their seam.
-fn covered(spans: &[std::ops::Range<u64>], range: std::ops::Range<u64>) -> bool {
+/// The disclosed spans merged: adjacent or overlapping disclosures become one span, in ascending order.
+fn merged(spans: &[std::ops::Range<u64>]) -> Vec<std::ops::Range<u64>> {
     let mut sorted: Vec<_> = spans.to_vec();
     sorted.sort_by_key(|span| span.start);
-    let mut reach: Option<std::ops::Range<u64>> = None;
+    let mut out: Vec<std::ops::Range<u64>> = Vec::new();
     for span in sorted {
-        reach = match reach {
-            Some(current) if span.start <= current.end => {
-                Some(current.start..current.end.max(span.end))
-            }
-            _ => Some(span),
-        };
-        if reach
-            .as_ref()
-            .is_some_and(|current| current.start <= range.start && range.end <= current.end)
-        {
-            return true;
+        match out.last_mut() {
+            Some(current) if span.start <= current.end => current.end = current.end.max(span.end),
+            _ => out.push(span),
         }
     }
-    false
+    out
+}
+
+/// Whether `range` lies inside the union of `spans`: adjacent or overlapping disclosures cover a citation across their seam.
+fn covered(spans: &[std::ops::Range<u64>], range: std::ops::Range<u64>) -> bool {
+    merged(spans)
+        .iter()
+        .any(|span| span.start <= range.start && range.end <= span.end)
 }
 
 /// A host-authored notice appended to the transcript: the alias, when there is one, and a bounded code. A notice that itself fails the render check is dropped rather than shown.
@@ -936,20 +946,26 @@ fn bind_proposal(
                 let shown = disclosed_spans
                     .get(alias.as_str())
                     .ok_or_else(|| refuse(Some(&alias), RefusalCode::UnknownAlias))?;
-                if let Some(range) = citation.range
-                    && !covered(shown, range.start..range.end)
-                {
-                    return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
-                }
+                // A citation names bytes the model was shown: the range it gave, or, without one, every disclosed span of the alias. A rangeless citation of a partial disclosure never reaches the bytes outside it.
+                let spans = match citation.range {
+                    Some(range) => {
+                        let range = range.start..range.end;
+                        if !covered(shown, range.clone()) {
+                            return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
+                        }
+                        vec![range]
+                    }
+                    None => merged(shown),
+                };
                 broker.ledger.record_citation(&alias)?;
-                references.push(EvidenceReference {
-                    evidence_id,
-                    span: citation.range.map(|range| SourceSpan {
+                references.extend(spans.into_iter().map(|span| EvidenceReference {
+                    evidence_id: evidence_id.clone(),
+                    span: Some(SourceSpan {
                         alias: alias.as_str().to_string(),
-                        start: range.start,
-                        end: range.end,
+                        start: span.start,
+                        end: span.end,
                     }),
-                });
+                }));
             }
             Ok(references)
         };
@@ -1146,5 +1162,55 @@ mod tests {
             vec![(alias, 10..24)],
             "a citation of the read alias must be able to name the bytes the model was shown"
         );
+    }
+
+    #[test]
+    fn a_hold_capacity_refusal_after_a_disclosure_marks_the_evidence_set_partial() {
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("README.md"), b"# Project\n").unwrap();
+        let (store, mut broker) = local_broker(store_dir.path(), now);
+        let mut root = ProjectText::open(
+            project.path(),
+            &ProtectedLocations::new([store_dir.path().to_path_buf()]).unwrap(),
+            InspectionBinding {
+                domain_id: DOMAIN.to_string(),
+                scope_id: None,
+                retain_until: now + 60 * 60 * 1_000,
+            },
+        )
+        .unwrap();
+        run_operation(
+            &store,
+            Some(&mut root),
+            &mut RelatedMemoryDiscovery::new(""),
+            Instant::now() + Duration::from_secs(60),
+            &mut broker,
+            Operation::ReadProject {
+                path: "README.md".to_string(),
+                range: None,
+            },
+            now,
+        )
+        .unwrap();
+        assert!(!broker.ledger.is_partial());
+        let mut transcript = Vec::new();
+        refused(
+            &mut broker,
+            &mut transcript,
+            &refuse(None, RefusalCode::HoldLimit),
+        );
+        assert!(
+            broker.ledger.is_partial(),
+            "the model reasons over a truncated evidence set once the hold cannot take a reference"
+        );
+        assert_eq!(transcript.len(), 1);
     }
 }
