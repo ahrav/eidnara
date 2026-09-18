@@ -158,10 +158,12 @@ pub enum AbstainReason {
     PartialDisclosure,
     /// The model declined to conclude.
     ModelDeclined,
+    /// The proposal breaks a payload rule the Kernel enforces at staging: a field shape, a bound, or an action that does not fit its target and text.
+    InvalidProposal,
 }
 
 impl AbstainReason {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::OwnerSensitive,
         Self::WrongScope,
         Self::Secret,
@@ -169,6 +171,7 @@ impl AbstainReason {
         Self::UndisclosedCitation,
         Self::PartialDisclosure,
         Self::ModelDeclined,
+        Self::InvalidProposal,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -180,6 +183,7 @@ impl AbstainReason {
             Self::UndisclosedCitation => "undisclosed_citation",
             Self::PartialDisclosure => "partial_disclosure",
             Self::ModelDeclined => "model_declined",
+            Self::InvalidProposal => "invalid_proposal",
         }
     }
 

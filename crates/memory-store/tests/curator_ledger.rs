@@ -895,7 +895,8 @@ fn every_abstain_reason_writes_under_the_column_check_and_reads_back() {
         | AbstainReason::ExpectationChanged
         | AbstainReason::UndisclosedCitation
         | AbstainReason::PartialDisclosure
-        | AbstainReason::ModelDeclined => AbstainReason::ALL.contains(&reason),
+        | AbstainReason::ModelDeclined
+        | AbstainReason::InvalidProposal => AbstainReason::ALL.contains(&reason),
     };
     for reason in AbstainReason::ALL {
         assert!(listed(reason));

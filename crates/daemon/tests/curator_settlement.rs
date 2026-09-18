@@ -16,13 +16,14 @@ use daemon::git_sources::{GitReadBounds, RepositoryBinding, read_selection};
 use daemon::harness_sources::SourcePublisher;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, CommitIntent, CuratorHoldBinding, CuratorHoldKind, Dimension, DomainSpec,
-    EvidenceReference, ExtractedFact, KernelStore, ManifestReference, PolicyDependencies,
-    ProposalAction, ProposalTarget, ProviderEgress, REVIEW_EXPIRY_MAX_MS, ReviewBinding,
-    ReviewOwner, ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadRefusal,
-    ReviewStagedReference, ReviewStagingSpec, ReviewSubject, ScopeSpec, ScopeTermSpec, Sensitivity,
-    SourceDependency, SourceDescriptorDetail, SourceSpan, StagingTerminalState, Uncertainty,
-    provisional_result_identity,
+    ArtifactDeletionIdentity, ArtifactDeletionKind, ArtifactDeletionRequest, ArtifactDestination,
+    CommitIntent, CuratorHoldBinding, CuratorHoldError, CuratorHoldKind, CuratorHoldRefusal,
+    Dimension, DomainSpec, EvidenceReference, ExtractedFact, KernelStore, ManifestReference,
+    PolicyDependencies, ProposalAction, ProposalTarget, ProviderEgress, REVIEW_EXPIRY_MAX_MS,
+    ReviewBinding, ReviewOwner, ReviewPayload, ReviewProposal, ReviewQuestionTemplate,
+    ReviewReadRefusal, ReviewStagedReference, ReviewStagingSpec, ReviewSubject, ScopeSpec,
+    ScopeTermSpec, Sensitivity, SourceDependency, SourceDescriptorDetail, SourceSpan,
+    StagingTerminalState, Uncertainty, provisional_result_identity,
 };
 use memory_store::curator_jobs::{
     CausalInputs, CuratorJobInput, EvidenceAvailability, ProducerBinding, ReserveOutcome,
@@ -1065,6 +1066,21 @@ fn revoked_or_uncited_dependencies_abstain_and_conflicting_content_is_refused() 
         fixture.receipt().abstained_reason,
         Some(AbstainReason::Secret)
     );
+    // A proposal that breaks a payload rule (here `Create` without text) can never be staged; the run abstains instead of leaving the receipt in progress for retries that fail the same way.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    let mut malformed = fixture.proposal(&[]);
+    malformed.new_text = None;
+    assert_eq!(
+        fixture
+            .settle(&broker, RunResult::Proposal(Box::new(malformed)))
+            .unwrap(),
+        Settled::Abstained(AbstainReason::InvalidProposal)
+    );
+    assert_eq!(
+        fixture.receipt().abstained_reason,
+        Some(AbstainReason::InvalidProposal)
+    );
 
     // Different content already at the provisional identity conflicts: nothing completes and nothing is readable.
     let fixture = Fixture::open();
@@ -1134,13 +1150,13 @@ fn a_proposal_the_kernel_cannot_stage_completes_without_content() {
         fixture
             .settle(&broker, RunResult::Proposal(Box::new(oversized)))
             .unwrap(),
-        Settled::Abstained(AbstainReason::ExpectationChanged)
+        Settled::Abstained(AbstainReason::InvalidProposal)
     );
     let receipt = fixture.receipt();
     assert_eq!(receipt.terminal, Some(CuratorReceiptTerminal::Abstained));
     assert_eq!(
         receipt.abstained_reason,
-        Some(AbstainReason::ExpectationChanged)
+        Some(AbstainReason::InvalidProposal)
     );
     assert_eq!(fixture.read(fixture.now + 6), Err(ReadRefusal::NotSelected));
 }
@@ -1367,6 +1383,52 @@ fn a_completion_the_ledger_refuses_as_clock_behind_keeps_the_review_hold_for_the
         Settled::Published(reference.clone())
     );
     assert_eq!(fixture.read(fixture.now + 6).unwrap().reference, reference);
+}
+
+#[test]
+fn recovery_releases_a_review_hold_a_purge_degraded() {
+    // The transfer committed, then a purge degraded the review pin before the completion. The retry must still find that pin: it protects nothing, so revalidation abstains, and the abstention releases it instead of leaving a degraded pin on the active-hold count until expiry.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
+    let review = fixture.review_hold_binding(1, &reference.candidate_id);
+    let hold = fixture
+        .store
+        .lookup_review_hold(&review, fixture.now + 6)
+        .unwrap()
+        .unwrap();
+    fixture
+        .store
+        .delete_artifact(ArtifactDeletionRequest {
+            intent: intent("purge-1"),
+            identity: ArtifactDeletionIdentity::Digest(fixture.source.1.artifact_digest.clone()),
+            kind: ArtifactDeletionKind::Purge,
+            operator_id: Some("operator".to_string()),
+            target_locator: Some("incident://purge".to_string()),
+            reason: Some("retired".to_string()),
+            deleted_at: fixture.now + 4,
+        })
+        .unwrap();
+    let settled = fixture
+        .settle(
+            &broker,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+        )
+        .unwrap();
+    assert!(
+        matches!(settled, Settled::Abstained(_)),
+        "a purged input publishes nothing: {settled:?}"
+    );
+    let release = fixture.store.release_review_hold(&hold.hold_id, &review);
+    assert!(
+        matches!(
+            release,
+            Err(CuratorHoldError::Refused(CuratorHoldRefusal::Released))
+        ),
+        "the settlement released the degraded review pin: {release:?}"
+    );
 }
 
 #[test]
