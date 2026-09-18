@@ -544,6 +544,10 @@ impl MemoryClassifierScheduler {
             firing_id: command_id.to_string(),
             ordinal: 0,
         };
+        // The sweep runs before any page is looked up or retried: it is the only production writer that retires jobs and pages past their deadlines, so a page deferred by pending capacity sees the capacity its expired blockers held, and frozen pages of projects no slot runs any more stop holding the host's frozen-page cap.
+        store
+            .expire_curator_work(now_ms)
+            .map_err(|error| format!("expiring curator work failed: {error}"))?;
         // This slot's own page first: a page it froze and could not enqueue resumes; one that expired or was already enqueued records that outcome and selects nothing new under this attempt.
         if let Some(own) = store
             .lookup_frozen_selection(&project.project, project.task.name(), command_id)
@@ -571,10 +575,6 @@ impl MemoryClassifierScheduler {
         {
             Some(frozen) => frozen,
             None => {
-                // Frozen pages of projects no slot runs any more would otherwise hold the host's frozen-page cap past their deadline; this sweep is the only writer that retires them.
-                store
-                    .expire_curator_work(now_ms)
-                    .map_err(|error| format!("expiring curator work failed: {error}"))?;
                 let cursor = store
                     .selection_cursor(&project.project, project.task.name())
                     .map_err(|error| format!("selection cursor lookup failed: {error}"))?;
@@ -1977,6 +1977,57 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("cursor-3")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deferred_page_is_enqueued_once_the_blocking_jobs_pass_their_deadline() {
+        use memory_store::curator_jobs::{
+            CURATOR_QUEUE_LIFETIME_MS, MAX_PENDING_CURATOR_JOBS_PER_PROJECT,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        // Another producer holds the project's whole pending capacity with jobs whose queue deadline passes one minute after the page is first offered; nobody but the selection slot sweeps them.
+        let producer = ProducerBinding {
+            producer: "filler".to_string(),
+            firing_id: "f".to_string(),
+            ordinal: 0,
+        };
+        let reserved_at = T0 + 16 * MINUTE_MS - CURATOR_QUEUE_LIFETIME_MS;
+        for index in 0..MAX_PENDING_CURATOR_JOBS_PER_PROJECT {
+            let page = selection_page(1_000 + index, 1, None);
+            store
+                .reserve_curator_job("git:a", &producer, &page.references[0], reserved_at)
+                .unwrap();
+        }
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 3, Some("cursor-3")))];
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::CapacityDeferred { .. }),
+            "{events:?}"
+        );
+        // The blocking jobs are past their deadline now; the retry must see the capacity they held as free.
+        clock.advance(MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued" && response["jobs"] == 3),
+            "{events:?}"
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 3);
+        assert_eq!(
+            store.curator_headroom("git:a").unwrap().pending_jobs,
+            3,
+            "the expired jobs left the pending count"
+        );
+        assert_eq!(
+            host.selection_cursors.lock().unwrap().len(),
+            1,
+            "no second selection"
         );
     }
 

@@ -14,7 +14,7 @@ use memory_store::curator_jobs::{
     CausalInputs, EvidenceAvailability, FrozenSelectionPage, MAX_SELECTION_REFERENCES, ReviewTarget,
 };
 
-/// Descriptor classes the production selector walks: the memories the Memory Classifier reviews.
+/// Descriptor classes the production selector walks: the memories the Memory Classifier reviews. The coordinator resolves both only through their originating decision (Q21), which `resolve_descriptor` does not do yet: a job over either class settles `Unsupported` before investigation and its causal row then suppresses the target under the same inputs. Activating the selection kind (Q36) therefore waits on Q21, or on narrowing this list to classes the coordinator resolves.
 pub const MEMORY_CLASSES: &[OccurrenceClass] = &[
     OccurrenceClass::CanonicalClaims,
     OccurrenceClass::PromotedMemory,
