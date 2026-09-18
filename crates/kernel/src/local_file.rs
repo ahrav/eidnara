@@ -42,6 +42,18 @@ pub struct LocalFileDetail {
     pub range: (u64, u64),
 }
 
+/// A live capture as the store holds it: the typed detail with the bindings and acquisition reference of the rows that carry it, so a run can tell its own capture from one seated under the same identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalFileCapture {
+    pub detail: LocalFileDetail,
+    /// The domain the capture observation and its evidence are registered in.
+    pub domain_id: String,
+    /// The scope the capture observation was recorded under.
+    pub scope_id: Option<String>,
+    /// The evidence row's acquisition reference (`retain_until`).
+    pub retain_until: i64,
+}
+
 #[derive(Debug)]
 pub struct LocalFileCaptureRequest<'a> {
     pub project_digest: &'a str,
@@ -277,29 +289,7 @@ impl KernelStore {
         .map(|_| ())
     }
 
-    /// The acquisition reference (`retain_until`) of the live Curator-capture evidence row `evidence_id`, or `None` when no such row is live. A run reusing a capture checks this before pinning the row, so a row that would outlive the run's own reference is refused without ever joining its hold.
-    ///
-    /// # Errors
-    ///
-    /// Returns storage errors.
-    pub fn local_file_capture_reference(
-        &self,
-        evidence_id: &str,
-    ) -> Result<Option<i64>, KernelError> {
-        let reader = self.lock_reader()?;
-        reader
-            .query_row(
-                "SELECT retain_until FROM evidence_meta
-                 WHERE evidence_id=?1 AND retention_class=?2 AND retain_until IS NOT NULL
-                   AND invalidated_commit_seq IS NULL",
-                params![evidence_id, super::cas::CURATOR_CAPTURE_RETENTION_CLASS],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(map_sqlite)
-    }
-
-    /// The typed detail of the live capture observation citing `evidence_id`, or `None` when no such observation is live.
+    /// The live capture citing `evidence_id`: its typed detail with the domain, scope, and acquisition reference of the rows that carry it, or `None` when no such capture is live.
     ///
     /// # Errors
     ///
@@ -307,27 +297,37 @@ impl KernelStore {
     pub fn local_file_capture(
         &self,
         evidence_id: &str,
-    ) -> Result<Option<LocalFileDetail>, KernelError> {
+    ) -> Result<Option<LocalFileCapture>, KernelError> {
         let reader = self.lock_reader()?;
-        let payload: Option<Vec<u8>> = reader
+        let row: Option<(Vec<u8>, String, Option<String>, i64)> = reader
             .query_row(
-                "SELECT observation_payload FROM observations
-                 WHERE evidence_id=?1 AND observation_kind=?2 AND invalidated_commit_seq IS NULL",
+                "SELECT o.observation_payload,g.domain_id,o.scope_id,e.retain_until
+                 FROM observations o
+                 JOIN object_registry g ON g.object_id=o.object_id
+                 JOIN evidence_meta e ON e.evidence_id=o.evidence_id
+                 WHERE o.evidence_id=?1 AND o.observation_kind=?2
+                   AND o.invalidated_commit_seq IS NULL AND e.invalidated_commit_seq IS NULL
+                   AND e.retain_until IS NOT NULL",
                 params![evidence_id, LOCAL_FILE_KIND],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(map_sqlite)?;
-        payload
-            .map(|payload| {
-                serde_json::from_slice::<ObservationPayload>(&payload)
-                    .ok()
-                    .and_then(|payload| payload.detail)
-                    .and_then(|detail| serde_json::from_str::<LocalFileDetail>(&detail).ok())
-                    .filter(|detail| detail.detail_version == LOCAL_FILE_DETAIL_VERSION)
-                    .ok_or(KernelError::CorruptCanonicalRow)
-            })
-            .transpose()
+        row.map(|(payload, domain_id, scope_id, retain_until)| {
+            serde_json::from_slice::<ObservationPayload>(&payload)
+                .ok()
+                .and_then(|payload| payload.detail)
+                .and_then(|detail| serde_json::from_str::<LocalFileDetail>(&detail).ok())
+                .filter(|detail| detail.detail_version == LOCAL_FILE_DETAIL_VERSION)
+                .map(|detail| LocalFileCapture {
+                    detail,
+                    domain_id,
+                    scope_id,
+                    retain_until,
+                })
+                .ok_or(KernelError::CorruptCanonicalRow)
+        })
+        .transpose()
     }
 }
 

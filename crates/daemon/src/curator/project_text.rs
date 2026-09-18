@@ -485,19 +485,17 @@ impl ProjectText {
                     .map_err(|_| refusal(RefusalCode::Store))?
                 {
                     None => false,
-                    Some(detail)
-                        if detail.project_digest == self.binding.hold.project_digest
-                            && detail.relative_path == file.relative
-                            && detail.buffer_digest == digest
-                            && detail.range == (0, byte_length) =>
+                    // A capture is this run's only if every binding agrees: the detail describes exactly this file, the rows are registered in this inspection's domain and scope, and the acquisition reference is live and no later than the inspection's. A reused row keeps its original reference, which may be earlier; one that has lapsed, or would outlive the inspection, is refused here, before the row is pinned, so it costs the hold nothing.
+                    Some(capture)
+                        if capture.detail.project_digest == self.binding.hold.project_digest
+                            && capture.detail.relative_path == file.relative
+                            && capture.detail.buffer_digest == digest
+                            && capture.detail.range == (0, byte_length)
+                            && capture.domain_id == self.binding.domain_id
+                            && capture.scope_id == self.binding.scope_id
+                            && capture.retain_until > now_ms.max(crate::now_ms())
+                            && capture.retain_until <= self.binding.retain_until =>
                     {
-                        // A reused row keeps its original acquisition reference, which may be earlier than this inspection's; one that would outlive the inspection's reference was not created by a run under it and is refused here, before the row is pinned, so it costs the hold nothing.
-                        let reference = store
-                            .local_file_capture_reference(&evidence_id)
-                            .map_err(|_| refusal(RefusalCode::Store))?;
-                        if reference.is_none_or(|reference| reference > self.binding.retain_until) {
-                            return Err(refusal(RefusalCode::Store));
-                        }
                         true
                     }
                     Some(_) => return Err(refusal(RefusalCode::Store)),

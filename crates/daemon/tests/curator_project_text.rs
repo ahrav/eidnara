@@ -356,12 +356,16 @@ fn a_read_captures_exact_bytes_once_with_typed_detail_and_a_charged_hold() {
         "a repository path grants no default-Sensitive exemption"
     );
     assert_eq!(egress, "local_only");
-    // The typed detail names the project, the path, the time, the digest, and the whole-file range; no Git identity is claimed for a working-tree read.
-    let detail = fixture
+    // The typed detail names the project, the path, the time, the digest, and the whole-file range; no Git identity is claimed for a working-tree read. The capture is registered in the inspection's domain and scope with its acquisition reference.
+    let capture = fixture
         .store
         .local_file_capture(&evidence_id)
         .unwrap()
         .unwrap();
+    assert_eq!(capture.domain_id, DOMAIN);
+    assert_eq!(capture.scope_id, None);
+    assert_eq!(capture.retain_until, fixture.now + HOUR_MS);
+    let detail = capture.detail;
     assert_eq!(detail.detail_version, kernel::LOCAL_FILE_DETAIL_VERSION);
     assert_eq!(detail.project_digest, PROJECT);
     assert_eq!(detail.relative_path, "src/main.rs");
@@ -1382,7 +1386,7 @@ fn captures_of_identical_bytes_by_two_projects_are_two_captures() {
                 .local_file_capture(evidence_id)
                 .unwrap()
                 .unwrap();
-            (detail.project_digest, detail.relative_path)
+            (detail.detail.project_digest, detail.detail.relative_path)
         })
         .collect();
     assert!(details.contains(&(PROJECT.to_string(), "same.txt".to_string())));
@@ -1467,6 +1471,7 @@ fn the_capture_writer_refuses_a_detail_that_does_not_describe_a_confined_capture
             .local_file_capture("local")
             .unwrap()
             .unwrap()
+            .detail
             .relative_path,
         "src/main.rs"
     );
@@ -1658,6 +1663,7 @@ fn two_paths_with_identical_bytes_are_two_captures_with_their_own_paths() {
             .local_file_capture(evidence_id)
             .unwrap()
             .unwrap()
+            .detail
             .relative_path,
         "b/copy.txt",
         "the hit's provenance names the path that matched"
@@ -2189,14 +2195,16 @@ fn only_the_run_that_owns_a_live_hold_may_abandon_its_own_capture() {
     assert_eq!(fixture.capture_rows().len(), 1, "the capture is untouched");
 }
 
-#[test]
-fn a_reused_capture_may_not_outlive_the_inspections_reference() {
-    let fixture = Fixture::open();
-    let body = b"bytes whose row was given a later deadline";
-    fixture.write("a.txt", body);
-    let evidence_id = predicted_capture_id(&fixture, "a.txt", body);
+/// Seats the capture row the fixture's run would create for `a.txt` holding `body`, under the run's own ingest intent so the run's ingest replays it, with a detail that matches the capture in every field but is registered in `domain` under `scope` with acquisition reference `retain_until`.
+fn seat_matching_capture(
+    fixture: &Fixture,
+    body: &[u8],
+    domain: &str,
+    scope: Option<&str>,
+    retain_until: i64,
+) -> String {
+    let evidence_id = predicted_capture_id(fixture, "a.txt", body);
     let digest = format!("{:x}", Sha256::digest(body));
-    // A caller seats the capture's row and a matching detail, with an acquisition reference well past the inspection's.
     fixture
         .store
         .ingest_exact_artifact(ArtifactIngestRequest {
@@ -2211,13 +2219,13 @@ fn a_reused_capture_may_not_outlive_the_inspections_reference() {
             evidence_id: evidence_id.clone(),
             object_id: format!("curcapobj:{evidence_id}"),
             object_kind: "evidence".to_string(),
-            domain_id: DOMAIN.to_string(),
+            domain_id: domain.to_string(),
             source_kind: kernel::LOCAL_FILE_SOURCE_KIND.to_string(),
             source_id: "a.txt".to_string(),
             source_revision: 1,
             media_type: "text/plain; charset=utf-8".to_string(),
             retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
-            retain_until: Some(fixture.now + 10 * HOUR_MS),
+            retain_until: Some(retain_until),
             asserted_sensitivity: Sensitivity::Sensitive,
             provider_egress: ProviderEgress::LocalOnly,
             provenance: None,
@@ -2230,8 +2238,8 @@ fn a_reused_capture_may_not_outlive_the_inspections_reference() {
                 project_digest: PROJECT,
                 relative_path: "a.txt",
                 captured_at: 1,
-                domain_id: DOMAIN,
-                scope_id: None,
+                domain_id: domain,
+                scope_id: scope,
                 evidence_id: &evidence_id,
                 artifact_digest: &digest,
                 byte_length: u64::try_from(body.len()).unwrap(),
@@ -2239,6 +2247,16 @@ fn a_reused_capture_may_not_outlive_the_inspections_reference() {
             Ok(String::new())
         })
         .unwrap();
+    evidence_id
+}
+
+#[test]
+fn a_reused_capture_may_not_outlive_the_inspections_reference() {
+    let fixture = Fixture::open();
+    let body = b"bytes whose row was given a later deadline";
+    fixture.write("a.txt", body);
+    // A caller seats the capture's row and a matching detail, with an acquisition reference well past the inspection's.
+    seat_matching_capture(&fixture, body, DOMAIN, None, fixture.now + 10 * HOUR_MS);
     let protected = fixture.protected();
     let mut text = fixture.text(&protected);
     let mut broker = fixture.broker(ArtifactDestination::Local);
@@ -2273,7 +2291,8 @@ fn a_capture_is_dated_no_earlier_than_the_wall_clock() {
         .store
         .local_file_capture(&evidence_id)
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .detail;
     assert!(
         detail.captured_at >= before,
         "captured_at {} predates the read at {before}",
@@ -2321,4 +2340,68 @@ fn an_invalid_range_is_refused_before_anything_is_captured() {
         )
         .unwrap();
     assert_eq!(read.buffer.bytes, b"twelve");
+}
+
+#[test]
+fn a_reused_capture_must_belong_to_the_inspections_domain_and_scope() {
+    let fixture = Fixture::open();
+    fixture
+        .store
+        .commit(intent("other-domain"), |envelope| {
+            envelope.insert_domain(DomainSpec {
+                domain_id: "other-domain".to_string(),
+                object_id: "other-domain-object".to_string(),
+                name: "other".to_string(),
+                source_kind: "fixture".to_string(),
+                source_id: "other-domain".to_string(),
+                sensitivity: Sensitivity::Normal,
+                source_revision: 1,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let body = b"bytes registered under another domain";
+    fixture.write("a.txt", body);
+    // A matching row and detail, registered in another domain.
+    seat_matching_capture(&fixture, body, "other-domain", None, fixture.now + HOUR_MS);
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Store,
+        "a capture registered in another domain is not this inspection's"
+    );
+    assert_eq!(broker.ledger.disclosed().count(), 0);
+    assert_eq!(fixture.hold_references(broker.hold_id()), 1);
+}
+
+#[test]
+fn a_reused_capture_whose_reference_has_lapsed_is_not_pinned() {
+    let fixture = Fixture::open();
+    let body = b"bytes whose reference already lapsed";
+    fixture.write("a.txt", body);
+    // A matching row whose acquisition reference is earlier than the inspection's, and already in the past at the read.
+    let lapsed = now_ms() + 400;
+    seat_matching_capture(&fixture, body, DOMAIN, None, lapsed);
+    while now_ms() <= lapsed {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Store,
+        "a lapsed reference cannot be reused"
+    );
+    assert_eq!(
+        fixture.hold_references(broker.hold_id()),
+        1,
+        "the lapsed row was never pinned"
+    );
 }
