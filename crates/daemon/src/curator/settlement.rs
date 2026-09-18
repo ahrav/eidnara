@@ -187,13 +187,17 @@ impl Settlement<'_> {
         match self.complete(run, ReceiptCompletion::Complete(selection))? {
             // The completion id proves this claim completed the receipt, not what it recorded: a replay may have selected other content, and the store may have recorded a cancellation or the deadline instead of the selection.
             LeaseCompleteOutcome::Applied { .. } | LeaseCompleteOutcome::Replayed { .. } => {
-                let settled = self.recorded(run, Some(reference))?;
-                if !matches!(settled, Settled::Published(_)) {
+                // Whatever the receipt recorded, if it is not this reference the hold protects a row nothing selects.
+                let settled = self.recorded(run, Some(reference));
+                if !matches!(settled, Ok(Settled::Published(_))) {
                     self.release_review_hold(run, review, review_hold);
                 }
-                Ok(settled)
+                settled
             }
-            LeaseCompleteOutcome::Conflict { .. } => {
+            LeaseCompleteOutcome::Conflict { kind } => {
+                if !conflict_ends_claim(kind) {
+                    return Err(retry_later(kind));
+                }
                 self.release_review_hold(run, review, review_hold);
                 Err(SettlementError::Fenced)
             }
@@ -271,7 +275,10 @@ impl Settlement<'_> {
                 self.recorded(run, None)?
             }
             // Another generation owns the receipt: this one can never complete, so the review hold it had moved retention to is released as the publication path does. Its execution hold ends only on a trusted terminal or at the run cutoff.
-            LeaseCompleteOutcome::Conflict { .. } => {
+            LeaseCompleteOutcome::Conflict { kind } => {
+                if !conflict_ends_claim(kind) {
+                    return Err(retry_later(kind));
+                }
                 if let Some((review, hold)) = recovered {
                     self.release_review_hold(run, review, hold);
                 }
@@ -438,6 +445,17 @@ impl Settlement<'_> {
     }
 }
 
+/// The ledger dates every write at or after its newest event and leaves a completion dated before that for the worker to repeat once its clock has caught up; that claim is still live. Every other conflict means this claim can never complete the receipt.
+fn conflict_ends_claim(kind: &str) -> bool {
+    kind != "clock_behind"
+}
+
+fn retry_later(kind: &str) -> SettlementError {
+    SettlementError::Store(format!(
+        "completion refused: {kind}; retry once the clock has caught up"
+    ))
+}
+
 /// The two completions settlement records without staging anything.
 enum ContentFree {
     Unknown,
@@ -455,7 +473,7 @@ fn proposal_binding(job: &ReviewBinding, run: &CuratorHoldBinding) -> ReviewBind
     }
 }
 
-/// The model text is render-checked, every citation must name disclosed evidence, and the policy dependencies are the broker's, never the model's. The bound payload then passes the Kernel's own field scan, so a secret in any model-controlled identity abstains instead of leaving the receipt in progress behind a staging refusal no retry can pass.
+/// The model text is render-checked, every citation must name disclosed evidence under a disclosed alias, and the policy dependencies are the broker's, never the model's. The bound payload then passes the Kernel's own field scan, so a secret in any model-controlled identity abstains instead of leaving the receipt in progress behind a staging refusal no retry can pass.
 fn bind_dependencies(
     broker: &EvidenceBroker,
     mut proposal: ReviewProposal,
@@ -477,6 +495,27 @@ fn bind_dependencies(
             .binary_search_by(|d| d.as_str().cmp(evidence_id))
             .is_err()
     }) {
+        return Err(AbstainReason::UndisclosedCitation);
+    }
+    // A span names the alias the model saw the bytes under: it must be an alias this run disclosed, and that alias must resolve to the evidence the citation names. The ledger does not record which byte ranges of an alias were rendered, so the offsets are not judged here.
+    let anchored = |reference: &EvidenceReference| {
+        reference.span.as_ref().is_none_or(|span| {
+            broker
+                .aliases
+                .resolve(&span.alias)
+                .ok()
+                .filter(|(alias, _)| broker.ledger.is_disclosed(alias))
+                .is_some_and(|(_, expectation)| {
+                    expectation.evidence_id() == Some(reference.evidence_id.as_str())
+                })
+        })
+    };
+    if !proposal
+        .support
+        .iter()
+        .chain(&proposal.contradictions)
+        .all(anchored)
+    {
         return Err(AbstainReason::UndisclosedCitation);
     }
     let disclosed_inputs: Vec<EvidenceReference> = disclosed

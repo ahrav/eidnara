@@ -1250,6 +1250,97 @@ fn recovery_adopts_captures_whose_acquisition_reference_moved_to_the_review_expi
 }
 
 #[test]
+fn a_citation_span_must_name_the_disclosed_alias_of_its_evidence() {
+    // A span says which rendered alias the cited bytes came from. An alias the run never issued, or one that resolves to other evidence, is a citation to bytes the model was not shown under that name, however real the evidence id is.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let cite = |alias: &str| {
+        let mut proposal = fixture.proposal(&[&evidence]);
+        proposal.support[0].span = Some(SourceSpan {
+            alias: alias.to_string(),
+            start: 0,
+            end: 4,
+        });
+        proposal
+    };
+    assert_eq!(
+        fixture.settle(&broker, RunResult::Proposal(Box::new(cite("ref-99")))),
+        Ok(Settled::Abstained(AbstainReason::UndisclosedCitation)),
+        "an alias the run never issued cannot anchor a citation"
+    );
+    // The receipt is complete now; a fresh job shows the disclosed alias is accepted.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let disclosed = broker
+        .ledger
+        .disclosed()
+        .next()
+        .unwrap()
+        .as_str()
+        .to_string();
+    let mut proposal = fixture.proposal(&[&evidence]);
+    proposal.support[0].span = Some(SourceSpan {
+        alias: disclosed,
+        start: 0,
+        end: 4,
+    });
+    assert!(matches!(
+        fixture
+            .settle(&broker, RunResult::Proposal(Box::new(proposal)))
+            .unwrap(),
+        Settled::Published(_)
+    ));
+}
+
+#[test]
+fn a_completion_the_ledger_refuses_as_clock_behind_keeps_the_review_hold_for_the_retry() {
+    // The ledger refuses a completion dated before its newest event and leaves the claim live for a retry. That refusal is not a fence: the review hold this settlement moved retention to must survive it, because the Kernel will not open another execution hold for a transferred generation.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let binding = fixture.review_binding();
+    let behind = fixture.now + 2;
+    let clock = move || behind;
+    let refused = fixture.settlement(&binding, &fixture.claim, &clock).settle(
+        &broker,
+        RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+    );
+    assert!(
+        matches!(refused, Err(SettlementError::Store(_))),
+        "a clock-behind refusal is retryable, not a fence: {refused:?}"
+    );
+    let reference = fixture.staged_reference(1, &fixture.bound_proposal(&[&evidence]));
+    assert!(
+        fixture
+            .store
+            .lookup_review_hold(
+                &fixture.review_hold_binding(1, &reference.candidate_id),
+                fixture.now + 6
+            )
+            .unwrap()
+            .is_some(),
+        "the review hold outlives a retryable refusal"
+    );
+    assert_eq!(fixture.receipt().terminal, None);
+    // Once the clock has caught up, the same run publishes through the recovered review hold.
+    assert_eq!(
+        fixture
+            .settle(
+                &broker,
+                RunResult::Proposal(Box::new(fixture.proposal(&[&evidence])))
+            )
+            .unwrap(),
+        Settled::Published(reference.clone())
+    );
+    assert_eq!(fixture.read(fixture.now + 6).unwrap().reference, reference);
+}
+
+#[test]
 fn recovery_revalidates_a_staged_subject_under_the_review_hold() {
     // A staged subject holds no evidence id, so its revalidation is a check that the run's hold is live. Once retention has moved to the review hold, that is the hold to check; the released execution hold would refuse and abstain a result that is already sealed.
     let fixture = Fixture::open();

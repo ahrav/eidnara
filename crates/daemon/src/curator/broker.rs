@@ -131,6 +131,16 @@ pub enum ReferenceExpectation {
 }
 
 impl ReferenceExpectation {
+    /// The evidence this reference names; a staged subject is a Kernel row, not evidence.
+    pub fn evidence_id(&self) -> Option<&str> {
+        match self {
+            Self::StagedSubject { .. } => None,
+            Self::NativeSource { evidence_id, .. }
+            | Self::CanonicalSource { evidence_id, .. }
+            | Self::TemporaryCapture { evidence_id, .. } => Some(evidence_id),
+        }
+    }
+
     pub fn origin(&self) -> OriginClass {
         match self {
             Self::StagedSubject { .. } => OriginClass::StagedSubject,
@@ -421,6 +431,10 @@ impl DisclosureLedger {
 
     pub fn uncited_disclosed(&self) -> impl Iterator<Item = &Alias> {
         self.disclosed.difference(&self.cited)
+    }
+
+    pub fn is_disclosed(&self, alias: &Alias) -> bool {
+        self.disclosed.contains(alias)
     }
 
     pub fn disclosed(&self) -> impl Iterator<Item = &Alias> {
