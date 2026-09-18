@@ -56,6 +56,9 @@ describe("parseHistorySegmentOutput — v2 5-category facts", () => {
 * [s3:0-12] [s4:5-9] Commit after every fix.
 * [not a citation] Keep brackets.
 * [s9:4-x] Malformed stays in the text.
+* [s:0-5] No digit is not an alias.
+* [s1:+5-9] A signed offset is not a citation.
+* [unclosed bracket stays text
 * [s1:0-3]
 </PROJECT_RULES>
 </facts>
@@ -70,6 +73,9 @@ describe("parseHistorySegmentOutput — v2 5-category facts", () => {
             ],
             ["[not a citation] Keep brackets.", []],
             ["[s9:4-x] Malformed stays in the text.", []],
+            ["[s:0-5] No digit is not an alias.", []],
+            ["[s1:+5-9] A signed offset is not a citation.", []],
+            ["[unclosed bracket stays text", []],
             ["", [{ alias: "s1", start: 0, end: 3 }]],
         ]);
     });

@@ -127,9 +127,9 @@ impl Builder {
         }
     }
 
-    /// The part a message renders as, with the native blocks behind it. Compaction, tool summaries, and joined multi-block text are transformations; a single text block presented as-is is verbatim. The marker brackets are reserved for the renderer, so native text containing them is escaped to ASCII brackets and counts as transformed: the markers in the rendered input are then exactly the issued aliases, and a withdrawal search cannot match a forged marker.
+    /// Builds the frozen alias for one rendered part. `transformed` is false only for a single text block presented unchanged. Native marker brackets are escaped to plain quotes and count as transformed, so the rendered input holds exactly the issued markers and withdrawal matching cannot hit a forged one.
     fn part(message: &FlatMessage<'_>, text: String, transformed: bool) -> FrozenAlias {
-        let escaped = text.replace(ALIAS_OPEN, "[").replace(ALIAS_CLOSE, "]");
+        let escaped = text.replace([ALIAS_OPEN, ALIAS_CLOSE], ALIAS_ESCAPE);
         let transformed = transformed || escaped != text;
         FrozenAlias {
             alias: String::new(),
@@ -991,22 +991,39 @@ pub fn presented_input(built: &mut HistorySummarizerBuiltChunk, token_budget: us
             .unwrap_or(&truncated)
             .len();
         let kept = &truncated[..kept_len];
-        // Marker brackets are escaped out of native text, so the marker followed by the presented bytes occurs in the rendered input exactly when the model saw that part whole.
-        built.chunk.aliases.aliases.retain(|alias| {
-            kept.contains(&format!(
-                "{}{}",
-                alias_marker(&alias.alias),
-                alias.presented
-            ))
-        });
+        // Marker brackets are escaped out of native text, so the marker followed by the presented bytes occurs in the rendered input exactly when the model saw that part whole. Aliases are issued in rendering order and `kept` is a prefix of the rendered text, so one forward cursor finds each alias after the previous one, and the first alias not found whole is the cut: every later alias lies beyond it.
+        let mut cursor = 0usize;
+        let kept_count = built
+            .chunk
+            .aliases
+            .aliases
+            .iter()
+            .take_while(|alias| {
+                let marker = alias_marker(&alias.alias);
+                let Some(at) = kept[cursor..].find(&marker) else {
+                    return false;
+                };
+                let end = cursor + at + marker.len();
+                if kept[end..].starts_with(&alias.presented) {
+                    cursor = end + alias.presented.len();
+                    true
+                } else {
+                    false
+                }
+            })
+            .count();
+        built.chunk.aliases.aliases.truncate(kept_count);
     }
     truncated
 }
 
-const ALIAS_OPEN: char = '\u{27e6}';
-const ALIAS_CLOSE: char = '\u{27e7}';
+/// Marker brackets: U+00AB and U+00BB, each a single vocabulary token, so a marker costs the alias plus two tokens. Native occurrences are escaped to [`ALIAS_ESCAPE`] before rendering.
+const ALIAS_OPEN: char = '\u{ab}';
+const ALIAS_CLOSE: char = '\u{bb}';
+/// What a native marker bracket becomes in presented text: a plain double quote, which cannot open a marker.
+const ALIAS_ESCAPE: &str = "\"";
 
-/// The marker that precedes an aliased part in the rendered input: `⟦sN⟧`. The brackets are reserved for markers; the builder escapes them out of native text.
+/// The marker that precedes an aliased part in the rendered input: `«sN»`. The brackets are reserved for markers; the builder escapes them out of native text.
 pub fn alias_marker(alias: &str) -> String {
     format!("{ALIAS_OPEN}{alias}{ALIAS_CLOSE}")
 }
@@ -1171,8 +1188,8 @@ mod tests {
         let built = project_and_build(&messages, 1, 1_000, 4);
         assert!(!built.text.contains("identity"));
         assert!(!built.text.contains("second pinned block"));
-        assert!(built.text.contains("U: ⟦s1⟧hello"));
-        assert!(built.text.contains("A: ⟦s2⟧done"));
+        assert!(built.text.contains("U: «s1»hello"));
+        assert!(built.text.contains("A: «s2»done"));
         assert_eq!(built.chunk.start_index, 1);
         let ordinals: Vec<u64> = built.chunk.lines.iter().map(|line| line.ordinal).collect();
         assert_eq!(ordinals, vec![1, 2, 3]);
@@ -1228,7 +1245,7 @@ mod tests {
         let projection = project_messages(&messages).unwrap();
         assert!(!projection.blocks.iter().any(|block| block.mid == "empty1"));
         let built = build_history_summarizer_chunk(&messages, &projection.blocks, 1, 1_000, 3);
-        assert_eq!(built.text, "[1-2] U: ⟦s1⟧real user text");
+        assert_eq!(built.text, "[1-2] U: «s1»real user text");
         assert_eq!(
             built
                 .chunk
@@ -1265,7 +1282,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
-        assert!(built.text.contains("[2-4] A: ⟦s2⟧second arc"));
+        assert!(built.text.contains("[2-4] A: «s2»second arc"));
 
         let output = r#"<output><history_segments>
 <history_segment start="1" end="1" title="first" episode_type="feature" importance="50"><p1>first</p1><p2>first</p2><p3>first</p3><p4 /></history_segment>
@@ -1338,7 +1355,7 @@ mod tests {
         let built = project_and_build(&messages, 1, 1_000, 5);
         assert_eq!(
             built.text,
-            "[1-4] A: ⟦s1⟧TC: read(one.rs) / ⟦s2⟧TC: read(one.rs) / ⟦s3⟧TC: read(two.rs) / ⟦s4⟧TC: read(two.rs)"
+            "[1-4] A: «s1»TC: read(one.rs) / «s2»TC: read(one.rs) / «s3»TC: read(two.rs) / «s4»TC: read(two.rs)"
         );
         assert_eq!(
             built.chunk.completed_tool_arcs,
@@ -1384,7 +1401,7 @@ mod tests {
         let built = project_and_build(&messages, 1, 1_000, 4);
         assert_eq!(
             built.text,
-            "[1-2] A: ⟦s1⟧I will inspect it / ⟦s2⟧TC: read(src/lib.rs)\n[3] U: ⟦s3⟧thanks"
+            "[1-2] A: «s1»I will inspect it / «s2»TC: read(src/lib.rs)\n[3] U: «s3»thanks"
         );
         assert_eq!(built.chunk.lines[0].message_id, "a1#1");
         assert_eq!(built.chunk.lines[1].message_id, "t2#0");
@@ -1814,14 +1831,28 @@ mod tests {
         let joined_tokens = estimate_tokens(&built.text);
 
         // Every rendered message carries its alias marker, so the same budget admits fewer messages than the unmarked rendering did.
-        assert_eq!(built.chunk.lines.len(), 601);
-        assert_eq!(built.chunk.aliases.aliases.len(), 601);
+        assert_eq!(built.chunk.lines.len(), 649);
+        assert_eq!(built.chunk.aliases.aliases.len(), 649);
         assert_eq!(joined_tokens, built.token_estimate);
         assert!(joined_tokens <= budget);
         assert_eq!(
             truncate_history_summarizer_input_if_needed(&built.text, budget),
             built.text
         );
+    }
+
+    #[test]
+    fn alias_markers_cost_one_token_per_bracket() {
+        // The marker is paid once per rendered part inside the chunk budget, so each bracket must be a single vocabulary token; a bracket outside the vocabulary falls back to one token per UTF-8 byte and triples the cost.
+        for alias in ["s1", "s42", "s4096"] {
+            let marker = alias_marker(alias);
+            let bare = estimate_tokens(alias);
+            assert_eq!(
+                estimate_tokens(&marker),
+                bare + 2,
+                "{marker:?} must add exactly one token per bracket"
+            );
+        }
     }
 
     #[test]
@@ -1950,7 +1981,7 @@ mod tests {
         let fixture = FixtureBuilder::session_with_boundary();
         let messages: crate::wire::IngressMessages = fixture.messages.clone().into_iter().collect();
         let built = project_and_build(&messages, 1, 1_000, 3);
-        assert!(built.text.contains("U: ⟦s1⟧before boundary"));
+        assert!(built.text.contains("U: «s1»before boundary"));
         assert_eq!(fixture.call_transform()["kind"], "transform");
     }
 }

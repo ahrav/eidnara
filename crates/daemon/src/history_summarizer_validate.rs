@@ -135,15 +135,11 @@ pub struct ParsedHistorySegment {
     pub episode_type: Option<String>,
 }
 
-/// The struct stores a fact extracted from the `<facts>` block.
+/// A fact extracted from the `<facts>` block. A fact proves its source through its citations' native ordinals, so it carries no segment anchor; a legacy `[at_history_segment=N]` prefix is stripped and ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactCandidate {
     pub category: String,
     pub content: String,
-    /// TypeScript facts are unanchored.
-    /// When boundary healing discards the last history_segment, validation skips a fact without `origin_history_segment_index` because it cannot prove the fact's source history_segment.
-    #[serde(default)]
-    pub origin_history_segment_index: Option<u64>,
     /// Frozen-alias citations the fact carried, checked by `check_fact_set` before the set is accepted.
     #[serde(default)]
     pub citations: Vec<Citation>,
@@ -349,17 +345,17 @@ pub fn parse_history_segment_output(
     let mut fact_syntax_failure = None;
     let facts_scope = if let Some(caps) = facts_block {
         let scope = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
-        // Q30: anything inside `<facts>` that the item grammar does not read is malformed material, never an absent fact. A second `<facts>` block is likewise unreadable rather than ignored.
+        // Anything inside `<facts>` that the item grammar does not read is malformed material, never an absent fact. A category whose closing tag names another category, and a second `<facts>` block, are likewise unreadable rather than ignored.
         let leftover = category_block_regex().replace_all(scope, "");
         if facts_block_regex().captures_iter(text).count() > 1
             || !leftover.trim().is_empty()
             || category_block_regex().captures_iter(scope).any(|category| {
-                category.get(2).is_some_and(|block| {
-                    block
-                        .as_str()
-                        .lines()
-                        .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with('*'))
-                })
+                category.get(1).map(|m| m.as_str()) != category.get(3).map(|m| m.as_str())
+                    || category.get(2).is_some_and(|block| {
+                        block.as_str().lines().any(|line| {
+                            !line.trim().is_empty() && !line.trim_start().starts_with('*')
+                        })
+                    })
             })
         {
             fact_syntax_failure = Some(ExtractionFailure::MalformedFacts);
@@ -382,7 +378,7 @@ pub fn parse_history_segment_output(
         for item_caps in fact_item_regex().captures_iter(block) {
             let raw = item_caps.get(1).map(|m| m.as_str()).unwrap_or_default();
             let unescaped = unescape_xml(raw.trim());
-            let (origin_history_segment_index, content) = split_anchor_prefix(&unescaped);
+            let (_, content) = split_anchor_prefix(&unescaped);
             let (citations, content) = match split_citations(&content) {
                 Ok((citations, content)) => (citations, content.to_string()),
                 Err(failure) => {
@@ -398,7 +394,6 @@ pub fn parse_history_segment_output(
                 facts.push(FactCandidate {
                     category: category.to_string(),
                     content,
-                    origin_history_segment_index,
                     citations,
                 });
             }
