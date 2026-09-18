@@ -187,9 +187,12 @@ impl Settlement<'_> {
         match self.complete(run, ReceiptCompletion::Complete(selection))? {
             // The completion id proves this claim completed the receipt, not what it recorded: a replay may have selected other content, and the store may have recorded a cancellation or the deadline instead of the selection.
             LeaseCompleteOutcome::Applied { .. } | LeaseCompleteOutcome::Replayed { .. } => {
-                // Whatever the receipt recorded, if it is not this reference the hold protects a row nothing selects.
+                // A terminal that is not this reference means the hold protects a row nothing selects. A read-back that failed decided nothing: the receipt may select this row, readers need the hold to reach it, and a retry is fenced by the terminal, so the hold stays.
                 let settled = self.recorded(run, Some(reference));
-                if !matches!(settled, Ok(Settled::Published(_))) {
+                if !matches!(
+                    settled,
+                    Ok(Settled::Published(_)) | Err(SettlementError::Store(_))
+                ) {
                     self.release_review_hold(run, review, review_hold);
                 }
                 settled

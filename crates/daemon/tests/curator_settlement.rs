@@ -5,7 +5,9 @@ mod support;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use daemon::curator::broker::{EvidenceBroker, QuestionTemplate, ReferenceExpectation, RunBinding};
+use daemon::curator::broker::{
+    EvidenceBroker, HeldUnder, QuestionTemplate, ReferenceExpectation, RunBinding,
+};
 use daemon::curator::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
 use daemon::curator::settlement::{
     ReadRefusal, RunResult, SETTLEMENT_PRODUCER, SelectedProposal, Settled, Settlement,
@@ -1399,6 +1401,102 @@ fn recovery_releases_a_review_hold_a_purge_degraded() {
             Err(CuratorHoldError::Refused(CuratorHoldRefusal::Released))
         ),
         "the settlement released the degraded review pin: {release:?}"
+    );
+}
+
+#[test]
+fn recovery_after_the_acquisition_reference_lapsed_reads_the_moved_reference() {
+    // The transfer moved the capture's reference to the review expiry, so a recovery that runs after the reference the alias was issued with has passed judges the moved one, not the stale one.
+    let fixture = Fixture::open();
+    let (broker, capture) = fixture.local_broker_with_capture(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let bound = fixture.bound_proposal_over(&[&evidence], &[&evidence, &capture]);
+    let reference = fixture.kernel_half(&broker, &bound);
+    let review = fixture.review_hold_binding(1, &reference.candidate_id);
+    let hold = fixture
+        .store
+        .lookup_review_hold(&review, fixture.now + 6)
+        .unwrap()
+        .unwrap();
+    let alias = broker
+        .ledger
+        .disclosed()
+        .find(|alias| {
+            broker
+                .aliases
+                .resolve(alias.as_str())
+                .unwrap()
+                .1
+                .evidence_id()
+                == Some(&capture)
+        })
+        .unwrap()
+        .as_str()
+        .to_string();
+    let after_reference = fixture.now + HOUR_MS + 10;
+    assert_eq!(
+        broker.revalidate_under(
+            &fixture.store,
+            &alias,
+            after_reference,
+            HeldUnder::Review {
+                hold: &hold,
+                binding: &review,
+            },
+        ),
+        Ok(Some(capture.clone()))
+    );
+    // Under the execution hold the issue-time reference is the only one, and it has lapsed.
+    assert!(
+        broker
+            .revalidate_under(
+                &fixture.store,
+                &alias,
+                after_reference,
+                HeldUnder::Execution(broker.binding()),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn a_publication_whose_receipt_cannot_be_read_back_keeps_its_review_hold() {
+    // The completion applied; the read that reports what it recorded then fails. The receipt may select this proposal, and readers need the hold to reach it, so a store failure is not a reason to release.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let shadow = || {
+        // After the completion commits, the connection's view of the receipts is a shadow the row reader refuses.
+        storage::after_commit_for_test(|conn| {
+            conn.execute("CREATE TEMP TABLE curator_receipts (x)", [])
+                .expect("plant a shadow after the commit");
+        });
+    };
+    // The shadow also blocks the fixture's ledger reads afterwards, so the review binding is computed first.
+    let reference = fixture.staged_reference(1, &fixture.bound_proposal(&[&evidence]));
+    let review = fixture.review_hold_binding(1, &reference.candidate_id);
+    let binding = fixture.review_binding();
+    let now = fixture.now + 5;
+    let clock = move || now;
+    let mut settlement = fixture.settlement(&binding, &fixture.claim, &clock);
+    settlement.before_completion_for_test = Some(&shadow);
+    let settled = settlement.settle(
+        &broker,
+        RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+    );
+    assert!(
+        matches!(settled, Err(SettlementError::Store(_))),
+        "the read-back failed, not the completion: {settled:?}"
+    );
+    assert!(
+        fixture
+            .store
+            .lookup_review_hold(&review, fixture.now + 6)
+            .unwrap()
+            .is_some(),
+        "the review hold outlives a failed read-back"
     );
 }
 

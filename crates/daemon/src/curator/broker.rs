@@ -1086,7 +1086,8 @@ impl EvidenceBroker {
                 byte_length,
                 retain_until,
             } => {
-                if *retain_until <= now_ms {
+                // The reference in force: the one the alias was issued with, or the review expiry the transfer moved it to.
+                if hold.moved_reference().unwrap_or(*retain_until) <= now_ms {
                     return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
                 }
                 let held = store
@@ -1100,11 +1101,12 @@ impl EvidenceBroker {
                     .map_err(|error| refuse(Some(alias), hold_refusal(error)))?
                     .pop()
                     .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
-                // The hold transfer moves a capture's acquisition reference to the review expiry; under the review hold, that is the other value the reference may legitimately hold.
-                let reference_stands = held.retain_until == Some(*retain_until)
-                    || hold
-                        .moved_reference()
-                        .is_some_and(|moved| held.retain_until == Some(moved));
+                // The hold transfer moves a capture's acquisition reference to the review expiry; under the review hold, that is the other value the reference may legitimately hold. Whichever it is, it must still be ahead of the clock: a reference that had lapsed before the transfer was not moved.
+                let reference_stands = held.retain_until.is_some_and(|stored| stored > now_ms)
+                    && (held.retain_until == Some(*retain_until)
+                        || hold
+                            .moved_reference()
+                            .is_some_and(|moved| held.retain_until == Some(moved)));
                 if held.artifact_digest != *artifact_digest
                     || held.byte_length != *byte_length
                     || held.retention_class != CURATOR_CAPTURE_RETENTION_CLASS
