@@ -499,6 +499,11 @@ impl InvestigationAccounting {
         Ok(())
     }
 
+    /// Returns a charge taken for a send that never left the host, so the bound counts only bytes a model could have seen.
+    pub fn refund_render(&mut self, bytes: u64) {
+        self.model_visible_bytes = self.model_visible_bytes.saturating_sub(bytes);
+    }
+
     pub fn issued_inspections(&self) -> usize {
         self.issued_inspections
     }
@@ -538,6 +543,7 @@ pub struct EvidenceRead {
 pub struct RunBinding {
     pub project: ProjectScope,
     pub hold: CuratorHoldBinding,
+    /// Empty when the run acquired no execution hold; settlement then releases none.
     pub hold_id: String,
     /// Where disclosed bytes go. A remote model admits only `Normal`, remote-allowed evidence; unproven sources stay policy-blocked there.
     pub destination: ArtifactDestination,

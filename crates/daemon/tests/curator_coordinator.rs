@@ -35,7 +35,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use support::curator_corpus::{CASES, Case, Expected, Relation, Source, judge};
-use support::tls_peer::{Peer, json_response, text_response};
+use support::tls_peer::{Peer, Scripted, json_response, text_response};
 
 const DOMAIN: &str = "domain";
 const SCOPE: &str = "project:a";
@@ -119,6 +119,7 @@ fn publish_commit(
         extra_headers: Vec::new(),
     };
     let oid = repo.write_object(&commit).unwrap().detach().to_string();
+    let object_bytes = u64::try_from(message.len()).unwrap().max(4096) + 1024;
     let selection = read_selection(
         &support::projection_gate::open_gate(),
         &RepositoryBinding {
@@ -128,8 +129,8 @@ fn publish_commit(
         std::slice::from_ref(&oid),
         GitReadBounds {
             max_commits: std::num::NonZeroUsize::new(1).unwrap(),
-            max_object_bytes: std::num::NonZeroU64::new(4096).unwrap(),
-            max_total_object_bytes: std::num::NonZeroU64::new(4096).unwrap(),
+            max_object_bytes: std::num::NonZeroU64::new(object_bytes).unwrap(),
+            max_total_object_bytes: std::num::NonZeroU64::new(object_bytes).unwrap(),
         },
     )
     .unwrap();
@@ -179,6 +180,11 @@ struct Fixture {
 
 impl Fixture {
     fn open(sources: &[Source]) -> Self {
+        Self::open_at(sources, now_ms())
+    }
+
+    /// Every ledger write from reservation through the begun receipt is stamped `now`, so a `now` in the past yields a receipt whose cutoff has already lapsed on the wall clock.
+    fn open_at(sources: &[Source], now: i64) -> Self {
         let kernel_dir = tempfile::tempdir().unwrap();
         let store = KernelStore::open(kernel_dir.path()).unwrap();
         store
@@ -210,7 +216,6 @@ impl Fixture {
                 Ok(String::new())
             })
             .unwrap();
-        let now = now_ms();
         let mut dirs = Vec::new();
         let mut published = Vec::new();
         for source in sources {
@@ -727,7 +732,7 @@ async fn run_case(case: &Case) {
 
 macro_rules! corpus_case {
     ($name:ident, $index:expr) => {
-        #[tokio::test]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn $name() {
             run_case(&CASES[$index]).await;
         }
@@ -751,7 +756,7 @@ fn the_corpus_covers_every_relation_once() {
     assert_eq!(relations.len(), 8);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capacity_is_acquired_before_anything_is_spawned_and_never_queued() {
     let fixture = Fixture::open(CASES[0].sources);
     let peer = Peer::start().await;
@@ -776,7 +781,7 @@ async fn capacity_is_acquired_before_anything_is_spawned_and_never_queued() {
     assert!(permits.try_acquire(PROJECT).is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missing_approval_sends_nothing_and_leaves_the_receipt_open() {
     let fixture = Fixture::open(CASES[0].sources);
     let peer = Peer::start().await;
@@ -790,7 +795,7 @@ async fn a_missing_approval_sends_nothing_and_leaves_the_receipt_open() {
     assert_eq!(fixture.permits.active(), 0, "the permit is released");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exhausted_rounds_and_malformed_output_abstain_as_budget_exhausted() {
     let fixture = Fixture::open(CASES[0].sources);
     let mut peer = Peer::start().await;
@@ -831,7 +836,7 @@ async fn exhausted_rounds_and_malformed_output_abstain_as_budget_exhausted() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_failure_spends_a_round_and_the_cutoff_ends_the_run_without_a_request() {
     let fixture = Fixture::open(CASES[0].sources);
     let mut peer = Peer::start().await;
@@ -887,7 +892,7 @@ async fn provider_failure_spends_a_round_and_the_cutoff_ends_the_run_without_a_r
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_protected_subject_abstains_by_policy_before_any_request() {
     let fixture = Fixture::open(&[Source {
         message: "sensitive subject text\n",
@@ -907,7 +912,7 @@ async fn a_protected_subject_abstains_by_policy_before_any_request() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalidation_after_disclosure_abstains_at_settlement() {
     let fixture = Fixture::open(CASES[0].sources);
     let mut peer = Peer::start().await;
@@ -956,7 +961,7 @@ async fn invalidation_after_disclosure_abstains_at_settlement() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt() {
     // A peer that accepts the request and never answers: the attempt hits its deadline after the body was sent, so the attempt is failed, not unknown; cancellation while it waits joins the run and leaves the receipt open.
     let fixture = Fixture::open(CASES[0].sources);
@@ -1038,7 +1043,7 @@ async fn an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_staged_subject_is_policy_blocked_for_a_remote_model_and_abstains() {
     // AE1: a default-Sensitive staged candidate never reaches a remote model; the run abstains by policy before any request.
     let mut fixture = Fixture::open(CASES[0].sources);
@@ -1086,7 +1091,7 @@ async fn a_staged_subject_is_policy_blocked_for_a_remote_model_and_abstains() {
     assert!(fixture.attempts().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inspections_are_charged_once_per_read_and_capped_per_job_and_per_batch() {
     // Two linked sources and a limit of three issued inspections: the subject is the first, the batch of two reads the second and third, and any further read is refused by the job cap, not the batch cap.
     let mut fixture = Fixture::open(CASES[4].sources);
@@ -1156,7 +1161,7 @@ fn case_marker(source: &Source) -> &str {
     &source.message[..source.message.len().min(30)]
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_citation_outside_the_disclosed_bytes_is_refused_before_binding() {
     let fixture = Fixture::open(CASES[2].sources);
     let mut peer = Peer::start().await;
@@ -1178,4 +1183,203 @@ async fn a_citation_outside_the_disclosed_bytes_is_refused_before_binding() {
         fixture.receipt().terminal,
         Some(CuratorReceiptTerminal::Abstained)
     );
+}
+
+/// A source whose message is `filler` repeated to `bytes`, behind a one-line lead that names the subject.
+fn large_source(lead: &str, filler: &str, bytes: usize) -> Source {
+    let mut message = String::from(lead);
+    while message.len() < bytes {
+        message.push_str(filler);
+    }
+    Source {
+        message: Box::leak(message.into_boxed_str()),
+        protected: false,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cutoff_lapsed_on_the_wall_clock_abstains_as_budget_exhausted_without_a_hold() {
+    // The receipt was begun ten minutes ago, so both the run's clock and the Kernel's wall clock agree the cutoff has passed: the Kernel refuses an execution hold that would expire in the past, and the run must still settle.
+    let started = now_ms() - 10 * 60 * 1_000;
+    let fixture = Fixture::open_at(CASES[0].sources, started);
+    let registration = fixture.registration();
+    for step in 1..4 {
+        fixture
+            .ledger
+            .renew_curator_task(
+                PROJECT,
+                &fixture.claim.claim_id,
+                "worker-a",
+                0,
+                registration,
+                started + step * 30_000,
+            )
+            .unwrap();
+    }
+    fixture
+        .clock
+        .store(fixture.receipt.execution_cutoff_ms + 1, Ordering::SeqCst);
+    let peer = Peer::start().await;
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(CuratorReceiptTerminal::Abstained)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_staged_subject_with_no_linked_references_abstains_by_policy() {
+    // With no evidence to protect there is no execution hold to acquire; the staged subject is still refused for a remote model and the run settles on that refusal.
+    let mut fixture = Fixture::open(CASES[6].sources);
+    assert!(fixture.input.starting_references.is_empty());
+    let reference = fixture
+        .store
+        .stage_review_input(kernel::ReviewStagingSpec {
+            extraction_run_id: "run-2".to_string(),
+            candidate_id: "subject-2".to_string(),
+            producer: "history-summarizer".to_string(),
+            binding: fixture.binding(),
+            payload: kernel::ReviewPayload::Subject(kernel::ReviewSubject {
+                facts: vec![kernel::ExtractedFact {
+                    text: "bun builds the workspace".to_string(),
+                    span: kernel::SourceSpan {
+                        alias: "s1".to_string(),
+                        start: 0,
+                        end: 4,
+                    },
+                }],
+            }),
+            recorded_at: fixture.now,
+            queue_deadline_at: fixture.now + 20 * 60 * 60 * 1_000,
+        })
+        .unwrap();
+    fixture
+        .store
+        .finish_staging_run(
+            "run-2",
+            kernel::StagingTerminalState::Completed,
+            fixture.now + 1,
+        )
+        .unwrap();
+    fixture.input.subject = ReviewTarget::StagedSubject {
+        kernel_incarnation: reference.database_incarnation_id,
+        candidate_id: reference.candidate_id,
+        payload_digest: reference.payload_digest,
+    };
+    let peer = Peer::start().await;
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::OwnerSensitive));
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(CuratorReceiptTerminal::Abstained)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversized_subject_abstains_as_budget_exhausted_before_any_request() {
+    // The subject alone exceeds the model-visible byte bound: a property of the job, not of the store, so the run settles instead of failing on every generation.
+    let subject = large_source(
+        "The workspace builds with bun; the build log follows.\n",
+        "bun install: resolved 1 package\n",
+        130 * 1024,
+    );
+    let fixture = Fixture::open(&[subject]);
+    let peer = Peer::start().await;
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert!(fixture.attempts().is_empty());
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(CuratorReceiptTerminal::Abstained)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_linked_reference_retired_before_the_run_abstains_as_expectation_changed() {
+    // The linked descriptor is gone before the run resolves it; the same condition after disclosure settles `expectation_changed`, and so must this one.
+    let fixture = Fixture::open(CASES[0].sources);
+    let object = fixture.sources[1].0.clone();
+    fixture
+        .store
+        .commit(intent("retire-linked-early"), |envelope| {
+            envelope.retire_observation(&object)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let peer = Peer::start().await;
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        settled,
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert!(fixture.attempts().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_that_never_left_the_host_does_not_charge_the_resend() {
+    // Q22: a 50 KiB subject fits the budget for one resend but not two. Round two's connection is refused before the handshake, so no byte left the host; round three must still be admitted.
+    let subject = large_source(
+        "The workspace builds with bun; the install log follows.\n",
+        "bun install: resolved 1 package\n",
+        50 * 1024,
+    );
+    let fixture = Fixture::open(&[subject, CASES[0].sources[1]]);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_turns(
+        vec![
+            Scripted::Respond(text_response(&fixture.expand(CASES[0].turns[0].0))),
+            Scripted::Refuse,
+            Scripted::Respond(text_response(
+                r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+            )),
+        ],
+        |_| Box::pin(async {}),
+    );
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    assert_eq!(server.await.unwrap().len(), 2, "two requests were answered");
+    assert_eq!(
+        peer.connections.load(Ordering::SeqCst),
+        3,
+        "the refused connection spent a round, not the byte budget"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_body_over_the_wire_bound_abstains_as_budget_exhausted() {
+    // Escape-heavy evidence: 48 KiB of raw bytes is within the render budget, but each ESC serializes as six JSON bytes, so the body exceeds the request bound before any byte leaves the host.
+    let subject = large_source(
+        "The workspace builds with bun; the terminal log follows.\n",
+        "\u{1b}",
+        48 * 1024,
+    );
+    let fixture = Fixture::open(&[subject]);
+    let peer = Peer::start().await;
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert!(fixture.attempts().is_empty());
 }
