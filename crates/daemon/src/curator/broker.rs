@@ -218,6 +218,22 @@ pub enum RefusalCode {
     Undecodable,
     #[error("invalid_cursor")]
     InvalidCursor,
+    #[error("invalid_path")]
+    InvalidPath,
+    #[error("protected")]
+    Protected,
+    #[error("not_regular_file")]
+    NotRegularFile,
+    #[error("confinement")]
+    Confinement,
+    #[error("unsupported")]
+    Unsupported,
+    #[error("not_found")]
+    NotFound,
+    #[error("too_large")]
+    TooLarge,
+    #[error("unavailable")]
+    Unavailable,
     #[error("unsupported_question")]
     UnsupportedQuestion,
     #[error("store")]
@@ -291,11 +307,10 @@ pub fn check_render(bytes: &[u8], alias: Option<&Alias>) -> Result<(), Refusal> 
 }
 
 /// The whole-artifact form of [`check_render`]: an artifact may exceed the scanner's single-pass input limit, so secrets are detected in windows, the same way ingest checked the bytes. A scan that cannot prove the buffer secret-free refuses.
-fn check_whole_artifact(bytes: &[u8], alias: &Alias) -> Result<(), Refusal> {
-    let text =
-        std::str::from_utf8(bytes).map_err(|_| refuse(Some(alias), RefusalCode::Undecodable))?;
+pub(crate) fn check_whole_artifact(bytes: &[u8], alias: Option<&Alias>) -> Result<(), Refusal> {
+    let text = std::str::from_utf8(bytes).map_err(|_| refuse(alias, RefusalCode::Undecodable))?;
     if contains_redaction_marker(text) || detect_windowed_durable_bytes(bytes) != Ok(false) {
-        return Err(refuse(Some(alias), RefusalCode::RenderCheck));
+        return Err(refuse(alias, RefusalCode::RenderCheck));
     }
     Ok(())
 }
@@ -444,14 +459,20 @@ impl InvestigationAccounting {
 
     /// Admits one operation of the current batch; refused-after-admission operations count, decode-rejected steps do not.
     pub fn admit_operation(&mut self, alias: Option<&Alias>) -> Result<(), Refusal> {
+        self.admit_check(alias)?;
+        self.batch_operations += 1;
+        self.issued_inspections += 1;
+        Ok(())
+    }
+
+    /// The refusal [`Self::admit_operation`] would give right now, without admitting anything; a caller that must do work before its operation is admitted asks first so a refused operation costs nothing.
+    pub fn admit_check(&self, alias: Option<&Alias>) -> Result<(), Refusal> {
         if self.batch_operations >= MAX_OPERATIONS_PER_BATCH {
             return Err(refuse(alias, RefusalCode::BatchLimit));
         }
         if self.issued_inspections >= self.max_inspections {
             return Err(refuse(alias, RefusalCode::InspectionLimit));
         }
-        self.batch_operations += 1;
-        self.issued_inspections += 1;
         Ok(())
     }
 
@@ -605,6 +626,22 @@ impl EvidenceBroker {
         &self.binding.hold_id
     }
 
+    /// The run's Kernel-side bindings.
+    pub fn binding(&self) -> &RunBinding {
+        &self.binding
+    }
+
+    /// The refusal a disclosure would meet at the run's batch and inspection ceilings right now, without admitting anything. A caller that must store or hold before its read asks here first so a refused read costs nothing; a refusal that truncates the evidence set marks the ledger partial, as the read itself would have.
+    pub fn admit_check(&mut self, alias: Option<&Alias>) -> Result<(), Refusal> {
+        let result = self.accounting.admit_check(alias);
+        if let Err(refusal) = &result
+            && refusal.code.truncates_evidence()
+        {
+            self.ledger.record_partial_disclosure();
+        }
+        result
+    }
+
     /// Renders host-authored text under the same render check; it is tagged and uncharged (Q22).
     pub fn render_host_text(&self, text: &str) -> Result<RenderedBuffer, Refusal> {
         check_render(text.as_bytes(), None)?;
@@ -720,7 +757,7 @@ impl EvidenceBroker {
                     return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
                 }
                 let mut held =
-                    self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
+                    self.hold_evidence(store, Some(&alias), evidence_id, artifact_digest, now_ms)?;
                 if held.byte_length != *byte_length
                     || held.retention_class != CURATOR_CAPTURE_RETENTION_CLASS
                     || held.retain_until != Some(*retain_until)
@@ -769,7 +806,7 @@ impl EvidenceBroker {
                 }
                 let range = span_range(&alias, detail.span, range)?;
                 let mut held =
-                    self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
+                    self.hold_evidence(store, Some(&alias), evidence_id, artifact_digest, now_ms)?;
                 let (bytes, loaded) = self.load_range(store, &alias, &mut held, range, now_ms)?;
                 let judged = if loaded {
                     self.judge(
@@ -801,7 +838,7 @@ impl EvidenceBroker {
                 let judgement = self.judge_canonical_source(store, Some(&alias), &expectation)?;
                 let range = span_range(&alias, judgement.detail.span, range)?;
                 let mut held =
-                    self.hold_evidence(store, &alias, evidence_id, artifact_digest, now_ms)?;
+                    self.hold_evidence(store, Some(&alias), evidence_id, artifact_digest, now_ms)?;
                 let (bytes, loaded) = self.load_range(store, &alias, &mut held, range, now_ms)?;
                 let judgement = if loaded {
                     self.judge_canonical_source(store, Some(&alias), &expectation)?
@@ -959,18 +996,35 @@ impl EvidenceBroker {
         Ok(())
     }
 
-    /// Checks the destination verdict on the expected digest, grows the execution hold over the artifact, and returns the held facts, which must carry that digest. The verdict comes first so a policy-blocked artifact is never pinned or charged against the hold's backing; an artifact already extended in this run skips the writer transaction and is still validated against the live hold.
-    fn hold_evidence(
+    /// Checks the destination verdict on the expected digest, grows the execution hold over the artifact, and returns the held facts, which must carry that digest. The verdict comes first so a policy-blocked artifact is never pinned or charged against the hold's backing; an artifact already extended in this run skips the writer transaction and is still validated against the live hold. A hold capacity refusal truncates the evidence set whichever caller asked, so it marks the ledger partial here, before any read.
+    pub(crate) fn hold_evidence(
         &mut self,
         store: &KernelStore,
-        alias: &Alias,
+        alias: Option<&Alias>,
+        evidence_id: &str,
+        artifact_digest: &str,
+        now_ms: i64,
+    ) -> Result<HeldEvidence, Refusal> {
+        let result = self.hold_evidence_inner(store, alias, evidence_id, artifact_digest, now_ms);
+        if let Err(refusal) = &result
+            && refusal.code.truncates_evidence()
+        {
+            self.ledger.record_partial_disclosure();
+        }
+        result
+    }
+
+    fn hold_evidence_inner(
+        &mut self,
+        store: &KernelStore,
+        alias: Option<&Alias>,
         evidence_id: &str,
         artifact_digest: &str,
         now_ms: i64,
     ) -> Result<HeldEvidence, Refusal> {
         self.egress_allowed(
             store,
-            Some(alias),
+            alias,
             &ArtifactHandle {
                 digest: artifact_digest.to_string(),
                 evidence_id: evidence_id.to_string(),
@@ -983,7 +1037,7 @@ impl EvidenceBroker {
                     &self.binding.hold,
                     std::slice::from_ref(&evidence_id.to_string()),
                 )
-                .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
+                .map_err(|error| refuse(alias, hold_refusal(error)))?;
             self.extended.insert(evidence_id.to_string());
         }
         let mut held = store
@@ -994,13 +1048,13 @@ impl EvidenceBroker {
                 std::slice::from_ref(&evidence_id.to_string()),
                 now_ms,
             )
-            .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
+            .map_err(|error| refuse(alias, hold_refusal(error)))?;
         let held = held
             .pop()
-            .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
+            .ok_or_else(|| refuse(alias, RefusalCode::HoldInvalid))?;
         // The verdict above was on the expected digest; the evidence must actually carry it.
         if held.artifact_digest != artifact_digest {
-            return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
+            return Err(refuse(alias, RefusalCode::ExpectationChanged));
         }
         Ok(held)
     }
@@ -1092,7 +1146,7 @@ impl EvidenceBroker {
                 .buffers
                 .slice(&held.artifact_digest, 0..held.byte_length)
                 .map_err(|_| refuse(Some(alias), RefusalCode::ExpectationChanged))?;
-            if let Err(refusal) = check_whole_artifact(whole, alias) {
+            if let Err(refusal) = check_whole_artifact(whole, Some(alias)) {
                 self.refused_artifacts.insert(held.artifact_digest.clone());
                 return Err(refusal);
             }
@@ -1225,7 +1279,7 @@ fn staged_refusal(error: ReviewReadError) -> RefusalCode {
     }
 }
 
-fn hold_refusal(error: CuratorHoldError) -> RefusalCode {
+pub(crate) fn hold_refusal(error: CuratorHoldError) -> RefusalCode {
     match error {
         CuratorHoldError::Refused(kernel::CuratorHoldRefusal::UnavailableEvidence)
         | CuratorHoldError::Refused(kernel::CuratorHoldRefusal::NotCovered) => {

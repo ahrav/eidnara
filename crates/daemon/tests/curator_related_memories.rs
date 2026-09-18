@@ -4,9 +4,10 @@ use daemon::curator::broker::{
     EvidenceBroker, MAX_OPERATIONS_PER_BATCH, QuestionTemplate, RefusalCode, RunBinding,
 };
 use daemon::curator::related_memories::{
-    Completeness, MAX_EXCERPT_BYTES, MAX_PAGE_PROBE_BYTES, MAX_PROBE_ARTIFACT_BYTES,
-    MAX_RELATED_CANDIDATES_PER_PAGE, MAX_RELATED_PAGE_HITS, RelatedHit, RelatedMemoryDiscovery,
+    MAX_PAGE_PROBE_BYTES, MAX_PROBE_ARTIFACT_BYTES, MAX_RELATED_CANDIDATES_PER_PAGE,
+    MAX_RELATED_PAGE_HITS, RelatedHit, RelatedMemoryDiscovery,
 };
+use daemon::curator::{Completeness, MAX_EXCERPT_BYTES};
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::{Occurrence, Span};
 use kernel::{

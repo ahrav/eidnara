@@ -29,7 +29,7 @@ pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 /// overlapping findings merge into detections; the scan stops at the cap.
 pub(super) const MAX_PAYLOAD_DETECTIONS: usize = 4096;
 /// Maximum UTF-8 byte length of each artifact text field.
-pub(super) const MAX_TEXT_FIELD_BYTES: usize = 1024;
+pub const MAX_TEXT_FIELD_BYTES: usize = 1024;
 
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
