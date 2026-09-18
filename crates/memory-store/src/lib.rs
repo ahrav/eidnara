@@ -15062,9 +15062,13 @@ fn compress_bytes(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     encoder.finish()
 }
 
-/// Inflates a retained publication, bounded by the inflated transcript envelope plus its serialized siblings; a payload that would grow past it is refused rather than read.
+/// Inflated bound of one retained publication: the inflated transcript envelope and its serialized siblings. The writer bounds each of the three text fields at `MAX_DURABLE_TEXT_BYTES`, so a payload it stores always inflates inside this bound; a row that does not was not written by it.
+const MAX_PENDING_PUBLICATION_INFLATED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_INFLATED_BYTES * 4;
+const _: () = assert!(3 * MAX_DURABLE_TEXT_BYTES < MAX_PENDING_PUBLICATION_INFLATED_BYTES);
+
+/// Inflates a retained publication, bounded by `MAX_PENDING_PUBLICATION_INFLATED_BYTES`; a payload that would grow past it is refused rather than read.
 fn decompress_bytes(blob: &[u8]) -> std::io::Result<Vec<u8>> {
-    let bound = (MAX_CHUNK_TRANSCRIPT_INFLATED_BYTES as u64).saturating_mul(4);
+    let bound = MAX_PENDING_PUBLICATION_INFLATED_BYTES as u64;
     let mut out = Vec::new();
     DeflateDecoder::new(blob)
         .take(bound + 1)
@@ -21501,6 +21505,41 @@ mod tests {
             None
         );
         assert_eq!(store.load_pending_publication("ses").unwrap(), None);
+    }
+
+    /// The writer bounds every text field at the durable text limit, so a payload the reader could not inflate is refused before it is stored and recovery never finds a row it must settle as unreadable.
+    #[test]
+    fn a_retained_publication_past_the_inflated_bound_is_not_retainable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        // Many small, repetitive alias entries: far past the inflated bound, well inside the compressed one.
+        let aliases: Vec<serde_json::Value> = (0..40_000)
+            .map(|index| serde_json::json!({"alias": format!("s{index}"), "presented": "the same sentence again and again"}))
+            .collect();
+        let pending = PendingPublication {
+            validated_json: "{}".to_string(),
+            aliases_json: serde_json::to_string(&aliases).unwrap(),
+            chunk_transcript: "U: retained".to_string(),
+            boundary_dates: BTreeMap::new(),
+            publication_floor_ordinal: 3,
+            collect_user_memory_candidates: false,
+            created_at_ms: 1,
+        };
+        assert!(pending.aliases_json.len() > MAX_PENDING_PUBLICATION_INFLATED_BYTES);
+        assert!(
+            compress_bytes(&serde_json::to_vec(&pending).unwrap())
+                .unwrap()
+                .len()
+                < MAX_PENDING_PUBLICATION_COMPRESSED_BYTES
+        );
+        assert!(
+            !store
+                .pending_publication_retainable("ses", &pending)
+                .unwrap()
+        );
     }
 
     /// Q31: the nonadmission code commits only with the history it accompanies, the count only grows, the latest reason is bound to the firing that produced it, and neither a failed publication nor a resent one moves them.
