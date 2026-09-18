@@ -1987,6 +1987,8 @@ fn a_hold_ended_between_lookup_and_validation_reads_as_the_review_expiring() {
     for ending in ["release", "purge"] {
         let fixture = Fixture::open();
         let broker = fixture.broker(1);
+        // Publication requires a completed attempt on the receipt.
+        fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
         let evidence = fixture.evidence_id();
         let Settled::Published(reference) = fixture
             .settle(
