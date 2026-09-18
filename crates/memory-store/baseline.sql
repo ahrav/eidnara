@@ -466,6 +466,18 @@ CREATE TABLE curator_frozen_selections (
 CREATE INDEX idx_curator_frozen_selections_state
             ON curator_frozen_selections(project, state, selection_deadline_ms);
 
+-- One keyset continuation per project and selection task: where the next
+-- selection resumes. It advances in the same transaction that enqueues a
+-- page or completes an empty slot, never on a deferred or expired page, and a
+-- NULL cursor means the last pass reached the end so the next one starts over.
+CREATE TABLE curator_selection_cursors (
+            project TEXT NOT NULL CHECK (length(project) > 0),
+            slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),
+            cursor TEXT CHECK (cursor IS NULL OR length(cursor) <= 512),
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (project, slot_id)
+        );
+
 CREATE TRIGGER curator_frozen_selections_reject_secret_insert
 BEFORE INSERT ON curator_frozen_selections
 BEGIN SELECT reject_transaction_text(NEW.page_json); END;

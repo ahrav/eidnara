@@ -14741,6 +14741,50 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
         &self.store
     }
 
+    /// The production selector: the project's live canonical descriptors, judged through the Kernel, minus targets that already have a review job. The Kernel scope is the bound route's; the ledger project is the authority project the slot is leased under.
+    fn select_review_page(
+        &self,
+        project: &memory_classifier_scheduler::ScheduledProject,
+        cursor: Option<&str>,
+    ) -> Result<memory_store::curator_jobs::FrozenSelectionPage, String> {
+        let binding = self
+            .binding_for_root(&project.route_root)
+            .ok_or_else(|| "no live route is bound to the project".to_string())?;
+        let kernel = self
+            .memory_classifier
+            .kernel
+            .kernel_store()
+            .map_err(|outcome| format!("kernel unavailable: {outcome:?}"))?;
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(30)),
+            Arc::default(),
+        );
+        // The policies a review depends on: a change to either permits one new job at an unchanged target (Q25/Q29).
+        let policy_versions = BTreeMap::from([
+            (
+                "question_template".to_string(),
+                curator::broker::QuestionTemplate::ExtractedFacts.revision(),
+            ),
+            (
+                "step_schema".to_string(),
+                curator::steps::STEP_VERSION.to_string(),
+            ),
+        ]);
+        curator::selection::select_review_targets(
+            &kernel,
+            &self.store,
+            &curator::selection::SelectionScope {
+                project: binding.kernel_project.scope(),
+                project_digest: &project.project,
+                classes: curator::selection::MEMORY_CLASSES,
+                policy_versions: &policy_versions,
+            },
+            cursor,
+            &budget,
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// The newest root speaks for a project: roots collapse by project before
     /// the winner's schedule is read, so a newest binding without a schedule
     /// unschedules the project.
@@ -14812,6 +14856,12 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
             memory_classifier_scheduler::ScheduledTask::MessageIndexCleanup => {
                 return memory_classifier_scheduler::TaskRunOutcome::NotRunnable {
                     reason: "message-index cleanup has no production enable path".to_string(),
+                };
+            }
+            // Selection runs through its own slot path, never through the classify protocol.
+            memory_classifier_scheduler::ScheduledTask::CuratorReviewSelection => {
+                return memory_classifier_scheduler::TaskRunOutcome::NotRunnable {
+                    reason: "curator selection is not a classify task".to_string(),
                 };
             }
             memory_classifier_scheduler::ScheduledTask::ReviewUserMemories => {}

@@ -58,6 +58,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "curator_frozen_selections"),
     ("table", "curator_jobs"),
     ("table", "curator_receipts"),
+    ("table", "curator_selection_cursors"),
     ("table", "curator_store_identity"),
     ("table", "facade_mutation_ledger"),
     ("table", "fence"),
