@@ -802,6 +802,22 @@ pub fn finish_curator_job_in_tx(
     Ok(job)
 }
 
+/// Closes every `Reserved` row of `causal_identity`, in any project, as a session reset drops the reservation that named it: expired past its deadline, not admitted otherwise. The identity carries the session, so no other session's job matches. Returns how many rows closed.
+pub(crate) fn close_reserved_jobs_of_identity_tx(
+    conn: &GuardedConn<'_>,
+    causal_identity: &str,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE curator_jobs
+            SET state = 'terminal',
+                outcome = CASE WHEN queue_deadline_ms <= ?2 THEN 'expired' ELSE 'nonadmitted' END,
+                allowance_bytes = 0, input_json = NULL, updated_at_ms = ?2
+          WHERE causal_identity = ?1 AND state = 'reserved'",
+        params![causal_identity, now_ms],
+    )
+}
+
 /// Closes a `Reserved` row whose queue deadline has passed with the same `expired` outcome the sweep would record, so an activation that finds its reservation expired can close it eagerly without the outcome depending on whether the sweep ran first. A row still inside its deadline, already terminal, or past reservation is refused.
 pub fn expire_reserved_curator_job_in_tx(
     conn: &GuardedConn<'_>,

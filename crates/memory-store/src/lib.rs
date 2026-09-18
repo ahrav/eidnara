@@ -10833,8 +10833,15 @@ impl MemoryStore {
                 "DELETE FROM history_summarizer_side_channel_outbox WHERE session_id = ?1",
                 params![session_id],
             )?;
-            // The reset metadata records no reservation, so nothing could consume the retained publication.
+            // The reset metadata records no reservation, so nothing could consume the retained publication or find the job it named; both go with the reset.
             delete_pending_publication_tx(tx, session_id)?;
+            if let Some(reservation) = prior_meta.history_summarizer.curator_reservation.as_ref() {
+                curator_jobs::close_reserved_jobs_of_identity_tx(
+                    tx,
+                    &reservation.causal_identity,
+                    current_time_ms(),
+                )?;
+            }
             let next_version = current as u64 + 1;
             tx.execute(
                 "UPDATE cache_state
@@ -21505,6 +21512,85 @@ mod tests {
             None
         );
         assert_eq!(store.load_pending_publication("ses").unwrap(), None);
+    }
+
+    /// A full-session reset closes the job the dropped reservation named, so a reset during a retained firing does not hold a Curator slot until the queue deadline.
+    #[test]
+    fn a_session_reset_closes_the_reserved_job() {
+        use curator_jobs::{
+            CausalInputs, CuratorJobOutcome, CuratorJobState, ProducerBinding, ReserveOutcome,
+            ReviewTarget,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            history_summarizer: HistorySummarizerDurableState {
+                state: HistorySummarizerPhase::Publishing,
+                firing_seq: 1,
+                ..HistorySummarizerDurableState::default()
+            },
+            ..ModuleMeta::default()
+        };
+        let row_version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let producer = ProducerBinding {
+            producer: "history_summarizer".to_string(),
+            firing_id: "ses#1".to_string(),
+            ordinal: 1,
+        };
+        let inputs = CausalInputs {
+            target: ReviewTarget::StagedSubject {
+                kernel_incarnation: "0a".repeat(16),
+                candidate_id: "hs-ses-candidate".to_string(),
+                payload_digest: "0d".repeat(32),
+            },
+            question_template: "extracted_facts".to_string(),
+            signals: Vec::new(),
+            required_evidence: Vec::new(),
+            policy_versions: BTreeMap::from([("disclosure".to_string(), "3".to_string())]),
+        };
+        let ReserveOutcome::Reserved(job) = store
+            .reserve_curator_job("proj", &producer, &inputs, current_time_ms())
+            .unwrap()
+        else {
+            panic!("a fresh reservation");
+        };
+        store
+            .record_curator_reservation(
+                "ses",
+                row_version,
+                &CuratorReservation {
+                    firing_seq: 1,
+                    causal_identity: job.causal_identity.clone(),
+                    candidate_id: "hs-ses-candidate".to_string(),
+                    payload_digest: "0d".repeat(32),
+                    kernel_incarnation: "0a".repeat(16),
+                    queue_deadline_ms: job.queue_deadline_ms,
+                },
+                &PendingPublication {
+                    validated_json: "{}".to_string(),
+                    aliases_json: "{}".to_string(),
+                    chunk_transcript: "U: retained".to_string(),
+                    boundary_dates: BTreeMap::new(),
+                    publication_floor_ordinal: 3,
+                    collect_user_memory_candidates: false,
+                    created_at_ms: 1,
+                },
+            )
+            .unwrap();
+        let row_version = store.load("ses").unwrap().row_version;
+        store.reset_session_for_recomp("ses", row_version).unwrap();
+        assert_eq!(store.load_pending_publication("ses").unwrap(), None);
+        assert_eq!(
+            store
+                .lookup_curator_job("proj", &job.causal_identity)
+                .unwrap()
+                .unwrap()
+                .state,
+            CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+        );
     }
 
     /// The writer bounds every text field at the durable text limit, so a payload the reader could not inflate is refused before it is stored and recovery never finds a row it must settle as unreadable.

@@ -2758,3 +2758,30 @@ fn a_firing_holding_its_reservation_does_not_take_back_a_job_another_firing_adop
     assert!(matches!(handoff, Handoff::Settled), "{handoff:?}");
     assert_eq!(rig.job(&prepared.causal_identity).producer, adopter);
 }
+
+#[test]
+fn a_recovery_clocked_before_the_deadline_still_publishes_a_job_the_sweep_expired() {
+    // The pass captured its clock just before the deadline; by the time it looks the job up, the sweep has closed it as expired. The terminal state proves the deadline passed: the retained history publishes through the expiry path instead of being discarded.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    let (jobs, _) = rig
+        .store
+        .expire_curator_work(reservation.queue_deadline_ms + 1)
+        .unwrap();
+    assert_eq!(jobs, 1);
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), reservation.queue_deadline_ms - 1),
+        RepublishOutcome::Published
+    );
+    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+}

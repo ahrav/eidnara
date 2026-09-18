@@ -854,7 +854,14 @@ pub fn republish_reserved(
     if !memory_enabled {
         return settle("memory is disabled");
     }
-    let expired = reservation.queue_deadline_ms <= now_ms;
+    // A job the sweep already closed as expired proves the deadline passed, whatever clock this pass was given before it was spawned.
+    let job = store
+        .lookup_curator_job(project_path, &reservation.causal_identity)
+        .map_err(HistorySummarizerStateError::Store)?;
+    let swept_expired = job
+        .as_ref()
+        .is_some_and(|job| job.state == CuratorJobState::Terminal(CuratorJobOutcome::Expired));
+    let expired = swept_expired || reservation.queue_deadline_ms <= now_ms;
     // Before the deadline the subject must be verified through the Kernel, so without a target nothing can be decided and the payload is not worth reading.
     let target = match (expired, curator_handoff) {
         (true, _) => None,
@@ -870,19 +877,11 @@ pub fn republish_reserved(
         }
     };
     // Recovery publishes only against the job the reservation names, as this firing reserved it. A job that is gone under the current authority, reserved for another firing (which adopted it), or already past reservation is not replaced, rebound, or waited for: the reservation settles and the firing refires under the current configuration. Past the deadline a job the sweep already closed still publishes, recording the expiry.
-    let names_reserved_job = match store
-        .lookup_curator_job(project_path, &reservation.causal_identity)
-        .map_err(HistorySummarizerStateError::Store)?
-    {
-        Some(job) => match job.state {
-            CuratorJobState::Reserved => {
-                handoff::firing_id_names(&job.producer, reservation.firing_seq)
-            }
-            CuratorJobState::Terminal(CuratorJobOutcome::Expired) => expired,
-            _ => false,
-        },
-        None => false,
-    };
+    let names_reserved_job = swept_expired
+        || job.as_ref().is_some_and(|job| {
+            job.state == CuratorJobState::Reserved
+                && handoff::firing_id_names(&job.producer, reservation.firing_seq)
+        });
     if !names_reserved_job {
         return settle("the reservation no longer names a job this firing can publish");
     }
