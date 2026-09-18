@@ -340,8 +340,8 @@ fn a_read_captures_exact_bytes_once_with_typed_detail_and_a_charged_hold() {
             fixture.now,
         )
         .unwrap();
-    assert_eq!(read.buffer.bytes, body.as_bytes()[3..12]);
-    assert_eq!(read.buffer.tag.charged_bytes, 9);
+    assert_eq!(read.buffer.bytes(), &body.as_bytes()[3..12]);
+    assert_eq!(read.buffer.tag().charged_bytes, 9);
     let rows = fixture.capture_rows();
     assert_eq!(rows.len(), 1, "one capture row");
     let (evidence_id, digest, retain_until, sensitivity, egress) = rows[0].clone();
@@ -401,7 +401,7 @@ fn a_read_captures_exact_bytes_once_with_typed_detail_and_a_charged_hold() {
             fixture.now,
         )
         .unwrap();
-    assert_eq!(again.buffer.bytes, body.as_bytes());
+    assert_eq!(again.buffer.bytes(), body.as_bytes());
     assert_eq!(fixture.capture_rows().len(), 1);
     assert_ne!(again.alias, read.alias);
     assert_eq!(
@@ -554,7 +554,7 @@ fn oversized_undecodable_and_secret_bearing_files_are_refused_before_any_write()
             fixture.now,
         )
         .unwrap();
-    assert_eq!(read.buffer.bytes, b"yyyyyyyy");
+    assert_eq!(read.buffer.bytes(), b"yyyyyyyy");
     assert_eq!(fixture.capture_rows().len(), 1);
 }
 
@@ -912,7 +912,7 @@ fn an_empty_file_that_matches_by_name_is_a_hit_with_an_empty_excerpt() {
             fixture.now,
         )
         .unwrap();
-    assert!(read.buffer.bytes.is_empty());
+    assert!(read.buffer.bytes().is_empty());
     let direct = text
         .read(
             &fixture.store,
@@ -922,7 +922,7 @@ fn an_empty_file_that_matches_by_name_is_a_hit_with_an_empty_excerpt() {
             fixture.now,
         )
         .unwrap();
-    assert!(direct.buffer.bytes.is_empty());
+    assert!(direct.buffer.bytes().is_empty());
     assert_eq!(
         fixture.capture_rows().len(),
         1,
@@ -2339,7 +2339,7 @@ fn an_invalid_range_is_refused_before_anything_is_captured() {
             fixture.now,
         )
         .unwrap();
-    assert_eq!(read.buffer.bytes, b"twelve");
+    assert_eq!(read.buffer.bytes(), b"twelve");
 }
 
 #[test]

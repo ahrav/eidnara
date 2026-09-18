@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use context_core::curator_policy_union::{PolicyUnion, PolicyUnionMember};
 use context_core::redaction::{
@@ -290,11 +291,27 @@ pub struct JudgedAt {
     pub tip: i64,
 }
 
-/// Rendered bytes with their tag; the bytes are owned by the render and borrowed by the assembler.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Rendered bytes, their tag, and the identity of the broker that rendered them. The bytes are owned by the render and moved into the assembler once, so a buffer cannot enter a body more times than the broker charged it; the broker stamp lets the assembler refuse a buffer another broker admitted, since aliases are broker-local and two brokers over one hold can both issue `ref-1`.
+#[derive(Debug, PartialEq, Eq)]
 pub struct RenderedBuffer {
-    pub bytes: Vec<u8>,
-    pub tag: ProvenanceTag,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) tag: ProvenanceTag,
+    pub(crate) broker: BrokerId,
+}
+
+impl RenderedBuffer {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn tag(&self) -> &ProvenanceTag {
+        &self.tag
+    }
+
+    /// The broker that rendered this buffer.
+    pub fn broker(&self) -> BrokerId {
+        self.broker
+    }
 }
 
 /// Detection-only render check over bytes about to be rendered: a secret or a redaction placeholder refuses disclosure (Q7). Host-authored text passes through the same check so a template can never carry protected text. Rendered ranges are bounded by [`MAX_MODEL_VISIBLE_BYTES`], well inside the scanner's single-pass input limit.
@@ -532,7 +549,7 @@ pub(crate) enum Probed {
 }
 
 /// What one successful read returns to the coordinator: the rendered buffer, the origin key two forms of one decision share, and the lineage member the disclosure added.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct EvidenceRead {
     pub alias: Alias,
     pub buffer: RenderedBuffer,
@@ -551,8 +568,15 @@ pub struct RunBinding {
     pub destination: ArtifactDestination,
 }
 
+/// Process-local identity of one broker: its alias table's. A hold id cannot serve, because the Kernel hands the same live hold back to every acquisition under one binding, so two brokers over one hold would share it while their aliases name different evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BrokerId(u64);
+
+static NEXT_BROKER: AtomicU64 = AtomicU64::new(1);
+
 /// The broker: aliases, accounting, buffers, ledger, and the reads that tie them to Kernel expectations.
 pub struct EvidenceBroker {
+    id: BrokerId,
     pub aliases: AliasTable,
     pub accounting: InvestigationAccounting,
     pub buffers: RunBufferMap,
@@ -584,6 +608,7 @@ impl EvidenceBroker {
     pub fn new(binding: RunBinding, question: QuestionTemplate) -> Result<Self, KernelError> {
         let project = ProjectScope::new(&binding.hold.project_digest)?;
         Ok(Self {
+            id: BrokerId(NEXT_BROKER.fetch_add(1, Ordering::Relaxed)),
             aliases: AliasTable::default(),
             accounting: InvestigationAccounting::new(),
             buffers: RunBufferMap::new(MAX_RUN_BUFFER_BYTES),
@@ -626,6 +651,11 @@ impl EvidenceBroker {
         &self.binding.hold_id
     }
 
+    /// This broker's identity, stamped on every buffer it renders.
+    pub fn id(&self) -> BrokerId {
+        self.id
+    }
+
     /// The run's Kernel-side bindings.
     pub fn binding(&self) -> &RunBinding {
         &self.binding
@@ -654,6 +684,7 @@ impl EvidenceBroker {
                 verdict: None,
                 charged_bytes: 0,
             },
+            broker: self.id,
         })
     }
 
@@ -776,47 +807,20 @@ impl EvidenceBroker {
                 )
             }
             ReferenceExpectation::NativeSource {
-                object_id,
                 class,
-                source_revision,
                 artifact_digest,
                 evidence_id,
-                occurrence_tuple,
+                ..
             } => {
-                // A decision-derived class resolves only through its originating decision; issued as native it would outlive a retraction.
-                if decision_derived(*class) {
-                    return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
-                }
-                let judged = self.judge(
-                    store,
-                    Some(&alias),
-                    object_id,
-                    *source_revision,
-                    artifact_digest,
-                    None,
-                )?;
-                let (detail, descriptor_class) =
-                    self.descriptor(store, Some(&alias), object_id, judged.tip)?;
-                if detail.class != class.code()
-                    || detail.occurrence_tuple != *occurrence_tuple
-                    || detail.artifact_digest != *artifact_digest
-                    || detail.evidence_id != *evidence_id
-                {
-                    return Err(refuse(Some(&alias), RefusalCode::ExpectationChanged));
-                }
+                let (judged, detail, descriptor_class) =
+                    self.judge_native_source(store, Some(&alias), &expectation)?;
                 let range = span_range(&alias, detail.span, range)?;
                 let mut held =
                     self.hold_evidence(store, Some(&alias), evidence_id, artifact_digest, now_ms)?;
                 let (bytes, loaded) = self.load_range(store, &alias, &mut held, range, now_ms)?;
                 let judged = if loaded {
-                    self.judge(
-                        store,
-                        Some(&alias),
-                        object_id,
-                        *source_revision,
-                        artifact_digest,
-                        None,
-                    )?
+                    self.judge_native_source(store, Some(&alias), &expectation)?
+                        .0
                 } else {
                     judged
                 };
@@ -871,6 +875,7 @@ impl EvidenceBroker {
                     verdict,
                     charged_bytes: charged,
                 },
+                broker: self.id,
             },
             alias,
             origin_key,
@@ -925,6 +930,149 @@ impl EvidenceBroker {
                 .ok_or_else(|| refuse(None, RefusalCode::ExpectationChanged))?,
         };
         Ok(Probed::Bytes { bytes, selected })
+    }
+
+    /// Judges a native descriptor and checks the live descriptor detail against the expectation's class, identity tuple, digest, and evidence. A decision-derived class is refused here: it resolves only through its originating decision, and issued as native it would outlive a retraction. Any other expectation kind is refused as unsupported. Returns the judgement, the detail, and the descriptor's own class.
+    fn judge_native_source(
+        &self,
+        store: &KernelStore,
+        alias: Option<&Alias>,
+        expectation: &ReferenceExpectation,
+    ) -> Result<(JudgedAt, SourceDescriptorDetail, Sensitivity), Refusal> {
+        let ReferenceExpectation::NativeSource {
+            object_id,
+            class,
+            source_revision,
+            artifact_digest,
+            evidence_id,
+            occurrence_tuple,
+        } = expectation
+        else {
+            return Err(refuse(alias, RefusalCode::UnsupportedQuestion));
+        };
+        if decision_derived(*class) {
+            return Err(refuse(alias, RefusalCode::ExpectationChanged));
+        }
+        let judged = self.judge(
+            store,
+            alias,
+            object_id,
+            *source_revision,
+            artifact_digest,
+            None,
+        )?;
+        let (detail, descriptor_class) = self.descriptor(store, alias, object_id, judged.tip)?;
+        if detail.class != class.code()
+            || detail.occurrence_tuple != *occurrence_tuple
+            || detail.artifact_digest != *artifact_digest
+            || detail.evidence_id != *evidence_id
+        {
+            return Err(refuse(alias, RefusalCode::ExpectationChanged));
+        }
+        Ok((judged, detail, descriptor_class))
+    }
+
+    /// Re-judges one disclosed reference at `now` (never earlier than the wall clock) without loading, holding, or charging anything: the same Kernel expectation, scope, hold, and egress checks `read` applied, so a reference reclassified, retired, or expired since it was rendered refuses before the prepared body is disclosed. Returns the evidence id the reference names, when it names one; the caller validates the execution hold over the whole set.
+    pub fn revalidate(
+        &self,
+        store: &KernelStore,
+        alias: &str,
+        now_ms: i64,
+    ) -> Result<Option<String>, Refusal> {
+        let now_ms = now_ms.max(crate::now_ms());
+        let (alias, expectation) = self.aliases.resolve(alias)?;
+        match expectation {
+            ReferenceExpectation::StagedSubject { reference, binding } => {
+                if binding.project_digest != self.binding.hold.project_digest
+                    || !matches!(&binding.owner, ReviewOwner::Job { job_id } if *job_id == self.binding.hold.subject)
+                {
+                    return Err(refuse(Some(alias), RefusalCode::Scope));
+                }
+                store
+                    .validate_held_evidence(
+                        &self.binding.hold_id,
+                        CuratorHoldKind::Execution,
+                        &self.binding.hold,
+                        &[],
+                        now_ms,
+                    )
+                    .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
+                let row = store
+                    .read_review_input(reference, binding, now_ms)
+                    .map_err(|error| refuse(Some(alias), staged_refusal(error)))?;
+                self.gate_destination(alias, row.sensitivity)?;
+                Ok(None)
+            }
+            ReferenceExpectation::TemporaryCapture {
+                evidence_id,
+                artifact_digest,
+                byte_length,
+                retain_until,
+            } => {
+                if *retain_until <= now_ms {
+                    return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
+                }
+                let held = store
+                    .validate_held_evidence(
+                        &self.binding.hold_id,
+                        CuratorHoldKind::Execution,
+                        &self.binding.hold,
+                        std::slice::from_ref(evidence_id),
+                        now_ms,
+                    )
+                    .map_err(|error| refuse(Some(alias), hold_refusal(error)))?
+                    .pop()
+                    .ok_or_else(|| refuse(Some(alias), RefusalCode::HoldInvalid))?;
+                if held.artifact_digest != *artifact_digest
+                    || held.byte_length != *byte_length
+                    || held.retention_class != CURATOR_CAPTURE_RETENTION_CLASS
+                    || held.retain_until != Some(*retain_until)
+                {
+                    return Err(refuse(Some(alias), RefusalCode::ExpectationChanged));
+                }
+                self.egress_allowed(
+                    store,
+                    Some(alias),
+                    &ArtifactHandle {
+                        digest: artifact_digest.clone(),
+                        evidence_id: evidence_id.clone(),
+                    },
+                )?;
+                Ok(Some(evidence_id.clone()))
+            }
+            ReferenceExpectation::NativeSource {
+                artifact_digest,
+                evidence_id,
+                ..
+            } => {
+                self.judge_native_source(store, Some(alias), expectation)?;
+                self.egress_allowed(
+                    store,
+                    Some(alias),
+                    &ArtifactHandle {
+                        digest: artifact_digest.clone(),
+                        evidence_id: evidence_id.clone(),
+                    },
+                )?;
+                Ok(Some(evidence_id.clone()))
+            }
+            ReferenceExpectation::CanonicalSource {
+                artifact_digest,
+                evidence_id,
+                ..
+            } => {
+                self.judge_canonical_source(store, Some(alias), expectation)?;
+                self.egress_allowed(
+                    store,
+                    Some(alias),
+                    &ArtifactHandle {
+                        digest: artifact_digest.clone(),
+                        evidence_id: evidence_id.clone(),
+                    },
+                )?;
+                Ok(Some(evidence_id.clone()))
+            }
+        }
     }
 
     /// Judges a canonical descriptor together with its originating decision, requires the owner to be a decision row at that snapshot, and checks the live descriptor detail against the expectation. The decision's standing caps the descriptor's (Q34): a retracted, superseded, or hidden decision revokes every form derived from it. Any other expectation kind is refused as unsupported.

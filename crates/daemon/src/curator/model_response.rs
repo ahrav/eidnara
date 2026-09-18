@@ -66,6 +66,8 @@ impl StopReason {
 pub struct DecodedMessage {
     pub text: String,
     pub stop_reason: Option<StopReason>,
+    /// The `model` the provider reports, when the response carries one.
+    pub model: Option<String>,
     /// Bytes the parser allocated for decoded strings while building the tree, apart from the transport buffer.
     pub scratch_bytes: usize,
 }
@@ -162,9 +164,15 @@ pub fn decode_message(body: &[u8]) -> Result<DecodedMessage, DecodeError> {
         Some(Value::String(reason)) => Some(StopReason::from_wire(reason)),
         Some(_) => return Err(DecodeError::Shape),
     };
+    let model = match root.field("model") {
+        None | Some(Value::Other) => None,
+        Some(Value::String(model)) => Some(model.clone()),
+        Some(_) => return Err(DecodeError::Shape),
+    };
     Ok(DecodedMessage {
         text,
         stop_reason,
+        model,
         scratch_bytes: parser.scratch_bytes,
     })
 }

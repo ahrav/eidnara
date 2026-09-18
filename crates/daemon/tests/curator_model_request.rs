@@ -1,9 +1,8 @@
 //! The sender proof: through a real local TLS peer, the one-shot handoff writes nothing until completion, the connection is one-use with no retry, the transport verifies chain and hostname, and responses are bounded, decoded, and egress-checked with host-authored refusals.
 
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll};
+mod support;
+
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use daemon::curator::model_request::{
@@ -12,244 +11,13 @@ use daemon::curator::model_request::{
     MAX_RESPONSE_HEADERS, Message, MessagesRequest, Role, SendError, Sender, Timing,
 };
 use daemon::curator::model_response::{DecodeError, StopReason};
-use rustls::pki_types::PrivateKeyDer;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpListener;
 use tokio::time::Instant;
-use tokio_rustls::TlsAcceptor;
 
-const OBSERVATION_WINDOW: Duration = Duration::from_millis(300);
-
-/// The peer's socket, counting every encrypted byte the client sends so the proof compares exact counters rather than only waiting.
-struct Counting {
-    inner: TcpStream,
-    received: Arc<AtomicUsize>,
-}
-
-impl AsyncRead for Counting {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let before = buf.filled().len();
-        let polled = Pin::new(&mut self.inner).poll_read(cx, buf);
-        if let Poll::Ready(Ok(())) = &polled {
-            self.received
-                .fetch_add(buf.filled().len() - before, Ordering::SeqCst);
-        }
-        polled
-    }
-}
-
-impl AsyncWrite for Counting {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-}
-
-type PeerStream = tokio_rustls::server::TlsStream<Counting>;
-type BeforeRead = Box<
-    dyn FnOnce(
-            &mut PeerStream,
-            Arc<AtomicUsize>,
-        ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
-        + Send,
->;
-
-/// A scripted TLS peer that speaks for `localhost` under a test-only authority.
-struct Peer {
-    port: u16,
-    roots: rustls::RootCertStore,
-    connections: Arc<AtomicUsize>,
-    listener: Option<TcpListener>,
-    acceptor: TlsAcceptor,
-    /// How long the peer holds the whole response after it has read the request, so a test can stand in for a provider that is still generating.
-    respond_after: Duration,
-    /// Splits the response at a byte offset and pauses between the two halves, so a test can stall a body mid-transfer.
-    stall: Option<(usize, Duration)>,
-}
-
-/// What the peer saw; every judgement is made by the test, not inside the peer task.
-#[derive(Debug, Default)]
-struct Observed {
-    head: String,
-    body: Vec<u8>,
-    /// Whether a second connection arrived within the observation window after the exchange.
-    reconnected: bool,
-    /// Encrypted bytes received after the request has been read.
-    after_handoff: Option<usize>,
-}
-
-impl Peer {
-    async fn start() -> Self {
-        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        let ca =
-            rcgen::CertifiedIssuer::self_signed(ca_params, rcgen::KeyPair::generate().unwrap())
-                .unwrap();
-        let leaf_key = rcgen::KeyPair::generate().unwrap();
-        let leaf = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .signed_by(&leaf_key, &ca)
-            .unwrap();
-        let mut roots = rustls::RootCertStore::empty();
-        roots
-            .add(AsRef::<rcgen::Certificate>::as_ref(&ca).der().clone())
-            .unwrap();
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut config = rustls::ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![leaf.der().clone()],
-                PrivateKeyDer::try_from(leaf_key.serialize_der()).unwrap(),
-            )
-            .unwrap();
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        Self {
-            port: listener.local_addr().unwrap().port(),
-            roots,
-            connections: Arc::new(AtomicUsize::new(0)),
-            listener: Some(listener),
-            acceptor: TlsAcceptor::from(Arc::new(config)),
-            respond_after: Duration::ZERO,
-            stall: None,
-        }
-    }
-
-    fn sender(&self) -> Sender {
-        Sender::new(
-            Endpoint::for_test("localhost", self.port, self.roots.clone()).unwrap(),
-            Credential::new("sk-test-credential".to_string()).unwrap(),
-        )
-    }
-
-    /// Accepts one TLS connection, runs `before_read` after the handshake, reads one full request if the client sends one, answers with `respond`, and reports what it observed. The peer never asserts; a client that goes away early yields a partial report.
-    fn serve(
-        &mut self,
-        before_read: BeforeRead,
-        respond: impl FnOnce(&Observed) -> Vec<u8> + Send + 'static,
-    ) -> tokio::task::JoinHandle<Observed> {
-        let listener = self.listener.take().unwrap();
-        let acceptor = self.acceptor.clone();
-        let connections = self.connections.clone();
-        let respond_after = self.respond_after;
-        let stall = self.stall;
-        tokio::spawn(async move {
-            let mut observed = Observed::default();
-            let (tcp, _) = listener.accept().await.unwrap();
-            connections.fetch_add(1, Ordering::SeqCst);
-            let received = Arc::new(AtomicUsize::new(0));
-            let counting = Counting {
-                inner: tcp,
-                received: received.clone(),
-            };
-            let Ok(mut tls) = acceptor.accept(counting).await else {
-                observed.reconnected = tokio::time::timeout(OBSERVATION_WINDOW, listener.accept())
-                    .await
-                    .is_ok();
-                return observed;
-            };
-            before_read(&mut tls, received.clone()).await;
-            let mut raw = Vec::new();
-            let mut buffer = [0u8; 16 * 1024];
-            loop {
-                let Ok(read) = tls.read(&mut buffer).await else {
-                    return observed;
-                };
-                if read == 0 {
-                    return observed;
-                }
-                raw.extend_from_slice(&buffer[..read]);
-                if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-                    observed.head = String::from_utf8(raw[..split].to_vec()).unwrap();
-                    let length: usize = observed
-                        .head
-                        .lines()
-                        .find_map(|line| line.strip_prefix("content-length: "))
-                        .unwrap()
-                        .parse()
-                        .unwrap();
-                    while raw.len() < split + 4 + length {
-                        let Ok(read) = tls.read(&mut buffer).await else {
-                            return observed;
-                        };
-                        if read == 0 {
-                            return observed;
-                        }
-                        raw.extend_from_slice(&buffer[..read]);
-                    }
-                    observed.body = raw[split + 4..split + 4 + length].to_vec();
-                    break;
-                }
-            }
-            observed.after_handoff = Some(received.load(Ordering::SeqCst));
-            tokio::time::sleep(respond_after).await;
-            // The client may refuse and hang up mid-write; that is its right and not the peer's failure.
-            let response = respond(&observed);
-            match stall {
-                Some((split, pause)) if split < response.len() => {
-                    let _ = tls.write_all(&response[..split]).await;
-                    let _ = tls.flush().await;
-                    tokio::time::sleep(pause).await;
-                    let _ = tls.write_all(&response[split..]).await;
-                }
-                _ => {
-                    let _ = tls.write_all(&response).await;
-                }
-            }
-            let _ = tls.shutdown().await;
-            observed.reconnected = tokio::time::timeout(OBSERVATION_WINDOW, listener.accept())
-                .await
-                .is_ok();
-            observed
-        })
-    }
-}
-
-fn no_wait() -> BeforeRead {
-    Box::new(|_, _| Box::pin(async {}))
-}
-
-fn json_response(status: &str, body: &str, extra_headers: &str) -> Vec<u8> {
-    format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n{extra_headers}\r\n{body}",
-        body.len()
-    )
-    .into_bytes()
-}
-
-fn chunked_response(status: &str, chunks: impl Iterator<Item = Vec<u8>>) -> Vec<u8> {
-    let mut response = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n").into_bytes();
-    for chunk in chunks {
-        response.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
-        response.extend_from_slice(&chunk);
-        response.extend_from_slice(b"\r\n");
-    }
-    response.extend_from_slice(b"0\r\n\r\n");
-    response
-}
-
-fn message(text: &str) -> String {
-    format!(
-        r#"{{"id":"msg_1","type":"message","role":"assistant","model":"claude","content":[{{"type":"text","text":"{text}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":3,"output_tokens":4}}}}"#
-    )
-}
+use support::tls_peer::{
+    OBSERVATION_WINDOW, Observed, Peer, chunked_response, json_response, message, no_wait,
+};
 
 fn request() -> MessagesRequest {
     MessagesRequest {
@@ -260,6 +28,7 @@ fn request() -> MessagesRequest {
             content: "What builds the workspace?".to_string(),
         }],
         max_tokens: 64,
+        temperature: None,
     }
 }
 
@@ -278,7 +47,7 @@ async fn exchange_with(
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(&request())
+        .handoff(request().body().unwrap())
         .unwrap()
         .complete(deadline())
         .await;
@@ -313,7 +82,7 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
     );
     let sender = peer.sender();
     let connected = sender.connect(deadline()).await.unwrap();
-    let in_flight = connected.handoff(&request()).unwrap();
+    let in_flight = connected.handoff(request().body().unwrap()).unwrap();
     armed_tx.send(()).unwrap();
     // Give the peer its whole observation window before the connection is polled.
     tokio::time::sleep(OBSERVATION_WINDOW + Duration::from_millis(100)).await;
@@ -346,7 +115,12 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
     assert_eq!(body["stream"], serde_json::Value::Bool(false));
     assert!(body.get("tools").is_none());
     assert_eq!(body["max_tokens"], 64);
+    assert!(
+        body.get("temperature").is_none(),
+        "an omitted sampling value is serialized as an omission"
+    );
     assert_eq!(body["system"], "Answer plainly.");
+    assert_eq!(answer.model.as_deref(), Some("claude"));
     assert!(!String::from_utf8_lossy(&observed.body).contains("sk-test-credential"));
 }
 
@@ -377,7 +151,7 @@ async fn no_request_byte_reaches_the_peer_before_the_connection_is_polled() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(&request())
+        .handoff(request().body().unwrap())
         .unwrap();
     armed_tx.send(()).unwrap();
     let (after_handshake, after_handoff) = count_rx.await.unwrap();
@@ -399,7 +173,7 @@ async fn the_transport_verifies_the_chain_and_the_hostname_without_retrying() {
     let server = peer.serve(no_wait(), |_| Vec::new());
     let untrusted = Sender::new(
         Endpoint::for_test("localhost", peer.port, rustls::RootCertStore::empty()).unwrap(),
-        Credential::new("k".to_string()).unwrap(),
+        Credential::new("k".to_string(), "k".to_string()).unwrap(),
     );
     assert_eq!(
         untrusted.connect(deadline()).await.unwrap_err(),
@@ -412,7 +186,7 @@ async fn the_transport_verifies_the_chain_and_the_hostname_without_retrying() {
     let server = peer.serve(no_wait(), |_| Vec::new());
     let wrong_name = Sender::new(
         Endpoint::for_test("127.0.0.1", peer.port, peer.roots.clone()).unwrap(),
-        Credential::new("k".to_string()).unwrap(),
+        Credential::new("k".to_string(), "k".to_string()).unwrap(),
     );
     assert_eq!(
         wrong_name.connect(deadline()).await.unwrap_err(),
@@ -426,20 +200,27 @@ async fn the_transport_verifies_the_chain_and_the_hostname_without_retrying() {
     drop(closed);
     let nobody = Sender::new(
         Endpoint::for_test("localhost", port, peer.roots.clone()).unwrap(),
-        Credential::new("k".to_string()).unwrap(),
+        Credential::new("k".to_string(), "k".to_string()).unwrap(),
     );
     assert_eq!(
         nobody.connect(deadline()).await.unwrap_err(),
         SendError::Connect
     );
-    // A credential that cannot be a header value is refused at startup.
+    // A credential that cannot be a header value, or that has no identifier, is refused at startup; `Debug` shows the identifier and never the secret.
     assert_eq!(
-        Credential::new("line\nbreak".to_string()).unwrap_err(),
+        Credential::new("k".to_string(), "line\nbreak".to_string()).unwrap_err(),
         SendError::Credential
     );
     assert_eq!(
-        format!("{:?}", Credential::new("sk-secret".to_string()).unwrap()),
-        "Credential(<redacted>)"
+        Credential::new(String::new(), "sk-secret".to_string()).unwrap_err(),
+        SendError::Credential
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            Credential::new("cred-1".to_string(), "sk-secret".to_string()).unwrap()
+        ),
+        "Credential(cred-1, <redacted>)"
     );
 }
 
@@ -604,7 +385,12 @@ async fn request_bounds_and_deadlines_are_enforced_by_the_sender() {
     let mut huge = request();
     huge.messages[0].content = "x".repeat(MAX_REQUEST_BYTES);
     assert_eq!(huge.body().unwrap_err(), SendError::RequestTooLarge);
-    // A handoff refused for request bounds consumes the connection and sends nothing: the peer's byte count does not move after the handshake.
+    let mut hot = request();
+    hot.temperature = Some(1.5);
+    assert_eq!(hot.body().unwrap_err(), SendError::Temperature);
+    hot.temperature = Some(f64::NAN);
+    assert_eq!(hot.body().unwrap_err(), SendError::Temperature);
+    // A connection dropped without a handoff sends nothing: the peer's byte count does not move after the handshake.
     let mut peer = Peer::start().await;
     let (count_tx, count_rx) = tokio::sync::oneshot::channel::<(usize, usize)>();
     let server = peer.serve(
@@ -621,10 +407,7 @@ async fn request_bounds_and_deadlines_are_enforced_by_the_sender() {
         |_| Vec::new(),
     );
     let connected = peer.sender().connect(deadline()).await.unwrap();
-    assert_eq!(
-        connected.handoff(&huge).unwrap_err(),
-        SendError::RequestTooLarge
-    );
+    drop(connected);
     let (after_handshake, after_refusal) = count_rx.await.unwrap();
     assert_eq!(after_handshake, after_refusal);
     server.await.unwrap();
@@ -644,7 +427,7 @@ async fn request_bounds_and_deadlines_are_enforced_by_the_sender() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(&request())
+        .handoff(request().body().unwrap())
         .unwrap();
     let outcome = in_flight
         .complete(Instant::now() + Duration::from_millis(500))
@@ -669,7 +452,11 @@ fn short_timing() -> Timing {
 fn sender_with(peer: &Peer, timing: Timing) -> Sender {
     Sender::with_timing(
         Endpoint::for_test("localhost", peer.port, peer.roots.clone()).unwrap(),
-        Credential::new("sk-test-credential".to_string()).unwrap(),
+        Credential::new(
+            "test-credential".to_string(),
+            "sk-test-credential".to_string(),
+        )
+        .unwrap(),
         timing,
     )
 }
@@ -686,7 +473,7 @@ async fn the_head_wait_is_bounded_by_the_completion_budget_not_the_frame_idle_li
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(&request)
+        .handoff(request.body().unwrap())
         .unwrap()
         .complete(deadline())
         .await
@@ -709,7 +496,7 @@ async fn the_completion_budget_scales_with_the_requested_output_tokens() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(&generous)
+        .handoff(generous.body().unwrap())
         .unwrap()
         .complete(deadline())
         .await
@@ -728,7 +515,7 @@ async fn the_completion_budget_scales_with_the_requested_output_tokens() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(&terse)
+        .handoff(terse.body().unwrap())
         .unwrap()
         .complete(deadline())
         .await;
@@ -752,7 +539,7 @@ async fn a_body_that_stalls_past_the_frame_idle_limit_is_a_deadline() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(&request)
+        .handoff(request.body().unwrap())
         .unwrap()
         .complete(deadline())
         .await;

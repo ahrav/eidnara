@@ -373,9 +373,10 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
             outcome,
             DispatchOutcome::Handed {
                 attempt_index: 0,
+                attempt_deadline_ms,
                 handoff: 6,
                 release: Ok(())
-            }
+            } if attempt_deadline_ms == T0 + 1 + CURATOR_ATTEMPT_MAX_MS
         ),
         "{outcome:?}"
     );

@@ -232,9 +232,10 @@ pub enum CuratorLedgerError {
 /// What happened after the marker committed.
 #[derive(Debug)]
 pub enum DispatchOutcome<H> {
-    /// The handoff consumed the prepared request. `release` reports whether the store's read-only view was restored afterwards; a failure there cannot recall the handoff, but it means this store's connection may refuse later writes, so it is carried here rather than dropped.
+    /// The handoff consumed the prepared request. `attempt_deadline_ms` is the absolute bound the marker committed under; the caller bounds its network wait by it. `release` reports whether the store's read-only view was restored afterwards; a failure there cannot recall the handoff, but it means this store's connection may refuse later writes, so it is carried here rather than dropped.
     Handed {
         attempt_index: u32,
+        attempt_deadline_ms: i64,
         handoff: H,
         release: Result<(), MemoryStoreError>,
     },
@@ -1075,6 +1076,7 @@ impl MemoryStore {
             ) => {
                 return Ok(DispatchOutcome::Handed {
                     attempt_index: attempt.attempt_index,
+                    attempt_deadline_ms: attempt.attempt_deadline_ms,
                     handoff,
                     release: release.map_err(MemoryStoreError::from),
                 });

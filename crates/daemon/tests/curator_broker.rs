@@ -357,9 +357,9 @@ fn staged_subjects_and_captures_read_through_kernel_expectations_and_grow_the_ho
             fixture.now + 2,
         )
         .unwrap();
-    assert_eq!(read.buffer.bytes, b"bun builds the workspace");
-    assert_eq!(read.buffer.tag.origin, OriginClass::StagedSubject);
-    assert_eq!(read.buffer.tag.charged_bytes, 24);
+    assert_eq!(read.buffer.bytes(), b"bun builds the workspace");
+    assert_eq!(read.buffer.tag().origin, OriginClass::StagedSubject);
+    assert_eq!(read.buffer.tag().charged_bytes, 24);
     assert_eq!(
         read.sensitivity,
         Sensitivity::Sensitive,
@@ -376,7 +376,7 @@ fn staged_subjects_and_captures_read_through_kernel_expectations_and_grow_the_ho
             fixture.now + 2,
         )
         .unwrap();
-    assert_eq!(ranged.buffer.bytes, b"bun");
+    assert_eq!(ranged.buffer.bytes(), b"bun");
     assert_eq!(
         broker
             .read(
@@ -426,8 +426,8 @@ fn staged_subjects_and_captures_read_through_kernel_expectations_and_grow_the_ho
             fixture.now + 2,
         )
         .unwrap();
-    assert_eq!(read.buffer.bytes, b"file");
-    assert_eq!(read.buffer.tag.origin, OriginClass::TemporaryCapture);
+    assert_eq!(read.buffer.bytes(), b"file");
+    assert_eq!(read.buffer.tag().origin, OriginClass::TemporaryCapture);
     assert_eq!(broker.buffers.loaded(), 1);
     fixture
         .store
@@ -714,7 +714,7 @@ fn render_check_refuses_secrets_and_placeholders_without_redacting() {
     let rendered = large_broker
         .read(&fixture.store, large.as_str(), Some(0..16), fixture.now)
         .unwrap();
-    assert_eq!(rendered.buffer.bytes, [b'x'; 16]);
+    assert_eq!(rendered.buffer.bytes(), [b'x'; 16]);
     assert!(
         broker
             .render_host_text(&format!("question {AWS_KEY}"))
@@ -723,8 +723,8 @@ fn render_check_refuses_secrets_and_placeholders_without_redacting() {
     let host = broker
         .render_host_text(QuestionTemplate::ExtractedFacts.text())
         .unwrap();
-    assert_eq!(host.tag.origin, OriginClass::HostAuthored);
-    assert_eq!(host.tag.charged_bytes, 0);
+    assert_eq!(host.tag().origin, OriginClass::HostAuthored);
+    assert_eq!(host.tag().charged_bytes, 0);
     assert_eq!(
         QuestionTemplate::parse("extracted_facts"),
         Ok(QuestionTemplate::ExtractedFacts)
@@ -813,10 +813,10 @@ fn canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_b
     let first = broker
         .read(&fixture.store, claim_alias.as_str(), None, fixture.now)
         .unwrap();
-    assert_eq!(first.buffer.bytes, claim_text.as_bytes());
+    assert_eq!(first.buffer.bytes(), claim_text.as_bytes());
     assert_eq!(first.origin_key, "decision:decision-a");
     assert_eq!(
-        first.buffer.tag.verdict,
+        first.buffer.tag().verdict,
         Some(JudgedAt {
             verdict: EligibilityVerdict::Hidden,
             visibility: SurfaceVisibility::Hidden,
@@ -871,7 +871,7 @@ fn canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_b
     let span_read = broker
         .read(&fixture.store, span_alias.as_str(), Some(0..8), fixture.now)
         .unwrap();
-    assert_eq!(span_read.buffer.bytes, b"a native");
+    assert_eq!(span_read.buffer.bytes(), b"a native");
     assert_eq!(
         span_read.origin_key, native.origin_key,
         "two spans of one message are one origin"
@@ -1600,8 +1600,8 @@ fn a_span_descriptor_discloses_only_its_span() {
     let whole = broker
         .read(&fixture.store, alias.as_str(), None, fixture.now)
         .unwrap();
-    assert_eq!(whole.buffer.bytes, b"a native");
-    assert_eq!(whole.buffer.tag.charged_bytes, 8);
+    assert_eq!(whole.buffer.bytes(), b"a native");
+    assert_eq!(whole.buffer.tag().charged_bytes, 8);
     // Bytes outside the span belong to other occurrences; the request is refused rather than translated.
     assert_eq!(
         broker
@@ -1613,7 +1613,7 @@ fn a_span_descriptor_discloses_only_its_span() {
     let inside = broker
         .read(&fixture.store, alias.as_str(), Some(2..8), fixture.now)
         .unwrap();
-    assert_eq!(inside.buffer.bytes, b"native");
+    assert_eq!(inside.buffer.bytes(), b"native");
 }
 
 #[test]
@@ -1957,5 +1957,5 @@ fn an_elapsed_retention_floor_does_not_expire_non_capture_evidence() {
     let read = broker
         .read(&fixture.store, alias.as_str(), None, fixture.now)
         .unwrap();
-    assert_eq!(read.buffer.bytes, native_text.as_bytes());
+    assert_eq!(read.buffer.bytes(), native_text.as_bytes());
 }

@@ -10,5 +10,6 @@ pub mod kernel_daemon;
 pub mod packing;
 pub mod projection_gate;
 pub mod query_route;
+pub mod tls_peer;
 pub mod vector_reads;
 pub mod vector_store;
