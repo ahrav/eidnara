@@ -199,9 +199,10 @@ impl Builder {
             self.pending_noise_meta.push(meta);
             return true;
         }
+        // Verbatim means the presented bytes are the native bytes: a trimmed leading space already shifts every presented offset off the native block.
         let verbatim = message.blocks.len() == 1
             && text_parts.len() == 1
-            && matches!(message.blocks[0].wire.kind(), BlockKind::Text { text } if text.trim() == compacted.text);
+            && matches!(message.blocks[0].wire.kind(), BlockKind::Text { text } if *text == compacted.text);
         let part = Self::part(message, compacted.text, !verbatim);
 
         let msg_has_narrative = !text_parts.is_empty();

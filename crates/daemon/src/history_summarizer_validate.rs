@@ -343,11 +343,16 @@ pub fn parse_history_segment_output(
     let facts_block = facts_block_regex().captures(text);
     let facts_block_present = facts_block.is_some();
     let mut fact_syntax_failure = None;
+    // A `<facts>` tag without its partner is a truncated or malformed block, never an unwrapped category the bare fallback may read.
+    let facts_blocks = facts_block_regex().captures_iter(text).count();
+    let stray_facts_tag = text.matches("<facts>").count() != facts_blocks
+        || text.matches("</facts>").count() != facts_blocks;
     let facts_scope = if let Some(caps) = facts_block {
         let scope = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
         // Anything inside `<facts>` that the item grammar does not read is malformed material, never an absent fact. A category whose closing tag names another category, and a second `<facts>` block, are likewise unreadable rather than ignored.
         let leftover = category_block_regex().replace_all(scope, "");
-        if facts_block_regex().captures_iter(text).count() > 1
+        if facts_blocks > 1
+            || stray_facts_tag
             || !leftover.trim().is_empty()
             || category_block_regex().captures_iter(scope).any(|category| {
                 category.get(1).map(|m| m.as_str()) != category.get(3).map(|m| m.as_str())
@@ -362,6 +367,9 @@ pub fn parse_history_segment_output(
         }
         scope.to_string()
     } else {
+        if stray_facts_tag {
+            fact_syntax_failure = Some(ExtractionFailure::MalformedFacts);
+        }
         let without_events = events_block_regex().replace_all(text, "");
         history_segment_regex()
             .replace_all(&without_events, "")
@@ -386,17 +394,20 @@ pub fn parse_history_segment_output(
                     (Vec::new(), content)
                 }
             };
-            // An item that is citations with no text is malformed, not an absent fact: dropping it would turn a bad item into apparent no-fact success.
-            if content.is_empty() && !citations.is_empty() {
-                fact_syntax_failure.get_or_insert(ExtractionFailure::MalformedCitation);
-            }
-            if !content.is_empty() {
-                facts.push(FactCandidate {
-                    category: category.to_string(),
-                    content,
-                    citations,
+            // An item with no text is malformed, not an absent fact: dropping it would turn a bad item into apparent no-fact success. Citations alone are a bad citation; a bare bullet is unreadable material.
+            if content.is_empty() {
+                fact_syntax_failure.get_or_insert(if citations.is_empty() {
+                    ExtractionFailure::MalformedFacts
+                } else {
+                    ExtractionFailure::MalformedCitation
                 });
+                continue;
             }
+            facts.push(FactCandidate {
+                category: category.to_string(),
+                content,
+                citations,
+            });
         }
     }
 
@@ -1300,7 +1311,7 @@ fn category_block_regex() -> &'static Regex {
 
 fn fact_item_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(?m)^\s*\*\s*(.+)$"#).unwrap())
+    RE.get_or_init(|| Regex::new(r#"(?m)^[ \t]*\*[ \t]*(.*)$"#).unwrap())
 }
 
 fn unprocessed_regex() -> &'static Regex {

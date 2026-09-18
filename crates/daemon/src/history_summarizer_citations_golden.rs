@@ -506,6 +506,23 @@ fn appending_a_tail_does_not_change_the_frozen_range_aliases() {
 }
 
 #[test]
+fn surrounding_whitespace_trimmed_from_a_single_block_is_a_transformation() {
+    // The presented bytes start where the native bytes do only when nothing was trimmed; a leading space shifts every presented offset, so the alias must not claim a verbatim copy.
+    let ck: Vec<Arc<IngressMessage>> = serde_json::from_value(serde_json::json!([
+        {"mid":"u1","ordinal":1,"ck":{"role":"user","content":[{"kind":{"type":"text","text":"Always run bun install first."}}]}},
+        {"mid":"a2","ordinal":2,"ck":{"role":"assistant","content":[{"kind":{"type":"text","text":"  Understood.  "}}]}}
+    ]))
+    .unwrap();
+    let projection = project_messages(&ck).unwrap();
+    let built = build_history_summarizer_chunk(&ck, &projection.blocks, 1, 10_000, 3);
+    let aliases = &built.chunk.aliases.aliases;
+    assert_eq!(aliases.len(), 2);
+    assert!(!aliases[0].transformed);
+    assert_eq!(aliases[1].presented, "Understood.");
+    assert!(aliases[1].transformed);
+}
+
+#[test]
 fn a_force_kept_final_segment_is_citable_and_an_unwrapped_block_is_still_a_fact_set() {
     let cases = golden().cases;
     let built = build(&cases[1]);
@@ -556,6 +573,29 @@ fn a_force_kept_final_segment_is_citable_and_an_unwrapped_block_is_still_a_fact_
         (
             "a second facts block",
             output(1, 3, &["[s1:0-14] ok"]).replace("<meta>", "<facts></facts><meta>"),
+        ),
+        // A `<facts>` opener the producer never closed is a truncated block, not an unwrapped category the bare fallback may read.
+        (
+            "an unclosed facts block",
+            output(1, 3, &["[s1:0-14] ok"]).replace("</facts>", ""),
+        ),
+        (
+            "a stray facts closer",
+            output(1, 3, &["[s1:0-14] ok"]).replace("<facts>", ""),
+        ),
+        // A bullet with nothing after the marker is material the item grammar cannot read, alone or beside a valid item.
+        (
+            "an empty bullet alone",
+            output(1, 3, &["[s1:0-14] ok"]).replace("* [s1:0-14] ok", "*"),
+        ),
+        (
+            "an empty bullet beside a valid item",
+            output(1, 3, &["[s1:0-14] ok"])
+                .replace("\n</PROJECT_RULES>", "\n*   \n</PROJECT_RULES>"),
+        ),
+        (
+            "an empty bullet before a valid item",
+            output(1, 3, &["[s1:0-14] ok"]).replace("\n* [s1", "\n*\n* [s1"),
         ),
         // A category whose closing tag names a different category is unreadable: its items must not vanish into no-fact success.
         (
