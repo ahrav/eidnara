@@ -2313,3 +2313,105 @@ fn the_queue_deadline_starts_at_the_reservation_not_the_firing() {
         t0() + CURATOR_QUEUE_LIFETIME_MS
     );
 }
+
+#[test]
+fn a_refused_publication_settles_only_the_reservation_it_attempted() {
+    let rig = Rig::open();
+    let prepared = activation(rig.handoff(t0()).unwrap());
+    let attempted = rig.reservation();
+    // Between this publication's refusal and its cleanup, another pass abandons firing 3, fires 4 over the same chunk, and firing 4 adopts the same job under its own reservation.
+    struct MoveOnThenRefuse<'a>(&'a Rig);
+    impl HistorySummarizerPublicationFence for MoveOnThenRefuse<'_> {
+        fn publish(
+            &self,
+            _store: &MemoryStore,
+            _request: memory_store::HistorySummarizerPublishRequest<'_>,
+        ) -> Result<memory_store::HistorySummarizerPublishResult, HistorySummarizerPublishError>
+        {
+            let rig = self.0;
+            rig.persist(abandon_with_detail(
+                &rig.state(),
+                t0() + 1,
+                Some("crash".to_string()),
+            ));
+            rig.persist(next_publishing_firing(rig, 2, 4));
+            let _ = activation(rig.handoff(t0() + 2).unwrap());
+            Err(HistorySummarizerPublishError::FenceRejected {
+                reason: "stale".to_string(),
+            })
+        }
+    }
+    let adopted_before = rig.reservation();
+    assert_eq!(adopted_before.firing_seq, 3);
+    let loaded = rig.store.load(SESSION).unwrap();
+    let predicate = publish_predicate(&loaded.meta.history_summarizer).unwrap();
+    let fence = MoveOnThenRefuse(&rig);
+    let validated = validated_range(2, 4);
+    let refused = publish_validated_chunk(
+        &rig.store,
+        ValidatedPublishRequest {
+            session_id: SESSION,
+            project_path: PROJECT,
+            expected_row_version: loaded.row_version,
+            expected_revert_epoch: 0,
+            predicate: &predicate,
+            observed_chunk_fingerprint: "fp",
+            validated: &validated,
+            collect_user_memory_candidates: false,
+            publication_floor_ordinal: 5,
+            chunk_transcript: "U: transcript",
+            boundary_dates: &BTreeMap::new(),
+            created_at_ms: t0() + 3,
+            now_ms: t0() + 3,
+            failure_backoff_at_ms: t0() + 60_000,
+            publication_fence: Some(&fence),
+            curator_nonadmission: None,
+            curator_activation: Some(&prepared),
+        },
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(HistorySummarizerStateError::Publish(
+                HistorySummarizerPublishError::FenceRejected { .. }
+            ))
+        ),
+        "{refused:?}"
+    );
+    // Firing 4 owns the job now: its reservation, retained publication, and the job all stand.
+    let later = rig.state();
+    assert_eq!(later.state, HistorySummarizerPhase::Publishing);
+    assert_eq!(later.firing_seq, 4);
+    let adopted = later
+        .curator_reservation
+        .expect("firing 4 holds its reservation");
+    assert_eq!(adopted.firing_seq, 4);
+    assert_eq!(adopted.causal_identity, attempted.causal_identity);
+    assert_eq!(rig.pending().map(|(firing_seq, _)| firing_seq), Some(4));
+    assert_eq!(
+        rig.job(&attempted.causal_identity).state,
+        CuratorJobState::Reserved
+    );
+}
+
+#[test]
+fn the_retained_boundary_dates_are_those_of_the_validated_segments() {
+    let mut boundary_dates = BTreeMap::new();
+    for ordinal in 1..=20 {
+        boundary_dates.insert(format!("m{ordinal}"), format!("2026-01-{ordinal:02}"));
+    }
+    let retained = retained_boundary_dates(&validated_range(2, 4), &boundary_dates);
+    assert_eq!(
+        retained,
+        BTreeMap::from([
+            ("m2".to_string(), "2026-01-02".to_string()),
+            ("m4".to_string(), "2026-01-04".to_string()),
+        ])
+    );
+    // A boundary message without a date is simply absent, as the publication reads it.
+    let retained = retained_boundary_dates(&validated_range(2, 40), &boundary_dates);
+    assert_eq!(
+        retained,
+        BTreeMap::from([("m2".to_string(), "2026-01-02".to_string())])
+    );
+}

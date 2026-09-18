@@ -682,7 +682,9 @@ fn settle_unpublishable_reservation(
     let Some(held) = loaded.meta.history_summarizer.curator_reservation.as_ref() else {
         return Ok(());
     };
-    if held.causal_identity != activation.causal_identity
+    // The attempted reservation is the request's firing holding the activation's job; a later firing that adopted the same job under its own reservation is not this attempt's to settle.
+    if held.firing_seq != request.predicate.firing_seq
+        || held.causal_identity != activation.causal_identity
         || store
             .clear_curator_reservation(request.session_id, held)?
             .is_none()
@@ -2112,7 +2114,7 @@ fn publish_output_from_awaiting(
                 HistorySummarizerStateError::Store(MemoryStoreError::Serde(error.to_string()))
             })?,
             chunk_transcript: chunk_transcript.to_string(),
-            boundary_dates: boundary_dates.clone(),
+            boundary_dates: retained_boundary_dates(&validated, boundary_dates),
             publication_floor_ordinal: validated.unprocessed_from,
             collect_user_memory_candidates: validate_options.user_memory_collection_enabled,
             created_at_ms,
@@ -2151,6 +2153,23 @@ fn publish_output_from_awaiting(
         },
     )?;
     Ok(published.row_version)
+}
+
+/// The dates the publication looks up: those of the validated segments' boundary messages. `boundary_dates` covers every dated message of the request, so retaining it whole would grow the bounded retained publication with the session rather than the chunk.
+fn retained_boundary_dates(
+    validated: &ValidatedChunk,
+    boundary_dates: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    validated
+        .history_segments
+        .iter()
+        .flat_map(|segment| [&segment.start_message_id, &segment.end_message_id])
+        .filter_map(|id| {
+            boundary_dates
+                .get(id)
+                .map(|date| (id.clone(), date.clone()))
+        })
+        .collect()
 }
 
 /// Writes the reservation into the Publishing state this firing persisted, fenced on that write's row version so a competing writer that moved the session on cannot be overwritten with a resurrected Publishing state.
