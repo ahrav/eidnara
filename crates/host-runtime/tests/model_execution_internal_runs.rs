@@ -565,6 +565,84 @@ async fn shutdown_joins_internal_runs() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_coordinator_cancel_keeps_the_ranked_stop_reason() {
+    // Shutdown has begun, but the launch ignores its token, so no terminal is committed when the coordinator cancels.
+    let supervisor = Arc::new(Supervisor::new(
+        ScriptedBackend::completing("public") as Arc<_>
+    ));
+    let script = Scripted::new();
+    let run = Arc::new(
+        supervisor
+            .launch_internal(
+                internal_key("job-1", 1),
+                0,
+                far(),
+                script.launch("stuck", false),
+            )
+            .unwrap(),
+    );
+    until(
+        || script.starts.load(Ordering::SeqCst) == 1,
+        "the launch is running",
+    )
+    .await;
+    let shutdown = tokio::spawn({
+        let supervisor = Arc::clone(&supervisor);
+        async move { supervisor.shutdown().await }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        try_public_send(&supervisor, "probe").unwrap_err().code,
+        "cancelled",
+        "shutdown has begun"
+    );
+    let cancelling = tokio::spawn({
+        let run = Arc::clone(&run);
+        async move { run.cancel().await }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(INTERNAL_LAUNCH_ABORT_GRACE + Duration::from_millis(1)).await;
+    cancelling.await.unwrap().unwrap_err();
+    shutdown.await.unwrap();
+    assert_eq!(
+        run.settled().await,
+        InternalOutcome::Shutdown,
+        "a coordinator cancel during shutdown is still a shutdown"
+    );
+    // The cutoff has passed and cancelled the token, but the launch ignores it and the coordinator cancels before the abort.
+    let supervisor = Supervisor::new(ScriptedBackend::completing("public") as Arc<_>);
+    let script = Scripted::new();
+    let run = Arc::new(
+        supervisor
+            .launch_internal(
+                internal_key("job-2", 1),
+                0,
+                Instant::now() + Duration::from_secs(10),
+                script.launch("stuck", false),
+            )
+            .unwrap(),
+    );
+    until(
+        || script.starts.load(Ordering::SeqCst) == 1,
+        "the launch is running",
+    )
+    .await;
+    tokio::time::advance(Duration::from_secs(11)).await;
+    let cancelling = tokio::spawn({
+        let run = Arc::clone(&run);
+        async move { run.cancel().await }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(INTERNAL_LAUNCH_ABORT_GRACE).await;
+    cancelling.await.unwrap().unwrap_err();
+    assert_eq!(
+        run.settled().await,
+        InternalOutcome::Cutoff,
+        "a coordinator cancel after the cutoff is still a cutoff"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_cutoff_bounds_the_backend_permit_wait_without_a_launch() {
     let (backend, public_gate) = ScriptedBackend::gated("public");
     let limits = ModelExecutionLimits {

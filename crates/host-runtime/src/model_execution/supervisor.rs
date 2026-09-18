@@ -643,6 +643,7 @@ impl Supervisor {
         Ok(InternalRun {
             inner: Arc::clone(inner),
             run,
+            cutoff,
         })
     }
 
@@ -1503,6 +1504,7 @@ fn sweep_for(inner: &Arc<Inner>, index: &mut Index, released: &mut Released) {
 pub struct InternalRun {
     inner: Arc<Inner>,
     run: Arc<Run>,
+    cutoff: Instant,
 }
 
 /// How an internal run ended. `Lost` means the run's task stopped without committing a terminal, which only a panic or abort of the supervisor's own task can cause; launched work may still be live.
@@ -1512,7 +1514,7 @@ pub enum InternalOutcome {
     Failed,
     /// Cancelled through [`InternalRun::cancel`].
     Cancelled,
-    /// The execution cutoff passed before or during the launch.
+    /// The execution cutoff passed before the launch started or while it was still running. A launch that returned before its token was cancelled reports its own terminal.
     Cutoff,
     /// The host shut down.
     Shutdown,
@@ -1527,12 +1529,13 @@ impl InternalRun {
     /// Cancels the run and resolves once its task has fully stopped, so no launched work outlives the call. A run that already reached a terminal is unaffected. Dropping this future after the terminal committed loses only the completion proof; `settled` recovers it.
     pub async fn cancel(&self) -> Result<(), RequestError> {
         self.run.cancel.cancel();
+        // The terminal this commits may win over the task's own, so it carries the same ranked reason: a cancel during shutdown or after the cutoff is still a shutdown or a cutoff.
+        let message =
+            stop_reason(&self.inner, &self.run, Some(self.cutoff)).unwrap_or("run cancelled");
         finish(
             &self.inner,
             &self.run,
-            TerminalOutcome::Cancelled {
-                message: "run cancelled",
-            },
+            TerminalOutcome::Cancelled { message },
         );
         wait_work_done(&self.run).await;
         Supervisor::settlement_error(&self.run)
