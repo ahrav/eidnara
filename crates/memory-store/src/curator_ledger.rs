@@ -1434,6 +1434,12 @@ impl MemoryStore {
         limit: usize,
     ) -> Result<Vec<CuratorReceipt>, MemoryStoreError> {
         check_project(project)?;
+        // A cursor is the causal identity a page ended on; any other string is a lexical bound that would silently drop the identities ordered below it.
+        if after.is_some_and(|after| !is_lower_hex(after, 64)) {
+            return Err(MemoryStoreError::Serde(
+                "receipt page cursor must be a causal identity".to_string(),
+            ));
+        }
         let limit = limit.clamp(1, MAX_RECEIPT_PAGE) as i64;
         self.inner
             .with_conn(|conn| {

@@ -859,6 +859,28 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
 }
 
 #[test]
+fn a_completed_receipt_page_refuses_a_cursor_that_is_not_a_causal_identity() {
+    // A cursor is the causal identity the last page ended on. Anything else is a lexical bound that silently drops every identity ordered below it.
+    let fixture = Fixture::open();
+    for cursor in ["f", &"F".repeat(64), &"a".repeat(63), "review-result:x"] {
+        assert!(
+            fixture
+                .store
+                .list_completed_curator_receipts(PROJECT, Some(cursor), 10)
+                .is_err(),
+            "{cursor:?} is not a causal identity"
+        );
+    }
+    assert!(
+        fixture
+            .store
+            .list_completed_curator_receipts(PROJECT, Some(&"a".repeat(64)), 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn an_in_progress_receipt_cannot_carry_a_selection_or_a_reason() {
     // `terminal_kind` is NULL while the receipt is in progress, and a comparison with NULL is NULL, which a CHECK accepts; the shape checks must be total so a selection or an abstention reason cannot land before the terminal that owns it.
     let fixture = Fixture::open();

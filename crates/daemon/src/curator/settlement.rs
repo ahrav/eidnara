@@ -61,6 +61,9 @@ pub enum SettlementError {
     /// A different proposal already occupies the provisional identity.
     #[error("conflicting_content")]
     ConflictingContent,
+    /// The staging binding names another project or job than the run's hold; nothing was staged.
+    #[error("binding_mismatch")]
+    BindingMismatch,
     /// The Kernel refused the staging or hold transfer for a reason other than conflict.
     #[error("kernel {0}")]
     Kernel(String),
@@ -72,7 +75,7 @@ pub enum SettlementError {
 pub struct Settlement<'a> {
     pub store: &'a KernelStore,
     pub ledger: &'a MemoryStore,
-    /// The job's staging binding; its owner is replaced by the proposal owner for this generation.
+    /// The job's staging binding, owned by the run's job in the run's project; its owner is replaced by the proposal owner for this generation.
     pub binding: &'a ReviewBinding,
     pub claim: &'a TaskClaim,
     pub now_ms: &'a (dyn Fn() -> i64 + Sync),
@@ -90,6 +93,12 @@ impl Settlement<'_> {
     ) -> Result<Settled, SettlementError> {
         let run = &broker.binding().hold;
         self.copy_receipt(run)?;
+        // The binding's project and job must be the run's own: the row is staged under this binding's scope and lineage, and only that job's receipt may select it.
+        if self.binding.project_digest != run.project_digest
+            || !matches!(&self.binding.owner, ReviewOwner::Job { job_id } if *job_id == run.subject)
+        {
+            return Err(SettlementError::BindingMismatch);
+        }
         // Q8: the staged proposal keeps the job's immutable queue deadline until selection moves it to the review expiry.
         let queue_deadline_at = self
             .ledger

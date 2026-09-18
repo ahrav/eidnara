@@ -1501,6 +1501,44 @@ fn a_publication_whose_receipt_cannot_be_read_back_keeps_its_review_hold() {
 }
 
 #[test]
+fn a_staging_binding_from_another_project_or_job_is_refused_before_any_kernel_write() {
+    // The binding names the job whose receipt selects the row. One from another project or job would stage the proposal under that scope and let this receipt select a row its own binding can never read.
+    let fixture = Fixture::open();
+    let evidence = fixture.evidence_id();
+    let now = fixture.now + 5;
+    let clock = move || now;
+    let mut other_project = fixture.review_binding();
+    other_project.project_digest = "b".repeat(64);
+    let mut other_job = fixture.review_binding();
+    other_job.owner = ReviewOwner::Job {
+        job_id: "c".repeat(64),
+    };
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    for (label, foreign) in [("project", other_project), ("job", other_job)] {
+        let settled = fixture.settlement(&foreign, &fixture.claim, &clock).settle(
+            &broker,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+        );
+        assert_eq!(
+            settled,
+            Err(SettlementError::BindingMismatch),
+            "a binding from another {label} must not stage"
+        );
+        assert_eq!(fixture.receipt().terminal, None);
+        assert_eq!(
+            fixture.store.read_review_input(
+                &fixture.staged_reference(1, &fixture.bound_proposal(&[&evidence])),
+                &fixture.proposal_binding(1),
+                now,
+            ),
+            Err(ReviewReadRefusal::Missing.into()),
+            "nothing was staged under the {label} binding"
+        );
+    }
+}
+
+#[test]
 fn recovery_revalidates_a_staged_subject_under_the_review_hold() {
     // A staged subject holds no evidence id, so its revalidation is a check that the run's hold is live. Once retention has moved to the review hold, that is the hold to check; the released execution hold would refuse and abstain a result that is already sealed.
     let fixture = Fixture::open();
