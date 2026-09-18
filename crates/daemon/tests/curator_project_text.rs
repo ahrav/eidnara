@@ -2063,20 +2063,24 @@ fn a_seated_receipt_cannot_keep_a_refused_capture_alive() {
     let body = b"bytes the hold has no room for";
     fixture.write("a.txt", body);
     let evidence_id = predicted_capture_id(&fixture, "a.txt", body);
-    // A caller seats a receipt under the daemon's compensating intent before the capture is attempted.
-    fixture
-        .store
-        .commit(
+    // The abandonment commit runs under the kernel's reserved producer, so a caller cannot seat a receipt in its place; the attempt is refused outright.
+    assert_eq!(
+        fixture.store.commit(
             CommitIntent {
-                producer: "curator".to_string(),
-                operation_key: format!("{evidence_id}:abandoned"),
-                request_digest: format!("{:x}", Sha256::digest(body)),
-                actor: "curator".to_string(),
-                cause: "project_text_capture".to_string(),
+                producer: format!(
+                    "{}local-file-abandon",
+                    CommitIntent::RESERVED_PRODUCER_PREFIX
+                ),
+                operation_key: evidence_id.clone(),
+                request_digest: format!("{:x}", Sha256::digest(evidence_id.as_bytes())),
+                actor: "local-file-abandon".to_string(),
+                cause: "capture abandoned by its run".to_string(),
             },
-            |_| Ok(String::new()),
-        )
-        .unwrap();
+            |_| Ok("abandoned".to_string()),
+        ),
+        Err(kernel::KernelError::InvalidInput),
+        "the abandonment producer is reserved to the store"
+    );
     let protected = fixture.protected();
     let mut text = fixture.text(&protected);
     let mut broker = fixture.broker_with_references(
@@ -2092,7 +2096,7 @@ fn a_seated_receipt_cannot_keep_a_refused_capture_alive() {
     );
     assert!(
         fixture.capture_rows().is_empty(),
-        "the refused capture is retired whatever receipts a caller seated"
+        "the refused capture is abandoned through the store"
     );
 }
 
