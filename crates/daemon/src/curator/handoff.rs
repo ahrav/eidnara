@@ -81,6 +81,8 @@ pub enum HandoffError {
     UnknownAlias,
     #[error("the firing has no chunk range")]
     NoChunkRange,
+    #[error("the recorded reservation did not resolve to its job: {0}")]
+    ReservationMismatch(&'static str),
 }
 
 /// The review policies a job depends on: a change to either permits one new job at an unchanged target (Q25/Q29).
@@ -167,6 +169,47 @@ pub fn review_subject(
     Ok(ReviewSubject {
         facts: extracted,
         origins,
+    })
+}
+
+/// The producer identity one firing reserves under: the session and firing sequence, at the chunk's first ordinal.
+pub fn producer_binding(
+    session_id: &str,
+    firing: &HistorySummarizerDurableState,
+) -> Result<ProducerBinding, HandoffError> {
+    Ok(ProducerBinding {
+        producer: PRODUCER.to_string(),
+        firing_id: format!("{session_id}#{}", firing.firing_seq),
+        ordinal: firing
+            .chunk_range
+            .as_ref()
+            .ok_or(HandoffError::NoChunkRange)?
+            .from_ordinal,
+    })
+}
+
+/// The activation for a recorded reservation whose queue deadline has passed. Nothing is staged: the Kernel refuses a deadline already behind it, and the publication records the job as expired rather than activating it.
+pub fn expired_activation(
+    store: &MemoryStore,
+    project: &str,
+    session_id: &str,
+    firing: &HistorySummarizerDurableState,
+    reservation: &CuratorReservation,
+    row_version: u64,
+) -> Result<PreparedActivation, HandoffError> {
+    let job = store
+        .lookup_curator_job(project, &reservation.causal_identity)
+        .map_err(CuratorJobError::Store)?
+        .ok_or(CuratorJobError::Refused(CuratorJobRefusal::Missing))?;
+    Ok(PreparedActivation {
+        causal_identity: job.causal_identity,
+        producer: producer_binding(session_id, firing)?,
+        input: CuratorJobInput {
+            subject: job.target,
+            starting_references: Vec::new(),
+            question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
+        },
+        row_version,
     })
 }
 
@@ -262,15 +305,7 @@ pub fn reserve_and_stage(
     // The candidate is named by the subject bytes, so identical facts from two firings name one target and deduplicate on the causal identity; the run is the firing's, so a retry of one firing restages under its own run.
     let candidate_id = format!("hs-{session_id}-{}", &payload_digest[..32]);
     let extraction_run_id = format!("hs-run-{session_id}-{}", firing.firing_seq);
-    let producer = ProducerBinding {
-        producer: PRODUCER.to_string(),
-        firing_id: format!("{session_id}#{}", firing.firing_seq),
-        ordinal: firing
-            .chunk_range
-            .as_ref()
-            .ok_or(HandoffError::NoChunkRange)?
-            .from_ordinal,
-    };
+    let producer = producer_binding(session_id, firing)?;
     let inputs = CausalInputs {
         target: ReviewTarget::StagedSubject {
             kernel_incarnation: target.kernel_incarnation.clone(),

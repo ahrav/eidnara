@@ -131,11 +131,60 @@ impl Rig {
             },
             |reservation| {
                 observe(reservation);
-                let mut reserved = self.state();
-                reserved.curator_reservation = Some(reservation.clone());
-                Ok(self.persist(reserved))
+                let row_version = self.store.load(SESSION).unwrap().row_version.unwrap();
+                Ok(self
+                    .store
+                    .record_curator_reservation(
+                        SESSION,
+                        row_version,
+                        reservation,
+                        &memory_store::PendingPublication {
+                            validated_json: serde_json::to_string(&validated_range(2, 4)).unwrap(),
+                            aliases_json: serde_json::to_string(&aliases()).unwrap(),
+                            chunk_transcript: "U: transcript".to_string(),
+                            boundary_dates: BTreeMap::new(),
+                            publication_floor_ordinal: 5,
+                            collect_user_memory_candidates: false,
+                        },
+                    )
+                    .unwrap())
             },
         )
+    }
+
+    fn pending(&self) -> Option<(u64, memory_store::PendingPublication)> {
+        self.store.load_pending_publication(SESSION).unwrap()
+    }
+
+    /// Reopens the Memory Store from its files, as a restarted daemon would; the old handle releases its lease first.
+    fn reopen(&mut self) {
+        let path = self._dirs[1].path().to_path_buf();
+        let placeholder_dir = tempfile::tempdir().unwrap();
+        let placeholder = MemoryStore::open(&MemoryStore::test_descriptor(
+            placeholder_dir.path(),
+            "eidnara-history-summarizer-handoff-placeholder",
+        ))
+        .unwrap();
+        drop(std::mem::replace(&mut self.store, placeholder));
+        self.store = MemoryStore::open(&MemoryStore::test_descriptor(
+            &path,
+            "eidnara-history-summarizer-handoff-test",
+        ))
+        .unwrap();
+        self._dirs.push(placeholder_dir);
+    }
+
+    fn republish(&self, target: Option<&HandoffTarget>, now_ms: i64) -> RepublishOutcome {
+        republish_reserved(RepublishRequest {
+            store: &self.store,
+            session_id: SESSION,
+            project_path: PROJECT,
+            curator_handoff: target,
+            now_ms,
+            failure_backoff_at_ms: now_ms + 60_000,
+            publication_fence: None,
+        })
+        .unwrap()
     }
 
     /// The reference the handoff stages the accepted facts under.
@@ -166,17 +215,40 @@ impl Rig {
         start: u64,
         end: u64,
     ) -> Result<memory_store::HistorySummarizerPublishResult, HistorySummarizerStateError> {
-        let validated = validated_range(start, end);
         let loaded = self.store.load(SESSION).unwrap();
         let predicate = publish_predicate(&loaded.meta.history_summarizer).unwrap();
+        self.publish_at(
+            loaded.row_version,
+            &predicate,
+            activation,
+            nonadmission,
+            now_ms,
+            start,
+            end,
+        )
+    }
+
+    /// Publishes against `expected_row_version` and `predicate`, which may both be stale.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_at(
+        &self,
+        expected_row_version: Option<u64>,
+        predicate: &HistorySummarizerPublishPredicate,
+        activation: Option<&PreparedActivation>,
+        nonadmission: Option<CuratorNonadmissionCode>,
+        now_ms: i64,
+        start: u64,
+        end: u64,
+    ) -> Result<memory_store::HistorySummarizerPublishResult, HistorySummarizerStateError> {
+        let validated = validated_range(start, end);
         publish_validated_chunk(
             &self.store,
             ValidatedPublishRequest {
                 session_id: SESSION,
                 project_path: PROJECT,
-                expected_row_version: loaded.row_version,
+                expected_row_version,
                 expected_revert_epoch: 0,
-                predicate: &predicate,
+                predicate,
                 observed_chunk_fingerprint: "fp",
                 validated: &validated,
                 collect_user_memory_candidates: false,
@@ -499,24 +571,20 @@ fn every_interruption_between_reservation_and_publication_converges_on_one_job()
             .queue_deadline_at,
         reservation.queue_deadline_ms
     );
-    // Window 5: publication fails at a fence; the reservation and the Reserved row stay, nothing advances.
-    let mut stale = rig.state();
-    stale.history_segment_set_generation = HistorySegmentSetGeneration {
-        max_sequence: 9,
-        count: 9,
-    };
-    rig.persist(stale);
-    let fenced = rig.publish(Some(&prepared), None, t0() + 30);
+    // Window 5: publication fails after the reservation for a reason a retry can cure (here the activation names the wrong producer); the reservation, the Reserved row, and the staged subject stay, and nothing advances.
+    let mut foreign = prepared.clone();
+    foreign.producer.firing_id = format!("{SESSION}#99");
+    let refused = rig.publish(Some(&foreign), None, t0() + 30);
     assert!(
         matches!(
-            fenced,
+            refused,
             Err(
                 crate::history_summarizer::HistorySummarizerStateError::Publish(
-                    HistorySummarizerPublishError::FenceRejected { .. }
+                    HistorySummarizerPublishError::CuratorActivation(_)
                 )
             )
         ),
-        "{fenced:?}"
+        "{refused:?}"
     );
     assert_eq!(
         rig.job(&prepared.causal_identity).state,
@@ -524,12 +592,10 @@ fn every_interruption_between_reservation_and_publication_converges_on_one_job()
     );
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
     let retained = rig.state();
+    assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
     assert_eq!(retained.curator_reservation, Some(reservation.clone()));
     assert_eq!(retained.curator_nonadmission.count, 0);
-    // The producer's retry reconciles against the retained reservation and publishes once.
-    let mut healed = publishing_state(3);
-    healed.curator_reservation = retained.curator_reservation.clone();
-    rig.persist(healed);
+    // The retry reconciles against the retained reservation and publishes once.
     let retried = activation(rig.handoff(t0() + 40).unwrap());
     assert_eq!(retried.causal_identity, prepared.causal_identity);
     assert_eq!(
@@ -543,6 +609,79 @@ fn every_interruption_between_reservation_and_publication_converges_on_one_job()
         Some(CuratorActivationOutcome::Activated)
     );
     assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+}
+
+#[test]
+fn a_fence_refusal_after_the_reservation_settles_the_job_without_progress() {
+    // The selected input changed under the firing: the history the candidate was extracted from can never publish, so the job is finished as not admitted, the reservation is dropped, nothing advances, and no nonadmission is counted (the outcome lives on the job).
+    let rig = Rig::open();
+    let prepared = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    let mut changed = rig.store.load(SESSION).unwrap();
+    changed.meta.block_identity_by_mid.get_mut("m2").unwrap()[0].byte_fingerprint =
+        "content-b".to_string();
+    rig.store
+        .commit(SESSION, changed.row_version, &changed.core, &changed.meta)
+        .unwrap();
+    let fenced = rig.publish(Some(&prepared), None, t0() + 1);
+    assert!(
+        matches!(
+            fenced,
+            Err(
+                crate::history_summarizer::HistorySummarizerStateError::Publish(
+                    HistorySummarizerPublishError::FenceRejected { .. }
+                )
+            )
+        ),
+        "{fenced:?}"
+    );
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
+    let after = rig.store.load(SESSION).unwrap();
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+    assert_eq!(after.meta.publication_floor_ordinal, None);
+    assert_eq!(
+        after.meta.history_summarizer.state,
+        HistorySummarizerPhase::Idle
+    );
+    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert_eq!(after.meta.history_summarizer.curator_nonadmission.count, 0);
+    assert!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().is_empty());
+    // A competing publication that moved the segment set on settles the same way.
+    let rig = Rig::open();
+    let prepared = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    rig.store
+        .replace_history_segments(
+            SESSION,
+            &[memory_store::StoredHistorySegment {
+                sequence: 1,
+                start_message: 1,
+                end_message: 1,
+                end_message_id: "m1".into(),
+                title: "earlier".into(),
+                content: "earlier".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+    let fenced = rig.publish(Some(&prepared), None, t0() + 1);
+    assert!(matches!(
+        fenced,
+        Err(
+            crate::history_summarizer::HistorySummarizerStateError::Publish(
+                HistorySummarizerPublishError::FenceRejected { .. }
+            )
+        )
+    ));
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
+    assert_eq!(rig.state().curator_reservation, None);
 }
 
 #[test]
@@ -966,4 +1105,347 @@ fn a_reservation_the_sweep_already_expired_reads_as_expired_at_late_publication(
         rig.job(&reservation.causal_identity).queue_deadline_ms,
         reservation.queue_deadline_ms
     );
+}
+
+#[test]
+fn restart_republishes_a_reserved_firing_without_a_model_run() {
+    let mut rig = Rig::open();
+    let prepared = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    // The daemon restarts before publication: the state is Publishing with the reservation and the retained output.
+    rig.reopen();
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, t0() + 60_000).unwrap(),
+        RestartAction::RepublishReserved { firing_seq: 3 }
+    );
+    assert_eq!(rig.state().state, HistorySummarizerPhase::Publishing);
+    // Without the Kernel the staged subject cannot be verified; nothing moves.
+    assert_eq!(rig.republish(None, t0() + 1), RepublishOutcome::Retained);
+    assert_eq!(rig.state().curator_reservation, Some(reservation.clone()));
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+    // With it, the retained publication commits and activates the same job.
+    let target = rig.target();
+    let outcome = rig.republish(Some(&target), t0() + 2);
+    assert_eq!(outcome, RepublishOutcome::Published);
+    let job = rig.job(&reservation.causal_identity);
+    assert!(
+        matches!(job.state, CuratorJobState::Ready(_)),
+        "{:?}",
+        job.state
+    );
+    assert_eq!(job.causal_identity, prepared.causal_identity);
+    let after = rig.store.load(SESSION).unwrap();
+    assert_eq!(after.meta.publication_floor_ordinal, Some(5));
+    assert_eq!(
+        after.meta.history_summarizer.state,
+        HistorySummarizerPhase::Idle
+    );
+    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
+    // A second restart finds nothing to do.
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, t0() + 60_000).unwrap(),
+        RestartAction::Done
+    );
+}
+
+#[test]
+fn restart_settles_a_reserved_firing_whose_input_changed_or_expired() {
+    // Changed selected input: the republication is fenced, the job is finished as not admitted, and the run is idle with nothing advanced.
+    let mut rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    let mut changed = rig.store.load(SESSION).unwrap();
+    changed.meta.block_identity_by_mid.get_mut("m2").unwrap()[0].byte_fingerprint =
+        "content-b".to_string();
+    rig.store
+        .commit(SESSION, changed.row_version, &changed.core, &changed.meta)
+        .unwrap();
+    rig.reopen();
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, t0() + 60_000).unwrap(),
+        RestartAction::RepublishReserved { firing_seq: 3 }
+    );
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 1),
+        RepublishOutcome::Settled
+    );
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+    assert_eq!(
+        rig.store
+            .load(SESSION)
+            .unwrap()
+            .meta
+            .publication_floor_ordinal,
+        None
+    );
+
+    // Expired reservation: the late republication records expiry and the valid history still advances, once.
+    let mut rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    rig.reopen();
+    let late = t0() + CURATOR_QUEUE_LIFETIME_MS + 1;
+    let target = rig.target();
+    let outcome = rig.republish(Some(&target), late);
+    assert_eq!(outcome, RepublishOutcome::Published);
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+    );
+    assert_eq!(
+        rig.store
+            .load(SESSION)
+            .unwrap()
+            .meta
+            .publication_floor_ordinal,
+        Some(5)
+    );
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, late).unwrap(),
+        RestartAction::Done
+    );
+}
+
+#[test]
+fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_carried() {
+    use crate::history_summarizer_producer::ProducerOutput;
+    use crate::history_summarizer_validate::{ChunkLine, HistorySummarizerChunk, ValidateOptions};
+
+    // The production path reserves and retains, then the store fails to activate (the activation names the wrong producer), which keeps the firing in Publishing with the failure recorded.
+    let mut rig = Rig::open();
+    let mut awaiting = publishing_state(3);
+    awaiting.state = HistorySummarizerPhase::AwaitingProducer;
+    awaiting.history_segment_set_generation = HistorySegmentSetGeneration::default();
+    rig.persist(awaiting);
+    let chunk = HistorySummarizerChunk {
+        aliases: aliases(),
+        start_index: 2,
+        end_index: 4,
+        lines: (2..=4)
+            .map(|ordinal| ChunkLine {
+                ordinal,
+                message_id: format!("m{ordinal}"),
+                anchorable: true,
+            })
+            .collect(),
+        present_ordinals: vec![2, 3, 4],
+        tool_only_ranges: vec![],
+        completed_tool_arcs: vec![],
+    };
+    let target = rig.target();
+    // A fence that refuses once, as a retired transform snapshot does, and then admits.
+    struct RefuseOnce(std::sync::atomic::AtomicBool);
+    impl HistorySummarizerPublicationFence for RefuseOnce {
+        fn publish(
+            &self,
+            store: &MemoryStore,
+            request: memory_store::HistorySummarizerPublishRequest<'_>,
+        ) -> Result<memory_store::HistorySummarizerPublishResult, HistorySummarizerPublishError>
+        {
+            if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(HistorySummarizerPublishError::CallerFenceRejected {
+                    reason: "snapshot retired".to_string(),
+                });
+            }
+            store.publish_history_summarizer_chunk(request)
+        }
+    }
+    let fence = RefuseOnce(std::sync::atomic::AtomicBool::new(true));
+    let refused = publish_output_from_awaiting(PublishOutputRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        awaiting: rig.state(),
+        output: ProducerOutput {
+            text: r#"<output><history_segments><history_segment start="2" end="3" title="arc" episode_type="feature" importance="60"><p1>arc</p1><p2>arc</p2><p3>arc</p3><p4 /></history_segment></history_segments><facts><PROJECT_RULES>
+* [s1:0-11] [s2:0-22] Run bun install before building.
+</PROJECT_RULES></facts><meta><unprocessed_from>4</unprocessed_from></meta></output>"#
+                .to_string(),
+            length_capped: false,
+        },
+        observed_chunk_fingerprint: "fp",
+        validation_chunk: &chunk,
+        chunk_transcript: "U: the transcript the recovery republishes",
+        boundary_dates: &BTreeMap::new(),
+        prior_history_segments: &[],
+        validate_options: ValidateOptions {
+            in_emergency: true,
+            ..ValidateOptions::default()
+        },
+        created_at_ms: t0(),
+        failure_started_at_ms: t0(),
+        failure_backoff_at_ms: 0,
+        completion_now_ms: t0,
+        publication_fence: Some(&fence),
+        curator_handoff: Some(&target),
+    });
+    assert!(
+        matches!(
+            refused,
+            Err(HistorySummarizerDriveError::State(
+                HistorySummarizerStateError::Publish(
+                    HistorySummarizerPublishError::CallerFenceRejected { .. }
+                )
+            ))
+        ),
+        "{refused:?}"
+    );
+    let retained = rig.state();
+    assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
+    let reservation = retained.curator_reservation.clone().expect("retained");
+    assert_eq!(retained.consecutive_publish_failures, 1);
+    let (firing_seq, pending) = rig.pending().expect("the retained publication is stored");
+    assert_eq!(firing_seq, 3);
+    assert_eq!(
+        pending.chunk_transcript,
+        "U: the transcript the recovery republishes"
+    );
+    assert_eq!(pending.publication_floor_ordinal, 4);
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Reserved
+    );
+
+    // After a restart, recovery republishes the retained output: no model, one activation, history advanced to exactly what the firing validated.
+    rig.reopen();
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, t0() + 60_000).unwrap(),
+        RestartAction::RepublishReserved { firing_seq: 3 }
+    );
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 1),
+        RepublishOutcome::Published
+    );
+    let after = rig.store.load(SESSION).unwrap();
+    assert_eq!(after.meta.publication_floor_ordinal, Some(4));
+    assert_eq!(
+        after.meta.history_summarizer.state,
+        HistorySummarizerPhase::Idle
+    );
+    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    let segments = rig.store.load_history_segments(SESSION).unwrap();
+    assert_eq!(segments.len(), 1);
+    assert_eq!((segments[0].start_message, segments[0].end_message), (2, 3));
+    assert!(matches!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Ready(_)
+    ));
+    assert_eq!(
+        rig.store
+            .load_chunk_transcripts_for_range(SESSION, 2, 3)
+            .unwrap()
+            .len(),
+        1,
+        "the retained transcript published with the segment"
+    );
+
+    // A reservation left by an earlier firing is not carried into the next one.
+    let mut stale = after.meta.history_summarizer.clone();
+    stale.curator_reservation = Some(reservation.clone());
+    rig.persist(stale);
+    let fired = match fire(
+        &rig.state(),
+        4,
+        6,
+        "fp".into(),
+        selected_range_identities(),
+        0,
+        HistorySegmentSetGeneration {
+            max_sequence: 1,
+            count: 1,
+        },
+        t0() + 2,
+    )
+    .unwrap()
+    {
+        FireOutcome::Fired(state) => state,
+        FireOutcome::Busy(_) => unreachable!(),
+    };
+    assert_eq!(fired.curator_reservation, None);
+    assert_eq!(fired.firing_seq, 4);
+}
+
+#[test]
+fn a_row_conflict_retains_the_reservation_and_a_duplicate_settle_spares_a_ready_job() {
+    let rig = Rig::open();
+    let prepared = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    // Another writer commits the session row before the publication: the CAS fails, the reservation and the retained output stay, and the state remains Publishing for the next pass.
+    let loaded = rig.store.load(SESSION).unwrap();
+    let predicate = publish_predicate(&loaded.meta.history_summarizer).unwrap();
+    rig.store
+        .commit(SESSION, loaded.row_version, &loaded.core, &loaded.meta)
+        .unwrap();
+    let conflict = rig.publish_at(
+        loaded.row_version,
+        &predicate,
+        Some(&prepared),
+        None,
+        t0() + 1,
+        2,
+        4,
+    );
+    assert!(
+        matches!(
+            conflict,
+            Err(HistorySummarizerStateError::Publish(
+                HistorySummarizerPublishError::CasConflict { reason: None, .. }
+            ))
+        ),
+        "{conflict:?}"
+    );
+    let state = rig.state();
+    assert_eq!(state.state, HistorySummarizerPhase::Publishing);
+    assert_eq!(state.curator_reservation, Some(reservation.clone()));
+    assert!(rig.pending().is_some());
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Reserved
+    );
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+    // Recovery publishes it.
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 2),
+        RepublishOutcome::Published
+    );
+    assert!(matches!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Ready(_)
+    ));
+    // A late duplicate publication of the same activation is refused by the row version and does not settle the Ready job.
+    let late = rig.publish_at(
+        loaded.row_version,
+        &predicate,
+        Some(&prepared),
+        None,
+        t0() + 3,
+        2,
+        4,
+    );
+    assert!(matches!(
+        late,
+        Err(HistorySummarizerStateError::Publish(
+            HistorySummarizerPublishError::CasConflict { .. }
+                | HistorySummarizerPublishError::InvalidState { .. }
+        ))
+    ));
+    assert!(matches!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Ready(_)
+    ));
 }

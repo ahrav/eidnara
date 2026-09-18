@@ -66,6 +66,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "format_marker"),
     ("table", "history_segment_events"),
     ("table", "history_segments"),
+    ("table", "history_summarizer_pending_publications"),
     ("table", "history_summarizer_side_channel_outbox"),
     ("table", "memory_classifier_attempts"),
     ("table", "memory_classifier_receipts"),

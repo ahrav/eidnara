@@ -594,6 +594,18 @@ pub struct CuratorReservation {
     pub queue_deadline_ms: i64,
 }
 
+/// Everything a reserved firing's publication needs to run again locally after an interruption, so recovery neither reruns the model nor reconstructs the validated output: the validated chunk as the daemon serializes it, and the publication inputs beside it. Stored compressed in its own row, written and cleared with the reservation it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPublication {
+    pub validated_json: String,
+    /// The frozen alias table the accepted facts cite, as the daemon serializes it; the reservation's subject is rebuilt from it.
+    pub aliases_json: String,
+    pub chunk_transcript: String,
+    pub boundary_dates: BTreeMap<String, String>,
+    pub publication_floor_ordinal: u64,
+    pub collect_user_memory_candidates: bool,
+}
+
 /// Producer-owned nonadmission facts. `count` only grows; both survive every phase transition, abandonment, and reset of the producer state within the session's store lifetime, and are written only by the fenced publication that also advances history.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CuratorNonadmission {
@@ -982,12 +994,12 @@ pub enum HistorySummarizerPublishError {
         found: u64,
         reason: Option<String>,
     },
-    /// A caller-supplied publication fence refused the publish before any write.
-    /// Distinct from CasConflict so callers can abandon the run WITHOUT arming a
-    /// model-failure cooldown: a fence rejection is a fast local race, not a
-    /// producer failure, and an immediate retry with a fresh snapshot is valid.
+    /// The store's own fence refused the publish before any write: the selected input or the segment set no longer matches the firing's snapshot. Distinct from CasConflict so callers can abandon the run WITHOUT arming a model-failure cooldown.
     #[error("publication fence rejected: {reason}")]
     FenceRejected { reason: String },
+    /// A caller-supplied publication fence refused before the store was reached: a fast local race, not a property of the stored history, so a retry with a fresh snapshot is valid.
+    #[error("caller publication fence rejected: {reason}")]
+    CallerFenceRejected { reason: String },
     /// An appended history_summarizer history_segment intersects an already durable range. This
     /// is a publish rejection rather than a SQLite failure so callers can abandon the
     /// stale firing and leave the session immediately reusable.
@@ -10347,6 +10359,7 @@ impl MemoryStore {
             }
             for table in [
                 "chunk_transcripts",
+                "history_summarizer_pending_publications",
                 "history_segments",
                 "tags",
                 "temporal_marks",
@@ -11146,6 +11159,220 @@ impl MemoryStore {
     /// Increment publication health without changing the in-flight state. This covers
     /// failures before a publish transaction can safely abandon the producer run, such
     /// as side-channel outbox preparation errors.
+    /// Records a firing's Curator reservation and the publication it retains in one fenced write: the session row must still be at `expected_row_version` in `Publishing` for `reservation.firing_seq`, the retained payload is scanned and stored compressed in its own row, and the reservation lands in the durable state. Returns the new row version.
+    pub fn record_curator_reservation(
+        &self,
+        session_id: &str,
+        expected_row_version: u64,
+        reservation: &CuratorReservation,
+        pending: &PendingPublication,
+    ) -> Result<u64, HistorySummarizerPublishError> {
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
+        write.domain_owner("session", session_id, "history_summarizer");
+        write.existing_identity("session_id", session_id)?;
+        let scanned = PendingPublication {
+            validated_json: write.json_content(
+                "pending_validated",
+                &pending.validated_json,
+                JsonScanPolicy::DurableRejectProtected,
+            )?,
+            aliases_json: write.json_content(
+                "pending_aliases",
+                &pending.aliases_json,
+                JsonScanPolicy::DurableRejectProtected,
+            )?,
+            chunk_transcript: write.content("pending_transcript", &pending.chunk_transcript)?,
+            boundary_dates: pending.boundary_dates.clone(),
+            publication_floor_ordinal: pending.publication_floor_ordinal,
+            collect_user_memory_candidates: pending.collect_user_memory_candidates,
+        };
+        let payload = serde_json::to_vec(&scanned)
+            .map_err(|error| HistorySummarizerPublishError::Serde(error.to_string()))?;
+        let payload_deflate = compress_bytes(&payload).map_err(|error| {
+            MemoryStoreError::Serde(format!("pending publication compression failed: {error}"))
+        })?;
+        if payload_deflate.len() > MAX_PENDING_PUBLICATION_COMPRESSED_BYTES {
+            return Err(HistorySummarizerPublishError::Store(
+                MemoryStoreError::Serde(
+                    "pending publication exceeds its compressed bound".to_string(),
+                ),
+            ));
+        }
+        let now_ms = current_time_ms();
+        let outcome = write.execute(&self.inner, |coordinated| {
+            let tx = coordinated.tx;
+            let row = tx
+                .query_row(CACHE_STATE_META_SELECT, params![session_id], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .optional()?;
+            let Some((current, meta_json)) = row else {
+                return Ok(WriteDisposition::Replay(PublishTxnOutcome::InvalidState(
+                    "missing".to_string(),
+                )));
+            };
+            if current != expected_row_version as i64 {
+                return Ok(WriteDisposition::Replay(PublishTxnOutcome::CasConflict {
+                    found: current.max(0) as u64,
+                    reason: None,
+                }));
+            }
+            let mut meta: ModuleMeta = match serde_json::from_str(&meta_json) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    return Ok(WriteDisposition::Replay(PublishTxnOutcome::Serde(
+                        e.to_string(),
+                    )));
+                }
+            };
+            if meta.history_summarizer.state != HistorySummarizerPhase::Publishing
+                || meta.history_summarizer.firing_seq != reservation.firing_seq
+            {
+                return Ok(WriteDisposition::Replay(PublishTxnOutcome::InvalidState(
+                    meta.history_summarizer.state.as_str().to_string(),
+                )));
+            }
+            meta.history_summarizer.curator_reservation = Some(reservation.clone());
+            let next = next_row_version(current)?;
+            let meta_json = match serde_json::to_string(&meta) {
+                Ok(json) => json,
+                Err(e) => {
+                    return Ok(WriteDisposition::Replay(PublishTxnOutcome::Serde(
+                        e.to_string(),
+                    )));
+                }
+            };
+            coordinated
+                .prepared
+                .borrow_mut()
+                .transaction_content("meta", &meta_json)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let meta_json = prepare_transaction_json_preserving_identities(&meta_json)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            tx.execute(
+                "INSERT OR REPLACE INTO history_summarizer_pending_publications
+                   (session_id, firing_seq, payload_deflate, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    session_id,
+                    i64::try_from(reservation.firing_seq).unwrap_or(i64::MAX),
+                    payload_deflate,
+                    now_ms
+                ],
+            )?;
+            tx.execute(
+                "UPDATE cache_state SET row_version = ?2, meta = ?3
+                 WHERE session_id = ?1 AND row_version = ?4",
+                params![session_id, next as i64, meta_json, current],
+            )?;
+            Ok(WriteDisposition::Applied(PublishTxnOutcome::Committed(
+                HistorySummarizerPublishResult {
+                    row_version: next,
+                    curator_nonadmission_count: meta.history_summarizer.curator_nonadmission.count,
+                    curator_activation: None,
+                },
+            )))
+        })?;
+        match outcome {
+            PublishTxnOutcome::Committed(result) => Ok(result.row_version),
+            PublishTxnOutcome::CasConflict { found, reason } => {
+                Err(HistorySummarizerPublishError::CasConflict {
+                    expected: Some(expected_row_version),
+                    found,
+                    reason,
+                })
+            }
+            PublishTxnOutcome::InvalidState(state) => {
+                Err(HistorySummarizerPublishError::InvalidState { state })
+            }
+            PublishTxnOutcome::Serde(e) => Err(HistorySummarizerPublishError::Serde(e)),
+            PublishTxnOutcome::FenceRejected(reason) => {
+                Err(HistorySummarizerPublishError::FenceRejected { reason })
+            }
+            PublishTxnOutcome::HistorySegmentOverlap { .. }
+            | PublishTxnOutcome::StateMismatch(_) => Err(HistorySummarizerPublishError::Serde(
+                "unexpected reservation outcome".to_string(),
+            )),
+        }
+    }
+
+    /// The retained publication recorded with the session's reservation, with the firing it belongs to.
+    pub fn load_pending_publication(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(u64, PendingPublication)>, MemoryStoreError> {
+        let row: Option<(i64, Vec<u8>)> = self.inner.with_conn(|conn| {
+            conn.query_row(
+                "SELECT firing_seq, payload_deflate FROM history_summarizer_pending_publications
+                 WHERE session_id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+        })?;
+        let Some((firing_seq, blob)) = row else {
+            return Ok(None);
+        };
+        let bytes = decompress_bytes(&blob)
+            .map_err(|error| MemoryStoreError::Serde(format!("pending publication: {error}")))?;
+        let pending: PendingPublication = serde_json::from_slice(&bytes)
+            .map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
+        Ok(Some((
+            u64::try_from(firing_seq).unwrap_or_default(),
+            pending,
+        )))
+    }
+
+    /// Drops a reservation whose publication can never commit, together with its retained publication, in one fenced write. The state's in-flight fields are left as they are; the caller decides the phase.
+    pub fn clear_curator_reservation(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<u64>, MemoryStoreError> {
+        let outcome = self.inner.with_conn_fenced(|tx| {
+            let row = tx
+                .query_row(
+                    CACHE_STATE_META_SELECT,
+                    params![session_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            let Some((current, meta_json)) = row else {
+                return Ok(AbandonHistorySummarizerTxnOutcome::Unchanged);
+            };
+            let mut meta: ModuleMeta = match serde_json::from_str(&meta_json) {
+                Ok(meta) => meta,
+                Err(error) => return Ok(AbandonHistorySummarizerTxnOutcome::Serde(error.to_string())),
+            };
+            delete_pending_publication_tx(tx, session_id)?;
+            if meta.history_summarizer.curator_reservation.take().is_none() {
+                return Ok(AbandonHistorySummarizerTxnOutcome::Unchanged);
+            }
+            let next = next_row_version(current)?;
+            let meta_json = match serde_json::to_string(&meta) {
+                Ok(json) => json,
+                Err(error) => return Ok(AbandonHistorySummarizerTxnOutcome::Serde(error.to_string())),
+            };
+            let meta_json = match prepare_transaction_json_preserving_identities(&meta_json) {
+                Ok(json) => json,
+                Err(_) => {
+                    return Ok(AbandonHistorySummarizerTxnOutcome::Serde(
+                        "history_summarizer metadata failed secret scanning".to_string(),
+                    ))
+                }
+            };
+            tx.execute(
+                "UPDATE cache_state SET row_version = ?2, meta = ?3 WHERE session_id = ?1 AND row_version = ?4",
+                params![session_id, next as i64, meta_json, current],
+            )?;
+            Ok(AbandonHistorySummarizerTxnOutcome::Committed(next))
+        })?;
+        match outcome {
+            AbandonHistorySummarizerTxnOutcome::Unchanged => Ok(None),
+            AbandonHistorySummarizerTxnOutcome::Committed(row_version) => Ok(Some(row_version)),
+            AbandonHistorySummarizerTxnOutcome::Serde(error) => Err(MemoryStoreError::Serde(error)),
+        }
+    }
+
     pub fn record_history_summarizer_publish_failure_if_matching(
         &self,
         session_id: &str,
@@ -11409,6 +11636,9 @@ impl MemoryStore {
                 )?;
             }
             enqueue_history_summarizer_side_channels_tx(tx, session_id, &side_channel_items)?;
+            if request.curator_activation.is_some() {
+                delete_pending_publication_tx(tx, session_id)?;
+            }
             // The reserved job moves to Ready here, past every `Ok` bail-out, so activation and progress commit together or not at all; a refusal is raised as an error and rolls the whole publication back. A reservation past its deadline is closed as expired with progress and never resurrected; one the sweep already closed reads the same way.
             let curator_activation = match request.curator_activation.as_ref() {
                 None => None,
@@ -14730,10 +14960,41 @@ fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlit
     }
 }
 
+/// Compressed bound of one retained publication; the same envelope as a chunk transcript.
+const MAX_PENDING_PUBLICATION_COMPRESSED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES;
+
+fn delete_pending_publication_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM history_summarizer_pending_publications WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
 fn compress_transcript(transcript: &str) -> std::io::Result<Vec<u8>> {
+    compress_bytes(transcript.as_bytes())
+}
+
+fn compress_bytes(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(transcript.as_bytes())?;
+    encoder.write_all(bytes)?;
     encoder.finish()
+}
+
+/// Inflates a retained publication, bounded by the inflated transcript envelope plus its serialized siblings; a payload that would grow past it is refused rather than read.
+fn decompress_bytes(blob: &[u8]) -> std::io::Result<Vec<u8>> {
+    let bound = (MAX_CHUNK_TRANSCRIPT_INFLATED_BYTES as u64).saturating_mul(4);
+    let mut out = Vec::new();
+    DeflateDecoder::new(blob)
+        .take(bound + 1)
+        .read_to_end(&mut out)?;
+    if out.len() as u64 > bound {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "pending publication inflates past its bound",
+        ));
+    }
+    Ok(out)
 }
 
 fn decompress_durable_text_exact(blob: &[u8], limit: usize) -> std::io::Result<String> {
@@ -17706,6 +17967,11 @@ mod tests {
             "history_segments",
             "INSERT INTO history_segments(session_id, sequence, start_message, end_message, title, content)
              VALUES (?1, 1, 1, 2, 't', 'c')",
+        ),
+        (
+            "history_summarizer_pending_publications",
+            "INSERT INTO history_summarizer_pending_publications(session_id, firing_seq, payload_deflate, created_at_ms)
+             VALUES (?1, 1, x'00', 1)",
         ),
         (
             "history_summarizer_side_channel_outbox",

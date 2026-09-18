@@ -3445,9 +3445,11 @@ impl history_summarizer::HistorySummarizerPublicationFence for WrapupSnapshotPub
         // The lock prevents a transform from retiring the cached raw snapshot between validation and additive writes.
         let snapshots = self.snapshots.lock().expect("transform snapshots mutex");
         if !snapshots.ready_generation_matches(&self.session_id, self.generation) {
-            return Err(memory_store::HistorySummarizerPublishError::FenceRejected {
-                reason: "transform snapshot generation changed before publication".to_string(),
-            });
+            return Err(
+                memory_store::HistorySummarizerPublishError::CallerFenceRejected {
+                    reason: "transform snapshot generation changed before publication".to_string(),
+                },
+            );
         }
         let published = store.publish_history_summarizer_chunk(request);
         #[cfg(test)]
@@ -3484,9 +3486,11 @@ impl history_summarizer::HistorySummarizerPublicationFence for ReattachSnapshotP
         // The lock prevents later transforms from replacing the request's selected messages before their history rows are stored.
         let snapshots = self.snapshots.lock().expect("transform snapshots mutex");
         if !snapshots.generation_present_in_flight_or_ready(&self.session_id, self.generation) {
-            return Err(memory_store::HistorySummarizerPublishError::FenceRejected {
-                reason: "transform snapshot state changed after reattach started".to_string(),
-            });
+            return Err(
+                memory_store::HistorySummarizerPublishError::CallerFenceRejected {
+                    reason: "transform snapshot state changed after reattach started".to_string(),
+                },
+            );
         }
         let published = store.publish_history_summarizer_chunk(request);
         #[cfg(test)]
@@ -5333,6 +5337,20 @@ impl HandlerCore {
                                     firing_seq,
                                 });
                             }
+                            history_summarizer::RestartAction::RepublishReserved { .. } => {
+                                return history_summarizer::republish_reserved(
+                                    history_summarizer::RepublishRequest {
+                                        store: &store,
+                                        session_id: &session_id,
+                                        project_path: &project_path,
+                                        curator_handoff: curator_handoff.as_ref(),
+                                        now_ms: now,
+                                        failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
+                                        publication_fence: Some(publication_fence.as_ref()),
+                                    },
+                                )
+                                .map(history_summarizer::HistorySummarizerReattachOutcome::Republished);
+                            }
                             history_summarizer::RestartAction::ReattachProducer { .. } => {}
                         }
                         let mut producer = tokio::select! {
@@ -5392,13 +5410,42 @@ impl HandlerCore {
             HistorySummarizerPhase::Firing
             | HistorySummarizerPhase::Validating
             | HistorySummarizerPhase::Publishing => {
+                let publication_fence = Arc::new(ReattachSnapshotPublicationFence {
+                    snapshots: Arc::clone(&self.transform_snapshots),
+                    session_id: session_id.clone(),
+                    generation: snapshot_generation,
+                    #[cfg(test)]
+                    after_store_publish: Arc::clone(&self.publication_fence_write_hook),
+                });
+                let curator_handoff = self.curator_handoff_target(&store, binding);
                 let spawned = self.spawn_module_task(async move {
                     let _guard = guard;
-                    if let Err(e) = history_summarizer::handle_restart_load(
+                    let result = match history_summarizer::handle_restart_load(
                         &store,
                         &session_id,
                         now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                     ) {
+                        // A reserved firing republishes its retained output under the same fences instead of refiring.
+                        Ok(history_summarizer::RestartAction::RepublishReserved { .. }) => {
+                            history_summarizer::republish_reserved(
+                                history_summarizer::RepublishRequest {
+                                    store: &store,
+                                    session_id: &session_id,
+                                    project_path: &project_path,
+                                    curator_handoff: curator_handoff.as_ref(),
+                                    now_ms: now,
+                                    failure_backoff_at_ms: now
+                                        + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
+                                    publication_fence: Some(publication_fence.as_ref()),
+                                },
+                            )
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                        }
+                        Ok(_) => Ok(()),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    if let Err(e) = result {
                         eprintln!(
                             "daemon: history_summarizer restart recovery failed for {session_id}: {e}"
                         );
@@ -6129,7 +6176,10 @@ impl HandlerCore {
                     history_summarizer::HistorySummarizerDriveError::State(
                         history_summarizer::HistorySummarizerStateError::Publish(
                             memory_store::HistorySummarizerPublishError::CasConflict { .. }
-                            | memory_store::HistorySummarizerPublishError::FenceRejected { .. },
+                            | memory_store::HistorySummarizerPublishError::FenceRejected { .. }
+                            | memory_store::HistorySummarizerPublishError::CallerFenceRejected {
+                                ..
+                            },
                         ),
                     )
                     | history_summarizer::HistorySummarizerDriveError::State(
