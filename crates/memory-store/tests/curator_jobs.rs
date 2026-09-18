@@ -486,6 +486,112 @@ fn activation_requires_the_reservation_and_takes_no_second_slot() {
 }
 
 #[test]
+fn rebinding_hands_a_reserved_row_to_another_firing_of_the_same_producer() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let job = reserved(
+        store
+            .reserve_curator_job("proj", &producer("f1"), &inputs("cand-1"), NOW)
+            .unwrap(),
+    );
+    let before = store.curator_headroom("proj").unwrap();
+    let mut foreign = producer("f2");
+    foreign.producer = "other-producer".to_string();
+    assert_eq!(
+        refusal(
+            store
+                .rebind_reserved_curator_job("proj", &job.causal_identity, &foreign, NOW + 1)
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::ProducerMismatch
+    );
+    assert_eq!(
+        refusal(
+            store
+                .rebind_reserved_curator_job(
+                    "proj",
+                    &job.causal_identity,
+                    &producer("f2"),
+                    job.queue_deadline_ms
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::Expired
+    );
+    let missing = inputs("cand-9").causal_identity().unwrap();
+    assert_eq!(
+        refusal(
+            store
+                .rebind_reserved_curator_job("proj", &missing, &producer("f2"), NOW + 1)
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::Missing
+    );
+    // The ordinal names the source revision the subject was staged under, so it stays with the row.
+    let mut recut_producer = producer("f2");
+    recut_producer.ordinal = 7;
+    let rebound = store
+        .rebind_reserved_curator_job("proj", &job.causal_identity, &recut_producer, NOW + 1)
+        .unwrap();
+    let rebound_producer = producer("f2");
+    assert_eq!(rebound.producer, rebound_producer);
+    assert_eq!(rebound.state, CuratorJobState::Reserved);
+    assert_eq!(rebound.queue_deadline_ms, job.queue_deadline_ms);
+    assert_eq!(rebound.target, job.target);
+    assert_eq!(rebound.created_at_ms, job.created_at_ms);
+    assert_eq!(store.curator_headroom("proj").unwrap(), before);
+    // The original firing cannot activate the rebound job; the rebound firing can.
+    assert_eq!(
+        refusal(
+            store
+                .activate_curator_job(
+                    "proj",
+                    &job.causal_identity,
+                    &producer("f1"),
+                    &input("cand-1"),
+                    NOW + 2
+                )
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::ProducerMismatch
+    );
+    let ready = store
+        .activate_curator_job(
+            "proj",
+            &job.causal_identity,
+            &rebound_producer,
+            &input("cand-1"),
+            NOW + 2,
+        )
+        .unwrap();
+    assert_eq!(ready.state, CuratorJobState::Ready(input("cand-1")));
+    assert_eq!(
+        refusal(
+            store
+                .rebind_reserved_curator_job("proj", &job.causal_identity, &producer("f3"), NOW + 3)
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::NotReserved
+    );
+    store
+        .finish_curator_job(
+            "proj",
+            &job.causal_identity,
+            CuratorJobOutcome::Failed,
+            NOW + 4,
+        )
+        .unwrap();
+    assert_eq!(
+        refusal(
+            store
+                .rebind_reserved_curator_job("proj", &job.causal_identity, &producer("f3"), NOW + 5)
+                .unwrap_err()
+        ),
+        CuratorJobRefusal::Terminal
+    );
+}
+
+#[test]
 fn activation_composed_with_a_failing_producer_transaction_commits_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let store = MemoryStore::open(&descriptor(dir.path())).unwrap();

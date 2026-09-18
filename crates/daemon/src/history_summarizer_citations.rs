@@ -10,8 +10,10 @@ use crate::history_summarizer_validate::FactCandidate;
 
 /// Aliases a chunk may issue; a chunk renders far fewer messages than this.
 pub const MAX_ALIASES: usize = 4096;
-/// Cited spans per fact, at most.
-pub const MAX_CITATIONS_PER_FACT: usize = 8;
+/// Cited spans per fact, at most; the Kernel refuses a staged subject past the same bound.
+pub const MAX_CITATIONS_PER_FACT: usize = kernel::MAX_FACT_SPANS;
+/// Facts per set, at most; the Kernel refuses a staged subject past the same bound.
+pub const MAX_FACTS_PER_SET: usize = kernel::MAX_REVIEW_FACTS;
 
 /// One presented message part and the native identity behind it. `alias` is empty until [`FrozenAliasTable::issue`] assigns it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +135,9 @@ pub fn check_fact_set(
     table: &FrozenAliasTable,
     accepted: Option<RangeInclusive<u64>>,
 ) -> Result<(), ExtractionFailure> {
+    if facts.len() > MAX_FACTS_PER_SET {
+        return Err(ExtractionFailure::TooManyFacts);
+    }
     for fact in facts {
         if fact.citations.is_empty() {
             return Err(ExtractionFailure::MissingCitation);
@@ -262,6 +267,27 @@ mod tests {
         assert_eq!(
             check_fact_set(&[fact(eight)], &table("0123456789"), Some(1..=1)),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn a_set_past_the_fact_bound_is_rejected_whole() {
+        let one = || {
+            fact(vec![Citation {
+                alias: "s1".into(),
+                start: 0,
+                end: 1,
+            }])
+        };
+        let at_bound: Vec<FactCandidate> = (0..MAX_FACTS_PER_SET).map(|_| one()).collect();
+        assert_eq!(
+            check_fact_set(&at_bound, &table("0123456789"), Some(1..=1)),
+            Ok(())
+        );
+        let over: Vec<FactCandidate> = (0..=MAX_FACTS_PER_SET).map(|_| one()).collect();
+        assert_eq!(
+            check_fact_set(&over, &table("0123456789"), Some(1..=1)),
+            Err(ExtractionFailure::TooManyFacts)
         );
     }
 

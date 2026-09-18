@@ -298,7 +298,7 @@ impl From<rusqlite::Error> for CuratorJobError {
     }
 }
 
-fn refuse(refusal: CuratorJobRefusal) -> rusqlite::Error {
+pub(crate) fn refuse(refusal: CuratorJobRefusal) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(refusal))
 }
 
@@ -744,6 +744,37 @@ pub fn activate_curator_job_in_tx(
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
+/// Rebinds a `Reserved` row to another firing of the same producer. Preserves its deadline, target, allowance, and ordinal: the ordinal names the source revision the row's subject was staged under, so the adopting firing reads and activates under it rather than its own. Refuses non-reserved, foreign-producer, or expired rows.
+pub fn rebind_reserved_curator_job_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    causal_identity: &str,
+    producer: &ProducerBinding,
+    now_ms: i64,
+) -> rusqlite::Result<CuratorJob> {
+    producer.validate().map_err(refuse)?;
+    let job = load_curator_job(conn, project, causal_identity)?
+        .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
+    match job.state {
+        CuratorJobState::Reserved => {}
+        CuratorJobState::Ready(_) => return Err(refuse(CuratorJobRefusal::NotReserved)),
+        CuratorJobState::Terminal(_) => return Err(refuse(CuratorJobRefusal::Terminal)),
+    }
+    if job.producer.producer != producer.producer {
+        return Err(refuse(CuratorJobRefusal::ProducerMismatch));
+    }
+    if job.queue_deadline_ms <= now_ms {
+        return Err(refuse(CuratorJobRefusal::Expired));
+    }
+    conn.execute(
+        "UPDATE curator_jobs SET firing_id = ?3, updated_at_ms = ?4
+         WHERE project = ?1 AND causal_identity = ?2 AND state = 'reserved'",
+        params![project, causal_identity, producer.firing_id, now_ms],
+    )?;
+    load_curator_job(conn, project, causal_identity)?
+        .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
+}
+
 /// Records one terminal outcome for a non-terminal row, drops its input, and releases its allowance; the compact receipt and its charge stay. A terminal row is never reopened, and a finish at or after the queue deadline is refused as expired so the permanent outcome does not depend on whether the sweep ran first.
 pub fn finish_curator_job_in_tx(
     conn: &GuardedConn<'_>,
@@ -766,6 +797,33 @@ pub fn finish_curator_job_in_tx(
         return Err(refuse(match job.state {
             CuratorJobState::Terminal(_) => CuratorJobRefusal::Terminal,
             _ => CuratorJobRefusal::Expired,
+        }));
+    }
+    Ok(job)
+}
+
+/// Closes a `Reserved` row whose queue deadline has passed with the same `expired` outcome the sweep would record, so an activation that finds its reservation expired can close it eagerly without the outcome depending on whether the sweep ran first. A row still inside its deadline, already terminal, or past reservation is refused.
+pub fn expire_reserved_curator_job_in_tx(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    causal_identity: &str,
+    now_ms: i64,
+) -> rusqlite::Result<CuratorJob> {
+    let changed = conn.execute(
+        "UPDATE curator_jobs
+            SET state = 'terminal', outcome = 'expired', allowance_bytes = 0, input_json = NULL,
+                updated_at_ms = ?3
+          WHERE project = ?1 AND causal_identity = ?2 AND state = 'reserved'
+            AND queue_deadline_ms <= ?3",
+        params![project, causal_identity, now_ms],
+    )?;
+    let job = load_curator_job(conn, project, causal_identity)?
+        .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
+    if changed == 0 {
+        return Err(refuse(match job.state {
+            CuratorJobState::Terminal(_) => CuratorJobRefusal::Terminal,
+            CuratorJobState::Ready(_) => CuratorJobRefusal::NotReserved,
+            CuratorJobState::Reserved => CuratorJobRefusal::InvalidRequest,
         }));
     }
     Ok(job)
@@ -1275,6 +1333,28 @@ impl MemoryStore {
             },
             |conn| {
                 activate_curator_job_in_tx(conn, project, causal_identity, producer, input, now_ms)
+                    .map(WriteDisposition::Applied)
+            },
+        )
+    }
+
+    pub fn rebind_reserved_curator_job(
+        &self,
+        project: &str,
+        causal_identity: &str,
+        producer: &ProducerBinding,
+        now_ms: i64,
+    ) -> Result<CuratorJob, CuratorJobError> {
+        self.curator_transaction(
+            project,
+            "rebind",
+            |write| {
+                write.identity("producer", &producer.producer)?;
+                write.identity("firing_id", &producer.firing_id)?;
+                Ok(())
+            },
+            |conn| {
+                rebind_reserved_curator_job_in_tx(conn, project, causal_identity, producer, now_ms)
                     .map(WriteDisposition::Applied)
             },
         )

@@ -210,11 +210,19 @@ impl Fixture {
                 payload: ReviewPayload::Subject(ReviewSubject {
                     facts: vec![ExtractedFact {
                         text: text.to_string(),
-                        span: SourceSpan {
+                        spans: vec![SourceSpan {
                             alias: "s1".to_string(),
                             start: 0,
                             end: 4,
-                        },
+                        }],
+                    }],
+                    origins: vec![kernel::SubjectOrigin {
+                        alias: "s1".to_string(),
+                        message_id: "m1".to_string(),
+                        ordinal: 1,
+                        block_ids: vec!["m1#0".to_string()],
+                        block_hashes: vec!["0".repeat(64)],
+                        ranges: vec![kernel::ByteRange { start: 0, end: 4 }],
                     }],
                 }),
                 recorded_at: self.now,
@@ -235,11 +243,19 @@ impl Fixture {
         let payload = ReviewPayload::Subject(ReviewSubject {
             facts: vec![ExtractedFact {
                 text: "bun builds the workspace".to_string(),
-                span: SourceSpan {
+                spans: vec![SourceSpan {
                     alias: "s1".to_string(),
                     start: 0,
                     end: 4,
-                },
+                }],
+            }],
+            origins: vec![kernel::SubjectOrigin {
+                alias: "s1".to_string(),
+                message_id: "m1".to_string(),
+                ordinal: 1,
+                block_ids: vec!["m1#0".to_string()],
+                block_hashes: vec!["0".repeat(64)],
+                ranges: vec![kernel::ByteRange { start: 0, end: 4 }],
             }],
         });
         ReferenceExpectation::StagedSubject {
@@ -1490,11 +1506,19 @@ fn a_staged_subject_owned_by_another_job_is_out_of_scope() {
             payload: ReviewPayload::Subject(ReviewSubject {
                 facts: vec![ExtractedFact {
                     text: "another job's subject".to_string(),
-                    span: SourceSpan {
+                    spans: vec![SourceSpan {
                         alias: "s1".to_string(),
                         start: 0,
                         end: 4,
-                    },
+                    }],
+                }],
+                origins: vec![kernel::SubjectOrigin {
+                    alias: "s1".to_string(),
+                    message_id: "m1".to_string(),
+                    ordinal: 1,
+                    block_ids: vec!["m1#0".to_string()],
+                    block_hashes: vec!["0".repeat(64)],
+                    ranges: vec![kernel::ByteRange { start: 0, end: 4 }],
                 }],
             }),
             recorded_at: fixture.now,

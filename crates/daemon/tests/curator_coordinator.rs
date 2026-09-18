@@ -1069,11 +1069,19 @@ async fn a_staged_subject_is_policy_blocked_for_a_remote_model_and_abstains() {
             payload: kernel::ReviewPayload::Subject(kernel::ReviewSubject {
                 facts: vec![kernel::ExtractedFact {
                     text: "bun builds the workspace".to_string(),
-                    span: kernel::SourceSpan {
+                    spans: vec![kernel::SourceSpan {
                         alias: "s1".to_string(),
                         start: 0,
                         end: 4,
-                    },
+                    }],
+                }],
+                origins: vec![kernel::SubjectOrigin {
+                    alias: "s1".to_string(),
+                    message_id: "m1".to_string(),
+                    ordinal: 1,
+                    block_ids: vec!["m1#0".to_string()],
+                    block_hashes: vec!["0".repeat(64)],
+                    ranges: vec![kernel::ByteRange { start: 0, end: 4 }],
                 }],
             }),
             recorded_at: fixture.now,
@@ -1493,11 +1501,19 @@ async fn a_staged_subject_with_no_linked_references_abstains_without_a_hold() {
             payload: kernel::ReviewPayload::Subject(kernel::ReviewSubject {
                 facts: vec![kernel::ExtractedFact {
                     text: "bun builds the workspace".to_string(),
-                    span: kernel::SourceSpan {
+                    spans: vec![kernel::SourceSpan {
                         alias: "s1".to_string(),
                         start: 0,
                         end: 4,
-                    },
+                    }],
+                }],
+                origins: vec![kernel::SubjectOrigin {
+                    alias: "s1".to_string(),
+                    message_id: "m1".to_string(),
+                    ordinal: 1,
+                    block_ids: vec!["m1#0".to_string()],
+                    block_hashes: vec!["0".repeat(64)],
+                    ranges: vec![kernel::ByteRange { start: 0, end: 4 }],
                 }],
             }),
             recorded_at: fixture.now,

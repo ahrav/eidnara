@@ -3514,6 +3514,8 @@ struct HistorySummarizerFiringTask {
     connect_failure_commit_hook: ConnectFailureCommitHook,
     publication_fence: Option<Arc<dyn history_summarizer::HistorySummarizerPublicationFence>>,
     credential_fingerprints: std::collections::BTreeMap<String, String>,
+    /// The Curator handoff an accepted fact set is reserved and staged through; `None` when the Kernel is unavailable, which publication records as a nonadmission.
+    curator_handoff: Option<curator::handoff::HandoffTarget>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5313,6 +5315,7 @@ impl HandlerCore {
                 let fingerprint_items: Vec<_> =
                     chunk.snapshot.iter().map(|item| item.as_item()).collect();
                 let observed = history_summarizer::compute_chunk_fingerprint(&fingerprint_items);
+                let curator_handoff = self.curator_handoff_target(&store, binding);
                 let spawned = self.spawn_module_task(async move {
                     let _guard = guard;
                     let result = async {
@@ -5368,6 +5371,7 @@ impl HandlerCore {
                                 failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                                 completion_now_ms: now_ms,
                                 publication_fence: Some(publication_fence.as_ref()),
+                                curator_handoff: curator_handoff.as_ref(),
                             },
                         );
                         tokio::select! {
@@ -5742,6 +5746,7 @@ impl HandlerCore {
                 };
             }
         };
+        let curator_handoff = self.curator_handoff_target(&store, binding);
         PreparedHistorySummarizerAction::FireReady(Box::new(PreparedHistorySummarizerFiring {
             diagnostics,
             task: HistorySummarizerFiringTask {
@@ -5756,8 +5761,34 @@ impl HandlerCore {
                 connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
                 credential_fingerprints: binding.credential_fingerprints.clone(),
                 publication_fence: None,
+                curator_handoff,
             },
         }))
+    }
+
+    /// The Kernel-side scope a firing hands accepted facts to Curator review under. Only a route whose memories authority is MODULE has a project the Curator dispatches jobs for, so an unmanaged route gets no target and its candidates are recorded as not admitted; the job row then lives under the authority project the publication itself commits under.
+    fn curator_handoff_target(
+        &self,
+        store: &MemoryStore,
+        binding: &SessionBinding,
+    ) -> Option<curator::handoff::HandoffTarget> {
+        let route_root = binding.project_root.to_string_lossy().to_string();
+        match memories_authority_for_route(store, &route_root) {
+            Ok(MemoriesAuthority::Module(_)) => {}
+            Ok(MemoriesAuthority::NotModule { .. }) | Err(_) => return None,
+        }
+        let kernel = self.memory_classifier.kernel.kernel_store().ok()?;
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+            Arc::default(),
+        );
+        let kernel_incarnation = kernel.database_incarnation_id_within_budget(&budget).ok()?;
+        Some(curator::handoff::HandoffTarget {
+            kernel,
+            project_digest: binding.kernel_project.digest().to_string(),
+            domain_id: canonical_memory::MEMORY_DOMAIN_ID.to_string(),
+            kernel_incarnation,
+        })
     }
 
     fn prepare_wrapup_fire(
@@ -5859,6 +5890,7 @@ impl HandlerCore {
                 return PreparedWrapupAction::Busy(completion);
             }
         };
+        let curator_handoff = self.curator_handoff_target(&store, binding);
         PreparedWrapupAction::FireReady(Box::new(HistorySummarizerFiringTask {
             store,
             session_id: parsed.session_id.clone(),
@@ -5871,6 +5903,7 @@ impl HandlerCore {
             connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
             credential_fingerprints: binding.credential_fingerprints.clone(),
             publication_fence: None,
+            curator_handoff,
         }))
     }
 
@@ -5922,6 +5955,7 @@ impl HandlerCore {
             connect_failure_commit_hook,
             publication_fence,
             credential_fingerprints,
+            curator_handoff,
         } = task;
         let cancel = live_guard.cancel.clone();
         let _guard = live_guard;
@@ -5943,6 +5977,7 @@ impl HandlerCore {
                     &harness,
                 );
                 request.publication_fence = publication_fence.as_deref();
+                request.curator_handoff = curator_handoff.as_ref();
                 tokio::select! {
                     () = cancel.cancelled() => Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
                     outcome = run_history_summarizer_firing(&mut *producer, request) => outcome,
@@ -14796,17 +14831,7 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
             Some(std::time::Instant::now() + std::time::Duration::from_secs(30)),
             Arc::default(),
         );
-        // The policies a review depends on: a change to either permits one new job at an unchanged target (Q25/Q29).
-        let policy_versions = BTreeMap::from([
-            (
-                "question_template".to_string(),
-                curator::broker::QuestionTemplate::ExtractedFacts.revision(),
-            ),
-            (
-                "step_schema".to_string(),
-                curator::steps::STEP_VERSION.to_string(),
-            ),
-        ]);
+        let policy_versions = curator::handoff::review_policy_versions();
         curator::selection::select_review_targets(
             &kernel,
             &self.store,
@@ -38795,6 +38820,7 @@ mod tests {
             last_no_fire: None,
             consecutive_publish_failures: 0,
             curator_nonadmission: Default::default(),
+            curator_reservation: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -38829,6 +38855,7 @@ mod tests {
             last_no_fire: None,
             consecutive_publish_failures: 0,
             curator_nonadmission: Default::default(),
+            curator_reservation: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -39265,6 +39292,7 @@ mod tests {
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
                 curator_nonadmission: None,
+                curator_activation: None,
             })
             .unwrap();
 
