@@ -4944,6 +4944,31 @@ impl HandlerCore {
             })
     }
 
+    /// Whether any transform lineage exists for `session_id`: an in-process root, durable cache
+    /// state, or a live transform route. A session with lineage is proven only on its own roots.
+    fn session_has_transform_lineage(&self, session_id: &str) -> bool {
+        if self
+            .transform_session_roots
+            .lock()
+            .expect("transform session roots mutex")
+            .get(session_id)
+            .is_some_and(|roots| !roots.is_empty())
+        {
+            return true;
+        }
+        if self
+            .store()
+            .is_some_and(|store| store.has_cache_state(session_id).unwrap_or(false))
+        {
+            return true;
+        }
+        self.transform_route_channels
+            .lock()
+            .expect("transform route channels mutex")
+            .values()
+            .any(|(session, _)| session == session_id)
+    }
+
     /// Route binding persists the transport-to-identity mapping when a route becomes bound to an authority-managed project.
     fn bind_authority_route(
         &self,
@@ -11146,13 +11171,20 @@ impl HandlerCore {
             return Err(session_unresolved_error());
         }
 
-        // OpenCode proves a session through an accepted transform on this root. Pi has no
-        // transform to prove anything with; its plugin is the only binder and binds the harness's
-        // own session id, so the route-bound session is the conversation.
-        let conversation_key = if (binding.harness == OPENCODE_HARNESS
-            && self.module_knows_transform_session(bound_session, &binding.project_root))
-            || binding.harness == PI_HARNESS
-        {
+        // OpenCode proves a session through an accepted transform on this root, and a session
+        // with lineage under another root cannot be rebound here. A harness without any
+        // transform lineage (Pi has no transform; OpenCode in TypeScript transform mode never
+        // sends one) has nothing to contradict the route-bound identity, and the plugins bind
+        // their harness's own session id, so the bound session is the conversation.
+        let harness_session_is_conversation = match binding.harness.as_str() {
+            OPENCODE_HARNESS => {
+                self.module_knows_transform_session(bound_session, &binding.project_root)
+                    || !self.session_has_transform_lineage(bound_session)
+            }
+            PI_HARNESS => true,
+            _ => false,
+        };
+        let conversation_key = if harness_session_is_conversation {
             bound_session.to_string()
         } else {
             match self
@@ -29243,8 +29275,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn claimed_opencode_harness_cannot_bypass_resolution_for_unknown_session() {
-        let resolver = FakeSessionResolver::with(&[("wrapper-instance", FakeResolve::None)]);
+    async fn opencode_session_without_transform_lineage_is_keyed_by_the_bound_session() {
+        // TypeScript transform mode never sends a transform, so no lineage exists to contradict
+        // the route-bound identity; the bound session is the conversation and no resolver runs.
+        let resolver = FakeSessionResolver::with(&[("ses-ts-mode", FakeResolve::None)]);
         let (handler, store, _dir, project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
             default_test_config(),
@@ -29252,24 +29286,19 @@ mod tests {
         );
         handler.bind_route(
             test_route(7),
-            binding_with_harness(
-                project.to_str().unwrap(),
-                OPENCODE_HARNESS,
-                "wrapper-instance",
-            ),
+            binding_with_harness(project.to_str().unwrap(), OPENCODE_HARNESS, "ses-ts-mode"),
         );
-
         let outcome = call_facade(
             &handler,
             "eidnara_note",
-            json!({ "action": "write", "content": "must not be token keyed" }),
+            json!({ "action": "write", "content": "keyed by the bound session" }),
         )
         .await;
-        assert_eq!(error_code(outcome), "session_unresolved");
-        assert_eq!(resolver.calls(), vec!["wrapper-instance"]);
+        assert!(!tool_is_error(outcome));
+        assert!(resolver.calls().is_empty());
         assert!(
-            store
-                .search_notes_like(project.to_str().unwrap(), "wrapper-instance", "token keyed")
+            !store
+                .search_notes_like(project.to_str().unwrap(), "ses-ts-mode", "bound session")
                 .unwrap()
                 .is_empty()
         );
