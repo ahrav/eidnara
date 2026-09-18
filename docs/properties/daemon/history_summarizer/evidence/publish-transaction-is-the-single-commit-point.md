@@ -4,10 +4,12 @@
 
 The task asked for the commit point precisely: the single operation after which
 the substitution is visible and irreversible. Tracing that question backwards
-from `publish_validated_chunk` showed the module makes five separate durable
-writes before the publish and only the sixth carries the substitution. The
-interesting property is not where the commit is but what is inside it, because
-separate writes land in separate transactions and the whole set lands in one.
+from `publish_validated_chunk` showed that the substitution is four writes, not
+one: the history_segment rows, the chunk transcripts, the queued side channels,
+and the `cache_state` row `UPDATE` that carries the raised floor, the idle
+producer state, and the nonadmission facts. The interesting property is not
+where the commit is but what is inside it, because separate writes would land
+in separate transactions and this set lands in one.
 
 ## Evidence trail
 
