@@ -13,6 +13,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::boundary::completed_tool_arc_crosses_boundary;
+use crate::history_summarizer_citations::{
+    Citation, ExtractionFailure, ExtractionOutcome, FrozenAliasTable, check_fact_set,
+    split_citations,
+};
 
 const BOUNDARY_HEALING_SLACK: u64 = 2;
 
@@ -46,6 +50,9 @@ pub struct HistorySummarizerChunk {
     pub start_index: u64,
     pub end_index: u64,
     pub lines: Vec<ChunkLine>,
+    /// The frozen aliases the rendered text carries, so a citation resolves to native identity and exact presented bytes.
+    #[serde(default)]
+    pub aliases: FrozenAliasTable,
     /// present_ordinals contains all non-synthetic input ordinals visible when the chunk was built.
     /// present_ordinals may be sparse when message identities are re-minted.
     /// Validation filters present_ordinals to the claimed range.
@@ -137,6 +144,9 @@ pub struct FactCandidate {
     /// When boundary healing discards the last history_segment, validation skips a fact without `origin_history_segment_index` because it cannot prove the fact's source history_segment.
     #[serde(default)]
     pub origin_history_segment_index: Option<u64>,
+    /// Frozen-alias citations the fact carried, checked by `check_fact_set` before the set is accepted.
+    #[serde(default)]
+    pub citations: Vec<Citation>,
 }
 
 /// A history_summarizer event uses its XML element name as `kind` and child element text keyed by element name as `fields`.
@@ -175,6 +185,12 @@ pub struct ParsedHistorySegmentOutput {
     pub history_segments: Vec<ParsedHistorySegment>,
     #[serde(default)]
     pub facts: Vec<FactCandidate>,
+    /// Whether the output carried a `<facts>` block at all, so an absent block and an empty one are told apart from a malformed item.
+    #[serde(default)]
+    pub facts_block_present: bool,
+    /// A fact item whose citation syntax did not parse; the set is rejected for it rather than the item being dropped.
+    #[serde(default)]
+    pub fact_syntax_failure: Option<ExtractionFailure>,
     #[serde(default)]
     pub events: Vec<ParsedEvent>,
     #[serde(default)]
@@ -213,7 +229,11 @@ pub struct ValidatedHistorySegment {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatedChunk {
     pub history_segments: Vec<ValidatedHistorySegment>,
+    /// The accepted facts; empty unless `extraction` is `Accepted`.
     pub facts: Vec<FactCandidate>,
+    /// Q30: the fact set's own verdict, independent of the history's validity.
+    #[serde(default)]
+    pub extraction: ExtractionOutcome,
     pub events: Vec<ParsedEvent>,
     pub primer_candidates: Vec<PrimerCandidate>,
     pub user_observations: Vec<UserObservationCandidate>,
@@ -324,10 +344,27 @@ pub fn parse_history_segment_output(
         }
     }
 
-    let facts_scope = if let Some(caps) = facts_block_regex().captures(text) {
-        caps.get(1)
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_default()
+    let facts_block = facts_block_regex().captures(text);
+    let facts_block_present = facts_block.is_some();
+    let mut fact_syntax_failure = None;
+    let facts_scope = if let Some(caps) = facts_block {
+        let scope = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
+        // Q30: anything inside `<facts>` that the item grammar does not read is malformed material, never an absent fact. A second `<facts>` block is likewise unreadable rather than ignored.
+        let leftover = category_block_regex().replace_all(scope, "");
+        if facts_block_regex().captures_iter(text).count() > 1
+            || !leftover.trim().is_empty()
+            || category_block_regex().captures_iter(scope).any(|category| {
+                category.get(2).is_some_and(|block| {
+                    block
+                        .as_str()
+                        .lines()
+                        .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with('*'))
+                })
+            })
+        {
+            fact_syntax_failure = Some(ExtractionFailure::MalformedFacts);
+        }
+        scope.to_string()
     } else {
         let without_events = events_block_regex().replace_all(text, "");
         history_segment_regex()
@@ -346,11 +383,23 @@ pub fn parse_history_segment_output(
             let raw = item_caps.get(1).map(|m| m.as_str()).unwrap_or_default();
             let unescaped = unescape_xml(raw.trim());
             let (origin_history_segment_index, content) = split_anchor_prefix(&unescaped);
+            let (citations, content) = match split_citations(&content) {
+                Ok((citations, content)) => (citations, content.to_string()),
+                Err(failure) => {
+                    fact_syntax_failure.get_or_insert(failure);
+                    (Vec::new(), content)
+                }
+            };
+            // An item that is citations with no text is malformed, not an absent fact: dropping it would turn a bad item into apparent no-fact success.
+            if content.is_empty() && !citations.is_empty() {
+                fact_syntax_failure.get_or_insert(ExtractionFailure::MalformedCitation);
+            }
             if !content.is_empty() {
                 facts.push(FactCandidate {
                     category: category.to_string(),
                     content,
                     origin_history_segment_index,
+                    citations,
                 });
             }
         }
@@ -415,6 +464,8 @@ pub fn parse_history_segment_output(
     Ok(ParsedHistorySegmentOutput {
         history_segments,
         facts,
+        facts_block_present,
+        fact_syntax_failure,
         events,
         unprocessed_from,
         user_observations,
@@ -554,18 +605,33 @@ pub fn validate_history_summarizer_output(
     }
 
     let persisted_count = history_segments.len() as u64;
-    let facts = parsed
-        .facts
-        .into_iter()
-        .filter(|fact| {
-            !options.force_keep_last_history_segment
-                && keep_side_channel(
-                    fact.origin_history_segment_index,
-                    persisted_count,
-                    discarded_last,
-                )
-        })
-        .collect();
+    // Q30: history is valid from here on. The proposed fact set is judged as a whole: one bad citation rejects every fact, and the failure travels with the valid history instead of failing publication. A fact proves its source through its citations' native ordinals, not through a segment anchor, so a citation into a discarded provisional segment is a recorded rejection rather than a silent drop; every persisted segment, including a force-kept final one, is citable because the citation names exact native bytes rather than a boundary.
+    let proposed = parsed.facts;
+    let citable = history_segments
+        .first()
+        .zip(history_segments.last())
+        .map(|(first, last)| first.start_message..=last.end_message);
+    let (extraction, facts) = if !options.memory_enabled {
+        (ExtractionOutcome::NotRequested, Vec::new())
+    } else if let Some(failure) = parsed.fact_syntax_failure {
+        (ExtractionOutcome::Rejected { failure }, Vec::new())
+    } else if proposed.is_empty() {
+        if parsed.facts_block_present {
+            (ExtractionOutcome::NoFacts, Vec::new())
+        } else {
+            (ExtractionOutcome::NotRequested, Vec::new())
+        }
+    } else {
+        match check_fact_set(&proposed, &chunk.aliases, citable) {
+            Ok(()) => (
+                ExtractionOutcome::Accepted {
+                    count: proposed.len(),
+                },
+                proposed,
+            ),
+            Err(failure) => (ExtractionOutcome::Rejected { failure }, Vec::new()),
+        }
+    };
     // Discarding the last history_segment requires validation to skip unanchored producer output because its source history_segment cannot be proven.
     let events = parsed
         .events
@@ -609,6 +675,7 @@ pub fn validate_history_summarizer_output(
     Ok(ValidatedChunk {
         history_segments,
         facts,
+        extraction,
         events,
         primer_candidates,
         user_observations,
@@ -1296,6 +1363,7 @@ fn side_channel_anchor_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history_summarizer_citations::FrozenAlias;
 
     /// A producer that escapes `&lt;` writes `&amp;lt;`; decoding in one pass
     /// yields the literal `&lt;` instead of decoding the exposed entity again.
@@ -1356,6 +1424,7 @@ mod tests {
 
     fn chunk(start: u64, end: u64) -> HistorySummarizerChunk {
         HistorySummarizerChunk {
+            aliases: Default::default(),
             start_index: start,
             end_index: end,
             lines: (start..=end)
@@ -1369,6 +1438,22 @@ mod tests {
             tool_only_ranges: Vec::new(),
             completed_tool_arcs: Vec::new(),
         }
+    }
+
+    /// `chunk` with one frozen alias per line whose presented text is `hello world`.
+    fn aliased_chunk(start: u64, end: u64) -> HistorySummarizerChunk {
+        let mut chunk = chunk(start, end);
+        for ordinal in start..=end {
+            chunk.aliases.issue(FrozenAlias {
+                message_id: format!("msg-{ordinal}"),
+                ordinal,
+                block_ids: vec![format!("msg-{ordinal}#0")],
+                block_hashes: vec!["0".repeat(64)],
+                presented: "hello world".into(),
+                ..FrozenAlias::default()
+            });
+        }
+        chunk
     }
 
     fn xml(history_segments: &[(u64, u64, &str)], unprocessed_from: u64, extra: &str) -> String {
@@ -1544,6 +1629,7 @@ full narrative
     #[test]
     fn chunk_coverage_rejects_duplicate_and_decreasing_ordinals() {
         let duplicate = HistorySummarizerChunk {
+            aliases: Default::default(),
             start_index: 1,
             end_index: 2,
             lines: vec![
@@ -1571,6 +1657,7 @@ full narrative
         assert!(duplicate_error.contains("duplicate raw message ordinal 1"));
 
         let decreasing = HistorySummarizerChunk {
+            aliases: Default::default(),
             start_index: 1,
             end_index: 3,
             lines: vec![
@@ -1696,6 +1783,7 @@ full narrative
     #[test]
     fn discard_last_uses_numeric_sparse_ordinal_distance() {
         let sparse = HistorySummarizerChunk {
+            aliases: Default::default(),
             start_index: 1,
             end_index: 100,
             lines: [1, 2, 100]
@@ -1724,8 +1812,8 @@ full narrative
     fn zero_side_channel_anchor_is_suppressed() {
         let extra = r#"
 <facts><PROJECT_RULES>
-* [at_history_segment=0] Drop the zero rule.
-* [at_history_segment=1] Keep the first rule.
+* [at_history_segment=0] [s1:0-5] Drop the zero rule.
+* [at_history_segment=1] [s1:0-5] Keep the first rule.
 </PROJECT_RULES></facts>
 <events>
 <causal_incident at_history_segment="0"><summary>zero event</summary></causal_incident>
@@ -1743,14 +1831,19 @@ full narrative
         let text = xml(&[(1, 2, "only")], 3, extra);
         let validated = validate_history_summarizer_output(
             &text,
-            &chunk(1, 2),
+            &aliased_chunk(1, 2),
             &[],
             ValidateOptions::default(),
         )
         .expect("valid history_segment publishes");
 
-        assert_eq!(validated.facts.len(), 1);
-        assert_eq!(validated.facts[0].content, "Keep the first rule.");
+        // A fact's source is its citation's native ordinal, not the segment anchor: both facts cite `s1` inside the kept segment, so both are admitted even though one carries a zero anchor.
+        assert_eq!(validated.facts.len(), 2);
+        assert_eq!(validated.facts[1].content, "Keep the first rule.");
+        assert_eq!(
+            validated.extraction,
+            ExtractionOutcome::Accepted { count: 2 }
+        );
         assert_eq!(validated.events.len(), 1);
         assert_eq!(validated.events[0].kind, "trajectory_correction");
         assert_eq!(validated.user_observations.len(), 1);
@@ -1770,8 +1863,8 @@ full narrative
         let extra = r#"
 <facts>
 <PROJECT_RULES>
-* [at_history_segment=1] Keep the earlier rule.
-* [at_history_segment=2] Drop the provisional rule.
+* [at_history_segment=1] [s1:0-5] Keep the earlier rule.
+* [at_history_segment=2] [s3:0-5] Drop the provisional rule.
 </PROJECT_RULES>
 </facts>
 <events>
@@ -1790,13 +1883,20 @@ full narrative
         let text = xml(&[(1, 2, "first"), (3, 4, "second")], 5, extra);
         let result = validate_history_summarizer_output(
             &text,
-            &chunk(1, 4),
+            &aliased_chunk(1, 4),
             &[],
             ValidateOptions::default(),
         )
         .expect("discard-last should still make forward progress");
 
         assert!(result.discarded_last);
+        // Facts are not anchor-filtered: the citation into the discarded segment (`s3`, ordinal 3) is a recorded rejection of the whole set.
+        assert_eq!(
+            result.extraction,
+            ExtractionOutcome::Rejected {
+                failure: ExtractionFailure::OutsideAcceptedSegment
+            }
+        );
         assert!(result.facts.is_empty());
         assert!(result.events.is_empty());
         assert!(result.user_observations.is_empty());

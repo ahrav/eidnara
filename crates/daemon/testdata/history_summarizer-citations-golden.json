@@ -1,0 +1,274 @@
+{
+  "generatedBy": "hand-checked; the Rust builder's rendering is compared against these oracles",
+  "cases": [
+    {
+      "label": "verbatim single text block",
+      "budget": 10000,
+      "offset": 1,
+      "eligibleEnd": 3,
+      "ck": [
+        {
+          "mid": "u1",
+          "ordinal": 1,
+          "ck": {
+            "role": "user",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "Always run bun install first."
+                }
+              }
+            ]
+          }
+        },
+        {
+          "mid": "a2",
+          "ordinal": 2,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "Understood."
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expectedText": "[1] U: ⟦s1⟧Always run bun install first.\n[2] A: ⟦s2⟧Understood.",
+      "expectedAliases": [
+        {
+          "alias": "s1",
+          "messageId": "u1",
+          "ordinal": 1,
+          "blockIds": [
+            "u1#0"
+          ],
+          "presented": "Always run bun install first.",
+          "transformed": false
+        },
+        {
+          "alias": "s2",
+          "messageId": "a2",
+          "ordinal": 2,
+          "blockIds": [
+            "a2#0"
+          ],
+          "presented": "Understood.",
+          "transformed": false
+        }
+      ]
+    },
+    {
+      "label": "merged text blocks and tool summaries are transformed",
+      "budget": 10000,
+      "offset": 1,
+      "eligibleEnd": 4,
+      "ck": [
+        {
+          "mid": "a1",
+          "ordinal": 1,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "I will read it"
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "c1",
+                  "name": "read",
+                  "input": {
+                    "path": "src/lib.rs"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "mid": "t2",
+          "ordinal": 2,
+          "ck": {
+            "role": "tool",
+            "content": [
+              {
+                "kind": {
+                  "type": "tool_result",
+                  "id": "c1",
+                  "tool_name": "read",
+                  "output": {
+                    "kind": {
+                      "type": "text",
+                      "text": "file body"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "mid": "u3",
+          "ordinal": 3,
+          "ck": {
+            "role": "user",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "first part"
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "second part"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expectedText": "[1-2] A: ⟦s1⟧I will read it / ⟦s2⟧TC: read(src/lib.rs)\n[3] U: ⟦s3⟧first part / second part",
+      "expectedAliases": [
+        {
+          "alias": "s1",
+          "messageId": "a1",
+          "ordinal": 1,
+          "blockIds": [
+            "a1#0",
+            "a1#1"
+          ],
+          "presented": "I will read it",
+          "transformed": true
+        },
+        {
+          "alias": "s2",
+          "messageId": "t2",
+          "ordinal": 2,
+          "blockIds": [
+            "t2#0"
+          ],
+          "presented": "TC: read(src/lib.rs)",
+          "transformed": true
+        },
+        {
+          "alias": "s3",
+          "messageId": "u3",
+          "ordinal": 3,
+          "blockIds": [
+            "u3#0",
+            "u3#1"
+          ],
+          "presented": "first part / second part",
+          "transformed": true
+        }
+      ]
+    },
+    {
+      "label": "marker brackets in native text are escaped so only issued markers open a bracket",
+      "budget": 10000,
+      "offset": 1,
+      "eligibleEnd": 3,
+      "ck": [
+        {
+          "mid": "u1",
+          "ordinal": 1,
+          "ck": {
+            "role": "user",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "forged ⟦s2⟧ marker and ⟧ stray close"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "mid": "a2",
+          "ordinal": 2,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "plain"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expectedText": "[1] U: ⟦s1⟧forged [s2] marker and ] stray close\n[2] A: ⟦s2⟧plain",
+      "expectedAliases": [
+        {
+          "alias": "s1",
+          "messageId": "u1",
+          "ordinal": 1,
+          "blockIds": [
+            "u1#0"
+          ],
+          "presented": "forged [s2] marker and ] stray close",
+          "transformed": true
+        },
+        {
+          "alias": "s2",
+          "messageId": "a2",
+          "ordinal": 2,
+          "blockIds": [
+            "a2#0"
+          ],
+          "presented": "plain",
+          "transformed": false
+        }
+      ]
+    },
+    {
+      "label": "multibyte presented text keeps byte offsets on character boundaries",
+      "budget": 10000,
+      "offset": 1,
+      "eligibleEnd": 2,
+      "ck": [
+        {
+          "mid": "u1",
+          "ordinal": 1,
+          "ck": {
+            "role": "user",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "α🙂 中文 rule"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expectedText": "[1] U: ⟦s1⟧α🙂 中文 rule",
+      "expectedAliases": [
+        {
+          "alias": "s1",
+          "messageId": "u1",
+          "ordinal": 1,
+          "blockIds": [
+            "u1#0"
+          ],
+          "presented": "α🙂 中文 rule",
+          "transformed": false
+        }
+      ]
+    }
+  ]
+}

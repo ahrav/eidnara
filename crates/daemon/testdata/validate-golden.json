@@ -2,7 +2,7 @@
   {
     "label": "clean multi-history_segment with side channels",
     "input": {
-      "text": "<output>\n<history_segments>\n<history_segment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</history_segment>\n<history_segment start=\"3\" end=\"4\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</history_segment>\n</history_segments>\n\n<facts>\n<PROJECT_RULES>\n* Keep generated goldens deterministic.\n</PROJECT_RULES>\n</facts>\n<events>\n<causal_incident at_history_segment=\"1\"><summary>Kept event.</summary><evidence>raw line</evidence></causal_incident>\n<trajectory_correction at_history_segment=\"2\"><summary>Second event.</summary><evidence>raw line</evidence></trajectory_correction>\n</events>\n<user_observations>\n* User prefers direct validation failures.\n</user_observations>\n<primer_candidates>\n<primer at_history_segment=\"2\">How does history_summarizer validation map endpoints?</primer>\n</primer_candidates>\n<meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+      "text": "<output>\n<history_segments>\n<history_segment start=\"1\" end=\"2\" title=\"alpha\" episode_type=\"feature\" importance=\"50\">\n<p1>alpha full &amp; exact</p1>\n<p2>alpha short</p2>\n<p3>alpha</p3>\n<p4 />\n</history_segment>\n<history_segment start=\"3\" end=\"4\" title=\"beta\" episode_type=\"feature\" importance=\"50\">\n<p1>beta full &amp; exact</p1>\n<p2>beta short</p2>\n<p3>beta</p3>\n<p4 />\n</history_segment>\n</history_segments>\n\n<facts>\n<PROJECT_RULES>\n* [s2:0-27] [s4:0-8] Keep generated goldens deterministic.\n</PROJECT_RULES>\n</facts>\n<events>\n<causal_incident at_history_segment=\"1\"><summary>Kept event.</summary><evidence>raw line</evidence></causal_incident>\n<trajectory_correction at_history_segment=\"2\"><summary>Second event.</summary><evidence>raw line</evidence></trajectory_correction>\n</events>\n<user_observations>\n* User prefers direct validation failures.\n</user_observations>\n<primer_candidates>\n<primer at_history_segment=\"2\">How does history_summarizer validation map endpoints?</primer>\n</primer_candidates>\n<meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta>\n</output>",
       "chunk": {
         "start_index": 1,
         "end_index": 7,
@@ -36,7 +36,102 @@
             "message_id": "msg-7"
           }
         ],
-        "tool_only_ranges": []
+        "tool_only_ranges": [],
+        "aliases": {
+          "aliases": [
+            {
+              "alias": "s1",
+              "message_id": "msg-1",
+              "ordinal": 1,
+              "block_ids": [
+                "msg-1#0"
+              ],
+              "block_hashes": [
+                "0000000000000000000000000000000000000000000000000000000000000001"
+              ],
+              "presented": "Start the golden regeneration.",
+              "transformed": false
+            },
+            {
+              "alias": "s2",
+              "message_id": "msg-2",
+              "ordinal": 2,
+              "block_ids": [
+                "msg-2#0"
+              ],
+              "block_hashes": [
+                "0000000000000000000000000000000000000000000000000000000000000002"
+              ],
+              "presented": "Goldens must stay deterministic",
+              "transformed": false
+            },
+            {
+              "alias": "s3",
+              "message_id": "msg-3",
+              "ordinal": 3,
+              "block_ids": [
+                "msg-3#0"
+              ],
+              "block_hashes": [
+                "0000000000000000000000000000000000000000000000000000000000000003"
+              ],
+              "presented": "TC: read(testdata/validate-golden.json)",
+              "transformed": true
+            },
+            {
+              "alias": "s4",
+              "message_id": "msg-4",
+              "ordinal": 4,
+              "block_ids": [
+                "msg-4#0"
+              ],
+              "block_hashes": [
+                "0000000000000000000000000000000000000000000000000000000000000004"
+              ],
+              "presented": "Compared bytes.",
+              "transformed": false
+            },
+            {
+              "alias": "s5",
+              "message_id": "msg-5",
+              "ordinal": 5,
+              "block_ids": [
+                "msg-5#0"
+              ],
+              "block_hashes": [
+                "0000000000000000000000000000000000000000000000000000000000000005"
+              ],
+              "presented": "Use the seeded generator only",
+              "transformed": false
+            },
+            {
+              "alias": "s6",
+              "message_id": "msg-6",
+              "ordinal": 6,
+              "block_ids": [
+                "msg-6#0"
+              ],
+              "block_hashes": [
+                "0000000000000000000000000000000000000000000000000000000000000006"
+              ],
+              "presented": "TC: write(validate-golden.json)",
+              "transformed": true
+            },
+            {
+              "alias": "s7",
+              "message_id": "msg-7",
+              "ordinal": 7,
+              "block_ids": [
+                "msg-7#0"
+              ],
+              "block_hashes": [
+                "0000000000000000000000000000000000000000000000000000000000000007"
+              ],
+              "presented": "Done.",
+              "transformed": false
+            }
+          ]
+        }
       },
       "prior_history_segments": [],
       "options": {
@@ -45,55 +140,75 @@
       }
     },
     "parsed": {
-      "history_segments": [
-        {
-          "start_message": 1,
-          "end_message": 2,
-          "title": "alpha",
-          "content": "alpha full & exact",
-          "p1": "alpha full & exact",
-          "p2": "alpha short",
-          "p3": "alpha",
-          "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
-        },
-        {
-          "start_message": 3,
-          "end_message": 4,
-          "title": "beta",
-          "content": "beta full & exact",
-          "p1": "beta full & exact",
-          "p2": "beta short",
-          "p3": "beta",
-          "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
-        }
-      ],
-      "facts": [
-        {
-          "category": "PROJECT_RULES",
-          "content": "Keep generated goldens deterministic.",
-          "origin_history_segment_index": null
-        }
-      ],
       "events": [
         {
-          "kind": "causal_incident",
           "at_history_segment": 1,
           "fields": {
             "evidence": "raw line",
             "summary": "Kept event."
-          }
+          },
+          "kind": "causal_incident"
         },
         {
-          "kind": "trajectory_correction",
           "at_history_segment": 2,
           "fields": {
             "evidence": "raw line",
             "summary": "Second event."
-          }
+          },
+          "kind": "trajectory_correction"
+        }
+      ],
+      "fact_syntax_failure": null,
+      "facts": [
+        {
+          "category": "PROJECT_RULES",
+          "citations": [
+            {
+              "alias": "s2",
+              "start": 0,
+              "end": 27
+            },
+            {
+              "alias": "s4",
+              "start": 0,
+              "end": 8
+            }
+          ],
+          "content": "Keep generated goldens deterministic.",
+          "origin_history_segment_index": null
+        }
+      ],
+      "facts_block_present": true,
+      "history_segments": [
+        {
+          "content": "alpha full & exact",
+          "end_message": 2,
+          "episode_type": "feature",
+          "importance": 50,
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "start_message": 1,
+          "title": "alpha"
+        },
+        {
+          "content": "beta full & exact",
+          "end_message": 4,
+          "episode_type": "feature",
+          "importance": 50,
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "start_message": 3,
+          "title": "beta"
+        }
+      ],
+      "primer_candidates": [
+        {
+          "origin_history_segment_index": 2,
+          "question": "How does history_summarizer validation map endpoints?"
         }
       ],
       "unprocessed_from": 5,
@@ -102,88 +217,98 @@
           "content": "User prefers direct validation failures.",
           "origin_history_segment_index": null
         }
-      ],
-      "primer_candidates": [
-        {
-          "question": "How does history_summarizer validation map endpoints?",
-          "origin_history_segment_index": 2
-        }
       ]
     },
     "validation": {
       "ok": true,
       "result": {
-        "history_segments": [
-          {
-            "sequence": 0,
-            "start_message_id": "msg-1",
-            "end_message_id": "msg-2",
-            "start_message": 1,
-            "end_message": 2,
-            "title": "alpha",
-            "content": "alpha full & exact",
-            "p1": "alpha full & exact",
-            "p2": "alpha short",
-            "p3": "alpha",
-            "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
-          },
-          {
-            "sequence": 1,
-            "start_message_id": "msg-3",
-            "end_message_id": "msg-4",
-            "start_message": 3,
-            "end_message": 4,
-            "title": "beta",
-            "content": "beta full & exact",
-            "p1": "beta full & exact",
-            "p2": "beta short",
-            "p3": "beta",
-            "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
-          }
-        ],
-        "facts": [
-          {
-            "category": "PROJECT_RULES",
-            "content": "Keep generated goldens deterministic.",
-            "origin_history_segment_index": null
-          }
-        ],
+        "discarded_last": false,
         "events": [
           {
-            "kind": "causal_incident",
             "at_history_segment": 1,
             "fields": {
               "evidence": "raw line",
               "summary": "Kept event."
-            }
+            },
+            "kind": "causal_incident"
           },
           {
-            "kind": "trajectory_correction",
             "at_history_segment": 2,
             "fields": {
               "evidence": "raw line",
               "summary": "Second event."
-            }
+            },
+            "kind": "trajectory_correction"
+          }
+        ],
+        "extraction": {
+          "kind": "accepted",
+          "count": 1
+        },
+        "facts": [
+          {
+            "category": "PROJECT_RULES",
+            "citations": [
+              {
+                "alias": "s2",
+                "start": 0,
+                "end": 27
+              },
+              {
+                "alias": "s4",
+                "start": 0,
+                "end": 8
+              }
+            ],
+            "content": "Keep generated goldens deterministic.",
+            "origin_history_segment_index": null
+          }
+        ],
+        "history_segments": [
+          {
+            "content": "alpha full & exact",
+            "end_message": 2,
+            "end_message_id": "msg-2",
+            "episode_type": "feature",
+            "importance": 50,
+            "p1": "alpha full & exact",
+            "p2": "alpha short",
+            "p3": "alpha",
+            "p4": "",
+            "sequence": 0,
+            "start_message": 1,
+            "start_message_id": "msg-1",
+            "title": "alpha"
+          },
+          {
+            "content": "beta full & exact",
+            "end_message": 4,
+            "end_message_id": "msg-4",
+            "episode_type": "feature",
+            "importance": 50,
+            "p1": "beta full & exact",
+            "p2": "beta short",
+            "p3": "beta",
+            "p4": "",
+            "sequence": 1,
+            "start_message": 3,
+            "start_message_id": "msg-3",
+            "title": "beta"
           }
         ],
         "primer_candidates": [
           {
-            "question": "How does history_summarizer validation map endpoints?",
-            "origin_history_segment_index": 2
+            "origin_history_segment_index": 2,
+            "question": "How does history_summarizer validation map endpoints?"
           }
         ],
+        "unprocessed_from": 5,
         "user_observations": [
           {
             "content": "User prefers direct validation failures.",
             "origin_history_segment_index": null
           }
-        ],
-        "unprocessed_from": 5,
-        "discarded_last": false
+        ]
       }
     }
   },
@@ -221,41 +346,43 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 1,
-          "end_message": 3,
-          "title": "alpha",
           "content": "alpha full & exact",
+          "end_message": 3,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "alpha full & exact",
           "p2": "alpha short",
           "p3": "alpha",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 1,
+          "title": "alpha"
         },
         {
-          "start_message": 3,
-          "end_message": 4,
-          "title": "beta",
           "content": "beta full & exact",
+          "end_message": 4,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "beta full & exact",
           "p2": "beta short",
           "p3": "beta",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 3,
+          "title": "beta"
         }
       ],
-      "facts": [],
-      "events": [],
+      "primer_candidates": [],
       "unprocessed_from": 5,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
-      "ok": false,
-      "error": "HistorySummarizer returned invalid history_segment output: overlap before message 4 (saw 3-4)"
+      "error": "HistorySummarizer returned invalid history_segment output: overlap before message 4 (saw 3-4)",
+      "ok": false
     }
   },
   {
@@ -364,41 +491,43 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 1,
-          "end_message": 2,
-          "title": "alpha",
           "content": "alpha full & exact",
+          "end_message": 2,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "alpha full & exact",
           "p2": "alpha short",
           "p3": "alpha",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 1,
+          "title": "alpha"
         },
         {
-          "start_message": 19,
-          "end_message": 22,
-          "title": "beta",
           "content": "beta full & exact",
+          "end_message": 22,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "beta full & exact",
           "p2": "beta short",
           "p3": "beta",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 19,
+          "title": "beta"
         }
       ],
-      "facts": [],
-      "events": [],
+      "primer_candidates": [],
       "unprocessed_from": 23,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
-      "ok": false,
-      "error": "HistorySummarizer returned invalid history_segment output: gap before present message 19 (expected 3)"
+      "error": "HistorySummarizer returned invalid history_segment output: gap before present message 19 (expected 3)",
+      "ok": false
     }
   },
   {
@@ -520,64 +649,69 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 1,
-          "end_message": 2,
-          "title": "alpha",
           "content": "alpha full & exact",
+          "end_message": 2,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "alpha full & exact",
           "p2": "alpha short",
           "p3": "alpha",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 1,
+          "title": "alpha"
         },
         {
-          "start_message": 23,
-          "end_message": 24,
-          "title": "beta",
           "content": "beta full & exact",
+          "end_message": 24,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "beta full & exact",
           "p2": "beta short",
           "p3": "beta",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 23,
+          "title": "beta"
         }
       ],
-      "facts": [],
-      "events": [],
+      "primer_candidates": [],
       "unprocessed_from": 25,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
       "ok": true,
       "result": {
+        "discarded_last": true,
+        "events": [],
+        "extraction": {
+          "kind": "not_requested"
+        },
+        "facts": [],
         "history_segments": [
           {
-            "sequence": 0,
-            "start_message_id": "msg-1",
-            "end_message_id": "msg-22",
-            "start_message": 1,
-            "end_message": 22,
-            "title": "alpha",
             "content": "alpha full & exact",
+            "end_message": 22,
+            "end_message_id": "msg-22",
+            "episode_type": "feature",
+            "importance": 50,
             "p1": "alpha full & exact",
             "p2": "alpha short",
             "p3": "alpha",
             "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
+            "sequence": 0,
+            "start_message": 1,
+            "start_message_id": "msg-1",
+            "title": "alpha"
           }
         ],
-        "facts": [],
-        "events": [],
         "primer_candidates": [],
-        "user_observations": [],
         "unprocessed_from": 23,
-        "discarded_last": true
+        "user_observations": []
       }
     }
   },
@@ -639,41 +773,43 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 1,
-          "end_message": 2,
-          "title": "alpha",
           "content": "alpha full & exact",
+          "end_message": 2,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "alpha full & exact",
           "p2": "alpha short",
           "p3": "alpha",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 1,
+          "title": "alpha"
         },
         {
-          "start_message": 8,
-          "end_message": 10,
-          "title": "beta",
           "content": "beta full & exact",
+          "end_message": 10,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "beta full & exact",
           "p2": "beta short",
           "p3": "beta",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 8,
+          "title": "beta"
         }
       ],
-      "facts": [],
-      "events": [],
+      "primer_candidates": [],
       "unprocessed_from": 11,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
-      "ok": false,
-      "error": "HistorySummarizer returned invalid history_segment output: gap before present message 8 (expected 3)"
+      "error": "HistorySummarizer returned invalid history_segment output: gap before present message 8 (expected 3)",
+      "ok": false
     }
   },
   {
@@ -714,29 +850,31 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 1,
-          "end_message": 2,
-          "title": "alpha",
           "content": "alpha full & exact",
+          "end_message": 2,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "alpha full & exact",
           "p2": "alpha short",
           "p3": "alpha",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 1,
+          "title": "alpha"
         }
       ],
-      "facts": [],
-      "events": [],
+      "primer_candidates": [],
       "unprocessed_from": 4,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
-      "ok": false,
-      "error": "HistorySummarizer returned invalid history_segment output: <unprocessed_from> 4 does not match next uncovered message 3"
+      "error": "HistorySummarizer returned invalid history_segment output: <unprocessed_from> 4 does not match next uncovered message 3",
+      "ok": false
     }
   },
   {
@@ -765,29 +903,31 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 1,
-          "end_message": 3,
-          "title": "alpha",
           "content": "alpha full & exact",
+          "end_message": 3,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "alpha full & exact",
           "p2": "alpha short",
           "p3": "alpha",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 1,
+          "title": "alpha"
         }
       ],
-      "facts": [],
-      "events": [],
+      "primer_candidates": [],
       "unprocessed_from": 4,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
-      "ok": false,
-      "error": "HistorySummarizer chunk coverage invalid: chunk omits raw message 3 while still claiming coverage through 3"
+      "error": "HistorySummarizer chunk coverage invalid: chunk omits raw message 3 while still claiming coverage through 3",
+      "ok": false
     }
   },
   {
@@ -825,52 +965,57 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 3,
-          "end_message": 5,
-          "title": "gamma",
           "content": "gamma full & exact",
+          "end_message": 5,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "gamma full & exact",
           "p2": "gamma short",
           "p3": "gamma",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 3,
+          "title": "gamma"
         }
       ],
-      "facts": [],
-      "events": [],
+      "primer_candidates": [],
       "unprocessed_from": 6,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
       "ok": true,
       "result": {
+        "discarded_last": false,
+        "events": [],
+        "extraction": {
+          "kind": "not_requested"
+        },
+        "facts": [],
         "history_segments": [
           {
-            "sequence": 1,
-            "start_message_id": "msg-3",
-            "end_message_id": "msg-5",
-            "start_message": 3,
-            "end_message": 5,
-            "title": "gamma",
             "content": "gamma full & exact",
+            "end_message": 5,
+            "end_message_id": "msg-5",
+            "episode_type": "feature",
+            "importance": 50,
             "p1": "gamma full & exact",
             "p2": "gamma short",
             "p3": "gamma",
             "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
+            "sequence": 1,
+            "start_message": 3,
+            "start_message_id": "msg-3",
+            "title": "gamma"
           }
         ],
-        "facts": [],
-        "events": [],
         "primer_candidates": [],
-        "user_observations": [],
         "unprocessed_from": 6,
-        "discarded_last": false
+        "user_observations": []
       }
     }
   },
@@ -891,7 +1036,13 @@
             "message_id": "msg-5"
           }
         ],
-        "present_ordinals": [1, 2, 3, 4, 5],
+        "present_ordinals": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
         "tool_only_ranges": []
       },
       "prior_history_segments": [
@@ -906,29 +1057,31 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 4,
-          "end_message": 5,
-          "title": "gamma",
           "content": "gamma full & exact",
+          "end_message": 5,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "gamma full & exact",
           "p2": "gamma short",
           "p3": "gamma",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 4,
+          "title": "gamma"
         }
       ],
-      "facts": [],
-      "events": [],
+      "primer_candidates": [],
       "unprocessed_from": 6,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
-      "ok": false,
-      "error": "HistorySummarizer chunk starts at raw message 4 but existing history_segments end at 2; expected next present raw message 3"
+      "error": "HistorySummarizer chunk starts at raw message 4 but existing history_segments end at 2; expected next present raw message 3",
+      "ok": false
     }
   },
   {
@@ -965,53 +1118,66 @@
       }
     },
     "parsed": {
-      "history_segments": [
+      "events": [
         {
-          "start_message": 1,
-          "end_message": 2,
-          "title": "alpha",
-          "content": "alpha full & exact",
-          "p1": "alpha full & exact",
-          "p2": "alpha short",
-          "p3": "alpha",
-          "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "at_history_segment": 1,
+          "fields": {
+            "summary": "Earlier event."
+          },
+          "kind": "causal_incident"
         },
         {
-          "start_message": 3,
-          "end_message": 4,
-          "title": "beta",
-          "content": "beta full & exact",
-          "p1": "beta full & exact",
-          "p2": "beta short",
-          "p3": "beta",
-          "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "at_history_segment": 2,
+          "fields": {
+            "summary": "Tail event."
+          },
+          "kind": "trajectory_correction"
         }
       ],
+      "fact_syntax_failure": null,
       "facts": [
         {
           "category": "PROJECT_RULES",
+          "citations": [],
           "content": "Provisional facts are skipped on discard-last because current facts are unanchored.",
           "origin_history_segment_index": null
         }
       ],
-      "events": [
+      "facts_block_present": true,
+      "history_segments": [
         {
-          "kind": "causal_incident",
-          "at_history_segment": 1,
-          "fields": {
-            "summary": "Earlier event."
-          }
+          "content": "alpha full & exact",
+          "end_message": 2,
+          "episode_type": "feature",
+          "importance": 50,
+          "p1": "alpha full & exact",
+          "p2": "alpha short",
+          "p3": "alpha",
+          "p4": "",
+          "start_message": 1,
+          "title": "alpha"
         },
         {
-          "kind": "trajectory_correction",
-          "at_history_segment": 2,
-          "fields": {
-            "summary": "Tail event."
-          }
+          "content": "beta full & exact",
+          "end_message": 4,
+          "episode_type": "feature",
+          "importance": 50,
+          "p1": "beta full & exact",
+          "p2": "beta short",
+          "p3": "beta",
+          "p4": "",
+          "start_message": 3,
+          "title": "beta"
+        }
+      ],
+      "primer_candidates": [
+        {
+          "origin_history_segment_index": 1,
+          "question": "How does the kept history_segment work?"
+        },
+        {
+          "origin_history_segment_index": 2,
+          "question": "How does the discarded history_segment work?"
         }
       ],
       "unprocessed_from": 5,
@@ -1020,44 +1186,38 @@
           "content": "Provisional observations are skipped on discard-last because current observations are unanchored.",
           "origin_history_segment_index": null
         }
-      ],
-      "primer_candidates": [
-        {
-          "question": "How does the kept history_segment work?",
-          "origin_history_segment_index": 1
-        },
-        {
-          "question": "How does the discarded history_segment work?",
-          "origin_history_segment_index": 2
-        }
       ]
     },
     "validation": {
       "ok": true,
       "result": {
+        "discarded_last": true,
+        "events": [],
+        "extraction": {
+          "kind": "rejected",
+          "failure": "missing_citation"
+        },
+        "facts": [],
         "history_segments": [
           {
-            "sequence": 0,
-            "start_message_id": "msg-1",
-            "end_message_id": "msg-2",
-            "start_message": 1,
-            "end_message": 2,
-            "title": "alpha",
             "content": "alpha full & exact",
+            "end_message": 2,
+            "end_message_id": "msg-2",
+            "episode_type": "feature",
+            "importance": 50,
             "p1": "alpha full & exact",
             "p2": "alpha short",
             "p3": "alpha",
             "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
+            "sequence": 0,
+            "start_message": 1,
+            "start_message_id": "msg-1",
+            "title": "alpha"
           }
         ],
-        "facts": [],
-        "events": [],
         "primer_candidates": [],
-        "user_observations": [],
         "unprocessed_from": 3,
-        "discarded_last": true
+        "user_observations": []
       }
     }
   },
@@ -1095,52 +1255,57 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 1,
-          "end_message": 4,
-          "title": "single",
           "content": "single full & exact",
+          "end_message": 4,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "single full & exact",
           "p2": "single short",
           "p3": "single",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 1,
+          "title": "single"
         }
       ],
-      "facts": [],
-      "events": [],
+      "primer_candidates": [],
       "unprocessed_from": 5,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
       "ok": true,
       "result": {
+        "discarded_last": false,
+        "events": [],
+        "extraction": {
+          "kind": "not_requested"
+        },
+        "facts": [],
         "history_segments": [
           {
-            "sequence": 0,
-            "start_message_id": "msg-1",
-            "end_message_id": "msg-4",
-            "start_message": 1,
-            "end_message": 4,
-            "title": "single",
             "content": "single full & exact",
+            "end_message": 4,
+            "end_message_id": "msg-4",
+            "episode_type": "feature",
+            "importance": 50,
             "p1": "single full & exact",
             "p2": "single short",
             "p3": "single",
             "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
+            "sequence": 0,
+            "start_message": 1,
+            "start_message_id": "msg-1",
+            "title": "single"
           }
         ],
-        "facts": [],
-        "events": [],
         "primer_candidates": [],
-        "user_observations": [],
         "unprocessed_from": 5,
-        "discarded_last": false
+        "user_observations": []
       }
     }
   },
@@ -1178,79 +1343,84 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 1,
-          "end_message": 2,
-          "title": "alpha",
           "content": "alpha full & exact",
+          "end_message": 2,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "alpha full & exact",
           "p2": "alpha short",
           "p3": "alpha",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 1,
+          "title": "alpha"
         },
         {
-          "start_message": 3,
-          "end_message": 4,
-          "title": "beta",
           "content": "beta full & exact",
+          "end_message": 4,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "beta full & exact",
           "p2": "beta short",
           "p3": "beta",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 3,
+          "title": "beta"
         }
       ],
-      "facts": [],
-      "events": [],
+      "primer_candidates": [],
       "unprocessed_from": 5,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
       "ok": true,
       "result": {
+        "discarded_last": false,
+        "events": [],
+        "extraction": {
+          "kind": "not_requested"
+        },
+        "facts": [],
         "history_segments": [
           {
-            "sequence": 0,
-            "start_message_id": "msg-1",
-            "end_message_id": "msg-2",
-            "start_message": 1,
-            "end_message": 2,
-            "title": "alpha",
             "content": "alpha full & exact",
+            "end_message": 2,
+            "end_message_id": "msg-2",
+            "episode_type": "feature",
+            "importance": 50,
             "p1": "alpha full & exact",
             "p2": "alpha short",
             "p3": "alpha",
             "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
+            "sequence": 0,
+            "start_message": 1,
+            "start_message_id": "msg-1",
+            "title": "alpha"
           },
           {
-            "sequence": 1,
-            "start_message_id": "msg-3",
-            "end_message_id": "msg-4",
-            "start_message": 3,
-            "end_message": 4,
-            "title": "beta",
             "content": "beta full & exact",
+            "end_message": 4,
+            "end_message_id": "msg-4",
+            "episode_type": "feature",
+            "importance": 50,
             "p1": "beta full & exact",
             "p2": "beta short",
             "p3": "beta",
             "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
+            "sequence": 1,
+            "start_message": 3,
+            "start_message_id": "msg-3",
+            "title": "beta"
           }
         ],
-        "facts": [],
-        "events": [],
         "primer_candidates": [],
-        "user_observations": [],
         "unprocessed_from": 5,
-        "discarded_last": false
+        "user_observations": []
       }
     }
   },
@@ -1300,89 +1470,94 @@
       }
     },
     "parsed": {
+      "events": [],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 1,
-          "end_message": 2,
-          "title": "alpha",
           "content": "alpha full & exact",
+          "end_message": 2,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "alpha full & exact",
           "p2": "alpha short",
           "p3": "alpha",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 1,
+          "title": "alpha"
         },
         {
-          "start_message": 3,
-          "end_message": 4,
-          "title": "beta",
           "content": "beta full & exact",
+          "end_message": 4,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "beta full & exact",
           "p2": "beta short",
           "p3": "beta",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 3,
+          "title": "beta"
         }
       ],
-      "facts": [],
-      "events": [],
-      "unprocessed_from": 5,
-      "user_observations": [],
       "primer_candidates": [
         {
-          "question": "How does beta work?",
-          "origin_history_segment_index": 2
+          "origin_history_segment_index": 2,
+          "question": "How does beta work?"
         }
-      ]
+      ],
+      "unprocessed_from": 5,
+      "user_observations": []
     },
     "validation": {
       "ok": true,
       "result": {
+        "discarded_last": false,
+        "events": [],
+        "extraction": {
+          "kind": "not_requested"
+        },
+        "facts": [],
         "history_segments": [
           {
-            "sequence": 0,
-            "start_message_id": "msg-1",
-            "end_message_id": "msg-2",
-            "start_message": 1,
-            "end_message": 2,
-            "title": "alpha",
             "content": "alpha full & exact",
+            "end_message": 2,
+            "end_message_id": "msg-2",
+            "episode_type": "feature",
+            "importance": 50,
             "p1": "alpha full & exact",
             "p2": "alpha short",
             "p3": "alpha",
             "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
+            "sequence": 0,
+            "start_message": 1,
+            "start_message_id": "msg-1",
+            "title": "alpha"
           },
           {
-            "sequence": 1,
-            "start_message_id": "msg-3",
-            "end_message_id": "msg-4",
-            "start_message": 3,
-            "end_message": 4,
-            "title": "beta",
             "content": "beta full & exact",
+            "end_message": 4,
+            "end_message_id": "msg-4",
+            "episode_type": "feature",
+            "importance": 50,
             "p1": "beta full & exact",
             "p2": "beta short",
             "p3": "beta",
             "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
+            "sequence": 1,
+            "start_message": 3,
+            "start_message_id": "msg-3",
+            "title": "beta"
           }
         ],
-        "facts": [],
-        "events": [],
         "primer_candidates": [
           {
-            "question": "How does beta work?",
-            "origin_history_segment_index": 2
+            "origin_history_segment_index": 2,
+            "question": "How does beta work?"
           }
         ],
-        "user_observations": [],
         "unprocessed_from": 5,
-        "discarded_last": false
+        "user_observations": []
       }
     }
   },
@@ -1432,102 +1607,107 @@
       }
     },
     "parsed": {
+      "events": [
+        {
+          "at_history_segment": 1,
+          "fields": {
+            "summary": "kept"
+          },
+          "kind": "causal_incident"
+        },
+        {
+          "at_history_segment": 3,
+          "fields": {
+            "summary": "dropped"
+          },
+          "kind": "trajectory_correction"
+        }
+      ],
+      "fact_syntax_failure": null,
+      "facts": [],
+      "facts_block_present": false,
       "history_segments": [
         {
-          "start_message": 1,
-          "end_message": 2,
-          "title": "alpha",
           "content": "alpha full & exact",
+          "end_message": 2,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "alpha full & exact",
           "p2": "alpha short",
           "p3": "alpha",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 1,
+          "title": "alpha"
         },
         {
-          "start_message": 3,
-          "end_message": 4,
-          "title": "beta",
           "content": "beta full & exact",
+          "end_message": 4,
+          "episode_type": "feature",
+          "importance": 50,
           "p1": "beta full & exact",
           "p2": "beta short",
           "p3": "beta",
           "p4": "",
-          "importance": 50,
-          "episode_type": "feature"
+          "start_message": 3,
+          "title": "beta"
         }
       ],
-      "facts": [],
-      "events": [
-        {
-          "kind": "causal_incident",
-          "at_history_segment": 1,
-          "fields": {
-            "summary": "kept"
-          }
-        },
-        {
-          "kind": "trajectory_correction",
-          "at_history_segment": 3,
-          "fields": {
-            "summary": "dropped"
-          }
-        }
-      ],
+      "primer_candidates": [],
       "unprocessed_from": 5,
-      "user_observations": [],
-      "primer_candidates": []
+      "user_observations": []
     },
     "validation": {
       "ok": true,
       "result": {
+        "discarded_last": false,
+        "events": [
+          {
+            "at_history_segment": 1,
+            "fields": {
+              "summary": "kept"
+            },
+            "kind": "causal_incident"
+          }
+        ],
+        "extraction": {
+          "kind": "not_requested"
+        },
+        "facts": [],
         "history_segments": [
           {
-            "sequence": 0,
-            "start_message_id": "msg-1",
-            "end_message_id": "msg-2",
-            "start_message": 1,
-            "end_message": 2,
-            "title": "alpha",
             "content": "alpha full & exact",
+            "end_message": 2,
+            "end_message_id": "msg-2",
+            "episode_type": "feature",
+            "importance": 50,
             "p1": "alpha full & exact",
             "p2": "alpha short",
             "p3": "alpha",
             "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
+            "sequence": 0,
+            "start_message": 1,
+            "start_message_id": "msg-1",
+            "title": "alpha"
           },
           {
-            "sequence": 1,
-            "start_message_id": "msg-3",
-            "end_message_id": "msg-4",
-            "start_message": 3,
-            "end_message": 4,
-            "title": "beta",
             "content": "beta full & exact",
+            "end_message": 4,
+            "end_message_id": "msg-4",
+            "episode_type": "feature",
+            "importance": 50,
             "p1": "beta full & exact",
             "p2": "beta short",
             "p3": "beta",
             "p4": "",
-            "importance": 50,
-            "episode_type": "feature"
-          }
-        ],
-        "facts": [],
-        "events": [
-          {
-            "kind": "causal_incident",
-            "at_history_segment": 1,
-            "fields": {
-              "summary": "kept"
-            }
+            "sequence": 1,
+            "start_message": 3,
+            "start_message_id": "msg-3",
+            "title": "beta"
           }
         ],
         "primer_candidates": [],
-        "user_observations": [],
         "unprocessed_from": 5,
-        "discarded_last": false
+        "user_observations": []
       }
     }
   },

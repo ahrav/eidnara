@@ -43,7 +43,35 @@ describe("parseHistorySegmentOutput — v2 5-category facts", () => {
         expect(parsed.facts[0]).toEqual({
             category: "PROJECT_RULES",
             content: "Always commit + build after every fix.",
+            citations: [],
         });
+    });
+
+    it("splits frozen-alias citations off a fact and keeps a non-citation bracket in the text", () => {
+        const parsed = parseHistorySegmentOutput(`
+<output>
+<history_segment start="1" end="2" title="t"><p1>a</p1><p2>a</p2><p3>a</p3><p4></p4></history_segment>
+<facts>
+<PROJECT_RULES>
+* [s3:0-12] [s4:5-9] Commit after every fix.
+* [not a citation] Keep brackets.
+* [s9:4-x] Malformed stays in the text.
+* [s1:0-3]
+</PROJECT_RULES>
+</facts>
+</output>`);
+        expect(parsed.facts.map((f) => [f.content, f.citations])).toEqual([
+            [
+                "Commit after every fix.",
+                [
+                    { alias: "s3", start: 0, end: 12 },
+                    { alias: "s4", start: 5, end: 9 },
+                ],
+            ],
+            ["[not a citation] Keep brackets.", []],
+            ["[s9:4-x] Malformed stays in the text.", []],
+            ["", [{ alias: "s1", start: 0, end: 3 }]],
+        ]);
     });
 
     it("does NOT parse legacy 9-cat fact categories (they exited history_summarizer output)", () => {
@@ -93,6 +121,7 @@ describe("parseHistorySegmentOutput — v2 5-category facts", () => {
         expect(parsed.facts).toContainEqual({
             category: "PROJECT_RULES",
             content: "Preserve Sam's decision & keep <eidnara> wording.",
+            citations: [],
         });
     });
 
@@ -116,6 +145,7 @@ describe("parseHistorySegmentOutput — v2 5-category facts", () => {
         expect(parsed.facts).toContainEqual({
             category: "PROJECT_RULES",
             content: "Escape as &quot; in attributes.",
+            citations: [],
         });
     });
 });
@@ -339,7 +369,11 @@ describe("parseHistorySegmentOutput — fact scoping (audit Fix 6)", () => {
 </events>
 </output>`);
         expect(parsed.facts).toEqual([
-            { category: "PROJECT_RULES", content: "Follow the project release checklist." },
+            {
+                category: "PROJECT_RULES",
+                content: "Follow the project release checklist.",
+                citations: [],
+            },
         ]);
     });
 });

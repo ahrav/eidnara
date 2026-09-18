@@ -29,6 +29,7 @@ pub mod healing;
 pub(crate) mod history_segment_coverage;
 pub mod history_summarizer;
 pub mod history_summarizer_chunk;
+pub mod history_summarizer_citations;
 pub mod history_summarizer_producer;
 pub(crate) mod history_summarizer_prompt;
 pub(crate) mod history_summarizer_validate;
@@ -182,6 +183,9 @@ mod transform_meta_bound;
 
 #[cfg(test)]
 mod differential_goldens;
+
+#[cfg(test)]
+mod history_summarizer_citations_golden;
 use transform::{
     HistorySummarizerDiagnostics, ProjectionCacheInput, SerializedOutputCache, TransformRequest,
     TransformWithProjection, transform_with_projection_cached,
@@ -5285,15 +5289,18 @@ impl HandlerCore {
                     drop(guard);
                     return Some("recovering");
                 };
-                let chunk = history_summarizer_chunk::build_history_summarizer_chunk(
+                let token_budget = derive_history_summarizer_chunk_tokens(
+                    config.history_summarizer_context_limit_tokens,
+                );
+                let mut chunk = history_summarizer_chunk::build_history_summarizer_chunk(
                     parsed.messages.as_slice(),
                     &live,
                     range.from_ordinal,
-                    derive_history_summarizer_chunk_tokens(
-                        config.history_summarizer_context_limit_tokens,
-                    ),
+                    token_budget,
                     range.to_ordinal.saturating_add(1),
                 );
+                // The firing presented this chunk under the same budget; re-applying the truncation withdraws the aliases the model never saw whole, so a reattached citation resolves only against presented bytes.
+                let _ = history_summarizer_chunk::presented_input(&mut chunk, token_budget);
                 let prior_history_segments = match store.load_history_segments(&session_id) {
                     Ok(cs) => cs
                         .iter()
@@ -18745,14 +18752,15 @@ mod tests {
                     replayed_unflagged
                 );
                 let (expected_text, expected_end) = match budget {
-                    1 => ("[1-2] U: α🙂e\u{301} 中文".to_string(), 2),
+                    1 => ("[1-2] U: ⟦s1⟧α🙂e\u{301} 中文".to_string(), 2),
                     128 => (
-                        "[1-2] U: α🙂e\u{301} 中文\n[3-4] A: TC: bash / TC: bash".to_string(),
+                        "[1-2] U: ⟦s1⟧α🙂e\u{301} 中文\n[3-4] A: ⟦s2⟧TC: bash / ⟦s3⟧TC: bash"
+                            .to_string(),
                         4,
                     ),
                     _ => (
                         format!(
-                            "[1-2] U: α🙂e\u{301} 中文\n[3-4] A: TC: bash / TC: bash\n[5] U: {}\n[8] A: kept reply",
+                            "[1-2] U: ⟦s1⟧α🙂e\u{301} 中文\n[3-4] A: ⟦s2⟧TC: bash / ⟦s3⟧TC: bash\n[5] U: ⟦s4⟧{}\n[8] A: ⟦s5⟧kept reply",
                             "word ".repeat(2_000).trim_end(),
                         ),
                         8,
@@ -18784,8 +18792,8 @@ mod tests {
                 assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
                 let expected_digest = match budget {
                     1 => "0e0eb1f520ba2500bd1fdd653c805dc72fed78e64197f569294a9eb091c5ef34",
-                    128 => "7bf6893aeb58b953a0909165a4443ab0fb1b793faba4c8e9655058f38cd5727a",
-                    _ => "bafe4494e0de9038ac1a5fd14d432282bb17584600858b0dfad885ddb3ffac5d",
+                    128 => "bd4cd63893b27d68e402b624e3f12cc864625a9e9063c36faa1d1e0c86183f9d",
+                    _ => "bbd9be7b6623b38710d42a2285dd3e9a257af89fb47a3684a6bb20cf962f3791",
                 };
                 assert_eq!(
                     format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),
@@ -26239,7 +26247,7 @@ mod tests {
             let first_prompt = producer.prompts.lock().unwrap()[0].clone();
             assert_eq!(
                 format!("{:x}", Sha256::digest(first_prompt.as_bytes())),
-                "2aa6e502a048b0729b21fc7e3368476e1fc56bcab5280860f66c89e29c5f5466"
+                "05c936442bcab53bbc53998b6d0e26a868e4c9aaa51e232819805479ca0177e7"
             );
             assert_eq!(prompt_ordinal_range(&first_prompt).unwrap().0, 1);
             assert!(first_prompt.contains("message 3 "));
@@ -26361,7 +26369,7 @@ mod tests {
             let third_prompt = producer.prompts.lock().unwrap()[1].clone();
             assert_eq!(
                 format!("{:x}", Sha256::digest(third_prompt.as_bytes())),
-                "eb6233c471dc084858e31929e01d931e8542490bf4ad950365b81d02f00fef7f"
+                "d95e5368b7bd08771c1fc19192224ea088b0f847a164d3e6a9d6c95c7aa105b0"
             );
             assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
             assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
