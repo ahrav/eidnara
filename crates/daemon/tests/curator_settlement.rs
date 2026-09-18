@@ -497,7 +497,7 @@ impl Fixture {
             &self.ledger,
             PROJECT,
             &self.identity,
-            |_| self.review_binding(),
+            |_| Some(self.review_binding()),
             now,
         )
     }
@@ -1216,7 +1216,7 @@ fn a_selected_result_is_readable_only_through_its_live_review_hold() {
                         &ledger,
                         PROJECT,
                         &identity,
-                        |_| binding.clone(),
+                        |_| Some(binding.clone()),
                         now,
                     )
                     .map(|selected| selected.reference)

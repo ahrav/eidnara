@@ -857,23 +857,28 @@ fn resolve_descriptor(
             .parse()
             .map_err(|_| kernel(RefusalCode::Unsupported))?,
     };
-    // Canonical and promoted descriptors resolve through their originating decision (Q21); no producer targets one yet, so the class is refused rather than resolved untested. The run settles on the refusal.
-    let expectation = match class {
-        OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory => {
-            return Err(InvestigationError::Refused(RefusalCode::Unsupported));
-        }
-        OccurrenceClass::Messages | OccurrenceClass::GitCommits | OccurrenceClass::RawToolSpans => {
-            ReferenceExpectation::NativeSource {
-                object_id: object_id.to_string(),
-                class,
-                source_revision,
-                artifact_digest: detail.artifact_digest.clone(),
-                evidence_id: detail.evidence_id.clone(),
-                occurrence_tuple: detail.occurrence_tuple.clone(),
-            }
-        }
+    if !resolves_class(class) {
+        return Err(InvestigationError::Refused(RefusalCode::Unsupported));
+    }
+    let expectation = ReferenceExpectation::NativeSource {
+        object_id: object_id.to_string(),
+        class,
+        source_revision,
+        artifact_digest: detail.artifact_digest.clone(),
+        evidence_id: detail.evidence_id.clone(),
+        occurrence_tuple: detail.occurrence_tuple.clone(),
     };
     Ok((expectation, vec![detail.evidence_id]))
+}
+
+/// Whether a descriptor of `class` resolves to a subject the run can read. Canonical and promoted descriptors resolve through their originating decision, a path this run does not implement, so they are refused; the selector walks only classes this admits.
+pub fn resolves_class(class: OccurrenceClass) -> bool {
+    match class {
+        OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory => false,
+        OccurrenceClass::Messages | OccurrenceClass::GitCommits | OccurrenceClass::RawToolSpans => {
+            true
+        }
+    }
 }
 
 /// Binds the model's outcome into a proposal: every citation resolves to disclosed evidence through the broker, names only bytes the model was shown, and is recorded as a citation; the target is the job's subject; the manifest reference digests the disclosed spans; policy dependencies are left for settlement to fill from the broker.

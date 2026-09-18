@@ -607,7 +607,7 @@ async fn run_case(case: &Case) {
                 &fixture.ledger,
                 PROJECT,
                 &fixture.identity,
-                |_| fixture.binding(),
+                |_| Some(fixture.binding()),
                 fixture.now + 6,
             )
             .unwrap();
@@ -949,7 +949,7 @@ async fn invalidation_after_disclosure_abstains_at_settlement() {
             &fixture.ledger,
             PROJECT,
             &fixture.identity,
-            |_| fixture.binding(),
+            |_| Some(fixture.binding()),
             fixture.now + 6,
         ),
         Err(ReadRefusal::NotSelected)
@@ -1388,7 +1388,7 @@ async fn a_selected_eligible_memory_becomes_a_published_proposal_through_the_sha
         &fixture.ledger,
         PROJECT,
         &job.causal_identity,
-        |_| binding.clone(),
+        |_| Some(binding.clone()),
         fixture.now + 6,
     )
     .unwrap();

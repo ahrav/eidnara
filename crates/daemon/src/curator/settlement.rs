@@ -652,13 +652,13 @@ pub fn list_review_outcomes(
     Ok(ReviewOutcomePage { outcomes, next })
 }
 
-/// Reads the proposal the job's completed receipt selects. `binding` builds the job's staging binding from the Kernel project digest the selection records; its owner is replaced by the selected generation's proposal owner.
+/// Reads the proposal the job's completed receipt selects. `binding` builds the job's staging binding from the Kernel project digest the selection records; its owner is replaced by the selected generation's proposal owner. A job with no defined binding is refused as the Kernel would refuse any binding invented for it: a scope mismatch.
 pub fn read_selected_proposal(
     store: &KernelStore,
     ledger: &MemoryStore,
     project: &str,
     causal_identity: &str,
-    binding: impl FnOnce(&str) -> ReviewBinding,
+    binding: impl FnOnce(&str) -> Option<ReviewBinding>,
     now: i64,
 ) -> Result<SelectedProposal, ReadRefusal> {
     let receipt = ledger
@@ -694,7 +694,8 @@ pub fn read_selected_proposal(
         subject: causal_identity.to_string(),
         generation: receipt.generation,
     };
-    let binding = binding(&selection.project_digest);
+    let binding = binding(&selection.project_digest)
+        .ok_or(ReadRefusal::Kernel(ReviewReadRefusal::ScopeMismatch))?;
     let row = store
         .read_review_input(&reference, &proposal_binding(&binding, &run), now)
         .map_err(|error| match error {

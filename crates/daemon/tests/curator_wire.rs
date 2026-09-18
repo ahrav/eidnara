@@ -236,7 +236,7 @@ fn publish(
         worker_instance: "worker-a".to_string(),
         slot: begun.job.producer.ordinal as i64,
     };
-    let binding = job_binding(digest, &begun.job);
+    let binding = job_binding(digest, &begun.job).expect("a History Summarizer job has a binding");
     let settled = Settlement {
         store: kernel,
         ledger: store,
