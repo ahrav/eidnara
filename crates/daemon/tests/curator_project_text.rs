@@ -118,30 +118,45 @@ impl Fixture {
 
     /// A broker for a run of `project`, whose hold subject and generation are the fixture's.
     fn broker_for(&self, project: &str, destination: ArtifactDestination) -> EvidenceBroker {
-        let anchor = self
-            .store
-            .ingest_artifact(ArtifactIngestRequest {
-                intent: intent(&format!("anchor-{destination:?}")),
-                payload: b"anchor".to_vec(),
-                evidence_id: format!("evidence-anchor-{destination:?}-{project}"),
-                object_id: format!("evidence-object-anchor-{destination:?}-{project}"),
-                object_kind: "evidence".to_string(),
-                domain_id: DOMAIN.to_string(),
-                source_kind: "conversation".to_string(),
-                source_id: "src/anchor".to_string(),
-                source_revision: 1,
-                media_type: "text/plain".to_string(),
-                retention_class: "canonical".to_string(),
-                retain_until: None,
-                asserted_sensitivity: Sensitivity::Normal,
-                provider_egress: ProviderEgress::RemoteAllowed,
-                provenance: None,
+        self.broker_with_references(project, destination, 1)
+    }
+
+    /// A broker whose execution hold already carries `references` canonical references, so at most `MAX_CURATOR_HOLD_REFERENCES - references` captures can still be pinned.
+    fn broker_with_references(
+        &self,
+        project: &str,
+        destination: ArtifactDestination,
+        references: usize,
+    ) -> EvidenceBroker {
+        let held: Vec<String> = (0..references)
+            .map(|index| {
+                let key = format!("anchor-{index}-{destination:?}-{project}");
+                self.store
+                    .ingest_artifact(ArtifactIngestRequest {
+                        intent: intent(&key),
+                        payload: format!("anchor {index}").into_bytes(),
+                        evidence_id: format!("evidence-{key}"),
+                        object_id: format!("evidence-object-{key}"),
+                        object_kind: "evidence".to_string(),
+                        domain_id: DOMAIN.to_string(),
+                        source_kind: "conversation".to_string(),
+                        source_id: "src/anchor".to_string(),
+                        source_revision: 1,
+                        media_type: "text/plain".to_string(),
+                        retention_class: "canonical".to_string(),
+                        retain_until: None,
+                        asserted_sensitivity: Sensitivity::Normal,
+                        provider_egress: ProviderEgress::RemoteAllowed,
+                        provenance: None,
+                    })
+                    .unwrap()
+                    .evidence_id
             })
-            .unwrap();
+            .collect();
         let binding = self.hold_binding_for(project);
         let hold = self
             .store
-            .acquire_execution_hold(&binding, &[anchor.evidence_id], self.now + 2 * HOUR_MS)
+            .acquire_execution_hold(&binding, &held, self.now + 2 * HOUR_MS)
             .unwrap();
         EvidenceBroker::new(
             RunBinding {
@@ -1347,4 +1362,47 @@ fn the_capture_writer_refuses_a_detail_that_does_not_describe_a_confined_capture
             .relative_path,
         "src/main.rs"
     );
+}
+
+#[test]
+fn a_hold_capacity_refusal_on_a_capture_marks_the_evidence_set_partial() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"bun one");
+    fixture.write("b.txt", b"bun two, longer");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    // Room on the hold for the first capture only: the second capture's hold extension is a capacity refusal before any disclosure of it.
+    let mut broker = fixture.broker_with_references(
+        PROJECT,
+        ArtifactDestination::Local,
+        kernel::MAX_CURATOR_HOLD_REFERENCES - 1,
+    );
+    let outcome = text
+        .search(
+            &fixture.store,
+            &mut broker,
+            SearchQuery::Content("bun"),
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(outcome.completeness, Completeness::CapacityBound);
+    assert_eq!(outcome.hits.len(), 1);
+    assert!(
+        !broker.ledger.conclusions_usable(),
+        "a hold capacity refusal on a capture truncates the evidence set like one on a read"
+    );
+    // With nothing disclosed yet, the refusal itself is the answer, and it still marks the set.
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker_with_references(
+        PROJECT,
+        ArtifactDestination::Local,
+        kernel::MAX_CURATOR_HOLD_REFERENCES,
+    );
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::HoldLimit
+    );
+    assert!(!broker.ledger.conclusions_usable());
 }

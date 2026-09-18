@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use super::cas::ProviderEgress;
+use super::envelope::commit_with_writer;
 use super::redaction::identity;
 use super::review_staging::check_digest;
 use super::slice::{EVIDENCE_CITED_SQL, ObservationPayload, ObservationSpec};
@@ -18,7 +19,8 @@ const OBSERVATION_ID_PREFIX: &str = "localfile:";
 const OBJECT_ID_PREFIX: &str = "localfileobj:";
 /// Expiries retired per maintenance call.
 pub const MAX_EXPIRED_CAPTURES_PER_CALL: usize = 64;
-const EXPIRY_PRODUCER: &str = "kernel-local-file-expiry";
+/// The reserved producer expiry receipts are written under; a caller cannot commit under it, so a receipt found under an expiry key was written by this sweep.
+const EXPIRY_PRODUCER: &str = "local-file-expiry";
 
 /// The typed detail stored with a local-file capture observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +139,7 @@ impl Envelope<'_> {
 impl KernelStore {
     /// Retires the capture observation and evidence of every Curator capture whose `retain_until` has passed and that no live hold still pins, at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] per call, one commit per capture keyed by `now` and the evidence id. A capture that some other live row still cites keeps its evidence: its own observation is retired, and the capture leaves the sweep until that citation is gone, so a retained capture costs nothing on later calls and never displaces a newer expired one from the page. Ownership ends here; the artifact bytes are reclaimed later only if no other live reference names the digest. Returns how many evidence rows were retired.
     ///
-    /// Candidates are chosen under a reader lock; each commit re-evaluates the expiry and pin predicate under the writer, so a hold acquired or extended over a candidate in between keeps it. A capture whose retirement the store refuses (`NotFound`, `Conflict`, or `InvalidInput` from its own commit) is skipped and the sweep continues, so one such row cannot hold every capture behind it in the page; a row whose registry object is not a live evidence object can never be retired and is not a candidate at all.
+    /// Candidates are chosen under a reader lock; each commit re-evaluates the expiry and pin predicate under the writer, so a hold acquired or extended over a candidate in between keeps it. A capture whose retirement the store refuses (`NotFound`, `Conflict`, or `InvalidInput` from its own commit) is skipped and the sweep continues, so one such row cannot hold every capture behind it in the page; a row whose registry object is not a live evidence object can never be retired and is not a candidate at all. Receipts are written under a reserved producer, so no caller can seat a receipt under an expiry key and have it replayed in place of the retirement.
     ///
     /// # Errors
     ///
@@ -149,16 +151,14 @@ impl KernelStore {
         };
         let mut retired = 0;
         for (evidence_id, evidence_object) in expired {
-            let intent = CommitIntent {
-                producer: EXPIRY_PRODUCER.to_string(),
-                operation_key: format!("{now}:{evidence_id}"),
-                request_digest: format!("{:x}", sha2::Sha256::digest(evidence_id.as_bytes())),
-                actor: EXPIRY_PRODUCER.to_string(),
-                cause: "acquisition reference expired".to_string(),
-            };
-            let outcome = self.commit(intent, |envelope| {
-                retire_expired_capture(envelope, now, &evidence_id, &evidence_object)
-            });
+            let mut writer = self.lock_writer()?;
+            let outcome = commit_with_writer(
+                &mut writer,
+                self.lease_epoch(),
+                expiry_intent(now, &evidence_id),
+                |envelope| retire_expired_capture(envelope, now, &evidence_id, &evidence_object),
+                || Ok(()),
+            );
             match outcome {
                 Ok(receipt) => {
                     if receipt.result == "retired" {
@@ -201,6 +201,20 @@ impl KernelStore {
                     .ok_or(KernelError::CorruptCanonicalRow)
             })
             .transpose()
+    }
+}
+
+/// The intent of one capture's expiry commit, keyed by the cutoff and the evidence id under the reserved producer.
+fn expiry_intent(now: i64, evidence_id: &str) -> CommitIntent {
+    CommitIntent {
+        producer: format!(
+            "{}{EXPIRY_PRODUCER}",
+            CommitIntent::RESERVED_PRODUCER_PREFIX
+        ),
+        operation_key: format!("{now}:{evidence_id}"),
+        request_digest: format!("{:x}", sha2::Sha256::digest(evidence_id.as_bytes())),
+        actor: EXPIRY_PRODUCER.to_string(),
+        cause: "acquisition reference expired".to_string(),
     }
 }
 
@@ -343,7 +357,7 @@ mod tests {
 
     use super::{
         LOCAL_FILE_KIND, LocalFileCaptureRequest, MAX_EXPIRED_CAPTURES_PER_CALL,
-        expired_captures_sql, retire_expired_capture,
+        expired_captures_sql, expiry_intent, retire_expired_capture,
     };
     use crate::cas::CURATOR_CAPTURE_RETENTION_CLASS;
     use crate::schema::apply_kernel_schema;
@@ -439,6 +453,21 @@ mod tests {
             generation: 1,
         };
         (store, binding, lapses_at)
+    }
+
+    #[test]
+    fn a_caller_cannot_seat_a_receipt_the_expiry_would_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let (store, _, lapses_at) = store_with_lapsing_capture(root.path());
+        let now = lapses_at + 1;
+        // A caller commits under the very intent the sweep will use for this capture at this cutoff, claiming it was retained.
+        assert_eq!(
+            store.commit(expiry_intent(now, "cap"), |_| Ok("retained".to_string())),
+            Err(KernelError::InvalidInput),
+            "the expiry producer is reserved to the store"
+        );
+        assert_eq!(store.expire_local_file_captures(now).unwrap(), 1);
+        assert!(store.local_file_capture("cap").unwrap().is_none());
     }
 
     #[test]

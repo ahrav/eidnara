@@ -979,8 +979,25 @@ impl EvidenceBroker {
         Ok(())
     }
 
-    /// Checks the destination verdict on the expected digest, grows the execution hold over the artifact, and returns the held facts, which must carry that digest. The verdict comes first so a policy-blocked artifact is never pinned or charged against the hold's backing; an artifact already extended in this run skips the writer transaction and is still validated against the live hold.
+    /// Checks the destination verdict on the expected digest, grows the execution hold over the artifact, and returns the held facts, which must carry that digest. The verdict comes first so a policy-blocked artifact is never pinned or charged against the hold's backing; an artifact already extended in this run skips the writer transaction and is still validated against the live hold. A hold capacity refusal truncates the evidence set whichever caller asked, so it marks the ledger partial here, before any read.
     pub(crate) fn hold_evidence(
+        &mut self,
+        store: &KernelStore,
+        alias: Option<&Alias>,
+        evidence_id: &str,
+        artifact_digest: &str,
+        now_ms: i64,
+    ) -> Result<HeldEvidence, Refusal> {
+        let result = self.hold_evidence_inner(store, alias, evidence_id, artifact_digest, now_ms);
+        if let Err(refusal) = &result
+            && refusal.code.truncates_evidence()
+        {
+            self.ledger.record_partial_disclosure();
+        }
+        result
+    }
+
+    fn hold_evidence_inner(
         &mut self,
         store: &KernelStore,
         alias: Option<&Alias>,
