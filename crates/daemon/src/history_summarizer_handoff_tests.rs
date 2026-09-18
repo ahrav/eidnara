@@ -1690,3 +1690,160 @@ fn every_retained_republish_arms_the_backoff() {
         RepublishOutcome::Published
     );
 }
+
+#[test]
+fn a_settle_from_a_stale_snapshot_spares_a_later_firing_and_the_job_the_publication_activated() {
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    // The publication commits and activates the job, but its answer is lost: by the time a refusal reaches this pass, firing 4 has fired and retained its own publication.
+    struct CommitThenMoveOn<'a>(&'a Rig);
+    impl HistorySummarizerPublicationFence for CommitThenMoveOn<'_> {
+        fn publish(
+            &self,
+            store: &MemoryStore,
+            request: memory_store::HistorySummarizerPublishRequest<'_>,
+        ) -> Result<memory_store::HistorySummarizerPublishResult, HistorySummarizerPublishError>
+        {
+            store.publish_history_summarizer_chunk(request)?;
+            let rig = self.0;
+            rig.persist(next_publishing_firing(rig, 5, 6));
+            rig.retain(
+                &later_reservation(),
+                &pending_publication(&validated_range(5, 6)),
+            );
+            Err(HistorySummarizerPublishError::CuratorActivation(
+                CuratorJobRefusal::InvalidRequest,
+            ))
+        }
+    }
+    let target = rig.target();
+    let fence = CommitThenMoveOn(&rig);
+    let outcome = republish_reserved(RepublishRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        curator_handoff: Some(&target),
+        now_ms: t0() + 1,
+        failure_backoff_at_ms: t0() + 1 + 60_000,
+        publication_fence: Some(&fence),
+    })
+    .unwrap();
+    // The activated job, the later firing, and its retained publication are all someone else's now.
+    assert!(
+        matches!(
+            rig.job(&reservation.causal_identity).state,
+            CuratorJobState::Ready(_)
+        ),
+        "{:?}",
+        rig.job(&reservation.causal_identity).state
+    );
+    let later = rig.state();
+    assert_eq!(later.state, HistorySummarizerPhase::Publishing);
+    assert_eq!(later.firing_seq, 4);
+    assert_eq!(later.curator_reservation, Some(later_reservation()));
+    assert_eq!(rig.pending().map(|(firing_seq, _)| firing_seq), Some(4));
+    assert_eq!(outcome, RepublishOutcome::Retained);
+}
+
+/// A reservation firing 4 records for a job of its own.
+fn later_reservation() -> memory_store::CuratorReservation {
+    memory_store::CuratorReservation {
+        firing_seq: 4,
+        causal_identity: "later-job".to_string(),
+        candidate_id: "hs-ses-later".to_string(),
+        payload_digest: "later".to_string(),
+        kernel_incarnation: "kernel".to_string(),
+        queue_deadline_ms: t0() + CURATOR_QUEUE_LIFETIME_MS,
+    }
+}
+
+#[test]
+fn a_retained_publication_the_store_refuses_is_a_nonadmission_before_any_reservation() {
+    let rig = Rig::open();
+    let target = rig.target();
+    let decide = |pending: PendingPublication| {
+        let loaded = rig.store.load(SESSION).unwrap();
+        curator_decision_before_publish(CuratorDecisionRequest {
+            store: &rig.store,
+            session_id: SESSION,
+            project_path: PROJECT,
+            publishing: &loaded.meta.history_summarizer,
+            publishing_row_version: loaded.row_version.unwrap(),
+            validated: &accepted_range(2, 4),
+            aliases: &aliases(),
+            pending,
+            curator_handoff: Some(&target),
+            created_at_ms: t0(),
+            failure_started_at_ms: t0(),
+            failure_backoff_at_ms: t0() + 60_000,
+            completion_now_ms: || 0,
+        })
+    };
+    // A chunk transcript inside its own envelope, retained beside the alias table that presents the same text again, exceeds the transcript envelope alone but fits the publication's.
+    let mut pending = pending_publication(&validated_range(2, 4));
+    pending.chunk_transcript = incompressible_text(400 * 1024, 1);
+    pending.aliases_json = serde_json::to_string(&incompressible_text(400 * 1024, 2)).unwrap();
+    let decision = decide(pending).unwrap();
+    assert!(decision.curator_activation.is_some());
+    assert_eq!(rig.pending().map(|(firing_seq, _)| firing_seq), Some(3));
+    // Past the envelope, the store refuses the payload before any job is reserved: the publication records a nonadmission, nothing is reserved, and the firing is not abandoned.
+    let rig = Rig::open();
+    let target = rig.target();
+    let mut pending = pending_publication(&validated_range(2, 4));
+    pending.chunk_transcript = incompressible_text(500 * 1024, 3);
+    pending.aliases_json = serde_json::to_string(&incompressible_text(500 * 1024, 4)).unwrap();
+    pending.validated_json = serde_json::to_string(&incompressible_text(500 * 1024, 5)).unwrap();
+    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
+    let loaded = rig.store.load(SESSION).unwrap();
+    let decision = curator_decision_before_publish(CuratorDecisionRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        publishing: &loaded.meta.history_summarizer,
+        publishing_row_version: loaded.row_version.unwrap(),
+        validated: &accepted_range(2, 4),
+        aliases: &aliases(),
+        pending,
+        curator_handoff: Some(&target),
+        created_at_ms: t0(),
+        failure_started_at_ms: t0(),
+        failure_backoff_at_ms: t0() + 60_000,
+        completion_now_ms: || 0,
+    })
+    .unwrap();
+    assert_eq!(
+        decision.curator_nonadmission,
+        Some(CuratorNonadmissionCode::SubjectRefused)
+    );
+    assert!(decision.curator_activation.is_none());
+    assert_eq!(
+        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        headroom_before.pending_jobs
+    );
+    assert_eq!(rig.state().state, HistorySummarizerPhase::Publishing);
+    assert_eq!(rig.pending(), None);
+}
+
+/// The validated chunk with its facts accepted, as the publication path sees an accepted set.
+fn accepted_range(start: u64, end: u64) -> ValidatedChunk {
+    let mut validated = validated_range(start, end);
+    validated.extraction = ExtractionOutcome::Accepted {
+        count: validated.facts.len(),
+    };
+    validated
+}
+
+/// `len` bytes of text deflate cannot shrink much: a xorshift stream mapped onto 64 symbols.
+fn incompressible_text(len: usize, seed: u64) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ALPHABET[(state >> 58) as usize] as char
+        })
+        .collect()
+}

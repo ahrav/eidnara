@@ -466,6 +466,8 @@ pub fn publish_validated_chunk(
     request: ValidatedPublishRequest<'_>,
 ) -> Result<HistorySummarizerPublishResult, HistorySummarizerStateError> {
     if request.predicate.chunk_fingerprint != request.observed_chunk_fingerprint {
+        // The chunk itself changed: a reservation for it can never publish.
+        settle_unpublishable_reservation(store, &request)?;
         abandon_matching_run_with_detail(
             store,
             request.session_id,
@@ -473,8 +475,6 @@ pub fn publish_validated_chunk(
             request.failure_backoff_at_ms,
             None,
         )?;
-        // The chunk itself changed: a reservation for it can never publish.
-        settle_unpublishable_reservation(store, &request)?;
         return Err(HistorySummarizerStateError::FingerprintMismatch {
             expected: request.predicate.chunk_fingerprint.clone(),
             found: request.observed_chunk_fingerprint.to_string(),
@@ -561,14 +561,14 @@ pub fn publish_validated_chunk(
     match publish_result {
         Ok(result) => Ok(result),
         Err(HistorySummarizerPublishError::FenceRejected { reason }) => {
-            // The store's fence refused the firing's snapshot: the selected input or the segment set changed under it. The run returns to `Idle` without a failure cooldown, and a reservation it carried can never publish.
+            // The store's fence refused the firing's snapshot: the selected input or the segment set changed under it. A reservation it carried can never publish, and the run returns to `Idle` without a failure cooldown.
+            settle_unpublishable_reservation(store, &request)?;
             abandon_matching_run_without_cooldown(
                 store,
                 request.session_id,
                 request.predicate,
                 Some(format!("publish rejected: {reason}")),
             )?;
-            settle_unpublishable_reservation(store, &request)?;
             Err(HistorySummarizerStateError::Publish(
                 HistorySummarizerPublishError::FenceRejected { reason },
             ))
@@ -596,13 +596,13 @@ pub fn publish_validated_chunk(
             // Storage-overlap handling treats a storage-detected overlap as a stale local race.
             // A storage-detected overlap makes the matching firing immediately idle.
             // Making the matching firing idle prevents a durable `Publishing` wedge.
+            settle_unpublishable_reservation(store, &request)?;
             abandon_matching_run_without_cooldown(
                 store,
                 request.session_id,
                 request.predicate,
                 Some(format!("publish rejected: {error}")),
             )?;
-            settle_unpublishable_reservation(store, &request)?;
             Err(HistorySummarizerStateError::Publish(error))
         }
         Err(HistorySummarizerPublishError::CasConflict {
@@ -621,6 +621,7 @@ pub fn publish_validated_chunk(
                     .clone()
                     .map(|reason| format!("publish rejected: {reason}"))
                     .or_else(|| Some("publish rejected: row-version CAS conflict".to_string()));
+                settle_unpublishable_reservation(store, &request)?;
                 abandon_matching_run_with_detail(
                     store,
                     request.session_id,
@@ -628,7 +629,6 @@ pub fn publish_validated_chunk(
                     request.failure_backoff_at_ms,
                     detail,
                 )?;
-                settle_unpublishable_reservation(store, &request)?;
             }
             Err(HistorySummarizerStateError::Publish(
                 HistorySummarizerPublishError::CasConflict {
@@ -651,7 +651,7 @@ pub fn publish_validated_chunk(
     }
 }
 
-/// A fence refused the history this reservation's candidate was extracted from (the selected input changed, or a competing publication moved the session on), so the job can never activate: it is finished as not admitted, or as expired when its deadline has passed, and the reservation and its retained publication are dropped. Nothing advances, and nothing is rerun. The session must still own the reservation, so a late duplicate attempt cannot terminate a job another publication already activated.
+/// A fence refused the history this reservation's candidate was extracted from (the selected input changed, or a competing publication moved the session on), so the job can never activate: the reservation and its retained publication are dropped, and the job is finished as not admitted, or as expired when its deadline has passed. Nothing advances, and nothing is rerun. The drop is fenced on the reservation itself, so a late duplicate attempt finds the state owned by a later firing or another publication and touches neither it nor the job it activated. It runs before the firing is abandoned: a firing that is idle never holds a reservation, and a reservation that is gone leaves at most a job the expiry sweep closes.
 fn settle_unpublishable_reservation(
     store: &MemoryStore,
     request: &ValidatedPublishRequest<'_>,
@@ -663,7 +663,11 @@ fn settle_unpublishable_reservation(
     let Some(held) = loaded.meta.history_summarizer.curator_reservation.as_ref() else {
         return Ok(());
     };
-    if held.causal_identity != activation.causal_identity {
+    if held.causal_identity != activation.causal_identity
+        || store
+            .clear_curator_reservation(request.session_id, held)?
+            .is_none()
+    {
         return Ok(());
     }
     let outcome = if held.queue_deadline_ms <= request.created_at_ms {
@@ -677,16 +681,12 @@ fn settle_unpublishable_reservation(
         outcome,
         request.created_at_ms,
     ) {
-        Ok(_) | Err(CuratorJobError::Refused(CuratorJobRefusal::Terminal)) => {}
-        Err(CuratorJobError::Refused(refusal)) => {
-            return Err(HistorySummarizerStateError::Publish(
-                HistorySummarizerPublishError::CuratorActivation(refusal),
-            ));
-        }
-        Err(CuratorJobError::Store(error)) => return Err(error.into()),
+        Ok(_) | Err(CuratorJobError::Refused(CuratorJobRefusal::Terminal)) => Ok(()),
+        Err(CuratorJobError::Refused(refusal)) => Err(HistorySummarizerStateError::Publish(
+            HistorySummarizerPublishError::CuratorActivation(refusal),
+        )),
+        Err(CuratorJobError::Store(error)) => Err(error.into()),
     }
-    store.clear_curator_reservation(request.session_id)?;
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -774,7 +774,7 @@ pub enum RepublishOutcome {
     Published,
     /// The retained publication can never commit; the job is finished with a terminal outcome and the run is idle with nothing advanced.
     Settled,
-    /// Nothing could be decided this pass (the Kernel is unavailable, the session row moved, or the snapshot retired); the reservation waits for the next pass or its deadline.
+    /// Nothing could be decided this pass (the Kernel is unavailable, the session row moved, the snapshot retired, or another pass settled or moved the session on first); the reservation, if it is still this firing's, waits for the next pass or its deadline.
     Retained,
 }
 
@@ -984,7 +984,7 @@ fn retain_republish(
     Ok(RepublishOutcome::Retained)
 }
 
-/// Finishes a reservation whose retained publication can never commit: the job records a terminal outcome (expired past its deadline, not admitted otherwise), the reservation and its retained publication are dropped, and the firing is abandoned with nothing advanced.
+/// Finishes a reservation whose retained publication can never commit: the reservation and its retained publication are dropped, the job records a terminal outcome (expired past its deadline, not admitted otherwise), and the firing is abandoned with nothing advanced. The drop is fenced on the reservation `publishing` snapshotted; a state that no longer records it was moved on by another pass, whose firing, retained publication, and job are left alone.
 fn settle_republish(
     store: &MemoryStore,
     session_id: &str,
@@ -995,6 +995,9 @@ fn settle_republish(
     detail: &str,
 ) -> Result<RepublishOutcome, HistorySummarizerDriveError> {
     if let Some(held) = publishing.curator_reservation.as_ref() {
+        if store.clear_curator_reservation(session_id, held)?.is_none() {
+            return Ok(RepublishOutcome::Retained);
+        }
         let outcome = if held.queue_deadline_ms <= now_ms {
             CuratorJobOutcome::Expired
         } else {
@@ -1016,17 +1019,20 @@ fn settle_republish(
             }
         }
     }
-    store.clear_curator_reservation(session_id)?;
     let current = store.load(session_id)?.meta.history_summarizer;
-    persist_history_summarizer_state(
-        store,
-        session_id,
-        abandon_with_detail(
-            &current,
-            failure_backoff_at_ms,
-            Some(format!("curator reservation settled: {detail}")),
-        ),
-    )?;
+    if current.state == HistorySummarizerPhase::Publishing
+        && current.firing_seq == publishing.firing_seq
+    {
+        persist_history_summarizer_state(
+            store,
+            session_id,
+            abandon_with_detail(
+                &current,
+                failure_backoff_at_ms,
+                Some(format!("curator reservation settled: {detail}")),
+            ),
+        )?;
+    }
     Ok(RepublishOutcome::Settled)
 }
 
@@ -2184,6 +2190,14 @@ fn curator_decision_before_publish(
             publishing_row_version,
         });
     };
+    // Q31: a publication the store refuses to retain (past its envelope, or content the durable scan rejects) could never be recovered after the reservation, so nothing is reserved for it and the refusal is recorded like the Kernel's.
+    if !store.pending_publication_retainable(session_id, &pending)? {
+        return Ok(CuratorDecision {
+            curator_nonadmission: Some(CuratorNonadmissionCode::SubjectRefused),
+            curator_activation: None,
+            publishing_row_version,
+        });
+    }
     let handoff = handoff::reserve_and_stage(
         target,
         &HandoffRequest {

@@ -571,7 +571,7 @@ pub enum CuratorNonadmissionCode {
     EvidenceUnavailable,
     /// The validator rejected the optional fact set as a whole.
     FactSetRejected { failure: ExtractionFailure },
-    /// The Kernel refuses the accepted set as a review subject (a bound or a secret in fact text), so nothing can be staged for it.
+    /// The Kernel refuses the accepted set as a review subject (a bound or a secret in fact text), or the Memory Store refuses to retain its publication for recovery, so nothing can be staged for it.
     SubjectRefused,
     /// A recorded code this build cannot read; only deserialization produces it.
     Unrecognized,
@@ -11182,37 +11182,7 @@ impl MemoryStore {
         reservation: &CuratorReservation,
         pending: &PendingPublication,
     ) -> Result<u64, HistorySummarizerPublishError> {
-        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
-        write.domain_owner("session", session_id, "history_summarizer");
-        write.existing_identity("session_id", session_id)?;
-        let scanned = PendingPublication {
-            validated_json: write.json_content(
-                "pending_validated",
-                &pending.validated_json,
-                JsonScanPolicy::DurableRejectProtected,
-            )?,
-            aliases_json: write.json_content(
-                "pending_aliases",
-                &pending.aliases_json,
-                JsonScanPolicy::DurableRejectProtected,
-            )?,
-            chunk_transcript: write.content("pending_transcript", &pending.chunk_transcript)?,
-            boundary_dates: pending.boundary_dates.clone(),
-            publication_floor_ordinal: pending.publication_floor_ordinal,
-            collect_user_memory_candidates: pending.collect_user_memory_candidates,
-        };
-        let payload = serde_json::to_vec(&scanned)
-            .map_err(|error| HistorySummarizerPublishError::Serde(error.to_string()))?;
-        let payload_deflate = compress_bytes(&payload).map_err(|error| {
-            MemoryStoreError::Serde(format!("pending publication compression failed: {error}"))
-        })?;
-        if payload_deflate.len() > MAX_PENDING_PUBLICATION_COMPRESSED_BYTES {
-            return Err(HistorySummarizerPublishError::Store(
-                MemoryStoreError::Serde(
-                    "pending publication exceeds its compressed bound".to_string(),
-                ),
-            ));
-        }
+        let (write, payload_deflate) = prepare_pending_publication(session_id, pending)?;
         let now_ms = current_time_ms();
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx;
@@ -11311,6 +11281,19 @@ impl MemoryStore {
         }
     }
 
+    /// Whether [`Self::record_curator_reservation`] would store `pending`: every field passes the durable scan and the compressed payload fits the retention envelope. `Ok(false)` is a payload the store refuses, so the caller records a nonadmission instead of reserving a job whose publication it could never retain.
+    pub fn pending_publication_retainable(
+        &self,
+        session_id: &str,
+        pending: &PendingPublication,
+    ) -> Result<bool, MemoryStoreError> {
+        match prepare_pending_publication(session_id, pending) {
+            Ok(_) => Ok(true),
+            Err(MemoryStoreError::Redaction(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The retained publication recorded with the session's reservation, with the firing it belongs to.
     pub fn load_pending_publication(
         &self,
@@ -11338,10 +11321,11 @@ impl MemoryStore {
         )))
     }
 
-    /// Drops a reservation whose publication can never commit, together with its retained publication, in one fenced write. The state's in-flight fields are left as they are; the caller decides the phase.
+    /// Drops `expected`, a reservation whose publication can never commit, together with its retained publication, in one fenced write. A state that records a different reservation, or none, belongs to a firing this caller did not settle and is left untouched with `None`. The state's in-flight fields are left as they are; the caller decides the phase.
     pub fn clear_curator_reservation(
         &self,
         session_id: &str,
+        expected: &CuratorReservation,
     ) -> Result<Option<u64>, MemoryStoreError> {
         let outcome = self.inner.with_conn_fenced(|tx| {
             let row = tx
@@ -11358,10 +11342,11 @@ impl MemoryStore {
                 Ok(meta) => meta,
                 Err(error) => return Ok(AbandonHistorySummarizerTxnOutcome::Serde(error.to_string())),
             };
-            delete_pending_publication_tx(tx, session_id)?;
-            if meta.history_summarizer.curator_reservation.take().is_none() {
+            if meta.history_summarizer.curator_reservation.as_ref() != Some(expected) {
                 return Ok(AbandonHistorySummarizerTxnOutcome::Unchanged);
             }
+            meta.history_summarizer.curator_reservation = None;
+            delete_pending_publication_tx(tx, session_id)?;
             let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
@@ -14977,8 +14962,43 @@ fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlit
     }
 }
 
-/// Compressed bound of one retained publication; the same envelope as a chunk transcript.
-const MAX_PENDING_PUBLICATION_COMPRESSED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES;
+/// Compressed bound of one retained publication: the chunk transcript envelope for the transcript and its serialized siblings (the validated output and the alias table, which presents the same text again), the same multiple `decompress_bytes` allows inflated.
+const MAX_PENDING_PUBLICATION_COMPRESSED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES * 4;
+
+/// Scans, serializes, and compresses a retained publication as `record_curator_reservation` stores it. A field the durable scan rejects, or a payload past `MAX_PENDING_PUBLICATION_COMPRESSED_BYTES`, is `MemoryStoreError::Redaction`: the store refuses to retain it.
+fn prepare_pending_publication(
+    session_id: &str,
+    pending: &PendingPublication,
+) -> Result<(PreparedWrite, Vec<u8>), MemoryStoreError> {
+    let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
+    write.domain_owner("session", session_id, "history_summarizer");
+    write.existing_identity("session_id", session_id)?;
+    let scanned = PendingPublication {
+        validated_json: write.json_content(
+            "pending_validated",
+            &pending.validated_json,
+            JsonScanPolicy::DurableRejectProtected,
+        )?,
+        aliases_json: write.json_content(
+            "pending_aliases",
+            &pending.aliases_json,
+            JsonScanPolicy::DurableRejectProtected,
+        )?,
+        chunk_transcript: write.content("pending_transcript", &pending.chunk_transcript)?,
+        boundary_dates: pending.boundary_dates.clone(),
+        publication_floor_ordinal: pending.publication_floor_ordinal,
+        collect_user_memory_candidates: pending.collect_user_memory_candidates,
+    };
+    let payload =
+        serde_json::to_vec(&scanned).map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
+    let payload_deflate = compress_bytes(&payload).map_err(|error| {
+        MemoryStoreError::Serde(format!("pending publication compression failed: {error}"))
+    })?;
+    if payload_deflate.len() > MAX_PENDING_PUBLICATION_COMPRESSED_BYTES {
+        return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
+    }
+    Ok((write, payload_deflate))
+}
 
 fn delete_pending_publication_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
     tx.execute(
