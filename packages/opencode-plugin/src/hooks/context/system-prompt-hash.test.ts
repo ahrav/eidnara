@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { buildHiddenAgentRegistrations } from "../../agents/hidden-agent-registrations";
 import { NOTE_CONDITION_COMPILER_SYSTEM_PROMPT } from "../../features/context/conditional-notes/compiler-prompt";
 import { CONTEXT_RESEARCHER_SYSTEM_PROMPT } from "../../features/context/context-researcher/agent";
+import { sessionLog } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { clearEidnaraReduceAvailability } from "./eidnara-reduce-availability";
 import { createSystemPromptHashHandler, isEidnaraInternalAgent } from "./system-prompt-hash";
@@ -622,5 +623,33 @@ describe("system-prompt-hash guidance injection", () => {
         expect(output.system).toEqual(["Host prompt"]);
         expect(attempts).toBe(2);
         expect(promptStateFor(sessionId)).toBeDefined();
+    });
+
+    it("forgets the once-per-session warning with the rest of an evicted session's state", async () => {
+        useTempDataHome("sph-guidance-warn-bound-");
+        const warn = spyOn(sessionLog, "warn").mockImplementation(() => {});
+        try {
+            const { handler, promptStateFor } = buildHandler({
+                fetchGuidance: async () => {
+                    throw new Error("daemon unavailable");
+                },
+            });
+            const guidanceWarnings = (): number =>
+                warn.mock.calls.filter(([, message]) =>
+                    String(message).startsWith("guidance fetch failed"),
+                ).length;
+            await handler({ sessionID: "ses-first" }, { system: ["Host prompt"] });
+            await handler({ sessionID: "ses-first" }, { system: ["Host prompt"] });
+            expect(guidanceWarnings()).toBe(1);
+            // One thousand later sessions evict the first from every per-session structure.
+            for (let index = 0; index < 1000; index += 1) {
+                await handler({ sessionID: `ses-${index}` }, { system: ["Host prompt"] });
+            }
+            expect(promptStateFor("ses-first")).toBeUndefined();
+            await handler({ sessionID: "ses-first" }, { system: ["Host prompt"] });
+            expect(guidanceWarnings()).toBe(1002);
+        } finally {
+            warn.mockRestore();
+        }
     });
 });

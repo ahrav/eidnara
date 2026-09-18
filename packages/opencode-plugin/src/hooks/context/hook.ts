@@ -13,14 +13,11 @@ import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { log } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
-import {
-    type PromptSurfaceRuntime,
-    promptSurfaceWireFields,
-} from "../../shared/prompt-surface-runtime";
-import { isRecord } from "../../shared/record-type-guard";
+import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import { createEidnaraCommandHandler } from "./command-handler";
 import { invalidateToolPermissionDenied } from "./eidnara-reduce-availability";
 import { type ContextUsageEntry, createEventHandler } from "./event-handler";
+import { createGuidanceFetcher } from "./guidance-fetch";
 import {
     createChatMessageHook,
     createCommandExecuteBeforeHook,
@@ -38,15 +35,12 @@ import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
 import { resolveSessionDirectory, type SessionDirectoryResolver } from "./session-directory";
-import { createSystemPromptHashHandler, type GuidanceFetchArgs } from "./system-prompt-hash";
+import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-content-primitives";
 import { createTextCompleteHandler } from "./text-complete";
 import { readOwnDataProperty } from "./transform-capture";
 
 export type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
-
-/** The transform's prompt-path budget (`TRANSFORM_SEND_TIMEOUT_MS`); guidance never outlives it. */
-const GUIDANCE_FETCH_TIMEOUT_MS = 5_000;
 
 export interface EidnaraDeps {
     client: PluginContext["client"];
@@ -286,42 +280,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     };
 
     // Guidance comes from the daemon, which is already on the prompt path and serves the tags
-    // and blocks the guidance explains. Bytes are cached per session and variant; a
-    // cache-busting pass refetches because the daemon may advance the pinned date only on such
-    // a pass. The fetch shares the transform's 5 s prompt-path budget
-    // (`TRANSFORM_SEND_TIMEOUT_MS` in module-transport.ts); a timeout is fail-open upstream.
-    const guidanceBySession = new BoundedSessionMap<{ key: string; bytes: string }>(1000);
-    const fetchGuidance = async (args: GuidanceFetchArgs): Promise<string | undefined> => {
-        const key = `${args.toolPresent}|${args.modelKey ?? ""}`;
-        const cached = guidanceBySession.get(args.sessionId);
-        if (cached && cached.key === key && !args.isCacheBusting) return cached.bytes;
-        const projectRoot = await projectRootForLiveSession(args.sessionId);
-        const response = await moduleClient.call({
-            sessionId: args.sessionId,
-            projectRoot,
-            method: "guidance.get",
-            signal: AbortSignal.timeout(GUIDANCE_FETCH_TIMEOUT_MS),
-            body: {
-                method: "guidance.get",
-                v: 1,
-                session_id: args.sessionId,
-                tool_present: args.toolPresent,
-                serializer_profile: "opencode-aisdk",
-                ...promptSurfaceWireFields(
-                    deps.promptSurfaceRuntime,
-                    deps.config.prompt_surface,
-                    args.modelKey,
-                ),
-                language: deps.config.language,
-            },
-        });
-        if (!isRecord(response) || typeof response.bytes !== "string") {
-            throw new Error("guidance.get returned no bytes");
-        }
-        const bytes = response.bytes;
-        guidanceBySession.set(args.sessionId, { key, bytes });
-        return bytes;
-    };
+    // and blocks the guidance explains.
+    const fetchGuidance = createGuidanceFetcher({
+        moduleClient,
+        projectRootForSession: projectRootForLiveSession,
+        promptSurfaceRuntime: deps.promptSurfaceRuntime,
+        promptSurface: deps.config.prompt_surface,
+        language: deps.config.language,
+    });
 
     const systemPromptHash = createSystemPromptHashHandler({
         promptSurface: deps.config.prompt_surface,
@@ -413,7 +379,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             // Memory reads from hooks, tools, and sidebar polls hold kernel routes on the shared transport; host route capacity is finite.
             closeKernelSession(deps.config, sessionId);
             systemPromptHash.clearSession(sessionId);
-            guidanceBySession.delete(sessionId);
+            fetchGuidance.clearSession(sessionId);
             lastHeuristicsTurnId.delete(sessionId);
             variantBySession.delete(sessionId);
             liveModelBySession.delete(sessionId);

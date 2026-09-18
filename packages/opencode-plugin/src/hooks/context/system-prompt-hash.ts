@@ -24,6 +24,8 @@ interface SessionTracking {
     /** Sticky dates change only on cache-busting passes, preventing midnight cache rebuilds. */
     stickyDate?: string;
     prompt?: SystemPromptState;
+    /** Set once the guidance fetch has failed and been logged; later failures stay quiet. */
+    guidanceFailureLogged?: boolean;
 }
 
 /** One entry per tracked session; the LRU bound matches the eidnara_reduce verdict caches. */
@@ -115,8 +117,6 @@ export function createSystemPromptHashHandler(deps: {
     const isSubagentSession = deps.isSubagentSession ?? (() => false);
 
     const trackingBySession = new BoundedSessionMap<SessionTracking>(SYSTEM_PROMPT_STATE_CAPACITY);
-    /** Sessions whose guidance fetch already failed once; later failures stay quiet until the session clears. */
-    const guidanceFailureLogged = new Set<string>();
 
     const handler = async (
         input: {
@@ -193,8 +193,9 @@ export function createSystemPromptHashHandler(deps: {
                     );
                 }
             } catch (error) {
-                if (!guidanceFailureLogged.has(sessionId)) {
-                    guidanceFailureLogged.add(sessionId);
+                const tracked = trackingBySession.peek(sessionId) ?? {};
+                if (!tracked.guidanceFailureLogged) {
+                    trackingBySession.set(sessionId, { ...tracked, guidanceFailureLogged: true });
                     sessionLog.warn(
                         sessionId,
                         "guidance fetch failed; system prompt continues without the Eidnara block:",
@@ -328,7 +329,6 @@ export function createSystemPromptHashHandler(deps: {
         promptStateFor: (sessionId: string) => trackingBySession.peek(sessionId)?.prompt,
         clearSession: (sessionId: string) => {
             trackingBySession.delete(sessionId);
-            guidanceFailureLogged.delete(sessionId);
         },
     };
 }
