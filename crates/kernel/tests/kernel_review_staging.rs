@@ -946,6 +946,23 @@ fn payload_bounds_are_enforced_at_the_boundary() {
         facts: vec![fact("f")],
         origins: vec![misaligned],
     }));
+    // And the reverse: a range or origin no fact cites asserts provenance nothing supports.
+    refused(ReviewPayload::Subject(ReviewSubject {
+        facts: vec![fact("f")],
+        origins: vec![origin(vec![
+            ByteRange { start: 0, end: 12 },
+            ByteRange { start: 12, end: 20 },
+        ])],
+    }));
+    let mut uncited_origin = origin(vec![ByteRange { start: 0, end: 12 }]);
+    uncited_origin.alias = "s2".to_string();
+    refused(ReviewPayload::Subject(ReviewSubject {
+        facts: vec![fact("f")],
+        origins: vec![
+            origin(vec![ByteRange { start: 0, end: 12 }]),
+            uncited_origin,
+        ],
+    }));
     // Two facts at the per-field text bound exceed the serialized payload bound.
     refused(ReviewPayload::Subject(ReviewSubject {
         facts: vec![fact(&"x".repeat(MAX_REVIEW_TEXT_BYTES)); 2],

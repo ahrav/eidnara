@@ -490,6 +490,19 @@ impl ReviewSubject {
                 return Err(ReviewStageRefusal::Invalid);
             }
         }
+        // And the reverse: an origin or range no fact cites would assert provenance nothing supports.
+        for origin in &self.origins {
+            for range in &origin.ranges {
+                let cited = self
+                    .facts
+                    .iter()
+                    .flat_map(|fact| &fact.spans)
+                    .any(|span| span.alias == origin.alias && span.range() == *range);
+                if !cited {
+                    return Err(ReviewStageRefusal::Invalid);
+                }
+            }
+        }
         Ok(())
     }
 }
