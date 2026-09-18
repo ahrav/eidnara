@@ -5,6 +5,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use context_core::canonical_json::is_lower_hex;
+
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
 use crate::kernel_routes::blocking;
 use crate::{HandlerCore, MemoriesAuthority, memories_authority_for_route};
@@ -47,6 +49,21 @@ fn response(body: Value) -> PreparedOutcome {
 
 fn terminal(code: &str) -> PreparedOutcome {
     response(json!({ "kind": "terminal", "terminal": code }))
+}
+
+/// A causal identity on the wire is a lower-hex sha256; any other spelling, as a read target or as a list cursor, is `invalid_params` rather than a text comparison that skips or repeats outcomes.
+fn require_causal_identity(
+    operation: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), PreparedOutcome> {
+    if is_lower_hex(value, 64) {
+        Ok(())
+    } else {
+        Err(crate::invalid_params_error(format!(
+            "{operation} requires a lower-hex sha256 {field}"
+        )))
+    }
 }
 
 /// The wire spelling of why a selected proposal was not returned: a closed set, never the refusal's text.
@@ -134,6 +151,11 @@ impl HandlerCore {
             Ok(bound) => bound,
             Err(outcome) => return outcome,
         };
+        if let Some(after) = parsed.after.as_deref()
+            && let Err(outcome) = require_causal_identity(LIST, "after", after)
+        {
+            return outcome;
+        }
         let limit = parsed.limit.unwrap_or(MAX_RECEIPT_PAGE);
         let page = blocking(move || {
             let scope = bound.review_scope()?;
@@ -166,15 +188,10 @@ impl HandlerCore {
             Ok(bound) => bound,
             Err(outcome) => return outcome,
         };
-        if parsed.causal_identity.len() != 64
-            || !parsed
-                .causal_identity
-                .bytes()
-                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        if let Err(outcome) =
+            require_causal_identity(READ, "causal_identity", &parsed.causal_identity)
         {
-            return crate::invalid_params_error(format!(
-                "{READ} requires a lower-hex sha256 causal_identity"
-            ));
+            return outcome;
         }
         let read = blocking(move || {
             let scope = bound.review_scope()?;

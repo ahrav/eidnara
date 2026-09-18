@@ -467,8 +467,12 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
     }
 
     // Bodies are strict: an unknown field and a malformed identity are transport errors, never a page.
+    // A malformed cursor is refused too: `after` that is not a causal identity would otherwise compare
+    // as text and skip or return every outcome.
     for (method, body) in [
         ("review.list", json!({ "limit": 1, "page": 2 })),
+        ("review.list", json!({ "after": "z" })),
+        ("review.list", json!({ "after": "0" })),
         ("review.read", json!({ "causal_identity": "not-a-digest" })),
         ("review.read", json!({})),
     ] {
