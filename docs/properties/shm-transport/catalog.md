@@ -1945,6 +1945,20 @@ Open questions:
   Node detachment gate so an unavailable addon is not reported as a detachment
   failure (`:328-329`). Whether the enumeration is meant to be one gate per
   documented step is the open question. (needs human input)
+- Superseded at the commit that starts the channel on Node: the probe no longer
+  refuses on `node_detachment_unavailable` or `transfer_prevention_unavailable`.
+  `probeCapabilities` (`packages/shm-native/index.ts:441-555`) refuses in the
+  order `addon_unavailable` (`:454`), `napi_8_unavailable` (`:462`),
+  `external_exact_bounds_unavailable` (`:478`), `detachment_unavailable`
+  (`:514`), `cleanup_hooks_unavailable` (`:534`), then the catch-all
+  `runtime_mechanism_unavailable` (`:552`). Transfer prevention is measured
+  (`transferPreventionMechanism` of `intrinsic`, `marked`, or `none`, `:489-490`)
+  and reported on the capability object rather than gated, because no shipped
+  runtime offers both marking and detachment; the evidence file
+  `capability-probe-gates-every-advertised-mechanism.md` describes the earlier
+  gating order and is stale for those two reasons. Whether a reported rather
+  than gated mechanism still satisfies this record's guarantee is open.
+  (needs human input)
 
 ### clean-reclamation-is-reachable
 
