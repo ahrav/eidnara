@@ -28,8 +28,9 @@ use memory_store::curator_jobs::{
     ReviewTarget,
 };
 use memory_store::curator_ledger::{
-    AbstainReason, AttemptMarker, CURATOR_TASK_LEASE_MS, CuratorAttemptTerminal,
-    CuratorBeginOutcome, CuratorReceipt, CuratorReceiptTerminal, DispatchOutcome,
+    AbstainReason, AttemptMarker, CURATOR_RUN_DEADLINE_MS, CURATOR_TASK_LEASE_MS,
+    CuratorAttemptTerminal, CuratorBeginOutcome, CuratorReceipt, CuratorReceiptTerminal,
+    DispatchOutcome,
 };
 use memory_store::{LeaseAcquireOutcome, MemoryStore};
 use sha2::{Digest, Sha256};
@@ -1369,6 +1370,76 @@ fn a_takeover_fences_the_losing_generation_and_selects_only_its_own_result() {
         receipt.selected.as_ref().map(|(generation, _)| *generation),
         Some(2)
     );
+}
+
+#[test]
+fn a_cancelled_or_expired_receipt_records_that_whatever_the_run_produced() {
+    // The Memory Store decides these two terminals from the receipt itself; settlement reports what was recorded, and the retention it moved to review is released because nothing was selected.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    fixture
+        .ledger
+        .cancel_curator_receipt(PROJECT, &fixture.identity, fixture.now + 4)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .settle(
+                &broker,
+                RunResult::Proposal(Box::new(fixture.proposal(&[&evidence])))
+            )
+            .unwrap(),
+        Settled::Cancelled
+    );
+    let receipt = fixture.receipt();
+    assert_eq!(receipt.terminal, Some(CuratorReceiptTerminal::Cancelled));
+    assert_eq!(receipt.selected, None);
+    assert_eq!(fixture.read(fixture.now + 6), Err(ReadRefusal::NotSelected));
+    let reference = fixture.staged_reference(1, &fixture.bound_proposal(&[&evidence]));
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(
+                &fixture.review_hold_binding(1, &reference.candidate_id),
+                fixture.now + 6
+            )
+            .unwrap(),
+        None,
+        "nothing was selected, so the review hold is released"
+    );
+
+    // A content-free completion at the run deadline records `expired`, not the abstention the run derived; the claim was renewed all the way there and never moved the deadline.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    let binding = fixture.review_binding();
+    let late = fixture.now + CURATOR_RUN_DEADLINE_MS;
+    let mut renewed_at = fixture.now;
+    while renewed_at + CURATOR_TASK_LEASE_MS <= late {
+        renewed_at += CURATOR_TASK_LEASE_MS - 5;
+        fixture
+            .ledger
+            .renew_curator_task(
+                PROJECT,
+                &fixture.claim.claim_id,
+                &fixture.claim.worker_instance,
+                fixture.claim.slot,
+                fixture.registration,
+                renewed_at,
+            )
+            .unwrap();
+    }
+    let clock = move || late;
+    assert_eq!(
+        fixture
+            .settlement(&binding, &fixture.claim, &clock)
+            .settle(&broker, RunResult::Declined)
+            .unwrap(),
+        Settled::Expired
+    );
+    let receipt = fixture.receipt();
+    assert_eq!(receipt.terminal, Some(CuratorReceiptTerminal::Expired));
+    assert_eq!(receipt.abstained_reason, None);
 }
 
 #[test]
