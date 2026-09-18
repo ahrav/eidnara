@@ -122,6 +122,23 @@ pub enum ProposalAction {
     NoChange,
 }
 
+impl ProposalAction {
+    /// Whether the action is legal for its target kind and text: create targets a staged candidate and needs text; revise targets a memory and needs text; retain and retire target a memory without text; no-change takes either target without text.
+    pub const fn admits(self, targets_memory: bool, has_text: bool) -> bool {
+        let (needs_memory, needs_text) = match self {
+            Self::Create => (Some(false), true),
+            Self::Revise => (Some(true), true),
+            Self::Retain | Self::Retire => (Some(true), false),
+            Self::NoChange => (None, false),
+        };
+        let target_ok = match needs_memory {
+            Some(needs) => needs == targets_memory,
+            None => true,
+        };
+        target_ok && needs_text == has_text
+    }
+}
+
 /// A canonical memory named by object id, source revision, and the snapshot the proposer read; `commit_token` is the last change commit the proposer observed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -424,7 +441,6 @@ impl EvidenceReference {
 }
 
 impl ReviewProposal {
-    /// Create targets a staged candidate and needs text; revise targets a memory and needs text; retain and retire target a memory without text; no-change takes either target without text.
     fn validate(&self) -> Result<(), ReviewStageRefusal> {
         let targets_memory = match &self.target {
             ProposalTarget::StagedCandidate { candidate_id } => {
@@ -439,15 +455,7 @@ impl ReviewProposal {
                 true
             }
         };
-        let (needs_memory, needs_text) = match self.action {
-            ProposalAction::Create => (Some(false), true),
-            ProposalAction::Revise => (Some(true), true),
-            ProposalAction::Retain | ProposalAction::Retire => (Some(true), false),
-            ProposalAction::NoChange => (None, false),
-        };
-        if needs_memory.is_some_and(|needs| needs != targets_memory)
-            || needs_text != self.new_text.is_some()
-        {
+        if !self.action.admits(targets_memory, self.new_text.is_some()) {
             return Err(ReviewStageRefusal::Invalid);
         }
         if let Some(text) = &self.new_text {

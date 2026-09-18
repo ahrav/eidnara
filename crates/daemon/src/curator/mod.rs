@@ -9,6 +9,7 @@ pub mod model_response;
 pub mod project_text;
 pub mod related_memories;
 pub mod settlement;
+pub mod steps;
 
 /// Per-hit excerpt bound (Q19), in bytes of the referenced artifact.
 pub const MAX_EXCERPT_BYTES: usize = 512;
