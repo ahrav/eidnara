@@ -46,7 +46,15 @@ pub const UNSUPPORTED_SELECTION_SCHEMA: &str = "unsupported active harness selec
 const ACTIVE_SELECTION_CREDENTIAL_DOMAIN: &[u8] = b"eidnara-active-selection-credential-v1";
 const MAX_DESCRIPTOR_ITEMS: usize = 32;
 const MAX_DESCRIPTOR_ITEM_BYTES: usize = 4096;
-const CREDENTIAL_NAMES: [&str; 3] = ["ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"];
+const CREDENTIAL_NAMES: [&str; 7] = [
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_REGION",
+];
 
 /// The startup envelope is size-capped before decoding.
 /// Startup-envelope decoding rejects unknown fields and requires absolute paths.

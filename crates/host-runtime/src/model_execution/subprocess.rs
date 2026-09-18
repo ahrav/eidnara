@@ -80,9 +80,51 @@ pub fn canonical_provider(
         ("opencode" | "pi", "anthropic") => Ok("anthropic"),
         ("opencode" | "pi", "google") => Ok("google"),
         ("opencode" | "pi", "openai") => Ok("openai"),
+        ("opencode" | "pi", "amazon-bedrock") => Ok("amazon-bedrock"),
         _ => Err(CredentialRowError::ProviderUnsupported),
     }
 }
+
+/// The variables one canonical provider's credential row is built from, in row order.
+/// `required` variables must all be present and non-empty; an `optional` variable joins the
+/// row only when present and non-empty, so a static Bedrock key pair and an STS session
+/// triple each form one row without the ambient credential chain or profile files.
+struct ProviderRowSpec {
+    required: &'static [&'static str],
+    optional: &'static [&'static str],
+}
+
+fn provider_row_spec(canonical: &str) -> Option<ProviderRowSpec> {
+    match canonical {
+        "anthropic" => Some(ProviderRowSpec {
+            required: &["ANTHROPIC_API_KEY"],
+            optional: &[],
+        }),
+        "google" => Some(ProviderRowSpec {
+            required: &["GEMINI_API_KEY"],
+            optional: &[],
+        }),
+        "openai" => Some(ProviderRowSpec {
+            required: &["OPENAI_API_KEY"],
+            optional: &[],
+        }),
+        // Explicit static or session credentials plus the region the SDK needs; `AWS_PROFILE`
+        // and the shared credential files stay forbidden, so no ambient chain is consulted.
+        "amazon-bedrock" => Some(ProviderRowSpec {
+            required: &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
+            optional: &["AWS_SESSION_TOKEN"],
+        }),
+        _ => None,
+    }
+}
+
+/// Row order is fixed by the specification so both fingerprint sides encode the same sequence.
+const AMAZON_BEDROCK_ROW_ORDER: [&str; 4] = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_REGION",
+];
 
 impl EnvSnapshot {
     /// The constructor builds a bounded snapshot from explicit startup variables.
@@ -139,30 +181,43 @@ impl EnvSnapshot {
         harness: &str,
         provider: &str,
     ) -> Result<Vec<(OsString, OsString)>, CredentialRowError> {
-        let variable = match canonical_provider(harness, provider)? {
-            "anthropic" => "ANTHROPIC_API_KEY",
-            "google" => "GEMINI_API_KEY",
-            "openai" => "OPENAI_API_KEY",
-            _ => return Err(CredentialRowError::ProviderUnsupported),
+        let canonical = canonical_provider(harness, provider)?;
+        let spec = provider_row_spec(canonical).ok_or(CredentialRowError::ProviderUnsupported)?;
+        let lookup = |variable: &str| -> Result<Option<(OsString, OsString)>, CredentialRowError> {
+            let Some((name, value)) = self
+                .vars
+                .iter()
+                .find(|(name, _)| name.as_os_str() == OsStr::new(variable))
+            else {
+                return Ok(None);
+            };
+            if value.is_empty() {
+                return Ok(None);
+            }
+            if value.len() > CREDENTIAL_VALUE_CAP_BYTES {
+                return Err(CredentialRowError::CredentialValueTooLarge);
+            }
+            Ok(Some((name.clone(), value.clone())))
         };
-        let Some((name, value)) = self
-            .vars
-            .iter()
-            .find(|(name, _)| name.as_os_str() == OsStr::new(variable))
-        else {
-            return Err(CredentialRowError::CredentialMissing);
+        let order: &[&str] = if canonical == "amazon-bedrock" {
+            &AMAZON_BEDROCK_ROW_ORDER
+        } else {
+            spec.required
         };
-        if value.is_empty() {
-            return Err(CredentialRowError::CredentialMissing);
+        let mut row = Vec::with_capacity(order.len());
+        for variable in order {
+            match lookup(variable)? {
+                Some(entry) => row.push(entry),
+                None if spec.optional.contains(variable) => {}
+                None => return Err(CredentialRowError::CredentialMissing),
+            }
         }
-        if value.len() > CREDENTIAL_VALUE_CAP_BYTES {
-            return Err(CredentialRowError::CredentialValueTooLarge);
-        }
-        Ok(vec![(name.clone(), value.clone())])
+        Ok(row)
     }
 
     /// Every provider `canonical_provider` admits for `harness`.
-    pub const SUPPORTED_PROVIDERS: [&'static str; 3] = ["anthropic", "google", "openai"];
+    pub const SUPPORTED_PROVIDERS: [&'static str; 4] =
+        ["amazon-bedrock", "anthropic", "google", "openai"];
 
     /// A snapshot with no usable credential for any supported provider cannot run any send for `harness`, whatever the harness's own availability.
     pub fn any_credential_available(&self, harness: &str) -> bool {
@@ -2777,6 +2832,86 @@ mod tests {
             .collect();
         assert!(canonical_rows.len() < providers.len());
         assert_eq!(seen.len(), keys.len() * canonical_rows.len() * values.len());
+    }
+
+    /// The Bedrock row is the explicit key pair plus region in fixed order; the session token
+    /// joins only when present, and the profile-based chain never enters a row.
+    #[test]
+    fn amazon_bedrock_row_orders_static_and_session_credentials() {
+        let names = |row: Vec<(OsString, OsString)>| -> Vec<String> {
+            row.into_iter()
+                .map(|(name, _)| name.into_string().expect("utf-8 name"))
+                .collect()
+        };
+        let static_row = EnvSnapshot::capture_from(vec![
+            (OsString::from("AWS_REGION"), OsString::from("us-west-2")),
+            (OsString::from("AWS_SECRET_ACCESS_KEY"), OsString::from("s")),
+            (OsString::from("AWS_ACCESS_KEY_ID"), OsString::from("k")),
+            (OsString::from("AWS_PROFILE"), OsString::from("ignored")),
+        ])
+        .expect("snapshot");
+        for harness in ["opencode", "pi"] {
+            assert_eq!(
+                names(
+                    static_row
+                        .provider_row(harness, "amazon-bedrock")
+                        .expect("row")
+                ),
+                ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"]
+            );
+        }
+        let session_row = EnvSnapshot::capture_from(vec![
+            (OsString::from("AWS_ACCESS_KEY_ID"), OsString::from("k")),
+            (OsString::from("AWS_SECRET_ACCESS_KEY"), OsString::from("s")),
+            (OsString::from("AWS_SESSION_TOKEN"), OsString::from("t")),
+            (OsString::from("AWS_REGION"), OsString::from("us-west-2")),
+        ])
+        .expect("snapshot");
+        assert_eq!(
+            names(
+                session_row
+                    .provider_row("opencode", "amazon-bedrock")
+                    .expect("row")
+            ),
+            [
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_SESSION_TOKEN",
+                "AWS_REGION"
+            ]
+        );
+        let key = [0x11u8; 32];
+        assert_ne!(
+            static_row.credential_fingerprint(&key, "opencode", "amazon-bedrock"),
+            session_row.credential_fingerprint(&key, "opencode", "amazon-bedrock"),
+            "a session token changes the row and its fingerprint"
+        );
+        let no_region = EnvSnapshot::capture_from(vec![
+            (OsString::from("AWS_ACCESS_KEY_ID"), OsString::from("k")),
+            (OsString::from("AWS_SECRET_ACCESS_KEY"), OsString::from("s")),
+        ])
+        .expect("snapshot");
+        assert_eq!(
+            no_region.provider_row("opencode", "amazon-bedrock"),
+            Err(CredentialRowError::CredentialMissing)
+        );
+        let empty_token = EnvSnapshot::capture_from(vec![
+            (OsString::from("AWS_ACCESS_KEY_ID"), OsString::from("k")),
+            (OsString::from("AWS_SECRET_ACCESS_KEY"), OsString::from("s")),
+            (OsString::from("AWS_SESSION_TOKEN"), OsString::new()),
+            (OsString::from("AWS_REGION"), OsString::from("us-west-2")),
+        ])
+        .expect("snapshot");
+        assert_eq!(
+            names(
+                empty_token
+                    .provider_row("pi", "amazon-bedrock")
+                    .expect("row")
+            ),
+            ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
+            "an empty optional variable is absent, not missing"
+        );
+        assert!(static_row.any_credential_available("opencode"));
     }
 
     /// Empty and oversize values are refused before any fingerprint is derived.
