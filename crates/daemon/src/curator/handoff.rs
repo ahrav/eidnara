@@ -336,6 +336,45 @@ fn adopt(
     }
 }
 
+/// The handoff key, the candidate id, and the causal inputs a subject with `payload_digest` is reserved under now. The candidate and its run are named by the scope, session, policies, and subject bytes, not the firing, so a later firing that adopts the reservation restages the same row under the same identity.
+fn causal_inputs(
+    target: &HandoffTarget,
+    session_id: &str,
+    payload_digest: &str,
+) -> (String, String, CausalInputs) {
+    let policy_versions = review_policy_versions();
+    let key = handoff_key(&target.project_digest, session_id, &policy_versions);
+    let candidate_id = format!("hs-{key}-{}", &payload_digest[..32]);
+    let inputs = CausalInputs {
+        target: ReviewTarget::StagedSubject {
+            kernel_incarnation: target.kernel_incarnation.clone(),
+            candidate_id: candidate_id.clone(),
+            payload_digest: payload_digest.to_string(),
+        },
+        question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
+        signals: Vec::new(),
+        required_evidence: Vec::new(),
+        policy_versions,
+    };
+    (key, candidate_id, inputs)
+}
+
+/// Whether `reservation` names the job this daemon would reserve for `facts` now: the same subject bytes and Kernel incarnation under the current review policies. A reservation recorded under other policy versions names a job the current publication could never activate.
+pub fn reservation_is_current(
+    target: &HandoffTarget,
+    session_id: &str,
+    facts: &[FactCandidate],
+    aliases: &FrozenAliasTable,
+    reservation: &CuratorReservation,
+) -> bool {
+    subject_payload(facts, aliases).is_ok_and(|(_, digest)| {
+        causal_inputs(target, session_id, &digest)
+            .2
+            .causal_identity()
+            .is_ok_and(|identity| identity == reservation.causal_identity)
+    })
+}
+
 /// Reserves the review, records the reservation through `persist`, then stages and seals the subject and reads it back. Capacity and quota refusals before the reservation exists are returned as the nonadmission code the publication records; a firing that already holds a matching reservation reuses it instead of reserving again. `persist` returns the session row version after the reservation is written.
 pub fn reserve_and_stage(
     target: &HandoffTarget,
@@ -360,10 +399,7 @@ pub fn reserve_and_stage(
             ));
         }
     };
-    // The candidate and its run are named by the scope, session, policies, and subject bytes, not the firing, so a later firing that adopts the reservation restages the same row under the same identity.
-    let policy_versions = review_policy_versions();
-    let key = handoff_key(&target.project_digest, session_id, &policy_versions);
-    let candidate_id = format!("hs-{key}-{}", &payload_digest[..32]);
+    let (key, candidate_id, inputs) = causal_inputs(target, session_id, &payload_digest);
     let extraction_run_id = format!("hs-run-{key}-{}", &payload_digest[..32]);
     let chunk_ordinal = firing
         .chunk_range
@@ -374,17 +410,6 @@ pub fn reserve_and_stage(
         producer: PRODUCER.to_string(),
         firing_id: format!("{key}#{}", firing.firing_seq),
         ordinal: chunk_ordinal,
-    };
-    let inputs = CausalInputs {
-        target: ReviewTarget::StagedSubject {
-            kernel_incarnation: target.kernel_incarnation.clone(),
-            candidate_id: candidate_id.clone(),
-            payload_digest: payload_digest.clone(),
-        },
-        question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
-        signals: Vec::new(),
-        required_evidence: Vec::new(),
-        policy_versions,
     };
     let job = match reserved_row(request, &producer, &inputs)? {
         ReservedRow::Job(job) => *job,

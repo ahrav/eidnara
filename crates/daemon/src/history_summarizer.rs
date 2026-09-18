@@ -880,13 +880,15 @@ pub fn republish_reserved(
         None => handoff::expired_activation(store, project_path, &reservation, row_version)
             .map(Box::new),
         Some(target) => {
-            // The reservation names its subject by digest and Kernel incarnation. A retained output that reproduces neither would reserve a second job under a name the publication refuses, so it is settled before anything is reserved or staged.
-            let reproduces_reservation = target.kernel_incarnation
-                == reservation.kernel_incarnation
-                && handoff::subject_payload(&validated.facts, &aliases)
-                    .is_ok_and(|(_, digest)| digest == reservation.payload_digest);
-            if !reproduces_reservation {
-                return settle("the retained output no longer names the reserved subject");
+            // The reservation names its job by the subject digest, the Kernel incarnation, and the review policies of the daemon that made it. A retained output that no longer reproduces that identity (a reincarnated Kernel, or an upgrade that changed the policies) would reserve a second job under a name the publication refuses, so it is settled before anything is reserved or staged.
+            if !handoff::reservation_is_current(
+                target,
+                session_id,
+                &validated.facts,
+                &aliases,
+                &reservation,
+            ) {
+                return settle("the retained output no longer names the reserved job");
             }
             match handoff::reserve_and_stage(
                 target,

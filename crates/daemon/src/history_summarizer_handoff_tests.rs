@@ -2527,3 +2527,84 @@ fn a_stale_retain_leaves_a_later_firing_untouched() {
     assert_eq!(later.last_failure, None);
     assert_eq!(later.failure_backoff_at_ms, None);
 }
+
+#[test]
+fn a_republication_under_other_policy_versions_settles_instead_of_reserving_a_second_job() {
+    use crate::curator::broker::QuestionTemplate;
+
+    // The firing reserved and retained under a previous step schema; the daemon that recovers it computes a different causal identity for the same subject. The retained output cannot publish under the recorded reservation, so it settles: no second job is reserved for the recovering daemon's policy.
+    let rig = Rig::open();
+    let reference = rig.staged_reference();
+    let previous_policy = CausalInputs {
+        target: ReviewTarget::StagedSubject {
+            kernel_incarnation: rig.kernel_incarnation.clone(),
+            candidate_id: reference.candidate_id.clone(),
+            payload_digest: reference.payload_digest.clone(),
+        },
+        question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
+        signals: Vec::new(),
+        required_evidence: Vec::new(),
+        policy_versions: BTreeMap::from([("step_schema".to_string(), "previous".to_string())]),
+    };
+    let producer = ProducerBinding {
+        producer: PRODUCER.to_string(),
+        firing_id: format!("{}#3", rig_key()),
+        ordinal: 2,
+    };
+    let previous = match rig
+        .store
+        .reserve_curator_job(PROJECT, &producer, &previous_policy, t0())
+        .unwrap()
+    {
+        memory_store::curator_jobs::ReserveOutcome::Reserved(job) => job,
+        other => panic!("{other:?}"),
+    };
+    rig.retain(
+        &memory_store::CuratorReservation {
+            firing_seq: 3,
+            causal_identity: previous.causal_identity.clone(),
+            candidate_id: reference.candidate_id.clone(),
+            payload_digest: reference.payload_digest.clone(),
+            kernel_incarnation: rig.kernel_incarnation.clone(),
+            queue_deadline_ms: previous.queue_deadline_ms,
+        },
+        &pending_publication(&validated_range(2, 4)),
+    );
+    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 1),
+        RepublishOutcome::Settled
+    );
+    assert_eq!(
+        rig.job(&previous.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
+    assert_eq!(
+        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        headroom_before.pending_jobs - 1,
+        "the previous policy's job closed and no job was reserved for the current one"
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+}
+
+#[test]
+fn a_publication_without_an_activation_drops_a_retained_publication_no_reservation_names() {
+    // Firing 3 was abandoned with its reservation retained; firing 4 fires (dropping the reservation pointer) and publishes with nothing to hand off. The retained row of firing 3 has no consumer left and goes with that publication.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    rig.persist(abandon_with_detail(
+        &rig.state(),
+        t0() + 1,
+        Some("crash".to_string()),
+    ));
+    assert_eq!(rig.pending().map(|(firing_seq, _)| firing_seq), Some(3));
+    rig.persist(next_publishing_firing(&rig, 5, 6));
+    assert_eq!(rig.state().curator_reservation, None);
+    rig.publish_range(None, None, t0() + 10, 5, 6).unwrap();
+    assert_eq!(rig.state().state, HistorySummarizerPhase::Idle);
+    assert_eq!(rig.pending(), None);
+}

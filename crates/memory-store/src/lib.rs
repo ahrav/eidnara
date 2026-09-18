@@ -11638,9 +11638,8 @@ impl MemoryStore {
                 )?;
             }
             enqueue_history_summarizer_side_channels_tx(tx, session_id, &side_channel_items)?;
-            if request.curator_activation.is_some() {
-                delete_pending_publication_tx(tx, session_id)?;
-            }
+            // The publication ends the firing and clears its reservation, so no reservation names a retained publication after it: the row this firing retained, or one a dropped reservation left behind, goes with it.
+            delete_pending_publication_tx(tx, session_id)?;
             // The reserved job moves to Ready here, past every `Ok` bail-out, so activation and progress commit together or not at all; a refusal is raised as an error and rolls the whole publication back. A reservation past its deadline is closed as expired with progress and never resurrected; one the sweep already closed reads the same way.
             let curator_activation = match request.curator_activation.as_ref() {
                 None => None,
