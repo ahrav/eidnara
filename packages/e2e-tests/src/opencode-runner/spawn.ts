@@ -108,7 +108,9 @@ async function pickFreePort(): Promise<number> {
  * Reusing the environment preserves opencode.db and the module store across serve restarts.
  */
 export function createIsolatedEnv(): IsolatedEnv {
-    const unique = `opencode-e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // The prefix is what `reapRecordedRustProcesses` scans for; the rest stays short because
+    // the direct host binds a Unix socket under `dataDir` and the path is bounded by `SUN_LEN`.
+    const unique = `opencode-e2e-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     const base = join(tmpdir(), unique);
     const configDir = join(base, "config");
     const dataDir = join(base, "data");

@@ -282,6 +282,8 @@ describe("catalog revision replay admission", () => {
                     JSON.stringify(event);
             }
             current.catalogText = JSON.stringify(after);
+            // When the latest accepted revision changed the fingerprint, history validation
+            // rejects the missing and reused cases before the replay gate names them.
             expect(() =>
                 replayCatalogVerifierChanges(
                     accepted,
@@ -291,7 +293,7 @@ describe("catalog revision replay admission", () => {
                     replayPass,
                 ),
             ).toThrow(
-                /requires an appended fingerprint-bound baseline|reusing semantic revision|does not match the registered case/,
+                /requires an appended fingerprint-bound baseline|reusing semantic revision|does not match the registered case|is not bound by a fingerprint-matching baseline adjudication|changed its semantic fingerprint while reusing revision id/,
             );
         }
     });

@@ -40,6 +40,7 @@ function a1Observation(
         rustPassCount: 6,
         transformServedPassCount: 6,
         deferredPassCount: 6,
+        renderPassCount: 0,
         ...overrides,
     };
 }
@@ -58,6 +59,7 @@ function a3Observation(
         rustPassCount: 9,
         transformServedPassCount: 9,
         deferredPassCount: 9,
+        renderPassCount: 0,
         ...overrides,
     };
 }
@@ -71,6 +73,7 @@ function nudgeObservation(
         requestsWithoutAssistant: 0,
         nudgeMarkerFound: false,
         thinkingBlockCount: 0,
+        thinkingBlockMutations: 0,
         ...overrides,
     };
 }
@@ -139,6 +142,7 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
                         rustPassCount: 0,
                         transformServedPassCount: 0,
                         deferredPassCount: 0,
+                        renderPassCount: 0,
                     }),
                 ),
             ),
@@ -163,6 +167,7 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
                         rustPassCount: 7,
                         transformServedPassCount: 7,
                         deferredPassCount: 7,
+                        renderPassCount: 0,
                     }),
                 ),
             ),
@@ -194,6 +199,7 @@ describe("first-render tag stability verifiers (parity A1/A3)", () => {
                         rustPassCount: 8,
                         transformServedPassCount: 8,
                         deferredPassCount: 8,
+                        renderPassCount: 0,
                     }),
                 ),
             ),
@@ -307,7 +313,11 @@ describe("thinking-block successor verifiers", () => {
             failedCheckIds(verifyThinkingNudgeAnchor(nudgeObservation({ mainRequestCount: 2 }))),
         ).toEqual(["check-thinking-a-nonvacuous-inspection"]);
         expect(
-            failedCheckIds(verifyThinkingNudgeAnchor(nudgeObservation({ thinkingBlockCount: 1 }))),
+            failedCheckIds(
+                verifyThinkingNudgeAnchor(
+                    nudgeObservation({ thinkingBlockCount: 1, thinkingBlockMutations: 1 }),
+                ),
+            ),
         ).toEqual(["check-thinking-a-signature-byte-stable"]);
     });
 

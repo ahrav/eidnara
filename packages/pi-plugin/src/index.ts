@@ -324,12 +324,13 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // The Pi plugin has no message transform yet: nothing folds history or serves `§N§` tags, so
     // owning compaction would only cancel Pi's native compaction and leave the session to
     // overflow. Until a Pi transform ships, Pi always runs in compaction-off mode: native
-    // compaction proceeds and `eidnara_reduce` is not registered, whatever `compaction.enabled` says.
+    // compaction proceeds and `eidnara_reduce` is not registered, whatever the compaction
+    // setting says.
     const compactionRequested = isCompactionEnabled(config);
     const compactionOff = true;
     if (compactionRequested) {
         info(
-            "compaction.enabled is not honored on Pi: no Pi context transform exists yet, so native Pi compaction proceeds and eidnara_reduce is not registered",
+            "the compaction setting is not honored on Pi: no Pi context transform exists yet, so native Pi compaction proceeds and eidnara_reduce is not registered",
         );
     }
     setEidnaraReduceRegisteredGlobally(!compactionOff);

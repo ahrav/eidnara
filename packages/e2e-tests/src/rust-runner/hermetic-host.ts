@@ -891,10 +891,17 @@ export class HermeticHostStack {
             }
         });
         child.once("error", () => readyReject?.(new Error("direct host fixture failed to start")));
-        child.once("exit", () => {
+        child.once("exit", (code, signal) => {
             if (this.child === child) this.child = null;
             this.persistPidFile();
-            readyReject?.(new Error("direct host fixture exited before readiness"));
+            // The tail of stderr rides on the error because callers such as the incident runner
+            // surface only the message, never the fixture log.
+            const tail = this.stderr.trim().split("\n").slice(-3).join(" | ");
+            readyReject?.(
+                new Error(
+                    `direct host fixture exited before readiness (code=${code} signal=${signal})${tail ? `: ${tail}` : ""}`,
+                ),
+            );
         });
 
         let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
