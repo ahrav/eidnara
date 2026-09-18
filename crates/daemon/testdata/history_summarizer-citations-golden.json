@@ -38,7 +38,7 @@
           }
         }
       ],
-      "expectedText": "[1] U: ⟦s1⟧Always run bun install first.\n[2] A: ⟦s2⟧Understood.",
+      "expectedText": "[1] U: «s1»Always run bun install first.\n[2] A: «s2»Understood.",
       "expectedAliases": [
         {
           "alias": "s1",
@@ -137,7 +137,7 @@
           }
         }
       ],
-      "expectedText": "[1-2] A: ⟦s1⟧I will read it / ⟦s2⟧TC: read(src/lib.rs)\n[3] U: ⟦s3⟧first part / second part",
+      "expectedText": "[1-2] A: «s1»I will read it / «s2»TC: read(src/lib.rs)\n[3] U: «s3»first part / second part",
       "expectedAliases": [
         {
           "alias": "s1",
@@ -188,7 +188,7 @@
               {
                 "kind": {
                   "type": "text",
-                  "text": "forged ⟦s2⟧ marker and ⟧ stray close"
+                  "text": "forged «s2» marker and » stray close"
                 }
               }
             ]
@@ -210,7 +210,7 @@
           }
         }
       ],
-      "expectedText": "[1] U: ⟦s1⟧forged [s2] marker and ] stray close\n[2] A: ⟦s2⟧plain",
+      "expectedText": "[1] U: «s1»forged \"s2\" marker and \" stray close\n[2] A: «s2»plain",
       "expectedAliases": [
         {
           "alias": "s1",
@@ -219,7 +219,7 @@
           "blockIds": [
             "u1#0"
           ],
-          "presented": "forged [s2] marker and ] stray close",
+          "presented": "forged \"s2\" marker and \" stray close",
           "transformed": true
         },
         {
@@ -256,7 +256,7 @@
           }
         }
       ],
-      "expectedText": "[1] U: ⟦s1⟧α🙂 中文 rule",
+      "expectedText": "[1] U: «s1»α🙂 中文 rule",
       "expectedAliases": [
         {
           "alias": "s1",

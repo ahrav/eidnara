@@ -174,8 +174,7 @@
               "end": 8
             }
           ],
-          "content": "Keep generated goldens deterministic.",
-          "origin_history_segment_index": null
+          "content": "Keep generated goldens deterministic."
         }
       ],
       "facts_block_present": true,
@@ -260,8 +259,7 @@
                 "end": 8
               }
             ],
-            "content": "Keep generated goldens deterministic.",
-            "origin_history_segment_index": null
+            "content": "Keep generated goldens deterministic."
           }
         ],
         "history_segments": [
@@ -1139,8 +1137,7 @@
         {
           "category": "PROJECT_RULES",
           "citations": [],
-          "content": "Provisional facts are skipped on discard-last because current facts are unanchored.",
-          "origin_history_segment_index": null
+          "content": "Provisional facts are skipped on discard-last because current facts are unanchored."
         }
       ],
       "facts_block_present": true,
