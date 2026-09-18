@@ -1908,3 +1908,78 @@ async fn evidence_cannot_forge_an_alias_marker() {
     );
     assert!(text.contains(&format!("[/ref-1 {token}]\n\nlinked references: ref-2\n")));
 }
+
+/// Two adjacent ranged reads and a rangeless citation: the proposal names each rendered range as its own reference, the shape settlement anchors citations against, and publishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rangeless_citation_after_adjacent_reads_publishes_one_reference_per_render() {
+    let fixture = Fixture::open(CASES[2].sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![
+        text_response(&fixture.expand(r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"read_reference","alias":"{alias:1}","range":{"start":0,"end":10}},{"op":"read_reference","alias":"{alias:1}","range":{"start":10,"end":20}}]}}"#)),
+        text_response(&fixture.expand(r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"revised","support":[{"alias":"{alias:1}"}],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#)),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let Settled::Published(_) = settled else {
+        panic!("{settled:?}")
+    };
+    let proposal = read_selected_proposal(
+        &fixture.store,
+        &fixture.ledger,
+        PROJECT,
+        &fixture.identity,
+        &fixture.binding(),
+        fixture.now + 6,
+    )
+    .unwrap()
+    .proposal;
+    let spans: Vec<(u64, u64)> = proposal
+        .support
+        .iter()
+        .map(|reference| {
+            let span = reference.span.as_ref().unwrap();
+            (span.start, span.end)
+        })
+        .collect();
+    assert_eq!(spans, vec![(0, 10), (10, 20)]);
+}
+
+/// A subject with more eligible tokens than the matcher bound: the related-search summary tells the model how many terms were never matched, so a quiet search is not read as complete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_related_search_summary_reports_dropped_matcher_terms() {
+    let mut words = String::from("feat: the workspace builds with bun;");
+    for index in 0..40 {
+        words.push_str(&format!(" component{index:02}"));
+    }
+    words.push('\n');
+    let sources = [
+        Source {
+            message: Box::leak(words.into_boxed_str()),
+            protected: false,
+        },
+        CASES[0].sources[1],
+    ];
+    let fixture = Fixture::open(&sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![
+        text_response(
+            r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"find_related"}]}}"#,
+        ),
+        text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#),
+    ]);
+    fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    let observed = server.await.unwrap();
+    let text = user_text(&prompts(&observed)[1]);
+    assert!(
+        text.contains(
+            "related search: 0 hits, completeness Complete, 12 subject terms not matched"
+        ),
+        "{text:?}"
+    );
+}

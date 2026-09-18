@@ -435,6 +435,11 @@ impl DisclosureLedger {
         self.union.insert(member);
     }
 
+    /// The ranges rendered under `alias`, in disclosure order; empty for an alias never disclosed.
+    pub fn rendered(&self, alias: &Alias) -> &[Range<u64>] {
+        self.rendered.get(alias).map_or(&[], Vec::as_slice)
+    }
+
     /// Whether `start..end` names at least one byte and lies within one range rendered under `alias`.
     pub fn covers(&self, alias: &Alias, start: u64, end: u64) -> bool {
         start < end

@@ -2,7 +2,7 @@
 //!
 //! The coordinator owns orchestration only. Evidence reads, egress, and aliases are the broker's; the connection, marker, and handoff are the disclosure's; the receipt and holds are the settlement's; live execution and physical completion are the Model Execution supervisor's. Capacity is one active investigation per project and four per host, acquired before anything is spawned and refused rather than queued. A job runs at most four rounds and four physical requests, admits no read or model work at its execution cutoff, and keeps its original run deadline whatever happens inside it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -193,7 +193,6 @@ impl Coordinator {
             broker: Arc::new(tokio::sync::Mutex::new(broker)),
             transcript: Vec::new(),
             sent: 0,
-            disclosed_spans: BTreeMap::new(),
             discovery: RelatedMemoryDiscovery::new(""),
             cutoff,
             marker_token: marker_token(),
@@ -245,14 +244,20 @@ impl Coordinator {
         protected.dedup();
         let before_cutoff = (self.now_ms)() < context.receipt.execution_cutoff_ms;
         let hold_id = if before_cutoff && subject.is_ok() && !protected.is_empty() {
-            self.store
-                .acquire_execution_hold(
-                    &hold_binding,
-                    &protected,
-                    context.receipt.execution_cutoff_ms,
-                )
-                .map_err(|error| InvestigationError::Kernel(super::broker::hold_refusal(error)))?
-                .hold_id
+            match self.store.acquire_execution_hold(
+                &hold_binding,
+                &protected,
+                context.receipt.execution_cutoff_ms,
+            ) {
+                Ok(hold) => hold.hold_id,
+                // The cutoff passed while the acquisition waited: the Kernel refuses a hold expiring in its past, and the run settles exhausted like one that saw the cutoff first, instead of leaving the receipt open on a Kernel error.
+                Err(_) if (self.now_ms)() >= context.receipt.execution_cutoff_ms => String::new(),
+                Err(error) => {
+                    return Err(InvestigationError::Kernel(super::broker::hold_refusal(
+                        error,
+                    )));
+                }
+            }
         } else {
             String::new()
         };
@@ -283,8 +288,6 @@ struct Run<'a> {
     transcript: Vec<RenderedBuffer>,
     /// Transcript buffers below this index have been sent at least once; Q22 charges them again on every later send.
     sent: usize,
-    /// Byte ranges of each alias the model has seen, so a citation can only name bytes that were disclosed.
-    disclosed_spans: BTreeMap<String, Vec<std::ops::Range<u64>>>,
     discovery: RelatedMemoryDiscovery,
     cutoff: Instant,
     /// Random per run and never in any evidence, so a marker inside disclosed bytes cannot pass as a boundary the host drew.
@@ -383,7 +386,6 @@ impl Run<'_> {
                             &self.coordinator.store,
                             &mut broker,
                             &self.context,
-                            &self.disclosed_spans,
                             *outcome,
                         )
                     });
@@ -413,7 +415,6 @@ impl Run<'_> {
                 self.discovery = RelatedMemoryDiscovery::new(
                     std::str::from_utf8(read.buffer.bytes()).unwrap_or(""),
                 );
-                self.record_span(&alias, 0..read.buffer.bytes().len() as u64);
                 self.push_labeled(broker, read.buffer);
             }
             Err(Refusal {
@@ -672,13 +673,6 @@ impl Run<'_> {
         }
     }
 
-    fn record_span(&mut self, alias: &Alias, span: std::ops::Range<u64>) {
-        self.disclosed_spans
-            .entry(alias.as_str().to_string())
-            .or_default()
-            .push(span);
-    }
-
     /// Appends a buffer to the transcript between host markers naming its alias and carrying the run's token, so the model can tell where each reference's bytes start and end, cite by alias, and never mistake marker-shaped evidence text for a boundary. Every other host text frames itself on its own line.
     fn push_labeled(&mut self, broker: &EvidenceBroker, buffer: RenderedBuffer) {
         let Some(alias) = buffer.tag().alias.clone() else {
@@ -731,11 +725,8 @@ impl Run<'_> {
             now,
         );
         match outcome {
-            Ok(executed) => {
-                for (alias, span) in executed.spans {
-                    self.record_span(&alias, span);
-                }
-                for buffer in executed.buffers {
+            Ok(buffers) => {
+                for buffer in buffers {
                     self.push_labeled(broker, buffer);
                 }
             }
@@ -752,12 +743,6 @@ fn refused(broker: &mut EvidenceBroker, transcript: &mut Vec<RenderedBuffer>, re
     push_notice(broker, transcript, refusal.alias.as_ref(), refusal.code);
 }
 
-/// The buffers one operation rendered for the transcript and the byte range of each alias they disclosed.
-struct Executed {
-    buffers: Vec<RenderedBuffer>,
-    spans: Vec<(Alias, std::ops::Range<u64>)>,
-}
-
 /// Runs one operation through the broker, related-memory discovery, or the confined project root. Every read is admitted and charged by the broker (Q23); nothing here adds to that accounting.
 fn run_operation(
     store: &KernelStore,
@@ -767,28 +752,27 @@ fn run_operation(
     broker: &mut EvidenceBroker,
     operation: Operation,
     now: i64,
-) -> Result<Executed, Refusal> {
+) -> Result<Vec<RenderedBuffer>, Refusal> {
     let unavailable = || refuse(None, RefusalCode::Unavailable);
-    let mut spans: Vec<(Alias, std::ops::Range<u64>)> = Vec::new();
     let buffers = match operation {
-        Operation::ReadReference { alias, range } => broker
-            .read(store, &alias, range.map(|range| range.to_range()), now)
-            .map(|read| {
-                spans.push((read.alias.clone(), disclosed_span(range, &read.buffer)));
-                vec![read.buffer]
-            })?,
+        Operation::ReadReference { alias, range } => vec![
+            broker
+                .read(store, &alias, range.map(|range| range.to_range()), now)?
+                .buffer,
+        ],
         Operation::FindRelated { cursor } => {
             let budget = EvalBudget::new(Some(cutoff.into_std()), Arc::default());
             let page = discovery.page(store, broker, cursor.as_deref(), &budget, now)?;
-            spans.extend(
-                page.hits
-                    .iter()
-                    .map(|hit| (hit.alias.clone(), hit.span.clone())),
-            );
+            // Matcher terms past the bound were never searched for; a memory naming only one of them is not found, whatever the completeness says.
+            let dropped = match discovery.dropped_terms() {
+                0 => String::new(),
+                dropped => format!(", {dropped} subject terms not matched"),
+            };
             let summary = format!(
-                "related search: {} hits, completeness {:?}{}{}",
+                "related search: {} hits, completeness {:?}{}{}{}",
                 page.hits.len(),
                 page.completeness,
+                dropped,
                 withheld(page.withheld),
                 page.next_cursor
                     .as_deref()
@@ -809,12 +793,6 @@ fn run_operation(
                 SearchBy::Content => SearchQuery::Content(&literal),
             };
             let outcome = root.search(store, broker, query, now)?;
-            spans.extend(
-                outcome
-                    .hits
-                    .iter()
-                    .map(|hit| (hit.alias.clone(), hit.span.clone())),
-            );
             let summary = format!(
                 "project search: {} hits, completeness {:?}{}",
                 outcome.hits.len(),
@@ -829,48 +807,19 @@ fn run_operation(
         }
         Operation::ReadProject { path, range } => {
             let root = project_root.ok_or_else(unavailable)?;
-            let read = root.read(
-                store,
-                broker,
-                &path,
-                range.map(|range| range.to_range()),
-                now,
-            )?;
-            spans.push((read.alias.clone(), disclosed_span(range, &read.buffer)));
-            vec![read.buffer]
+            vec![
+                root.read(
+                    store,
+                    broker,
+                    &path,
+                    range.map(|range| range.to_range()),
+                    now,
+                )?
+                .buffer,
+            ]
         }
     };
-    Ok(Executed { buffers, spans })
-}
-
-/// The artifact bytes `buffer` carries: the requested range, or the whole artifact when none was asked for. The broker returns exactly the requested range or refuses, so the buffer's length is the range's.
-fn disclosed_span(
-    range: Option<super::steps::ByteRange>,
-    buffer: &RenderedBuffer,
-) -> std::ops::Range<u64> {
-    let len = buffer.bytes().len() as u64;
-    range.map_or(0..len, |range| range.start..range.start + len)
-}
-
-/// The disclosed spans merged: adjacent or overlapping disclosures become one span, in ascending order.
-fn merged(spans: &[std::ops::Range<u64>]) -> Vec<std::ops::Range<u64>> {
-    let mut sorted: Vec<_> = spans.to_vec();
-    sorted.sort_by_key(|span| span.start);
-    let mut out: Vec<std::ops::Range<u64>> = Vec::new();
-    for span in sorted {
-        match out.last_mut() {
-            Some(current) if span.start <= current.end => current.end = current.end.max(span.end),
-            _ => out.push(span),
-        }
-    }
-    out
-}
-
-/// Whether `range` lies inside the union of `spans`: adjacent or overlapping disclosures cover a citation across their seam.
-fn covered(spans: &[std::ops::Range<u64>], range: std::ops::Range<u64>) -> bool {
-    merged(spans)
-        .iter()
-        .any(|span| span.start <= range.start && range.end <= span.end)
+    Ok(buffers)
 }
 
 /// A host-authored notice appended to the transcript: the alias, when there is one, and a bounded code. A notice that itself fails the render check is dropped rather than shown.
@@ -991,7 +940,6 @@ fn bind_proposal(
     store: &KernelStore,
     broker: &mut EvidenceBroker,
     context: &JobContext<'_>,
-    disclosed_spans: &BTreeMap<String, Vec<std::ops::Range<u64>>>,
     outcome: ProposedOutcome,
 ) -> Result<ReviewProposal, Refusal> {
     let mut cite =
@@ -1004,19 +952,20 @@ fn bind_proposal(
                     .evidence_id()
                     .ok_or_else(|| refuse(Some(&alias), RefusalCode::Unsupported))?
                     .to_string();
-                let shown = disclosed_spans
-                    .get(alias.as_str())
-                    .ok_or_else(|| refuse(Some(&alias), RefusalCode::UnknownAlias))?;
-                // A citation names bytes the model was shown: the range it gave, or, without one, every disclosed span of the alias. A rangeless citation of a partial disclosure never reaches the bytes outside it.
-                let spans = match citation.range {
+                // A citation names bytes the model was shown, judged against the ranges the broker rendered under the alias, the same record settlement anchors to: the range it gave must lie within one render, and a rangeless citation names each render. Nothing outside a render is ever cited.
+                let rendered = broker.ledger.rendered(&alias);
+                if rendered.is_empty() {
+                    return Err(refuse(Some(&alias), RefusalCode::UnknownAlias));
+                }
+                let spans: Vec<std::ops::Range<u64>> = match citation.range {
                     Some(range) => {
-                        let range = range.start..range.end;
-                        if !covered(shown, range.clone()) {
+                        if !broker.ledger.covers(&alias, range.start, range.end) {
                             return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
                         }
-                        vec![range]
+                        let cited = range.start..range.end;
+                        vec![cited]
                     }
-                    None => merged(shown),
+                    None => rendered.to_vec(),
                 };
                 broker.ledger.record_citation(&alias)?;
                 references.extend(spans.into_iter().map(|span| EvidenceReference {
@@ -1066,11 +1015,11 @@ fn bind_proposal(
             })
         }
     };
-    // The manifest is the inspection record this run can attest to: every alias and the byte ranges disclosed under it, in order.
+    // The manifest is the inspection record this run can attest to: every disclosed alias and the byte ranges rendered under it, in order.
     let mut manifest = Sha256::new();
-    for (alias, spans) in disclosed_spans {
-        manifest.update(alias.as_bytes());
-        for span in spans {
+    for alias in broker.ledger.disclosed() {
+        manifest.update(alias.as_str().as_bytes());
+        for span in broker.ledger.rendered(alias) {
             manifest.update(span.start.to_be_bytes());
             manifest.update(span.end.to_be_bytes());
         }
@@ -1238,12 +1187,12 @@ mod tests {
             now,
         )
         .unwrap();
-        assert_eq!(executed.buffers.len(), 1);
-        let alias = executed.buffers[0].tag().alias.clone().unwrap();
-        assert_eq!(
-            executed.spans,
-            vec![(alias, 10..24)],
-            "a citation of the read alias must be able to name the bytes the model was shown"
+        assert_eq!(executed.len(), 1);
+        let alias = executed[0].tag().alias.clone().unwrap();
+        let shown = broker.ledger.rendered(&alias);
+        assert!(
+            shown.len() == 1 && shown[0] == (10..24),
+            "a citation of the read alias must be able to name the bytes the model was shown: {shown:?}"
         );
     }
 
