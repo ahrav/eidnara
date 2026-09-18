@@ -141,12 +141,16 @@ impl Worker {
             kernel_incarnation,
             memstore_incarnation,
             provider: probe.provider_identity(),
+            // Only the credential the sender's protocol carries can vouch for this provider; a record naming another provider's secret reads as an unknown credential.
             credentials: self
                 .host
                 .credential_identities
                 .get()?
                 .iter()
-                .filter(|(name, _)| self.host.credentials.contains_key(*name))
+                .filter(|(name, _)| {
+                    *name == super::model_request::CREDENTIAL_NAME
+                        && self.host.credentials.contains_key(*name)
+                })
                 .map(|(name, identity)| (name.clone(), identity.clone()))
                 .collect(),
         })

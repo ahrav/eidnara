@@ -169,12 +169,16 @@ impl Rig {
     }
 
     fn host(&self) -> Arc<CuratorHost> {
+        self.host_with(&[(CREDENTIAL, SECRET)])
+    }
+
+    fn host_with(&self, credentials: &[(&str, &str)]) -> Arc<CuratorHost> {
         Arc::new(CuratorHost {
             supervisor: Arc::new(Supervisor::new(Arc::new(NoPublicModel))),
-            credentials: BTreeMap::from([(
-                CREDENTIAL.to_string(),
-                Zeroizing::new(SECRET.to_string()),
-            )]),
+            credentials: credentials
+                .iter()
+                .map(|(name, secret)| (name.to_string(), Zeroizing::new(secret.to_string())))
+                .collect(),
             credential_identities: OnceLock::new(),
             worker_instance: "worker-a".to_string(),
         })
@@ -205,6 +209,10 @@ impl Rig {
 
     /// The owner's activation record for exactly this deployment.
     fn write_activation(&self) {
+        self.write_activation_naming(CREDENTIAL, CREDENTIAL_IDENTITY);
+    }
+
+    fn write_activation_naming(&self, credential: &str, credential_fingerprint: &str) {
         let provider = self.peer.sender().provider_identity();
         let record = serde_json::json!({
             "schema": IDENTITY_SCHEMA,
@@ -218,8 +226,8 @@ impl Rig {
             "kernel_incarnation": self.kernel_incarnation,
             "memstore_incarnation": self.store.curator_store_incarnation().unwrap(),
             "provider": provider,
-            "credential": CREDENTIAL,
-            "credential_fingerprint": CREDENTIAL_IDENTITY,
+            "credential": credential,
+            "credential_fingerprint": credential_fingerprint,
             "provider_retention": {
                 "attested_by": "deployment owner",
                 "attested_on": "2026-09-18",
@@ -461,6 +469,36 @@ async fn ready_jobs_no_bound_root_owns_do_not_starve_the_jobs_behind_them() {
             .terminal,
         Some(CuratorReceiptTerminal::Abstained)
     );
+}
+
+#[tokio::test]
+async fn a_record_naming_another_providers_credential_closes_the_gate() {
+    // The sender speaks Anthropic's protocol and writes the named credential into `x-api-key`. A record naming the OpenAI secret, fingerprint and all, must close the gate rather than send that secret to Anthropic.
+    let rig = Rig::open().await;
+    let now = now_ms();
+    let identity = rig.ready_history_summarizer_job(now);
+    let host = rig.host_with(&[(CREDENTIAL, SECRET), ("OPENAI_API_KEY", "sk-openai")]);
+    host.credential_identities
+        .set(BTreeMap::from([
+            (CREDENTIAL.to_string(), CREDENTIAL_IDENTITY.to_string()),
+            ("OPENAI_API_KEY".to_string(), "hmac-of-openai".to_string()),
+        ]))
+        .unwrap();
+    let worker = rig.worker_for(host, vec![rig.root("project", PROJECT_DIGEST)]);
+    rig.write_activation_naming("OPENAI_API_KEY", "hmac-of-openai");
+
+    assert_eq!(worker.pass(&CancellationToken::new()).await, 0);
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Closed("unknown_credential")
+    );
+    assert!(
+        rig.store
+            .lookup_curator_receipt(PROJECT, &identity)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

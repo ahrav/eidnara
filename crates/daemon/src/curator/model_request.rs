@@ -30,6 +30,8 @@ pub const ANTHROPIC_HOST: &str = "api.anthropic.com";
 pub const ANTHROPIC_PORT: u16 = 443;
 pub const MESSAGES_PATH: &str = "/v1/messages";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// The one startup-envelope credential this protocol may write into `x-api-key`; another provider's secret never reaches this host.
+pub const CREDENTIAL_NAME: &str = "ANTHROPIC_API_KEY";
 /// Serialized request bytes a send may carry.
 pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// Output tokens a request may ask for.
