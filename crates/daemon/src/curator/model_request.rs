@@ -60,7 +60,7 @@ pub enum SendError {
     /// The temperature is non-finite or outside the provider's `0.0..=1.0`.
     #[error("temperature")]
     Temperature,
-    /// The credential is not a valid header value.
+    /// The credential is not a valid header value, or its identifier is empty.
     #[error("credential")]
     Credential,
     #[error("deadline")]
@@ -91,21 +91,31 @@ pub enum SendError {
     EgressCheck,
 }
 
-/// A startup credential. It is rendered only into the authentication header, `Debug` never shows it, and its bytes are wiped when the last copy drops.
+/// A startup credential: the deployment owner's identifier for it and the secret. The identifier is what an approval and an attempt marker name; the secret is rendered only into the authentication header, `Debug` never shows it, and its bytes are wiped when the last copy drops. Keeping both in one value means the credential a marker records is the one the header carries.
 #[derive(Clone)]
-pub struct Credential(Zeroizing<String>);
+pub struct Credential {
+    id: String,
+    secret: Zeroizing<String>,
+}
 
 impl Credential {
-    /// Refuses a secret that cannot be a header value, so the refusal is named at startup rather than at the first send.
-    pub fn new(secret: String) -> Result<Self, SendError> {
+    /// Refuses an empty identifier or a secret that cannot be a header value, so the refusal is named at startup rather than at the first send.
+    pub fn new(id: String, secret: String) -> Result<Self, SendError> {
         let secret = Zeroizing::new(secret);
+        if id.is_empty() {
+            return Err(SendError::Credential);
+        }
         HeaderValue::from_str(&secret).map_err(|_| SendError::Credential)?;
-        Ok(Self(secret))
+        Ok(Self { id, secret })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     fn header(&self) -> HeaderValue {
         let mut value =
-            HeaderValue::from_str(&self.0).unwrap_or_else(|_| HeaderValue::from_static(""));
+            HeaderValue::from_str(&self.secret).unwrap_or_else(|_| HeaderValue::from_static(""));
         value.set_sensitive(true);
         value
     }
@@ -113,7 +123,7 @@ impl Credential {
 
 impl std::fmt::Debug for Credential {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Credential(<redacted>)")
+        write!(formatter, "Credential({}, <redacted>)", self.id)
     }
 }
 
@@ -278,6 +288,11 @@ impl Sender {
     /// The provider identity a disclosure marker records: the host this sender actually dials, the API surface, and the API version it speaks.
     pub fn provider_identity(&self) -> String {
         format!("{}{MESSAGES_PATH}@{ANTHROPIC_VERSION}", self.endpoint.host)
+    }
+
+    /// The identifier of the credential this sender writes into the authentication header.
+    pub fn credential_id(&self) -> &str {
+        self.credential.id()
     }
 
     pub fn new(endpoint: Endpoint, credential: Credential) -> Self {

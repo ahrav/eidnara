@@ -178,7 +178,7 @@ async fn the_transport_verifies_the_chain_and_the_hostname_without_retrying() {
     let server = peer.serve(no_wait(), |_| Vec::new());
     let untrusted = Sender::new(
         Endpoint::for_test("localhost", peer.port, rustls::RootCertStore::empty()).unwrap(),
-        Credential::new("k".to_string()).unwrap(),
+        Credential::new("k".to_string(), "k".to_string()).unwrap(),
     );
     assert_eq!(
         untrusted.connect(deadline()).await.unwrap_err(),
@@ -191,7 +191,7 @@ async fn the_transport_verifies_the_chain_and_the_hostname_without_retrying() {
     let server = peer.serve(no_wait(), |_| Vec::new());
     let wrong_name = Sender::new(
         Endpoint::for_test("127.0.0.1", peer.port, peer.roots.clone()).unwrap(),
-        Credential::new("k".to_string()).unwrap(),
+        Credential::new("k".to_string(), "k".to_string()).unwrap(),
     );
     assert_eq!(
         wrong_name.connect(deadline()).await.unwrap_err(),
@@ -205,20 +205,27 @@ async fn the_transport_verifies_the_chain_and_the_hostname_without_retrying() {
     drop(closed);
     let nobody = Sender::new(
         Endpoint::for_test("localhost", port, peer.roots.clone()).unwrap(),
-        Credential::new("k".to_string()).unwrap(),
+        Credential::new("k".to_string(), "k".to_string()).unwrap(),
     );
     assert_eq!(
         nobody.connect(deadline()).await.unwrap_err(),
         SendError::Connect
     );
-    // A credential that cannot be a header value is refused at startup.
+    // A credential that cannot be a header value, or that has no identifier, is refused at startup; `Debug` shows the identifier and never the secret.
     assert_eq!(
-        Credential::new("line\nbreak".to_string()).unwrap_err(),
+        Credential::new("k".to_string(), "line\nbreak".to_string()).unwrap_err(),
         SendError::Credential
     );
     assert_eq!(
-        format!("{:?}", Credential::new("sk-secret".to_string()).unwrap()),
-        "Credential(<redacted>)"
+        Credential::new(String::new(), "sk-secret".to_string()).unwrap_err(),
+        SendError::Credential
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            Credential::new("cred-1".to_string(), "sk-secret".to_string()).unwrap()
+        ),
+        "Credential(cred-1, <redacted>)"
     );
 }
 

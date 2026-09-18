@@ -122,13 +122,14 @@ impl Peer {
     }
 
     pub fn sender(&self) -> Sender {
-        self.sender_with_credential("sk-test-credential")
+        self.sender_with_credential("test-credential")
     }
 
-    pub fn sender_with_credential(&self, credential: &str) -> Sender {
+    /// A sender whose credential is identified as `credential_id`; the secret it presents is `sk-<credential_id>`.
+    pub fn sender_with_credential(&self, credential_id: &str) -> Sender {
         Sender::new(
             Endpoint::for_test("localhost", self.port, self.roots.clone()).unwrap(),
-            Credential::new(credential.to_string()).unwrap(),
+            Credential::new(credential_id.to_string(), format!("sk-{credential_id}")).unwrap(),
         )
     }
 

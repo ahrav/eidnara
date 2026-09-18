@@ -284,8 +284,8 @@ pub struct JudgedAt {
     pub tip: i64,
 }
 
-/// Rendered bytes, their tag, and the producing run's hold id. The bytes are owned by the render and borrowed by the assembler; the hold id lets the assembler refuse a buffer another broker admitted, since aliases are broker-local.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Rendered bytes, their tag, and the producing run's hold id. The bytes are owned by the render and moved into the assembler once, so a buffer cannot enter a body more times than the broker charged it; the hold id lets the assembler refuse a buffer another broker admitted, since aliases are broker-local.
+#[derive(Debug, PartialEq, Eq)]
 pub struct RenderedBuffer {
     pub(crate) bytes: Vec<u8>,
     pub(crate) tag: ProvenanceTag,
@@ -509,7 +509,7 @@ pub(crate) enum Probed {
 }
 
 /// What one successful read returns to the coordinator: the rendered buffer, the origin key two forms of one decision share, and the lineage member the disclosure added.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct EvidenceRead {
     pub alias: Alias,
     pub buffer: RenderedBuffer,

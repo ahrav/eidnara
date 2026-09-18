@@ -12,8 +12,7 @@ use daemon::curator::broker::{
     RenderedBuffer, RunBinding,
 };
 use daemon::curator::disclosure::{
-    AttemptBinding, Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile, PreparedBody,
-    prepare_body,
+    Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile, PreparedBody, prepare_body,
 };
 use daemon::curator::model_request::{ANTHROPIC_VERSION, MESSAGES_PATH, SendError};
 use daemon::git_sources::{GitReadBounds, RepositoryBinding, read_selection};
@@ -28,7 +27,8 @@ use memory_store::curator_jobs::{
     ReviewTarget,
 };
 use memory_store::curator_ledger::{
-    CURATOR_MAX_ATTEMPTS, CuratorAttemptTerminal, CuratorBeginOutcome, CuratorLedgerRefusal,
+    CURATOR_MAX_ATTEMPTS, CURATOR_TASK_LEASE_MS, CuratorAttemptTerminal, CuratorBeginOutcome,
+    CuratorLedgerRefusal,
 };
 use memory_store::{LeaseAcquireOutcome, MemoryStore};
 use sha2::{Digest, Sha256};
@@ -144,6 +144,86 @@ fn publish_commit(
     (published.object_id, detail)
 }
 
+/// Reserves, activates, claims, and begins one job whose review target is the staged candidate `candidate_id`; returns its causal identity and live claim.
+fn open_job(
+    ledger: &MemoryStore,
+    registration: i64,
+    kernel_id: &str,
+    candidate_id: &str,
+    now: i64,
+) -> (String, String) {
+    let target = ReviewTarget::StagedSubject {
+        kernel_incarnation: kernel_id.to_string(),
+        candidate_id: candidate_id.to_string(),
+        payload_digest: "0d".repeat(32),
+    };
+    let producer = ProducerBinding {
+        producer: "history-summarizer".to_string(),
+        firing_id: format!("firing-{candidate_id}"),
+        ordinal: 0,
+    };
+    let ReserveOutcome::Reserved(job) = ledger
+        .reserve_curator_job(
+            PROJECT,
+            &producer,
+            &CausalInputs {
+                target: target.clone(),
+                question_template: "extracted_facts".to_string(),
+                signals: vec![],
+                required_evidence: vec![EvidenceAvailability {
+                    evidence_id: "ev-1".to_string(),
+                    available: true,
+                }],
+                policy_versions: BTreeMap::new(),
+            },
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("fresh inputs reserve")
+    };
+    ledger
+        .activate_curator_job(
+            PROJECT,
+            &job.causal_identity,
+            &producer,
+            &CuratorJobInput {
+                subject: target,
+                starting_references: vec![],
+                question_template: "extracted_facts".to_string(),
+            },
+            now,
+        )
+        .unwrap();
+    let LeaseAcquireOutcome::Claim { claim, .. } = ledger
+        .acquire_curator_task(
+            PROJECT,
+            &format!("acq-{candidate_id}"),
+            &format!("worker-{candidate_id}"),
+            0,
+            registration,
+            &job.causal_identity,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("the ready job is claimed")
+    };
+    let CuratorBeginOutcome::Begun(_) = ledger
+        .begin_curator_receipt(
+            PROJECT,
+            &job.causal_identity,
+            kernel_id,
+            &claim.claim_id,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("first claim begins")
+    };
+    (job.causal_identity, claim.claim_id)
+}
+
 /// A Kernel store holding one commit message published through the byte-verifying Git publisher (the only producer of remote-eligible evidence a Curator fixture may use), a Memory Store with a ready job under a live claim and receipt, and a remote-destination broker that has disclosed the commit.
 struct Fixture {
     kernel_dir: tempfile::TempDir,
@@ -152,6 +232,7 @@ struct Fixture {
     store: Arc<KernelStore>,
     ledger: Arc<MemoryStore>,
     now: i64,
+    registration: i64,
     identity: String,
     claim: String,
     /// The published descriptor's object id and detail.
@@ -218,75 +299,7 @@ impl Fixture {
             i64::try_from(row.generation).unwrap()
         };
         let kernel_id = kernel_incarnation(kernel_dir.path());
-        let target = ReviewTarget::StagedSubject {
-            kernel_incarnation: kernel_id.clone(),
-            candidate_id: "subject-1".to_string(),
-            payload_digest: "0d".repeat(32),
-        };
-        let producer = ProducerBinding {
-            producer: "history-summarizer".to_string(),
-            firing_id: "firing-1".to_string(),
-            ordinal: 0,
-        };
-        let ReserveOutcome::Reserved(job) = ledger
-            .reserve_curator_job(
-                PROJECT,
-                &producer,
-                &CausalInputs {
-                    target: target.clone(),
-                    question_template: "extracted_facts".to_string(),
-                    signals: vec![],
-                    required_evidence: vec![EvidenceAvailability {
-                        evidence_id: "ev-1".to_string(),
-                        available: true,
-                    }],
-                    policy_versions: BTreeMap::new(),
-                },
-                now,
-            )
-            .unwrap()
-        else {
-            panic!("fresh inputs reserve")
-        };
-        ledger
-            .activate_curator_job(
-                PROJECT,
-                &job.causal_identity,
-                &producer,
-                &CuratorJobInput {
-                    subject: target,
-                    starting_references: vec![],
-                    question_template: "extracted_facts".to_string(),
-                },
-                now,
-            )
-            .unwrap();
-        let LeaseAcquireOutcome::Claim { claim, .. } = ledger
-            .acquire_curator_task(
-                PROJECT,
-                "acq-1",
-                "worker-a",
-                0,
-                registration,
-                &job.causal_identity,
-                now,
-            )
-            .unwrap()
-        else {
-            panic!("the ready job is claimed")
-        };
-        let CuratorBeginOutcome::Begun(_) = ledger
-            .begin_curator_receipt(
-                PROJECT,
-                &job.causal_identity,
-                &kernel_id,
-                &claim.claim_id,
-                now,
-            )
-            .unwrap()
-        else {
-            panic!("first claim begins")
-        };
+        let (identity, claim) = open_job(&ledger, registration, &kernel_id, "subject-1", now);
         Self {
             kernel_dir,
             ledger_dir,
@@ -294,8 +307,9 @@ impl Fixture {
             store: Arc::new(store),
             ledger: Arc::new(ledger),
             now,
-            identity: job.causal_identity,
-            claim: claim.claim_id,
+            registration,
+            identity,
+            claim,
             source,
         }
     }
@@ -380,16 +394,6 @@ impl Fixture {
         }
     }
 
-    fn binding(&self) -> AttemptBinding {
-        AttemptBinding {
-            project: PROJECT.to_string(),
-            causal_identity: self.identity.clone(),
-            generation: 1,
-            claim_id: self.claim.clone(),
-            credential_id: CREDENTIAL_ID.to_string(),
-        }
-    }
-
     fn attempts(&self) -> Vec<memory_store::curator_ledger::CuratorAttempt> {
         self.ledger
             .list_curator_attempts(PROJECT, &self.identity)
@@ -435,7 +439,7 @@ async fn attempt(
         broker,
         sender: &sender,
         approval,
-        binding: &fixture.binding(),
+        claim_id: &fixture.claim,
         now_ms: now,
     }
     .disclose(prepared, cancel, deadline())
@@ -498,12 +502,10 @@ async fn the_captured_request_is_the_tagged_prepared_body_the_marker_binds() {
             .unwrap()
             .ends_with(COMMIT_MESSAGE)
     );
-    assert!(
-        observed
-            .head
-            .to_ascii_lowercase()
-            .contains("x-api-key: cred-1")
-    );
+    // The header carries the secret of the credential the marker names, never the identifier.
+    let head = observed.head.to_ascii_lowercase();
+    assert!(head.contains("x-api-key: sk-cred-1\r\n"));
+    assert!(!head.contains("x-api-key: cred-1"));
     assert!(!observed.reconnected);
     assert_eq!(disclosed.text.text, "the workspace builds with bun");
     assert_eq!(disclosed.attempt_index, 0);
@@ -629,15 +631,13 @@ async fn nothing_is_sent_without_approval_under_cancellation_or_when_the_marker_
     let mut peer = Peer::start().await;
     let server = peer.serve(no_wait(), |_| answer(MODEL));
     let sender = peer.sender_with_credential(CREDENTIAL_ID);
-    let mut stale_binding = fixture.binding();
-    stale_binding.claim_id = "claim-stale".to_string();
     let outcome = Disclosure {
         store: &fixture.store,
         ledger: &fixture.ledger,
         broker: &broker,
         sender: &sender,
         approval: Some(&approved),
-        binding: &stale_binding,
+        claim_id: "claim-stale",
         now_ms: &clock,
     }
     .disclose(&prepared, &fresh, deadline())
@@ -659,17 +659,22 @@ async fn nothing_is_sent_without_approval_under_cancellation_or_when_the_marker_
 async fn a_buffer_or_body_judged_under_another_broker_is_refused_before_any_connection() {
     let fixture = Fixture::open();
     let (remote, _) = fixture.broker();
-    let (local, local_turn) = fixture.broker_for(kernel::ArtifactDestination::Local);
+    let (mut local, local_turn) = fixture.broker_for(kernel::ArtifactDestination::Local);
     // Both brokers issued `ref-1` for the same commit, so only the run stamp can tell whose judgement admitted the bytes.
     let alias = local_turn[0].tag().alias.clone().unwrap();
     assert!(remote.aliases.resolve(alias.as_str()).is_ok());
     let system = remote.render_host_text("Extract facts.").unwrap();
     assert_eq!(
-        prepare_body(&remote, &profile(), system, local_turn.clone()).unwrap_err(),
+        prepare_body(&remote, &profile(), system, local_turn).unwrap_err(),
         DisclosureRefusal::BrokerMismatch,
         "a buffer judged for the local destination is not assembled under the remote broker"
     );
-    let local_prepared = fixture.prepared(&local, local_turn);
+    // Buffers are consumed by assembly; the refused body took the local read with it, so the local body needs a fresh charged read.
+    let reread = local
+        .read(&fixture.store, alias.as_str(), None, fixture.now + 2)
+        .unwrap()
+        .buffer;
+    let local_prepared = fixture.prepared(&local, vec![reread]);
     assert_eq!(local_prepared.hold_id(), local.hold_id());
     let peer = Peer::start().await;
     let refusal = attempt(
@@ -1013,7 +1018,7 @@ async fn the_network_wait_begins_only_after_both_owners_release() {
         broker: &broker,
         sender: &sender,
         approval: Some(&fixture.approval()),
-        binding: &fixture.binding(),
+        claim_id: &fixture.claim,
         now_ms: &move || now,
     };
     let cancel = CancellationToken::new();
@@ -1076,5 +1081,201 @@ async fn the_network_wait_begins_only_after_both_owners_release() {
     assert!(
         foreground < stall / 4,
         "both owners are released during the network wait: {foreground:?}"
+    );
+}
+
+/// Like [`attempt`], with the caller's sender.
+async fn attempt_with_sender(
+    fixture: &Fixture,
+    sender: &daemon::curator::model_request::Sender,
+    broker: &EvidenceBroker,
+    prepared: &PreparedBody,
+    now: &(dyn Fn() -> i64 + Sync),
+) -> Result<daemon::curator::disclosure::Disclosed, DisclosureRefusal> {
+    Disclosure {
+        store: &fixture.store,
+        ledger: &fixture.ledger,
+        broker,
+        sender,
+        approval: Some(&fixture.approval()),
+        claim_id: &fixture.claim,
+        now_ms: now,
+    }
+    .disclose(prepared, &CancellationToken::new(), deadline())
+    .await
+}
+
+#[tokio::test]
+async fn the_approval_names_the_credential_the_sender_presents() {
+    let fixture = Fixture::open();
+    let (broker, turn) = fixture.broker();
+    let prepared = fixture.prepared(&broker, turn);
+    // The approval covers `cred-1`; this sender writes another credential into the header. The identity is the sender's own, not a caller-supplied label, so nothing connects.
+    let peer = Peer::start().await;
+    let sender = peer.sender_with_credential("cred-2");
+    assert_eq!(sender.credential_id(), "cred-2");
+    let refusal = attempt_with_sender(&fixture, &sender, &broker, &prepared, &move || {
+        fixture.now + 3
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(refusal, DisclosureRefusal::Unavailable);
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert!(fixture.attempts().is_empty());
+}
+
+#[tokio::test]
+async fn the_attempt_is_charged_under_the_holds_job_while_another_job_is_live() {
+    let fixture = Fixture::open();
+    // A second job is ready, claimed, and begun under the same worker registration; the broker's hold names the first.
+    let (other_identity, _) = open_job(
+        &fixture.ledger,
+        fixture.registration,
+        &fixture.kernel_incarnation(),
+        "subject-2",
+        fixture.now,
+    );
+    assert_ne!(other_identity, fixture.identity);
+    let (broker, turn) = fixture.broker();
+    let prepared = fixture.prepared(&broker, turn);
+    assert_eq!(broker.binding().hold.subject, fixture.identity);
+    let mut peer = Peer::start().await;
+    let server = peer.serve(no_wait(), |_| answer(MODEL));
+    let disclosed = attempt(
+        &fixture,
+        &peer,
+        &broker,
+        &prepared,
+        Some(&fixture.approval()),
+        &move || fixture.now + 3,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(disclosed.attempt_index, 0);
+    server.await.unwrap();
+    assert_eq!(fixture.attempts().len(), 1, "the hold's job is charged");
+    assert!(
+        fixture
+            .ledger
+            .list_curator_attempts(PROJECT, &other_identity)
+            .unwrap()
+            .is_empty(),
+        "no other job is charged"
+    );
+}
+
+#[test]
+fn the_assembled_prompt_is_render_checked_across_buffer_boundaries() {
+    let fixture = Fixture::open();
+    let (broker, _) = fixture.broker();
+    // Each half passes the render check alone; only their concatenation is a key.
+    let head = broker.render_host_text("token AKIAQ7RSTU").unwrap();
+    let tail = broker.render_host_text("VWXYZ23456 more").unwrap();
+    let system = broker.render_host_text("Extract facts.").unwrap();
+    assert_eq!(
+        prepare_body(&broker, &profile(), system, vec![head, tail]).unwrap_err(),
+        DisclosureRefusal::RenderCheck
+    );
+    // The system text and the first turn buffer are scanned as one prompt too.
+    let system = broker.render_host_text("token AKIAQ7RSTU").unwrap();
+    let tail = broker.render_host_text("VWXYZ23456 more").unwrap();
+    assert_eq!(
+        prepare_body(&broker, &profile(), system, vec![tail]).unwrap_err(),
+        DisclosureRefusal::RenderCheck
+    );
+}
+
+#[tokio::test]
+async fn a_revocation_during_the_handshake_is_refused_before_the_marker_commits() {
+    let fixture = Fixture::open();
+    let (broker, turn) = fixture.broker();
+    let prepared = fixture.prepared(&broker, turn);
+    let mut peer = Peer::start().await;
+    let server = peer.serve(no_wait(), |_| answer(MODEL));
+    // Before the connection the clock is read twice, by the revalidation and by the guard. The third read is the first after the handshake; the descriptor is retired there, as if a Kernel write landed while the TLS handshake was in flight.
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let store = Arc::clone(&fixture.store);
+    let object = fixture.source.0.clone();
+    let now = fixture.now + 3;
+    let clock = move || {
+        if reads.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+            store
+                .commit(intent("retire-during-handshake"), |envelope| {
+                    envelope.retire_observation(&object)?;
+                    Ok(String::new())
+                })
+                .unwrap();
+        }
+        now
+    };
+    let refusal = attempt(
+        &fixture,
+        &peer,
+        &broker,
+        &prepared,
+        Some(&fixture.approval()),
+        &clock,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    let DisclosureRefusal::Revalidation(refusal) = refusal else {
+        panic!("{refusal:?}");
+    };
+    assert_eq!(refusal.code, RefusalCode::ExpectationChanged);
+    assert_eq!(refusal.alias, prepared.tags()[1].alias);
+    let observed = server.await.unwrap();
+    assert_eq!(
+        peer.connections.load(Ordering::SeqCst),
+        1,
+        "the handshake happened"
+    );
+    assert!(observed.head.is_empty(), "no request byte followed it");
+    assert!(fixture.attempts().is_empty(), "no marker was committed");
+}
+
+#[tokio::test]
+async fn the_committed_attempt_deadline_bounds_the_response_wait() {
+    let fixture = Fixture::open();
+    let (broker, turn) = fixture.broker();
+    let prepared = fixture.prepared(&broker, turn);
+    // The claim expires 700 ms after this clock, so the ledger commits the attempt with a 700 ms bound; the caller's deadline is 10 s and the peer answers after 1.5 s.
+    let now = fixture.now + CURATOR_TASK_LEASE_MS - 700;
+    let mut peer = Peer::start().await;
+    let server = peer.serve(
+        Box::new(|_, _| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            })
+        }),
+        |_| answer(MODEL),
+    );
+    let refusal = attempt(
+        &fixture,
+        &peer,
+        &broker,
+        &prepared,
+        Some(&fixture.approval()),
+        &move || now,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        refusal,
+        DisclosureRefusal::Send {
+            attempt_index: Some(0),
+            error: SendError::Deadline,
+            sent: true,
+        }
+    );
+    let observed = server.await.unwrap();
+    assert!(!observed.reconnected, "the bounded attempt is not retried");
+    let attempts = fixture.attempts();
+    assert_eq!(attempts[0].attempt_deadline_ms, now + 700);
+    assert_eq!(
+        attempts[0].terminal.map(|(terminal, _)| terminal),
+        Some(CuratorAttemptTerminal::Failed)
     );
 }
