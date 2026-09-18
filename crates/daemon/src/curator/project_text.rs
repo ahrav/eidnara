@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
 use std::ops::Range;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -161,6 +161,8 @@ impl ProjectText {
             Mode::empty(),
         )
         .map_err(|errno| refusal(open_refusal(errno)))?;
+        // The checks above were on a path; the descriptor is what the run holds. An ancestor swapped between the resolve and the open would hand back a directory at some other location, so the opened descriptor must still resolve to the checked path.
+        opened_at(&root, &canonical)?;
         let metadata = metadata(&root)?;
         if protected
             .identities
@@ -562,6 +564,16 @@ fn capacity(outcome: SearchOutcome, refusal: Refusal) -> Result<SearchOutcome, R
     Ok(finish(outcome, Completeness::CapacityBound))
 }
 
+/// Requires the directory `handle` was opened at to be `expected`: the kernel's current path for the descriptor must equal the checked one. A directory that has since been moved or unlinked, or that never was the checked one, is a confinement refusal.
+fn opened_at(handle: &OwnedFd, expected: &Path) -> Result<(), Refusal> {
+    let actual = std::fs::read_link(format!("/proc/self/fd/{}", handle.as_raw_fd()))
+        .map_err(|_| refusal(RefusalCode::Unavailable))?;
+    if actual != expected {
+        return Err(refusal(RefusalCode::Confinement));
+    }
+    Ok(())
+}
+
 fn metadata(handle: &OwnedFd) -> Result<std::fs::Metadata, Refusal> {
     File::from(
         handle
@@ -729,6 +741,42 @@ mod tests {
         };
         assert_eq!(refused.code, RefusalCode::Undecodable);
         assert_eq!(scanned, 4);
+    }
+
+    #[test]
+    fn a_root_descriptor_must_resolve_to_the_checked_path() {
+        let checked = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let handle = rustix::fs::open(
+            other.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        // The descriptor was opened somewhere other than the path that was checked.
+        assert_eq!(
+            opened_at(&handle, &checked.path().canonicalize().unwrap())
+                .unwrap_err()
+                .code,
+            RefusalCode::Confinement
+        );
+        opened_at(&handle, &other.path().canonicalize().unwrap()).unwrap();
+        // A directory moved after it was opened no longer resolves to the checked path.
+        let moved = checked.path().join("moved");
+        std::fs::rename(other.path(), &moved).unwrap();
+        assert_eq!(
+            opened_at(
+                &handle,
+                &other
+                    .path()
+                    .canonicalize()
+                    .unwrap_or(other.path().to_path_buf())
+            )
+            .unwrap_err()
+            .code,
+            RefusalCode::Confinement
+        );
+        std::fs::rename(&moved, other.path()).unwrap();
     }
 
     #[test]
