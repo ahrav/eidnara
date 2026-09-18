@@ -1078,8 +1078,9 @@ async fn the_network_wait_begins_only_after_both_owners_release() {
         ledger_wait >= stall,
         "a ledger read issued inside the stall waited for the connection: {ledger_wait:?}"
     );
+    // A held Kernel would cost the foreground the whole stall and a held ledger the whole send deadline; the bound is the stall itself, with room for a slow runner's fsync on the foreground commit.
     assert!(
-        foreground < stall / 4,
+        foreground < stall,
         "both owners are released during the network wait: {foreground:?}"
     );
 }
