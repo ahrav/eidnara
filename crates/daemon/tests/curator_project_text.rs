@@ -1895,3 +1895,41 @@ fn refused_reads_of_a_cached_capture_issue_no_aliases() {
         "a read the inspection ceiling refuses issues no alias"
     );
 }
+
+#[test]
+fn an_inspection_ceiling_refusal_on_a_capture_marks_the_evidence_set_partial() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"bun one");
+    fixture.write("b.txt", b"bun two");
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture
+        .broker(ArtifactDestination::Local)
+        .with_inspection_limit(1);
+    let outcome = text
+        .search(
+            &fixture.store,
+            &mut broker,
+            SearchQuery::Content("bun"),
+            fixture.now,
+        )
+        .unwrap();
+    assert_eq!(outcome.completeness, Completeness::CapacityBound);
+    assert_eq!(outcome.hits.len(), 1);
+    assert!(
+        !broker.ledger.conclusions_usable(),
+        "the inspection ceiling truncates the evidence set whether a read or a capture hits it"
+    );
+    // A single read refused by the ceiling marks the set the same way.
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture
+        .broker(ArtifactDestination::Local)
+        .with_inspection_limit(0);
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::InspectionLimit
+    );
+    assert!(!broker.ledger.conclusions_usable());
+}

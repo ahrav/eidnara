@@ -631,6 +631,17 @@ impl EvidenceBroker {
         &self.binding
     }
 
+    /// The refusal a disclosure would meet at the run's batch and inspection ceilings right now, without admitting anything. A caller that must store or hold before its read asks here first so a refused read costs nothing; a refusal that truncates the evidence set marks the ledger partial, as the read itself would have.
+    pub fn admit_check(&mut self, alias: Option<&Alias>) -> Result<(), Refusal> {
+        let result = self.accounting.admit_check(alias);
+        if let Err(refusal) = &result
+            && refusal.code.truncates_evidence()
+        {
+            self.ledger.record_partial_disclosure();
+        }
+        result
+    }
+
     /// Renders host-authored text under the same render check; it is tagged and uncharged (Q22).
     pub fn render_host_text(&self, text: &str) -> Result<RenderedBuffer, Refusal> {
         check_render(text.as_bytes(), None)?;

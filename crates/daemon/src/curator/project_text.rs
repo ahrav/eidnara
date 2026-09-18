@@ -427,8 +427,8 @@ impl ProjectText {
         file: &ReadFile,
         now_ms: i64,
     ) -> Result<Alias, Refusal> {
-        // A disclosure the run's ceilings would refuse is refused here, before anything is stored or an alias is issued: every alias must be one the broker could admit.
-        broker.accounting.admit_check(None)?;
+        // A disclosure the run's ceilings would refuse is refused here, before anything is stored or an alias is issued: every alias must be one the broker could admit. The broker marks the ledger for a truncating refusal, as its read would.
+        broker.admit_check(None)?;
         let digest = format!("{:x}", Sha256::digest(&file.bytes));
         let byte_length = u64::try_from(file.bytes.len()).unwrap_or(u64::MAX);
         let key = (file.relative.clone(), digest.clone());
