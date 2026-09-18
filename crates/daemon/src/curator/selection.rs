@@ -108,7 +108,8 @@ pub fn select_review_targets(
     let tip = store.tip().map_err(kernel)?;
     let mut references = Vec::new();
     let mut examined = 0usize;
-    loop {
+    // A page that filled at the end of a batch returns before another batch is read and judged.
+    while references.len() < MAX_SELECTION_REFERENCES {
         let remaining = MAX_EXAMINED_PER_PAGE.saturating_sub(examined);
         let Some(max_rows) = NonZeroUsize::new(remaining.min(MAX_SELECTION_REFERENCES * 4)) else {
             break;

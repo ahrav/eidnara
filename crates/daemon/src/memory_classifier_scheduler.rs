@@ -2390,6 +2390,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_page_that_fits_once_its_own_allowance_is_released_is_enqueued() {
+        use memory_store::curator_jobs::{
+            CURATOR_JOB_ALLOWANCE_BYTES, CURATOR_RECEIPT_CHARGE_BYTES,
+            MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path());
+        let host = scripted(&store, vec![selection_project(&store, "git:a")]);
+        let clock = ManualClock::at(T0 + 1_000);
+        let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
+        assert!(scheduler.tick(&host).await.is_empty());
+        // After the filler's receipt and allowance, exactly the page's two jobs fit under the quota: the 8 KiB the frozen page itself holds is released by the same transaction, so it must not count against them.
+        let producer = ProducerBinding {
+            producer: "filler".to_string(),
+            firing_id: "f".to_string(),
+            ordinal: 0,
+        };
+        let filler = selection_page(1_000, 1, None).references[0].clone();
+        store
+            .reserve_curator_job("git:a", &producer, &filler, T0)
+            .unwrap();
+        let near_quota = i64::try_from(
+            MAX_CURATOR_METADATA_BYTES_PER_PROJECT
+                - CURATOR_JOB_ALLOWANCE_BYTES
+                - 2 * (CURATOR_JOB_ALLOWANCE_BYTES + CURATOR_RECEIPT_CHARGE_BYTES),
+        )
+        .unwrap();
+        store
+            .with_fenced_conn_for_test(|conn| {
+                conn.execute(
+                    "UPDATE curator_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
+                    rusqlite::params![near_quota, filler.causal_identity().unwrap()],
+                )
+            })
+            .unwrap();
+        *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 2, Some("c")))];
+        clock.advance(15 * MINUTE);
+        let events = scheduler.tick(&host).await;
+        assert!(
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued" && response["jobs"] == 2),
+            "{events:?}"
+        );
+        assert_eq!(ready_jobs(&store, "git:a"), 2);
+        assert_eq!(
+            store
+                .curator_headroom("git:a")
+                .unwrap()
+                .project_metadata_remaining,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn a_successor_resumes_a_predecessors_selection_slot_under_its_own_claim() {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());

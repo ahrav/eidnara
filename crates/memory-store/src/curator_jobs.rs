@@ -857,7 +857,15 @@ pub fn enqueue_frozen_selection_in_tx(
         )?;
         return Ok(EnqueueOutcome::Expired);
     }
-    // Headroom is judged once for the whole page: the capacity and quota aggregates scan the incarnation's permanent receipts, and a page either fits entirely or is deferred entirely.
+    // The page leaves `frozen` first so headroom is judged against the committed state: its own allowance is released by this transaction, and a deferral rolls the state change back with everything else. Headroom is judged once for the whole page: the capacity and quota aggregates scan the incarnation's permanent receipts, and a page either fits entirely or is deferred entirely.
+    let enqueued = complete_frozen_selection_in_tx(
+        conn,
+        project,
+        &selection.slot_id,
+        &selection.selection_attempt,
+        FrozenSelectionState::Enqueued,
+        now_ms,
+    )?;
     producer.validate().map_err(refuse)?;
     let mut fresh = Vec::with_capacity(existing.page.references.len());
     let mut replayed = 0usize;
@@ -902,14 +910,6 @@ pub fn enqueue_frozen_selection_in_tx(
             now_ms,
         )?;
     }
-    let enqueued = complete_frozen_selection_in_tx(
-        conn,
-        project,
-        &selection.slot_id,
-        &selection.selection_attempt,
-        FrozenSelectionState::Enqueued,
-        now_ms,
-    )?;
     advance_selection_cursor_in_tx(
         conn,
         project,
