@@ -1444,8 +1444,15 @@ fn a_hold_capacity_refusal_on_a_capture_marks_the_evidence_set_partial() {
         !broker.ledger.conclusions_usable(),
         "a hold capacity refusal on a capture truncates the evidence set like one on a read"
     );
-    // With nothing disclosed yet, the refusal itself is the answer, and it still marks the set.
+}
+
+#[test]
+fn a_hold_capacity_refusal_on_the_first_capture_is_the_answer_and_still_marks_the_set() {
+    let fixture = Fixture::open();
+    fixture.write("a.txt", b"bun one");
+    let protected = fixture.protected();
     let mut text = fixture.text(&protected);
+    // A full hold: the first capture's extension is refused before any disclosure.
     let mut broker = fixture.broker_with_references(
         PROJECT,
         ArtifactDestination::Local,
