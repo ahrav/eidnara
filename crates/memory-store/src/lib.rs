@@ -619,6 +619,8 @@ pub struct PendingPublication {
     pub boundary_dates: BTreeMap<String, String>,
     pub publication_floor_ordinal: u64,
     pub collect_user_memory_candidates: bool,
+    /// When the publication was first attempted; a republication dates its rows by it, not by the pass that recovers it.
+    pub created_at_ms: i64,
 }
 
 /// Producer-owned nonadmission facts. `count` only grows; both survive every phase transition, abandonment, and reset of the producer state within the session's store lifetime, and are written only by the fenced publication that also advances history.
@@ -14988,6 +14990,7 @@ fn prepare_pending_publication(
         boundary_dates: pending.boundary_dates.clone(),
         publication_floor_ordinal: pending.publication_floor_ordinal,
         collect_user_memory_candidates: pending.collect_user_memory_candidates,
+        created_at_ms: pending.created_at_ms,
     };
     let payload =
         serde_json::to_vec(&scanned).map_err(|error| MemoryStoreError::Serde(error.to_string()))?;

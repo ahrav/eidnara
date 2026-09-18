@@ -14,8 +14,8 @@ use memory_store::{
     HistorySummarizerPhase, HistorySummarizerPrimerCandidate, HistorySummarizerPublishError,
     HistorySummarizerPublishPredicate, HistorySummarizerPublishRequest,
     HistorySummarizerPublishResult, HistorySummarizerSelectedMessageIdentity,
-    HistorySummarizerUserMemoryCandidate, MemoryStore, MemoryStoreError, PendingPublication,
-    StoredHistorySegment,
+    HistorySummarizerUserMemoryCandidate, LoadedState, MemoryStore, MemoryStoreError,
+    PendingPublication, StoredHistorySegment,
 };
 
 use crate::curator::handoff::{
@@ -423,6 +423,22 @@ pub fn persist_history_summarizer_state(
     Ok(store.commit(session_id, loaded.row_version, &loaded.core, &meta)?)
 }
 
+/// Commits `next_state` only while the session row is still the one `loaded` observed. Another writer's commit in between wins: nothing is written over it and `None` is returned, so a check made against `loaded` cannot resurrect a state that writer already moved on from.
+fn persist_history_summarizer_state_if_unmoved(
+    store: &MemoryStore,
+    session_id: &str,
+    loaded: &LoadedState,
+    next_state: HistorySummarizerDurableState,
+) -> Result<Option<u64>, HistorySummarizerStateError> {
+    let mut meta = loaded.meta.clone();
+    meta.history_summarizer = next_state;
+    match store.commit(session_id, loaded.row_version, &loaded.core, &meta) {
+        Ok(row_version) => Ok(Some(row_version)),
+        Err(MemoryStoreError::CasConflict { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub trait HistorySummarizerPublicationFence: Send + Sync {
     fn publish(
         &self,
@@ -444,7 +460,10 @@ pub struct ValidatedPublishRequest<'a> {
     pub publication_floor_ordinal: u64,
     pub chunk_transcript: &'a str,
 
+    /// When the publication was first attempted; every row it publishes is dated by it, and a republication keeps it.
     pub created_at_ms: i64,
+    /// The present, for the reservation's deadline and the job's activation; a republication supplies its own.
+    pub now_ms: i64,
     /// `boundary_dates` maps native message IDs to YYYY-MM-DD dates; absent IDs have no date.
     pub boundary_dates: &'a BTreeMap<String, String>,
     pub failure_backoff_at_ms: i64,
@@ -551,7 +570,7 @@ pub fn publish_validated_chunk(
                 causal_identity: &prepared.causal_identity,
                 producer: &prepared.producer,
                 input: &prepared.input,
-                now_ms: request.created_at_ms,
+                now_ms: request.now_ms,
             }),
     };
     let publish_result = match request.publication_fence {
@@ -670,7 +689,7 @@ fn settle_unpublishable_reservation(
     {
         return Ok(());
     }
-    let outcome = if held.queue_deadline_ms <= request.created_at_ms {
+    let outcome = if held.queue_deadline_ms <= request.now_ms {
         CuratorJobOutcome::Expired
     } else {
         CuratorJobOutcome::Nonadmitted
@@ -679,7 +698,7 @@ fn settle_unpublishable_reservation(
         request.project_path,
         &activation.causal_identity,
         outcome,
-        request.created_at_ms,
+        request.now_ms,
     ) {
         Ok(_) | Err(CuratorJobError::Refused(CuratorJobRefusal::Terminal)) => Ok(()),
         Err(CuratorJobError::Refused(refusal)) => Err(HistorySummarizerStateError::Publish(
@@ -930,7 +949,8 @@ pub fn republish_reserved(
             publication_floor_ordinal: pending.publication_floor_ordinal,
             chunk_transcript: &pending.chunk_transcript,
             boundary_dates: &pending.boundary_dates,
-            created_at_ms: now_ms,
+            created_at_ms: pending.created_at_ms,
+            now_ms,
             failure_backoff_at_ms,
             publication_fence,
             curator_nonadmission: None,
@@ -977,9 +997,10 @@ fn retain_republish(
     session_id: &str,
     next: impl FnOnce(&HistorySummarizerDurableState) -> HistorySummarizerDurableState,
 ) -> Result<RepublishOutcome, HistorySummarizerDriveError> {
-    let current = store.load(session_id)?.meta.history_summarizer;
+    let loaded = store.load(session_id)?;
+    let current = &loaded.meta.history_summarizer;
     if current.state == HistorySummarizerPhase::Publishing && current.holds_reservation() {
-        persist_history_summarizer_state(store, session_id, next(&current))?;
+        persist_history_summarizer_state_if_unmoved(store, session_id, &loaded, next(current))?;
     }
     Ok(RepublishOutcome::Retained)
 }
@@ -1019,15 +1040,17 @@ fn settle_republish(
             }
         }
     }
-    let current = store.load(session_id)?.meta.history_summarizer;
+    let loaded = store.load(session_id)?;
+    let current = &loaded.meta.history_summarizer;
     if current.state == HistorySummarizerPhase::Publishing
         && current.firing_seq == publishing.firing_seq
     {
-        persist_history_summarizer_state(
+        persist_history_summarizer_state_if_unmoved(
             store,
             session_id,
+            &loaded,
             abandon_with_detail(
-                &current,
+                current,
                 failure_backoff_at_ms,
                 Some(format!("curator reservation settled: {detail}")),
             ),
@@ -2088,6 +2111,7 @@ fn publish_output_from_awaiting(
             boundary_dates: boundary_dates.clone(),
             publication_floor_ordinal: validated.unprocessed_from,
             collect_user_memory_candidates: validate_options.user_memory_collection_enabled,
+            created_at_ms,
         },
         curator_handoff,
         created_at_ms,
@@ -2116,6 +2140,7 @@ fn publish_output_from_awaiting(
 
             boundary_dates,
             created_at_ms,
+            now_ms: created_at_ms,
             failure_backoff_at_ms,
             publication_fence,
             curator_nonadmission,
@@ -2242,14 +2267,15 @@ fn curator_decision_before_publish(
                 failure_backoff_at_ms,
                 completion_now_ms(),
             );
-            let current = store.load(session_id)?.meta.history_summarizer;
+            let loaded = store.load(session_id)?;
+            let current = &loaded.meta.history_summarizer;
             let detail = Some(format!("curator handoff failed: {error}"));
             let next = if current.holds_reservation() {
-                retain_with_detail(&current, failure_backoff_at_ms, detail)
+                retain_with_detail(current, failure_backoff_at_ms, detail)
             } else {
-                abandon_with_detail(&current, failure_backoff_at_ms, detail)
+                abandon_with_detail(current, failure_backoff_at_ms, detail)
             };
-            persist_history_summarizer_state(store, session_id, next)?;
+            persist_history_summarizer_state_if_unmoved(store, session_id, &loaded, next)?;
             Err(HistorySummarizerDriveError::CuratorHandoff(error))
         }
     }
@@ -4695,6 +4721,7 @@ mod tests {
 
                 boundary_dates: empty_boundary_dates(),
                 created_at_ms: 123,
+                now_ms: 123,
                 failure_backoff_at_ms: 0,
                 publication_fence: None,
                 curator_nonadmission: None,
@@ -5110,6 +5137,7 @@ mod tests {
 
                 boundary_dates: empty_boundary_dates(),
                 created_at_ms: 0,
+                now_ms: 0,
                 failure_backoff_at_ms: 999,
                 publication_fence: None,
                 curator_nonadmission: None,
@@ -5198,6 +5226,7 @@ mod tests {
 
                 boundary_dates: empty_boundary_dates(),
                 created_at_ms: 0,
+                now_ms: 0,
                 failure_backoff_at_ms: 999,
                 publication_fence: None,
                 curator_nonadmission: None,
@@ -5281,6 +5310,7 @@ mod tests {
 
                 boundary_dates: empty_boundary_dates(),
                 created_at_ms: 0,
+                now_ms: 0,
                 failure_backoff_at_ms: 999,
                 publication_fence: None,
                 curator_nonadmission: None,

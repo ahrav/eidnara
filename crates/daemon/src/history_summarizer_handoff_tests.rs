@@ -251,6 +251,7 @@ impl Rig {
                 chunk_transcript: "U: transcript",
                 boundary_dates: &BTreeMap::new(),
                 created_at_ms: now_ms,
+                now_ms,
                 failure_backoff_at_ms: now_ms + 60_000,
                 publication_fence: None,
                 curator_nonadmission: nonadmission,
@@ -397,6 +398,7 @@ fn pending_publication(validated: &ValidatedChunk) -> memory_store::PendingPubli
         boundary_dates: BTreeMap::new(),
         publication_floor_ordinal: 5,
         collect_user_memory_candidates: false,
+        created_at_ms: t0(),
     }
 }
 
@@ -1846,4 +1848,46 @@ fn incompressible_text(len: usize, seed: u64) -> String {
             ALPHABET[(state >> 58) as usize] as char
         })
         .collect()
+}
+
+#[test]
+fn a_retain_that_loses_the_row_to_a_publication_writes_nothing_back() {
+    let rig = Rig::open();
+    let prepared = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    // The retain checks a Publishing state that holds the reservation; before it writes, another pass publishes the firing, activates the job, and drops the retained publication.
+    let outcome = retain_republish(&rig.store, SESSION, |current| {
+        rig.publish(Some(&prepared), None, t0() + 1).unwrap();
+        retain_with_detail(current, t0() + 60_000, Some("stale pass".to_string()))
+    })
+    .unwrap();
+    assert_eq!(outcome, RepublishOutcome::Retained);
+    let state = rig.state();
+    assert_eq!(state.state, HistorySummarizerPhase::Idle);
+    assert_eq!(state.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    // Nothing was resurrected, so the next pass finds nothing to settle and the activated job stands.
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, t0() + 2).unwrap(),
+        RestartAction::Done
+    );
+    assert!(matches!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Ready(_)
+    ));
+}
+
+#[test]
+fn a_republished_publication_keeps_the_time_it_was_first_attempted() {
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let target = rig.target();
+    // Recovery runs a minute later; the history it publishes was produced at the original attempt, and search ranks recency by that time.
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 60_000),
+        RepublishOutcome::Published
+    );
+    let segments = rig.store.load_history_segments(SESSION).unwrap();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].created_at, t0());
 }

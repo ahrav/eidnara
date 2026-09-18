@@ -38982,6 +38982,7 @@ mod tests {
                     boundary_dates: BTreeMap::new(),
                     publication_floor_ordinal: 3,
                     collect_user_memory_candidates: false,
+                    created_at_ms: now_ms(),
                 },
             )
             .unwrap();
