@@ -1478,3 +1478,159 @@ async fn text_the_supervisor_rejected_is_not_accepted_as_a_step() {
     assert_eq!(server.await.unwrap().len(), MAX_ROUNDS);
     assert_eq!(fixture.receipt().selected, None);
 }
+
+/// A response the provider stopped for any reason other than an affirmative completion is not a step: a refusal ends the run as the model declining, an unknown stop reason spends the round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_an_affirmative_stop_reason_admits_the_text_as_a_step() {
+    let stopped = |reason: &str| {
+        let text = serde_json::to_string(RETAIN_WITHOUT_CITATIONS).unwrap();
+        json_response(
+            "200 OK",
+            &format!(
+                r#"{{"id":"msg_1","type":"message","role":"assistant","model":"{MODEL}","content":[{{"type":"text","text":{text}}}],"stop_reason":"{reason}","usage":{{"input_tokens":3,"output_tokens":4}}}}"#
+            ),
+            "",
+        )
+    };
+    let fixture = Fixture::open(CASES[0].sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![stopped("refusal")]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    assert_eq!(server.await.unwrap().len(), 1);
+
+    let fixture = Fixture::open(CASES[0].sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![
+        stopped("pause_turn"),
+        text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    let observed = server.await.unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(user_text(&prompts(&observed)[1]).contains("refused: unsupported"));
+}
+
+/// A memory target carries Kernel commit sequences: the snapshot the proposal was bound at and the last change the subject had seen by then, not a wall-clock millisecond.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_memory_target_names_the_snapshot_and_the_subjects_last_change_as_commit_sequences() {
+    let fixture = Fixture::open(CASES[0].sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(RETAIN_WITHOUT_CITATIONS)]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let Settled::Published(_) = settled else {
+        panic!("{settled:?}")
+    };
+    let proposal = read_selected_proposal(
+        &fixture.store,
+        &fixture.ledger,
+        PROJECT,
+        &fixture.identity,
+        &fixture.binding(),
+        fixture.now + 6,
+    )
+    .unwrap()
+    .proposal;
+    let kernel::ProposalTarget::Memory(target) = &proposal.target else {
+        panic!("{:?}", proposal.target)
+    };
+    let (tip, mut states) = fixture
+        .store
+        .object_states(std::slice::from_ref(&fixture.sources[0].0))
+        .unwrap();
+    let state = states.pop().flatten().unwrap();
+    assert!(
+        target.known_as_of <= tip,
+        "known_as_of {} is a commit sequence at or below the tip {tip}",
+        target.known_as_of
+    );
+    assert_eq!(
+        Some(target.commit_token),
+        state.latest_change_commit_seq,
+        "commit_token is the subject's last change commit"
+    );
+}
+
+/// Evidence bytes and host notices are framed apart, so a subject without a trailing newline cannot absorb the notice that follows it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_notices_are_framed_apart_from_evidence_bytes() {
+    let sources = [
+        Source {
+            message: "feat: the workspace builds with bun",
+            protected: false,
+        },
+        CASES[0].sources[1],
+    ];
+    let fixture = Fixture::open(&sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(
+        r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+    )]);
+    fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    let observed = server.await.unwrap();
+    let text = user_text(&prompts(&observed)[0]);
+    assert!(
+        text.contains("builds with bun\n[/ref-1]\n"),
+        "the subject ends at its end marker: {text:?}"
+    );
+    assert!(
+        text.contains("\nlinked references: ref-2\n"),
+        "the notice sits on its own line: {text:?}"
+    );
+}
+
+/// An open receipt resumed at the same generation launches under supervisor keys the earlier attempts did not use, so the retained runs of a cancelled investigation do not refuse the resumed one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resumed_generation_launches_under_fresh_supervisor_keys() {
+    let fixture = Fixture::open(CASES[0].sources);
+    let mut peer = Peer::start().await;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = peer.serve(
+        Box::new(move |_, _| {
+            Box::pin(async move {
+                release_rx.await.ok();
+            })
+        }),
+        |_| text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"late"}}"#),
+    );
+    let cancel = CancellationToken::new();
+    let run = fixture.run(&peer, Some(fixture.approval()), &cancel);
+    let cancelling = async {
+        while peer.connections.load(Ordering::SeqCst) < 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel.cancel();
+    };
+    let (outcome, ()) = tokio::join!(run, cancelling);
+    assert_eq!(outcome, Err(InvestigationError::Cancelled));
+    release_tx.send(()).ok();
+    let _ = server.await;
+    assert_eq!(fixture.receipt().terminal, None);
+    // The same receipt, claim, and generation run again in the same daemon.
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(
+        r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+    )]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    server.await.unwrap();
+    assert_eq!(fixture.attempts().len(), 2);
+}

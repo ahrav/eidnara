@@ -143,6 +143,8 @@ pub enum InvestigationError {
 /// What one supervised attempt yielded.
 enum Attempt {
     Text(String),
+    /// The provider reported the model refused to answer; the run settles as the model declining.
+    Declined,
     /// The request failed or was refused after being charged; the round is spent.
     Spent,
     /// The ledger, the cutoff, or the byte budget admits no further attempt.
@@ -185,6 +187,7 @@ impl Coordinator {
             coordinator: self,
             context,
             hold_binding: prepared.hold_binding,
+            attempt_base: prepared.attempt_base,
             broker: Arc::new(tokio::sync::Mutex::new(broker)),
             transcript: Vec::new(),
             sent: 0,
@@ -242,11 +245,20 @@ impl Coordinator {
         } else {
             String::new()
         };
+        // A receipt resumed at its generation has attempts behind it; the supervisor retains their runs under their keys, so this run's keys start past them.
+        let attempt_base = self
+            .ledger
+            .list_curator_attempts(&context.job.project, &context.job.causal_identity)
+            .map_err(|_| InvestigationError::Kernel(RefusalCode::Store))?
+            .iter()
+            .filter(|attempt| attempt.generation == context.receipt.generation)
+            .count();
         Ok(Prepared {
             hold_binding,
             subject,
             starting,
             hold_id,
+            attempt_base: u32::try_from(attempt_base).unwrap_or(u32::MAX),
         })
     }
 }
@@ -257,6 +269,8 @@ struct Prepared {
     starting: Vec<ReferenceExpectation>,
     /// `hold_id` is empty when the run holds no evidence.
     hold_id: String,
+    /// Attempts already committed at this generation before the run began.
+    attempt_base: u32,
 }
 
 /// One investigation's state: the broker every disclosure goes through, the transcript resent each round, the related-memory cursors, and the cutoff every wait is bounded by.
@@ -264,6 +278,8 @@ struct Run<'a> {
     coordinator: &'a Coordinator,
     context: JobContext<'a>,
     hold_binding: CuratorHoldBinding,
+    /// Supervisor keys for this run's attempts start here, past the generation's earlier attempts.
+    attempt_base: u32,
     /// The broker is shared with the launch future, which must be `'static`; the coordinator is idle while an attempt runs, so the lock is never contended.
     broker: Arc<tokio::sync::Mutex<EvidenceBroker>>,
     transcript: Vec<RenderedBuffer>,
@@ -307,10 +323,13 @@ impl Run<'_> {
             if (self.coordinator.now_ms)() >= self.context.receipt.execution_cutoff_ms {
                 return self.settle_now(RunResult::Exhausted).await;
             }
-            let attempt_index = u32::try_from(round).unwrap_or(u32::MAX);
+            let attempt_index = self
+                .attempt_base
+                .saturating_add(u32::try_from(round).unwrap_or(u32::MAX));
             let text = match self.attempt(attempt_index, cancel).await? {
                 Attempt::Text(text) => text,
                 Attempt::Spent => continue,
+                Attempt::Declined => return self.settle_now(RunResult::Declined).await,
                 Attempt::Exhausted => return self.settle_now(RunResult::Exhausted).await,
                 Attempt::Refused(code) => return self.settle_now(RunResult::Refused(code)).await,
             };
@@ -400,9 +419,9 @@ impl Run<'_> {
             .map(|expectation| broker.aliases.issue(expectation).as_str().to_string())
             .collect();
         let notice = if issued.is_empty() {
-            "no linked references".to_string()
+            "\nno linked references\n".to_string()
         } else {
-            format!("linked references: {}", issued.join(", "))
+            format!("\nlinked references: {}\n", issued.join(", "))
         };
         let notice = broker
             .render_host_text(&notice)
@@ -584,15 +603,28 @@ impl Run<'_> {
             (InternalOutcome::Lost, _) => Err(InvestigationError::Supervisor("lost".to_string())),
             // The supervisor closed its sink on the answer (retained budget or replay cap) and recorded the run failed: the request was charged, the text is not admitted.
             (InternalOutcome::Failed, Some(Ok(_))) => Ok(Attempt::Spent),
-            // A cut answer is not a step even when its prefix parses; the model is told and the budget decides whether another is made.
-            (_, Some(Ok(disclosed)))
-                if disclosed.text.stop_reason == Some(StopReason::MaxTokens) =>
-            {
-                let broker = self.broker.lock().await;
-                push_notice(&broker, &mut self.transcript, None, RefusalCode::TooLarge);
-                Ok(Attempt::Spent)
-            }
-            (_, Some(Ok(disclosed))) => Ok(Attempt::Text(disclosed.text.text)),
+            // Only an affirmative completion admits the text as a step. A cut answer or an unknown stop is not one even when the text parses: the model is told and the budget decides whether another is made. A provider refusal is the model declining.
+            (_, Some(Ok(disclosed))) => match disclosed.text.stop_reason {
+                Some(StopReason::EndTurn | StopReason::StopSequence) => {
+                    Ok(Attempt::Text(disclosed.text.text))
+                }
+                Some(StopReason::Refusal) => Ok(Attempt::Declined),
+                Some(StopReason::MaxTokens) => {
+                    let broker = self.broker.lock().await;
+                    push_notice(&broker, &mut self.transcript, None, RefusalCode::TooLarge);
+                    Ok(Attempt::Spent)
+                }
+                Some(StopReason::Other) | None => {
+                    let broker = self.broker.lock().await;
+                    push_notice(
+                        &broker,
+                        &mut self.transcript,
+                        None,
+                        RefusalCode::Unsupported,
+                    );
+                    Ok(Attempt::Spent)
+                }
+            },
             (_, Some(Err(refusal))) => Ok(match refusal {
                 DisclosureRefusal::Unavailable => return Err(InvestigationError::Unavailable),
                 DisclosureRefusal::Cancelled => return Err(InvestigationError::Cancelled),
@@ -625,14 +657,20 @@ impl Run<'_> {
             .push(span);
     }
 
-    /// Appends a buffer to the transcript behind a host label naming its alias and prompt boundary, so the model can tell which bytes belong to which reference and cite by alias.
+    /// Appends a buffer to the transcript between host markers naming its alias, so the model can tell where each reference's bytes start and end and cite by alias. Every other host text frames itself on its own line.
     fn push_labeled(&mut self, broker: &EvidenceBroker, buffer: RenderedBuffer) {
-        if let Some(alias) = &buffer.tag().alias
-            && let Ok(label) = broker.render_host_text(&format!("\n[{}]\n", alias.as_str()))
-        {
+        let Some(alias) = buffer.tag().alias.clone() else {
+            self.transcript.push(buffer);
+            return;
+        };
+        let marker = |text: String| broker.render_host_text(&text).ok();
+        if let Some(label) = marker(format!("\n[{}]\n", alias.as_str())) {
             self.transcript.push(label);
         }
         self.transcript.push(buffer);
+        if let Some(end) = marker(format!("\n[/{}]\n", alias.as_str())) {
+            self.transcript.push(end);
+        }
     }
 }
 
@@ -819,8 +857,8 @@ fn push_notice(
     code: RefusalCode,
 ) {
     let text = match alias {
-        Some(alias) => format!("refused {}: {code}", alias.as_str()),
-        None => format!("refused: {code}"),
+        Some(alias) => format!("\nrefused {}: {code}\n", alias.as_str()),
+        None => format!("\nrefused: {code}\n"),
     };
     if let Ok(buffer) = broker.render_host_text(&text) {
         transcript.push(buffer);
@@ -842,13 +880,13 @@ fn render_hits(
         buffers.push(buffer);
         if let Some(origin) = shared_origin {
             buffers.push(broker.render_host_text(&format!(
-                "{} shares its origin with {}",
+                "\n{} shares its origin with {}\n",
                 alias.as_str(),
                 origin.as_str()
             ))?);
         }
     }
-    buffers.push(broker.render_host_text(summary)?);
+    buffers.push(broker.render_host_text(&format!("\n{summary}\n"))?);
     Ok(buffers)
 }
 
@@ -932,7 +970,6 @@ fn bind_proposal(
     disclosed_spans: &BTreeMap<String, Vec<std::ops::Range<u64>>>,
     outcome: ProposedOutcome,
 ) -> Result<ReviewProposal, Refusal> {
-    let tip = store.tip().map_err(|_| refuse(None, RefusalCode::Store))?;
     let mut cite =
         |citations: Vec<super::steps::Citation>| -> Result<Vec<EvidenceReference>, Refusal> {
             let mut references = Vec::with_capacity(citations.len());
@@ -978,12 +1015,24 @@ fn bind_proposal(
         ReviewTarget::Memory {
             object_id,
             source_revision,
-        } => ProposalTarget::Memory(kernel::CanonicalTarget {
-            object_id: object_id.clone(),
-            source_revision: *source_revision,
-            known_as_of: context.receipt.created_at_ms,
-            commit_token: tip,
-        }),
+        } => {
+            // The target is named by Kernel commit sequences: the snapshot this binding read and the last change the subject had seen by then, which is what a later mutation token check compares against.
+            let (tip, mut states) = store
+                .object_states(std::slice::from_ref(object_id))
+                .map_err(|_| refuse(None, RefusalCode::Store))?;
+            let state = states
+                .pop()
+                .flatten()
+                .ok_or_else(|| refuse(None, RefusalCode::NotFound))?;
+            ProposalTarget::Memory(kernel::CanonicalTarget {
+                object_id: object_id.clone(),
+                source_revision: *source_revision,
+                known_as_of: tip,
+                commit_token: state
+                    .latest_change_commit_seq
+                    .unwrap_or(state.object.created_commit_seq),
+            })
+        }
     };
     // The manifest is the inspection record this run can attest to: every alias and the byte ranges disclosed under it, in order.
     let mut manifest = Sha256::new();
