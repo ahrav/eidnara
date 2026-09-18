@@ -107,6 +107,13 @@ impl LlmExecutionBackend for OpenCodeBackend {
     }
 }
 
+/// OpenCode's config schema requires `limit.context` beside `limit.output` on a model entry and
+/// rejects the whole inline config without it, so the output cap alone could never be applied.
+/// The child runs one zero-tool prompt the daemon has already bounded to the model's window; a
+/// large declared context only keeps the child's own compaction out of that single run, while
+/// the provider still enforces the model's real limit.
+const OPENCODE_INLINE_CONTEXT_LIMIT: u64 = 1_000_000;
+
 fn inline_config(request: &BackendRequest) -> String {
     let mut agent = serde_json::json!({
         "mode": "primary",
@@ -119,11 +126,17 @@ fn inline_config(request: &BackendRequest) -> String {
     }
     let config = serde_json::json!({
         "agent": { OPENCODE_MODEL_EXECUTION_AGENT: agent },
+        // The single run must never compact or prune its own prompt; the transcript parser
+        // accepts only the zero-tool step, text, and finish events.
+        "compaction": { "auto": false, "prune": false },
         "provider": {
             &request.provider: {
                 "models": {
                     &request.model: {
-                        "limit": { "output": request.max_output_tokens },
+                        "limit": {
+                            "context": OPENCODE_INLINE_CONTEXT_LIMIT,
+                            "output": request.max_output_tokens,
+                        },
                     },
                 },
             },
@@ -452,5 +465,10 @@ mod tests {
             "leak {env:HOME} and {file:/etc/passwd}"
         );
         assert!(decoded["provider"]["{env:P}"]["models"]["{file:/x}"].is_object());
+        // OpenCode refuses a model entry whose `limit` lacks `context`; both bounds are present.
+        let limit = &decoded["provider"]["{env:P}"]["models"]["{file:/x}"]["limit"];
+        assert_eq!(limit["output"], 1);
+        assert_eq!(limit["context"], OPENCODE_INLINE_CONTEXT_LIMIT);
+        assert_eq!(decoded["compaction"]["auto"], false);
     }
 }
