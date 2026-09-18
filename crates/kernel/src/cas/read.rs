@@ -181,16 +181,11 @@ fn eligibility_for(
             }
         };
     };
-    if sensitivity == Sensitivity::Secret {
-        return ArtifactEligibility::Denied(EligibilityDeniedReason::Secret);
+    if let Some(reason) = sensitivity.denies_destination(destination) {
+        return ArtifactEligibility::Denied(reason);
     }
-    if destination == ArtifactDestination::Remote {
-        if sensitivity != Sensitivity::Normal {
-            return ArtifactEligibility::Denied(EligibilityDeniedReason::SensitiveRemote);
-        }
-        if egress == ProviderEgress::LocalOnly {
-            return ArtifactEligibility::Denied(EligibilityDeniedReason::ProviderRestricted);
-        }
+    if destination == ArtifactDestination::Remote && egress == ProviderEgress::LocalOnly {
+        return ArtifactEligibility::Denied(EligibilityDeniedReason::ProviderRestricted);
     }
     ArtifactEligibility::Allowed
 }

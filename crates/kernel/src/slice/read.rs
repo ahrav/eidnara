@@ -1,4 +1,4 @@
-use rusqlite::{Transaction, TransactionBehavior};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
 
 use super::{DecisionPayload, ObservationPayload};
 use crate::{KernelError, KernelStore, Sensitivity};
@@ -69,6 +69,24 @@ impl KernelStore {
         let snapshot = load_slice(&tx, requested)?;
         tx.commit().map_err(|_| KernelError::Io)?;
         Ok(snapshot)
+    }
+
+    /// The live observation of one object at `requested`, looked up by the object's unique id.
+    ///
+    /// Returns the same errors as [`Self::slice_as_of`].
+    pub fn observation_for_object_as_of(
+        &self,
+        object_id: &str,
+        requested: i64,
+    ) -> Result<Option<ObservationRow>, KernelError> {
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|_| KernelError::Io)?;
+        snapshot_tip(&tx, requested)?;
+        let row = load_observation_for_object(&tx, requested, object_id)?;
+        tx.commit().map_err(|_| KernelError::Io)?;
+        Ok(row)
     }
 
     /// Query work scales with `object_ids`, not the store's total decision count.
@@ -301,44 +319,68 @@ pub(super) fn load_observations(
     requested: i64,
 ) -> Result<Vec<ObservationRow>, KernelError> {
     let mut statement = tx
-        .prepare(
-            "SELECT observation_id,object_id,proposition_id,scope_id,anchor_id,evidence_id,
-                    observation_kind,observation_payload,observed_at,created_commit_seq,
-                    sensitivity_class
-             FROM observations
+        .prepare(&format!(
+            "{OBSERVATION_SELECT}
              WHERE created_commit_seq<=?1
                AND (invalidated_commit_seq IS NULL OR ?1<invalidated_commit_seq)
-             ORDER BY observation_id",
-        )
+             ORDER BY observation_id"
+        ))
         .map_err(|_| KernelError::Io)?;
     let rows = statement
-        .query_map([requested], |row| {
-            let payload = row.get::<_, Vec<u8>>(7)?;
-            let sensitivity = row.get::<_, String>(10)?;
-            Ok(ObservationRow {
-                observation_id: row.get(0)?,
-                object_id: row.get(1)?,
-                proposition_id: row.get(2)?,
-                scope_id: row.get(3)?,
-                anchor_id: row.get(4)?,
-                evidence_id: row.get(5)?,
-                observation_kind: row.get(6)?,
-                payload: serde_json::from_slice(&payload).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        payload.len(),
-                        rusqlite::types::Type::Blob,
-                        Box::new(error),
-                    )
-                })?,
-                observed_at: row.get(8)?,
-                created_commit_seq: row.get(9)?,
-                sensitivity: Sensitivity::from_stored(&sensitivity),
-            })
-        })
+        .query_map([requested], observation_from_row)
         .map_err(|_| KernelError::Io)?
         .collect::<rusqlite::Result<_>>()
         .map_err(classify_row_error)?;
     Ok(rows)
+}
+
+/// The one live observation of `object_id` at `requested`; `object_id` is unique on the table, so the primary key drives the lookup.
+fn load_observation_for_object(
+    tx: &Transaction<'_>,
+    requested: i64,
+    object_id: &str,
+) -> Result<Option<ObservationRow>, KernelError> {
+    tx.query_row(
+        &format!(
+            "{OBSERVATION_SELECT}
+             WHERE object_id=?2 AND created_commit_seq<=?1
+               AND (invalidated_commit_seq IS NULL OR ?1<invalidated_commit_seq)"
+        ),
+        rusqlite::params![requested, object_id],
+        observation_from_row,
+    )
+    .optional()
+    .map_err(classify_row_error)
+}
+
+const OBSERVATION_SELECT: &str =
+    "SELECT observation_id,object_id,proposition_id,scope_id,anchor_id,evidence_id,
+                    observation_kind,observation_payload,observed_at,created_commit_seq,
+                    sensitivity_class
+             FROM observations";
+
+fn observation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObservationRow> {
+    let payload = row.get::<_, Vec<u8>>(7)?;
+    let sensitivity = row.get::<_, String>(10)?;
+    Ok(ObservationRow {
+        observation_id: row.get(0)?,
+        object_id: row.get(1)?,
+        proposition_id: row.get(2)?,
+        scope_id: row.get(3)?,
+        anchor_id: row.get(4)?,
+        evidence_id: row.get(5)?,
+        observation_kind: row.get(6)?,
+        payload: serde_json::from_slice(&payload).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                payload.len(),
+                rusqlite::types::Type::Blob,
+                Box::new(error),
+            )
+        })?,
+        observed_at: row.get(8)?,
+        created_commit_seq: row.get(9)?,
+        sensitivity: Sensitivity::from_stored(&sensitivity),
+    })
 }
 
 // A `serde_json::Error` indicates non-transient stored-payload corruption; every

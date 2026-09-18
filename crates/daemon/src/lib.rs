@@ -13,6 +13,7 @@ pub(crate) mod conditional_note_evaluation;
 pub(crate) mod config;
 pub mod context_capabilities;
 pub mod coverage;
+pub mod curator;
 pub mod decay_render;
 pub mod dispatch;
 pub(crate) mod divergence;

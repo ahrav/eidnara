@@ -90,7 +90,8 @@ pub use consumer_obligations::{ConsumerObligation, ConsumerObligationError};
 pub use curator_hold::{
     CURATOR_EXECUTION_HOLD_KIND, CURATOR_REVIEW_HOLD_KIND, CuratorHold, CuratorHoldBinding,
     CuratorHoldError, CuratorHoldKind, CuratorHoldRefusal, HeldEvidence,
-    MAX_CURATOR_HOLD_REFERENCES, REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
+    MAX_CURATOR_HOLD_REFERENCES, MAX_RUN_BUFFER_BYTES, REVIEW_EXPIRY_MAX_MS, RunBufferMap,
+    RunBufferRefusal,
 };
 pub use current_input::{
     CurrentInputDescriptor, CurrentInputExpectation, CurrentInputGuard, EligibilityBinding,
