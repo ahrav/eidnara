@@ -573,12 +573,27 @@ pub enum CuratorNonadmissionCode {
     FactSetRejected { failure: ExtractionFailure },
     /// The Kernel refuses the accepted set as a review subject (a bound or a secret in fact text), so nothing can be staged for it.
     SubjectRefused,
+    /// A recorded code this build cannot read; only deserialization produces it.
+    Unrecognized,
+}
+
+/// Maps a recorded code this build cannot read to [`CuratorNonadmissionCode::Unrecognized`] so a session written by a later build still loads.
+fn recorded_nonadmission_code<'de, D>(deserializer: D) -> Result<CuratorNonadmissionCode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(
+        CuratorNonadmissionCode::deserialize(value)
+            .unwrap_or(CuratorNonadmissionCode::Unrecognized),
+    )
 }
 
 /// The latest recorded nonadmission, bound to the firing that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedNonadmission {
     pub firing_seq: u64,
+    #[serde(deserialize_with = "recorded_nonadmission_code")]
     pub code: CuratorNonadmissionCode,
 }
 
@@ -21075,6 +21090,33 @@ mod tests {
                 .pending_count,
             0
         );
+    }
+
+    /// Unknown nonadmission tags and fact-set failures deserialize as `Unrecognized` without failing durable-state loading.
+    #[test]
+    fn an_unrecognized_nonadmission_code_loads_without_failing_the_state() {
+        let known: HistorySummarizerDurableState = serde_json::from_str(
+            r#"{"curator_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"fact_set_rejected","failure":"invalid_span"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            known.curator_nonadmission.latest.map(|latest| latest.code),
+            Some(CuratorNonadmissionCode::FactSetRejected {
+                failure: ExtractionFailure::InvalidSpan,
+            })
+        );
+        for encoded in [
+            r#"{"curator_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"from_a_later_build"}}}}"#,
+            r#"{"curator_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"fact_set_rejected","failure":"from_a_later_build"}}}}"#,
+        ] {
+            let state: HistorySummarizerDurableState = serde_json::from_str(encoded).unwrap();
+            let latest = state.curator_nonadmission.latest.unwrap();
+            assert_eq!(latest.firing_seq, 3);
+            assert_eq!(latest.code, CuratorNonadmissionCode::Unrecognized);
+            assert_eq!(state.curator_nonadmission.count, 1);
+        }
+        let reencoded = serde_json::to_value(CuratorNonadmissionCode::Unrecognized).unwrap();
+        assert_eq!(reencoded, serde_json::json!({"code": "unrecognized"}));
     }
 
     /// Q31: the nonadmission code commits only with the history it accompanies, the count only grows, the latest reason is bound to the firing that produced it, and neither a failed publication nor a resent one moves them.
