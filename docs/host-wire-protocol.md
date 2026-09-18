@@ -350,7 +350,7 @@ Before filesystem work or handler bind, host MUST enforce these UTF-8 byte limit
 | `consumer_identity.launch_nonce` | 256 bytes; no NUL |
 | each consumer capability | 64 bytes; at most 32 entries |
 | `admission_facts` | at most 8,192 encoded bytes and 32 nesting levels |
-| `identity.credential_fingerprints` | optional object; keys only `anthropic`, `google`, `openai`; at most 3 entries; each value exactly 64 lowercase hex |
+| `identity.credential_fingerprints` | optional object; keys only `amazon-bedrock`, `anthropic`, `google`, `openai`; at most 4 entries; each value exactly 64 lowercase hex |
 
 Malformed JSON, duplicate recognized fields, invalid UTF-8, invalid field type, excessive nesting, out-of-range field, or relative project root receives terminal `invalid_control_request` for that correlation. Unknown fields are ignored for published serde forward compatibility but still count toward body and nesting limits. `admission_facts` size is its compact UTF-8 JSON serialization; collection depth is 1 at the subtree root and increases for each nested object/array. No handler callback or filesystem work runs on rejection. `BindIdentity` still grants no authority. Host MAY verify an absolute project root against its real filesystem when handler semantics require it; caller and handler MUST NOT derive privilege from existence or path spelling. Error `code` is stable; `message` is diagnostic unless this document states exact text.
 

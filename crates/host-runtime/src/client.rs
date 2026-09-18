@@ -3243,7 +3243,7 @@ fn check_route_identity(target: &RouteTarget, identity: &RouteIdentity) -> Resul
     }
     for (provider, fingerprint) in &identity.credential_fingerprints {
         // The host accepts exactly these providers and 64 lowercase hex characters.
-        if !matches!(provider.as_str(), "anthropic" | "google" | "openai")
+        if !crate::control::CREDENTIAL_FINGERPRINT_PROVIDERS.contains(&provider.as_str())
             || fingerprint.len() != 64
             || !fingerprint
                 .bytes()

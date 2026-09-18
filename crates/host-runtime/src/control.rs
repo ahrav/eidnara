@@ -55,7 +55,11 @@ pub(crate) const MAX_SESSION_LEN: usize = 256;
 pub(crate) const MAX_LAUNCH_NONCE_LEN: usize = 256;
 pub(crate) const MAX_CAPABILITY_LEN: usize = 64;
 pub(crate) const MAX_CAPABILITIES: usize = 32;
-pub(crate) const MAX_CREDENTIAL_FINGERPRINTS: usize = 3;
+/// One entry per model-execution provider the host admits: `amazon-bedrock`, `anthropic`, `google`, `openai`.
+pub(crate) const MAX_CREDENTIAL_FINGERPRINTS: usize = 4;
+/// Provider keys `identity.credential_fingerprints` may carry, matching `EnvSnapshot::SUPPORTED_PROVIDERS`.
+pub(crate) const CREDENTIAL_FINGERPRINT_PROVIDERS: [&str; 4] =
+    ["amazon-bedrock", "anthropic", "google", "openai"];
 pub(crate) const MAX_ADMISSION_FACTS_BYTES: usize = 8192;
 pub(crate) const MAX_ADMISSION_FACTS_DEPTH: usize = 32;
 /// Whole-request nesting bound: the root object plus a maximal
@@ -271,7 +275,7 @@ fn parse_route_open(
             }
             let mut out = BTreeMap::new();
             for (provider, value) in entries {
-                if !matches!(provider.as_str(), "anthropic" | "google" | "openai") {
+                if !CREDENTIAL_FINGERPRINT_PROVIDERS.contains(&provider.as_str()) {
                     return invalid("credential fingerprint provider is unsupported");
                 }
                 let Some(fingerprint) = value.as_str() else {
@@ -881,6 +885,7 @@ mod tests {
     fn credential_fingerprints_are_closed_and_bounded() {
         let mut request = minimal_route_open();
         request["identity"]["credential_fingerprints"] = serde_json::json!({
+            "amazon-bedrock": "0".repeat(64),
             "anthropic": "a".repeat(64),
             "openai": "b".repeat(64),
         });
@@ -897,10 +902,11 @@ mod tests {
             serde_json::json!({"anthropic": "A".repeat(64)}),
             serde_json::json!({"anthropic": "a".repeat(63)}),
             serde_json::json!({
-                "anthropic": "a".repeat(64),
-                "google": "b".repeat(64),
-                "openai": "c".repeat(64),
-                "extra": "d".repeat(64),
+                "amazon-bedrock": "a".repeat(64),
+                "anthropic": "b".repeat(64),
+                "google": "c".repeat(64),
+                "openai": "d".repeat(64),
+                "extra": "e".repeat(64),
             }),
         ] {
             let mut request = minimal_route_open();
