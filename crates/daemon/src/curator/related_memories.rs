@@ -12,7 +12,9 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{KernelStore, LiveDescriptor};
 
-use super::broker::{Alias, EvidenceBroker, Probed, ReferenceExpectation, Refusal, RefusalCode};
+use super::broker::{
+    Alias, EvidenceBroker, Probed, ReferenceExpectation, Refusal, RefusalCode, RenderedBuffer,
+};
 use super::{Completeness, EXCERPT_LEAD_BYTES, MAX_EXCERPT_BYTES, excerpt_window};
 
 /// Hits per page; one page fills at most one model batch.
@@ -43,7 +45,8 @@ pub struct RelatedHit {
     pub alias: Alias,
     /// Half-open byte span of the excerpt inside the referenced artifact, on UTF-8 boundaries.
     pub span: Range<u64>,
-    pub excerpt: Vec<u8>,
+    /// The excerpt as the broker rendered, checked, tagged, and charged it.
+    pub buffer: RenderedBuffer,
     /// The alias an earlier disclosure of the same originating decision was issued under, when there is one.
     pub shared_origin: Option<Alias>,
 }
@@ -304,7 +307,7 @@ impl RelatedMemoryDiscovery {
             hit: RelatedHit {
                 alias,
                 span,
-                excerpt: read.buffer.bytes,
+                buffer: read.buffer,
                 shared_origin,
             },
             probed_bytes,

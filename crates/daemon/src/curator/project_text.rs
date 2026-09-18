@@ -22,8 +22,8 @@ use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 
 use super::broker::{
-    Alias, EvidenceBroker, EvidenceRead, ReferenceExpectation, Refusal, RefusalCode, check_render,
-    check_whole_artifact, hold_refusal,
+    Alias, EvidenceBroker, EvidenceRead, ReferenceExpectation, Refusal, RefusalCode,
+    RenderedBuffer, check_render, check_whole_artifact, hold_refusal,
 };
 use super::{Completeness, excerpt_window};
 
@@ -95,7 +95,8 @@ pub enum SearchQuery<'a> {
 pub struct TextHit {
     pub alias: Alias,
     pub span: Range<u64>,
-    pub excerpt: Vec<u8>,
+    /// The excerpt as the broker rendered, checked, tagged, and charged it.
+    pub buffer: RenderedBuffer,
 }
 
 #[derive(Debug)]
@@ -307,7 +308,7 @@ impl ProjectText {
                 Ok(read) => outcome.hits.push(TextHit {
                     alias,
                     span,
-                    excerpt: read.buffer.bytes,
+                    buffer: read.buffer,
                 }),
                 Err(refusal) if refusal.code.is_capacity() => return capacity(outcome, refusal),
                 Err(_) => outcome.withheld = true,

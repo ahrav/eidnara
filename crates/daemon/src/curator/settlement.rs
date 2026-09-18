@@ -30,11 +30,13 @@ pub struct TaskClaim {
     pub slot: i64,
 }
 
-/// What the run produced: a proposal to publish, or the model's own decision not to conclude.
+/// What the run produced: a proposal to publish, the model's own decision not to conclude, a run that spent its rounds or requests without concluding, or a run the broker refused before the model saw its subject.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunResult {
     Proposal(Box<ReviewProposal>),
     Declined,
+    Exhausted,
+    Refused(RefusalCode),
 }
 
 /// How one settlement ended in the Memory Store.
@@ -134,6 +136,15 @@ impl Settlement<'_> {
         let proposal = match result {
             RunResult::Declined => {
                 return content_free(ContentFree::Abstained(AbstainReason::ModelDeclined));
+            }
+            RunResult::Exhausted => {
+                return content_free(ContentFree::Abstained(AbstainReason::BudgetExhausted));
+            }
+            RunResult::Refused(code) => {
+                return match Verdict::from_refusal(code) {
+                    Verdict::Abstain(reason) => content_free(ContentFree::Abstained(reason)),
+                    Verdict::Store(error) => Err(SettlementError::Store(error)),
+                };
             }
             RunResult::Proposal(proposal) => proposal,
         };
@@ -299,6 +310,7 @@ impl Settlement<'_> {
         };
         match recovered {
             Some((review, hold)) => self.release_review_hold(run, review, hold),
+            None if broker.binding().hold_id.is_empty() => {}
             None => match self
                 .store
                 .release_execution_hold(&broker.binding().hold_id, run)
@@ -585,9 +597,11 @@ impl Verdict {
             RefusalCode::PolicyBlocked => Self::Abstain(AbstainReason::OwnerSensitive),
             RefusalCode::Scope => Self::Abstain(AbstainReason::WrongScope),
             RefusalCode::RenderCheck => Self::Abstain(AbstainReason::Secret),
-            RefusalCode::UnknownAlias
-            | RefusalCode::InvalidRange
-            | RefusalCode::ExpectationChanged
+            // A citation the coordinator could not bind names an alias never disclosed or bytes never shown: the model cited what it did not see, and nothing about the evidence changed.
+            RefusalCode::UnknownAlias | RefusalCode::InvalidRange => {
+                Self::Abstain(AbstainReason::UndisclosedCitation)
+            }
+            RefusalCode::ExpectationChanged
             | RefusalCode::OriginRevoked
             | RefusalCode::HoldInvalid
             | RefusalCode::Undecodable

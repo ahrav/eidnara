@@ -621,9 +621,12 @@ fn search_matches_paths_names_and_content_within_bounds_and_discloses_excerpts_o
         "the Git store and the oversized file are withheld"
     );
     for hit in &content.hits {
-        assert!(text_of(&hit.excerpt).contains("bun"));
+        assert!(text_of(hit.buffer.bytes()).contains("bun"));
         assert!(hit.span.end - hit.span.start <= MAX_EXCERPT_BYTES as u64);
-        assert_eq!(hit.span.end - hit.span.start, hit.excerpt.len() as u64);
+        assert_eq!(
+            hit.span.end - hit.span.start,
+            hit.buffer.bytes().len() as u64
+        );
     }
     assert!(
         fixture.store.tip().unwrap() > tip,
@@ -896,7 +899,7 @@ fn an_empty_file_that_matches_by_name_is_a_hit_with_an_empty_excerpt() {
         "an empty match is a hit, not a refusal"
     );
     assert_eq!(outcome.hits[0].span, 0..0);
-    assert!(outcome.hits[0].excerpt.is_empty());
+    assert!(outcome.hits[0].buffer.bytes().is_empty());
     assert!(!outcome.withheld);
     assert_eq!(outcome.completeness, Completeness::Complete);
     assert_eq!(

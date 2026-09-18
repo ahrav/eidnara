@@ -275,7 +275,7 @@ pub struct Refusal {
     pub code: RefusalCode,
 }
 
-fn refuse(alias: Option<&Alias>, code: RefusalCode) -> Refusal {
+pub(crate) fn refuse(alias: Option<&Alias>, code: RefusalCode) -> Refusal {
     Refusal {
         alias: alias.cloned(),
         code,
@@ -322,6 +322,15 @@ impl RenderedBuffer {
     /// The broker that rendered this buffer.
     pub fn broker(&self) -> BrokerId {
         self.broker
+    }
+
+    /// The same render for a later body of the same run. The caller charges the bytes again through [`InvestigationAccounting::charge_render`] before the copy is sent (Q22), so a resend costs what the first render did.
+    pub fn resend(&self) -> Self {
+        Self {
+            bytes: self.bytes.clone(),
+            tag: self.tag.clone(),
+            broker: self.broker,
+        }
     }
 }
 
@@ -424,6 +433,11 @@ impl DisclosureLedger {
             .or_default()
             .push(rendered);
         self.union.insert(member);
+    }
+
+    /// The ranges rendered under `alias`, in disclosure order; empty for an alias never disclosed.
+    pub fn rendered(&self, alias: &Alias) -> &[Range<u64>] {
+        self.rendered.get(alias).map_or(&[], Vec::as_slice)
     }
 
     /// Whether `start..end` names at least one byte and lies within one range rendered under `alias`.
@@ -558,6 +572,11 @@ impl InvestigationAccounting {
         Ok(())
     }
 
+    /// Returns a charge taken for a send that never left the host, so the bound counts only bytes a model could have seen.
+    pub fn refund_render(&mut self, bytes: u64) {
+        self.model_visible_bytes = self.model_visible_bytes.saturating_sub(bytes);
+    }
+
     pub fn issued_inspections(&self) -> usize {
         self.issued_inspections
     }
@@ -609,6 +628,7 @@ pub struct EvidenceRead {
 #[derive(Debug, Clone)]
 pub struct RunBinding {
     pub hold: CuratorHoldBinding,
+    /// Empty when the run acquired no execution hold; settlement then releases none.
     pub hold_id: String,
     /// Where disclosed bytes go. A remote model admits only `Normal`, remote-allowed evidence; unproven sources stay policy-blocked there.
     pub destination: ArtifactDestination,
@@ -688,7 +708,7 @@ pub struct EvidenceBroker {
 
 /// A test hook given the store the broker is reading from.
 #[cfg(feature = "test-support")]
-pub type AfterLoadHook = Box<dyn FnMut(&KernelStore)>;
+pub type AfterLoadHook = Box<dyn FnMut(&KernelStore) + Send + Sync>;
 
 impl EvidenceBroker {
     /// Refuses a hold binding whose project digest is not a digest; every other check on it is the Kernel's.
