@@ -1591,14 +1591,7 @@ fn a_seated_observation_receipt_cannot_stand_in_for_the_capture_detail() {
     fixture.write("a.txt", body);
     let digest = format!("{:x}", Sha256::digest(body));
     let hold = fixture.hold_binding();
-    let evidence_id = format!(
-        "curcap:{}:{}:{}:{}:{digest}:{:x}",
-        hold.project_digest,
-        hold.memstore_incarnation,
-        hold.subject,
-        hold.generation,
-        Sha256::digest(b"a.txt")
-    );
+    let evidence_id = kernel::local_file_capture_id(&hold, &digest, "a.txt");
     // A caller seats a receipt under the capture's observation intent before the run captures the file.
     fixture
         .store
@@ -1994,15 +1987,10 @@ fn a_capture_whose_detail_cannot_be_recorded_leaves_no_evidence_behind() {
 
 /// The capture identity `capture` derives for `relative` holding `body` under the fixture's run.
 fn predicted_capture_id(fixture: &Fixture, relative: &str, body: &[u8]) -> String {
-    let hold = fixture.hold_binding();
-    format!(
-        "curcap:{}:{}:{}:{}:{:x}:{:x}",
-        hold.project_digest,
-        hold.memstore_incarnation,
-        hold.subject,
-        hold.generation,
-        Sha256::digest(body),
-        Sha256::digest(relative.as_bytes())
+    kernel::local_file_capture_id(
+        &fixture.hold_binding(),
+        &format!("{:x}", Sha256::digest(body)),
+        relative,
     )
 }
 
@@ -2137,4 +2125,126 @@ fn a_run_whose_hold_has_ended_may_not_inspect() {
             .code,
         RefusalCode::HoldInvalid
     );
+}
+
+#[test]
+fn only_the_run_that_owns_a_live_hold_may_abandon_its_own_capture() {
+    let fixture = Fixture::open();
+    let body = b"a capture only its run may abandon";
+    fixture.write("a.txt", body);
+    let digest = format!("{:x}", Sha256::digest(body));
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+        .unwrap();
+    // Another run's binding derives another identity: nothing of this run's is found.
+    let other = fixture.broker_of_run("job-2");
+    assert_eq!(
+        fixture.store.abandon_local_file_capture(
+            other.hold_id(),
+            &other.binding().hold,
+            &digest,
+            "a.txt"
+        ),
+        Err(kernel::KernelError::NotFound)
+    );
+    // This run's identity under a hold it does not own, or one that has ended, is refused.
+    assert_eq!(
+        fixture.store.abandon_local_file_capture(
+            other.hold_id(),
+            &fixture.hold_binding(),
+            &digest,
+            "a.txt"
+        ),
+        Err(kernel::KernelError::Conflict)
+    );
+    // The owning run cannot abandon what its hold still pins.
+    assert_eq!(
+        fixture.store.abandon_local_file_capture(
+            broker.hold_id(),
+            &fixture.hold_binding(),
+            &digest,
+            "a.txt"
+        ),
+        Err(kernel::KernelError::Conflict)
+    );
+    fixture
+        .store
+        .release_execution_hold(broker.hold_id(), &fixture.hold_binding())
+        .unwrap();
+    assert_eq!(
+        fixture.store.abandon_local_file_capture(
+            broker.hold_id(),
+            &fixture.hold_binding(),
+            &digest,
+            "a.txt"
+        ),
+        Err(kernel::KernelError::Conflict),
+        "a released hold proves nothing"
+    );
+    assert_eq!(fixture.capture_rows().len(), 1, "the capture is untouched");
+}
+
+#[test]
+fn a_reused_capture_may_not_outlive_the_inspections_reference() {
+    let fixture = Fixture::open();
+    let body = b"bytes whose row was given a later deadline";
+    fixture.write("a.txt", body);
+    let evidence_id = predicted_capture_id(&fixture, "a.txt", body);
+    let digest = format!("{:x}", Sha256::digest(body));
+    // A caller seats the capture's row and a matching detail, with an acquisition reference well past the inspection's.
+    fixture
+        .store
+        .ingest_exact_artifact(ArtifactIngestRequest {
+            intent: CommitIntent {
+                producer: "curator".to_string(),
+                operation_key: evidence_id.clone(),
+                request_digest: digest.clone(),
+                actor: "curator".to_string(),
+                cause: "project_text_capture".to_string(),
+            },
+            payload: body.to_vec(),
+            evidence_id: evidence_id.clone(),
+            object_id: format!("curcapobj:{evidence_id}"),
+            object_kind: "evidence".to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: kernel::LOCAL_FILE_SOURCE_KIND.to_string(),
+            source_id: "a.txt".to_string(),
+            source_revision: 1,
+            media_type: "text/plain; charset=utf-8".to_string(),
+            retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+            retain_until: Some(fixture.now + 10 * HOUR_MS),
+            asserted_sensitivity: Sensitivity::Sensitive,
+            provider_egress: ProviderEgress::LocalOnly,
+            provenance: None,
+        })
+        .unwrap();
+    fixture
+        .store
+        .commit(intent("seat-detail"), |envelope| {
+            envelope.record_local_file_capture(&kernel::LocalFileCaptureRequest {
+                project_digest: PROJECT,
+                relative_path: "a.txt",
+                captured_at: 1,
+                domain_id: DOMAIN,
+                scope_id: None,
+                evidence_id: &evidence_id,
+                artifact_digest: &digest,
+                byte_length: u64::try_from(body.len()).unwrap(),
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let protected = fixture.protected();
+    let mut text = fixture.text(&protected);
+    let mut broker = fixture.broker(ArtifactDestination::Local);
+    assert_eq!(
+        text.read(&fixture.store, &mut broker, "a.txt", None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Store,
+        "a row that would outlive the inspection's reference is not this run's capture"
+    );
+    assert_eq!(broker.ledger.disclosed().count(), 0);
 }

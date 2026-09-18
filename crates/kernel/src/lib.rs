@@ -112,7 +112,7 @@ pub use envelope::{
 pub use facts::{ArtifactBudgetFacts, KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};
 pub use local_file::{
     LOCAL_FILE_DETAIL_VERSION, LOCAL_FILE_KIND, LOCAL_FILE_SOURCE_KIND, LocalFileCaptureRequest,
-    LocalFileDetail, MAX_EXPIRED_CAPTURES_PER_CALL,
+    LocalFileDetail, MAX_EXPIRED_CAPTURES_PER_CALL, local_file_capture_id,
 };
 #[cfg(feature = "test-support")]
 pub use open::OpenPhase;

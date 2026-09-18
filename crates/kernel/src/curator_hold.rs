@@ -177,7 +177,7 @@ impl CuratorHoldBinding {
     }
 }
 
-struct StoredHold {
+pub(crate) struct StoredHold {
     expires_at: i64,
     released: bool,
     purge_degraded: bool,
@@ -481,7 +481,7 @@ impl KernelStore {
         Ok(())
     }
 
-    fn check_incarnation(
+    pub(crate) fn check_incarnation(
         &self,
         tx: &Transaction<'_>,
         binding: &CuratorHoldBinding,
@@ -767,7 +767,7 @@ fn load_hold(
     .map_err(sqlite)
 }
 
-fn load_valid_hold(
+pub(crate) fn load_valid_hold(
     tx: &Transaction<'_>,
     hold_id: &str,
     kind: CuratorHoldKind,

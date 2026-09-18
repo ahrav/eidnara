@@ -258,6 +258,10 @@ impl ProjectText {
             // Deliverability is decided before any literal is applied, for every query kind: a file that cannot be read or rendered is withheld whether or not its path, name, or text would have matched. The read charges the bytes it takes to `scanned`, accepted or refused.
             let Ok(file) = self.read_file(&relative, &probed, &mut scanned) else {
                 outcome.withheld = true;
+                // A read cut off at the scan bound, because the file outgrew its probe, ends the search as the bound would have.
+                if scanned > MAX_SCAN_BYTES {
+                    return Ok(finish(outcome, Completeness::ProbeBound));
+                }
                 continue;
             };
             let text = String::from_utf8_lossy(&file.bytes);
@@ -436,16 +440,8 @@ impl ProjectText {
         let captured = match self.captured.get(&key) {
             Some(captured) => captured.clone(),
             None => {
-                // The capture's identity is the run's, the bytes, and the path: two projects, two MemoryStore incarnations, two runs, or two paths with identical bytes are distinct captures, each with its own detail and acquisition reference over one stored object. The Kernel incarnation is not part of it because the hold binding already refuses another Kernel store. The path is hashed so the id stays within the store's field bound.
-                let hold = &self.binding.hold;
-                let evidence_id = format!(
-                    "curcap:{}:{}:{}:{}:{digest}:{:x}",
-                    hold.project_digest,
-                    hold.memstore_incarnation,
-                    hold.subject,
-                    hold.generation,
-                    Sha256::digest(file.relative.as_bytes())
-                );
+                let evidence_id =
+                    kernel::local_file_capture_id(&self.binding.hold, &digest, &file.relative);
                 let handle = store
                     .ingest_exact_artifact(ArtifactIngestRequest {
                         intent: intent(&evidence_id, &digest),
@@ -491,9 +487,15 @@ impl ProjectText {
                     Some(_) => return Err(refusal(RefusalCode::Store)),
                 };
                 // A fresh capture (no earlier run's detail cites it) that cannot be completed is abandoned through the store rather than left live until expiry: the detail and evidence are retired under a producer no caller can seat a receipt for. Best effort; an unheld row expires on its own if this fails.
+                let hold_id = broker.hold_id().to_string();
                 let abandon = |refused: Refusal| {
                     if !recorded {
-                        let _ = store.abandon_local_file_capture(&evidence_id);
+                        let _ = store.abandon_local_file_capture(
+                            &hold_id,
+                            &self.binding.hold,
+                            &digest,
+                            &file.relative,
+                        );
                     }
                     refused
                 };
@@ -529,12 +531,15 @@ impl ProjectText {
                 let held = broker
                     .hold_evidence(store, None, &evidence_id, &digest, now_ms)
                     .map_err(abandon)?;
+                // A reused row keeps its original acquisition reference, which may be earlier than this inspection's; one that would outlive the inspection's reference was not created by a run under it and is refused.
+                let retain_until = held
+                    .retain_until
+                    .filter(|retain_until| *retain_until <= self.binding.retain_until)
+                    .ok_or_else(|| refusal(RefusalCode::Store))?;
                 let captured = Captured {
                     evidence_id,
                     byte_length: held.byte_length,
-                    retain_until: held
-                        .retain_until
-                        .ok_or_else(|| refusal(RefusalCode::Store))?,
+                    retain_until,
                 };
                 self.captured.insert(key, captured.clone());
                 captured

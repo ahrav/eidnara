@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use super::cas::ProviderEgress;
+use super::curator_hold::{CuratorHoldBinding, CuratorHoldKind, load_valid_hold};
 use super::envelope::commit_with_writer;
 use super::redaction::identity;
 use super::review_staging::check_digest;
@@ -57,6 +58,22 @@ pub struct LocalFileCaptureRequest<'a> {
 /// Whether `object_id` names a local-file capture observation object.
 pub(crate) fn is_local_file_object(object_id: &str) -> bool {
     object_id.starts_with(OBJECT_ID_PREFIX)
+}
+
+/// The evidence id of the capture a run under `hold` takes of the file at `relative_path` whose whole buffer has `artifact_digest`. The identity is the run's (project, MemoryStore incarnation, subject, generation), the bytes, and the path, so two projects, two MemoryStore incarnations, two runs, or two paths with identical bytes are distinct captures over one stored object. The path is hashed so the id stays within the store's field bound; the Kernel incarnation is not part of it because a hold binding already refuses another Kernel store.
+pub fn local_file_capture_id(
+    hold: &CuratorHoldBinding,
+    artifact_digest: &str,
+    relative_path: &str,
+) -> String {
+    format!(
+        "curcap:{}:{}:{}:{}:{artifact_digest}:{:x}",
+        hold.project_digest,
+        hold.memstore_incarnation,
+        hold.subject,
+        hold.generation,
+        sha2::Sha256::digest(relative_path.as_bytes())
+    )
 }
 
 pub(crate) fn uses_local_file_namespace(spec: &ObservationSpec) -> bool {
@@ -189,12 +206,19 @@ impl KernelStore {
         Ok(retired)
     }
 
-    /// Retires a capture its run could not complete: the capture's own observations, then the evidence unless another live row cites it. For a run whose capture was ingested but could not be held or described, so the row does not stay live until its acquisition reference lapses. The commit runs under the reserved producer, so no caller can seat a receipt in its place. Idempotent for one evidence id.
+    /// Retires a capture its run could not complete: the capture's own observations, then the evidence unless another live row cites it. For a run whose capture was ingested but could not be held or described, so the row does not stay live until its acquisition reference lapses. The caller proves it is that run: `hold_id` must be a live execution hold owned by `binding`, and the capture is named by the inputs [`local_file_capture_id`] derives it from, so a run can abandon only captures of its own identity. The commit runs under the reserved producer, so no caller can seat a receipt in its place. Idempotent for one capture.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Conflict`] when a live hold pins the evidence (it belongs to a run and is left alone) or another live row cites it after its own observations are retired; [`KernelError::NotFound`] when no live Curator-capture evidence row has this id; and storage, lock, or fence errors otherwise.
-    pub fn abandon_local_file_capture(&self, evidence_id: &str) -> Result<(), KernelError> {
+    /// Returns [`KernelError::Conflict`] when the hold is not live and owned by `binding`, when a live hold pins the evidence (it belongs to a run and is left alone), or when another live row cites it after its own observations are retired; [`KernelError::NotFound`] when no live Curator-capture evidence row has the derived id; and storage, lock, or fence errors otherwise.
+    pub fn abandon_local_file_capture(
+        &self,
+        hold_id: &str,
+        binding: &CuratorHoldBinding,
+        artifact_digest: &str,
+        relative_path: &str,
+    ) -> Result<(), KernelError> {
+        let evidence_id = local_file_capture_id(binding, artifact_digest, relative_path);
         let mut writer = self.lock_writer()?;
         commit_with_writer(
             &mut writer,
@@ -204,12 +228,22 @@ impl KernelStore {
                     "{}{ABANDON_PRODUCER}",
                     CommitIntent::RESERVED_PRODUCER_PREFIX
                 ),
-                operation_key: evidence_id.to_string(),
+                operation_key: evidence_id.clone(),
                 request_digest: format!("{:x}", sha2::Sha256::digest(evidence_id.as_bytes())),
                 actor: ABANDON_PRODUCER.to_string(),
                 cause: "capture abandoned by its run".to_string(),
             },
             |envelope| {
+                self.check_incarnation(envelope.tx, binding)
+                    .map_err(|_| KernelError::Conflict)?;
+                load_valid_hold(
+                    envelope.tx,
+                    hold_id,
+                    CuratorHoldKind::Execution,
+                    binding,
+                    super::current_time_ms(),
+                )
+                .map_err(|_| KernelError::Conflict)?;
                 let (evidence_object, pinned): (String, bool) = envelope
                     .tx
                     .query_row_cached(
@@ -229,10 +263,10 @@ impl KernelStore {
                 if pinned {
                     return Err(KernelError::Conflict);
                 }
-                for observation in live_capture_observations(envelope, evidence_id)? {
+                for observation in live_capture_observations(envelope, &evidence_id)? {
                     envelope.retire_capture_observation(&observation)?;
                 }
-                if cited_elsewhere(envelope, evidence_id)? {
+                if cited_elsewhere(envelope, &evidence_id)? {
                     return Err(KernelError::Conflict);
                 }
                 envelope.retire_evidence(&evidence_object)?;
