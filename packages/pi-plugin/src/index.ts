@@ -321,7 +321,17 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         resolveProjectIdentityForSession(projectDir, config.allow_home_project) ?? "";
     info(`loaded | harness=pi | project=${projectIdentity} | dir=${projectDir}`);
     // Pi registers tools once per process, so compaction registration does not follow later /cd config changes.
-    const compactionOff = !isCompactionEnabled(config);
+    // The Pi plugin has no message transform yet: nothing folds history or serves `§N§` tags, so
+    // owning compaction would only cancel Pi's native compaction and leave the session to
+    // overflow. Until a Pi transform ships, Pi always runs in compaction-off mode: native
+    // compaction proceeds and `eidnara_reduce` is not registered, whatever `compaction.enabled` says.
+    const compactionRequested = isCompactionEnabled(config);
+    const compactionOff = true;
+    if (compactionRequested) {
+        info(
+            "compaction.enabled is not honored on Pi: no Pi context transform exists yet, so native Pi compaction proceeds and eidnara_reduce is not registered",
+        );
+    }
     setEidnaraReduceRegisteredGlobally(!compactionOff);
     // Pi configures child-runner extensions once at boot because the allowlist is user-tier only.
     // The returned merged config strips project-level subagent extension settings.
