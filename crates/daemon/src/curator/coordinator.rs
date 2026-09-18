@@ -29,9 +29,10 @@ use super::broker::{
     RenderedBuffer, RunBinding, refuse,
 };
 use super::disclosure::{
-    AttemptBinding, Disclosed, Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile,
-    prepare_body,
+    Disclosed, Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile, prepare_body,
 };
+use super::model_request::SendError;
+use super::model_response::StopReason;
 use super::project_text::{ProjectText, SearchQuery};
 use super::related_memories::RelatedMemoryDiscovery;
 use super::settlement::{RunResult, Settled, Settlement, SettlementError, TaskClaim};
@@ -42,6 +43,8 @@ pub const MAX_ROUNDS: usize = 4;
 pub const MAX_ACTIVE_PER_HOST: usize = 4;
 /// The supervisor key's task kind for Curator attempts.
 pub const CURATOR_TASK_KIND: &str = "curator_review";
+/// Retained supervisor keys one attempt probes past before launching under a colliding one.
+const MAX_KEY_PROBES: u32 = 64;
 
 /// Host text sent with every request: the step schema the model must answer in. Content-free and fixed; it never carries source text.
 const STEP_INSTRUCTIONS: &str = "Answer with exactly one JSON object {\"v\":1,\"step\":{...}} and nothing else. step.kind is one of: \"read_batch\" with \"operations\" (at most 8) where each operation is {\"op\":\"read_reference\",\"alias\":\"ref-N\",\"range\":{\"start\":0,\"end\":N}?}, {\"op\":\"find_related\",\"cursor\":\"...\"?}, {\"op\":\"search_project\",\"by\":\"path\"|\"name\"|\"content\",\"literal\":\"...\"}, or {\"op\":\"read_project\",\"path\":\"relative/path\",\"range\":{...}?}; \"propose\" with \"action\" (create|revise|retain|retire|no_change), \"new_text\"?, \"support\" and \"contradictions\" as lists of {\"alias\":\"ref-N\",\"range\":{...}?}, \"limitations\" as a list of strings, and \"uncertainty\" (low|medium|high); or \"abstain\" with \"reason\". Cite only aliases you were given. Zero search results never prove absence.";
@@ -95,7 +98,7 @@ pub struct Coordinator {
     pub credential_id: String,
     pub permits: Arc<InvestigationPermits>,
     pub now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
-    /// Issued inspections per job; production passes [`super::broker::MAX_ISSUED_INSPECTIONS`], tests lower it (Q23).
+    /// Issued inspections per job; production passes [`super::broker::MAX_ISSUED_INSPECTIONS`], tests lower it (Q23). Applied only under the `test-support` feature.
     pub inspection_limit: usize,
 }
 
@@ -141,6 +144,8 @@ pub enum InvestigationError {
 /// What one supervised attempt yielded.
 enum Attempt {
     Text(String),
+    /// The provider reported the model refused to answer; the run settles as the model declining.
+    Declined,
     /// The request failed or was refused after being charged; the round is spent.
     Spent,
     /// The ledger, the cutoff, or the byte budget admits no further attempt.
@@ -162,17 +167,19 @@ impl Coordinator {
             .try_acquire(project)
             .ok_or(InvestigationError::Capacity)?;
         let prepared = tokio::task::block_in_place(|| self.prepare(&context))?;
+        let hold_id = prepared.hold_id.clone();
         let broker = EvidenceBroker::new(
             RunBinding {
-                project: kernel::ProjectScope::new(project)
-                    .map_err(|_| InvestigationError::Kernel(RefusalCode::Scope))?,
                 hold: prepared.hold_binding.clone(),
                 hold_id: prepared.hold_id,
                 destination: kernel::ArtifactDestination::Remote,
             },
             context.question,
         )
-        .with_inspection_limit(self.inspection_limit);
+        .map_err(|_| InvestigationError::Kernel(RefusalCode::Scope))?;
+        // The ceiling is lowered only under `test-support`; production runs at the broker's own bound whatever the field says.
+        #[cfg(feature = "test-support")]
+        let broker = broker.with_inspection_limit(self.inspection_limit);
         // The cutoff as a monotonic instant: the ledger's absolute millisecond mapped through the same clock the run reads.
         let remaining = context
             .receipt
@@ -190,8 +197,16 @@ impl Coordinator {
             discovery: RelatedMemoryDiscovery::new(""),
             cutoff,
         };
-        run.investigate(prepared.subject, prepared.starting, cancel)
-            .await
+        let settled = run
+            .investigate(prepared.subject, prepared.starting, cancel)
+            .await;
+        // Settlement releases the hold on every settled run. A run that exits unsettled leaves the receipt open for a retry that acquires its own hold, so this one is released now instead of holding project capacity until the cutoff.
+        if settled.is_err() && !hold_id.is_empty() {
+            let _ = self
+                .store
+                .release_execution_hold(&hold_id, &run.hold_binding);
+        }
+        settled
     }
 
     /// Resolves the subject and linked references and acquires the execution hold over their evidence. The hold is taken only for a run that will read: the Kernel refuses a hold expiring at or before its own clock, a refused subject sends nothing, and an evidence-free staged subject has nothing to protect. Each of those runs settles without a hold, so an empty `hold_id` reaches the broker for them.
@@ -280,6 +295,10 @@ impl Run<'_> {
         starting: Vec<ReferenceExpectation>,
         cancel: &CancellationToken,
     ) -> Result<Settled, InvestigationError> {
+        // A run its owner already stopped settles nothing, not even an opening refusal: the receipt stays with the lifecycle owner.
+        if cancel.is_cancelled() {
+            return Err(InvestigationError::Cancelled);
+        }
         let now = (self.coordinator.now_ms)();
         // The subject is the first disclosure; a subject the policy refuses is the abstention AE1 names, settled without any request. At the cutoff not even that read is admitted.
         {
@@ -309,6 +328,7 @@ impl Run<'_> {
             let text = match self.attempt(attempt_index, cancel).await? {
                 Attempt::Text(text) => text,
                 Attempt::Spent => continue,
+                Attempt::Declined => return self.settle_now(RunResult::Declined).await,
                 Attempt::Exhausted => return self.settle_now(RunResult::Exhausted).await,
                 Attempt::Refused(code) => return self.settle_now(RunResult::Refused(code)).await,
             };
@@ -398,9 +418,9 @@ impl Run<'_> {
             .map(|expectation| broker.aliases.issue(expectation).as_str().to_string())
             .collect();
         let notice = if issued.is_empty() {
-            "no linked references".to_string()
+            "\nno linked references\n".to_string()
         } else {
-            format!("linked references: {}", issued.join(", "))
+            format!("\nlinked references: {}\n", issued.join(", "))
         };
         let notice = broker
             .render_host_text(&notice)
@@ -463,17 +483,21 @@ impl Run<'_> {
                 &guard,
                 &coordinator.profile,
                 system,
-                self.transcript.clone(),
+                self.transcript.iter().map(RenderedBuffer::resend).collect(),
             ) {
                 Ok(prepared) => prepared,
-                Err(DisclosureRefusal::Send { .. }) => {
+                // A body over the wire bound spends the budget; a profile the encoder refuses is a configuration fault that leaves the receipt open for a corrected deployment.
+                Err(DisclosureRefusal::Send { error, .. }) => {
                     guard.accounting.refund_render(resend);
-                    return Ok(Attempt::Exhausted);
+                    return match error {
+                        SendError::RequestTooLarge => Ok(Attempt::Exhausted),
+                        _ => Err(InvestigationError::Unavailable),
+                    };
                 }
                 Err(_) => return Err(InvestigationError::Kernel(RefusalCode::Unsupported)),
             }
         };
-        let key = InternalRunKey {
+        let mut key = InternalRunKey {
             task_kind: CURATOR_TASK_KIND.to_string(),
             project_digest: self.hold_binding.project_digest.clone(),
             job_id: self.hold_binding.subject.clone(),
@@ -482,6 +506,12 @@ impl Run<'_> {
             kernel_incarnation: self.hold_binding.kernel_incarnation.clone(),
             memstore_incarnation: self.hold_binding.memstore_incarnation.clone(),
         };
+        // An earlier run of this generation in the same daemon left its attempts retained under their keys, whether or not they reached the ledger; this attempt takes the first key past them. The probe is bounded, and a launch that still collides is refused as before.
+        let mut probes = 0;
+        while probes < MAX_KEY_PROBES && coordinator.supervisor.internal_run_exists(&key) {
+            key.attempt = key.attempt.saturating_add(1);
+            probes += 1;
+        }
         let cutoff = self.cutoff;
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(CURATOR_ATTEMPT_MAX_MS as u64))
@@ -496,13 +526,7 @@ impl Run<'_> {
             let sender = Arc::clone(&coordinator.sender);
             let approval = coordinator.approval.clone();
             let now_ms = Arc::clone(&coordinator.now_ms);
-            let binding = AttemptBinding {
-                project: self.hold_binding.project_digest.clone(),
-                causal_identity: self.hold_binding.subject.clone(),
-                generation: self.hold_binding.generation,
-                claim_id: self.context.claim.claim_id.clone(),
-                credential_id: coordinator.credential_id.clone(),
-            };
+            let claim_id = self.context.claim.claim_id.clone();
             let outcome = Arc::clone(&outcome);
             move |sink: EventSink, token: CancellationToken| {
                 Box::pin(async move {
@@ -513,19 +537,24 @@ impl Run<'_> {
                         broker: &broker,
                         sender: &sender,
                         approval: approval.as_ref(),
-                        binding: &binding,
+                        claim_id: &claim_id,
                         now_ms: &move || now_ms(),
                     };
                     let disclosed = disclosure.disclose(&prepared, &token, deadline).await;
                     let terminal = match &disclosed {
                         Ok(disclosed) => {
+                            // A provider stop at the token limit is a cut answer, not a completed one; the run record says so.
+                            let finish_reason =
+                                if disclosed.text.stop_reason == Some(StopReason::MaxTokens) {
+                                    FinishReason::Length
+                                } else {
+                                    FinishReason::Completed
+                                };
                             sink.emit(BackendEvent::AssistantText {
                                 text: disclosed.text.text.clone(),
-                                finish_reason: Some(FinishReason::Completed),
+                                finish_reason: Some(finish_reason),
                             });
-                            BackendTerminal::Completed {
-                                finish_reason: FinishReason::Completed,
-                            }
+                            BackendTerminal::Completed { finish_reason }
                         }
                         Err(refusal) => BackendTerminal::Failed(BackendError {
                             class: ErrorClass::Permanent,
@@ -575,7 +604,30 @@ impl Run<'_> {
                 Err(InvestigationError::Cancelled)
             }
             (InternalOutcome::Lost, _) => Err(InvestigationError::Supervisor("lost".to_string())),
-            (_, Some(Ok(disclosed))) => Ok(Attempt::Text(disclosed.text.text)),
+            // The supervisor closed its sink on the answer (retained budget or replay cap) and recorded the run failed: the request was charged, the text is not admitted.
+            (InternalOutcome::Failed, Some(Ok(_))) => Ok(Attempt::Spent),
+            // Only an affirmative completion admits the text as a step. A cut answer or an unknown stop is not one even when the text parses: the model is told and the budget decides whether another is made. A provider refusal is the model declining.
+            (_, Some(Ok(disclosed))) => match disclosed.text.stop_reason {
+                Some(StopReason::EndTurn | StopReason::StopSequence) => {
+                    Ok(Attempt::Text(disclosed.text.text))
+                }
+                Some(StopReason::Refusal) => Ok(Attempt::Declined),
+                Some(StopReason::MaxTokens) => {
+                    let broker = self.broker.lock().await;
+                    push_notice(&broker, &mut self.transcript, None, RefusalCode::TooLarge);
+                    Ok(Attempt::Spent)
+                }
+                Some(StopReason::Other) | None => {
+                    let broker = self.broker.lock().await;
+                    push_notice(
+                        &broker,
+                        &mut self.transcript,
+                        None,
+                        RefusalCode::Unsupported,
+                    );
+                    Ok(Attempt::Spent)
+                }
+            },
             (_, Some(Err(refusal))) => Ok(match refusal {
                 DisclosureRefusal::Unavailable => return Err(InvestigationError::Unavailable),
                 DisclosureRefusal::Cancelled => return Err(InvestigationError::Cancelled),
@@ -585,10 +637,14 @@ impl Run<'_> {
                 DisclosureRefusal::Ledger(reason)
                 | DisclosureRefusal::ChargedNotDispatched { reason, .. } => ledger_verdict(reason)?,
                 DisclosureRefusal::DestinationNotRemote
+                | DisclosureRefusal::BrokerMismatch
+                | DisclosureRefusal::SystemNotHostAuthored
                 | DisclosureRefusal::PromptNotUtf8
                 | DisclosureRefusal::PolicyUnion => {
                     return Err(InvestigationError::Kernel(RefusalCode::Unsupported));
                 }
+                // The assembled body formed a secret across a buffer seam: nothing was sent, and no body of this run's disclosures may be.
+                DisclosureRefusal::RenderCheck => Attempt::Refused(RefusalCode::RenderCheck),
                 DisclosureRefusal::Store(error) => return Err(InvestigationError::Store(error)),
                 // The request was charged and failed or was withheld; the disclosure recorded the attempt's terminal, and the remaining budget decides whether another is made.
                 DisclosureRefusal::Send { .. }
@@ -608,14 +664,20 @@ impl Run<'_> {
             .push(span);
     }
 
-    /// Appends a buffer to the transcript behind a host label naming its alias and prompt boundary, so the model can tell which bytes belong to which reference and cite by alias.
+    /// Appends a buffer to the transcript between host markers naming its alias, so the model can tell where each reference's bytes start and end and cite by alias. Every other host text frames itself on its own line.
     fn push_labeled(&mut self, broker: &EvidenceBroker, buffer: RenderedBuffer) {
-        if let Some(alias) = &buffer.tag().alias
-            && let Ok(label) = broker.render_host_text(&format!("\n[{}]\n", alias.as_str()))
-        {
+        let Some(alias) = buffer.tag().alias.clone() else {
+            self.transcript.push(buffer);
+            return;
+        };
+        let marker = |text: String| broker.render_host_text(&text).ok();
+        if let Some(label) = marker(format!("\n[{}]\n", alias.as_str())) {
             self.transcript.push(label);
         }
         self.transcript.push(buffer);
+        if let Some(end) = marker(format!("\n[/{}]\n", alias.as_str())) {
+            self.transcript.push(end);
+        }
     }
 }
 
@@ -629,6 +691,8 @@ fn ledger_verdict(reason: CuratorLedgerRefusal) -> Result<Attempt, Investigation
         CuratorLedgerRefusal::Cancelled => Err(InvestigationError::Cancelled),
         // The post-commit recheck could not read the ledger: the attempt is charged and nothing was sent; another round decides.
         CuratorLedgerRefusal::RecheckUnavailable => Ok(Attempt::Spent),
+        // The run's clock is behind the ledger's newest event: nothing was charged or sent, and the run is retried once the clock has caught up.
+        CuratorLedgerRefusal::ClockBehind => Err(InvestigationError::Unavailable),
         CuratorLedgerRefusal::InvalidRequest
         | CuratorLedgerRefusal::Missing
         | CuratorLedgerRefusal::Fenced
@@ -660,23 +724,17 @@ impl Run<'_> {
                     self.push_labeled(broker, buffer);
                 }
             }
-            Err(refusal) => {
-                // The broker marks the disclosure partial when it refuses admission itself; a byte or buffer bound hit inside a read is the same truncation.
-                if matches!(
-                    refusal.code,
-                    RefusalCode::ByteLimit | RefusalCode::BufferLimit
-                ) {
-                    broker.ledger.record_partial_disclosure();
-                }
-                push_notice(
-                    broker,
-                    &mut self.transcript,
-                    refusal.alias.as_ref(),
-                    refusal.code,
-                );
-            }
+            Err(refusal) => refused(broker, &mut self.transcript, &refusal),
         }
     }
+}
+
+/// Records a refused operation in the transcript. A capacity bound hit inside a read (bytes, buffers, or the execution hold's backing) truncates the evidence set the same way a refused admission does, so the disclosure is marked partial.
+fn refused(broker: &mut EvidenceBroker, transcript: &mut Vec<RenderedBuffer>, refusal: &Refusal) {
+    if refusal.code.is_capacity() {
+        broker.ledger.record_partial_disclosure();
+    }
+    push_notice(broker, transcript, refusal.alias.as_ref(), refusal.code);
 }
 
 /// The buffers one operation rendered for the transcript and the byte range of each alias they disclosed.
@@ -779,26 +837,25 @@ fn disclosed_span(
     range.map_or(0..len, |range| range.start..range.start + len)
 }
 
-/// Whether `range` lies inside the union of `spans`: adjacent or overlapping disclosures cover a citation across their seam.
-fn covered(spans: &[std::ops::Range<u64>], range: std::ops::Range<u64>) -> bool {
+/// The disclosed spans merged: adjacent or overlapping disclosures become one span, in ascending order.
+fn merged(spans: &[std::ops::Range<u64>]) -> Vec<std::ops::Range<u64>> {
     let mut sorted: Vec<_> = spans.to_vec();
     sorted.sort_by_key(|span| span.start);
-    let mut reach: Option<std::ops::Range<u64>> = None;
+    let mut out: Vec<std::ops::Range<u64>> = Vec::new();
     for span in sorted {
-        reach = match reach {
-            Some(current) if span.start <= current.end => {
-                Some(current.start..current.end.max(span.end))
-            }
-            _ => Some(span),
-        };
-        if reach
-            .as_ref()
-            .is_some_and(|current| current.start <= range.start && range.end <= current.end)
-        {
-            return true;
+        match out.last_mut() {
+            Some(current) if span.start <= current.end => current.end = current.end.max(span.end),
+            _ => out.push(span),
         }
     }
-    false
+    out
+}
+
+/// Whether `range` lies inside the union of `spans`: adjacent or overlapping disclosures cover a citation across their seam.
+fn covered(spans: &[std::ops::Range<u64>], range: std::ops::Range<u64>) -> bool {
+    merged(spans)
+        .iter()
+        .any(|span| span.start <= range.start && range.end <= span.end)
 }
 
 /// A host-authored notice appended to the transcript: the alias, when there is one, and a bounded code. A notice that itself fails the render check is dropped rather than shown.
@@ -809,8 +866,8 @@ fn push_notice(
     code: RefusalCode,
 ) {
     let text = match alias {
-        Some(alias) => format!("refused {}: {code}", alias.as_str()),
-        None => format!("refused: {code}"),
+        Some(alias) => format!("\nrefused {}: {code}\n", alias.as_str()),
+        None => format!("\nrefused: {code}\n"),
     };
     if let Ok(buffer) = broker.render_host_text(&text) {
         transcript.push(buffer);
@@ -832,13 +889,13 @@ fn render_hits(
         buffers.push(buffer);
         if let Some(origin) = shared_origin {
             buffers.push(broker.render_host_text(&format!(
-                "{} shares its origin with {}",
+                "\n{} shares its origin with {}\n",
                 alias.as_str(),
                 origin.as_str()
             ))?);
         }
     }
-    buffers.push(broker.render_host_text(summary)?);
+    buffers.push(broker.render_host_text(&format!("\n{summary}\n"))?);
     Ok(buffers)
 }
 
@@ -922,7 +979,6 @@ fn bind_proposal(
     disclosed_spans: &BTreeMap<String, Vec<std::ops::Range<u64>>>,
     outcome: ProposedOutcome,
 ) -> Result<ReviewProposal, Refusal> {
-    let tip = store.tip().map_err(|_| refuse(None, RefusalCode::Store))?;
     let mut cite =
         |citations: Vec<super::steps::Citation>| -> Result<Vec<EvidenceReference>, Refusal> {
             let mut references = Vec::with_capacity(citations.len());
@@ -936,25 +992,39 @@ fn bind_proposal(
                 let shown = disclosed_spans
                     .get(alias.as_str())
                     .ok_or_else(|| refuse(Some(&alias), RefusalCode::UnknownAlias))?;
-                if let Some(range) = citation.range
-                    && !covered(shown, range.start..range.end)
-                {
-                    return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
-                }
+                // A citation names bytes the model was shown: the range it gave, or, without one, every disclosed span of the alias. A rangeless citation of a partial disclosure never reaches the bytes outside it.
+                let spans = match citation.range {
+                    Some(range) => {
+                        let range = range.start..range.end;
+                        if !covered(shown, range.clone()) {
+                            return Err(refuse(Some(&alias), RefusalCode::InvalidRange));
+                        }
+                        vec![range]
+                    }
+                    None => merged(shown),
+                };
                 broker.ledger.record_citation(&alias)?;
-                references.push(EvidenceReference {
-                    evidence_id,
-                    span: citation.range.map(|range| SourceSpan {
+                references.extend(spans.into_iter().map(|span| EvidenceReference {
+                    evidence_id: evidence_id.clone(),
+                    span: Some(SourceSpan {
                         alias: alias.as_str().to_string(),
-                        start: range.start,
-                        end: range.end,
+                        start: span.start,
+                        end: span.end,
                     }),
-                });
+                }));
             }
             Ok(references)
         };
-    let support = cite(outcome.support)?;
-    let contradictions = cite(outcome.contradictions)?;
+    let mut support = cite(outcome.support)?;
+    let mut contradictions = cite(outcome.contradictions)?;
+    // Expansion can repeat a span the model cited twice and can outgrow the count the step passed; the Kernel bound holds after expansion or the proposal is refused here, not at staging.
+    for references in [&mut support, &mut contradictions] {
+        let mut seen = BTreeSet::new();
+        references.retain(|reference| seen.insert(reference.clone()));
+    }
+    if support.len() + contradictions.len() > kernel::MAX_REVIEW_REFERENCES {
+        return Err(refuse(None, RefusalCode::TooLarge));
+    }
     let target = match &context.input.subject {
         ReviewTarget::StagedSubject { candidate_id, .. } => ProposalTarget::StagedCandidate {
             candidate_id: candidate_id.clone(),
@@ -962,12 +1032,24 @@ fn bind_proposal(
         ReviewTarget::Memory {
             object_id,
             source_revision,
-        } => ProposalTarget::Memory(kernel::CanonicalTarget {
-            object_id: object_id.clone(),
-            source_revision: *source_revision,
-            known_as_of: context.receipt.created_at_ms,
-            commit_token: tip,
-        }),
+        } => {
+            // The target is named by Kernel commit sequences: the snapshot this binding read and the last change the subject had seen by then, which is what a later mutation token check compares against.
+            let (tip, mut states) = store
+                .object_states(std::slice::from_ref(object_id))
+                .map_err(|_| refuse(None, RefusalCode::Store))?;
+            let state = states
+                .pop()
+                .flatten()
+                .ok_or_else(|| refuse(None, RefusalCode::NotFound))?;
+            ProposalTarget::Memory(kernel::CanonicalTarget {
+                object_id: object_id.clone(),
+                source_revision: *source_revision,
+                known_as_of: tip,
+                commit_token: state
+                    .latest_change_commit_seq
+                    .unwrap_or(state.object.created_commit_seq),
+            })
+        }
     };
     // The manifest is the inspection record this run can attest to: every alias and the byte ranges disclosed under it, in order.
     let mut manifest = Sha256::new();
@@ -1005,9 +1087,7 @@ fn bind_proposal(
 
 #[cfg(test)]
 mod tests {
-    use kernel::{
-        ArtifactIngestRequest, CommitIntent, DomainSpec, ProjectScope, ProviderEgress, Sensitivity,
-    };
+    use kernel::{ArtifactIngestRequest, CommitIntent, DomainSpec, ProviderEgress, Sensitivity};
 
     use super::*;
     use crate::curator::project_text::{InspectionBinding, ProtectedLocations};
@@ -1041,7 +1121,10 @@ mod tests {
     }
 
     /// A Kernel store with one domain, and a broker disclosing locally under an execution hold over an anchor artifact.
-    fn local_broker(store_dir: &std::path::Path, now: i64) -> (KernelStore, EvidenceBroker) {
+    fn local_broker(
+        store_dir: &std::path::Path,
+        now: i64,
+    ) -> (KernelStore, EvidenceBroker, CuratorHoldBinding) {
         let store = KernelStore::open(store_dir).unwrap();
         store
             .commit(intent("seed"), |envelope| {
@@ -1088,14 +1171,14 @@ mod tests {
             .unwrap();
         let broker = EvidenceBroker::new(
             RunBinding {
-                project: ProjectScope::new(PROJECT).unwrap(),
-                hold: binding,
+                hold: binding.clone(),
                 hold_id: hold.hold_id,
                 destination: kernel::ArtifactDestination::Local,
             },
             QuestionTemplate::ExtractedFacts,
-        );
-        (store, broker)
+        )
+        .unwrap();
+        (store, broker, binding)
     }
 
     #[test]
@@ -1114,11 +1197,12 @@ mod tests {
             b"# Project\nbun builds the workspace\n",
         )
         .unwrap();
-        let (store, mut broker) = local_broker(store_dir.path(), now);
+        let (store, mut broker, hold) = local_broker(store_dir.path(), now);
         let mut root = ProjectText::open(
             project.path(),
             &ProtectedLocations::new([store_dir.path().to_path_buf()]).unwrap(),
             InspectionBinding {
+                hold: hold.clone(),
                 domain_id: DOMAIN.to_string(),
                 scope_id: None,
                 retain_until: now + 60 * 60 * 1_000,
@@ -1146,5 +1230,56 @@ mod tests {
             vec![(alias, 10..24)],
             "a citation of the read alias must be able to name the bytes the model was shown"
         );
+    }
+
+    #[test]
+    fn a_hold_capacity_refusal_after_a_disclosure_marks_the_evidence_set_partial() {
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("README.md"), b"# Project\n").unwrap();
+        let (store, mut broker, hold) = local_broker(store_dir.path(), now);
+        let mut root = ProjectText::open(
+            project.path(),
+            &ProtectedLocations::new([store_dir.path().to_path_buf()]).unwrap(),
+            InspectionBinding {
+                hold: hold.clone(),
+                domain_id: DOMAIN.to_string(),
+                scope_id: None,
+                retain_until: now + 60 * 60 * 1_000,
+            },
+        )
+        .unwrap();
+        run_operation(
+            &store,
+            Some(&mut root),
+            &mut RelatedMemoryDiscovery::new(""),
+            Instant::now() + Duration::from_secs(60),
+            &mut broker,
+            Operation::ReadProject {
+                path: "README.md".to_string(),
+                range: None,
+            },
+            now,
+        )
+        .unwrap();
+        assert!(!broker.ledger.is_partial());
+        let mut transcript = Vec::new();
+        refused(
+            &mut broker,
+            &mut transcript,
+            &refuse(None, RefusalCode::HoldLimit),
+        );
+        assert!(
+            broker.ledger.is_partial(),
+            "the model reasons over a truncated evidence set once the hold cannot take a reference"
+        );
+        assert_eq!(transcript.len(), 1);
     }
 }

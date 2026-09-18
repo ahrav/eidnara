@@ -151,4 +151,60 @@ mod tests {
         assert_ne!(third.encode().unwrap().digest, a.digest);
         assert_eq!(PolicyUnion::new().encode().unwrap().members, 0);
     }
+
+    const FIXTURE: &str = include_str!("../testdata/canonical-json-contract-v1.json");
+
+    fn fixture() -> Value {
+        serde_json::from_str(FIXTURE).expect("golden corpus parses")
+    }
+
+    /// Consumers store the digest, so the protocol literal and version are pinned; changing either is a `v2`.
+    #[test]
+    fn protocol_and_version_are_the_recorded_literals() {
+        let fixture = fixture();
+        assert_eq!(
+            CURATOR_POLICY_UNION_PROTOCOL,
+            "eidnara-curator-policy-union-v1"
+        );
+        assert_eq!(
+            fixture["curatorPolicyUnionDigestProtocol"]
+                .as_str()
+                .unwrap(),
+            CURATOR_POLICY_UNION_PROTOCOL
+        );
+        assert_eq!(
+            fixture["curatorPolicyUnionVersion"].as_u64().unwrap(),
+            u64::from(CURATOR_POLICY_UNION_VERSION)
+        );
+    }
+
+    #[test]
+    fn encoding_matches_the_golden_vectors() {
+        for case in fixture()["curatorPolicyUnion"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let mut union = PolicyUnion::new();
+            for member in case["members"].as_array().unwrap() {
+                let text = |key: &str| member[key].as_str().map(str::to_string);
+                union.insert(PolicyUnionMember {
+                    kind: text("kind").unwrap(),
+                    id: text("id").unwrap(),
+                    revision: text("revision").unwrap(),
+                    owner_id: text("owner_id"),
+                    owner_revision: text("owner_revision"),
+                });
+            }
+            let encoded = union.encode().unwrap();
+            assert_eq!(
+                encoded.canonical,
+                case["canonical"].as_str().unwrap(),
+                "case {name}"
+            );
+            assert_eq!(
+                encoded.digest,
+                case["digest"].as_str().unwrap(),
+                "case {name}"
+            );
+            assert_eq!(encoded.members, union.len(), "case {name}");
+        }
+    }
 }

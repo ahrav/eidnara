@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use daemon::curator::broker::{MAX_ISSUED_INSPECTIONS, QuestionTemplate};
 use daemon::curator::coordinator::{
     Coordinator, InvestigationError, InvestigationPermits, JobContext, MAX_ACTIVE_PER_HOST,
+    MAX_ROUNDS,
 };
 use daemon::curator::disclosure::{DisclosureApproval, ModelProfile};
 use daemon::curator::model_request::{ANTHROPIC_VERSION, MESSAGES_PATH};
@@ -174,6 +175,7 @@ struct Fixture {
     permits: Arc<InvestigationPermits>,
     clock: Arc<AtomicI64>,
     inspection_limit: usize,
+    max_tokens: u32,
     /// A confined project directory the run may inspect, when the test gives it one.
     project_root: Option<tempfile::TempDir>,
 }
@@ -343,6 +345,7 @@ impl Fixture {
             permits: Arc::new(InvestigationPermits::default()),
             clock: Arc::new(AtomicI64::new(now + 5)),
             inspection_limit: MAX_ISSUED_INSPECTIONS,
+            max_tokens: 1024,
             project_root: None,
         }
     }
@@ -403,7 +406,7 @@ impl Fixture {
             approval,
             profile: ModelProfile {
                 model: MODEL.to_string(),
-                max_tokens: 1024,
+                max_tokens: self.max_tokens,
                 temperature: None,
             },
             credential_id: CREDENTIAL_ID.to_string(),
@@ -434,6 +437,13 @@ impl Fixture {
                 root.path(),
                 &ProtectedLocations::new([self.kernel_dir.path().to_path_buf()]).unwrap(),
                 InspectionBinding {
+                    hold: kernel::CuratorHoldBinding {
+                        project_digest: PROJECT.to_string(),
+                        kernel_incarnation: self.kernel_incarnation(),
+                        memstore_incarnation: self.ledger.curator_store_incarnation().unwrap(),
+                        subject: self.identity.clone(),
+                        generation: self.receipt.generation,
+                    },
                     domain_id: DOMAIN.to_string(),
                     scope_id: Some(SCOPE.to_string()),
                     retain_until: self.now + 60 * 60 * 1_000,
@@ -752,6 +762,8 @@ corpus_case!(corpus_injected_instructions, 7);
 fn the_corpus_covers_every_relation_once() {
     assert_eq!(CASES.len(), 8);
     let mut relations: Vec<_> = CASES.iter().map(|case| case.relation).collect();
+    // `dedup` drops only adjacent repeats; the sort makes any repeat adjacent.
+    relations.sort_unstable_by_key(|relation| *relation as u8);
     relations.dedup();
     assert_eq!(relations.len(), 8);
 }
@@ -1020,7 +1032,7 @@ async fn an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the
                 provider: "localhost/v1/messages@2023-06-01".to_string(),
                 model: MODEL.to_string(),
                 credential_id: CREDENTIAL_ID.to_string(),
-                policy_union_digest: "u".repeat(64),
+                policy_union_digest: "e".repeat(64),
             },
             (),
             || fixture.now + 3,
@@ -1303,7 +1315,10 @@ async fn a_selected_eligible_memory_becomes_a_published_proposal_through_the_sha
     .unwrap();
     assert!(again.references.is_empty());
     // The ready job for the subject commit is claimed and run through the coordinator.
-    let ready = fixture.ledger.ready_curator_jobs(PROJECT, 16).unwrap();
+    let ready = fixture
+        .ledger
+        .ready_curator_jobs(PROJECT, 16, fixture.now)
+        .unwrap();
     let job = ready
         .iter()
         .find(|job| {
@@ -1464,8 +1479,8 @@ async fn a_cutoff_lapsed_on_the_wall_clock_abstains_as_budget_exhausted_without_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_staged_subject_with_no_linked_references_abstains_by_policy() {
-    // With no evidence to protect there is no execution hold to acquire; the staged subject is still refused for a remote model and the run settles on that refusal.
+async fn a_staged_subject_with_no_linked_references_abstains_without_a_hold() {
+    // With no evidence to protect there is no execution hold to acquire, and the broker reads a staged row only under a live hold: the read is refused before the remote-destination policy is judged, nothing is sent, and the run settles on that refusal.
     let mut fixture = Fixture::open(CASES[6].sources);
     assert!(fixture.input.starting_references.is_empty());
     let reference = fixture
@@ -1507,7 +1522,10 @@ async fn a_staged_subject_with_no_linked_references_abstains_by_policy() {
         .run(&peer, Some(fixture.approval()), &CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(settled, Settled::Abstained(AbstainReason::OwnerSensitive));
+    assert_eq!(
+        settled,
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
     assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
     assert_eq!(
         fixture.receipt().terminal,
@@ -1516,8 +1534,8 @@ async fn a_staged_subject_with_no_linked_references_abstains_by_policy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_oversized_subject_abstains_as_budget_exhausted_before_any_request() {
-    // The subject alone exceeds the model-visible byte bound: a property of the job, not of the store, so the run settles instead of failing on every generation.
+async fn an_oversized_subject_abstains_as_partial_disclosure_before_any_request() {
+    // The subject alone exceeds the model-visible byte bound: a property of the job, not of the store, so the run settles instead of failing on every generation. The broker marks the refused read partial, since the run asked for evidence it will never see, and that outranks the spent budget at settlement.
     let subject = large_source(
         "The workspace builds with bun; the build log follows.\n",
         "bun install: resolved 1 package\n",
@@ -1529,7 +1547,10 @@ async fn an_oversized_subject_abstains_as_budget_exhausted_before_any_request() 
         .run(&peer, Some(fixture.approval()), &CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+    assert_eq!(
+        settled,
+        Settled::Abstained(AbstainReason::PartialDisclosure)
+    );
     assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
     assert!(fixture.attempts().is_empty());
     assert_eq!(
@@ -1613,4 +1634,473 @@ async fn a_request_body_over_the_wire_bound_abstains_as_budget_exhausted() {
     assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
     assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
     assert!(fixture.attempts().is_empty());
+}
+
+/// A ranged read disclosed bytes 0..40 of the reference; a citation that names no range binds to those bytes, not to the whole artifact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rangeless_citation_of_a_partial_disclosure_binds_to_the_disclosed_bytes() {
+    let fixture = Fixture::open(CASES[2].sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![
+        text_response(&fixture.expand(CASES[2].turns[0].0)),
+        text_response(&fixture.expand(r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"revised","support":[{"alias":"{alias:1}"}],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#)),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let Settled::Published(_) = settled else {
+        panic!("{settled:?}")
+    };
+    let proposal = read_selected_proposal(
+        &fixture.store,
+        &fixture.ledger,
+        PROJECT,
+        &fixture.identity,
+        &fixture.binding(),
+        fixture.now + 6,
+    )
+    .unwrap()
+    .proposal;
+    assert_eq!(
+        proposal.support,
+        vec![kernel::EvidenceReference {
+            evidence_id: fixture.evidence(1),
+            span: Some(kernel::SourceSpan {
+                alias: fixture.expand("{alias:1}"),
+                start: 0,
+                end: 40,
+            }),
+        }]
+    );
+}
+
+/// A complete proposal that cites nothing: accepted as a step, it publishes.
+const RETAIN_WITHOUT_CITATIONS: &str = r#"{"v":1,"step":{"kind":"propose","action":"retain","new_text":null,"support":[],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#;
+
+/// A response the provider cut at `max_tokens` is not a step, even when the truncated text parses: the round is spent with a notice and the next answer decides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_length_truncated_response_spends_the_round_instead_of_being_accepted_as_a_step() {
+    let fixture = Fixture::open(CASES[0].sources);
+    let mut peer = Peer::start().await;
+    let truncated = serde_json::to_string(RETAIN_WITHOUT_CITATIONS).unwrap();
+    let server = peer.serve_script(vec![
+        json_response(
+            "200 OK",
+            &format!(
+                r#"{{"id":"msg_1","type":"message","role":"assistant","model":"{MODEL}","content":[{{"type":"text","text":{truncated}}}],"stop_reason":"max_tokens","usage":{{"input_tokens":3,"output_tokens":4}}}}"#
+            ),
+            "",
+        ),
+        text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    let observed = server.await.unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(
+        user_text(&prompts(&observed)[1]).contains("refused: too_large"),
+        "the model is told its answer was cut"
+    );
+}
+
+/// A supervisor whose retained replay cannot take the answer closes the sink and records the run failed; the coordinator must not settle on text the supervisor rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_the_supervisor_rejected_is_not_accepted_as_a_step() {
+    let mut fixture = Fixture::open(CASES[0].sources);
+    fixture.supervisor = Arc::new(Supervisor::with_limits(
+        Arc::new(NoPublicModel),
+        host_runtime::model_execution::config::ModelExecutionLimits {
+            max_run_replay_bytes: host_runtime::model_execution::config::TERMINAL_HEADROOM_BYTES,
+            ..Default::default()
+        },
+    ));
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(RETAIN_WITHOUT_CITATIONS); MAX_ROUNDS]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+    assert_eq!(server.await.unwrap().len(), MAX_ROUNDS);
+    assert_eq!(fixture.receipt().selected, None);
+}
+
+/// A response the provider stopped for any reason other than an affirmative completion is not a step: a refusal ends the run as the model declining, an unknown stop reason spends the round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_an_affirmative_stop_reason_admits_the_text_as_a_step() {
+    let stopped = |reason: &str| {
+        let text = serde_json::to_string(RETAIN_WITHOUT_CITATIONS).unwrap();
+        json_response(
+            "200 OK",
+            &format!(
+                r#"{{"id":"msg_1","type":"message","role":"assistant","model":"{MODEL}","content":[{{"type":"text","text":{text}}}],"stop_reason":"{reason}","usage":{{"input_tokens":3,"output_tokens":4}}}}"#
+            ),
+            "",
+        )
+    };
+    let fixture = Fixture::open(CASES[0].sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![stopped("refusal")]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    assert_eq!(server.await.unwrap().len(), 1);
+
+    let fixture = Fixture::open(CASES[0].sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![
+        stopped("pause_turn"),
+        text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    let observed = server.await.unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(user_text(&prompts(&observed)[1]).contains("refused: unsupported"));
+}
+
+/// A memory target carries Kernel commit sequences: the snapshot the proposal was bound at and the last change the subject had seen by then, not a wall-clock millisecond.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_memory_target_names_the_snapshot_and_the_subjects_last_change_as_commit_sequences() {
+    let fixture = Fixture::open(CASES[0].sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(RETAIN_WITHOUT_CITATIONS)]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let Settled::Published(_) = settled else {
+        panic!("{settled:?}")
+    };
+    let proposal = read_selected_proposal(
+        &fixture.store,
+        &fixture.ledger,
+        PROJECT,
+        &fixture.identity,
+        &fixture.binding(),
+        fixture.now + 6,
+    )
+    .unwrap()
+    .proposal;
+    let kernel::ProposalTarget::Memory(target) = &proposal.target else {
+        panic!("{:?}", proposal.target)
+    };
+    let (tip, mut states) = fixture
+        .store
+        .object_states(std::slice::from_ref(&fixture.sources[0].0))
+        .unwrap();
+    let state = states.pop().flatten().unwrap();
+    assert!(
+        target.known_as_of <= tip,
+        "known_as_of {} is a commit sequence at or below the tip {tip}",
+        target.known_as_of
+    );
+    assert_eq!(
+        Some(target.commit_token),
+        state.latest_change_commit_seq,
+        "commit_token is the subject's last change commit"
+    );
+}
+
+/// Evidence bytes and host notices are framed apart, so a subject without a trailing newline cannot absorb the notice that follows it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_notices_are_framed_apart_from_evidence_bytes() {
+    let sources = [
+        Source {
+            message: "feat: the workspace builds with bun",
+            protected: false,
+        },
+        CASES[0].sources[1],
+    ];
+    let fixture = Fixture::open(&sources);
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(
+        r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+    )]);
+    fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    let observed = server.await.unwrap();
+    let text = user_text(&prompts(&observed)[0]);
+    assert!(
+        text.contains("builds with bun\n[/ref-1]\n"),
+        "the subject ends at its end marker: {text:?}"
+    );
+    assert!(
+        text.contains("\nlinked references: ref-2\n"),
+        "the notice sits on its own line: {text:?}"
+    );
+}
+
+/// An open receipt resumed at the same generation launches under supervisor keys the earlier attempts did not use, so the retained runs of a cancelled investigation do not refuse the resumed one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resumed_generation_launches_under_fresh_supervisor_keys() {
+    let fixture = Fixture::open(CASES[0].sources);
+    let mut peer = Peer::start().await;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = peer.serve(
+        Box::new(move |_, _| {
+            Box::pin(async move {
+                release_rx.await.ok();
+            })
+        }),
+        |_| text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"late"}}"#),
+    );
+    let cancel = CancellationToken::new();
+    let run = fixture.run(&peer, Some(fixture.approval()), &cancel);
+    let cancelling = async {
+        while peer.connections.load(Ordering::SeqCst) < 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel.cancel();
+    };
+    let (outcome, ()) = tokio::join!(run, cancelling);
+    assert_eq!(outcome, Err(InvestigationError::Cancelled));
+    release_tx.send(()).ok();
+    let _ = server.await;
+    assert_eq!(fixture.receipt().terminal, None);
+    // The same receipt, claim, and generation run again in the same daemon.
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(
+        r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+    )]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    server.await.unwrap();
+    assert_eq!(fixture.attempts().len(), 2);
+}
+
+/// A launch that failed before the ledger recorded an attempt (no approval) is still retained by the supervisor under its key; the retried generation must launch past it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_after_a_pre_ledger_failure_launches_under_a_fresh_supervisor_key() {
+    let fixture = Fixture::open(CASES[0].sources);
+    let peer = Peer::start().await;
+    assert_eq!(
+        fixture.run(&peer, None, &CancellationToken::new()).await,
+        Err(InvestigationError::Unavailable)
+    );
+    assert!(fixture.attempts().is_empty());
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(
+        r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+    )]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    server.await.unwrap();
+}
+
+/// The backing bytes one hold over `evidence` charges the project, measured and released.
+fn backing_bytes(fixture: &Fixture, evidence: &str) -> u64 {
+    let binding = kernel::CuratorHoldBinding {
+        project_digest: PROJECT.to_string(),
+        kernel_incarnation: fixture.kernel_incarnation(),
+        memstore_incarnation: fixture.ledger.curator_store_incarnation().unwrap(),
+        subject: "probe".to_string(),
+        generation: 1,
+    };
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, &[evidence.to_string()], now_ms() + 60_000)
+        .unwrap();
+    fixture
+        .store
+        .release_execution_hold(&hold.hold_id, &binding)
+        .unwrap();
+    hold.backing_bytes
+}
+
+/// A run that exits without settling releases the execution hold it acquired, so retries of an open receipt do not accumulate live holds against the project's cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_settling_exit_releases_the_execution_hold() {
+    let fixture = Fixture::open(CASES[0].sources);
+    let peer = Peer::start().await;
+    assert_eq!(
+        fixture.run(&peer, None, &CancellationToken::new()).await,
+        Err(InvestigationError::Unavailable)
+    );
+    // A hold over the linked reference under a quota of exactly its own bytes admits only if nothing else in the project is still held.
+    let other = fixture.evidence(1);
+    let quota = backing_bytes(&fixture, &other);
+    let binding = kernel::CuratorHoldBinding {
+        project_digest: PROJECT.to_string(),
+        kernel_incarnation: fixture.kernel_incarnation(),
+        memstore_incarnation: fixture.ledger.curator_store_incarnation().unwrap(),
+        subject: "probe".to_string(),
+        generation: 2,
+    };
+    let acquired = fixture.store.acquire_execution_hold_with_quota_for_test(
+        &binding,
+        &[other],
+        now_ms() + 60_000,
+        quota,
+        u64::MAX,
+    );
+    assert!(
+        acquired.is_ok(),
+        "the failed run's hold is still charged to the project: {acquired:?}"
+    );
+}
+
+/// Citations expanded to disclosed spans are deduplicated and still bounded by the Kernel's reference limit, so an over-long list settles as a refusal instead of failing at staging with the receipt open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expanded_citations_are_deduplicated_and_bounded() {
+    let fixture = Fixture::open(CASES[2].sources);
+    let mut peer = Peer::start().await;
+    // Two disjoint reads of the reference, then one rangeless citation twice: the proposal carries each disclosed span once.
+    let server = peer.serve_script(vec![
+        text_response(&fixture.expand(r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"read_reference","alias":"{alias:1}","range":{"start":0,"end":10}},{"op":"read_reference","alias":"{alias:1}","range":{"start":20,"end":30}}]}}"#)),
+        text_response(&fixture.expand(r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"revised","support":[{"alias":"{alias:1}"},{"alias":"{alias:1}"}],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#)),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let Settled::Published(_) = settled else {
+        panic!("{settled:?}")
+    };
+    let proposal = read_selected_proposal(
+        &fixture.store,
+        &fixture.ledger,
+        PROJECT,
+        &fixture.identity,
+        &fixture.binding(),
+        fixture.now + 6,
+    )
+    .unwrap()
+    .proposal;
+    let spans: Vec<(u64, u64)> = proposal
+        .support
+        .iter()
+        .map(|reference| {
+            let span = reference.span.as_ref().unwrap();
+            (span.start, span.end)
+        })
+        .collect();
+    assert_eq!(spans, vec![(0, 10), (20, 30)]);
+
+    // 255 distinct ranged citations plus one rangeless citation expanding to two spans pass the step's own count but exceed the Kernel limit after expansion.
+    let sources = [
+        CASES[0].sources[0],
+        large_source(
+            "build: the workspace builds with bun\n",
+            "more notes on bun ",
+            500,
+        ),
+    ];
+    let fixture = Fixture::open(&sources);
+    let mut peer = Peer::start().await;
+    let mut citations: Vec<String> = (2..=256)
+        .map(|end| format!(r#"{{"alias":"{{alias:1}}","range":{{"start":1,"end":{end}}}}}"#))
+        .collect();
+    citations.push(r#"{"alias":"{alias:1}"}"#.to_string());
+    let propose = format!(
+        r#"{{"v":1,"step":{{"kind":"propose","action":"revise","new_text":"revised","support":[{}],"contradictions":[],"limitations":[],"uncertainty":"low"}}}}"#,
+        citations.join(",")
+    );
+    let server = peer.serve_script(vec![
+        text_response(&fixture.expand(r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"read_reference","alias":"{alias:1}","range":{"start":0,"end":300}},{"op":"read_reference","alias":"{alias:1}","range":{"start":400,"end":410}}]}}"#)),
+        text_response(&fixture.expand(&propose)),
+    ]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(
+        settled,
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(CuratorReceiptTerminal::Abstained)
+    );
+}
+
+/// The network wait ends at the ledger's attempt deadline, which the claim expiry bounds, so a dispatched request cannot outlive the authority that must record it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dispatched_request_ends_at_the_attempt_deadline_the_claim_bounds() {
+    let fixture = Fixture::open(CASES[0].sources);
+    // One second before the claim lapses: the attempt deadline is the claim expiry, well under the 30-second request bound.
+    fixture.clock.store(
+        fixture.now + memory_store::curator_ledger::CURATOR_TASK_LEASE_MS - 1_000,
+        Ordering::SeqCst,
+    );
+    let mut peer = Peer::start().await;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = peer.serve(
+        Box::new(move |_, _| {
+            Box::pin(async move {
+                release_rx.await.ok();
+            })
+        }),
+        |_| text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"late"}}"#),
+    );
+    // The peer is released once the first attempt has lapsed, so its listener closes and the remaining rounds fail to connect at once; only the first wait measures the deadline.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+        release_tx.send(()).ok();
+    });
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        fixture.run(&peer, Some(fixture.approval()), &CancellationToken::new()),
+    )
+    .await;
+    let _ = server.await;
+    let settled = outcome
+        .expect("every attempt ends at the claim-bounded deadline, not the 30-second request bound")
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+}
+
+/// A model profile the request encoder refuses is a configuration fault: the run reports it unavailable and leaves the receipt open, instead of durably abstaining the job as budget exhaustion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_invalid_model_profile_is_unavailable_not_budget_exhaustion() {
+    let mut fixture = Fixture::open(CASES[0].sources);
+    fixture.max_tokens = 0;
+    let peer = Peer::start().await;
+    assert_eq!(
+        fixture
+            .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+            .await,
+        Err(InvestigationError::Unavailable)
+    );
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.receipt().terminal, None);
+}
+
+/// A run cancelled before it opens returns to its lifecycle owner without settling: an opening refusal or cutoff must not durably complete a receipt the owner asked to stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_run_does_not_settle_its_opening_refusal() {
+    let fixture = Fixture::open(&[Source {
+        message: "sensitive subject text\n",
+        protected: true,
+    }]);
+    let peer = Peer::start().await;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert_eq!(
+        fixture.run(&peer, Some(fixture.approval()), &cancel).await,
+        Err(InvestigationError::Cancelled)
+    );
+    assert_eq!(fixture.receipt().terminal, None);
 }

@@ -1803,7 +1803,7 @@ mod tests {
     }
 
     fn ready_jobs(store: &MemoryStore, identity: &str) -> usize {
-        store.ready_curator_jobs(identity, 256).unwrap().len()
+        store.ready_curator_jobs(identity, 256, 0).unwrap().len()
     }
 
     #[tokio::test]
@@ -1942,7 +1942,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(frozen.state, FrozenSelectionState::Frozen);
-        assert_eq!(frozen.page.references.len(), 3);
+        assert_eq!(frozen.page.as_ref().unwrap().references.len(), 3);
         // The slot stays due and claimed: the next tick retries the same page without selecting again.
         clock.advance(MINUTE);
         let events = scheduler.tick(&host).await;
@@ -2365,8 +2365,8 @@ mod tests {
     async fn an_exhausted_metadata_quota_completes_the_slot_and_keeps_the_page_for_the_next_cron_slot()
      {
         use memory_store::curator_jobs::{
-            CURATOR_JOB_ALLOWANCE_BYTES, CURATOR_RECEIPT_CHARGE_BYTES,
-            MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+            CURATOR_JOB_ALLOWANCE_BYTES, FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+            FROZEN_SELECTION_ALLOWANCE_BYTES, MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
         };
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());
@@ -2374,7 +2374,7 @@ mod tests {
         let clock = ManualClock::at(T0 + 1_000);
         let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
         assert!(scheduler.tick(&host).await.is_empty());
-        // A receipt charge near the project quota stands in for a long history of admitted work: after the page's own allowance, exactly one more reservation fits.
+        // A receipt charge near the project quota stands in for a long history of admitted work: the frozen page fits exactly, and once its allowance is released exactly one more reservation fits beside its receipt, so a page of two is refused.
         let producer = ProducerBinding {
             producer: "filler".to_string(),
             firing_id: "f".to_string(),
@@ -2386,8 +2386,9 @@ mod tests {
             .unwrap();
         let near_quota = i64::try_from(
             MAX_CURATOR_METADATA_BYTES_PER_PROJECT
-                - memory_store::curator_jobs::FROZEN_SELECTION_ALLOWANCE_BYTES
-                - 2 * (CURATOR_JOB_ALLOWANCE_BYTES + CURATOR_RECEIPT_CHARGE_BYTES),
+                - CURATOR_JOB_ALLOWANCE_BYTES
+                - FROZEN_SELECTION_ALLOWANCE_BYTES
+                - FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
         )
         .unwrap();
         store
@@ -2452,7 +2453,7 @@ mod tests {
         let clock = ManualClock::at(T0 + 1_000);
         let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
         assert!(scheduler.tick(&host).await.is_empty());
-        // After the filler's receipt and allowance, exactly the page's two jobs fit under the quota: the 8 KiB the frozen page itself holds is released by the same transaction, so it must not count against them.
+        // After the filler's receipt and allowance and the page's own permanent receipt, exactly the page's two jobs fit under the quota: the allowance the frozen page holds is released by the same transaction, so it must not count against them.
         let producer = ProducerBinding {
             producer: "filler".to_string(),
             firing_id: "f".to_string(),
@@ -2465,6 +2466,7 @@ mod tests {
         let near_quota = i64::try_from(
             MAX_CURATOR_METADATA_BYTES_PER_PROJECT
                 - CURATOR_JOB_ALLOWANCE_BYTES
+                - memory_store::curator_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES
                 - 2 * (CURATOR_JOB_ALLOWANCE_BYTES + CURATOR_RECEIPT_CHARGE_BYTES),
         )
         .unwrap();
