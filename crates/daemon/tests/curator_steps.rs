@@ -118,9 +118,39 @@ fn steps_are_rejected_before_any_effect() {
             Ok(()),
         ),
         (
+            r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"read_reference","alias":"ref-1","range":{"start":0,"end":5}},{"op":"read_project","path":"src/lib.rs","range":{"start":10,"end":20}}]}}"#,
+            true,
+            Ok(()),
+        ),
+        (
+            r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"find_related"},{"op":"find_related","cursor":"c1"},{"op":"search_project","by":"path","literal":"lib"},{"op":"search_project","by":"name","literal":"lib.rs"},{"op":"search_project","by":"content","literal":"fn main"}]}}"#,
+            true,
+            Ok(()),
+        ),
+        (
             r#"{"v":1,"step":{"kind":"propose","action":"retain","support":[{"alias":"ref-1"}],"uncertainty":"low"}}"#,
             true,
             Ok(()),
+        ),
+        (
+            r#"{"v":1,"step":{"kind":"propose","action":"retain","support":[{"alias":"ref-1","range":{"start":1,"end":3}}],"contradictions":[{"alias":"ref-1"}],"limitations":["x"],"uncertainty":"high"}}"#,
+            true,
+            Ok(()),
+        ),
+        (
+            r#"{"v":1,"step":{"kind":"propose","action":"no_change","support":[],"uncertainty":"medium"}}"#,
+            true,
+            Ok(()),
+        ),
+        (
+            r#"{"v":1,"step":{"kind":"propose","action":"no_change","support":[],"uncertainty":"medium"}}"#,
+            false,
+            Ok(()),
+        ),
+        (
+            r#"{"v":1,"step":{"kind":"propose","action":"no_change","new_text":"x","support":[],"uncertainty":"medium"}}"#,
+            true,
+            Err(RefusalCode::Unsupported),
         ),
         (
             r#"{"v":1,"step":{"kind":"propose","action":"retain","new_text":"x","support":[],"uncertainty":"low"}}"#,
