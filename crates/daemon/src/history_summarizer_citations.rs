@@ -61,32 +61,7 @@ pub struct Citation {
     pub end: usize,
 }
 
-/// Why a proposed fact set was rejected as a whole. Host-authored, closed, and content-free: the code is what #595 records as the nonadmission reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtractionFailure {
-    /// A fact cited an alias the chunk never issued.
-    #[error("unknown_alias")]
-    UnknownAlias,
-    /// A cited range is empty, inverted, past the presented text, or not on UTF-8 character boundaries.
-    #[error("invalid_span")]
-    InvalidSpan,
-    /// A citation names a message outside the finally accepted history segment.
-    #[error("outside_accepted_segment")]
-    OutsideAcceptedSegment,
-    /// A fact carries more citations than [`MAX_CITATIONS_PER_FACT`].
-    #[error("too_many_citations")]
-    TooManyCitations,
-    /// A citation's syntax did not parse, or a fact item was citations with no text.
-    #[error("malformed_citation")]
-    MalformedCitation,
-    /// The `<facts>` block carried material that is neither a category block nor a bullet item, or appeared more than once.
-    #[error("malformed_facts")]
-    MalformedFacts,
-    /// A fact carried no citation, so it cannot be reattached to native identity.
-    #[error("missing_citation")]
-    MissingCitation,
-}
+pub use memory_store::ExtractionFailure;
 
 /// The extraction result that accompanies independently validated history.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
