@@ -113,7 +113,7 @@ impl CuratorAttemptTerminal {
         Self::NotDispatched,
     ];
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == value)
     }
 

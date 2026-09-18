@@ -13,8 +13,11 @@ use crate::cas::gc::GcFaults;
 /// Retention interval after a staging run reaches a terminal state, in milliseconds.
 pub const STAGING_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 
-/// Maximum number of runs removed by one deletion transaction.
-const DELETE_BATCH_RUNS: i64 = 1_024;
+/// Maximum number of runs removed by one deletion transaction. `deleted_runs ==
+/// STAGING_DELETE_BATCH_RUNS` means eligible aged runs may remain; a smaller count means the
+/// deleter exhausted them at that clock.
+pub const STAGING_DELETE_BATCH_RUNS: usize = 1_024;
+const DELETE_BATCH_RUNS: i64 = STAGING_DELETE_BATCH_RUNS as i64;
 
 /// Owners cannot declare `abandoned`, reserving it for lease-sweep reclamation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

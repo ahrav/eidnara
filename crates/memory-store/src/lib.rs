@@ -575,6 +575,25 @@ pub enum CuratorNonadmissionCode {
     SubjectRefused,
 }
 
+impl CuratorNonadmissionCode {
+    pub const CURATOR_UNAVAILABLE_TAG: &'static str = "curator_unavailable";
+    pub const CAPACITY_FULL_TAG: &'static str = "capacity_full";
+    pub const EVIDENCE_UNAVAILABLE_TAG: &'static str = "evidence_unavailable";
+    pub const FACT_SET_REJECTED_TAG: &'static str = "fact_set_rejected";
+    pub const SUBJECT_REFUSED_TAG: &'static str = "subject_refused";
+
+    /// The `code` tag serde writes into the session metadata for this variant. The sampler groups sessions by the stored tag, so its SQL and this mapping must agree; a test holds both to serde's output.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::CuratorUnavailable => Self::CURATOR_UNAVAILABLE_TAG,
+            Self::CapacityFull => Self::CAPACITY_FULL_TAG,
+            Self::EvidenceUnavailable => Self::EVIDENCE_UNAVAILABLE_TAG,
+            Self::FactSetRejected { .. } => Self::FACT_SET_REJECTED_TAG,
+            Self::SubjectRefused => Self::SUBJECT_REFUSED_TAG,
+        }
+    }
+}
+
 /// The latest recorded nonadmission, bound to the firing that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedNonadmission {
@@ -639,116 +658,185 @@ pub struct CuratorStatusFacts {
     pub latest_nonadmission_subject_refused: u64,
 }
 
+impl CuratorStatusFacts {
+    fn job_outcome_slot(&mut self, outcome: curator_jobs::CuratorJobOutcome) -> &mut u64 {
+        use curator_jobs::CuratorJobOutcome as Outcome;
+        match outcome {
+            Outcome::Expired => &mut self.jobs_expired,
+            Outcome::Nonadmitted => &mut self.jobs_nonadmitted,
+            Outcome::Failed => &mut self.jobs_failed,
+            Outcome::Unknown => &mut self.jobs_unknown,
+            Outcome::Completed => &mut self.jobs_completed,
+            Outcome::Abstained => &mut self.jobs_abstained,
+        }
+    }
+
+    fn selection_slot(&mut self, state: curator_jobs::FrozenSelectionState) -> &mut u64 {
+        use curator_jobs::FrozenSelectionState as State;
+        match state {
+            State::Frozen => &mut self.selections_frozen,
+            State::Enqueued => &mut self.selections_enqueued,
+            State::Expired => &mut self.selections_expired,
+            State::FailedSlot => &mut self.selections_failed_slot,
+        }
+    }
+
+    fn attempt_slot(&mut self, kind: curator_ledger::CuratorAttemptTerminal) -> &mut u64 {
+        use curator_ledger::CuratorAttemptTerminal as Kind;
+        match kind {
+            Kind::Complete => &mut self.attempts_acknowledged,
+            Kind::Failed => &mut self.attempts_failed,
+            Kind::Cancelled => &mut self.attempts_cancelled,
+            Kind::Unknown => &mut self.attempts_unknown,
+            Kind::NotDispatched => &mut self.attempts_not_dispatched,
+        }
+    }
+
+    fn latest_nonadmission_slot(&mut self, tag: &str) -> Option<&mut u64> {
+        use CuratorNonadmissionCode as Code;
+        match tag {
+            Code::CURATOR_UNAVAILABLE_TAG => {
+                Some(&mut self.latest_nonadmission_curator_unavailable)
+            }
+            Code::CAPACITY_FULL_TAG => Some(&mut self.latest_nonadmission_capacity_full),
+            Code::EVIDENCE_UNAVAILABLE_TAG => {
+                Some(&mut self.latest_nonadmission_evidence_unavailable)
+            }
+            Code::FACT_SET_REJECTED_TAG => Some(&mut self.latest_nonadmission_fact_set_rejected),
+            Code::SUBJECT_REFUSED_TAG => Some(&mut self.latest_nonadmission_subject_refused),
+            _ => None,
+        }
+    }
+}
+
 impl MemoryStore {
-    /// Samples the Curator facts with a handful of bounded aggregate queries; the producer facts read the sessions' metadata through SQLite's JSON functions, so a large session table costs one scan.
+    /// Samples the Curator facts in one grouped pass per ledger table plus one over the sessions' metadata, so the store's single connection is held for eight statements however many rows the tables hold. Group keys are parsed back through the same mappings the writers use, so a renamed state cannot leave a counter silently at zero.
     pub fn curator_status_facts(&self) -> Result<CuratorStatusFacts, MemoryStoreError> {
-        fn count(conn: &GuardedConn<'_>, sql: &str) -> rusqlite::Result<u64> {
-            let value: i64 = conn.query_row(sql, [], |row| row.get(0))?;
-            Ok(u64::try_from(value).unwrap_or_default())
+        fn unsigned(value: i64) -> u64 {
+            u64::try_from(value).unwrap_or_default()
         }
-        fn job_outcome(conn: &GuardedConn<'_>, outcome: &str) -> rusqlite::Result<u64> {
-            let value: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM curator_jobs WHERE state = 'terminal' AND outcome = ?1",
-                [outcome],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(value).unwrap_or_default())
-        }
-        fn selection_state(conn: &GuardedConn<'_>, state: &str) -> rusqlite::Result<u64> {
-            let value: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM curator_frozen_selections WHERE state = ?1",
-                [state],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(value).unwrap_or_default())
-        }
-        fn attempt_kind(conn: &GuardedConn<'_>, kind: &str) -> rusqlite::Result<u64> {
-            let value: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM curator_attempts WHERE terminal_kind = ?1",
-                [kind],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(value).unwrap_or_default())
-        }
-        fn latest_code(conn: &GuardedConn<'_>, code: &str) -> rusqlite::Result<u64> {
-            let value: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM cache_state
-                 WHERE json_extract(meta, '$.history_summarizer.curator_nonadmission.latest.code.code') = ?1",
-                [code],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(value).unwrap_or_default())
+        fn grouped<K: rusqlite::types::FromSql>(
+            conn: &GuardedConn<'_>,
+            sql: &str,
+            mut visit: impl FnMut(K, &rusqlite::Row<'_>) -> rusqlite::Result<()>,
+        ) -> rusqlite::Result<()> {
+            let mut statement = conn.prepare(sql)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                visit(row.get(0)?, row)?;
+            }
+            Ok(())
         }
         self.inner
             .with_conn(|conn| {
-                let receipt_charge_bytes = count(
-                    conn,
-                    "SELECT COALESCE(SUM(receipt_charge_bytes), 0) FROM curator_jobs",
-                )?;
-                let metadata_bytes = curator_jobs::metadata_bytes(conn, None)?;
-                // Everything charged that is not a permanent receipt is a temporary allowance: job allowances plus the frozen pages' charges.
-                let allowance_bytes = metadata_bytes.saturating_sub(receipt_charge_bytes);
-                Ok(CuratorStatusFacts {
-                    jobs_reserved: count(conn, "SELECT COUNT(*) FROM curator_jobs WHERE state = 'reserved'")?,
-                    jobs_ready: count(conn, "SELECT COUNT(*) FROM curator_jobs WHERE state = 'ready'")?,
-                    jobs_expired: job_outcome(conn, "expired")?,
-                    jobs_expired_unseen: count(
-                        conn,
-                        "SELECT COUNT(*) FROM curator_jobs job
-                         WHERE job.state = 'terminal' AND job.outcome = 'expired'
-                           AND NOT EXISTS (SELECT 1 FROM curator_receipts receipt
-                                           WHERE receipt.project = job.project
-                                             AND receipt.causal_identity = job.causal_identity)",
-                    )?,
-                    jobs_nonadmitted: job_outcome(conn, "nonadmitted")?,
-                    jobs_failed: job_outcome(conn, "failed")?,
-                    jobs_unknown: job_outcome(conn, "unknown")?,
-                    jobs_completed: job_outcome(conn, "completed")?,
-                    jobs_abstained: job_outcome(conn, "abstained")?,
-                    selections_frozen: selection_state(conn, "frozen")?,
-                    selections_enqueued: selection_state(conn, "enqueued")?,
-                    selections_expired: selection_state(conn, "expired")?,
-                    selections_failed_slot: selection_state(conn, "failed_slot")?,
-                    attempts_attempted: count(conn, "SELECT COUNT(*) FROM curator_attempts")?,
-                    attempts_acknowledged: attempt_kind(conn, "complete")?,
-                    attempts_failed: attempt_kind(conn, "failed")?,
-                    attempts_cancelled: attempt_kind(conn, "cancelled")?,
-                    attempts_unknown: attempt_kind(conn, "unknown")?,
-                    attempts_not_dispatched: attempt_kind(conn, "not_dispatched")?,
-                    attempts_open: count(
-                        conn,
-                        "SELECT COUNT(*) FROM curator_attempts WHERE terminal_kind IS NULL",
-                    )?,
-                    receipts_in_progress: count(
-                        conn,
-                        "SELECT COUNT(*) FROM curator_receipts WHERE state = 'in_progress'",
-                    )?,
-                    receipts_complete: count(
-                        conn,
-                        "SELECT COUNT(*) FROM curator_receipts WHERE state = 'complete'",
-                    )?,
-                    receipt_charge_bytes,
-                    allowance_bytes,
-                    metadata_bytes,
+                let mut facts = CuratorStatusFacts {
                     metadata_quota_bytes: curator_jobs::MAX_CURATOR_METADATA_BYTES_PER_HOST,
-                    metadata_headroom_bytes: curator_jobs::MAX_CURATOR_METADATA_BYTES_PER_HOST
-                        .saturating_sub(metadata_bytes),
-                    nonadmissions: count(
-                        conn,
-                        "SELECT COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_nonadmission.count')), 0)
-                         FROM cache_state",
-                    )?,
-                    sessions_with_reservation: count(
-                        conn,
-                        "SELECT COUNT(*) FROM cache_state
-                         WHERE json_extract(meta, '$.history_summarizer.curator_reservation') IS NOT NULL",
-                    )?,
-                    latest_nonadmission_curator_unavailable: latest_code(conn, "curator_unavailable")?,
-                    latest_nonadmission_capacity_full: latest_code(conn, "capacity_full")?,
-                    latest_nonadmission_evidence_unavailable: latest_code(conn, "evidence_unavailable")?,
-                    latest_nonadmission_fact_set_rejected: latest_code(conn, "fact_set_rejected")?,
-                    latest_nonadmission_subject_refused: latest_code(conn, "subject_refused")?,
-                })
+                    ..CuratorStatusFacts::default()
+                };
+                grouped::<String>(
+                    conn,
+                    "SELECT state, outcome, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
+                     FROM curator_jobs GROUP BY state, outcome",
+                    |state, row| {
+                        let outcome: Option<String> = row.get(1)?;
+                        let count = unsigned(row.get(2)?);
+                        facts.receipt_charge_bytes = facts
+                            .receipt_charge_bytes
+                            .saturating_add(unsigned(row.get(3)?));
+                        match state.as_str() {
+                            "reserved" => facts.jobs_reserved += count,
+                            "ready" => facts.jobs_ready += count,
+                            "terminal" => {
+                                if let Some(outcome) = outcome
+                                    .as_deref()
+                                    .and_then(curator_jobs::CuratorJobOutcome::parse)
+                                {
+                                    *facts.job_outcome_slot(outcome) += count;
+                                }
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    },
+                )?;
+                facts.jobs_expired_unseen = unsigned(conn.query_row(
+                    "SELECT COUNT(*) FROM curator_jobs job
+                     WHERE job.state = 'terminal' AND job.outcome = ?1
+                       AND NOT EXISTS (SELECT 1 FROM curator_receipts receipt
+                                       WHERE receipt.project = job.project
+                                         AND receipt.causal_identity = job.causal_identity)",
+                    [curator_jobs::CuratorJobOutcome::Expired.as_str()],
+                    |row| row.get(0),
+                )?);
+                grouped::<String>(
+                    conn,
+                    "SELECT state, COUNT(*) FROM curator_frozen_selections GROUP BY state",
+                    |state, row| {
+                        if let Some(state) = curator_jobs::FrozenSelectionState::parse(&state) {
+                            *facts.selection_slot(state) += unsigned(row.get(1)?);
+                        }
+                        Ok(())
+                    },
+                )?;
+                grouped::<Option<String>>(
+                    conn,
+                    "SELECT terminal_kind, COUNT(*) FROM curator_attempts GROUP BY terminal_kind",
+                    |kind, row| {
+                        let count = unsigned(row.get(1)?);
+                        facts.attempts_attempted += count;
+                        match kind.as_deref().map(curator_ledger::CuratorAttemptTerminal::parse) {
+                            None => facts.attempts_open += count,
+                            Some(Some(kind)) => *facts.attempt_slot(kind) += count,
+                            Some(None) => {}
+                        }
+                        Ok(())
+                    },
+                )?;
+                grouped::<String>(
+                    conn,
+                    "SELECT state, COUNT(*) FROM curator_receipts GROUP BY state",
+                    |state, row| {
+                        let count = unsigned(row.get(1)?);
+                        match state.as_str() {
+                            "in_progress" => facts.receipts_in_progress += count,
+                            "complete" => facts.receipts_complete += count,
+                            _ => {}
+                        }
+                        Ok(())
+                    },
+                )?;
+                facts.metadata_bytes = curator_jobs::metadata_bytes(conn, None)?;
+                // Everything charged that is not a permanent receipt is a temporary allowance: job allowances plus the frozen pages' charges.
+                facts.allowance_bytes = facts
+                    .metadata_bytes
+                    .saturating_sub(facts.receipt_charge_bytes);
+                facts.metadata_headroom_bytes = facts
+                    .metadata_quota_bytes
+                    .saturating_sub(facts.metadata_bytes);
+                grouped::<Option<String>>(
+                    conn,
+                    "SELECT json_extract(meta, '$.history_summarizer.curator_nonadmission.latest.code.code'),
+                            COUNT(*),
+                            COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_nonadmission.count')), 0),
+                            COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_reservation') IS NOT NULL), 0)
+                     FROM cache_state
+                     GROUP BY 1",
+                    |code, row| {
+                        let sessions = unsigned(row.get(1)?);
+                        facts.nonadmissions = facts.nonadmissions.saturating_add(unsigned(row.get(2)?));
+                        facts.sessions_with_reservation = facts
+                            .sessions_with_reservation
+                            .saturating_add(unsigned(row.get(3)?));
+                        if let Some(slot) = code
+                            .as_deref()
+                            .and_then(|code| facts.latest_nonadmission_slot(code))
+                        {
+                            *slot += sessions;
+                        }
+                        Ok(())
+                    },
+                )?;
+                Ok(facts)
             })
             .map_err(Into::into)
     }
@@ -21674,6 +21762,28 @@ mod tests {
         assert_eq!(second.curator_nonadmission_count, 1);
         assert_eq!(nonadmission(), recorded);
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
+    }
+
+    /// The sampler groups sessions by serde's `code` tag, which must match every variant's counter tag.
+    #[test]
+    fn nonadmission_code_tags_match_what_serde_stores() {
+        for code in [
+            CuratorNonadmissionCode::CuratorUnavailable,
+            CuratorNonadmissionCode::CapacityFull,
+            CuratorNonadmissionCode::EvidenceUnavailable,
+            CuratorNonadmissionCode::FactSetRejected {
+                failure: ExtractionFailure::MissingCitation,
+            },
+            CuratorNonadmissionCode::SubjectRefused,
+        ] {
+            let stored = serde_json::to_value(code).unwrap();
+            assert_eq!(stored["code"], code.tag(), "{code:?}");
+            let mut facts = CuratorStatusFacts::default();
+            assert!(
+                facts.latest_nonadmission_slot(code.tag()).is_some(),
+                "{code:?} has no counter"
+            );
+        }
     }
 
     #[test]
