@@ -3816,11 +3816,11 @@ impl Handler {
     }
 
     /// Attaches the supervisor and credentials the Curator worker runs review jobs under. The credentials are the startup envelope's, by name; the activation record names which one the sender dials with.
-    pub fn with_curator_host(self, host: curator::worker::CuratorHost) -> Self {
+    pub fn with_curator_host(self, host: Arc<curator::worker::CuratorHost>) -> Self {
         *self
             .curator_host
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(host));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
         self
     }
 
@@ -14927,13 +14927,14 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
             Arc::default(),
         );
         let policy_versions = curator::handoff::review_policy_versions();
+        let classes = curator::selection::resolvable_classes();
         curator::selection::select_review_targets(
             &kernel,
             &self.store,
             &curator::selection::SelectionScope {
                 project: binding.kernel_project.scope(),
                 ledger_project: &project.project,
-                classes: curator::selection::MEMORY_CLASSES,
+                classes: &classes,
                 policy_versions: &policy_versions,
             },
             cursor,
@@ -14986,9 +14987,9 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
                 std::collections::btree_map::Entry::Occupied(_) => {}
             }
         }
-        // Curator review selection rides the same schedule as the review of user memories and only while the deployment owner's activation record admits disclosure.
         let curator_open = self.curator_status.reported().activation_state.0
-            == curator::lifecycle::ActivationState::Open;
+            == curator::lifecycle::ActivationState::Open
+            && !curator::selection::resolvable_classes().is_empty();
         Ok(by_project
             .into_iter()
             .flat_map(
@@ -32743,6 +32744,46 @@ mod tests {
             .unwrap();
         assert_ne!(draining.state, "MODULE");
         assert!(bridge.scheduled_projects().unwrap().is_empty());
+    }
+
+    /// Selection requires an open gate and at least one resolvable class.
+    #[tokio::test(flavor = "current_thread")]
+    async fn curator_review_selection_is_scheduled_only_for_classes_the_coordinator_resolves() {
+        use memory_classifier_scheduler::{ScheduledTask, SchedulerHost};
+        let producer = Arc::new(ProducerState::default());
+        let harness = MemoryClassifierHarness::start(&producer).await;
+        harness.schedule(Some("*/15 * * * *"));
+        let bridge = harness.scheduler_bridge();
+        let tasks = |bridge: &SchedulerBridge| -> Vec<ScheduledTask> {
+            bridge
+                .scheduled_projects()
+                .unwrap()
+                .into_iter()
+                .map(|project| project.task)
+                .collect()
+        };
+        assert_eq!(tasks(&bridge), vec![ScheduledTask::ReviewUserMemories]);
+
+        harness
+            .handler
+            .curator_status
+            .set_activation(curator::lifecycle::ActivationState::Open);
+        let resolvable = curator::selection::resolvable_classes();
+        if resolvable.is_empty() {
+            assert_eq!(
+                tasks(&bridge),
+                vec![ScheduledTask::ReviewUserMemories],
+                "no walked class resolves, so an open gate schedules no selection"
+            );
+        } else {
+            assert_eq!(
+                tasks(&bridge),
+                vec![
+                    ScheduledTask::ReviewUserMemories,
+                    ScheduledTask::CuratorReviewSelection
+                ]
+            );
+        }
     }
 
     /// A failed authority lookup must return an error rather than an empty

@@ -331,9 +331,9 @@ pub enum MediaKind {
 /// store identity `storage::open_sqlite` checks on every open.
 const BASELINE: &str = include_str!("../baseline.sql");
 
-/// The lowercase SHA-256 of the shipped baseline schema: the identity a deployment record names when it binds itself to one Memory Store baseline.
+/// The store identity `storage::open_sqlite` checks on every open and a fresh file records in `format_marker`: the digest of the storage crate's baseline followed by this crate's, not of this crate's alone.
 pub fn baseline_digest() -> String {
-    format!("{:x}", sha2::Sha256::digest(BASELINE.as_bytes()))
+    storage::baseline_digest(BASELINE)
 }
 
 /// Bytes of page cache the store connection holds; `PRAGMA cache_size` is derived from

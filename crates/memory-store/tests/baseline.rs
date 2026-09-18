@@ -196,6 +196,20 @@ fn fresh_open_creates_memory_sqlite_with_the_eidnara_identity_and_the_whole_base
     }
 }
 
+#[test]
+fn the_published_baseline_digest_is_the_one_every_open_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(MemoryStore::open_for_test(dir.path(), "eidnara-test"));
+    let stored: String = inspect(dir.path())
+        .query_row(
+            "SELECT baseline_sha256 FROM format_marker WHERE id = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(memory_store::baseline_digest(), stored);
+}
+
 /// `notes` triggers require scalar functions that only `MemoryStore::open` registers,
 /// so a raw connection cannot mutate `notes`.
 #[test]

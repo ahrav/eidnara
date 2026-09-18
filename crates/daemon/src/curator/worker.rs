@@ -2,15 +2,17 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use host_runtime::model_execution::supervisor::Supervisor;
-use kernel::{ReviewBinding, ReviewOwner, SourceDependency};
+use kernel::{
+    ReviewBinding, ReviewOwner, ReviewReadError, ReviewReadRefusal, ReviewStagedReference,
+    SourceDependency,
+};
 use memory_store::curator_jobs::{CuratorJob, CuratorJobState, ReviewTarget};
-use memory_store::curator_ledger::CuratorBeginOutcome;
-use memory_store::{LeaseAcquireOutcome, MemoryStore};
-use sha2::{Digest, Sha256};
+use memory_store::curator_ledger::{CuratorBeginOutcome, CuratorReceipt};
+use memory_store::{LeaseAcquireOutcome, LeaseClaim, MemoryStore};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -34,31 +36,26 @@ pub const IDLE_INTERVAL: Duration = Duration::from_secs(30);
 pub const JOBS_PER_PASS: usize = 8;
 /// Output budget and sampling every Curator request carries; the model id comes from the activation record.
 pub const MAX_TOKENS: u32 = 4096;
-const CREDENTIAL_DOMAIN: &[u8] = b"eidnara-curator-credential-v1";
 
-/// What the host hands the daemon for Curator runs: the Model Execution supervisor its internal launches run under, and the startup credentials by name.
 pub struct CuratorHost {
     pub supervisor: Arc<Supervisor>,
     pub credentials: BTreeMap<String, Zeroizing<String>>,
+    /// Credential identities keyed under the incarnation key; unset until the key exists.
+    pub credential_identities: OnceLock<BTreeMap<String, String>>,
     pub worker_instance: String,
 }
 
-/// The stable identity of one credential, bound into approvals and attempt receipts without the secret.
-pub fn credential_fingerprint(name: &str, secret: &str) -> String {
-    let mut hash = Sha256::new();
-    hash.update(CREDENTIAL_DOMAIN);
-    hash.update(b"\0");
-    hash.update(name.as_bytes());
-    hash.update(b"\0");
-    hash.update(secret.as_bytes());
-    format!("{:x}", hash.finalize())
-}
-
-/// One MODULE-authority project as a bound route presents it: the ledger project the jobs live under, the authority generation the lease is keyed by, and the Kernel scope the run reads and stages under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectRoute {
     pub project: String,
     pub authority_generation: u64,
+    /// Newest binding first.
+    pub roots: Vec<RootScope>,
+}
+
+/// One bound root and the Kernel scope derived from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootScope {
     pub project_root: PathBuf,
     pub project_digest: String,
     pub scope_id: String,
@@ -78,7 +75,7 @@ pub struct Worker {
     pub endpoint: Endpoint,
 }
 
-/// The production project source: every bound route whose memories authority is MODULE, one entry per authority project. The newest root speaks for a project, the rule the scheduler applies to the same map, so the digest jobs are read and staged under is the one the scheduler selects under.
+/// MODULE-authority bound routes grouped by authority project, newest binding first within each project's roots.
 pub(crate) fn module_projects(
     store: &MemoryStore,
     bindings: &Mutex<RouteBindings>,
@@ -101,6 +98,10 @@ pub(crate) fn module_projects(
                 .or_insert(ProjectRoute {
                     project: authority.project,
                     authority_generation: authority.generation,
+                    roots: Vec::new(),
+                })
+                .roots
+                .push(RootScope {
                     project_root: binding.project_root.clone(),
                     project_digest: binding.kernel_project.digest().to_string(),
                     scope_id: binding.kernel_project.scope_id(),
@@ -134,19 +135,21 @@ impl Worker {
             provider: probe.provider_identity(),
             credentials: self
                 .host
-                .credentials
+                .credential_identities
+                .get()?
                 .iter()
-                .map(|(name, secret)| (name.clone(), credential_fingerprint(name, secret)))
+                .filter(|(name, _)| self.host.credentials.contains_key(*name))
+                .map(|(name, identity)| (name.clone(), identity.clone()))
                 .collect(),
         })
     }
 
     /// The gate as of now, with the closed state published for the operator surface.
     fn gate(&self, kernel: &kernel::KernelStore) -> Result<Activation, Closed> {
-        let live = self
+        let gate = self
             .live_identity(kernel)
-            .ok_or_else(|| Closed::Unreadable("store identity".to_string()))?;
-        let gate = activation::read_gate(&self.home, &live);
+            .ok_or_else(|| Closed::Unreadable("store identity".to_string()))
+            .and_then(|live| activation::read_gate(&self.home, &live));
         self.status.set_activation(match &gate {
             Ok(_) => ActivationState::Open,
             Err(closed) => ActivationState::from(closed),
@@ -154,13 +157,25 @@ impl Worker {
         gate
     }
 
-    /// One pass: nothing runs unless the gate is open; then every Ready job of every MODULE project is claimed and investigated. Returns how many runs settled.
-    pub async fn pass(&self, cancel: &CancellationToken) -> usize {
+    /// `gate` on the blocking pool: it reads the record from disk and queries both stores.
+    async fn gate_off_runtime(
+        self: &Arc<Self>,
+        kernel: &Arc<kernel::KernelStore>,
+    ) -> Result<Activation, Closed> {
+        let worker = Arc::clone(self);
+        let kernel = Arc::clone(kernel);
+        tokio::task::spawn_blocking(move || worker.gate(&kernel))
+            .await
+            .unwrap_or_else(|_| Err(Closed::Unreadable("gate evaluation".to_string())))
+    }
+
+    /// One pass: nothing runs unless the gate is open; then every Ready job of every MODULE project is claimed and investigated. Returns how many runs settled. Store and filesystem work runs on the blocking pool; only the investigation itself is awaited on the runtime.
+    pub async fn pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
         let Some(kernel) = (self.kernel)() else {
             self.status.set_activation(ActivationState::Closed("store"));
             return 0;
         };
-        let activation = match self.gate(&kernel) {
+        let activation = match self.gate_off_runtime(&kernel).await {
             Ok(activation) => activation,
             Err(_) => return 0,
         };
@@ -195,7 +210,18 @@ impl Worker {
             if cancel.is_cancelled() {
                 break;
             }
-            let ready = match self.store.ready_curator_jobs(&route.project, JOBS_PER_PASS) {
+            let ready = {
+                let store = Arc::clone(&self.store);
+                let project = route.project.clone();
+                tokio::task::spawn_blocking(move || {
+                    store
+                        .ready_curator_jobs(&project, JOBS_PER_PASS)
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()))
+            };
+            let ready = match ready {
                 Ok(ready) => ready,
                 Err(error) => {
                     eprintln!(
@@ -204,15 +230,19 @@ impl Worker {
                     continue;
                 }
             };
+            let route = Arc::new(route);
             for job in ready {
                 if cancel.is_cancelled() {
                     break;
                 }
                 // The owner can withdraw the record between jobs; a gate that closed or changed since the pass began admits no further run under the pass's approval.
-                if self.gate(&kernel).as_ref() != Ok(&activation) {
+                if self.gate_off_runtime(&kernel).await.as_ref() != Ok(&activation) {
                     return settled;
                 }
-                match self.run_job(&coordinator, &route, &job, cancel).await {
+                match self
+                    .run_job(&coordinator, &kernel, &route, Arc::new(job), cancel)
+                    .await
+                {
                     Ok(true) => settled += 1,
                     Ok(false) => {}
                     Err(InvestigationError::Capacity) => break,
@@ -231,21 +261,78 @@ impl Worker {
         settled
     }
 
-    /// Claims one Ready job under the authority's lease, begins or takes over its receipt, and investigates it. `Ok(false)` means another worker holds it, this worker's slot still holds another job's claim, or it already settled. A run that ends without settling leaves its receipt in progress; the next pass takes the receipt over under a fresh claim at the next generation, so a lease that lapsed under an abandoned run never runs again on its stale fence.
+    /// Claims one Ready job under the authority's lease, begins or takes over its receipt, and investigates it. `Ok(false)` means another worker holds it, this worker's slot still holds another job's claim, it already settled, or no bound root holds its staged subject. A run that ends without settling leaves its receipt in progress; the next pass takes the receipt over under a fresh claim at the next generation, so a lease that lapsed under an abandoned run never runs again on its stale fence.
     async fn run_job(
-        &self,
+        self: &Arc<Self>,
         coordinator: &Coordinator,
-        route: &ProjectRoute,
-        job: &CuratorJob,
+        kernel: &Arc<kernel::KernelStore>,
+        route: &Arc<ProjectRoute>,
+        job: Arc<CuratorJob>,
         cancel: &CancellationToken,
     ) -> Result<bool, InvestigationError> {
         let CuratorJobState::Ready(input) = &job.state else {
             return Ok(false);
         };
+        let kernel_incarnation = coordinator
+            .approval
+            .as_ref()
+            .map(|approval| approval.kernel_incarnation.clone())
+            .ok_or(InvestigationError::Unavailable)?;
+        let prepared = {
+            let worker = Arc::clone(self);
+            let kernel = Arc::clone(kernel);
+            let route = Arc::clone(route);
+            let job = Arc::clone(&job);
+            tokio::task::spawn_blocking(move || {
+                worker.prepare_job(&kernel, &route, &job, &kernel_incarnation)
+            })
+            .await
+            .map_err(|error| InvestigationError::Store(error.to_string()))??
+        };
+        let Some(mut prepared) = prepared else {
+            return Ok(false);
+        };
+        coordinator
+            .investigate(
+                JobContext {
+                    job: &job,
+                    input,
+                    receipt: &prepared.receipt,
+                    claim: &TaskClaim {
+                        claim_id: prepared.claim.claim_id.clone(),
+                        worker_instance: self.host.worker_instance.clone(),
+                        slot: 0,
+                    },
+                    binding: &prepared.binding,
+                    question: QuestionTemplate::ExtractedFacts,
+                    project_root: prepared.project_text.as_mut(),
+                },
+                cancel,
+            )
+            .await?;
+        Ok(true)
+    }
+
+    /// The synchronous prefix of a run: the root the job is read under, the lease claim, the receipt, and the project inspection. `Ok(None)` is a job this pass leaves alone.
+    fn prepare_job(
+        &self,
+        kernel: &kernel::KernelStore,
+        route: &ProjectRoute,
+        job: &CuratorJob,
+        kernel_incarnation: &str,
+    ) -> Result<Option<PreparedJob>, InvestigationError> {
         let project = route.project.as_str();
         let now = crate::now_ms();
+        // Resolved before the claim: a job left unclaimed here stays Ready for its queue deadline instead of leaving a receipt in progress.
+        let Some((root, binding)) = job_root(kernel, route, job, now) else {
+            eprintln!(
+                "daemon: curator job {}/{} was staged under a root no bound route names; it is left for its queue deadline",
+                project, job.causal_identity
+            );
+            return Ok(None);
+        };
         let store_error =
-            |error: memory_store::MemoryStoreError| InvestigationError::Store(error.to_string());
+            |error: &dyn std::fmt::Display| InvestigationError::Store(error.to_string());
         let acquisition_id = format!("curator:{}:{now}", job.causal_identity);
         let claim = match self
             .store
@@ -258,27 +345,22 @@ impl Worker {
                 &job.causal_identity,
                 now,
             )
-            .map_err(store_error)?
+            .map_err(|error| store_error(&error))?
         {
             // The slot's live claim is rebound to the caller whatever job it names; a claim naming another job is that job's fence, not this one's.
             LeaseAcquireOutcome::Claim { claim, task, .. } if task == job.causal_identity => claim,
-            _ => return Ok(false),
+            _ => return Ok(None),
         };
-        let kernel_incarnation = coordinator
-            .approval
-            .as_ref()
-            .map(|approval| approval.kernel_incarnation.clone())
-            .ok_or(InvestigationError::Unavailable)?;
         let receipt = match self
             .store
             .begin_curator_receipt(
                 project,
                 &job.causal_identity,
-                &kernel_incarnation,
+                kernel_incarnation,
                 &claim.claim_id,
                 now,
             )
-            .map_err(|error| InvestigationError::Store(error.to_string()))?
+            .map_err(|error| store_error(&error))?
         {
             CuratorBeginOutcome::Begun(receipt) => receipt,
             CuratorBeginOutcome::InProgress(receipt) if receipt.claim_id == claim.claim_id => {
@@ -293,49 +375,42 @@ impl Worker {
                     &claim.claim_id,
                     now,
                 )
-                .map_err(|error| InvestigationError::Store(error.to_string()))?,
-            CuratorBeginOutcome::Complete(_) => return Ok(false),
+                .map_err(|error| store_error(&error))?,
+            CuratorBeginOutcome::Complete(_) => return Ok(None),
         };
-        let review_binding = job_binding(&route.project_digest, job);
-        let mut project_text =
+        let project_text =
             ProtectedLocations::new([self.home.clone()])
                 .ok()
                 .and_then(|protected| {
                     ProjectText::open(
-                        &route.project_root,
+                        &root.project_root,
                         &protected,
                         InspectionBinding {
                             domain_id: MEMORY_DOMAIN_ID.to_string(),
-                            scope_id: Some(route.scope_id.clone()),
+                            scope_id: Some(root.scope_id.clone()),
                             retain_until: receipt.execution_cutoff_ms,
                         },
                     )
                     .ok()
                 });
-        coordinator
-            .investigate(
-                JobContext {
-                    job,
-                    input,
-                    receipt: &receipt,
-                    claim: &TaskClaim {
-                        claim_id: claim.claim_id.clone(),
-                        worker_instance: self.host.worker_instance.clone(),
-                        slot: 0,
-                    },
-                    binding: &review_binding,
-                    question: QuestionTemplate::ExtractedFacts,
-                    project_root: project_text.as_mut(),
-                },
-                cancel,
-            )
-            .await?;
-        Ok(true)
+        Ok(Some(PreparedJob {
+            binding,
+            claim,
+            receipt,
+            project_text,
+        }))
     }
 }
 
-/// The binding a job's subject is read and its proposals are staged under. A History Summarizer subject cites the session's chunk at the firing that produced it; a Memory Classifier target cites the canonical memory at its revision.
-pub fn job_binding(project_digest: &str, job: &CuratorJob) -> ReviewBinding {
+struct PreparedJob {
+    binding: ReviewBinding,
+    claim: LeaseClaim,
+    receipt: CuratorReceipt,
+    project_text: Option<ProjectText>,
+}
+
+/// Only `HISTORY_SUMMARIZER` has a defined staged-subject binding; other producers return `None`.
+pub fn job_binding(project_digest: &str, job: &CuratorJob) -> Option<ReviewBinding> {
     match &job.target {
         ReviewTarget::StagedSubject { .. } if job.producer.producer == HISTORY_SUMMARIZER => {
             let (session_id, firing_seq) = job
@@ -344,31 +419,19 @@ pub fn job_binding(project_digest: &str, job: &CuratorJob) -> ReviewBinding {
                 .rsplit_once('#')
                 .and_then(|(session, seq)| Some((session, seq.parse::<u64>().ok()?)))
                 .unwrap_or((job.producer.firing_id.as_str(), 0));
-            review_binding(
+            Some(review_binding(
                 project_digest,
                 MEMORY_DOMAIN_ID,
                 session_id,
                 firing_seq,
                 &job.causal_identity,
-            )
+            ))
         }
-        ReviewTarget::StagedSubject { candidate_id, .. } => ReviewBinding {
-            project_digest: project_digest.to_string(),
-            domain_id: MEMORY_DOMAIN_ID.to_string(),
-            owner: ReviewOwner::Job {
-                job_id: job.causal_identity.clone(),
-            },
-            subject_source: SourceDependency {
-                source_kind: "staged_subject".to_string(),
-                source_id: candidate_id.clone(),
-                source_revision: 0,
-            },
-            reference_sources: Vec::new(),
-        },
+        ReviewTarget::StagedSubject { .. } => None,
         ReviewTarget::Memory {
             object_id,
             source_revision,
-        } => ReviewBinding {
+        } => Some(ReviewBinding {
             project_digest: project_digest.to_string(),
             domain_id: MEMORY_DOMAIN_ID.to_string(),
             owner: ReviewOwner::Job {
@@ -380,8 +443,40 @@ pub fn job_binding(project_digest: &str, job: &CuratorJob) -> ReviewBinding {
                 source_revision: *source_revision,
             },
             reference_sources: Vec::new(),
-        },
+        }),
     }
+}
+
+/// The root a job is read under, with its binding. A `ScopeMismatch` means the root does not own the staged subject, so the next root is tried; any other outcome is that root's to settle. Memory targets use the newest root. `None` when no root owns the staged subject.
+fn job_root<'a>(
+    kernel: &kernel::KernelStore,
+    route: &'a ProjectRoute,
+    job: &CuratorJob,
+    now: i64,
+) -> Option<(&'a RootScope, ReviewBinding)> {
+    let reference = match &job.target {
+        ReviewTarget::StagedSubject {
+            kernel_incarnation,
+            candidate_id,
+            payload_digest,
+        } => ReviewStagedReference {
+            database_incarnation_id: kernel_incarnation.clone(),
+            candidate_id: candidate_id.clone(),
+            payload_digest: payload_digest.clone(),
+        },
+        ReviewTarget::Memory { .. } => {
+            let root = route.roots.first()?;
+            return Some((root, job_binding(&root.project_digest, job)?));
+        }
+    };
+    for root in &route.roots {
+        let binding = job_binding(&root.project_digest, job)?;
+        match kernel.read_review_input(&reference, &binding, now) {
+            Err(ReviewReadError::Refused(ReviewReadRefusal::ScopeMismatch)) => continue,
+            Ok(_) | Err(_) => return Some((root, binding)),
+        }
+    }
+    None
 }
 
 /// Runs passes until cancelled: a pass that settled a run is followed at once, an idle one after [`IDLE_INTERVAL`].
@@ -404,5 +499,46 @@ pub async fn run(worker: Arc<Worker>, cancel: CancellationToken) {
 impl Worker {
     pub(crate) fn home_of(store_path: &str) -> Option<PathBuf> {
         crate::sqlite_store_data_home(store_path).map(|home| Path::new(home).to_path_buf())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use memory_store::curator_jobs::ProducerBinding;
+
+    use super::*;
+
+    fn staged_job(producer: &str) -> CuratorJob {
+        CuratorJob {
+            project: "git:proj".to_string(),
+            causal_identity: "job-1".to_string(),
+            producer: ProducerBinding {
+                producer: producer.to_string(),
+                firing_id: "ses#3".to_string(),
+                ordinal: 1,
+            },
+            target: ReviewTarget::StagedSubject {
+                kernel_incarnation: "k".repeat(64),
+                candidate_id: "cand-1".to_string(),
+                payload_digest: "0".repeat(64),
+            },
+            input_fingerprint: "1".repeat(64),
+            state: CuratorJobState::Reserved,
+            queue_deadline_ms: 10,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    /// A staged subject is read under the binding its stager wrote, and only the History Summarizer's is known; another producer's job yields no binding rather than one the Kernel would refuse.
+    #[test]
+    fn only_a_history_summarizer_staged_subject_has_a_binding() {
+        let digest = "a".repeat(64);
+        let history = job_binding(&digest, &staged_job(HISTORY_SUMMARIZER)).unwrap();
+        assert_eq!(
+            history,
+            review_binding(&digest, MEMORY_DOMAIN_ID, "ses", 3, "job-1")
+        );
+        assert_eq!(job_binding(&digest, &staged_job("other_producer")), None);
     }
 }

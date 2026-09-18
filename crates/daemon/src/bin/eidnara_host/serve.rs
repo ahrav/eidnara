@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use hmac::{Hmac, Mac};
 use host_runtime::generation::{GenerationStore, ValidatedGeneration};
@@ -407,6 +407,23 @@ fn hmac_sha256(key: &[u8], segments: &[&[u8]]) -> [u8; 32] {
         mac.update(segment);
     }
     mac.finalize().into_bytes().into()
+}
+
+/// The activation record names a credential by the identity the selection file shows for it, so the Curator host receives the map from the same derivation that the selection commits.
+fn selection_commit_hook(
+    selection: HarnessSelection,
+    credentials: BTreeMap<String, String>,
+    selection_root: PathBuf,
+    curator_host: Arc<daemon::curator::worker::CuratorHost>,
+) -> daemon::ConnectionKeyHook {
+    Box::new(move |key| {
+        let mut selection = selection;
+        selection.credential_identities = credential_identities(&credentials, &key);
+        let _ = curator_host
+            .credential_identities
+            .set(selection.credential_identities.clone());
+        write_selection(&selection_root, &selection)
+    })
 }
 
 /// Reads the 32-byte connection key used to derive credential identities.
@@ -1118,25 +1135,25 @@ pub fn run() -> Result<(), &'static str> {
         credential_identities: BTreeMap::new(),
     };
     let selection_credentials = envelope.credentials.clone();
-    let commit_selection: daemon::ConnectionKeyHook = Box::new(move |key| {
-        let mut selection = selection;
-        selection.credential_identities = credential_identities(&selection_credentials, &key);
-        // A failed commit fails initialization, so the host never publishes an incarnation whose selection is not on disk.
-        write_selection(&selection_root, &selection)
-    });
-    // Curator runs launch under the same Model Execution supervisor as every other internal run and dial with the envelope's credentials; the activation record under the data home names which one.
-    let curator_host = daemon::curator::worker::CuratorHost {
+    let curator_host = Arc::new(daemon::curator::worker::CuratorHost {
         supervisor: model_execution.supervisor(),
         credentials: envelope
             .credentials
             .iter()
             .map(|(name, value)| (name.clone(), zeroize::Zeroizing::new(value.clone())))
             .collect(),
+        credential_identities: OnceLock::new(),
         worker_instance: format!(
             "curator-worker:{}",
             &envelope.payload_manifest_digest[..envelope.payload_manifest_digest.len().min(16)]
         ),
-    };
+    });
+    let commit_selection = selection_commit_hook(
+        selection,
+        selection_credentials,
+        selection_root,
+        Arc::clone(&curator_host),
+    );
     let composite = StaticComposite::new(
         daemon::Handler::new_with_connection_file(Some(publication))
             .with_connection_key_hook(commit_selection)
@@ -1395,6 +1412,67 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    /// The commit hook gives `CuratorHost` the same keyed credential identities written to the selection.
+    #[test]
+    fn the_curator_host_receives_the_credential_identities_the_selection_commits() {
+        let root = tempfile::tempdir().expect("selection root");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("selection root mode");
+        let store = HarnessClosureStore::open(root.path()).expect("closure store");
+        let credentials = BTreeMap::from([(
+            "ANTHROPIC_API_KEY".to_owned(),
+            "credential-value".to_owned(),
+        )]);
+        let curator_host = Arc::new(daemon::curator::worker::CuratorHost {
+            supervisor: Arc::new(host_runtime::model_execution::supervisor::Supervisor::new(
+                Arc::new(UnavailableBackend { subreason: "test" }),
+            )),
+            credentials: credentials
+                .iter()
+                .map(|(name, value)| (name.clone(), zeroize::Zeroizing::new(value.clone())))
+                .collect(),
+            credential_identities: OnceLock::new(),
+            worker_instance: "curator-worker:test".to_owned(),
+        });
+        assert!(curator_host.credential_identities.get().is_none());
+        let hook = selection_commit_hook(
+            HarnessSelection {
+                schema: 1,
+                opencode: None,
+                pi: None,
+                credential_identities: BTreeMap::new(),
+            },
+            credentials.clone(),
+            root.path().to_path_buf(),
+            Arc::clone(&curator_host),
+        );
+        hook([11; 32]).expect("commit");
+
+        let loaded = match read_selection(root.path(), &mut ClosureValidator::new(Some(&store)))
+            .expect("read selection")
+        {
+            SelectionState::Active(loaded) => loaded,
+            _ => panic!("a committed selection must read back as active"),
+        };
+        let identities = curator_host
+            .credential_identities
+            .get()
+            .expect("the hook hands the identities to the Curator host");
+        assert_eq!(identities, &loaded.credential_identities);
+        assert_eq!(identities, &credential_identities(&credentials, &[11; 32]));
+        let identity = &identities["ANTHROPIC_API_KEY"];
+        let unkeyed = format!(
+            "{:x}",
+            <Sha256 as sha2::Digest>::digest(b"credential-value")
+        );
+        assert_ne!(identity, &unkeyed);
+        assert_ne!(
+            identities,
+            &credential_identities(&credentials, &[12; 32]),
+            "the identity depends on the incarnation key"
+        );
     }
 
     fn plant_stale_selection(closure_root: &Path) {

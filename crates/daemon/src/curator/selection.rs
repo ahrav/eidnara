@@ -19,6 +19,14 @@ pub const MEMORY_CLASSES: &[OccurrenceClass] = &[
     OccurrenceClass::CanonicalClaims,
     OccurrenceClass::PromotedMemory,
 ];
+
+pub fn resolvable_classes() -> Vec<OccurrenceClass> {
+    MEMORY_CLASSES
+        .iter()
+        .copied()
+        .filter(|class| super::coordinator::resolves_class(*class))
+        .collect()
+}
 /// Live descriptors examined per selection page, so one slot's work is bounded whatever the inventory's size.
 pub const MAX_EXAMINED_PER_PAGE: usize = 256;
 
