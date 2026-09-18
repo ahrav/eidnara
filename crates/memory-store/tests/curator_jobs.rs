@@ -6,13 +6,13 @@ use context_core::redaction::RedactionErrorKind;
 use memory_store::curator_jobs::{
     CURATOR_JOB_ALLOWANCE_BYTES, CURATOR_QUEUE_LIFETIME_MS, CURATOR_RECEIPT_CHARGE_BYTES,
     CausalInputs, CuratorJobError, CuratorJobInput, CuratorJobOutcome, CuratorJobRefusal,
-    CuratorJobState, EvidenceAvailability, FROZEN_SELECTION_ALLOWANCE_BYTES, FrozenSelectionPage,
-    FrozenSelectionState, MAX_CAUSAL_POLICY_VERSIONS, MAX_CAUSAL_SIGNALS,
-    MAX_CURATOR_METADATA_BYTES_PER_PROJECT, MAX_FROZEN_PAGE_BYTES, MAX_FROZEN_SELECTIONS_PER_HOST,
-    MAX_PENDING_CURATOR_JOBS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_PROJECT, MAX_REQUIRED_EVIDENCE,
-    MAX_SELECTION_REFERENCES, ProducerBinding, ReserveOutcome, ReviewTarget,
-    activate_curator_job_in_tx, complete_frozen_selection_in_tx, freeze_selection_in_tx,
-    reserve_curator_job_in_tx,
+    CuratorJobState, EvidenceAvailability, FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
+    FROZEN_SELECTION_ALLOWANCE_BYTES, FrozenSelectionPage, FrozenSelectionState,
+    MAX_CAUSAL_POLICY_VERSIONS, MAX_CAUSAL_SIGNALS, MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+    MAX_FROZEN_PAGE_BYTES, MAX_FROZEN_SELECTIONS_PER_HOST, MAX_PENDING_CURATOR_JOBS_PER_HOST,
+    MAX_PENDING_CURATOR_JOBS_PER_PROJECT, MAX_REQUIRED_EVIDENCE, MAX_SELECTION_REFERENCES,
+    ProducerBinding, ReserveOutcome, ReviewTarget, activate_curator_job_in_tx,
+    complete_frozen_selection_in_tx, freeze_selection_in_tx, reserve_curator_job_in_tx,
 };
 use memory_store::{MemoryStore, MemoryStoreError};
 use storage::StorageDescriptor;
@@ -135,7 +135,7 @@ fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job(
         .finish_curator_job(
             "proj",
             &job.causal_identity,
-            CuratorJobOutcome::Abstained,
+            CuratorJobOutcome::Failed,
             NOW + 10,
         )
         .unwrap();
@@ -146,7 +146,7 @@ fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job(
         ReserveOutcome::Existing(existing) => {
             assert_eq!(
                 existing.state,
-                CuratorJobState::Terminal(CuratorJobOutcome::Abstained)
+                CuratorJobState::Terminal(CuratorJobOutcome::Failed)
             );
         }
         other => panic!("expected the terminal row, got {other:?}"),
@@ -202,7 +202,7 @@ fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job(
             .unwrap()
             .unwrap()
             .state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Abstained)
+        CuratorJobState::Terminal(CuratorJobOutcome::Failed)
     );
     // Evidence that becomes available at the unchanged target is a causal change; conflicting availability for one id is a producer error.
     let mut flipped = inputs("cand-1");
@@ -596,7 +596,7 @@ fn capacity_counts_reserved_and_ready_and_refusal_writes_nothing() {
     // A terminal outcome frees the slot but keeps its receipt charge.
     let first = inputs("cand-0").causal_identity().unwrap();
     store
-        .finish_curator_job("proj", &first, CuratorJobOutcome::Completed, NOW + 1)
+        .finish_curator_job("proj", &first, CuratorJobOutcome::Failed, NOW + 1)
         .unwrap();
     let after = store.curator_headroom("proj").unwrap();
     assert_eq!(after.pending_jobs, MAX_PENDING_CURATOR_JOBS_PER_PROJECT - 1);
@@ -710,7 +710,7 @@ fn expiry_records_terminal_outcomes_without_resurrection_and_receipts_survive_re
                 .finish_curator_job(
                     "proj",
                     &ready_job.causal_identity,
-                    CuratorJobOutcome::Completed,
+                    CuratorJobOutcome::Failed,
                     deadline
                 )
                 .unwrap_err()
@@ -799,7 +799,9 @@ fn expiry_records_terminal_outcomes_without_resurrection_and_receipts_survive_re
     );
     assert_eq!(
         after.project_metadata_bytes,
-        4 * CURATOR_RECEIPT_CHARGE_BYTES + CURATOR_JOB_ALLOWANCE_BYTES,
+        3 * CURATOR_RECEIPT_CHARGE_BYTES
+            + FROZEN_PAGE_RECEIPT_CHARGE_BYTES
+            + CURATOR_JOB_ALLOWANCE_BYTES,
         "every admitted job and every frozen page keeps its permanent receipt charge"
     );
     drop(store);
@@ -1330,7 +1332,7 @@ fn terminal_pages_drop_their_references_and_keep_a_receipt_charge() {
             .curator_headroom("proj")
             .unwrap()
             .project_metadata_bytes,
-        CURATOR_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
+        FROZEN_PAGE_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
         "a frozen page holds its allowance and its permanent receipt"
     );
     let enqueued = store
@@ -1375,7 +1377,7 @@ fn terminal_pages_drop_their_references_and_keep_a_receipt_charge() {
             .curator_headroom("proj")
             .unwrap()
             .project_metadata_bytes,
-        CURATOR_RECEIPT_CHARGE_BYTES,
+        FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
         "the allowance is released; the receipt charge stays for the incarnation"
     );
     // A failed slot also drops its page, and every attempt leaves one receipt behind.
@@ -1396,7 +1398,7 @@ fn terminal_pages_drop_their_references_and_keep_a_receipt_charge() {
             .curator_headroom("proj")
             .unwrap()
             .project_metadata_bytes,
-        2 * CURATOR_RECEIPT_CHARGE_BYTES
+        2 * FROZEN_PAGE_RECEIPT_CHARGE_BYTES
     );
     let retained: i64 = store
         .with_conn_for_test(|conn| {
@@ -1448,4 +1450,46 @@ fn transaction_local_primitives_validate_the_project_identity() {
         })
         .unwrap();
     assert_eq!(rows, (0, 0), "an invalid project writes nothing");
+}
+
+/// A frozen page's reference identities are scanned at freeze and the audit rows stay while the page holds its references; a terminal page drops them with the references, keeping only the slot and attempt identities the compact row retains.
+#[test]
+fn a_terminal_page_releases_the_scan_audit_of_its_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1"), inputs("cand-2")],
+        next_cursor: Some("cursor-1".to_string()),
+    };
+    store
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    let scans = |store: &MemoryStore| -> Vec<String> {
+        store
+            .with_conn_for_test(|conn| {
+                conn.prepare("SELECT DISTINCT field_id FROM scan_owner_copies ORDER BY field_id")?
+                    .query_map([], |row| row.get(0))?
+                    .collect()
+            })
+            .unwrap()
+    };
+    let frozen = scans(&store);
+    assert!(
+        frozen.iter().any(|field| field == "candidate_id"),
+        "{frozen:?}"
+    );
+    store
+        .complete_frozen_selection(
+            "proj",
+            "slot-1",
+            "attempt-1",
+            FrozenSelectionState::FailedSlot,
+            NOW + 1,
+        )
+        .unwrap();
+    assert_eq!(
+        scans(&store),
+        ["project", "selection_attempt", "slot_id"],
+        "only the identities the compact row still retains keep their audit"
+    );
 }

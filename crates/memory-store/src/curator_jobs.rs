@@ -18,7 +18,7 @@ use context_core::redaction::reject_transaction_secret_text;
 
 use crate::{
     DurableWriteFamily, MemoryStore, MemoryStoreError, PreparedWrite, WriteDisposition,
-    active_scan_owner_key,
+    active_scan_owner_key, retire_active_scan_domain_owner,
 };
 
 pub const MAX_PENDING_CURATOR_JOBS_PER_PROJECT: usize = 64;
@@ -38,8 +38,10 @@ const MAX_TARGET_JSON_BYTES: usize = 1024;
 pub const CURATOR_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const MAX_CURATOR_METADATA_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024;
 pub const MAX_CURATOR_METADATA_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
-/// Permanent receipt charge retained for each admitted job and frozen page.
-pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 1024;
+/// Permanent receipt charge every admitted job keeps for the store incarnation: the job row, its receipt, up to four attempt markers, and the scan-audit rows their caller text leaves, all sized at their byte bounds. Worst case: the job row (project 256, firing id 256, target 1024, template 256, digests 128) about 2 KiB; the receipt (project, authority store 256, claim id 200, candidate 256, digest 64, incarnations 64) about 1.3 KiB; four markers (project, provider 128, model 256, credential 256, digests 128) about 1 KiB each; the primary-key index entry each row repeats, about 2.5 KiB together; and the scan audit, roughly 2.6 KiB per dispatch (one batch, one domain owner, four field scans and owner copies with their indexes), about 1 KiB for the selection, and about 3 KiB for the reservation and activation identities, some 14 KiB in all. Terminal rows keep it, so it also bounds lifetime admissions per store incarnation: `MAX_CURATOR_METADATA_BYTES_PER_PROJECT / CURATOR_RECEIPT_CHARGE_BYTES` (2,048) jobs per project and four times that per host before reservation refuses for good.
+pub const CURATOR_RECEIPT_CHARGE_BYTES: u64 = 32 * 1024;
+/// Permanent receipt charge each frozen page keeps once terminal: the compact row (project, slot id, and selection attempt at 256 bytes each, plus state and timestamps) and the primary-key index entry that repeats those keys, about 1.7 KiB at the bounds.
+pub const FROZEN_PAGE_RECEIPT_CHARGE_BYTES: u64 = 4096;
 /// Worst-case temporary allowance a reservation prepays for its input, holds, manifest, and attempt metadata; released when the job is terminal.
 pub const CURATOR_JOB_ALLOWANCE_BYTES: u64 = 32 * 1024;
 /// Allowance a `frozen` page holds for its serialized references, sized to [`MAX_FROZEN_PAGE_BYTES`]; terminal pages hold none.
@@ -298,7 +300,7 @@ fn refuse(refusal: CuratorJobRefusal) -> rusqlite::Error {
 }
 
 /// Reads the refusal a transaction body raised through `refuse` before the storage layer flattens the error to text.
-fn refusal_of(error: &rusqlite::Error) -> Option<CuratorJobRefusal> {
+pub(crate) fn refusal_of(error: &rusqlite::Error) -> Option<CuratorJobRefusal> {
     match error {
         rusqlite::Error::ToSqlConversionFailure(inner) => {
             inner.downcast_ref::<CuratorJobRefusal>().copied()
@@ -308,7 +310,7 @@ fn refusal_of(error: &rusqlite::Error) -> Option<CuratorJobRefusal> {
 }
 
 /// A project is an identity: 1 to 256 bytes, refused as a store error at the public surface so it never reaches a row.
-fn check_project(project: &str) -> Result<(), MemoryStoreError> {
+pub(crate) fn check_project(project: &str) -> Result<(), MemoryStoreError> {
     check_identity(project)
         .map_err(|_| MemoryStoreError::Serde("curator project must be 1 to 256 bytes".to_string()))
 }
@@ -528,7 +530,7 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CuratorJob> {
     })
 }
 
-fn load_job(
+pub(crate) fn load_curator_job(
     conn: &GuardedConn<'_>,
     project: &str,
     causal_identity: &str,
@@ -623,7 +625,7 @@ pub fn reserve_curator_job_in_tx(
     let inputs = inputs.clone().normalized().map_err(refuse)?;
     let causal_identity = inputs.causal_identity().map_err(refuse)?;
     inputs.reject_secrets()?;
-    if let Some(existing) = load_job(conn, project, &causal_identity)? {
+    if let Some(existing) = load_curator_job(conn, project, &causal_identity)? {
         return Ok(ReserveOutcome::Existing(existing));
     }
     if pending_jobs(conn, Some(project))? >= MAX_PENDING_CURATOR_JOBS_PER_PROJECT {
@@ -661,7 +663,7 @@ pub fn reserve_curator_job_in_tx(
             now_ms,
         ],
     )?;
-    load_job(conn, project, &causal_identity)?
+    load_curator_job(conn, project, &causal_identity)?
         .map(ReserveOutcome::Reserved)
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
@@ -678,7 +680,7 @@ pub fn activate_curator_job_in_tx(
     producer.validate().map_err(refuse)?;
     input.reject_secrets()?;
     let input_json = input.encode().map_err(refuse)?;
-    let job = load_job(conn, project, causal_identity)?
+    let job = load_curator_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
     match job.state {
         CuratorJobState::Reserved => {}
@@ -699,7 +701,8 @@ pub fn activate_curator_job_in_tx(
          WHERE project = ?1 AND causal_identity = ?2 AND state = 'reserved'",
         params![project, causal_identity, input_json, now_ms],
     )?;
-    load_job(conn, project, causal_identity)?.ok_or_else(|| refuse(CuratorJobRefusal::Missing))
+    load_curator_job(conn, project, causal_identity)?
+        .ok_or_else(|| refuse(CuratorJobRefusal::Missing))
 }
 
 /// Records one terminal outcome for a non-terminal row, drops its input, and releases its allowance; the compact receipt and its charge stay. A terminal row is never reopened, and a finish at or after the queue deadline is refused as expired so the permanent outcome does not depend on whether the sweep ran first.
@@ -718,7 +721,7 @@ pub fn finish_curator_job_in_tx(
             AND queue_deadline_ms > ?4",
         params![project, causal_identity, outcome.as_str(), now_ms],
     )?;
-    let job = load_job(conn, project, causal_identity)?
+    let job = load_curator_job(conn, project, causal_identity)?
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
     if changed == 0 {
         return Err(refuse(match job.state {
@@ -789,7 +792,7 @@ pub fn freeze_selection_in_tx(
     check_quota(
         conn,
         project,
-        CURATOR_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
+        FROZEN_PAGE_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
     )?;
     let deadline = now_ms
         .checked_add(CURATOR_QUEUE_LIFETIME_MS)
@@ -808,7 +811,7 @@ pub fn freeze_selection_in_tx(
             page.next_cursor,
             deadline,
             i64::try_from(FROZEN_SELECTION_ALLOWANCE_BYTES).unwrap_or(i64::MAX),
-            i64::try_from(CURATOR_RECEIPT_CHARGE_BYTES).unwrap_or(i64::MAX),
+            i64::try_from(FROZEN_PAGE_RECEIPT_CHARGE_BYTES).unwrap_or(i64::MAX),
             now_ms,
         ],
     )?;
@@ -843,6 +846,7 @@ pub fn complete_frozen_selection_in_tx(
           WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
         params![project, slot_id, selection_attempt, state.as_str(), now_ms],
     )?;
+    release_frozen_page_scans(conn, project, slot_id, selection_attempt)?;
     Ok(FrozenSelection {
         state,
         page: existing
@@ -850,6 +854,26 @@ pub fn complete_frozen_selection_in_tx(
             .filter(|_| state == FrozenSelectionState::Enqueued),
         ..existing
     })
+}
+
+/// The scan owner of one page's reference and cursor text; retired when the page goes terminal and that text leaves the row.
+fn frozen_page_owner_key(slot_id: &str, selection_attempt: &str) -> String {
+    active_scan_owner_key(&["curator", "freeze", slot_id, selection_attempt])
+}
+
+fn release_frozen_page_scans(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    slot_id: &str,
+    selection_attempt: &str,
+) -> rusqlite::Result<()> {
+    retire_active_scan_domain_owner(
+        conn,
+        "project",
+        project,
+        DurableWriteFamily::CuratorJobs.owner_kind(),
+        &frozen_page_owner_key(slot_id, selection_attempt),
+    )
 }
 
 fn load_selection(
@@ -926,29 +950,32 @@ fn scan_target(write: &mut PreparedWrite, target: &ReviewTarget) -> Result<(), M
     Ok(())
 }
 
-fn curator_write(project: &str, operation: &str) -> Result<PreparedWrite, MemoryStoreError> {
+/// The prepared write every Curator family operation runs under: the project is bounded and scanned as an existing identity, and the scan audit is owned by `owner_parts`.
+pub(crate) fn curator_write(
+    project: &str,
+    owner_parts: &[&str],
+) -> Result<PreparedWrite, MemoryStoreError> {
     check_project(project)?;
     let mut write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
-    write.domain_owner(
-        "project",
-        project,
-        active_scan_owner_key(&["curator", operation]),
-    );
+    write.domain_owner("project", project, active_scan_owner_key(owner_parts));
     write.existing_identity("project", project)?;
     Ok(write)
+}
+
+/// The store's own durable incarnation, read inside the caller's transaction.
+pub(crate) fn store_incarnation_in_tx(conn: &GuardedConn<'_>) -> rusqlite::Result<String> {
+    conn.query_row(
+        "SELECT database_incarnation_id FROM curator_store_identity WHERE id = 0",
+        [],
+        |row| row.get(0),
+    )
 }
 
 impl MemoryStore {
     /// The store's own durable incarnation, written once at genesis; reopen keeps it and a replaced file has another.
     pub fn curator_store_incarnation(&self) -> Result<String, MemoryStoreError> {
         self.inner
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT database_incarnation_id FROM curator_store_identity WHERE id = 0",
-                    [],
-                    |row| row.get(0),
-                )
-            })
+            .with_conn(store_incarnation_in_tx)
             .map_err(Into::into)
     }
 
@@ -987,7 +1014,7 @@ impl MemoryStore {
         prepare: impl FnOnce(&mut PreparedWrite) -> Result<(), MemoryStoreError>,
         body: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<WriteDisposition<T>>,
     ) -> Result<T, CuratorJobError> {
-        let mut write = curator_write(project, operation)?;
+        let mut write = curator_write(project, &["curator", operation])?;
         prepare(&mut write)?;
         let refusal = std::cell::Cell::new(None);
         let result = write.execute(&self.inner, |coordinated| {
@@ -1056,6 +1083,7 @@ impl MemoryStore {
         )
     }
 
+    /// Closes a job from outside a run. `Completed` and `Abstained` are execution outcomes that only a receipt completion records, with the attempt and selection evidence behind them; they are refused here.
     pub fn finish_curator_job(
         &self,
         project: &str,
@@ -1063,36 +1091,115 @@ impl MemoryStore {
         outcome: CuratorJobOutcome,
         now_ms: i64,
     ) -> Result<CuratorJob, CuratorJobError> {
+        if matches!(
+            outcome,
+            CuratorJobOutcome::Completed | CuratorJobOutcome::Abstained
+        ) {
+            return Err(CuratorJobError::Refused(CuratorJobRefusal::InvalidRequest));
+        }
         self.curator_transaction(
             project,
             "finish",
             |_| Ok(()),
             |conn| {
-                finish_curator_job_in_tx(conn, project, causal_identity, outcome, now_ms)
-                    .map(WriteDisposition::Applied)
+                let job =
+                    finish_curator_job_in_tx(conn, project, causal_identity, outcome, now_ms)?;
+                // A claim on a finished job can do nothing but renew; fence it here rather than leave it to the sweep.
+                let job_id: i64 = conn.query_row(
+                    "SELECT job_id FROM curator_jobs WHERE project = ?1 AND causal_identity = ?2",
+                    params![project, causal_identity],
+                    |row| row.get(0),
+                )?;
+                crate::task_lease::fence_task_claims_tx(
+                    conn,
+                    &crate::curator_ledger::CURATOR_REVIEW_TASK,
+                    project,
+                    job_id,
+                    "stale",
+                    now_ms,
+                )?;
+                Ok(WriteDisposition::Applied(job))
             },
         )
     }
 
-    /// Marks every reserved or ready job and every frozen page whose deadline is at or before `now_ms` as expired. Expiry releases allowances, keeps receipts, and never moves a slot cursor.
+    /// Expires reserved or ready jobs and frozen selections at their deadlines. An in-progress receipt inside its run deadline shields its job; at the run deadline the receipt closes as `cancelled` when a cancellation was recorded, `unknown` when it has an unterminated attempt, otherwise `expired`, and its job goes terminal in the same sweep with the outcome a completion would have mapped. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts, and the live claim of any terminal job is fenced `expired`, so a worker that keeps renewing cannot hold a ledger slot for a job that no longer exists.
     pub fn expire_curator_work(&self, now_ms: i64) -> Result<(usize, usize), CuratorJobError> {
         // The sweep carries no caller text, so it records no scan and needs no owner scope.
         let write = PreparedWrite::new(DurableWriteFamily::CuratorJobs);
         write
             .execute(&self.inner, |coordinated| {
-                let jobs = coordinated.tx().execute(
-                    "UPDATE curator_jobs
-                        SET state = 'terminal', outcome = 'expired', allowance_bytes = 0,
-                            input_json = NULL, updated_at_ms = ?1
-                      WHERE state IN ('reserved', 'ready') AND queue_deadline_ms <= ?1",
+                // Nothing can publish once a receipt's run deadline has passed, so an in-progress receipt closes there whatever its job's state, and the job follows in the same transaction rather than holding a pending slot until its queue deadline.
+                coordinated.tx().execute(
+                    "UPDATE curator_receipts
+                        SET state = 'complete', updated_at_ms = ?1,
+                            terminal_kind = CASE
+                              WHEN cancelled_at_ms IS NOT NULL THEN 'cancelled'
+                              WHEN EXISTS(
+                                SELECT 1 FROM curator_attempts a
+                                 WHERE a.project = curator_receipts.project
+                                   AND a.causal_identity = curator_receipts.causal_identity
+                                   AND a.terminal_kind IS NULL)
+                              THEN 'unknown' ELSE 'expired' END
+                      WHERE state = 'in_progress' AND run_deadline_ms <= ?1",
                     [now_ms],
                 )?;
+                // A job expires at its queue deadline, or as soon as its receipt is closed; an in-progress receipt inside its run deadline still shields the job.
+                let jobs = coordinated.tx().execute(
+                    "UPDATE curator_jobs
+                        SET state = 'terminal', allowance_bytes = 0, input_json = NULL, updated_at_ms = ?1,
+                            outcome = COALESCE((
+                                SELECT CASE r.terminal_kind
+                                         WHEN 'unknown' THEN 'unknown'
+                                         WHEN 'cancelled' THEN 'failed'
+                                         ELSE 'expired' END
+                                  FROM curator_receipts r
+                                 WHERE r.project = curator_jobs.project
+                                   AND r.causal_identity = curator_jobs.causal_identity), 'expired')
+                      WHERE state IN ('reserved', 'ready')
+                        AND (queue_deadline_ms <= ?1
+                             OR EXISTS(SELECT 1 FROM curator_receipts r
+                                        WHERE r.project = curator_jobs.project
+                                          AND r.causal_identity = curator_jobs.causal_identity
+                                          AND r.state = 'complete'))
+                        AND NOT EXISTS(SELECT 1 FROM curator_receipts r
+                                        WHERE r.project = curator_jobs.project
+                                          AND r.causal_identity = curator_jobs.causal_identity
+                                          AND r.state = 'in_progress')",
+                    [now_ms],
+                )?;
+                let expiring_pages: Vec<(String, String, String)> = coordinated
+                    .tx()
+                    .prepare(
+                        "SELECT project, slot_id, selection_attempt FROM curator_frozen_selections
+                          WHERE state = 'frozen' AND selection_deadline_ms <= ?1",
+                    )?
+                    .query_map([now_ms], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
                 let pages = coordinated.tx().execute(
                     "UPDATE curator_frozen_selections
                         SET state = 'expired', page_json = NULL, next_cursor = NULL,
                             allowance_bytes = 0, updated_at_ms = ?1
                       WHERE state = 'frozen' AND selection_deadline_ms <= ?1",
                     [now_ms],
+                )?;
+                for (project, slot_id, selection_attempt) in &expiring_pages {
+                    release_frozen_page_scans(coordinated.tx(), project, slot_id, selection_attempt)?;
+                }
+                // Renewal checks the claim, not the job, so a claim on a terminal job would otherwise live as long as its worker heartbeats.
+                coordinated.tx().execute(
+                    "UPDATE note_eval_claims
+                        SET terminal_kind = 'expired', terminal_response = ?2, terminal_at_ms = ?1
+                      WHERE task_kind = ?3 AND terminal_kind IS NULL
+                        AND EXISTS(SELECT 1 FROM curator_jobs j
+                                    WHERE j.project = note_eval_claims.project
+                                      AND j.job_id = note_eval_claims.note_id
+                                      AND j.state = 'terminal')",
+                    params![
+                        now_ms,
+                        crate::task_lease::kind_response("expired"),
+                        crate::curator_ledger::CURATOR_REVIEW_TASK.task_kind
+                    ],
                 )?;
                 Ok(if jobs + pages == 0 {
                     WriteDisposition::Replay((0, 0))
@@ -1117,12 +1224,21 @@ impl MemoryStore {
             |write| {
                 write.identity("slot_id", slot_id)?;
                 write.identity("selection_attempt", selection_attempt)?;
+                // The references and cursor leave the row when the page goes terminal; their scans are owned by this page alone so they can be retired with them, while the slot and attempt identities the compact row keeps stay under the shared freeze owner.
+                let first_reference_scan = write.scans.len();
                 if let Some(cursor) = &page.next_cursor {
                     write.identity("next_cursor", cursor)?;
                 }
                 page.references
                     .iter()
-                    .try_for_each(|inputs| scan_causal_identities(write, inputs))
+                    .try_for_each(|inputs| scan_causal_identities(write, inputs))?;
+                write.reassign_scans_in(
+                    first_reference_scan..write.scans.len(),
+                    "project",
+                    project,
+                    frozen_page_owner_key(slot_id, selection_attempt),
+                );
+                Ok(())
             },
             |conn| {
                 // An identical page under an existing attempt replays the row; only a new row records its scan audit.
@@ -1181,7 +1297,7 @@ impl MemoryStore {
     ) -> Result<Option<CuratorJob>, MemoryStoreError> {
         check_project(project)?;
         self.inner
-            .with_conn(|conn| load_job(conn, project, causal_identity))
+            .with_conn(|conn| load_curator_job(conn, project, causal_identity))
             .map_err(Into::into)
     }
 

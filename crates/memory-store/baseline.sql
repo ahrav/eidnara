@@ -409,7 +409,10 @@ CREATE TRIGGER curator_store_identity_no_reinsert BEFORE INSERT ON curator_store
 WHEN EXISTS (SELECT 1 FROM curator_store_identity)
 BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 
+-- `job_id` is the task id a Curator claim persists; a declared integer key survives a
+-- rebuild, where a hidden rowid may be renumbered.
 CREATE TABLE curator_jobs (
+            job_id INTEGER PRIMARY KEY,
             project TEXT NOT NULL CHECK (length(project) > 0),
             causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
             producer TEXT NOT NULL CHECK (length(producer) BETWEEN 1 AND 64),
@@ -426,7 +429,7 @@ CREATE TABLE curator_jobs (
             receipt_charge_bytes INTEGER NOT NULL CHECK (receipt_charge_bytes > 0),
             created_at_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
-            PRIMARY KEY (project, causal_identity),
+            UNIQUE (project, causal_identity),
             CHECK ((state = 'terminal') = (outcome IS NOT NULL)),
             CHECK (state <> 'ready' OR input_json IS NOT NULL),
             CHECK (state <> 'reserved' OR input_json IS NULL)
@@ -491,6 +494,93 @@ BEGIN
     SELECT reject_transaction_text(NEW.slot_id),
            reject_transaction_text(NEW.selection_attempt),
            reject_transaction_text(COALESCE(NEW.page_json, ''));
+END;
+
+-- One Curator receipt per admitted job: the run deadline and execution cutoff are
+-- written at the first claim and inherited unchanged by every takeover; the
+-- generation fences every later write; completion selects exactly one Kernel result.
+-- Attempt rows are the KTD7 markers. Every committed row stays consumed, sent or not,
+-- and the count across generations is the attempt allowance.
+CREATE TABLE curator_receipts (
+            project TEXT NOT NULL CHECK (length(project) > 0),
+            causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
+            database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) = 32),
+            kernel_incarnation_id TEXT NOT NULL CHECK (length(kernel_incarnation_id) = 32),
+            authority_generation INTEGER NOT NULL CHECK (authority_generation >= 0),
+            authority_context_store TEXT NOT NULL CHECK (length(authority_context_store) BETWEEN 1 AND 256),
+            state TEXT NOT NULL CHECK (state IN ('in_progress', 'complete')),
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            claim_id TEXT NOT NULL CHECK (length(claim_id) BETWEEN 1 AND 200),
+            run_deadline_ms INTEGER NOT NULL,
+            execution_cutoff_ms INTEGER NOT NULL CHECK (execution_cutoff_ms < run_deadline_ms),
+            cancelled_at_ms INTEGER,
+            terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'abstained', 'failed', 'cancelled', 'unknown', 'expired')),
+            selected_generation INTEGER CHECK (selected_generation IS NULL OR selected_generation >= 1),
+            selected_candidate_id TEXT CHECK (selected_candidate_id IS NULL OR length(selected_candidate_id) BETWEEN 1 AND 256),
+            selected_payload_digest TEXT CHECK (selected_payload_digest IS NULL OR length(selected_payload_digest) = 64),
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (project, causal_identity),
+            FOREIGN KEY (project, causal_identity) REFERENCES curator_jobs(project, causal_identity),
+            CHECK ((state = 'complete') = (terminal_kind IS NOT NULL)),
+            CHECK ((selected_candidate_id IS NULL) = (selected_payload_digest IS NULL)),
+            CHECK ((selected_candidate_id IS NULL) = (selected_generation IS NULL)),
+            CHECK (terminal_kind IS NOT 'complete' OR selected_candidate_id IS NOT NULL)
+        );
+
+-- Receipts survive for the store incarnation; the expiry sweep reads only the in-progress ones by deadline.
+CREATE INDEX idx_curator_receipts_state
+            ON curator_receipts(state, run_deadline_ms);
+
+CREATE TABLE curator_attempts (
+            project TEXT NOT NULL,
+            causal_identity TEXT NOT NULL,
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            attempt_index INTEGER NOT NULL CHECK (attempt_index >= 0),
+            body_digest TEXT NOT NULL CHECK (length(body_digest) = 64),
+            request_bytes INTEGER NOT NULL CHECK (request_bytes BETWEEN 1 AND 262144),
+            provider TEXT NOT NULL CHECK (length(provider) BETWEEN 1 AND 128),
+            model TEXT NOT NULL CHECK (length(model) BETWEEN 1 AND 256),
+            credential_id TEXT NOT NULL CHECK (length(credential_id) BETWEEN 1 AND 256),
+            policy_union_digest TEXT NOT NULL CHECK (length(policy_union_digest) = 64),
+            attempt_deadline_ms INTEGER NOT NULL,
+            committed_at_ms INTEGER NOT NULL,
+            terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown', 'not_dispatched')),
+            terminal_at_ms INTEGER,
+            PRIMARY KEY (project, causal_identity, generation, attempt_index),
+            FOREIGN KEY (project, causal_identity) REFERENCES curator_receipts(project, causal_identity),
+            CHECK ((terminal_kind IS NULL) = (terminal_at_ms IS NULL))
+        );
+
+CREATE TRIGGER curator_receipts_no_delete BEFORE DELETE ON curator_receipts
+BEGIN SELECT RAISE(ABORT, 'curator receipts survive for the store incarnation'); END;
+
+CREATE TRIGGER curator_receipts_deadlines_immutable
+BEFORE UPDATE OF run_deadline_ms, execution_cutoff_ms, created_at_ms, database_incarnation_id, kernel_incarnation_id, authority_generation, authority_context_store
+ON curator_receipts
+BEGIN SELECT RAISE(ABORT, 'curator receipt deadlines, incarnations, and authority are written once'); END;
+
+-- The selected candidate is caller text a completion writes once: a detected secret
+-- refuses the completion instead of being redacted, as every other Curator identity is.
+CREATE TRIGGER curator_receipts_reject_secret_update BEFORE UPDATE OF selected_candidate_id ON curator_receipts
+BEGIN
+    SELECT reject_transaction_text(COALESCE(NEW.selected_candidate_id, ''));
+END;
+
+CREATE TRIGGER curator_attempts_no_delete BEFORE DELETE ON curator_attempts
+BEGIN SELECT RAISE(ABORT, 'a committed curator attempt stays consumed'); END;
+
+CREATE TRIGGER curator_attempts_marker_immutable
+BEFORE UPDATE OF generation, attempt_index, body_digest, request_bytes, provider, model,
+    credential_id, policy_union_digest, attempt_deadline_ms, committed_at_ms
+ON curator_attempts
+BEGIN SELECT RAISE(ABORT, 'a curator attempt marker is written once'); END;
+
+CREATE TRIGGER curator_attempts_reject_secret_insert BEFORE INSERT ON curator_attempts
+BEGIN
+    SELECT reject_transaction_text(NEW.provider),
+           reject_transaction_text(NEW.model),
+           reject_transaction_text(NEW.credential_id);
 END;
 
 CREATE TABLE transform_session_roots (

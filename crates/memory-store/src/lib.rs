@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod curator_jobs;
+pub mod curator_ledger;
 pub mod memory_classifier_ledger;
 pub(crate) mod task_lease;
 
@@ -2254,6 +2255,42 @@ impl PreparedWrite {
             None => result.map_err(Into::into),
         }
     }
+
+    /// [`Self::execute`] followed by one synchronous handoff through
+    /// [`SqliteStore::with_conn_fenced_then_handoff`]: the operation and its scan audit commit
+    /// together, then `handoff` runs once with a read-only view and the committed value.
+    fn execute_then_handoff<T, H>(
+        self,
+        store: &SqliteStore,
+        operation: impl FnOnce(&mut ActiveWriteTransaction<'_>) -> rusqlite::Result<WriteDisposition<T>>,
+        handoff: impl FnOnce(&GuardedConn<'_>, &T) -> H,
+    ) -> Result<(T, storage::HandoffOutcome<H>), MemoryStoreError> {
+        let redaction_failure = std::cell::Cell::new(None);
+        let redaction_failure_in_tx = &redaction_failure;
+        let result = store.with_conn_fenced_then_handoff(
+            move |tx| {
+                let mut coordinated = ActiveWriteTransaction {
+                    tx,
+                    prepared: std::cell::RefCell::new(self),
+                };
+                let disposition = operation(&mut coordinated).inspect_err(|error| {
+                    redaction_failure_in_tx.set(sqlite_redaction_kind(error));
+                })?;
+                match disposition {
+                    WriteDisposition::Applied(value) => {
+                        coordinated.persist_audit()?;
+                        Ok(value)
+                    }
+                    WriteDisposition::Replay(value) => Ok(value),
+                }
+            },
+            handoff,
+        );
+        match redaction_failure.get() {
+            Some(kind) => Err(MemoryStoreError::Redaction(kind)),
+            None => result.map_err(Into::into),
+        }
+    }
 }
 
 impl ActiveWriteTransaction<'_> {
@@ -2729,7 +2766,7 @@ const PASS_TRACE_HISTORY_RING_LEN: usize = 256;
 /// The receipt field ids of the two writers that append to `scheduler_history`.
 const OBSERVATION_RING_FIELDS: &[&str] = &["scheduler_observation", "scheduler_history"];
 
-fn active_scan_owner_key(parts: &[&str]) -> String {
+pub(crate) fn active_scan_owner_key(parts: &[&str]) -> String {
     let mut key = String::new();
     for part in parts {
         use std::fmt::Write;
@@ -3949,7 +3986,11 @@ pub const MEMORY_CLASSIFIER_TASK: TaskLeaseKind = TaskLeaseKind {
 
 /// Every kind on the shared ledger, so an authority transition can fence the
 /// kinds that domain governs.
-const LEASE_KINDS: [&TaskLeaseKind; 2] = [&NOTE_EVALUATION, &MEMORY_CLASSIFIER_TASK];
+const LEASE_KINDS: [&TaskLeaseKind; 3] = [
+    &NOTE_EVALUATION,
+    &MEMORY_CLASSIFIER_TASK,
+    &curator_ledger::CURATOR_REVIEW_TASK,
+];
 
 pub use task_lease::{
     LeaseAbandonOutcome as NoteEvalAbandonOutcome, LeaseAcquireOutcome, LeaseClaim,
