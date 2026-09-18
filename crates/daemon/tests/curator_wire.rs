@@ -439,6 +439,13 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
         .await;
     assert_eq!(all["items"], json!(expected_items));
     assert_eq!(all["next"], Value::Null);
+    // A null limit is the absent one, clamped like an oversized one.
+    assert_eq!(
+        daemon
+            .call(envelope("review.list", &project, json!({ "limit": null })))
+            .await,
+        all
+    );
     let listed = serde_json::to_string(&all).unwrap();
     assert!(!listed.contains("bun"), "no payload text lists");
     assert!(
