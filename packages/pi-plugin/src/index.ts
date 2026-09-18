@@ -517,7 +517,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
                     try {
                         const id = getId.call(sm);
                         if (typeof id === "string" && id.length > 0) sessionId = id;
-                    } catch {}
+                    } catch {
+                        // A session manager that cannot answer leaves the handler without a session id.
+                    }
                 }
             }
 
@@ -687,7 +689,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         try {
             const outgoingSessionId = sessionIdFromContext(ctx);
             if (outgoingSessionId) releaseSessionResources(outgoingSessionId);
-        } catch {}
+        } catch {
+            // Releasing the outgoing session is best effort; the switch itself must proceed.
+        }
     });
     return true;
 }

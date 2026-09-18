@@ -1044,13 +1044,16 @@ fn local_embeddings_component(generation: &ValidatedGeneration) -> LocalEmbeddin
     {
         const BUNDLE_DIR: &str = "payload/model/gte-modernbert-base-f16";
         const ORT_LIBRARY: &str = "payload/ort/libonnxruntime.so";
+        // A generation that ships no ORT library or bundle (the development payload) is a build
+        // without local embeddings, not a configured lane that failed: it reports `unsupported`,
+        // which status and doctor skip, rather than `degraded`, which they fail.
         let Some(ort) = generation
             .manifest
             .files
             .iter()
             .find(|entry| entry.path == ORT_LIBRARY)
         else {
-            return LocalEmbeddingsComponent::new(None);
+            return LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported");
         };
         let descriptor_root = generation.descriptor_root_path();
         let bundle_dir = descriptor_root.join(BUNDLE_DIR);
@@ -1064,7 +1067,7 @@ fn local_embeddings_component(generation: &ValidatedGeneration) -> LocalEmbeddin
             .iter()
             .find(|entry| entry.path == bundle_manifest_path)
         else {
-            return LocalEmbeddingsComponent::new(None);
+            return LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported");
         };
         LocalEmbeddingsComponent::new(Some(LocalEmbeddingsConfig {
             bundle_dir,

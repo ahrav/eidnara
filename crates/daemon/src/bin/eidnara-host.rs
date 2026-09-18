@@ -2200,14 +2200,20 @@ mod tests {
             .insert("ANTHROPIC_API_KEY".to_owned(), "secret".to_owned());
         assert_eq!(envelope.validate(), Ok(()));
 
+        // Explicit Bedrock credentials are a supported row; the profile-based chain is not.
         envelope
             .credentials
-            .insert("AWS_ACCESS_KEY_ID".to_owned(), "ambient".to_owned());
+            .insert("AWS_ACCESS_KEY_ID".to_owned(), "static".to_owned());
+        assert_eq!(envelope.validate(), Ok(()));
+        envelope.credentials.remove("AWS_ACCESS_KEY_ID");
+        envelope
+            .credentials
+            .insert("AWS_PROFILE".to_owned(), "ambient".to_owned());
         assert_eq!(
             envelope.validate(),
             Err("credential source contains an unsupported variable")
         );
-        envelope.credentials.remove("AWS_ACCESS_KEY_ID");
+        envelope.credentials.remove("AWS_PROFILE");
         envelope
             .credentials
             .insert("ANTHROPIC_API_KEY".to_owned(), "x".repeat(16 * 1024 + 1));
