@@ -994,6 +994,22 @@ fn revoked_or_uncited_dependencies_abstain_and_conflicting_content_is_refused() 
             .unwrap(),
         Settled::Abstained(AbstainReason::Secret)
     );
+    // The Kernel scans every payload field, identities included; a credential in a model-controlled identity abstains the same way instead of leaving the receipt in progress behind a staging refusal no retry can pass.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    let mut leaking = fixture.proposal(&[]);
+    leaking.manifest.manifest_id =
+        "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678".to_string();
+    assert_eq!(
+        fixture
+            .settle(&broker, RunResult::Proposal(Box::new(leaking)))
+            .unwrap(),
+        Settled::Abstained(AbstainReason::Secret)
+    );
+    assert_eq!(
+        fixture.receipt().abstained_reason,
+        Some(AbstainReason::Secret)
+    );
 
     // Different content already at the provisional identity conflicts: nothing completes and nothing is readable.
     let fixture = Fixture::open();
