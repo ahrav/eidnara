@@ -230,6 +230,28 @@ impl HandlerCore {
 mod tests {
     use super::*;
     use crate::ModuleMemoriesAuthority;
+    use memory_store::curator_ledger::AbstainReason;
+
+    /// Every abstention reason a receipt can record is a literal the protocol's `review.list` item vocabulary names; a strict client rejects a page carrying an undocumented one.
+    #[test]
+    fn every_abstention_reason_is_a_documented_review_list_literal() {
+        let wire = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/host-wire-protocol.md"
+        ))
+        .unwrap();
+        let vocabulary = wire
+            .lines()
+            .find(|line| line.starts_with("`review.list` carries"))
+            .expect("the review.list paragraph");
+        for reason in AbstainReason::ALL {
+            assert!(
+                vocabulary.contains(&format!("`{}`", reason.as_str())),
+                "{} is not in the review.list reason vocabulary",
+                reason.as_str()
+            );
+        }
+    }
 
     #[test]
     fn authority_project_separates_a_store_fault_from_a_root_outside_module_authority() {
