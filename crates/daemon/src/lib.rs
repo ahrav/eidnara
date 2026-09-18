@@ -155,7 +155,7 @@ use classify::{
 use config::{ConfigCache, DaemonConfig, derive_history_summarizer_chunk_tokens};
 use healing::{SerializerProfile, tail_reclaim};
 use history_summarizer::{
-    HistorySummarizerProducerDriver, reattach_history_summarizer_producer,
+    HistorySummarizerProducerDriver, HoldsReservation, reattach_history_summarizer_producer,
     run_history_summarizer_firing,
 };
 use history_summarizer_chunk::{
@@ -5238,6 +5238,17 @@ impl HandlerCore {
         let phase = loaded.meta.history_summarizer.state.clone();
         if phase == HistorySummarizerPhase::Idle {
             return Some("recovered");
+        }
+        // A reserved firing whose last recovery pass decided nothing armed a backoff; recovery runs on every transform pass, so the backoff is what keeps a stalled reservation from being reconciled once per request.
+        if phase == HistorySummarizerPhase::Publishing
+            && loaded.meta.history_summarizer.holds_reservation()
+            && loaded
+                .meta
+                .history_summarizer
+                .failure_backoff_at_ms
+                .is_some_and(|backoff_at_ms| now < backoff_at_ms)
+        {
+            return Some("backoff");
         }
         if self
             .live_history_summarizer_sessions
@@ -38940,6 +38951,84 @@ mod tests {
         ] {
             assert_seeded_phase_recovers_then_refires_after_backoff(phase).await;
         }
+    }
+
+    /// Records a reservation and a retained publication for the seeded firing, as the live path leaves them when publication fails after the handoff.
+    fn seed_retained_reservation(store: &MemoryStore) {
+        let loaded = store.load("ses").unwrap();
+        let reservation = memory_store::CuratorReservation {
+            firing_seq: loaded.meta.history_summarizer.firing_seq,
+            causal_identity: "c".repeat(64),
+            candidate_id: "hs-ses-candidate".to_string(),
+            payload_digest: "d".repeat(64),
+            kernel_incarnation: "k".repeat(64),
+            queue_deadline_ms: now_ms() + memory_store::curator_jobs::CURATOR_QUEUE_LIFETIME_MS,
+        };
+        store
+            .record_curator_reservation(
+                "ses",
+                loaded.row_version.unwrap(),
+                &reservation,
+                &memory_store::PendingPublication {
+                    validated_json: serde_json::to_string(
+                        &history_summarizer_validate::ValidatedChunk::default(),
+                    )
+                    .unwrap(),
+                    aliases_json: serde_json::to_string(
+                        &history_summarizer_citations::FrozenAliasTable::default(),
+                    )
+                    .unwrap(),
+                    chunk_transcript: "U: retained".to_string(),
+                    boundary_dates: BTreeMap::new(),
+                    publication_floor_ordinal: 3,
+                    collect_user_memory_candidates: false,
+                },
+            )
+            .unwrap();
+    }
+
+    async fn wait_for_reattach_to_finish(handler: &Handler) {
+        let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+        while std::time::Instant::now() < deadline {
+            if handler.reattaching_sessions.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(TEST_WAIT_POLL).await;
+        }
+        panic!("the reattach did not finish");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retained_reserved_firing_waits_out_its_backoff_before_the_next_reattach() {
+        // The test route has no MODULE memories authority, so the reserved firing cannot be verified and every recovery pass retains it. Retaining must arm the backoff and the next transform must honor it instead of running the recovery again.
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+        seed_history_summarizer_phase(&store, HistorySummarizerPhase::Publishing);
+        seed_retained_reservation(&store);
+
+        let recovering = call_transform(&handler, messages.clone()).await;
+        assert_eq!(recovering["history_summarizer"]["no_fire"], "recovering");
+        wait_for_reattach_to_finish(&handler).await;
+        let retained = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
+        assert!(retained.curator_reservation.is_some());
+        assert!(
+            retained.failure_backoff_at_ms.is_some(),
+            "a retained pass arms the backoff"
+        );
+
+        let backed_off = call_transform(&handler, messages.clone()).await;
+        assert_eq!(backed_off["history_summarizer"]["no_fire"], "backoff");
+        assert!(handler.reattaching_sessions.lock().unwrap().is_empty());
+
+        expire_history_summarizer_backoff(&store);
+        let again = call_transform(&handler, messages).await;
+        assert_eq!(again["history_summarizer"]["no_fire"], "recovering");
+        wait_for_reattach_to_finish(&handler).await;
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]

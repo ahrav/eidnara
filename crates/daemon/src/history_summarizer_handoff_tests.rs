@@ -131,25 +131,20 @@ impl Rig {
             },
             |reservation| {
                 observe(reservation);
-                let row_version = self.store.load(SESSION).unwrap().row_version.unwrap();
-                Ok(self
-                    .store
-                    .record_curator_reservation(
-                        SESSION,
-                        row_version,
-                        reservation,
-                        &memory_store::PendingPublication {
-                            validated_json: serde_json::to_string(&validated_range(2, 4)).unwrap(),
-                            aliases_json: serde_json::to_string(&aliases()).unwrap(),
-                            chunk_transcript: "U: transcript".to_string(),
-                            boundary_dates: BTreeMap::new(),
-                            publication_floor_ordinal: 5,
-                            collect_user_memory_candidates: false,
-                        },
-                    )
-                    .unwrap())
+                Ok(self.retain(reservation, &pending_publication(&validated_range(2, 4))))
             },
         )
+    }
+
+    fn retain(
+        &self,
+        reservation: &memory_store::CuratorReservation,
+        pending: &memory_store::PendingPublication,
+    ) -> u64 {
+        let row_version = self.store.load(SESSION).unwrap().row_version.unwrap();
+        self.store
+            .record_curator_reservation(SESSION, row_version, reservation, pending)
+            .unwrap()
     }
 
     fn pending(&self) -> Option<(u64, memory_store::PendingPublication)> {
@@ -391,6 +386,17 @@ fn validated_range(start: u64, end: u64) -> ValidatedChunk {
         facts: facts(),
         unprocessed_from: end + 1,
         ..ValidatedChunk::default()
+    }
+}
+
+fn pending_publication(validated: &ValidatedChunk) -> memory_store::PendingPublication {
+    memory_store::PendingPublication {
+        validated_json: serde_json::to_string(validated).unwrap(),
+        aliases_json: serde_json::to_string(&aliases()).unwrap(),
+        chunk_transcript: "U: transcript".to_string(),
+        boundary_dates: BTreeMap::new(),
+        publication_floor_ordinal: 5,
+        collect_user_memory_candidates: false,
     }
 }
 
@@ -1448,4 +1454,129 @@ fn a_row_conflict_retains_the_reservation_and_a_duplicate_settle_spares_a_ready_
         rig.job(&reservation.causal_identity).state,
         CuratorJobState::Ready(_)
     ));
+}
+
+#[test]
+fn an_unreadable_retained_publication_settles_the_reservation_instead_of_stranding_the_firing() {
+    // The retained payload is the daemon's own serialization of in-memory types; a later daemon that no longer reads it must still close the firing, or the session never leaves Publishing.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    rig.retain(
+        &reservation,
+        &memory_store::PendingPublication {
+            validated_json: r#"{"schema":"a shape this daemon does not read"}"#.to_string(),
+            ..pending_publication(&validated_range(2, 4))
+        },
+    );
+    let target = rig.target();
+    let outcome = republish_reserved(RepublishRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        curator_handoff: Some(&target),
+        now_ms: t0() + 1,
+        failure_backoff_at_ms: t0() + 60_000,
+        publication_fence: None,
+    });
+    assert!(
+        matches!(outcome, Ok(RepublishOutcome::Settled)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, t0() + 60_000).unwrap(),
+        RestartAction::Done
+    );
+}
+
+#[test]
+fn a_reincarnated_kernel_settles_the_reservation_without_reserving_a_second_job() {
+    // The reservation names its subject by digest and Kernel incarnation. A Kernel that came back under a new incarnation no longer holds that subject, and a handoff under the new incarnation would reserve a second job the publication then refuses; recovery must settle before it reserves or stages anything.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    let reincarnated = HandoffTarget {
+        kernel_incarnation: "f".repeat(64),
+        ..rig.target()
+    };
+    assert_eq!(
+        rig.republish(Some(&reincarnated), t0() + 1),
+        RepublishOutcome::Settled
+    );
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
+    assert_eq!(
+        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        0,
+        "no job was reserved under the new incarnation"
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+}
+
+#[test]
+fn every_retained_republish_arms_the_backoff() {
+    // Recovery runs on every transform pass while the firing is not idle, so a pass that decides nothing must leave a backoff for the next one to wait on.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    assert_eq!(rig.state().failure_backoff_at_ms, None);
+    // No handoff target: nothing can be verified.
+    assert_eq!(rig.republish(None, t0() + 1), RepublishOutcome::Retained);
+    let retained = rig.state();
+    assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
+    assert_eq!(retained.curator_reservation, Some(reservation.clone()));
+    assert_eq!(retained.failure_backoff_at_ms, Some(t0() + 1 + 60_000));
+    // Another writer moved the session row under the publication.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    struct MoveRowFirst<'a>(&'a MemoryStore);
+    impl HistorySummarizerPublicationFence for MoveRowFirst<'_> {
+        fn publish(
+            &self,
+            store: &MemoryStore,
+            request: memory_store::HistorySummarizerPublishRequest<'_>,
+        ) -> Result<memory_store::HistorySummarizerPublishResult, HistorySummarizerPublishError>
+        {
+            let loaded = self.0.load(SESSION).unwrap();
+            self.0
+                .commit(SESSION, loaded.row_version, &loaded.core, &loaded.meta)
+                .unwrap();
+            store.publish_history_summarizer_chunk(request)
+        }
+    }
+    let target = rig.target();
+    let fence = MoveRowFirst(&rig.store);
+    let outcome = republish_reserved(RepublishRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        curator_handoff: Some(&target),
+        now_ms: t0() + 1,
+        failure_backoff_at_ms: t0() + 1 + 60_000,
+        publication_fence: Some(&fence),
+    })
+    .unwrap();
+    assert_eq!(outcome, RepublishOutcome::Retained);
+    let retained = rig.state();
+    assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
+    assert_eq!(retained.failure_backoff_at_ms, Some(t0() + 1 + 60_000));
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 2),
+        RepublishOutcome::Published
+    );
 }

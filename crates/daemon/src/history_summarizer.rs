@@ -348,15 +348,25 @@ pub fn retain_with_detail(
     failure_backoff_at_ms: i64,
     detail: Option<String>,
 ) -> HistorySummarizerDurableState {
-    let mut next = current.clone();
-    next.failure_backoff_at_ms = Some(failure_backoff_at_ms);
-    next.last_failure = detail.or_else(|| current.last_failure.clone());
+    let mut next = retain_backoff(current, failure_backoff_at_ms, detail);
     next.consecutive_publish_failures = current.consecutive_publish_failures.saturating_add(1);
     next
 }
 
+/// Arms the backoff without incrementing `consecutive_publish_failures`, for a refusal the store already counted.
+fn retain_backoff(
+    current: &HistorySummarizerDurableState,
+    failure_backoff_at_ms: i64,
+    detail: Option<String>,
+) -> HistorySummarizerDurableState {
+    let mut next = current.clone();
+    next.failure_backoff_at_ms = Some(failure_backoff_at_ms);
+    next.last_failure = detail.or_else(|| current.last_failure.clone());
+    next
+}
+
 /// Whether a state's recorded reservation belongs to its own firing; a reservation carried from an earlier firing is not one this firing can publish.
-trait HoldsReservation {
+pub(crate) trait HoldsReservation {
     fn holds_reservation(&self) -> bool;
 }
 
@@ -768,7 +778,7 @@ pub enum RepublishOutcome {
     Retained,
 }
 
-/// Republishes a reserved firing's retained output without a model run. The reservation is reused as recorded, the subject is restaged or read back (or, past the deadline, nothing is staged and the publication records the expiry), and the publication runs under the fences the firing snapshot fixed. Every refusal is classified: a store fence or a proof the job cannot activate settles the reservation with a terminal outcome; a transient condition retains it.
+/// Republishes a reserved firing's retained output without a model run. The reservation is reused as recorded, the subject is restaged or read back (or, past the deadline, nothing is staged and the publication records the expiry), and the publication runs under the fences the firing snapshot fixed. Every refusal is classified: a store fence, an unreadable or diverged retained output, or a proof the job cannot activate settles the reservation with a terminal outcome; a transient condition retains it with the backoff armed, so the next reattach waits instead of repeating the pass.
 pub fn republish_reserved(
     request: RepublishRequest<'_>,
 ) -> Result<RepublishOutcome, HistorySummarizerDriveError> {
@@ -797,28 +807,49 @@ pub fn republish_reserved(
     ) else {
         return Err(invalid().into());
     };
-    // The retained output must be this firing's; anything else is a reservation that can never publish.
-    let pending = match store.load_pending_publication(session_id)? {
-        Some((firing_seq, pending)) if firing_seq == reservation.firing_seq => pending,
-        _ => {
-            return settle_republish(
-                store,
-                session_id,
-                project_path,
-                &publishing,
-                now_ms,
-                failure_backoff_at_ms,
-                "no retained publication for the reservation",
-            );
+    let settle = |detail: &str| {
+        settle_republish(
+            store,
+            session_id,
+            project_path,
+            &publishing,
+            now_ms,
+            failure_backoff_at_ms,
+            detail,
+        )
+    };
+    let expired = reservation.queue_deadline_ms <= now_ms;
+    // Before the deadline the subject must be verified through the Kernel, so without a target nothing can be decided and the payload is not worth reading.
+    let target = match (expired, curator_handoff) {
+        (true, _) => None,
+        (false, Some(target)) => Some(target),
+        (false, None) => {
+            return retain_republish(store, session_id, |current| {
+                retain_with_detail(
+                    current,
+                    failure_backoff_at_ms,
+                    Some("curator republish: no Curator handoff target".to_string()),
+                )
+            });
         }
     };
-    let serde_error = |error: serde_json::Error| {
-        HistorySummarizerStateError::Store(MemoryStoreError::Serde(error.to_string()))
+    // The retained output must be this firing's and must still read as the types this daemon publishes; anything else can never publish.
+    let pending = match store.load_pending_publication(session_id) {
+        Ok(Some((firing_seq, pending))) if firing_seq == reservation.firing_seq => pending,
+        Ok(_) => return settle("no retained publication for the reservation"),
+        Err(MemoryStoreError::Serde(_)) => {
+            return settle("the retained publication is unreadable");
+        }
+        Err(error) => return Err(HistorySummarizerStateError::Store(error).into()),
     };
-    let validated: ValidatedChunk =
-        serde_json::from_str(&pending.validated_json).map_err(serde_error)?;
-    let plan = if reservation.queue_deadline_ms <= now_ms {
-        handoff::expired_activation(
+    let (Ok(validated), Ok(aliases)) = (
+        serde_json::from_str::<ValidatedChunk>(&pending.validated_json),
+        serde_json::from_str::<FrozenAliasTable>(&pending.aliases_json),
+    ) else {
+        return settle("the retained publication is unreadable");
+    };
+    let plan = match target {
+        None => handoff::expired_activation(
             store,
             project_path,
             session_id,
@@ -826,62 +857,62 @@ pub fn republish_reserved(
             &reservation,
             row_version,
         )
-        .map(Box::new)
-    } else {
-        let Some(target) = curator_handoff else {
-            return Ok(RepublishOutcome::Retained);
-        };
-        let aliases: FrozenAliasTable =
-            serde_json::from_str(&pending.aliases_json).map_err(serde_error)?;
-        handoff::reserve_and_stage(
-            target,
-            &HandoffRequest {
-                store,
-                project: project_path,
-                session_id,
-                firing: &publishing,
-                facts: &validated.facts,
-                aliases: &aliases,
-                now_ms,
-            },
-            |_| Ok(row_version),
-        )
-        .and_then(|handoff| match handoff {
-            Handoff::Activate(prepared) => Ok(prepared),
-            other => Err(HandoffError::ReservationMismatch(match other {
-                Handoff::Settled => "settled",
-                Handoff::Nonadmission(_) => "nonadmission",
-                Handoff::Activate(_) => unreachable!("matched above"),
-            })),
-        })
+        .map(Box::new),
+        Some(target) => {
+            // The reservation names its subject by digest and Kernel incarnation. A retained output that reproduces neither would reserve a second job under a name the publication refuses, so it is settled before anything is reserved or staged.
+            let reproduces_reservation = target.kernel_incarnation
+                == reservation.kernel_incarnation
+                && handoff::subject_payload(&validated.facts, &aliases)
+                    .is_ok_and(|(_, digest)| digest == reservation.payload_digest);
+            if !reproduces_reservation {
+                return settle("the retained output no longer names the reserved subject");
+            }
+            match handoff::reserve_and_stage(
+                target,
+                &HandoffRequest {
+                    store,
+                    project: project_path,
+                    session_id,
+                    firing: &publishing,
+                    facts: &validated.facts,
+                    aliases: &aliases,
+                    now_ms,
+                },
+                |_| Ok(row_version),
+            ) {
+                Ok(Handoff::Activate(prepared)) => Ok(prepared),
+                // A matching reservation is reused, never reserved again, so a decision without an activation proves nothing about the job and is retried.
+                Ok(Handoff::Settled | Handoff::Nonadmission(_)) => {
+                    return retain_republish(store, session_id, |current| {
+                        retain_with_detail(
+                            current,
+                            failure_backoff_at_ms,
+                            Some(
+                                "curator republish: the handoff did not reuse the reservation"
+                                    .to_string(),
+                            ),
+                        )
+                    });
+                }
+                Err(error) => Err(error),
+            }
+        }
     };
     let prepared = match plan {
         Ok(prepared) => prepared,
-        // The reservation's own job is gone or was taken by another identity: nothing to publish against.
-        Err(HandoffError::ReservationMismatch(_))
-        | Err(HandoffError::Reserve(CuratorJobError::Refused(CuratorJobRefusal::Missing))) => {
-            return settle_republish(
-                store,
-                session_id,
-                project_path,
-                &publishing,
-                now_ms,
-                failure_backoff_at_ms,
-                "the reservation no longer names a publishable job",
-            );
+        // The reservation's own job is gone: nothing to publish against.
+        Err(HandoffError::Reserve(CuratorJobError::Refused(CuratorJobRefusal::Missing))) => {
+            return settle("the reservation no longer names a publishable job");
         }
         // Staging or reading back failed for a reason a later pass may not see again.
         Err(error) => {
-            persist_history_summarizer_state(
-                store,
-                session_id,
+            return retain_republish(store, session_id, |current| {
                 retain_with_detail(
-                    &publishing,
+                    current,
                     failure_backoff_at_ms,
                     Some(format!("curator republish: {error}")),
-                ),
-            )?;
-            return Ok(RepublishOutcome::Retained);
+                )
+            });
         }
     };
     let predicate = publish_predicate(&publishing)?;
@@ -915,11 +946,17 @@ pub fn republish_reserved(
                 reason: Some(_), ..
             },
         )) => Ok(RepublishOutcome::Settled),
-        // The row moved or the snapshot retired under this pass; the state stays Publishing with the failure recorded, and the next pass tries again.
+        // The row moved or the snapshot retired under this pass; the store counted the refusal, and the next pass tries again after the backoff.
         Err(HistorySummarizerStateError::Publish(
-            HistorySummarizerPublishError::CallerFenceRejected { .. }
-            | HistorySummarizerPublishError::CasConflict { reason: None, .. },
-        )) => Ok(RepublishOutcome::Retained),
+            error @ (HistorySummarizerPublishError::CallerFenceRejected { .. }
+            | HistorySummarizerPublishError::CasConflict { reason: None, .. }),
+        )) => retain_republish(store, session_id, |current| {
+            retain_backoff(
+                current,
+                failure_backoff_at_ms,
+                Some(format!("curator republish: {error}")),
+            )
+        }),
         // The job itself refuses to activate: the reservation is settled with a terminal outcome.
         Err(HistorySummarizerStateError::Publish(
             HistorySummarizerPublishError::CuratorActivation(
@@ -929,17 +966,22 @@ pub fn republish_reserved(
                 | CuratorJobRefusal::InvalidRequest
                 | CuratorJobRefusal::Missing,
             ),
-        )) => settle_republish(
-            store,
-            session_id,
-            project_path,
-            &publishing,
-            now_ms,
-            failure_backoff_at_ms,
-            "the job refused activation",
-        ),
+        )) => settle("the job refused activation"),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Leaves a firing that still holds its reservation in Publishing as `next` describes it, so the next reattach finds the backoff it armed.
+fn retain_republish(
+    store: &MemoryStore,
+    session_id: &str,
+    next: impl FnOnce(&HistorySummarizerDurableState) -> HistorySummarizerDurableState,
+) -> Result<RepublishOutcome, HistorySummarizerDriveError> {
+    let current = store.load(session_id)?.meta.history_summarizer;
+    if current.state == HistorySummarizerPhase::Publishing && current.holds_reservation() {
+        persist_history_summarizer_state(store, session_id, next(&current))?;
+    }
+    Ok(RepublishOutcome::Retained)
 }
 
 /// Finishes a reservation whose retained publication can never commit: the job records a terminal outcome (expired past its deadline, not admitted otherwise), the reservation and its retained publication are dropped, and the firing is abandoned with nothing advanced.

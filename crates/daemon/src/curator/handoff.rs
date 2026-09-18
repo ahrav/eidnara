@@ -81,8 +81,6 @@ pub enum HandoffError {
     UnknownAlias,
     #[error("the firing has no chunk range")]
     NoChunkRange,
-    #[error("the recorded reservation did not resolve to its job: {0}")]
-    ReservationMismatch(&'static str),
 }
 
 /// The review policies a job depends on: a change to either permits one new job at an unchanged target (Q25/Q29).
@@ -170,6 +168,23 @@ pub fn review_subject(
         facts: extracted,
         origins,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubjectRefusal {
+    /// A citation names an alias the chunk never issued.
+    UnknownAlias,
+    Unencodable,
+}
+
+pub fn subject_payload(
+    facts: &[FactCandidate],
+    aliases: &FrozenAliasTable,
+) -> Result<(ReviewPayload, String), SubjectRefusal> {
+    let subject = review_subject(facts, aliases).map_err(|_| SubjectRefusal::UnknownAlias)?;
+    let payload = ReviewPayload::Subject(subject);
+    let digest = payload.digest().map_err(|_| SubjectRefusal::Unencodable)?;
+    Ok((payload, digest))
 }
 
 /// The producer identity one firing reserves under: the session and firing sequence, at the chunk's first ordinal.
@@ -294,13 +309,15 @@ pub fn reserve_and_stage(
         now_ms,
         ..
     } = *request;
-    let subject = review_subject(facts, aliases).map_err(|_| HandoffError::UnknownAlias)?;
-    let payload = ReviewPayload::Subject(subject);
-    // Refused before any reservation exists: the publication records it and advances.
-    let Ok(payload_digest) = payload.digest() else {
-        return Ok(Handoff::Nonadmission(
-            CuratorNonadmissionCode::SubjectRefused,
-        ));
+    let (payload, payload_digest) = match subject_payload(facts, aliases) {
+        Ok(subject) => subject,
+        Err(SubjectRefusal::UnknownAlias) => return Err(HandoffError::UnknownAlias),
+        // Refused before any reservation exists: the publication records it and advances.
+        Err(SubjectRefusal::Unencodable) => {
+            return Ok(Handoff::Nonadmission(
+                CuratorNonadmissionCode::SubjectRefused,
+            ));
+        }
     };
     // The candidate is named by the subject bytes, so identical facts from two firings name one target and deduplicate on the causal identity; the run is the firing's, so a retry of one firing restages under its own run.
     let candidate_id = format!("hs-{session_id}-{}", &payload_digest[..32]);
