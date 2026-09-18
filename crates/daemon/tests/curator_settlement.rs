@@ -16,11 +16,11 @@ use daemon::harness_sources::SourcePublisher;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDestination, CommitIntent, CuratorHoldBinding, CuratorHoldKind, Dimension, DomainSpec,
-    EvidenceReference, KernelStore, ManifestReference, PolicyDependencies, ProposalAction,
-    ProposalTarget, ProviderEgress, REVIEW_EXPIRY_MAX_MS, ReviewBinding, ReviewOwner,
-    ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadRefusal,
-    ReviewStagedReference, ReviewStagingSpec, ScopeSpec, ScopeTermSpec, Sensitivity,
-    SourceDependency, SourceDescriptorDetail, StagingTerminalState, Uncertainty,
+    EvidenceReference, ExtractedFact, KernelStore, ManifestReference, PolicyDependencies,
+    ProposalAction, ProposalTarget, ProviderEgress, REVIEW_EXPIRY_MAX_MS, ReviewBinding,
+    ReviewOwner, ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadRefusal,
+    ReviewStagedReference, ReviewStagingSpec, ReviewSubject, ScopeSpec, ScopeTermSpec, Sensitivity,
+    SourceDependency, SourceDescriptorDetail, SourceSpan, StagingTerminalState, Uncertainty,
     provisional_result_identity,
 };
 use memory_store::curator_jobs::{
@@ -431,6 +431,47 @@ impl Fixture {
             other => panic!("a project-text read issues a capture alias, not {other:?}"),
         };
         (broker, capture)
+    }
+
+    /// A local broker that has disclosed the commit and the job's staged subject, which the fixture seals here under the job binding; a staged row is sensitive, so only a local destination admits it.
+    fn broker_with_subject(&self, generation: u64) -> EvidenceBroker {
+        let mut broker = self.broker_to(generation, ArtifactDestination::Local);
+        let reference = self
+            .store
+            .stage_review_input(ReviewStagingSpec {
+                extraction_run_id: "run-subject-1".to_string(),
+                candidate_id: "subject-1".to_string(),
+                producer: "history-summarizer".to_string(),
+                binding: self.review_binding(),
+                payload: ReviewPayload::Subject(ReviewSubject {
+                    facts: vec![ExtractedFact {
+                        text: "the workspace builds with bun".to_string(),
+                        span: SourceSpan {
+                            alias: "s1".to_string(),
+                            start: 0,
+                            end: 4,
+                        },
+                    }],
+                }),
+                recorded_at: self.now,
+                queue_deadline_at: self.now + 24 * HOUR_MS,
+            })
+            .unwrap();
+        self.store
+            .finish_staging_run(
+                "run-subject-1",
+                StagingTerminalState::Completed,
+                self.now + 1,
+            )
+            .unwrap();
+        let subject = broker.aliases.issue(ReferenceExpectation::StagedSubject {
+            reference,
+            binding: self.review_binding(),
+        });
+        broker
+            .read(&self.store, subject.as_str(), None, self.now + 2)
+            .unwrap();
+        broker
     }
 
     /// A broker that has disclosed both commits.
@@ -1206,6 +1247,26 @@ fn recovery_adopts_captures_whose_acquisition_reference_moved_to_the_review_expi
         Some(2),
         "the review hold still covers both disclosed inputs"
     );
+}
+
+#[test]
+fn recovery_revalidates_a_staged_subject_under_the_review_hold() {
+    // A staged subject holds no evidence id, so its revalidation is a check that the run's hold is live. Once retention has moved to the review hold, that is the hold to check; the released execution hold would refuse and abstain a result that is already sealed.
+    let fixture = Fixture::open();
+    let broker = fixture.broker_with_subject(1);
+    fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
+    assert_eq!(
+        fixture
+            .settle(
+                &broker,
+                RunResult::Proposal(Box::new(fixture.proposal(&[&evidence])))
+            )
+            .unwrap(),
+        Settled::Published(reference.clone())
+    );
+    assert_eq!(fixture.read(fixture.now + 6).unwrap().reference, reference);
 }
 
 #[test]

@@ -859,6 +859,33 @@ fn completion_selects_one_result_atomically_with_the_lease_and_fences_losers() {
 }
 
 #[test]
+fn an_in_progress_receipt_cannot_carry_a_selection_or_a_reason() {
+    // `terminal_kind` is NULL while the receipt is in progress, and a comparison with NULL is NULL, which a CHECK accepts; the shape checks must be total so a selection or an abstention reason cannot land before the terminal that owns it.
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    for (column, value) in [
+        ("selected_candidate_id", "review-result:early"),
+        ("abstained_reason", "model_declined"),
+    ] {
+        let planted = fixture.store.with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                &format!("UPDATE curator_receipts SET {column} = ?1 WHERE state = 'in_progress'"),
+                [value],
+            )
+        });
+        assert!(
+            planted.is_err(),
+            "{column} on an in-progress receipt must fail the column check, not write"
+        );
+    }
+    let receipt = receipt(&fixture);
+    assert_eq!(receipt.terminal, None);
+    assert_eq!(receipt.selected, None);
+    assert_eq!(receipt.abstained_reason, None);
+}
+
+#[test]
 fn every_abstain_reason_writes_under_the_column_check_and_reads_back() {
     // The explicit match requires every `AbstainReason` variant; completing each `ALL` entry checks the column CHECK and the row parser cover it.
     let listed = |reason: AbstainReason| match reason {

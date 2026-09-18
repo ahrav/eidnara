@@ -528,8 +528,8 @@ CREATE TABLE curator_receipts (
             CHECK ((state = 'complete') = (terminal_kind IS NOT NULL)),
             CHECK ((selected_candidate_id IS NULL) = (selected_payload_digest IS NULL)),
             CHECK ((selected_candidate_id IS NULL) = (selected_generation IS NULL)),
-            CHECK ((terminal_kind = 'complete') = (selected_candidate_id IS NOT NULL)),
-            CHECK ((terminal_kind = 'abstained') = (abstained_reason IS NOT NULL))
+            CHECK ((terminal_kind IS 'complete') = (selected_candidate_id IS NOT NULL)),
+            CHECK ((terminal_kind IS 'abstained') = (abstained_reason IS NOT NULL))
         );
 
 -- Receipts survive for the store incarnation; the expiry sweep reads only the in-progress ones by deadline.

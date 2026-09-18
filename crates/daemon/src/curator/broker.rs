@@ -1034,7 +1034,7 @@ impl EvidenceBroker {
         self.revalidate_under(store, alias, now_ms, HeldUnder::Execution(&self.binding))
     }
 
-    /// [`Self::revalidate`] with the hold that protects a capture named explicitly: the execution hold while the run investigates, or the review hold once settlement has moved retention there and the execution hold is released.
+    /// [`Self::revalidate`] with the hold that protects the disclosed inputs named explicitly: the execution hold while the run investigates, or the review hold once settlement has moved retention there and the execution hold is released.
     pub fn revalidate_under(
         &self,
         store: &KernelStore,
@@ -1053,9 +1053,9 @@ impl EvidenceBroker {
                 }
                 store
                     .validate_held_evidence(
-                        &self.binding.hold_id,
-                        CuratorHoldKind::Execution,
-                        &self.binding.hold,
+                        hold.hold_id(),
+                        hold.kind(),
+                        hold.binding(),
                         &[],
                         now_ms,
                     )
