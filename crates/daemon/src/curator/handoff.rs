@@ -261,7 +261,7 @@ fn reserved_row(
     producer: &ProducerBinding,
     inputs: &CausalInputs,
 ) -> Result<ReservedRow, HandoffError> {
-    // A recorded reservation names the job only when it is the job this firing would reserve now: same subject bytes, Kernel incarnation, and review policies. One recorded under other policy versions is left to expire and the current policy gets its own job (Q25/Q29); `adopt` decides whether the firing can activate the named job.
+    // A recorded reservation names the job only when it is the job this firing would reserve now: same subject bytes, Kernel incarnation, and review policies. One recorded under other policy versions is left to expire and the current policy gets its own job (Q25/Q29). A firing that holds its reservation reuses the job only while it is still bound to this firing: a job another firing has adopted since is not taken back, so the holder answers `Settled` and its recovery settles or retains on that. Only a firing without a reservation adopts, through `adopt`.
     let causal_identity = inputs.causal_identity().map_err(CuratorJobError::Refused)?;
     let held = request
         .firing
@@ -276,14 +276,19 @@ fn reserved_row(
         })
         .transpose()?
         .flatten();
-    let existing = match held {
-        Some(job) => job,
-        None => match request.store.reserve_curator_job(
-            request.project,
-            producer,
-            inputs,
-            request.now_ms,
-        ) {
+    if let Some(job) = held {
+        return Ok(match job.state {
+            CuratorJobState::Reserved if job.producer == *producer => {
+                ReservedRow::Job(Box::new(job))
+            }
+            _ => ReservedRow::Done(Handoff::Settled),
+        });
+    }
+    let existing =
+        match request
+            .store
+            .reserve_curator_job(request.project, producer, inputs, request.now_ms)
+        {
             Ok(ReserveOutcome::Reserved(job)) => return Ok(ReservedRow::Job(Box::new(job))),
             Ok(ReserveOutcome::Existing(job)) => job,
             Err(CuratorJobError::Refused(
@@ -301,8 +306,7 @@ fn reserved_row(
                 )));
             }
             Err(error) => return Err(error.into()),
-        },
-    };
+        };
     adopt(request, producer, existing)
 }
 

@@ -2726,3 +2726,35 @@ fn a_republication_with_memory_disabled_settles_instead_of_activating() {
     assert_eq!(rig.pending(), None);
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
 }
+
+#[test]
+fn a_firing_holding_its_reservation_does_not_take_back_a_job_another_firing_adopted() {
+    // Firing 3 holds its reservation; before it republishes, firing 4 adopted the same job. The handoff for firing 3 reuses the job only while it is still bound to firing 3: it does not rebind it back, and answers Settled.
+    let rig = Rig::open();
+    let prepared = activation(rig.handoff(t0()).unwrap());
+    let holder = rig.state();
+    assert!(holder.holds_reservation());
+    let adopter = ProducerBinding {
+        firing_id: format!("{}#4", rig_key()),
+        ..prepared.producer.clone()
+    };
+    rig.store
+        .rebind_reserved_curator_job(PROJECT, &prepared.causal_identity, &adopter, t0() + 1)
+        .unwrap();
+    let handoff = reserve_and_stage(
+        &rig.target(),
+        &HandoffRequest {
+            store: &rig.store,
+            project: PROJECT,
+            session_id: SESSION,
+            firing: &holder,
+            facts: &facts(),
+            aliases: &aliases(),
+            now_ms: t0() + 2,
+        },
+        |_| Ok(0),
+    )
+    .unwrap();
+    assert!(matches!(handoff, Handoff::Settled), "{handoff:?}");
+    assert_eq!(rig.job(&prepared.causal_identity).producer, adopter);
+}
