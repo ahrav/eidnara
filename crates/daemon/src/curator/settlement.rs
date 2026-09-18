@@ -74,7 +74,7 @@ pub struct Settlement<'a> {
     pub now_ms: &'a (dyn Fn() -> i64 + Sync),
     /// Runs after the Kernel work and before the Memory Store completion, so a test can interleave a takeover in the crash window between the two stores.
     #[cfg(any(test, feature = "test-support"))]
-    pub before_completion_for_test: Option<&'a (dyn Fn() + Sync)>,
+    pub before_completion_for_test: Option<&'a dyn Fn()>,
 }
 
 impl Settlement<'_> {

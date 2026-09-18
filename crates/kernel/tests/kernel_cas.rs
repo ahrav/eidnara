@@ -1906,3 +1906,35 @@ fn a_replaced_shard_directory_does_not_receive_an_ingest() {
     let reopened = KernelStore::open(root.path()).unwrap();
     assert_eq!(reopened.read_artifact(&second).unwrap(), second_payload);
 }
+
+#[test]
+fn the_class_rule_for_a_destination_has_one_source() {
+    use kernel::{ArtifactDestination, EligibilityDeniedReason, Sensitivity};
+    let table = [
+        (Sensitivity::Normal, ArtifactDestination::Local, None),
+        (Sensitivity::Normal, ArtifactDestination::Remote, None),
+        (Sensitivity::Sensitive, ArtifactDestination::Local, None),
+        (
+            Sensitivity::Sensitive,
+            ArtifactDestination::Remote,
+            Some(EligibilityDeniedReason::SensitiveRemote),
+        ),
+        (
+            Sensitivity::Secret,
+            ArtifactDestination::Local,
+            Some(EligibilityDeniedReason::Secret),
+        ),
+        (
+            Sensitivity::Secret,
+            ArtifactDestination::Remote,
+            Some(EligibilityDeniedReason::Secret),
+        ),
+    ];
+    for (sensitivity, destination, expected) in table {
+        assert_eq!(
+            sensitivity.denies_destination(destination),
+            expected,
+            "{sensitivity:?} to {destination:?}"
+        );
+    }
+}

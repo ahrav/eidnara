@@ -59,6 +59,23 @@ impl Sensitivity {
             _ => Self::Normal,
         }
     }
+
+    /// Why this class alone denies `destination`, before any provider-egress
+    /// rule: a secret is denied everywhere, and a remote model admits only
+    /// `Normal`. Every egress judgement derives its class rule from here so
+    /// artifacts, served objects, and staged rows cannot drift apart.
+    pub fn denies_destination(
+        self,
+        destination: crate::ArtifactDestination,
+    ) -> Option<crate::EligibilityDeniedReason> {
+        match (self, destination) {
+            (Self::Secret, _) => Some(crate::EligibilityDeniedReason::Secret),
+            (Self::Normal, _) | (Self::Sensitive, crate::ArtifactDestination::Local) => None,
+            (Self::Sensitive, crate::ArtifactDestination::Remote) => {
+                Some(crate::EligibilityDeniedReason::SensitiveRemote)
+            }
+        }
+    }
 }
 
 /// `producer` and `operation_key` form the dedup key, so `commit` rejects either one carrying a detected secret.
@@ -268,6 +285,8 @@ pub struct Envelope<'tx> {
     pub(super) descriptor_objects: HashMap<String, String>,
     /// Causality subject to the `claimcauseobj:` row this envelope wrote for it.
     pub(super) causality_objects: HashMap<String, String>,
+    /// Capture evidence id to the `localfileobj:` row this envelope wrote for it.
+    pub(super) local_file_objects: HashMap<String, String>,
     poisoned: Option<KernelError>,
 }
 
@@ -750,6 +769,7 @@ impl KernelStore {
                     admission_latest: HashMap::new(),
                     descriptor_objects: HashMap::new(),
                     causality_objects: HashMap::new(),
+                    local_file_objects: HashMap::new(),
                     poisoned: None,
                 },
             })
@@ -1224,6 +1244,7 @@ fn commit_prepared_with_writer(
         admission_latest: HashMap::new(),
         descriptor_objects: HashMap::new(),
         causality_objects: HashMap::new(),
+        local_file_objects: HashMap::new(),
         poisoned: None,
     };
     let result = operation(&mut envelope)?;
@@ -1232,6 +1253,7 @@ fn commit_prepared_with_writer(
     }
     envelope.check_descriptor_ownership()?;
     envelope.check_causality_ownership()?;
+    envelope.check_local_file_ownership()?;
     let unconditional_changes = envelope
         .changes
         .iter()
@@ -1791,6 +1813,7 @@ impl RedactedCandidate {
             || spec.source_kind.trim().is_empty()
             || spec.source_id.trim().is_empty()
             || spec.candidate_kind.trim().is_empty()
+            || crate::review_staging::is_review_kind(&spec.candidate_kind)
         {
             return Err(KernelError::InvalidInput);
         }
