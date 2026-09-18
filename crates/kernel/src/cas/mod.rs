@@ -29,7 +29,7 @@ pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 /// overlapping findings merge into detections; the scan stops at the cap.
 pub(super) const MAX_PAYLOAD_DETECTIONS: usize = 4096;
 /// Maximum UTF-8 byte length of each artifact text field.
-pub(super) const MAX_TEXT_FIELD_BYTES: usize = 1024;
+pub const MAX_TEXT_FIELD_BYTES: usize = 1024;
 
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +145,7 @@ pub struct ArtifactIngestRequest {
     pub provenance: Option<RepositoryProvenance>,
 }
 
-/// `retention_class` of evidence a Curator run captured for itself; ingestion requires such rows to carry a live, finite `retain_until`.
+/// `retention_class` of evidence a Curator run captured for itself; an ingest request for such a row must carry a finite `retain_until`, and a new reference commits only while that deadline is still ahead of the store clock. An identical request whose receipt already committed replays regardless.
 pub const CURATOR_CAPTURE_RETENTION_CLASS: &str = "curator_capture";
 
 /// Stable identifiers returned after artifact bytes and evidence are committed.

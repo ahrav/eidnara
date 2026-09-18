@@ -2391,6 +2391,42 @@ impl PreparedWrite {
             None => result.map_err(Into::into),
         }
     }
+
+    /// [`Self::execute`] followed by one synchronous handoff through
+    /// [`SqliteStore::with_conn_fenced_then_handoff`]: the operation and its scan audit commit
+    /// together, then `handoff` runs once with a read-only view and the committed value.
+    fn execute_then_handoff<T, H>(
+        self,
+        store: &SqliteStore,
+        operation: impl FnOnce(&mut ActiveWriteTransaction<'_>) -> rusqlite::Result<WriteDisposition<T>>,
+        handoff: impl FnOnce(&GuardedConn<'_>, &T) -> H,
+    ) -> Result<(T, storage::HandoffOutcome<H>), MemoryStoreError> {
+        let redaction_failure = std::cell::Cell::new(None);
+        let redaction_failure_in_tx = &redaction_failure;
+        let result = store.with_conn_fenced_then_handoff(
+            move |tx| {
+                let mut coordinated = ActiveWriteTransaction {
+                    tx,
+                    prepared: std::cell::RefCell::new(self),
+                };
+                let disposition = operation(&mut coordinated).inspect_err(|error| {
+                    redaction_failure_in_tx.set(sqlite_redaction_kind(error));
+                })?;
+                match disposition {
+                    WriteDisposition::Applied(value) => {
+                        coordinated.persist_audit()?;
+                        Ok(value)
+                    }
+                    WriteDisposition::Replay(value) => Ok(value),
+                }
+            },
+            handoff,
+        );
+        match redaction_failure.get() {
+            Some(kind) => Err(MemoryStoreError::Redaction(kind)),
+            None => result.map_err(Into::into),
+        }
+    }
 }
 
 impl ActiveWriteTransaction<'_> {
@@ -2866,7 +2902,7 @@ const PASS_TRACE_HISTORY_RING_LEN: usize = 256;
 /// The receipt field ids of the two writers that append to `scheduler_history`.
 const OBSERVATION_RING_FIELDS: &[&str] = &["scheduler_observation", "scheduler_history"];
 
-fn active_scan_owner_key(parts: &[&str]) -> String {
+pub(crate) fn active_scan_owner_key(parts: &[&str]) -> String {
     let mut key = String::new();
     for part in parts {
         use std::fmt::Write;
@@ -10707,7 +10743,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// The full-session form of the revert re-cut: history_segments and their recoverable transcripts are removed, while the cache row is replaced with an empty core and default meta carrying a bumped revert epoch. The epoch and row-version update share one fenced transaction, so an in-flight history_summarizer cannot publish against the retired history_segment set.
+    /// The full-session form of the revert re-cut: history_segments and their recoverable transcripts are removed, while the cache row is replaced with an empty core and default meta carrying a bumped revert epoch. The row itself survives, so the producer's sequence and nonadmission facts are carried over with in-flight firing state cleared. The epoch and row-version update share one fenced transaction, so an in-flight history_summarizer cannot publish against the retired history_segment set.
     pub fn reset_session_for_recomp(
         &self,
         session_id: &str,
@@ -10739,6 +10775,7 @@ impl MemoryStore {
                 last_recut: Some(format!(
                     "native recomp reset all history_segments; epoch {next_epoch}"
                 )),
+                history_summarizer: prior_meta.history_summarizer.cleared_of_in_flight_firing(),
                 ..ModuleMeta::default()
             };
             let core_json = match serde_json::to_string(&CoreState::empty()) {
@@ -11442,11 +11479,10 @@ impl MemoryStore {
                         Ok(_) => Some(CuratorActivationOutcome::Activated),
                         Err(error) => match curator_jobs::refusal_of(&error) {
                             Some(curator_jobs::CuratorJobRefusal::Expired) => {
-                                curator_jobs::finish_curator_job_in_tx(
+                                curator_jobs::expire_reserved_curator_job_in_tx(
                                     coordinated.tx(),
                                     request.project_path,
                                     activation.causal_identity,
-                                    curator_jobs::CuratorJobOutcome::Expired,
                                     now_ms,
                                 )?;
                                 Some(CuratorActivationOutcome::Expired)
@@ -26282,6 +26318,44 @@ mod lineage_descent_tests {
         assert_eq!(target.firing_seq, 5);
         assert_eq!(
             target.curator_nonadmission,
+            meta.history_summarizer.curator_nonadmission
+        );
+    }
+
+    /// A full-session recomp retires the history_segment set and bumps the revert epoch, but the row stays alive, so the producer's sequence and Q31 nonadmission facts survive while in-flight firing state is cleared.
+    #[test]
+    fn recomp_reset_keeps_the_producer_sequence_and_nonadmission_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let loaded = store.load("A").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::Publishing,
+            firing_seq: 5,
+            producer_run_id: Some("run-5".into()),
+            curator_nonadmission: CuratorNonadmission {
+                count: 3,
+                latest: Some(RecordedNonadmission {
+                    firing_seq: 4,
+                    code: CuratorNonadmissionCode::CapacityFull,
+                }),
+            },
+            ..HistorySummarizerDurableState::default()
+        };
+        let row_version = store
+            .commit("A", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        store
+            .reset_session_for_recomp("A", Some(row_version))
+            .unwrap();
+        let reset = store.load("A").unwrap().meta;
+        assert_eq!(reset.revert_epoch, meta.revert_epoch + 1);
+        assert_eq!(reset.history_summarizer.state, HistorySummarizerPhase::Idle);
+        assert_eq!(reset.history_summarizer.producer_run_id, None);
+        assert_eq!(reset.history_summarizer.firing_seq, 5);
+        assert_eq!(
+            reset.history_summarizer.curator_nonadmission,
             meta.history_summarizer.curator_nonadmission
         );
     }

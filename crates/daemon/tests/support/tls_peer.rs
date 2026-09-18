@@ -71,6 +71,10 @@ pub struct Peer {
     pub connections: Arc<AtomicUsize>,
     listener: Option<TcpListener>,
     acceptor: TlsAcceptor,
+    /// How long the peer holds the whole response after it has read the request, so a test can stand in for a provider that is still generating.
+    pub respond_after: Duration,
+    /// Splits the response at a byte offset and pauses between the two halves, so a test can stall a body mid-transfer.
+    pub stall: Option<(usize, Duration)>,
 }
 
 /// What the peer saw; every judgement is made by the test, not inside the peer task.
@@ -119,17 +123,20 @@ impl Peer {
             connections: Arc::new(AtomicUsize::new(0)),
             listener: Some(listener),
             acceptor: TlsAcceptor::from(Arc::new(config)),
+            respond_after: Duration::ZERO,
+            stall: None,
         }
     }
 
     pub fn sender(&self) -> Sender {
-        self.sender_with_credential("sk-test-credential")
+        self.sender_with_credential("test-credential")
     }
 
-    pub fn sender_with_credential(&self, credential: &str) -> Sender {
+    /// A sender whose credential is identified as `credential_id`; the secret it presents is `sk-<credential_id>`.
+    pub fn sender_with_credential(&self, credential_id: &str) -> Sender {
         Sender::new(
             Endpoint::for_test("localhost", self.port, self.roots.clone()).unwrap(),
-            Credential::new(credential.to_string()).unwrap(),
+            Credential::new(credential_id.to_string(), format!("sk-{credential_id}")).unwrap(),
         )
     }
 
@@ -142,6 +149,8 @@ impl Peer {
         let listener = self.listener.take().unwrap();
         let acceptor = self.acceptor.clone();
         let connections = self.connections.clone();
+        let respond_after = self.respond_after;
+        let stall = self.stall;
         tokio::spawn(async move {
             let mut observed = Observed::default();
             let (tcp, _) = listener.accept().await.unwrap();
@@ -194,8 +203,20 @@ impl Peer {
             observed.after_handoff = observed
                 .after_handoff
                 .or(Some(received.load(Ordering::SeqCst)));
+            tokio::time::sleep(respond_after).await;
             // The client may refuse and hang up mid-write; that is its right and not the peer's failure.
-            let _ = tls.write_all(&respond(&observed)).await;
+            let response = respond(&observed);
+            match stall {
+                Some((split, pause)) if split < response.len() => {
+                    let _ = tls.write_all(&response[..split]).await;
+                    let _ = tls.flush().await;
+                    tokio::time::sleep(pause).await;
+                    let _ = tls.write_all(&response[split..]).await;
+                }
+                _ => {
+                    let _ = tls.write_all(&response).await;
+                }
+            }
             let _ = tls.shutdown().await;
             observed.reconnected = tokio::time::timeout(OBSERVATION_WINDOW, listener.accept())
                 .await
@@ -203,6 +224,13 @@ impl Peer {
             observed
         })
     }
+}
+
+pub enum Scripted {
+    /// The peer reads the request, then answers with these bytes.
+    Respond(Vec<u8>),
+    /// The peer closes the socket before the TLS handshake, so the client's connect fails and no request byte leaves it.
+    Refuse,
 }
 
 impl Peer {
@@ -218,6 +246,18 @@ impl Peer {
     pub fn serve_script_with(
         &mut self,
         responses: Vec<Vec<u8>>,
+        before_respond: impl FnMut(usize) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static,
+    ) -> tokio::task::JoinHandle<Vec<Observed>> {
+        self.serve_turns(
+            responses.into_iter().map(Scripted::Respond).collect(),
+            before_respond,
+        )
+    }
+
+    /// One scripted turn per accepted connection: a response, or a refusal that drops the socket before the handshake. Refused connections are counted but carry no request, so the report holds one entry per answered connection.
+    pub fn serve_turns(
+        &mut self,
+        turns: Vec<Scripted>,
         mut before_respond: impl FnMut(usize) -> Pin<Box<dyn Future<Output = ()> + Send>>
         + Send
         + 'static,
@@ -226,14 +266,21 @@ impl Peer {
         let acceptor = self.acceptor.clone();
         let connections = self.connections.clone();
         tokio::spawn(async move {
-            let mut observations = Vec::with_capacity(responses.len());
-            for (index, response) in responses.into_iter().enumerate() {
+            let mut observations = Vec::with_capacity(turns.len());
+            for (index, turn) in turns.into_iter().enumerate() {
                 let Ok(Ok((tcp, _))) =
                     tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
                 else {
                     return observations;
                 };
                 connections.fetch_add(1, Ordering::SeqCst);
+                let response = match turn {
+                    Scripted::Respond(response) => response,
+                    Scripted::Refuse => {
+                        drop(tcp);
+                        continue;
+                    }
+                };
                 let counting = Counting {
                     inner: tcp,
                     received: Arc::new(AtomicUsize::new(0)),

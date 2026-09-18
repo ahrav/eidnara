@@ -1492,7 +1492,7 @@ pub(crate) fn retirement_child(root: &Path, cut: &str) {
     );
     case.retire(root, &mut |event| {
         if event == RetirementEvent::BeforeReceiptCommit && cut == "retire-after-commit" {
-            storage::after_commit_for_test(|| park("retire-after-commit"));
+            storage::after_commit_for_test(|_| park("retire-after-commit"));
         }
         let name = match event {
             RetirementEvent::BeforeCleanup => "retire-before-cleanup",

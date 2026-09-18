@@ -283,7 +283,6 @@ fn facts() -> Vec<FactCandidate> {
         FactCandidate {
             category: "PROJECT_RULES".to_string(),
             content: "Run bun install before building.".to_string(),
-            origin_history_segment_index: None,
             citations: vec![
                 citation("s1", 0, 11),
                 citation("s1", 12, 35),
@@ -293,7 +292,6 @@ fn facts() -> Vec<FactCandidate> {
         FactCandidate {
             category: "CONFIG_VALUES".to_string(),
             content: "The package manager is bun.".to_string(),
-            origin_history_segment_index: None,
             citations: vec![citation("s1", 0, 11)],
         },
     ]
@@ -432,7 +430,13 @@ fn identical_facts_from_the_next_firing_adopt_the_orphaned_reservation() {
         result.curator_activation,
         Some(CuratorActivationOutcome::Activated)
     );
-    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0() + 11)
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(rig.state().curator_reservation, None);
 }
 
@@ -560,7 +564,13 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
     assert_eq!(after.meta.history_summarizer.curator_reservation, None);
     assert_eq!(after.meta.history_summarizer.curator_nonadmission.count, 0);
     assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
-    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0() + 2)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -649,7 +659,13 @@ fn every_interruption_between_reservation_and_publication_converges_on_one_job()
         result.curator_activation,
         Some(CuratorActivationOutcome::Activated)
     );
-    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0() + 41)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -688,7 +704,12 @@ fn a_late_publication_records_expiry_and_never_resurrects_the_reservation() {
         rig.read_subject(&reservation, late),
         Err(ReviewReadError::Refused(ReviewReadRefusal::Expired))
     ));
-    assert!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().is_empty());
+    assert!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, late)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -700,13 +721,19 @@ fn identical_inputs_neither_duplicate_a_job_nor_reopen_a_settled_one() {
     rig.persist(publishing_state(4));
     assert_eq!(rig.handoff(t0() + 2).unwrap(), Handoff::Settled);
     assert_eq!(rig.state().curator_reservation, None);
-    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0() + 2)
+            .unwrap()
+            .len(),
+        1
+    );
     // Once the job is terminal, the same inputs stay settled.
     rig.store
         .finish_curator_job(
             PROJECT,
             &prepared.causal_identity,
-            CuratorJobOutcome::Completed,
+            CuratorJobOutcome::Failed,
             t0() + 3,
         )
         .unwrap();
@@ -893,7 +920,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     );
     assert_eq!(after.meta.history_summarizer.curator_reservation, None);
     assert_eq!(after.meta.history_summarizer.curator_nonadmission.count, 0);
-    let ready = rig.store.ready_curator_jobs(PROJECT, 8).unwrap();
+    let ready = rig.store.ready_curator_jobs(PROJECT, 8, t0()).unwrap();
     assert_eq!(ready.len(), 1);
     let job = &ready[0];
     assert_eq!(job.producer.firing_id, format!("{SESSION}#3"));
@@ -986,7 +1013,13 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
         })
     );
     assert_eq!(state.curator_reservation, None);
-    assert_eq!(rig.store.ready_curator_jobs(PROJECT, 8).unwrap().len(), 1);
+    assert_eq!(
+        rig.store
+            .ready_curator_jobs(PROJECT, 8, t0())
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
