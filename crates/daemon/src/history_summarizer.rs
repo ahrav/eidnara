@@ -1922,6 +1922,7 @@ mod tests {
     fn history_summarizer_chunk() -> HistorySummarizerChunk {
         use crate::history_summarizer_validate::ChunkLine;
         HistorySummarizerChunk {
+            aliases: Default::default(),
             start_index: 2,
             end_index: 4,
             lines: vec![
@@ -3834,6 +3835,7 @@ mod tests {
         let store = store(dir.path());
         seed_prior_history_segment(&store);
         let chunk = HistorySummarizerChunk {
+            aliases: Default::default(),
             start_index: 2,
             end_index: 9,
             lines: (2..=9)
@@ -3923,13 +3925,23 @@ mod tests {
 <p4 />
 </history_segment>
 </history_segments>
-<facts><ARCHITECTURE>* [at_history_segment=1] Publish facts in the same flow.</ARCHITECTURE></facts>
+<facts><ARCHITECTURE>* [s1:0-11] Publish facts in the same flow.</ARCHITECTURE></facts>
 <events><causal_incident at_history_segment="1"><summary>event survives</summary></causal_incident></events>
 <primer_candidates><primer at_history_segment="1">What did this publish preserve?</primer></primer_candidates>
 <user_observations>* [at_history_segment=1] The user prefers durable history.</user_observations>
 <meta><messages_processed>2-3</messages_processed><unprocessed_from>4</unprocessed_from></meta>
 </output>"#;
+        let mut aliases = crate::history_summarizer_citations::FrozenAliasTable::default();
+        aliases.issue(crate::history_summarizer_citations::FrozenAlias {
+            message_id: "m2".into(),
+            ordinal: 2,
+            block_ids: vec!["m2#0".into()],
+            block_hashes: vec!["0".repeat(64)],
+            presented: "second arc: publish facts through the same flow".into(),
+            ..Default::default()
+        });
         let chunk = HistorySummarizerChunk {
+            aliases,
             start_index: 2,
             end_index: 4,
             lines: vec![
@@ -3975,6 +3987,37 @@ mod tests {
         .expect("validation succeeds");
         assert_eq!(validated.history_segments.len(), 1);
         assert_eq!(validated.history_segments[0].end_message_id, "m3#0");
+        assert_eq!(
+            validated.extraction,
+            crate::history_summarizer_citations::ExtractionOutcome::Accepted { count: 1 }
+        );
+        assert_eq!(
+            validated.facts[0].content,
+            "Publish facts in the same flow."
+        );
+        // Q30: a bad citation rejects the fact set but leaves the same publishable history; publication below consumes only the history, so both variants publish identically.
+        let rejected = validate_history_summarizer_output(
+            &text.replace("[s1:0-11]", "[s1:0-999]"),
+            &chunk,
+            &prior,
+            ValidateOptions {
+                sequence_offset: 1,
+                in_emergency: true,
+                memory_enabled: true,
+                auto_promote: true,
+                user_memory_collection_enabled: true,
+                force_keep_last_history_segment: false,
+            },
+        )
+        .expect("history still validates");
+        assert_eq!(rejected.history_segments, validated.history_segments);
+        assert_eq!(
+            rejected.extraction,
+            crate::history_summarizer_citations::ExtractionOutcome::Rejected {
+                failure: crate::history_summarizer_citations::ExtractionFailure::InvalidSpan
+            }
+        );
+        assert!(rejected.facts.is_empty());
 
         let mut meta = store.load("ses").unwrap().meta;
         for selected in test_selected_range_identities() {

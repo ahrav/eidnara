@@ -29,6 +29,7 @@ pub mod healing;
 pub(crate) mod history_segment_coverage;
 pub mod history_summarizer;
 pub mod history_summarizer_chunk;
+pub mod history_summarizer_citations;
 pub mod history_summarizer_producer;
 pub(crate) mod history_summarizer_prompt;
 pub(crate) mod history_summarizer_validate;
@@ -182,6 +183,9 @@ mod transform_meta_bound;
 
 #[cfg(test)]
 mod differential_goldens;
+
+#[cfg(test)]
+mod history_summarizer_citations_golden;
 use transform::{
     HistorySummarizerDiagnostics, ProjectionCacheInput, SerializedOutputCache, TransformRequest,
     TransformWithProjection, transform_with_projection_cached,
@@ -5285,15 +5289,18 @@ impl HandlerCore {
                     drop(guard);
                     return Some("recovering");
                 };
-                let chunk = history_summarizer_chunk::build_history_summarizer_chunk(
+                // `usize::MAX` builds the full frozen ordinal range before `presented_input` truncates it to `token_budget` and withdraws the aliases the cut removes.
+                let mut chunk = history_summarizer_chunk::build_history_summarizer_chunk(
                     parsed.messages.as_slice(),
                     &live,
                     range.from_ordinal,
-                    derive_history_summarizer_chunk_tokens(
-                        config.history_summarizer_context_limit_tokens,
-                    ),
+                    usize::MAX,
                     range.to_ordinal.saturating_add(1),
                 );
+                let token_budget = derive_history_summarizer_chunk_tokens(
+                    config.history_summarizer_context_limit_tokens,
+                );
+                let _ = history_summarizer_chunk::presented_input(&mut chunk, token_budget);
                 let prior_history_segments = match store.load_history_segments(&session_id) {
                     Ok(cs) => cs
                         .iter()
@@ -18781,14 +18788,15 @@ mod tests {
                     replayed_unflagged
                 );
                 let (expected_text, expected_end) = match budget {
-                    1 => ("[1-2] U: α🙂e\u{301} 中文".to_string(), 2),
+                    1 => ("[1-2] U: «s1»α🙂e\u{301} 中文".to_string(), 2),
                     128 => (
-                        "[1-2] U: α🙂e\u{301} 中文\n[3-4] A: TC: bash / TC: bash".to_string(),
+                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash"
+                            .to_string(),
                         4,
                     ),
                     _ => (
                         format!(
-                            "[1-2] U: α🙂e\u{301} 中文\n[3-4] A: TC: bash / TC: bash\n[5] U: {}\n[8] A: kept reply",
+                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
                             "word ".repeat(2_000).trim_end(),
                         ),
                         8,
@@ -18820,8 +18828,8 @@ mod tests {
                 assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
                 let expected_digest = match budget {
                     1 => "0e0eb1f520ba2500bd1fdd653c805dc72fed78e64197f569294a9eb091c5ef34",
-                    128 => "7bf6893aeb58b953a0909165a4443ab0fb1b793faba4c8e9655058f38cd5727a",
-                    _ => "bafe4494e0de9038ac1a5fd14d432282bb17584600858b0dfad885ddb3ffac5d",
+                    128 => "92b29f62d5d0341b8421f53bf1169721ad6523a8a32045ccd5168cf144863d1d",
+                    _ => "48238b64939260eb768998bf3f2a9caa393857e6e006e3082526fb1afb7da207",
                 };
                 assert_eq!(
                     format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),
@@ -26275,7 +26283,7 @@ mod tests {
             let first_prompt = producer.prompts.lock().unwrap()[0].clone();
             assert_eq!(
                 format!("{:x}", Sha256::digest(first_prompt.as_bytes())),
-                "2aa6e502a048b0729b21fc7e3368476e1fc56bcab5280860f66c89e29c5f5466"
+                "813b4fd06c4cce739fd415892cb229086016b9a07fd1305fcb6cc4d0e9a90018"
             );
             assert_eq!(prompt_ordinal_range(&first_prompt).unwrap().0, 1);
             assert!(first_prompt.contains("message 3 "));
@@ -26397,7 +26405,7 @@ mod tests {
             let third_prompt = producer.prompts.lock().unwrap()[1].clone();
             assert_eq!(
                 format!("{:x}", Sha256::digest(third_prompt.as_bytes())),
-                "eb6233c471dc084858e31929e01d931e8542490bf4ad950365b81d02f00fef7f"
+                "c0377979d652d86253f19839ae3ee23e4396f57de73e0c39432cf77458a9094d"
             );
             assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
             assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
@@ -39071,6 +39079,57 @@ mod tests {
         );
         assert_ne!(control_after, control_before);
         assert_eq!(control_state.state, HistorySummarizerPhase::Idle);
+    }
+
+    /// `chunk_range` fixes the messages the producer saw. The reattach must rebuild that range without applying the live chunk budget, which can otherwise drop messages the model's segments cover and abandon a completed producer run.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_rebuilds_the_frozen_range_regardless_of_the_live_budget() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(history_summarizer_output(
+                1,
+                3,
+                "reattached under a smaller budget",
+            ));
+        // Three alternating-role messages of roughly 4k tokens each render as three blocks that fit the default budget that fired them and exceed the 8k floor a 32k context limit derives.
+        let messages: Vec<IngressMessage> = (1..=3)
+            .map(|ordinal| {
+                wire_with_role(
+                    &format!("m{ordinal}"),
+                    ordinal,
+                    if ordinal % 2 == 1 {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    &format!("message {ordinal} {}", "word ".repeat(4_000)),
+                )
+            })
+            .collect();
+        let config = DaemonConfig {
+            history_summarizer_context_limit_tokens: 32_000,
+            ..default_test_config()
+        };
+        assert_eq!(
+            derive_history_summarizer_chunk_tokens(config.history_summarizer_context_limit_tokens),
+            crate::config::MIN_HISTORY_SUMMARIZER_CHUNK_TOKENS
+        );
+        let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
+        seed_awaiting(&store, &messages);
+
+        let response = call_transform(&handler, messages).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_idle(&store).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.last_failure, None, "{state:?}");
+        assert_eq!(state.failure_backoff_at_ms, None);
+        let history_segments = store.load_history_segments("ses").unwrap();
+        assert_eq!(history_segments.len(), 1);
+        assert_eq!(history_segments[0].end_message, 3);
     }
 
     #[tokio::test(flavor = "current_thread")]
