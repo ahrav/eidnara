@@ -14970,7 +14970,7 @@ fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlit
 /// Compressed bound of one retained publication: the chunk transcript envelope for the transcript and its serialized siblings (the validated output and the alias table, which presents the same text again), the same multiple `decompress_bytes` allows inflated.
 const MAX_PENDING_PUBLICATION_COMPRESSED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES * 4;
 
-/// Scans, serializes, and compresses a retained publication as `record_curator_reservation` stores it. A field the durable scan rejects or would rewrite in the subject-bearing fields, or a payload past `MAX_PENDING_PUBLICATION_COMPRESSED_BYTES`, is `MemoryStoreError::Redaction`: the store refuses to retain it.
+/// Scans, serializes, and compresses a retained publication as `record_curator_reservation` stores it. A field the durable scan rejects or would rewrite in the subject-bearing fields, or a payload past `MAX_PENDING_PUBLICATION_INFLATED_BYTES` serialized or `MAX_PENDING_PUBLICATION_COMPRESSED_BYTES` deflated, is `MemoryStoreError::Redaction`: the store refuses to retain it.
 fn prepare_pending_publication(
     session_id: &str,
     pending: &PendingPublication,
@@ -15003,6 +15003,10 @@ fn prepare_pending_publication(
     }
     let payload =
         serde_json::to_vec(&scanned).map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
+    // JSON encoding can more than double a field, so the serialized payload is bounded by what the reader inflates, not only by the fields.
+    if payload.len() > MAX_PENDING_PUBLICATION_INFLATED_BYTES {
+        return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
+    }
     let payload_deflate = compress_bytes(&payload).map_err(|error| {
         MemoryStoreError::Serde(format!("pending publication compression failed: {error}"))
     })?;
@@ -15069,9 +15073,8 @@ fn compress_bytes(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     encoder.finish()
 }
 
-/// Inflated bound of one retained publication: the inflated transcript envelope and its serialized siblings. The writer bounds each of the three text fields at `MAX_DURABLE_TEXT_BYTES`, so a payload it stores always inflates inside this bound; a row that does not was not written by it.
+/// Inflated bound of one retained publication: the inflated transcript envelope and its serialized siblings. `prepare_pending_publication` refuses a serialized payload past it, so a row that does not inflate inside it was not written by this store.
 const MAX_PENDING_PUBLICATION_INFLATED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_INFLATED_BYTES * 4;
-const _: () = assert!(3 * MAX_DURABLE_TEXT_BYTES < MAX_PENDING_PUBLICATION_INFLATED_BYTES);
 
 /// Inflates a retained publication, bounded by `MAX_PENDING_PUBLICATION_INFLATED_BYTES`; a payload that would grow past it is refused rather than read.
 fn decompress_bytes(blob: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -21593,7 +21596,37 @@ mod tests {
         );
     }
 
-    /// The writer bounds every text field at the durable text limit, so a payload the reader could not inflate is refused before it is stored and recovery never finds a row it must settle as unreadable.
+    /// JSON encoding of the retained fields can more than double them (a `"` becomes `\"`, and again when the JSON text is embedded as a string), so three fields inside the durable text limit can serialize past what the reader inflates. The writer refuses the serialized payload, not only its fields.
+    #[test]
+    fn a_retained_publication_whose_encoding_exceeds_the_inflated_bound_is_not_retainable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        // A JSON string of 250 K quotes: 500 KiB as JSON text, inside the field bound; 1 MiB once embedded.
+        let quotes = serde_json::to_string(&"\"".repeat(250 * 1024)).unwrap();
+        assert!(quotes.len() <= MAX_DURABLE_TEXT_BYTES);
+        let pending = PendingPublication {
+            validated_json: quotes.clone(),
+            aliases_json: quotes.clone(),
+            chunk_transcript: "\"".repeat(500 * 1024),
+            boundary_dates: BTreeMap::new(),
+            publication_floor_ordinal: 3,
+            collect_user_memory_candidates: false,
+            created_at_ms: 1,
+        };
+        let payload = serde_json::to_vec(&pending).unwrap();
+        assert!(payload.len() > MAX_PENDING_PUBLICATION_INFLATED_BYTES);
+        assert!(compress_bytes(&payload).unwrap().len() < MAX_PENDING_PUBLICATION_COMPRESSED_BYTES);
+        assert!(
+            !store
+                .pending_publication_retainable("ses", &pending)
+                .unwrap()
+        );
+    }
+
+    /// A field past the durable text limit is refused before the payload is serialized, so recovery never finds a row it must settle as unreadable.
     #[test]
     fn a_retained_publication_past_the_inflated_bound_is_not_retainable() {
         let dir = tempfile::tempdir().unwrap();
