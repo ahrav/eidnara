@@ -155,7 +155,7 @@ use classify::{
 use config::{ConfigCache, DaemonConfig, derive_history_summarizer_chunk_tokens};
 use healing::{SerializerProfile, tail_reclaim};
 use history_summarizer::{
-    HistorySummarizerProducerDriver, reattach_history_summarizer_producer,
+    HistorySummarizerProducerDriver, HoldsReservation, reattach_history_summarizer_producer,
     run_history_summarizer_firing,
 };
 use history_summarizer_chunk::{
@@ -2259,6 +2259,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// The memory store's connection holds `memory_store::PAGE_CACHE_BUDGET_BYTES` of page cache and maps up to `memory_store::MMAP_BUDGET_BYTES` of its file; mapped pages are file-backed and reclaimable, and are counted so the ceiling stays conservative.
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
+/// The Curator host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`curator::worker::RETAINED_CREDENTIAL_BYTES`).
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
@@ -2279,7 +2280,8 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
-    + kernel_routes::eligibility::CACHE_BUDGET_BYTES;
+    + kernel_routes::eligibility::CACHE_BUDGET_BYTES
+    + curator::worker::RETAINED_CREDENTIAL_BYTES;
 
 #[derive(Debug, Clone)]
 struct NativeDeltaFrontier {
@@ -5307,6 +5309,17 @@ impl HandlerCore {
         if phase == HistorySummarizerPhase::Idle {
             return Some("recovered");
         }
+        // A reserved firing whose last recovery pass decided nothing armed a backoff; recovery runs on every transform pass, so the backoff is what keeps a stalled reservation from being reconciled once per request.
+        if phase == HistorySummarizerPhase::Publishing
+            && loaded.meta.history_summarizer.holds_reservation()
+            && loaded
+                .meta
+                .history_summarizer
+                .failure_backoff_at_ms
+                .is_some_and(|backoff_at_ms| now < backoff_at_ms)
+        {
+            return Some("backoff");
+        }
         if self
             .live_history_summarizer_sessions
             .lock()
@@ -5363,17 +5376,17 @@ impl HandlerCore {
                     drop(guard);
                     return Some("recovering");
                 };
-                let token_budget = derive_history_summarizer_chunk_tokens(
-                    config.history_summarizer_context_limit_tokens,
-                );
+                // `usize::MAX` builds the full frozen ordinal range before `presented_input` truncates it to `token_budget` and withdraws the aliases the cut removes.
                 let mut chunk = history_summarizer_chunk::build_history_summarizer_chunk(
                     parsed.messages.as_slice(),
                     &live,
                     range.from_ordinal,
-                    token_budget,
+                    usize::MAX,
                     range.to_ordinal.saturating_add(1),
                 );
-                // The firing presented this chunk under the same budget; re-applying the truncation withdraws the aliases the model never saw whole, so a reattached citation resolves only against presented bytes.
+                let token_budget = derive_history_summarizer_chunk_tokens(
+                    config.history_summarizer_context_limit_tokens,
+                );
                 let _ = history_summarizer_chunk::presented_input(&mut chunk, token_budget);
                 let prior_history_segments = match store.load_history_segments(&session_id) {
                     Ok(cs) => cs
@@ -5415,6 +5428,8 @@ impl HandlerCore {
                                         now_ms: now,
                                         failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                                         publication_fence: Some(publication_fence.as_ref()),
+                                        collect_user_memory_candidates: config
+                                            .user_memory_collection_enabled,
                                     },
                                 )
                                 .map(history_summarizer::HistorySummarizerReattachOutcome::Republished);
@@ -5505,6 +5520,8 @@ impl HandlerCore {
                                     failure_backoff_at_ms: now
                                         + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                                     publication_fence: Some(publication_fence.as_ref()),
+                                    collect_user_memory_candidates: config
+                                        .user_memory_collection_enabled,
                                 },
                             )
                             .map(|_| ())
@@ -14924,20 +14941,50 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
         &self.store
     }
 
-    /// The production selector: the project's live canonical descriptors, judged through the Kernel, minus targets that already have a review job. The Kernel scope is the bound route's; the ledger project is the authority project the slot is leased under.
+    /// The production selector: the project's live canonical descriptors, judged through the Kernel, minus targets that already have a review job. The Kernel scope is the bound route's; the ledger project is the authority project the slot is leased under. A missing binding or kernel and a transient selection error retry the slot, as `run_task` retains the same conditions; every other selection error completes it.
     fn select_review_page(
         &self,
         project: &memory_classifier_scheduler::ScheduledProject,
         cursor: Option<&str>,
-    ) -> Result<memory_store::curator_jobs::FrozenSelectionPage, String> {
-        let binding = self
-            .binding_for_root(&project.route_root)
-            .ok_or_else(|| "no live route is bound to the project".to_string())?;
+    ) -> Result<
+        memory_store::curator_jobs::FrozenSelectionPage,
+        memory_classifier_scheduler::SelectionFailure,
+    > {
+        use memory_classifier_scheduler::SelectionFailure;
+        // The lease names a project at a generation; a root that moved to another project or an authority that advanced since the snapshot must not select for the lease it left. The classify path refuses the same way.
+        let route_root = project.route_root.to_string_lossy().to_string();
+        match memories_authority_for_route(&self.store, &route_root) {
+            Ok(MemoriesAuthority::Module(authority))
+                if authority.project == project.project
+                    && authority.generation == project.authority_generation => {}
+            Ok(MemoriesAuthority::Module(authority)) => {
+                return Err(SelectionFailure::Failed(format!(
+                    "the route now resolves to {} at generation {}, the lease is on {} at generation {}",
+                    authority.project,
+                    authority.generation,
+                    project.project,
+                    project.authority_generation
+                )));
+            }
+            Ok(MemoriesAuthority::NotModule { message }) => {
+                return Err(SelectionFailure::Failed(message));
+            }
+            Err(error) => {
+                return Err(SelectionFailure::Retry(format!(
+                    "authority lookup failed: {error}"
+                )));
+            }
+        }
+        let binding = self.binding_for_root(&project.route_root).ok_or_else(|| {
+            SelectionFailure::Retry("no live route is bound to the project".to_string())
+        })?;
         let kernel = self
             .memory_classifier
             .kernel
             .kernel_store()
-            .map_err(|outcome| format!("kernel unavailable: {outcome:?}"))?;
+            .map_err(|outcome| {
+                SelectionFailure::Retry(format!("kernel unavailable: {outcome:?}"))
+            })?;
         let budget = kernel::applicability::EvalBudget::new(
             Some(std::time::Instant::now() + std::time::Duration::from_secs(30)),
             Arc::default(),
@@ -14956,7 +15003,13 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
             cursor,
             &budget,
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            if error.is_transient() {
+                SelectionFailure::Retry(error.to_string())
+            } else {
+                SelectionFailure::Failed(error.to_string())
+            }
+        })
     }
 
     /// The newest root speaks for a project: roots collapse by project before
@@ -18933,15 +18986,15 @@ mod tests {
                     replayed_unflagged
                 );
                 let (expected_text, expected_end) = match budget {
-                    1 => ("[1-2] U: ⟦s1⟧α🙂e\u{301} 中文".to_string(), 2),
+                    1 => ("[1-2] U: «s1»α🙂e\u{301} 中文".to_string(), 2),
                     128 => (
-                        "[1-2] U: ⟦s1⟧α🙂e\u{301} 中文\n[3-4] A: ⟦s2⟧TC: bash / ⟦s3⟧TC: bash"
+                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash"
                             .to_string(),
                         4,
                     ),
                     _ => (
                         format!(
-                            "[1-2] U: ⟦s1⟧α🙂e\u{301} 中文\n[3-4] A: ⟦s2⟧TC: bash / ⟦s3⟧TC: bash\n[5] U: ⟦s4⟧{}\n[8] A: ⟦s5⟧kept reply",
+                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
                             "word ".repeat(2_000).trim_end(),
                         ),
                         8,
@@ -18973,8 +19026,8 @@ mod tests {
                 assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
                 let expected_digest = match budget {
                     1 => "0e0eb1f520ba2500bd1fdd653c805dc72fed78e64197f569294a9eb091c5ef34",
-                    128 => "bd4cd63893b27d68e402b624e3f12cc864625a9e9063c36faa1d1e0c86183f9d",
-                    _ => "bbd9be7b6623b38710d42a2285dd3e9a257af89fb47a3684a6bb20cf962f3791",
+                    128 => "92b29f62d5d0341b8421f53bf1169721ad6523a8a32045ccd5168cf144863d1d",
+                    _ => "48238b64939260eb768998bf3f2a9caa393857e6e006e3082526fb1afb7da207",
                 };
                 assert_eq!(
                     format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),
@@ -26428,7 +26481,7 @@ mod tests {
             let first_prompt = producer.prompts.lock().unwrap()[0].clone();
             assert_eq!(
                 format!("{:x}", Sha256::digest(first_prompt.as_bytes())),
-                "05c936442bcab53bbc53998b6d0e26a868e4c9aaa51e232819805479ca0177e7"
+                "813b4fd06c4cce739fd415892cb229086016b9a07fd1305fcb6cc4d0e9a90018"
             );
             assert_eq!(prompt_ordinal_range(&first_prompt).unwrap().0, 1);
             assert!(first_prompt.contains("message 3 "));
@@ -26550,7 +26603,7 @@ mod tests {
             let third_prompt = producer.prompts.lock().unwrap()[1].clone();
             assert_eq!(
                 format!("{:x}", Sha256::digest(third_prompt.as_bytes())),
-                "d95e5368b7bd08771c1fc19192224ea088b0f847a164d3e6a9d6c95c7aa105b0"
+                "c0377979d652d86253f19839ae3ee23e4396f57de73e0c39432cf77458a9094d"
             );
             assert!(prompt_ordinal_range(&third_prompt).unwrap().0 > 1);
             assert!(!third_prompt.contains("replayed synthetic carrier sentinel"));
@@ -32999,6 +33052,40 @@ mod tests {
         }
     }
 
+    /// Selection combines the route's Kernel scope with the leased project, so a
+    /// root that moved to another project after the snapshot must not select for
+    /// the lease it left. Both projects share a generation, as in the classify case.
+    #[tokio::test(flavor = "current_thread")]
+    async fn memory_classifier_scheduler_bridge_refuses_to_select_for_a_root_that_moved_to_another_project()
+     {
+        use memory_classifier_scheduler::{ScheduledTask, SchedulerHost, SelectionFailure};
+        let producer = Arc::new(ProducerState::default());
+        let harness = MemoryClassifierHarness::start(&producer).await;
+        harness.schedule(Some("*/15 * * * *"));
+        let bridge = harness.scheduler_bridge();
+        let mut project = bridge.scheduled_projects().unwrap().remove(0);
+        project.task = ScheduledTask::CuratorReviewSelection;
+        assert!(
+            bridge.select_review_page(&project, None).is_ok(),
+            "the bound project selects"
+        );
+
+        activate_module_authority(
+            &harness.store,
+            "context",
+            "git:other",
+            &harness.route_root,
+            "memories",
+        );
+        match bridge.select_review_page(&project, None) {
+            Err(SelectionFailure::Failed(reason)) => assert!(
+                reason.contains("git:other") && reason.contains("git:identity"),
+                "{reason}"
+            ),
+            other => panic!("a moved root selected for its old lease: {other:?}"),
+        }
+    }
+
     /// A store failure inside the durable protocol is not the protocol's
     /// answer for the command: the bridge reports the store unavailable so the
     /// scheduler keeps the slot due instead of recording the failure on the
@@ -39089,6 +39176,85 @@ mod tests {
         }
     }
 
+    /// Records a reservation and a retained publication for the seeded firing, as the live path leaves them when publication fails after the handoff.
+    fn seed_retained_reservation(store: &MemoryStore) {
+        let loaded = store.load("ses").unwrap();
+        let reservation = memory_store::CuratorReservation {
+            firing_seq: loaded.meta.history_summarizer.firing_seq,
+            causal_identity: "c".repeat(64),
+            candidate_id: "hs-ses-candidate".to_string(),
+            payload_digest: "d".repeat(64),
+            kernel_incarnation: "k".repeat(64),
+            queue_deadline_ms: now_ms() + memory_store::curator_jobs::CURATOR_QUEUE_LIFETIME_MS,
+        };
+        store
+            .record_curator_reservation(
+                "ses",
+                loaded.row_version.unwrap(),
+                &reservation,
+                &memory_store::PendingPublication {
+                    validated_json: serde_json::to_string(
+                        &history_summarizer_validate::ValidatedChunk::default(),
+                    )
+                    .unwrap(),
+                    aliases_json: serde_json::to_string(
+                        &history_summarizer_citations::FrozenAliasTable::default(),
+                    )
+                    .unwrap(),
+                    chunk_transcript: "U: retained".to_string(),
+                    boundary_dates: BTreeMap::new(),
+                    publication_floor_ordinal: 3,
+                    collect_user_memory_candidates: false,
+                    created_at_ms: now_ms(),
+                },
+            )
+            .unwrap();
+    }
+
+    async fn wait_for_reattach_to_finish(handler: &Handler) {
+        let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+        while std::time::Instant::now() < deadline {
+            if handler.reattaching_sessions.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(TEST_WAIT_POLL).await;
+        }
+        panic!("the reattach did not finish");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retained_reserved_firing_waits_out_its_backoff_before_the_next_reattach() {
+        // The test route has no MODULE memories authority, so the reserved firing cannot be verified and every recovery pass retains it. Retaining must arm the backoff and the next transform must honor it instead of running the recovery again.
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+        seed_history_summarizer_phase(&store, HistorySummarizerPhase::Publishing);
+        seed_retained_reservation(&store);
+
+        let recovering = call_transform(&handler, messages.clone()).await;
+        assert_eq!(recovering["history_summarizer"]["no_fire"], "recovering");
+        wait_for_reattach_to_finish(&handler).await;
+        let retained = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
+        assert!(retained.curator_reservation.is_some());
+        assert!(
+            retained.failure_backoff_at_ms.is_some(),
+            "a retained pass arms the backoff"
+        );
+
+        let backed_off = call_transform(&handler, messages.clone()).await;
+        assert_eq!(backed_off["history_summarizer"]["no_fire"], "backoff");
+        assert!(handler.reattaching_sessions.lock().unwrap().is_empty());
+
+        expire_history_summarizer_backoff(&store);
+        let again = call_transform(&handler, messages).await;
+        assert_eq!(again["history_summarizer"]["no_fire"], "recovering");
+        wait_for_reattach_to_finish(&handler).await;
+        assert_eq!(producer.connects.load(Ordering::SeqCst), 0);
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn stale_reattach_task_rechecks_idle_before_connecting() {
         let producer = Arc::new(ProducerState::default());
@@ -39235,6 +39401,57 @@ mod tests {
         );
         assert_ne!(control_after, control_before);
         assert_eq!(control_state.state, HistorySummarizerPhase::Idle);
+    }
+
+    /// `chunk_range` fixes the messages the producer saw. The reattach must rebuild that range without applying the live chunk budget, which can otherwise drop messages the model's segments cover and abandon a completed producer run.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_rebuilds_the_frozen_range_regardless_of_the_live_budget() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(history_summarizer_output(
+                1,
+                3,
+                "reattached under a smaller budget",
+            ));
+        // Three alternating-role messages of roughly 4k tokens each render as three blocks that fit the default budget that fired them and exceed the 8k floor a 32k context limit derives.
+        let messages: Vec<IngressMessage> = (1..=3)
+            .map(|ordinal| {
+                wire_with_role(
+                    &format!("m{ordinal}"),
+                    ordinal,
+                    if ordinal % 2 == 1 {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    &format!("message {ordinal} {}", "word ".repeat(4_000)),
+                )
+            })
+            .collect();
+        let config = DaemonConfig {
+            history_summarizer_context_limit_tokens: 32_000,
+            ..default_test_config()
+        };
+        assert_eq!(
+            derive_history_summarizer_chunk_tokens(config.history_summarizer_context_limit_tokens),
+            crate::config::MIN_HISTORY_SUMMARIZER_CHUNK_TOKENS
+        );
+        let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
+        seed_awaiting(&store, &messages);
+
+        let response = call_transform(&handler, messages).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_idle(&store).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.last_failure, None, "{state:?}");
+        assert_eq!(state.failure_backoff_at_ms, None);
+        let history_segments = store.load_history_segments("ses").unwrap();
+        assert_eq!(history_segments.len(), 1);
+        assert_eq!(history_segments[0].end_message, 3);
     }
 
     #[tokio::test(flavor = "current_thread")]

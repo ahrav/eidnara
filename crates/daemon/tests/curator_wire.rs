@@ -11,8 +11,8 @@ use daemon::curator::settlement::{RunResult, Settled, Settlement, TaskClaim};
 use daemon::curator::worker::job_binding;
 use daemon::dispatch::PreparedOutcome;
 use kernel::{
-    CuratorHoldBinding, KernelStore, ManifestReference, PolicyDependencies, ProjectScope,
-    ProposalAction, ProposalTarget, ReviewProposal, ReviewQuestionTemplate, Uncertainty,
+    CuratorHoldBinding, KernelStore, ManifestReference, PolicyDependencies, ProposalAction,
+    ProposalTarget, ReviewProposal, ReviewQuestionTemplate, Uncertainty,
 };
 use memory_store::LeaseAcquireOutcome;
 use memory_store::MemoryStore;
@@ -224,13 +224,13 @@ fn publish(
         .unwrap();
     let broker = EvidenceBroker::new(
         RunBinding {
-            project: ProjectScope::new(digest).unwrap(),
             hold: hold_binding,
             hold_id: hold.hold_id,
             destination: kernel::ArtifactDestination::Remote,
         },
         QuestionTemplate::ExtractedFacts,
-    );
+    )
+    .unwrap();
     let claim = TaskClaim {
         claim_id: begun.claim_id.clone(),
         worker_instance: "worker-a".to_string(),

@@ -531,6 +531,44 @@ fn purge_tombstones_unlinks_degrades_pins_and_is_idempotent() {
 }
 
 #[test]
+fn artifact_byte_length_agrees_with_read_artifact_on_liveness() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let handle = ingest(&store, "length", b"eight by");
+    assert_eq!(store.artifact_byte_length(&handle).unwrap(), Some(8));
+    let unknown = kernel::ArtifactHandle {
+        digest: handle.digest.clone(),
+        evidence_id: "evidence-other".to_string(),
+    };
+    assert_eq!(store.artifact_byte_length(&unknown).unwrap(), None);
+    assert_eq!(
+        store.read_artifact(&unknown).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceUnavailable
+    );
+    // A tombstone with the evidence row still marked live is the state `read_artifact` defends against; the length lookup applies the same liveness rule.
+    let connection = inspect(root.path());
+    let commit_seq: i64 = connection
+        .query_row("SELECT MAX(commit_seq) FROM commit_log", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact_purge_tombstones(artifact_digest,artifact_reference,operator_id,reason,purged_at,commit_seq)
+             VALUES (?1,?2,'operator-1','secret',42,?3)",
+            params![&handle.digest, format!("sha256:{}", handle.digest), commit_seq],
+        )
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        store.read_artifact(&handle).unwrap_err().kind(),
+        ArtifactErrorKind::ReferenceUnavailable
+    );
+    assert_eq!(store.artifact_byte_length(&handle).unwrap(), None);
+}
+
+#[test]
 fn purge_removes_actual_digest_temp_from_concurrent_dedup_ingest() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(KernelStore::open(root.path()).unwrap());

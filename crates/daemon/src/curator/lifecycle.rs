@@ -1,4 +1,4 @@
-//! The Curator's operator surface and expiry maintenance: one task per data home samples content-free ledger facts from the Memory Store into the `metrics.curator` block and runs the bounded, kind-specific cleanup between samples. The Memory Store closes jobs and frozen selections past their queue deadlines with recorded terminal outcomes. The Kernel retires expired Curator-only captures, then abandons expired staging runs and review inputs, releases capture pins, and reclaims unreferenced artifacts through its own staging maintenance, called at most four times per slice so a backlog drains a bounded batch at a time. Neither sweep touches a live reservation, an accepted dependency, or an independent original: the Memory Store spares receipts in progress, and the Kernel abandons only runs past their deadline and deletes only terminal rows past retention.
+//! The Curator's operator surface and expiry maintenance: one task per data home samples content-free ledger facts from the Memory Store into the `metrics.curator` block and runs the kind-specific cleanup between samples. The Memory Store closes jobs and frozen selections past their queue deadlines with recorded terminal outcomes. The Kernel retires expired Curator-only captures, then abandons expired staging runs and review inputs, releases capture pins, and reclaims unreferenced artifacts through its own staging maintenance. Neither sweep touches a live reservation, an accepted dependency, or an independent original: the Memory Store spares receipts in progress, and the Kernel abandons only runs past their deadline and deletes only terminal rows past retention.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 pub const SAMPLE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// A `ready` block older than this reads as unavailable, on the monotonic clock.
 pub const SAMPLE_STALE_AFTER: Duration = Duration::from_secs(300);
-/// Staging maintenance passes per slice; each deletes at most one batch of aged runs.
+/// Cap on staging maintenance calls per slice. Only the staging-run deleter inside a call is batched; artifact GC walks every object each call, so a repeat is earned only by a full deleter batch.
 pub const MAINTENANCE_PASSES_PER_SLICE: usize = 4;
 
 /// Whether the deployment owner's activation record admits Curator disclosure, from a closed set: `open`, or the closed reason's kind.
@@ -121,8 +121,8 @@ struct Published {
 /// The sampler's published projection; `health()` reads it and never touches the store. The activation state is the worker's, published beside the sampler's block.
 pub struct CuratorStatus {
     snapshot: ArcSwap<Published>,
-    /// The worker's latest gate evaluation and when it stops being current: a worker that stopped evaluating must not keep reporting `open`.
-    activation: ArcSwap<(ActivationState, Instant)>,
+    /// The worker's latest gate evaluation and when it stops being current: a worker that stopped evaluating must not keep reporting `open`. `None` until the first evaluation, which nothing can age.
+    activation: ArcSwap<Option<(ActivationState, Instant)>>,
 }
 
 impl Default for CuratorStatus {
@@ -132,10 +132,7 @@ impl Default for CuratorStatus {
                 block: CuratorHealthBlock::starting(),
                 stale_at: Instant::now() + SAMPLE_STALE_AFTER,
             }),
-            activation: ArcSwap::from_pointee((
-                ActivationState::Closed("unknown"),
-                Instant::now() + SAMPLE_STALE_AFTER,
-            )),
+            activation: ArcSwap::from_pointee(None),
         }
     }
 }
@@ -151,18 +148,17 @@ impl CuratorStatus {
             } else {
                 published.block.clone()
             };
-        let (activation, stale_at) = **self.activation.load();
-        block.activation_state = ActivationStateText(if now >= stale_at {
-            ActivationState::Closed("stale")
-        } else {
-            activation
+        block.activation_state = ActivationStateText(match **self.activation.load() {
+            None => ActivationState::Closed("unknown"),
+            Some((_, stale_at)) if now >= stale_at => ActivationState::Closed("stale"),
+            Some((activation, _)) => activation,
         });
         block
     }
 
     pub fn set_activation(&self, state: ActivationState) {
         self.activation
-            .store(Arc::new((state, Instant::now() + SAMPLE_STALE_AFTER)));
+            .store(Arc::new(Some((state, Instant::now() + SAMPLE_STALE_AFTER))));
     }
 
     fn last_sampled_at_ms(&self) -> Option<i64> {
@@ -176,13 +172,15 @@ impl CuratorStatus {
         }));
     }
 
-    /// Moves the current block's stale deadline to now.
+    /// Moves the current block's and the activation's stale deadlines to now.
     #[cfg(any(test, feature = "test-support"))]
     pub fn expire_for_test(&self) {
         self.snapshot.rcu(|current| Published {
             block: current.block.clone(),
             stale_at: Instant::now(),
         });
+        self.activation
+            .rcu(|current| current.map(|(state, _)| (state, Instant::now())));
     }
 }
 
@@ -196,52 +194,82 @@ pub struct Pass {
     pub healthy: bool,
 }
 
-/// One Kernel maintenance slice: expired Curator-only captures are retired first, then staging maintenance runs until it deletes less than a full batch or the pass cap is reached. Returns whether anything advanced.
-fn kernel_slice(kernel: &kernel::KernelStore, now_ms: i64) -> Result<bool, kernel::KernelError> {
-    let mut advanced = kernel.expire_local_file_captures(now_ms)? > 0;
+/// Returns whether capture expiry or staging maintenance advanced, or `None` when `cancelled` fired before a step.
+fn kernel_slice(
+    kernel: &kernel::KernelStore,
+    now_ms: i64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<bool>, kernel::KernelError> {
+    if cancelled() {
+        return Ok(None);
+    }
+    let expiry = kernel.expire_local_file_captures(now_ms)?;
+    let advanced = expiry.retired + expiry.retained > 0;
+    Ok(
+        maintenance_slice(cancelled, || kernel.run_staging_maintenance(now_ms))?
+            .map(|maintained| advanced || maintained),
+    )
+}
+
+/// Abandonment and artifact GC finish in one maintenance call; only the staging-run deleter is batched. A repeat call therefore costs a full artifact-object walk and buys nothing unless the deleter came up full, so that is the only result that earns one. `None` means `cancelled` fired before a call.
+fn maintenance_slice(
+    cancelled: &dyn Fn() -> bool,
+    mut maintain: impl FnMut() -> Result<kernel::StagingMaintenanceResult, kernel::KernelError>,
+) -> Result<Option<bool>, kernel::KernelError> {
+    let mut advanced = false;
     for _ in 0..MAINTENANCE_PASSES_PER_SLICE {
-        let result = kernel.run_staging_maintenance(now_ms)?;
-        let progressed = result.abandoned_runs > 0
+        if cancelled() {
+            return Ok(None);
+        }
+        let result = maintain()?;
+        advanced |= result.abandoned_runs > 0
             || result.deleted_runs > 0
             || result.artifact_gc.reclaimed_objects > 0;
-        advanced |= progressed;
-        if !progressed {
+        if result.deleted_runs < kernel::STAGING_DELETE_BATCH_RUNS {
             break;
         }
     }
-    Ok(advanced)
+    Ok(Some(advanced))
 }
 
-/// One cleanup-and-sample pass: the Memory Store closes expired jobs and selections, the Kernel runs one maintenance slice when it is ready, and the facts are sampled. `last_sampled_at_ms` is kept on the unavailable block when a step fails.
+/// One cleanup-and-sample pass: the Memory Store closes expired jobs and selections, the Kernel runs one maintenance slice when it is ready, and the facts are sampled. `last_sampled_at_ms` is kept on the unavailable block when a step fails. `cancelled` is read before every blocking step; `None` means it fired, and the steps already taken keep their effects.
 pub fn sweep_and_sample(
     store: &MemoryStore,
     kernel: Option<&kernel::KernelStore>,
     now_ms: i64,
     last_sampled_at_ms: Option<i64>,
-) -> Pass {
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Pass> {
     let unavailable = |advanced: bool| Pass {
         block: CuratorHealthBlock::unavailable(last_sampled_at_ms),
         advanced,
         healthy: false,
     };
+    if cancelled() {
+        return None;
+    }
     let (swept_jobs, swept_selections) = match store.expire_curator_work(now_ms) {
         Ok((jobs, selections)) => (jobs as u64, selections as u64),
         Err(error) => {
             eprintln!("daemon: curator expiry sweep failed: {error}");
-            return unavailable(false);
+            return Some(unavailable(false));
         }
     };
     let mut advanced = swept_jobs + swept_selections > 0;
     if let Some(kernel) = kernel {
-        match kernel_slice(kernel, now_ms) {
-            Ok(slice_advanced) => advanced |= slice_advanced,
+        match kernel_slice(kernel, now_ms, cancelled) {
+            Ok(Some(slice_advanced)) => advanced |= slice_advanced,
+            Ok(None) => return None,
             Err(error) => {
                 eprintln!("daemon: kernel staging maintenance failed: {error:?}");
-                return unavailable(advanced);
+                return Some(unavailable(advanced));
             }
         }
     }
-    match store.curator_status_facts() {
+    if cancelled() {
+        return None;
+    }
+    Some(match store.curator_status_facts() {
         Ok(facts) => Pass {
             block: CuratorHealthBlock {
                 curator_state: CuratorState::Ready,
@@ -258,10 +286,10 @@ pub fn sweep_and_sample(
             eprintln!("daemon: curator facts sample failed: {error}");
             unavailable(advanced)
         }
-    }
+    })
 }
 
-/// Runs passes until cancelled. The Kernel joins a pass only while it is ready. The blocking work runs off the runtime thread and is joined before the task ends, so shutdown observes its physical completion.
+/// Blocking work runs off the runtime thread and is joined before the task ends, so shutdown observes physical completion. The blocking pass checks the token between steps, so the join waits for at most one in-flight step.
 pub(crate) async fn run(
     status: Arc<CuratorStatus>,
     store: Arc<MemoryStore>,
@@ -276,8 +304,15 @@ pub(crate) async fn run(
         let now_ms = crate::now_ms();
         let last_sampled_at_ms = status.last_sampled_at_ms();
         let store = Arc::clone(&store);
+        let probe = cancel.clone();
         let mut worker = tokio::task::spawn_blocking(move || {
-            sweep_and_sample(&store, kernel_store.as_deref(), now_ms, last_sampled_at_ms)
+            sweep_and_sample(
+                &store,
+                kernel_store.as_deref(),
+                now_ms,
+                last_sampled_at_ms,
+                &|| probe.is_cancelled(),
+            )
         });
         let pass = tokio::select! {
             _ = cancel.cancelled() => {
@@ -286,7 +321,8 @@ pub(crate) async fn run(
                 return;
             }
             joined = &mut worker => match joined {
-                Ok(pass) => pass,
+                Ok(Some(pass)) => pass,
+                Ok(None) => return,
                 Err(error) => {
                     eprintln!("daemon: curator sampler worker failed: {error}");
                     Pass {
@@ -342,6 +378,230 @@ mod tests {
         }
     }
 
+    /// Stages one unsealed review input bound to `causal_identity` with the given queue deadline and returns its handle and binding.
+    fn stage_review_input(
+        kernel_store: &kernel::KernelStore,
+        causal_identity: &str,
+        recorded_at: i64,
+        queue_deadline_at: i64,
+    ) -> (kernel::ReviewStagedReference, kernel::ReviewBinding) {
+        let binding = crate::curator::handoff::review_binding(
+            &"a".repeat(64),
+            "memory",
+            "ses",
+            1,
+            causal_identity,
+        );
+        let payload = kernel::ReviewPayload::Subject(kernel::ReviewSubject {
+            facts: vec![kernel::ExtractedFact {
+                text: "f".to_string(),
+                spans: vec![kernel::SourceSpan {
+                    alias: "s1".to_string(),
+                    start: 0,
+                    end: 1,
+                }],
+            }],
+            origins: vec![kernel::SubjectOrigin {
+                alias: "s1".to_string(),
+                message_id: "m1".to_string(),
+                ordinal: 1,
+                block_ids: vec!["m1#0".to_string()],
+                block_hashes: vec!["0".repeat(64)],
+                ranges: vec![kernel::ByteRange { start: 0, end: 1 }],
+            }],
+        });
+        let staged = kernel_store
+            .stage_review_input(kernel::ReviewStagingSpec {
+                extraction_run_id: "run-expired".to_string(),
+                candidate_id: "subject-expired".to_string(),
+                producer: "history_summarizer".to_string(),
+                binding: binding.clone(),
+                payload,
+                recorded_at,
+                queue_deadline_at,
+            })
+            .unwrap();
+        assert!(matches!(
+            kernel_store.read_review_input(&staged, &binding, recorded_at),
+            Err(kernel::ReviewReadError::Refused(
+                kernel::ReviewReadRefusal::Unsealed
+            ))
+        ));
+        (staged, binding)
+    }
+
+    /// Seeds one lapsed Curator capture whose evidence a foreign observation cites, so the sweep can retire only its observation and must keep the evidence.
+    fn seed_retained_capture(kernel_store: &kernel::KernelStore, lapses_at: i64) {
+        use sha2::Digest as _;
+        let intent = |key: &str| kernel::CommitIntent {
+            producer: "lifecycle-test".to_string(),
+            operation_key: key.to_string(),
+            request_digest: format!("{:x}", sha2::Sha256::digest(key.as_bytes())),
+            actor: "test".to_string(),
+            cause: "proof".to_string(),
+        };
+        kernel_store
+            .commit(intent("domain"), |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "domain".to_string(),
+                    object_id: "domain-object".to_string(),
+                    name: "fixture".to_string(),
+                    source_kind: "fixture".to_string(),
+                    source_id: "domain".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let payload = b"captured bytes";
+        let digest = format!("{:x}", sha2::Sha256::digest(payload));
+        let handle = kernel_store
+            .ingest_artifact(kernel::ArtifactIngestRequest {
+                intent: intent("capture"),
+                payload: payload.to_vec(),
+                evidence_id: "evidence-capture".to_string(),
+                object_id: "evidence-object-capture".to_string(),
+                object_kind: "evidence".to_string(),
+                domain_id: "domain".to_string(),
+                source_kind: kernel::LOCAL_FILE_SOURCE_KIND.to_string(),
+                source_id: "notes.txt".to_string(),
+                source_revision: 1,
+                media_type: "text/plain".to_string(),
+                retention_class: kernel::CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+                retain_until: Some(lapses_at),
+                asserted_sensitivity: kernel::Sensitivity::Sensitive,
+                provider_egress: kernel::ProviderEgress::LocalOnly,
+                provenance: None,
+            })
+            .unwrap();
+        kernel_store
+            .commit(intent("observations"), |envelope| {
+                envelope.record_local_file_capture(&kernel::LocalFileCaptureRequest {
+                    project_digest: &"0a".repeat(32),
+                    relative_path: "notes.txt",
+                    captured_at: lapses_at - 1,
+                    domain_id: "domain",
+                    scope_id: None,
+                    evidence_id: &handle.evidence_id,
+                    artifact_digest: &digest,
+                    byte_length: payload.len() as u64,
+                })?;
+                envelope.insert_observation(kernel::ObservationSpec {
+                    observation_id: "foreign".to_string(),
+                    object_id: "foreign-object".to_string(),
+                    domain_id: "domain".to_string(),
+                    proposition_id: None,
+                    scope_id: None,
+                    anchor_id: None,
+                    evidence_id: Some(handle.evidence_id.clone()),
+                    observation_kind: "note".to_string(),
+                    payload: kernel::ObservationPayload {
+                        summary: "independent support".to_string(),
+                        classification: "note".to_string(),
+                        detail: None,
+                    },
+                    observed_at: lapses_at - 1,
+                    dependencies: Vec::new(),
+                    source_kind: "test".to_string(),
+                    source_id: "foreign".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Sensitive,
+                })?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    /// Retiring a retained capture's observation is cleanup work: the pass that did it follows without the idle interval, so a backlog of cited captures drains page after page; the pass after it, with nothing left, idles.
+    #[test]
+    fn retiring_a_retained_capture_counts_as_advancing() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&MemoryStore::test_descriptor(
+            store_dir.path(),
+            "eidnara-curator-lifecycle-test",
+        ))
+        .unwrap();
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+        let t0 = crate::now_ms();
+        seed_retained_capture(&kernel_store, t0 + 1_000);
+        let sweep_at = t0 + 2_000;
+        let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &|| false)
+            .expect("not cancelled");
+        assert!(pass.healthy);
+        assert!(
+            kernel_store
+                .local_file_capture("evidence-capture")
+                .unwrap()
+                .is_none(),
+            "the capture's own observation was retired"
+        );
+        assert!(
+            pass.advanced,
+            "retiring a retained capture's observation is progress"
+        );
+        let again = sweep_and_sample(&store, Some(&kernel_store), sweep_at + 1, None, &|| false)
+            .expect("not cancelled");
+        assert!(!again.advanced, "nothing was left to retire");
+    }
+
+    fn maintenance(
+        deleted_runs: usize,
+        reclaimed_objects: usize,
+    ) -> kernel::StagingMaintenanceResult {
+        kernel::StagingMaintenanceResult {
+            abandoned_runs: 0,
+            deleted_runs,
+            artifact_gc: kernel::ArtifactGcResult {
+                reclaimed_objects,
+                ..kernel::ArtifactGcResult::default()
+            },
+        }
+    }
+
+    /// Only the staging-run deleter is batched; artifact GC and abandonment finish in one call. So a second maintenance call is worth its full object walk only when the deleter filled its batch, and any other progress still counts as advancement without repeating the call.
+    #[test]
+    fn the_maintenance_slice_repeats_only_while_the_deleter_batch_is_full() {
+        let full = kernel::STAGING_DELETE_BATCH_RUNS;
+        let scripted = |results: Vec<kernel::StagingMaintenanceResult>| {
+            let mut results = results.into_iter();
+            let mut calls = 0;
+            let advanced = maintenance_slice(&|| false, || {
+                calls += 1;
+                Ok(results.next().expect("more calls than scripted results"))
+            })
+            .unwrap()
+            .expect("not cancelled");
+            (calls, advanced)
+        };
+        assert_eq!(
+            scripted(vec![maintenance(0, 5)]),
+            (1, true),
+            "reclaimed artifacts advance but do not earn a second object walk"
+        );
+        assert_eq!(
+            scripted(vec![maintenance(3, 0)]),
+            (1, true),
+            "a partial deleter batch drained everything eligible"
+        );
+        assert_eq!(scripted(vec![maintenance(0, 0)]), (1, false));
+        assert_eq!(
+            scripted(vec![
+                maintenance(full, 0),
+                maintenance(full, 0),
+                maintenance(10, 0)
+            ]),
+            (3, true),
+            "a full batch earns another call until the deleter comes up short"
+        );
+        assert_eq!(
+            scripted(vec![maintenance(full, 0); MAINTENANCE_PASSES_PER_SLICE + 1]),
+            (MAINTENANCE_PASSES_PER_SLICE, true),
+            "the pass cap bounds a deep backlog"
+        );
+    }
+
     /// The sweep closes reserved work past its deadline with a recorded outcome, leaves live work alone, and the sample reports every count content-free; a staged review input past its deadline is abandoned by the Kernel's own maintenance in the same pass.
     #[test]
     fn the_sweep_closes_expired_work_and_the_sample_counts_the_rest() {
@@ -391,52 +651,12 @@ mod tests {
             )
             .unwrap();
         // A review input whose queue deadline the sweep clock will have passed.
-        let soon = t0 + 1_000;
-        let binding = crate::curator::handoff::review_binding(
-            &"a".repeat(64),
-            "memory",
-            "ses",
-            1,
-            &live.causal_identity,
-        );
-        let payload = kernel::ReviewPayload::Subject(kernel::ReviewSubject {
-            facts: vec![kernel::ExtractedFact {
-                text: "f".to_string(),
-                spans: vec![kernel::SourceSpan {
-                    alias: "s1".to_string(),
-                    start: 0,
-                    end: 1,
-                }],
-            }],
-            origins: vec![kernel::SubjectOrigin {
-                alias: "s1".to_string(),
-                message_id: "m1".to_string(),
-                ordinal: 1,
-                block_ids: vec!["m1#0".to_string()],
-                block_hashes: vec!["0".repeat(64)],
-                ranges: vec![kernel::ByteRange { start: 0, end: 1 }],
-            }],
-        });
-        let staged = kernel_store
-            .stage_review_input(kernel::ReviewStagingSpec {
-                extraction_run_id: "run-expired".to_string(),
-                candidate_id: "subject-expired".to_string(),
-                producer: "history_summarizer".to_string(),
-                binding: binding.clone(),
-                payload,
-                recorded_at: t0,
-                queue_deadline_at: soon,
-            })
-            .unwrap();
-        assert!(matches!(
-            kernel_store.read_review_input(&staged, &binding, t0),
-            Err(kernel::ReviewReadError::Refused(
-                kernel::ReviewReadRefusal::Unsealed
-            ))
-        ));
+        let (staged, binding) =
+            stage_review_input(&kernel_store, &live.causal_identity, t0, t0 + 1_000);
 
         let sweep_at = t0 + 2_000;
-        let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at, None);
+        let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &|| false)
+            .expect("not cancelled");
         assert!(pass.healthy);
         assert!(
             pass.advanced,
@@ -497,7 +717,14 @@ mod tests {
             ))
         ));
         // A second pass sweeps nothing more, counts the same, and advances nothing, so the loop returns to its idle interval.
-        let again = sweep_and_sample(&store, Some(&kernel_store), sweep_at + 1, Some(sweep_at));
+        let again = sweep_and_sample(
+            &store,
+            Some(&kernel_store),
+            sweep_at + 1,
+            Some(sweep_at),
+            &|| false,
+        )
+        .expect("not cancelled");
         assert!(again.healthy);
         assert!(!again.advanced);
         assert_eq!(again.block.swept_jobs, 0);
@@ -520,6 +747,24 @@ mod tests {
                 .state,
             CuratorJobState::Terminal(CuratorJobOutcome::Expired),
             "the expired reservation keeps its recorded outcome and is not reopened"
+        );
+    }
+
+    /// Before the worker's first evaluation nothing can go stale: `unknown` outlives the staleness bound. An evaluation does age into `stale`.
+    #[test]
+    fn an_unevaluated_gate_stays_unknown_while_an_evaluation_ages_into_stale() {
+        let status = CuratorStatus::default();
+        status.expire_for_test();
+        assert_eq!(
+            status.reported().activation_state.0,
+            ActivationState::Closed("unknown")
+        );
+        status.set_activation(ActivationState::Open);
+        assert_eq!(status.reported().activation_state.0, ActivationState::Open);
+        status.expire_for_test();
+        assert_eq!(
+            status.reported().activation_state.0,
+            ActivationState::Closed("stale")
         );
     }
 
@@ -651,10 +896,77 @@ mod tests {
         let kernel_dir = tempfile::tempdir().unwrap();
         let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
         // A negative clock is refused by the Kernel's maintenance and by the store's expiry alike.
-        let pass = sweep_and_sample(&store, Some(&kernel_store), -1, Some(41));
+        let pass = sweep_and_sample(&store, Some(&kernel_store), -1, Some(41), &|| false)
+            .expect("not cancelled");
         assert!(!pass.healthy);
         assert_eq!(pass.block.curator_state, CuratorState::Unavailable);
         assert_eq!(pass.block.sampled_at_ms, Some(41));
         assert!(pass.block.facts.is_none());
+    }
+
+    /// Cancellation is checked before each blocking step; an in-flight store sweep completes before cancellation prevents the Kernel slice.
+    #[test]
+    fn a_cancelled_pass_stops_before_its_next_step() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&MemoryStore::test_descriptor(
+            store_dir.path(),
+            "eidnara-curator-lifecycle-cancel-test",
+        ))
+        .unwrap();
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
+        let t0 = crate::now_ms();
+        let expired = match store
+            .reserve_curator_job(
+                "git:p",
+                &producer(1),
+                &inputs(1),
+                t0 - CURATOR_QUEUE_LIFETIME_MS - 1,
+            )
+            .unwrap()
+        {
+            memory_store::curator_jobs::ReserveOutcome::Reserved(job) => job,
+            other => panic!("{other:?}"),
+        };
+        let (staged, binding) =
+            stage_review_input(&kernel_store, &expired.causal_identity, t0, t0 + 1_000);
+        let sweep_at = t0 + 2_000;
+        let job_state = || {
+            store
+                .lookup_curator_job("git:p", &expired.causal_identity)
+                .unwrap()
+                .unwrap()
+                .state
+        };
+
+        assert!(sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &|| true).is_none());
+        assert_eq!(
+            job_state(),
+            CuratorJobState::Reserved,
+            "a probe that fires before the first step leaves the store untouched"
+        );
+
+        let checks = std::cell::Cell::new(0);
+        let after_first = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        };
+        assert!(
+            sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &after_first).is_none()
+        );
+        assert_eq!(
+            job_state(),
+            CuratorJobState::Terminal(CuratorJobOutcome::Expired),
+            "the step already in flight completes"
+        );
+        assert!(
+            matches!(
+                kernel_store.read_review_input(&staged, &binding, sweep_at),
+                Err(kernel::ReviewReadError::Refused(
+                    kernel::ReviewReadRefusal::Unsealed
+                ))
+            ),
+            "the Kernel slice did not start"
+        );
     }
 }

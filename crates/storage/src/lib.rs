@@ -536,29 +536,48 @@ mod sqlite_backend {
 
         /// [`Self::with_conn_fenced`] followed by one synchronous handoff. `f` runs under the
         /// fenced transaction; after it commits, and while this store still holds its
-        /// connection, `handoff` runs exactly once with a read-only view of the connection and
-        /// the committed value, and its result is returned beside `f`'s. A failed commit returns
-        /// the error and never calls `handoff`. `handoff` runs outside any transaction, so it can
-        /// recheck durable state but cannot write, and it must return without blocking: the
-        /// connection is released only after it returns.
+        /// connection, `handoff` runs at most once with a read-only view of the connection and
+        /// the committed value. The handoff runs inside a second immediate transaction that
+        /// re-checks the fence and is rolled back afterwards: no newer writer can commit until
+        /// it returns, and a writer that superseded this store between the commit and the
+        /// handoff withholds it. `handoff` can recheck durable state but cannot write, and it
+        /// must return without blocking: the write lock and the connection are released only
+        /// after it returns.
+        ///
+        /// `Err` means nothing committed and `handoff` never ran; `Ok` means `f` committed,
+        /// and the [`HandoffOutcome`] says whether `handoff` ran.
         ///
         /// # Errors
         ///
-        /// As [`Self::with_conn_fenced`]; a `handoff` error surfaces as [`StoreError::Backend`]
-        /// after the commit has already happened.
+        /// As [`Self::with_conn_fenced`], and only for failures before or at the commit.
         pub fn with_conn_fenced_then_handoff<T, H>(
             &self,
             f: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<T>,
-            handoff: impl FnOnce(&GuardedConn<'_>, &T) -> rusqlite::Result<H>,
-        ) -> Result<(T, H), StoreError> {
+            handoff: impl FnOnce(&GuardedConn<'_>, &T) -> H,
+        ) -> Result<(T, HandoffOutcome<H>), StoreError> {
             let guard = self.lock_conn()?;
             let out = self.fenced_write(&guard, None, f)?;
-            let scope = CallbackScope::read_only(&guard, &self.gate)?;
-            let handed = handoff(&GuardedConn::new(&guard, &self.gate), &out);
-            let released = scope.release();
-            let handed = handed.map_err(|e| StoreError::Backend(e.to_string()))?;
-            released?;
-            Ok((out, handed))
+            // Holding the write lock across the handoff keeps a replacement writer from
+            // claiming the fence, or moving the state the handoff rechecks, until it has run.
+            let tx = match rusqlite::Transaction::new_unchecked(
+                &guard,
+                rusqlite::TransactionBehavior::Immediate,
+            ) {
+                Ok(tx) => tx,
+                Err(error) => return Ok((out, HandoffOutcome::NotRun(backend_error(error)))),
+            };
+            if let Err(error) = precheck_fence(&tx, self.epoch) {
+                return Ok((out, HandoffOutcome::NotRun(error)));
+            }
+            let scope = match CallbackScope::read_only(&tx, &self.gate) {
+                Ok(scope) => scope,
+                Err(error) => return Ok((out, HandoffOutcome::NotRun(error))),
+            };
+            let handed = handoff(&GuardedConn::new(&tx, &self.gate), &out);
+            let release = scope.release();
+            // Nothing was written under the read-only scope; the rollback only drops the lock.
+            let release = with_cleanup_failure(release, tx.rollback().map_err(backend_error));
+            Ok((out, HandoffOutcome::Handed { handed, release }))
         }
 
         fn fenced_write<T>(
@@ -600,21 +619,36 @@ mod sqlite_backend {
             #[cfg(feature = "test-support")]
             AFTER_COMMIT.with(|hook| {
                 if let Some(hook) = hook.borrow_mut().take() {
-                    hook();
+                    hook(&MaintenanceConn::new(conn));
                 }
             });
             Ok(out)
         }
     }
 
-    #[cfg(feature = "test-support")]
-    thread_local! {
-        static AFTER_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// What became of the handoff after [`SqliteStore::with_conn_fenced_then_handoff`] committed.
+    #[derive(Debug)]
+    pub enum HandoffOutcome<H> {
+        /// A failed `release` cannot recall anything `handoff` did, so it is reported beside the
+        /// handed value rather than in place of it.
+        Handed {
+            handed: H,
+            release: Result<(), StoreError>,
+        },
+        /// The read-only view could not be set up after the commit, so `handoff` never ran.
+        NotRun(StoreError),
     }
 
-    /// Installs a one-shot barrier after COMMIT while the connection lock is held.
     #[cfg(feature = "test-support")]
-    pub fn after_commit_for_test(hook: impl FnOnce() + 'static) {
+    type AfterCommitHook = Box<dyn FnOnce(&MaintenanceConn<'_>)>;
+
+    #[cfg(feature = "test-support")]
+    thread_local! {
+        static AFTER_COMMIT: std::cell::RefCell<Option<AfterCommitHook>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn after_commit_for_test(hook: impl FnOnce(&MaintenanceConn<'_>) + 'static) {
         AFTER_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
@@ -3105,10 +3139,11 @@ pub use sqlite_backend::enable_library_memory_statistics;
 pub use sqlite_backend::library_memory_used;
 #[cfg(feature = "sqlite")]
 pub use sqlite_backend::{
-    APPLICATION_ID, CachedStatement, GuardedConn, INFRASTRUCTURE_TABLES, MaintenanceConn,
-    SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject, SqliteStore, USER_VERSION,
-    baseline_digest, delete_sqlite_family, immutable_uri, inspection_scratch_tag, is_interrupted,
-    open_sqlite, schema_inventory, verify_baseline, verify_sqlite_family_removed,
+    APPLICATION_ID, CachedStatement, GuardedConn, HandoffOutcome, INFRASTRUCTURE_TABLES,
+    MaintenanceConn, SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject,
+    SqliteStore, USER_VERSION, baseline_digest, delete_sqlite_family, immutable_uri,
+    inspection_scratch_tag, is_interrupted, open_sqlite, schema_inventory, verify_baseline,
+    verify_sqlite_family_removed,
 };
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -6870,7 +6905,7 @@ mod tests {
         drop(open_sqlite(&d, KV_BASELINE).expect("open"));
         let store = SqliteStore::for_test(rusqlite::Connection::open(path).unwrap(), 2);
         let handed = std::cell::Cell::new(0);
-        let (rows, delivered) = store
+        let (rows, outcome) = store
             .with_conn_fenced_then_handoff(
                 |tx| {
                     tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", [])?;
@@ -6879,29 +6914,35 @@ mod tests {
                 |conn, prepared| {
                     handed.set(handed.get() + 1);
                     // The handoff reads committed state without a transaction of its own.
-                    let n: i64 = conn.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0))?;
+                    let n: i64 = conn
+                        .query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0))
+                        .expect("count");
                     assert_eq!(n, 1, "the marker is durable before the handoff runs");
                     assert!(
                         conn.execute("INSERT INTO kv (k, v) VALUES ('b', '2')", [])
                             .is_err(),
                         "the handoff view is read-only"
                     );
-                    Ok(format!("{prepared}:{n}"))
+                    format!("{prepared}:{n}")
                 },
             )
             .expect("commit then handoff");
-        assert_eq!((rows, delivered.as_str()), ("prepared", "prepared:1"));
+        assert_eq!(rows, "prepared");
+        match outcome {
+            HandoffOutcome::Handed { handed, release } => {
+                assert_eq!(handed, "prepared:1");
+                release.expect("the read-only scope releases cleanly");
+            }
+            other => panic!("the handoff must run, got {other:?}"),
+        }
         assert_eq!(handed.get(), 1);
-        let failed: Result<(i32, ()), StoreError> = store.with_conn_fenced_then_handoff(
+        let failed = store.with_conn_fenced_then_handoff(
             |tx| {
                 tx.execute("INSERT INTO kv (k, v) VALUES ('c', '3')", [])?;
                 tx.query_row("SELECT * FROM does_not_exist", [], |_| Ok(()))?;
                 Ok(2)
             },
-            |_, _| {
-                handed.set(handed.get() + 1);
-                Ok(())
-            },
+            |_, _| handed.set(handed.get() + 1),
         );
         assert!(matches!(failed, Err(StoreError::Backend(_))));
         assert_eq!(handed.get(), 1, "a failed commit hands nothing off");
@@ -6909,6 +6950,84 @@ mod tests {
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
             .expect("count");
         assert_eq!(n, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A failure after COMMIT must not look like a failed commit: the caller has to learn that
+    /// the write is durable and whether the handoff consumed anything.
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn commit_then_handoff_reports_a_durable_commit_whose_handoff_could_not_run() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        drop(open_sqlite(&d, KV_BASELINE).expect("open"));
+        let store = SqliteStore::for_test(rusqlite::Connection::open(path).unwrap(), 2);
+        // Between COMMIT and the handoff a temp shadow appears, which the read-only scope refuses.
+        after_commit_for_test(|conn| {
+            conn.execute("CREATE TEMP TABLE KV (k TEXT PRIMARY KEY, v TEXT)", [])
+                .expect("plant a shadow after the commit");
+        });
+        let handed = std::cell::Cell::new(0);
+        let (rows, outcome) = store
+            .with_conn_fenced_then_handoff(
+                |tx| {
+                    tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", [])?;
+                    Ok(7)
+                },
+                |_, _| handed.set(handed.get() + 1),
+            )
+            .expect("the commit itself succeeded and must not be reported as a failure");
+        assert_eq!(rows, 7);
+        match outcome {
+            HandoffOutcome::NotRun(StoreError::Backend(m)) => assert!(m.contains("shadows"), "{m}"),
+            other => panic!("the handoff must be reported as not run, got {other:?}"),
+        }
+        assert_eq!(handed.get(), 0, "the handoff never ran");
+        store
+            .with_conn_unfenced(|conn| conn.execute("DROP TABLE temp.KV", []).map(|_| ()))
+            .expect("maintenance drops the shadow");
+        let n: i64 = store
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM kv", [], |r| r.get(0)))
+            .expect("count");
+        assert_eq!(n, 1, "the write committed before the handoff was withheld");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A newer writer that claims the database between the commit and the handoff supersedes
+    /// this store; the handoff must be withheld, not run on the stale writer's behalf.
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn commit_then_handoff_withholds_the_handoff_once_a_newer_writer_holds_the_fence() {
+        let (root, d) = tmp();
+        let path = sqlite_path(&d);
+        drop(open_sqlite(&d, KV_BASELINE).expect("open"));
+        let store = SqliteStore::for_test(rusqlite::Connection::open(path).unwrap(), 2);
+        after_commit_for_test(|conn| {
+            conn.execute("UPDATE fence SET epoch = 3 WHERE id = 0", [])
+                .expect("a replacement writer claims the database after the commit");
+        });
+        let handed = std::cell::Cell::new(0);
+        let (rows, outcome) = store
+            .with_conn_fenced_then_handoff(
+                |tx| {
+                    tx.execute("INSERT INTO kv (k, v) VALUES ('a', '1')", [])?;
+                    Ok(7)
+                },
+                |_, _| handed.set(handed.get() + 1),
+            )
+            .expect("the commit itself succeeded");
+        assert_eq!(rows, 7);
+        assert!(
+            matches!(
+                outcome,
+                HandoffOutcome::NotRun(StoreError::Fenced {
+                    holder_epoch: 2,
+                    db_epoch: 3
+                })
+            ),
+            "the superseded writer must not hand off, got {outcome:?}"
+        );
+        assert_eq!(handed.get(), 0, "the handoff never ran");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -576,14 +576,50 @@ pub enum CuratorNonadmissionCode {
     EvidenceUnavailable,
     /// The validator rejected the optional fact set as a whole.
     FactSetRejected { failure: ExtractionFailure },
-    /// The Kernel refuses the accepted set as a review subject (a bound or a secret in fact text), so nothing can be staged for it.
+    /// The Kernel refuses the accepted set as a review subject (a bound or a secret in fact text), or the Memory Store refuses to retain its publication for recovery, so nothing can be staged for it.
     SubjectRefused,
+    /// A recorded code this build cannot read; only deserialization produces it.
+    Unrecognized,
+}
+
+/// Maps a recorded code this build cannot read to [`CuratorNonadmissionCode::Unrecognized`] so a session written by a later build still loads.
+fn recorded_nonadmission_code<'de, D>(deserializer: D) -> Result<CuratorNonadmissionCode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(
+        CuratorNonadmissionCode::deserialize(value)
+            .unwrap_or(CuratorNonadmissionCode::Unrecognized),
+    )
+}
+
+impl CuratorNonadmissionCode {
+    pub const CURATOR_UNAVAILABLE_TAG: &'static str = "curator_unavailable";
+    pub const CAPACITY_FULL_TAG: &'static str = "capacity_full";
+    pub const EVIDENCE_UNAVAILABLE_TAG: &'static str = "evidence_unavailable";
+    pub const FACT_SET_REJECTED_TAG: &'static str = "fact_set_rejected";
+    pub const SUBJECT_REFUSED_TAG: &'static str = "subject_refused";
+    pub const UNRECOGNIZED_TAG: &'static str = "unrecognized";
+
+    /// The `code` tag serde writes into the session metadata for this variant. The sampler groups sessions by the stored tag, so its SQL and this mapping must agree; a test holds both to serde's output. `Unrecognized` has no per-code counter: such a session counts only toward `nonadmissions`.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::CuratorUnavailable => Self::CURATOR_UNAVAILABLE_TAG,
+            Self::CapacityFull => Self::CAPACITY_FULL_TAG,
+            Self::EvidenceUnavailable => Self::EVIDENCE_UNAVAILABLE_TAG,
+            Self::FactSetRejected { .. } => Self::FACT_SET_REJECTED_TAG,
+            Self::SubjectRefused => Self::SUBJECT_REFUSED_TAG,
+            Self::Unrecognized => Self::UNRECOGNIZED_TAG,
+        }
+    }
 }
 
 /// The latest recorded nonadmission, bound to the firing that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedNonadmission {
     pub firing_seq: u64,
+    #[serde(deserialize_with = "recorded_nonadmission_code")]
     pub code: CuratorNonadmissionCode,
 }
 
@@ -644,116 +680,190 @@ pub struct CuratorStatusFacts {
     pub latest_nonadmission_subject_refused: u64,
 }
 
+impl CuratorStatusFacts {
+    fn job_outcome_slot(&mut self, outcome: curator_jobs::CuratorJobOutcome) -> &mut u64 {
+        use curator_jobs::CuratorJobOutcome as Outcome;
+        match outcome {
+            Outcome::Expired => &mut self.jobs_expired,
+            Outcome::Nonadmitted => &mut self.jobs_nonadmitted,
+            Outcome::Failed => &mut self.jobs_failed,
+            Outcome::Unknown => &mut self.jobs_unknown,
+            Outcome::Completed => &mut self.jobs_completed,
+            Outcome::Abstained => &mut self.jobs_abstained,
+        }
+    }
+
+    fn selection_slot(&mut self, state: curator_jobs::FrozenSelectionState) -> &mut u64 {
+        use curator_jobs::FrozenSelectionState as State;
+        match state {
+            State::Frozen => &mut self.selections_frozen,
+            State::Enqueued => &mut self.selections_enqueued,
+            State::Expired => &mut self.selections_expired,
+            State::FailedSlot => &mut self.selections_failed_slot,
+        }
+    }
+
+    fn attempt_slot(&mut self, kind: curator_ledger::CuratorAttemptTerminal) -> &mut u64 {
+        use curator_ledger::CuratorAttemptTerminal as Kind;
+        match kind {
+            Kind::Complete => &mut self.attempts_acknowledged,
+            Kind::Failed => &mut self.attempts_failed,
+            Kind::Cancelled => &mut self.attempts_cancelled,
+            Kind::Unknown => &mut self.attempts_unknown,
+            Kind::NotDispatched => &mut self.attempts_not_dispatched,
+        }
+    }
+
+    fn latest_nonadmission_slot(&mut self, tag: &str) -> Option<&mut u64> {
+        use CuratorNonadmissionCode as Code;
+        match tag {
+            Code::CURATOR_UNAVAILABLE_TAG => {
+                Some(&mut self.latest_nonadmission_curator_unavailable)
+            }
+            Code::CAPACITY_FULL_TAG => Some(&mut self.latest_nonadmission_capacity_full),
+            Code::EVIDENCE_UNAVAILABLE_TAG => {
+                Some(&mut self.latest_nonadmission_evidence_unavailable)
+            }
+            Code::FACT_SET_REJECTED_TAG => Some(&mut self.latest_nonadmission_fact_set_rejected),
+            Code::SUBJECT_REFUSED_TAG => Some(&mut self.latest_nonadmission_subject_refused),
+            _ => None,
+        }
+    }
+}
+
 impl MemoryStore {
-    /// Samples the Curator facts with a handful of bounded aggregate queries; the producer facts read the sessions' metadata through SQLite's JSON functions, so a large session table costs one scan.
+    /// Samples the Curator facts in one grouped pass per ledger table plus one over the sessions' metadata, so the store's single connection is held for eight statements however many rows the tables hold. Group keys are parsed back through the same mappings the writers use, so a renamed state cannot leave a counter silently at zero.
     pub fn curator_status_facts(&self) -> Result<CuratorStatusFacts, MemoryStoreError> {
-        fn count(conn: &GuardedConn<'_>, sql: &str) -> rusqlite::Result<u64> {
-            let value: i64 = conn.query_row(sql, [], |row| row.get(0))?;
-            Ok(u64::try_from(value).unwrap_or_default())
+        fn unsigned(value: i64) -> u64 {
+            u64::try_from(value).unwrap_or_default()
         }
-        fn job_outcome(conn: &GuardedConn<'_>, outcome: &str) -> rusqlite::Result<u64> {
-            let value: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM curator_jobs WHERE state = 'terminal' AND outcome = ?1",
-                [outcome],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(value).unwrap_or_default())
-        }
-        fn selection_state(conn: &GuardedConn<'_>, state: &str) -> rusqlite::Result<u64> {
-            let value: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM curator_frozen_selections WHERE state = ?1",
-                [state],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(value).unwrap_or_default())
-        }
-        fn attempt_kind(conn: &GuardedConn<'_>, kind: &str) -> rusqlite::Result<u64> {
-            let value: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM curator_attempts WHERE terminal_kind = ?1",
-                [kind],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(value).unwrap_or_default())
-        }
-        fn latest_code(conn: &GuardedConn<'_>, code: &str) -> rusqlite::Result<u64> {
-            let value: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM cache_state
-                 WHERE json_extract(meta, '$.history_summarizer.curator_nonadmission.latest.code.code') = ?1",
-                [code],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(value).unwrap_or_default())
+        fn grouped<K: rusqlite::types::FromSql>(
+            conn: &GuardedConn<'_>,
+            sql: &str,
+            mut visit: impl FnMut(K, &rusqlite::Row<'_>) -> rusqlite::Result<()>,
+        ) -> rusqlite::Result<()> {
+            let mut statement = conn.prepare(sql)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                visit(row.get(0)?, row)?;
+            }
+            Ok(())
         }
         self.inner
             .with_conn(|conn| {
-                let receipt_charge_bytes = count(
-                    conn,
-                    "SELECT COALESCE(SUM(receipt_charge_bytes), 0) FROM curator_jobs",
-                )?;
-                let metadata_bytes = curator_jobs::metadata_bytes(conn, None)?;
-                // Everything charged that is not a permanent receipt is a temporary allowance: job allowances plus the frozen pages' charges.
-                let allowance_bytes = metadata_bytes.saturating_sub(receipt_charge_bytes);
-                Ok(CuratorStatusFacts {
-                    jobs_reserved: count(conn, "SELECT COUNT(*) FROM curator_jobs WHERE state = 'reserved'")?,
-                    jobs_ready: count(conn, "SELECT COUNT(*) FROM curator_jobs WHERE state = 'ready'")?,
-                    jobs_expired: job_outcome(conn, "expired")?,
-                    jobs_expired_unseen: count(
-                        conn,
-                        "SELECT COUNT(*) FROM curator_jobs job
-                         WHERE job.state = 'terminal' AND job.outcome = 'expired'
-                           AND NOT EXISTS (SELECT 1 FROM curator_receipts receipt
-                                           WHERE receipt.project = job.project
-                                             AND receipt.causal_identity = job.causal_identity)",
-                    )?,
-                    jobs_nonadmitted: job_outcome(conn, "nonadmitted")?,
-                    jobs_failed: job_outcome(conn, "failed")?,
-                    jobs_unknown: job_outcome(conn, "unknown")?,
-                    jobs_completed: job_outcome(conn, "completed")?,
-                    jobs_abstained: job_outcome(conn, "abstained")?,
-                    selections_frozen: selection_state(conn, "frozen")?,
-                    selections_enqueued: selection_state(conn, "enqueued")?,
-                    selections_expired: selection_state(conn, "expired")?,
-                    selections_failed_slot: selection_state(conn, "failed_slot")?,
-                    attempts_attempted: count(conn, "SELECT COUNT(*) FROM curator_attempts")?,
-                    attempts_acknowledged: attempt_kind(conn, "complete")?,
-                    attempts_failed: attempt_kind(conn, "failed")?,
-                    attempts_cancelled: attempt_kind(conn, "cancelled")?,
-                    attempts_unknown: attempt_kind(conn, "unknown")?,
-                    attempts_not_dispatched: attempt_kind(conn, "not_dispatched")?,
-                    attempts_open: count(
-                        conn,
-                        "SELECT COUNT(*) FROM curator_attempts WHERE terminal_kind IS NULL",
-                    )?,
-                    receipts_in_progress: count(
-                        conn,
-                        "SELECT COUNT(*) FROM curator_receipts WHERE state = 'in_progress'",
-                    )?,
-                    receipts_complete: count(
-                        conn,
-                        "SELECT COUNT(*) FROM curator_receipts WHERE state = 'complete'",
-                    )?,
-                    receipt_charge_bytes,
-                    allowance_bytes,
-                    metadata_bytes,
+                let mut facts = CuratorStatusFacts {
                     metadata_quota_bytes: curator_jobs::MAX_CURATOR_METADATA_BYTES_PER_HOST,
-                    metadata_headroom_bytes: curator_jobs::MAX_CURATOR_METADATA_BYTES_PER_HOST
-                        .saturating_sub(metadata_bytes),
-                    nonadmissions: count(
-                        conn,
-                        "SELECT COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_nonadmission.count')), 0)
-                         FROM cache_state",
-                    )?,
-                    sessions_with_reservation: count(
-                        conn,
-                        "SELECT COUNT(*) FROM cache_state
-                         WHERE json_extract(meta, '$.history_summarizer.curator_reservation') IS NOT NULL",
-                    )?,
-                    latest_nonadmission_curator_unavailable: latest_code(conn, "curator_unavailable")?,
-                    latest_nonadmission_capacity_full: latest_code(conn, "capacity_full")?,
-                    latest_nonadmission_evidence_unavailable: latest_code(conn, "evidence_unavailable")?,
-                    latest_nonadmission_fact_set_rejected: latest_code(conn, "fact_set_rejected")?,
-                    latest_nonadmission_subject_refused: latest_code(conn, "subject_refused")?,
-                })
+                    ..CuratorStatusFacts::default()
+                };
+                grouped::<String>(
+                    conn,
+                    "SELECT state, outcome, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
+                     FROM curator_jobs GROUP BY state, outcome",
+                    |state, row| {
+                        let outcome: Option<String> = row.get(1)?;
+                        let count = unsigned(row.get(2)?);
+                        facts.receipt_charge_bytes = facts
+                            .receipt_charge_bytes
+                            .saturating_add(unsigned(row.get(3)?));
+                        match state.as_str() {
+                            "reserved" => facts.jobs_reserved += count,
+                            "ready" => facts.jobs_ready += count,
+                            "terminal" => {
+                                if let Some(outcome) = outcome
+                                    .as_deref()
+                                    .and_then(curator_jobs::CuratorJobOutcome::parse)
+                                {
+                                    *facts.job_outcome_slot(outcome) += count;
+                                }
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    },
+                )?;
+                facts.jobs_expired_unseen = unsigned(conn.query_row(
+                    "SELECT COUNT(*) FROM curator_jobs job
+                     WHERE job.state = 'terminal' AND job.outcome = ?1
+                       AND NOT EXISTS (SELECT 1 FROM curator_receipts receipt
+                                       WHERE receipt.project = job.project
+                                         AND receipt.causal_identity = job.causal_identity)",
+                    [curator_jobs::CuratorJobOutcome::Expired.as_str()],
+                    |row| row.get(0),
+                )?);
+                grouped::<String>(
+                    conn,
+                    "SELECT state, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
+                     FROM curator_frozen_selections GROUP BY state",
+                    |state, row| {
+                        // A page's receipt charge is permanent whatever its state; only its allowance is released at a terminal.
+                        facts.receipt_charge_bytes = facts
+                            .receipt_charge_bytes
+                            .saturating_add(unsigned(row.get(2)?));
+                        if let Some(state) = curator_jobs::FrozenSelectionState::parse(&state) {
+                            *facts.selection_slot(state) += unsigned(row.get(1)?);
+                        }
+                        Ok(())
+                    },
+                )?;
+                grouped::<Option<String>>(
+                    conn,
+                    "SELECT terminal_kind, COUNT(*) FROM curator_attempts GROUP BY terminal_kind",
+                    |kind, row| {
+                        let count = unsigned(row.get(1)?);
+                        facts.attempts_attempted += count;
+                        match kind.as_deref().map(curator_ledger::CuratorAttemptTerminal::parse) {
+                            None => facts.attempts_open += count,
+                            Some(Some(kind)) => *facts.attempt_slot(kind) += count,
+                            Some(None) => {}
+                        }
+                        Ok(())
+                    },
+                )?;
+                grouped::<String>(
+                    conn,
+                    "SELECT state, COUNT(*) FROM curator_receipts GROUP BY state",
+                    |state, row| {
+                        let count = unsigned(row.get(1)?);
+                        match state.as_str() {
+                            "in_progress" => facts.receipts_in_progress += count,
+                            "complete" => facts.receipts_complete += count,
+                            _ => {}
+                        }
+                        Ok(())
+                    },
+                )?;
+                facts.metadata_bytes = curator_jobs::metadata_bytes(conn, None)?;
+                // Everything charged that is not a permanent receipt is a temporary allowance: job allowances plus the frozen pages' charges.
+                facts.allowance_bytes = facts
+                    .metadata_bytes
+                    .saturating_sub(facts.receipt_charge_bytes);
+                facts.metadata_headroom_bytes = facts
+                    .metadata_quota_bytes
+                    .saturating_sub(facts.metadata_bytes);
+                grouped::<Option<String>>(
+                    conn,
+                    "SELECT json_extract(meta, '$.history_summarizer.curator_nonadmission.latest.code.code'),
+                            COUNT(*),
+                            COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_nonadmission.count')), 0),
+                            COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_reservation') IS NOT NULL), 0)
+                     FROM cache_state
+                     GROUP BY 1",
+                    |code, row| {
+                        let sessions = unsigned(row.get(1)?);
+                        facts.nonadmissions = facts.nonadmissions.saturating_add(unsigned(row.get(2)?));
+                        facts.sessions_with_reservation = facts
+                            .sessions_with_reservation
+                            .saturating_add(unsigned(row.get(3)?));
+                        if let Some(slot) = code
+                            .as_deref()
+                            .and_then(|code| facts.latest_nonadmission_slot(code))
+                        {
+                            *slot += sessions;
+                        }
+                        Ok(())
+                    },
+                )?;
+                Ok(facts)
             })
             .map_err(Into::into)
     }
@@ -769,6 +879,8 @@ pub struct PendingPublication {
     pub boundary_dates: BTreeMap<String, String>,
     pub publication_floor_ordinal: u64,
     pub collect_user_memory_candidates: bool,
+    /// When the publication was first attempted; a republication dates its rows by it, not by the pass that recovers it.
+    pub created_at_ms: i64,
 }
 
 /// Producer-owned nonadmission facts. `count` only grows; both survive every phase transition, abandonment, and reset of the producer state within the session's store lifetime, and are written only by the fenced publication that also advances history.
@@ -2553,6 +2665,42 @@ impl PreparedWrite {
             None => result.map_err(Into::into),
         }
     }
+
+    /// [`Self::execute`] followed by one synchronous handoff through
+    /// [`SqliteStore::with_conn_fenced_then_handoff`]: the operation and its scan audit commit
+    /// together, then `handoff` runs once with a read-only view and the committed value.
+    fn execute_then_handoff<T, H>(
+        self,
+        store: &SqliteStore,
+        operation: impl FnOnce(&mut ActiveWriteTransaction<'_>) -> rusqlite::Result<WriteDisposition<T>>,
+        handoff: impl FnOnce(&GuardedConn<'_>, &T) -> H,
+    ) -> Result<(T, storage::HandoffOutcome<H>), MemoryStoreError> {
+        let redaction_failure = std::cell::Cell::new(None);
+        let redaction_failure_in_tx = &redaction_failure;
+        let result = store.with_conn_fenced_then_handoff(
+            move |tx| {
+                let mut coordinated = ActiveWriteTransaction {
+                    tx,
+                    prepared: std::cell::RefCell::new(self),
+                };
+                let disposition = operation(&mut coordinated).inspect_err(|error| {
+                    redaction_failure_in_tx.set(sqlite_redaction_kind(error));
+                })?;
+                match disposition {
+                    WriteDisposition::Applied(value) => {
+                        coordinated.persist_audit()?;
+                        Ok(value)
+                    }
+                    WriteDisposition::Replay(value) => Ok(value),
+                }
+            },
+            handoff,
+        );
+        match redaction_failure.get() {
+            Some(kind) => Err(MemoryStoreError::Redaction(kind)),
+            None => result.map_err(Into::into),
+        }
+    }
 }
 
 impl ActiveWriteTransaction<'_> {
@@ -3028,7 +3176,7 @@ const PASS_TRACE_HISTORY_RING_LEN: usize = 256;
 /// The receipt field ids of the two writers that append to `scheduler_history`.
 const OBSERVATION_RING_FIELDS: &[&str] = &["scheduler_observation", "scheduler_history"];
 
-fn active_scan_owner_key(parts: &[&str]) -> String {
+pub(crate) fn active_scan_owner_key(parts: &[&str]) -> String {
     let mut key = String::new();
     for part in parts {
         use std::fmt::Write;
@@ -10870,7 +11018,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// The full-session form of the revert re-cut: history_segments and their recoverable transcripts are removed, while the cache row is replaced with an empty core and default meta carrying a bumped revert epoch. The epoch and row-version update share one fenced transaction, so an in-flight history_summarizer cannot publish against the retired history_segment set.
+    /// The full-session form of the revert re-cut: history_segments and their recoverable transcripts are removed, while the cache row is replaced with an empty core and default meta carrying a bumped revert epoch. The row itself survives, so the producer's sequence and nonadmission facts are carried over with in-flight firing state cleared. The epoch and row-version update share one fenced transaction, so an in-flight history_summarizer cannot publish against the retired history_segment set.
     pub fn reset_session_for_recomp(
         &self,
         session_id: &str,
@@ -10902,6 +11050,7 @@ impl MemoryStore {
                 last_recut: Some(format!(
                     "native recomp reset all history_segments; epoch {next_epoch}"
                 )),
+                history_summarizer: prior_meta.history_summarizer.cleared_of_in_flight_firing(),
                 ..ModuleMeta::default()
             };
             let core_json = match serde_json::to_string(&CoreState::empty()) {
@@ -10944,6 +11093,8 @@ impl MemoryStore {
                 "DELETE FROM history_summarizer_side_channel_outbox WHERE session_id = ?1",
                 params![session_id],
             )?;
+            // The reset metadata records no reservation, so nothing could consume the retained publication.
+            delete_pending_publication_tx(tx, session_id)?;
             let next_version = current as u64 + 1;
             tx.execute(
                 "UPDATE cache_state
@@ -11332,37 +11483,7 @@ impl MemoryStore {
         reservation: &CuratorReservation,
         pending: &PendingPublication,
     ) -> Result<u64, HistorySummarizerPublishError> {
-        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
-        write.domain_owner("session", session_id, "history_summarizer");
-        write.existing_identity("session_id", session_id)?;
-        let scanned = PendingPublication {
-            validated_json: write.json_content(
-                "pending_validated",
-                &pending.validated_json,
-                JsonScanPolicy::DurableRejectProtected,
-            )?,
-            aliases_json: write.json_content(
-                "pending_aliases",
-                &pending.aliases_json,
-                JsonScanPolicy::DurableRejectProtected,
-            )?,
-            chunk_transcript: write.content("pending_transcript", &pending.chunk_transcript)?,
-            boundary_dates: pending.boundary_dates.clone(),
-            publication_floor_ordinal: pending.publication_floor_ordinal,
-            collect_user_memory_candidates: pending.collect_user_memory_candidates,
-        };
-        let payload = serde_json::to_vec(&scanned)
-            .map_err(|error| HistorySummarizerPublishError::Serde(error.to_string()))?;
-        let payload_deflate = compress_bytes(&payload).map_err(|error| {
-            MemoryStoreError::Serde(format!("pending publication compression failed: {error}"))
-        })?;
-        if payload_deflate.len() > MAX_PENDING_PUBLICATION_COMPRESSED_BYTES {
-            return Err(HistorySummarizerPublishError::Store(
-                MemoryStoreError::Serde(
-                    "pending publication exceeds its compressed bound".to_string(),
-                ),
-            ));
-        }
+        let (write, payload_deflate) = prepare_pending_publication(session_id, pending)?;
         let now_ms = current_time_ms();
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx;
@@ -11461,6 +11582,19 @@ impl MemoryStore {
         }
     }
 
+    /// Whether [`Self::record_curator_reservation`] would store `pending`: every field passes the durable scan and the compressed payload fits the retention envelope. `Ok(false)` is a payload the store refuses, so the caller records a nonadmission instead of reserving a job whose publication it could never retain.
+    pub fn pending_publication_retainable(
+        &self,
+        session_id: &str,
+        pending: &PendingPublication,
+    ) -> Result<bool, MemoryStoreError> {
+        match prepare_pending_publication(session_id, pending) {
+            Ok(_) => Ok(true),
+            Err(MemoryStoreError::Redaction(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The retained publication recorded with the session's reservation, with the firing it belongs to.
     pub fn load_pending_publication(
         &self,
@@ -11488,10 +11622,11 @@ impl MemoryStore {
         )))
     }
 
-    /// Drops a reservation whose publication can never commit, together with its retained publication, in one fenced write. The state's in-flight fields are left as they are; the caller decides the phase.
+    /// Drops `expected`, a reservation whose publication can never commit, together with its retained publication, in one fenced write. A state that records a different reservation, or none, belongs to a firing this caller did not settle and is left untouched with `None`. The state's in-flight fields are left as they are; the caller decides the phase.
     pub fn clear_curator_reservation(
         &self,
         session_id: &str,
+        expected: &CuratorReservation,
     ) -> Result<Option<u64>, MemoryStoreError> {
         let outcome = self.inner.with_conn_fenced(|tx| {
             let row = tx
@@ -11508,10 +11643,11 @@ impl MemoryStore {
                 Ok(meta) => meta,
                 Err(error) => return Ok(AbandonHistorySummarizerTxnOutcome::Serde(error.to_string())),
             };
-            delete_pending_publication_tx(tx, session_id)?;
-            if meta.history_summarizer.curator_reservation.take().is_none() {
+            if meta.history_summarizer.curator_reservation.as_ref() != Some(expected) {
                 return Ok(AbandonHistorySummarizerTxnOutcome::Unchanged);
             }
+            meta.history_summarizer.curator_reservation = None;
+            delete_pending_publication_tx(tx, session_id)?;
             let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
@@ -11739,7 +11875,7 @@ impl MemoryStore {
                     .unwrap_or(1)
                     .max(request.publication_floor_ordinal.max(1)),
             );
-            // KTD3: the durable reservation and the request's activation must name the same job, or neither is touched; the activation itself runs after every other bail-out below so it commits only with the history.
+            // An activation must name the job this firing reserved; a reservation another firing left behind is accepted only without an activation. Either mismatch refuses before anything is written.
             match (
                 meta.history_summarizer.curator_reservation.as_ref(),
                 request.curator_activation.as_ref(),
@@ -11747,6 +11883,8 @@ impl MemoryStore {
                 (None, None) => {}
                 (Some(reservation), Some(activation))
                     if reservation.causal_identity == activation.causal_identity => {}
+                (Some(reservation), None)
+                    if reservation.firing_seq != meta.history_summarizer.firing_seq => {}
                 _ => {
                     return Err(curator_jobs::refuse(
                         curator_jobs::CuratorJobRefusal::InvalidRequest,
@@ -11820,11 +11958,10 @@ impl MemoryStore {
                         Ok(_) => Some(CuratorActivationOutcome::Activated),
                         Err(error) => match curator_jobs::refusal_of(&error) {
                             Some(curator_jobs::CuratorJobRefusal::Expired) => {
-                                curator_jobs::finish_curator_job_in_tx(
+                                curator_jobs::expire_reserved_curator_job_in_tx(
                                     coordinated.tx(),
                                     request.project_path,
                                     activation.causal_identity,
-                                    curator_jobs::CuratorJobOutcome::Expired,
                                     now_ms,
                                 )?;
                                 Some(CuratorActivationOutcome::Expired)
@@ -15125,8 +15262,50 @@ fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlit
     }
 }
 
-/// Compressed bound of one retained publication; the same envelope as a chunk transcript.
-const MAX_PENDING_PUBLICATION_COMPRESSED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES;
+/// Compressed bound of one retained publication: the chunk transcript envelope for the transcript and its serialized siblings (the validated output and the alias table, which presents the same text again), the same multiple `decompress_bytes` allows inflated.
+const MAX_PENDING_PUBLICATION_COMPRESSED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES * 4;
+
+/// Scans, serializes, and compresses a retained publication as `record_curator_reservation` stores it. A field the durable scan rejects or would rewrite in the subject-bearing fields, or a payload past `MAX_PENDING_PUBLICATION_COMPRESSED_BYTES`, is `MemoryStoreError::Redaction`: the store refuses to retain it.
+fn prepare_pending_publication(
+    session_id: &str,
+    pending: &PendingPublication,
+) -> Result<(PreparedWrite, Vec<u8>), MemoryStoreError> {
+    let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
+    write.domain_owner("session", session_id, "history_summarizer");
+    write.existing_identity("session_id", session_id)?;
+    let scanned = PendingPublication {
+        validated_json: write.json_content(
+            "pending_validated",
+            &pending.validated_json,
+            JsonScanPolicy::DurableRejectProtected,
+        )?,
+        aliases_json: write.json_content(
+            "pending_aliases",
+            &pending.aliases_json,
+            JsonScanPolicy::DurableRejectProtected,
+        )?,
+        chunk_transcript: write.content("pending_transcript", &pending.chunk_transcript)?,
+        boundary_dates: pending.boundary_dates.clone(),
+        publication_floor_ordinal: pending.publication_floor_ordinal,
+        collect_user_memory_candidates: pending.collect_user_memory_candidates,
+        created_at_ms: pending.created_at_ms,
+    };
+    // The reserved subject is rebuilt from the retained facts and alias table, so a substitution in either would retain bytes the reservation does not name; the transcript is not part of the subject and is stored as the scan leaves it, as the publication stores it.
+    if write.recorded_detections(&["pending_validated", "pending_aliases"]) {
+        return Err(MemoryStoreError::Redaction(
+            RedactionErrorKind::SecretDetected,
+        ));
+    }
+    let payload =
+        serde_json::to_vec(&scanned).map_err(|error| MemoryStoreError::Serde(error.to_string()))?;
+    let payload_deflate = compress_bytes(&payload).map_err(|error| {
+        MemoryStoreError::Serde(format!("pending publication compression failed: {error}"))
+    })?;
+    if payload_deflate.len() > MAX_PENDING_PUBLICATION_COMPRESSED_BYTES {
+        return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
+    }
+    Ok((write, payload_deflate))
+}
 
 fn delete_pending_publication_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
     tx.execute(
@@ -21506,6 +21685,87 @@ mod tests {
         );
     }
 
+    /// Unknown nonadmission tags and fact-set failures deserialize as `Unrecognized` without failing durable-state loading.
+    #[test]
+    fn an_unrecognized_nonadmission_code_loads_without_failing_the_state() {
+        let known: HistorySummarizerDurableState = serde_json::from_str(
+            r#"{"curator_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"fact_set_rejected","failure":"invalid_span"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            known.curator_nonadmission.latest.map(|latest| latest.code),
+            Some(CuratorNonadmissionCode::FactSetRejected {
+                failure: ExtractionFailure::InvalidSpan,
+            })
+        );
+        for encoded in [
+            r#"{"curator_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"from_a_later_build"}}}}"#,
+            r#"{"curator_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"fact_set_rejected","failure":"from_a_later_build"}}}}"#,
+        ] {
+            let state: HistorySummarizerDurableState = serde_json::from_str(encoded).unwrap();
+            let latest = state.curator_nonadmission.latest.unwrap();
+            assert_eq!(latest.firing_seq, 3);
+            assert_eq!(latest.code, CuratorNonadmissionCode::Unrecognized);
+            assert_eq!(state.curator_nonadmission.count, 1);
+        }
+        let reencoded = serde_json::to_value(CuratorNonadmissionCode::Unrecognized).unwrap();
+        assert_eq!(reencoded, serde_json::json!({"code": "unrecognized"}));
+    }
+
+    /// A full-session reset drops the retained publication with the reservation pointer it belonged to; nothing can consume the row once the metadata is reset.
+    #[test]
+    fn a_session_reset_drops_the_retained_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            history_summarizer: HistorySummarizerDurableState {
+                state: HistorySummarizerPhase::Publishing,
+                firing_seq: 1,
+                ..HistorySummarizerDurableState::default()
+            },
+            ..ModuleMeta::default()
+        };
+        let row_version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        store
+            .record_curator_reservation(
+                "ses",
+                row_version,
+                &CuratorReservation {
+                    firing_seq: 1,
+                    causal_identity: "job".to_string(),
+                    candidate_id: "hs-ses-job".to_string(),
+                    payload_digest: "digest".to_string(),
+                    kernel_incarnation: "kernel".to_string(),
+                    queue_deadline_ms: 10,
+                },
+                &PendingPublication {
+                    validated_json: "{}".to_string(),
+                    aliases_json: "{}".to_string(),
+                    chunk_transcript: "U: retained".to_string(),
+                    boundary_dates: BTreeMap::new(),
+                    publication_floor_ordinal: 3,
+                    collect_user_memory_candidates: false,
+                    created_at_ms: 1,
+                },
+            )
+            .unwrap();
+        assert!(store.load_pending_publication("ses").unwrap().is_some());
+        let row_version = store.load("ses").unwrap().row_version;
+        store.reset_session_for_recomp("ses", row_version).unwrap();
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .curator_reservation,
+            None
+        );
+        assert_eq!(store.load_pending_publication("ses").unwrap(), None);
+    }
+
     /// Q31: the nonadmission code commits only with the history it accompanies, the count only grows, the latest reason is bound to the firing that produced it, and neither a failed publication nor a resent one moves them.
     #[test]
     fn publish_records_a_nonadmission_only_with_committed_progress() {
@@ -21679,6 +21939,65 @@ mod tests {
         assert_eq!(second.curator_nonadmission_count, 1);
         assert_eq!(nonadmission(), recorded);
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
+    }
+
+    /// The sampler groups sessions by serde's `code` tag, which must match every variant's counter tag.
+    #[test]
+    fn nonadmission_code_tags_match_what_serde_stores() {
+        for code in [
+            CuratorNonadmissionCode::CuratorUnavailable,
+            CuratorNonadmissionCode::CapacityFull,
+            CuratorNonadmissionCode::EvidenceUnavailable,
+            CuratorNonadmissionCode::FactSetRejected {
+                failure: ExtractionFailure::MissingCitation,
+            },
+            CuratorNonadmissionCode::SubjectRefused,
+        ] {
+            let stored = serde_json::to_value(code).unwrap();
+            assert_eq!(stored["code"], code.tag(), "{code:?}");
+            let mut facts = CuratorStatusFacts::default();
+            assert!(
+                facts.latest_nonadmission_slot(code.tag()).is_some(),
+                "{code:?} has no counter"
+            );
+        }
+    }
+
+    /// A frozen page's receipt charge is permanent and its allowance temporary; the sampler must attribute each to the right counter, including once the page is terminal and only the receipt charge remains.
+    #[test]
+    fn frozen_page_receipt_charges_are_permanent_not_allowances_in_the_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let receipt = curator_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES;
+        let allowance = curator_jobs::FROZEN_SELECTION_ALLOWANCE_BYTES;
+        store
+            .with_fenced_conn_for_test(|conn| {
+                conn.execute(
+                    "INSERT INTO curator_frozen_selections (
+                         project, slot_id, selection_attempt, page_json, reference_count, next_cursor,
+                         state, selection_deadline_ms, allowance_bytes, receipt_charge_bytes,
+                         created_at_ms, updated_at_ms
+                     ) VALUES ('p', 'slot', 'a1', '{}', 1, NULL, 'frozen', 10, ?1, ?2, 1, 1),
+                              ('p', 'slot', 'a0', NULL, 1, NULL, 'enqueued', 10, 0, ?2, 1, 1)",
+                    rusqlite::params![
+                        i64::try_from(allowance).unwrap(),
+                        i64::try_from(receipt).unwrap()
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let facts = store.curator_status_facts().unwrap();
+        assert_eq!(facts.metadata_bytes, 2 * receipt + allowance);
+        assert_eq!(
+            facts.receipt_charge_bytes,
+            2 * receipt,
+            "both pages' receipt charges are permanent"
+        );
+        assert_eq!(
+            facts.allowance_bytes, allowance,
+            "only the frozen page still holds an allowance"
+        );
     }
 
     #[test]
@@ -26675,6 +26994,44 @@ mod lineage_descent_tests {
         assert_eq!(target.firing_seq, 5);
         assert_eq!(
             target.curator_nonadmission,
+            meta.history_summarizer.curator_nonadmission
+        );
+    }
+
+    /// A full-session recomp retires the history_segment set and bumps the revert epoch, but the row stays alive, so the producer's sequence and Q31 nonadmission facts survive while in-flight firing state is cleared.
+    #[test]
+    fn recomp_reset_keeps_the_producer_sequence_and_nonadmission_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let loaded = store.load("A").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::Publishing,
+            firing_seq: 5,
+            producer_run_id: Some("run-5".into()),
+            curator_nonadmission: CuratorNonadmission {
+                count: 3,
+                latest: Some(RecordedNonadmission {
+                    firing_seq: 4,
+                    code: CuratorNonadmissionCode::CapacityFull,
+                }),
+            },
+            ..HistorySummarizerDurableState::default()
+        };
+        let row_version = store
+            .commit("A", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        store
+            .reset_session_for_recomp("A", Some(row_version))
+            .unwrap();
+        let reset = store.load("A").unwrap().meta;
+        assert_eq!(reset.revert_epoch, meta.revert_epoch + 1);
+        assert_eq!(reset.history_summarizer.state, HistorySummarizerPhase::Idle);
+        assert_eq!(reset.history_summarizer.producer_run_id, None);
+        assert_eq!(reset.history_summarizer.firing_seq, 5);
+        assert_eq!(
+            reset.history_summarizer.curator_nonadmission,
             meta.history_summarizer.curator_nonadmission
         );
     }

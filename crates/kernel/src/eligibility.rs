@@ -10,7 +10,6 @@ use crate::claim_facts::{
     ClaimFactBounds, ClaimFacts, ClaimFactsError, check_claim_bounds, load_claims_in_tx,
 };
 use crate::commit_read::CommitReadIncarnation;
-use crate::envelope::Sensitivity;
 use crate::scope::{
     CanonicalScope, Dimension, MatchOutcome, ScopeMatchContext, ScopeTermSpec, UnknownGraph,
     load_scope_terms, scope_matches,
@@ -204,9 +203,7 @@ fn judge(
     let sensitivity = facts
         .served
         .map_or(state.object.sensitivity, |served| served.sensitivity);
-    if sensitivity == Sensitivity::Secret
-        || (destination == ArtifactDestination::Remote && sensitivity != Sensitivity::Normal)
-    {
+    if sensitivity.denies_destination(destination).is_some() {
         return EligibilityVerdict::ProviderSensitive;
     }
     if facts

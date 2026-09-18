@@ -169,12 +169,16 @@ impl Rig {
     }
 
     fn host(&self) -> Arc<CuratorHost> {
+        self.host_with(&[(CREDENTIAL, SECRET)])
+    }
+
+    fn host_with(&self, credentials: &[(&str, &str)]) -> Arc<CuratorHost> {
         Arc::new(CuratorHost {
             supervisor: Arc::new(Supervisor::new(Arc::new(NoPublicModel))),
-            credentials: BTreeMap::from([(
-                CREDENTIAL.to_string(),
-                Zeroizing::new(SECRET.to_string()),
-            )]),
+            credentials: credentials
+                .iter()
+                .map(|(name, secret)| (name.to_string(), Zeroizing::new(secret.to_string())))
+                .collect(),
             credential_identities: OnceLock::new(),
             worker_instance: "worker-a".to_string(),
         })
@@ -205,6 +209,10 @@ impl Rig {
 
     /// The owner's activation record for exactly this deployment.
     fn write_activation(&self) {
+        self.write_activation_naming(CREDENTIAL, CREDENTIAL_IDENTITY);
+    }
+
+    fn write_activation_naming(&self, credential: &str, credential_fingerprint: &str) {
         let provider = self.peer.sender().provider_identity();
         let record = serde_json::json!({
             "schema": IDENTITY_SCHEMA,
@@ -218,8 +226,8 @@ impl Rig {
             "kernel_incarnation": self.kernel_incarnation,
             "memstore_incarnation": self.store.curator_store_incarnation().unwrap(),
             "provider": provider,
-            "credential": CREDENTIAL,
-            "credential_fingerprint": CREDENTIAL_IDENTITY,
+            "credential": credential,
+            "credential_fingerprint": credential_fingerprint,
             "provider_retention": {
                 "attested_by": "deployment owner",
                 "attested_on": "2026-09-18",
@@ -241,6 +249,16 @@ impl Rig {
     }
 
     fn ready_history_summarizer_job_under(&self, now: i64, project_digest: &str) -> String {
+        self.ready_history_summarizer_job_tagged(now, project_digest, "ses-3")
+    }
+
+    /// `tag` distinguishes the staged payload and its staging run, so several jobs can coexist.
+    fn ready_history_summarizer_job_tagged(
+        &self,
+        now: i64,
+        project_digest: &str,
+        tag: &str,
+    ) -> String {
         let producer = ProducerBinding {
             producer: "history_summarizer".to_string(),
             firing_id: "ses#3".to_string(),
@@ -248,7 +266,7 @@ impl Rig {
         };
         let payload = kernel::ReviewPayload::Subject(kernel::ReviewSubject {
             facts: vec![kernel::ExtractedFact {
-                text: "bun builds the workspace".to_string(),
+                text: format!("bun builds the workspace {tag}"),
                 spans: vec![kernel::SourceSpan {
                     alias: "s1".to_string(),
                     start: 0,
@@ -286,7 +304,7 @@ impl Rig {
         };
         self.kernel
             .stage_review_input(kernel::ReviewStagingSpec {
-                extraction_run_id: "hs-run-ses-3".to_string(),
+                extraction_run_id: format!("hs-run-{tag}"),
                 candidate_id,
                 producer: "history_summarizer".to_string(),
                 binding: review_binding(project_digest, "memory", "ses", 3, &job.causal_identity),
@@ -296,7 +314,11 @@ impl Rig {
             })
             .unwrap();
         self.kernel
-            .finish_staging_run("hs-run-ses-3", kernel::StagingTerminalState::Completed, now)
+            .finish_staging_run(
+                &format!("hs-run-{tag}"),
+                kernel::StagingTerminalState::Completed,
+                now,
+            )
             .unwrap();
         self.store
             .activate_curator_job(
@@ -315,7 +337,7 @@ impl Rig {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closed_gate_runs_nothing_and_an_open_gate_runs_the_job_to_policy_blocked_abstention() {
     let rig = Rig::open().await;
     let now = now_ms();
@@ -399,7 +421,7 @@ async fn a_closed_gate_runs_nothing_and_an_open_gate_runs_the_job_to_policy_bloc
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_subject_staged_from_an_older_root_of_the_project_is_read_under_that_root() {
     // The staged row is keyed by the older root's digest. Reading it under the newest root would consume the job as a wrong-scope abstention.
     let rig = Rig::open().await;
@@ -425,7 +447,61 @@ async fn a_subject_staged_from_an_older_root_of_the_project_is_read_under_that_r
     assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_jobs_no_bound_root_owns_do_not_starve_the_jobs_behind_them() {
+    // Unroutable jobs stay Ready for their queue deadline and sort first by deadline. A pass must still reach the routable job behind a full page of them.
+    let rig = Rig::open().await;
+    let now = now_ms();
+    let unbound = "c".repeat(64);
+    for index in 0..daemon::curator::worker::JOBS_PER_PASS {
+        rig.ready_history_summarizer_job_tagged(now, &unbound, &format!("orphan-{index}"));
+    }
+    let identity = rig.ready_history_summarizer_job_tagged(now + 1, PROJECT_DIGEST, "routable");
+    let worker = rig.worker();
+    rig.write_activation();
+
+    assert_eq!(worker.pass(&CancellationToken::new()).await, 1);
+    assert_eq!(
+        rig.store
+            .lookup_curator_receipt(PROJECT, &identity)
+            .unwrap()
+            .expect("the routable job ran")
+            .terminal,
+        Some(CuratorReceiptTerminal::Abstained)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_naming_another_providers_credential_closes_the_gate() {
+    // The sender speaks Anthropic's protocol and writes the named credential into `x-api-key`. A record naming the OpenAI secret, fingerprint and all, must close the gate rather than send that secret to Anthropic.
+    let rig = Rig::open().await;
+    let now = now_ms();
+    let identity = rig.ready_history_summarizer_job(now);
+    let host = rig.host_with(&[(CREDENTIAL, SECRET), ("OPENAI_API_KEY", "sk-openai")]);
+    host.credential_identities
+        .set(BTreeMap::from([
+            (CREDENTIAL.to_string(), CREDENTIAL_IDENTITY.to_string()),
+            ("OPENAI_API_KEY".to_string(), "hmac-of-openai".to_string()),
+        ]))
+        .unwrap();
+    let worker = rig.worker_for(host, vec![rig.root("project", PROJECT_DIGEST)]);
+    rig.write_activation_naming("OPENAI_API_KEY", "hmac-of-openai");
+
+    assert_eq!(worker.pass(&CancellationToken::new()).await, 0);
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Closed("unknown_credential")
+    );
+    assert!(
+        rig.store
+            .lookup_curator_receipt(PROJECT, &identity)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cancelled_worker_loop_returns_before_the_stores_are_released() {
     // The daemon joins the worker under its task tracker before it releases the stores; the loop must return on cancellation from its idle wait, not after the next interval.
     let rig = Rig::open().await;
@@ -444,7 +520,7 @@ async fn a_cancelled_worker_loop_returns_before_the_stores_are_released() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_gate_stays_closed_until_the_host_has_derived_the_credential_identities() {
     // The record names the credential by the keyed identity the host derives once the incarnation key exists; before that nothing can vouch for the named credential, so a matching record must not open the gate.
     let rig = Rig::open().await;
