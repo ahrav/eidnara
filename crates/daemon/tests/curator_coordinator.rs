@@ -437,6 +437,13 @@ impl Fixture {
                 root.path(),
                 &ProtectedLocations::new([self.kernel_dir.path().to_path_buf()]).unwrap(),
                 InspectionBinding {
+                    hold: kernel::CuratorHoldBinding {
+                        project_digest: PROJECT.to_string(),
+                        kernel_incarnation: self.kernel_incarnation(),
+                        memstore_incarnation: self.ledger.curator_store_incarnation().unwrap(),
+                        subject: self.identity.clone(),
+                        generation: self.receipt.generation,
+                    },
                     domain_id: DOMAIN.to_string(),
                     scope_id: Some(SCOPE.to_string()),
                     retain_until: self.now + 60 * 60 * 1_000,
@@ -1023,7 +1030,7 @@ async fn an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the
                 provider: "localhost/v1/messages@2023-06-01".to_string(),
                 model: MODEL.to_string(),
                 credential_id: CREDENTIAL_ID.to_string(),
-                policy_union_digest: "u".repeat(64),
+                policy_union_digest: "e".repeat(64),
             },
             (),
             || fixture.now + 3,
@@ -1236,8 +1243,8 @@ async fn a_cutoff_lapsed_on_the_wall_clock_abstains_as_budget_exhausted_without_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_staged_subject_with_no_linked_references_abstains_by_policy() {
-    // With no evidence to protect there is no execution hold to acquire; the staged subject is still refused for a remote model and the run settles on that refusal.
+async fn a_staged_subject_with_no_linked_references_abstains_without_a_hold() {
+    // With no evidence to protect there is no execution hold to acquire, and the broker reads a staged row only under a live hold: the read is refused before the remote-destination policy is judged, nothing is sent, and the run settles on that refusal.
     let mut fixture = Fixture::open(CASES[6].sources);
     assert!(fixture.input.starting_references.is_empty());
     let reference = fixture
@@ -1279,7 +1286,10 @@ async fn a_staged_subject_with_no_linked_references_abstains_by_policy() {
         .run(&peer, Some(fixture.approval()), &CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(settled, Settled::Abstained(AbstainReason::OwnerSensitive));
+    assert_eq!(
+        settled,
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
     assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
     assert_eq!(
         fixture.receipt().terminal,
@@ -1288,8 +1298,8 @@ async fn a_staged_subject_with_no_linked_references_abstains_by_policy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_oversized_subject_abstains_as_budget_exhausted_before_any_request() {
-    // The subject alone exceeds the model-visible byte bound: a property of the job, not of the store, so the run settles instead of failing on every generation.
+async fn an_oversized_subject_abstains_as_partial_disclosure_before_any_request() {
+    // The subject alone exceeds the model-visible byte bound: a property of the job, not of the store, so the run settles instead of failing on every generation. The broker marks the refused read partial, since the run asked for evidence it will never see, and that outranks the spent budget at settlement.
     let subject = large_source(
         "The workspace builds with bun; the build log follows.\n",
         "bun install: resolved 1 package\n",
@@ -1301,7 +1311,10 @@ async fn an_oversized_subject_abstains_as_budget_exhausted_before_any_request() 
         .run(&peer, Some(fixture.approval()), &CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+    assert_eq!(
+        settled,
+        Settled::Abstained(AbstainReason::PartialDisclosure)
+    );
     assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
     assert!(fixture.attempts().is_empty());
     assert_eq!(

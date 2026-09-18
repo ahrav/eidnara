@@ -12,12 +12,10 @@ pub mod related_memories;
 pub mod settlement;
 pub mod steps;
 
-use broker::RefusalCode;
-
 /// Per-hit excerpt bound (Q19), in bytes of the referenced artifact.
 pub const MAX_EXCERPT_BYTES: usize = 512;
 /// Bytes kept before a matching position so an excerpt carries its lead-in.
-const EXCERPT_LEAD_BYTES: usize = 64;
+pub(crate) const EXCERPT_LEAD_BYTES: usize = 64;
 
 /// Why a bounded traversal stopped where it did. Only `Complete` means the inventory was exhausted; every other code is explicit incompleteness, never absence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,23 +30,13 @@ pub enum Completeness {
     PageFull,
     /// The model batch has no operation left, or a broker capacity bound stopped the call after at least one hit.
     CapacityBound,
+    /// The caller's budget expired or was cancelled after the call passed at least one candidate.
+    BudgetBound,
 }
 
-/// The excerpt window around `position` in `text`: up to [`EXCERPT_LEAD_BYTES`] before it and [`MAX_EXCERPT_BYTES`] long, clamped to char boundaries.
+/// The excerpt window around `position` in `text`: up to [`EXCERPT_LEAD_BYTES`] before it and [`MAX_EXCERPT_BYTES`] long, clamped to char boundaries. Rounding the lead up keeps at least `MAX_EXCERPT_BYTES - EXCERPT_LEAD_BYTES` bytes after the match, which bounds every matcher.
 pub(crate) fn excerpt_window(text: &str, position: usize) -> Range<usize> {
-    let start = text.floor_char_boundary(position.saturating_sub(EXCERPT_LEAD_BYTES));
+    let start = text.ceil_char_boundary(position.saturating_sub(EXCERPT_LEAD_BYTES));
     let end = text.floor_char_boundary(start.saturating_add(MAX_EXCERPT_BYTES));
     start..end
-}
-
-/// Whether a refusal names a run or batch capacity bound rather than a property of the reference.
-pub(crate) fn is_capacity(code: RefusalCode) -> bool {
-    matches!(
-        code,
-        RefusalCode::InspectionLimit
-            | RefusalCode::BatchLimit
-            | RefusalCode::ByteLimit
-            | RefusalCode::BufferLimit
-            | RefusalCode::HoldLimit
-    )
 }

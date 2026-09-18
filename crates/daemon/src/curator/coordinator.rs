@@ -29,10 +29,8 @@ use super::broker::{
     RenderedBuffer, RunBinding, refuse,
 };
 use super::disclosure::{
-    AttemptBinding, Disclosed, Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile,
-    prepare_body,
+    Disclosed, Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile, prepare_body,
 };
-use super::is_capacity;
 use super::model_request::SendError;
 use super::model_response::StopReason;
 use super::project_text::{ProjectText, SearchQuery};
@@ -172,14 +170,13 @@ impl Coordinator {
         let hold_id = prepared.hold_id.clone();
         let broker = EvidenceBroker::new(
             RunBinding {
-                project: kernel::ProjectScope::new(project)
-                    .map_err(|_| InvestigationError::Kernel(RefusalCode::Scope))?,
                 hold: prepared.hold_binding.clone(),
                 hold_id: prepared.hold_id,
                 destination: kernel::ArtifactDestination::Remote,
             },
             context.question,
         )
+        .map_err(|_| InvestigationError::Kernel(RefusalCode::Scope))?
         .with_inspection_limit(self.inspection_limit);
         // The cutoff as a monotonic instant: the ledger's absolute millisecond mapped through the same clock the run reads.
         let remaining = context
@@ -480,7 +477,7 @@ impl Run<'_> {
                 &guard,
                 &coordinator.profile,
                 system,
-                self.transcript.clone(),
+                self.transcript.iter().map(RenderedBuffer::resend).collect(),
             ) {
                 Ok(prepared) => prepared,
                 // A body over the wire bound spends the budget; a profile the encoder refuses is a configuration fault that leaves the receipt open for a corrected deployment.
@@ -523,13 +520,7 @@ impl Run<'_> {
             let sender = Arc::clone(&coordinator.sender);
             let approval = coordinator.approval.clone();
             let now_ms = Arc::clone(&coordinator.now_ms);
-            let binding = AttemptBinding {
-                project: self.hold_binding.project_digest.clone(),
-                causal_identity: self.hold_binding.subject.clone(),
-                generation: self.hold_binding.generation,
-                claim_id: self.context.claim.claim_id.clone(),
-                credential_id: coordinator.credential_id.clone(),
-            };
+            let claim_id = self.context.claim.claim_id.clone();
             let outcome = Arc::clone(&outcome);
             move |sink: EventSink, token: CancellationToken| {
                 Box::pin(async move {
@@ -540,7 +531,7 @@ impl Run<'_> {
                         broker: &broker,
                         sender: &sender,
                         approval: approval.as_ref(),
-                        binding: &binding,
+                        claim_id: &claim_id,
                         now_ms: &move || now_ms(),
                     };
                     let disclosed = disclosure.disclose(&prepared, &token, deadline).await;
@@ -640,10 +631,14 @@ impl Run<'_> {
                 DisclosureRefusal::Ledger(reason)
                 | DisclosureRefusal::ChargedNotDispatched { reason, .. } => ledger_verdict(reason)?,
                 DisclosureRefusal::DestinationNotRemote
+                | DisclosureRefusal::BrokerMismatch
+                | DisclosureRefusal::SystemNotHostAuthored
                 | DisclosureRefusal::PromptNotUtf8
                 | DisclosureRefusal::PolicyUnion => {
                     return Err(InvestigationError::Kernel(RefusalCode::Unsupported));
                 }
+                // The assembled body formed a secret across a buffer seam: nothing was sent, and no body of this run's disclosures may be.
+                DisclosureRefusal::RenderCheck => Attempt::Refused(RefusalCode::RenderCheck),
                 DisclosureRefusal::Store(error) => return Err(InvestigationError::Store(error)),
                 // The request was charged and failed or was withheld; the disclosure recorded the attempt's terminal, and the remaining budget decides whether another is made.
                 DisclosureRefusal::Send { .. }
@@ -690,6 +685,8 @@ fn ledger_verdict(reason: CuratorLedgerRefusal) -> Result<Attempt, Investigation
         CuratorLedgerRefusal::Cancelled => Err(InvestigationError::Cancelled),
         // The post-commit recheck could not read the ledger: the attempt is charged and nothing was sent; another round decides.
         CuratorLedgerRefusal::RecheckUnavailable => Ok(Attempt::Spent),
+        // The run's clock is behind the ledger's newest event: nothing was charged or sent, and the run is retried once the clock has caught up.
+        CuratorLedgerRefusal::ClockBehind => Err(InvestigationError::Unavailable),
         CuratorLedgerRefusal::InvalidRequest
         | CuratorLedgerRefusal::Missing
         | CuratorLedgerRefusal::Fenced
@@ -728,7 +725,7 @@ impl Run<'_> {
 
 /// Records a refused operation in the transcript. A capacity bound hit inside a read (bytes, buffers, or the execution hold's backing) truncates the evidence set the same way a refused admission does, so the disclosure is marked partial.
 fn refused(broker: &mut EvidenceBroker, transcript: &mut Vec<RenderedBuffer>, refusal: &Refusal) {
-    if is_capacity(refusal.code) {
+    if refusal.code.is_capacity() {
         broker.ledger.record_partial_disclosure();
     }
     push_notice(broker, transcript, refusal.alias.as_ref(), refusal.code);
@@ -1084,9 +1081,7 @@ fn bind_proposal(
 
 #[cfg(test)]
 mod tests {
-    use kernel::{
-        ArtifactIngestRequest, CommitIntent, DomainSpec, ProjectScope, ProviderEgress, Sensitivity,
-    };
+    use kernel::{ArtifactIngestRequest, CommitIntent, DomainSpec, ProviderEgress, Sensitivity};
 
     use super::*;
     use crate::curator::project_text::{InspectionBinding, ProtectedLocations};
@@ -1120,7 +1115,10 @@ mod tests {
     }
 
     /// A Kernel store with one domain, and a broker disclosing locally under an execution hold over an anchor artifact.
-    fn local_broker(store_dir: &std::path::Path, now: i64) -> (KernelStore, EvidenceBroker) {
+    fn local_broker(
+        store_dir: &std::path::Path,
+        now: i64,
+    ) -> (KernelStore, EvidenceBroker, CuratorHoldBinding) {
         let store = KernelStore::open(store_dir).unwrap();
         store
             .commit(intent("seed"), |envelope| {
@@ -1167,14 +1165,14 @@ mod tests {
             .unwrap();
         let broker = EvidenceBroker::new(
             RunBinding {
-                project: ProjectScope::new(PROJECT).unwrap(),
-                hold: binding,
+                hold: binding.clone(),
                 hold_id: hold.hold_id,
                 destination: kernel::ArtifactDestination::Local,
             },
             QuestionTemplate::ExtractedFacts,
-        );
-        (store, broker)
+        )
+        .unwrap();
+        (store, broker, binding)
     }
 
     #[test]
@@ -1193,11 +1191,12 @@ mod tests {
             b"# Project\nbun builds the workspace\n",
         )
         .unwrap();
-        let (store, mut broker) = local_broker(store_dir.path(), now);
+        let (store, mut broker, hold) = local_broker(store_dir.path(), now);
         let mut root = ProjectText::open(
             project.path(),
             &ProtectedLocations::new([store_dir.path().to_path_buf()]).unwrap(),
             InspectionBinding {
+                hold: hold.clone(),
                 domain_id: DOMAIN.to_string(),
                 scope_id: None,
                 retain_until: now + 60 * 60 * 1_000,
@@ -1228,44 +1227,6 @@ mod tests {
     }
 
     #[test]
-    fn a_hold_capacity_refusal_marks_the_evidence_set_partial_at_the_broker() {
-        // Discovery and project search swallow a capacity refusal after a hit into a `CapacityBound` page, so the broker itself must record the truncation when the hold refuses.
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
-        )
-        .unwrap();
-        let store_dir = tempfile::tempdir().unwrap();
-        let (_store, mut broker) = local_broker(store_dir.path(), now);
-        let alias = broker
-            .aliases
-            .issue(ReferenceExpectation::TemporaryCapture {
-                evidence_id: "evidence-anchor".to_string(),
-                artifact_digest: format!("{:x}", Sha256::digest(b"anchor")),
-                byte_length: 6,
-                retain_until: now + 60_000,
-            });
-        broker.ledger.record_disclosure(
-            &alias,
-            context_core::curator_policy_union::PolicyUnionMember {
-                kind: "temporary_capture".to_string(),
-                id: "evidence-anchor".to_string(),
-                revision: "1".to_string(),
-                owner_id: None,
-                owner_revision: None,
-            },
-        );
-        assert!(!broker.ledger.is_partial());
-        broker.hold_refused(
-            None,
-            kernel::CuratorHoldError::Refused(kernel::CuratorHoldRefusal::ProjectBackingExhausted),
-        );
-        assert!(broker.ledger.is_partial());
-    }
-
-    #[test]
     fn a_hold_capacity_refusal_after_a_disclosure_marks_the_evidence_set_partial() {
         let now = i64::try_from(
             std::time::SystemTime::now()
@@ -1277,11 +1238,12 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("README.md"), b"# Project\n").unwrap();
-        let (store, mut broker) = local_broker(store_dir.path(), now);
+        let (store, mut broker, hold) = local_broker(store_dir.path(), now);
         let mut root = ProjectText::open(
             project.path(),
             &ProtectedLocations::new([store_dir.path().to_path_buf()]).unwrap(),
             InspectionBinding {
+                hold: hold.clone(),
                 domain_id: DOMAIN.to_string(),
                 scope_id: None,
                 retain_until: now + 60 * 60 * 1_000,

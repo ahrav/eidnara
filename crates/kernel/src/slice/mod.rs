@@ -15,6 +15,7 @@ pub use write::{
 
 pub(crate) use alignment::{rebuild_alignment_tx, rebuild_alignment_with_writer};
 pub(crate) use read::snapshot_tip;
+pub(crate) use write::EVIDENCE_CITED_SQL;
 
 /// Human-readable content stored with a decision.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
