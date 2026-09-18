@@ -1270,6 +1270,28 @@ fn a_selection_cursor_carrying_a_secret_is_refused_on_insert_and_upsert() {
     assert_eq!(stored, vec!["0\u{1f}object-1".to_string()]);
 }
 
+/// The cursor primitive binds `project` like every other transaction-local primitive of the family: an identity past the bound is refused before the row exists, so no row can be written that the public reader would refuse.
+#[test]
+fn a_cursor_for_an_overlong_project_is_refused_before_it_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let overlong = "p".repeat(257);
+    let written: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        advance_selection_cursor_in_tx(conn, &overlong, "slot-1", Some("0\u{1f}object-1"), NOW)
+    });
+    assert!(written.is_err(), "an overlong project is refused");
+    let rows: i64 = store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM curator_selection_cursors",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
 /// A page that reaches its deadline between the slot's sweep and its enqueue is recorded as the slot's failure inside the enqueue transaction, not refused back to the caller for another retry.
 #[test]
 fn an_enqueue_at_or_after_the_page_deadline_records_the_failed_slot() {

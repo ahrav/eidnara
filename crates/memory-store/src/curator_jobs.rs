@@ -941,6 +941,7 @@ pub fn advance_selection_cursor_in_tx(
     cursor: Option<&str>,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
+    check_identity(project).map_err(refuse)?;
     check_identity(slot_id).map_err(refuse)?;
     if cursor.is_some_and(|cursor| cursor.len() > 512) {
         return Err(refuse(CuratorJobRefusal::InvalidRequest));
