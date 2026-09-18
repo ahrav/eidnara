@@ -604,12 +604,21 @@ fn frozen_pages(conn: &GuardedConn<'_>, project: Option<&str>) -> rusqlite::Resu
     Ok(usize::try_from(count).unwrap_or(usize::MAX))
 }
 
-/// Refuses when adding `charge` bytes would exceed either metadata quota.
-fn check_quota(conn: &GuardedConn<'_>, project: &str, charge: u64) -> rusqlite::Result<()> {
-    if metadata_bytes(conn, Some(project))?.saturating_add(charge)
-        > MAX_CURATOR_METADATA_BYTES_PER_PROJECT
-        || metadata_bytes(conn, None)?.saturating_add(charge) > MAX_CURATOR_METADATA_BYTES_PER_HOST
-    {
+/// Refuses when adding `charge` bytes would exceed either metadata quota. `credit` is what the same transaction releases before it commits (a frozen page's allowance once its references become jobs), so headroom is judged against the committed state without writing anything first.
+fn check_quota(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    charge: u64,
+    credit: u64,
+) -> rusqlite::Result<()> {
+    let fits = |held: u64, bound: u64| held.saturating_sub(credit).saturating_add(charge) <= bound;
+    if !fits(
+        metadata_bytes(conn, Some(project))?,
+        MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+    ) || !fits(
+        metadata_bytes(conn, None)?,
+        MAX_CURATOR_METADATA_BYTES_PER_HOST,
+    ) {
         return Err(refuse(CuratorJobRefusal::MetadataQuota));
     }
     Ok(())
@@ -631,16 +640,17 @@ pub fn reserve_curator_job_in_tx(
     if let Some(existing) = load_curator_job(conn, project, &causal_identity)? {
         return Ok(ReserveOutcome::Existing(existing));
     }
-    check_reservation_headroom(conn, project, 1)?;
+    check_reservation_headroom(conn, project, 1, 0)?;
     insert_reservation_in_tx(conn, project, producer, &inputs, &causal_identity, now_ms)
         .map(ReserveOutcome::Reserved)
 }
 
-/// Refuses unless `count` new reservations fit under both pending-job caps and both metadata quotas. Capacity is judged before quota, so a caller sees the refusal that clears first.
+/// Refuses unless `count` new reservations fit under both pending-job caps and both metadata quotas, after `credit` bytes the same transaction releases. Capacity is judged before quota, so a caller sees the refusal that clears first.
 fn check_reservation_headroom(
     conn: &GuardedConn<'_>,
     project: &str,
     count: usize,
+    credit: u64,
 ) -> rusqlite::Result<()> {
     if pending_jobs(conn, Some(project))?.saturating_add(count)
         > MAX_PENDING_CURATOR_JOBS_PER_PROJECT
@@ -655,6 +665,7 @@ fn check_reservation_headroom(
         project,
         (CURATOR_RECEIPT_CHARGE_BYTES + CURATOR_JOB_ALLOWANCE_BYTES)
             .saturating_mul(u64::try_from(count).unwrap_or(u64::MAX)),
+        credit,
     )
 }
 
@@ -821,6 +832,7 @@ pub fn freeze_selection_in_tx(
         conn,
         project,
         FROZEN_PAGE_RECEIPT_CHARGE_BYTES + FROZEN_SELECTION_ALLOWANCE_BYTES,
+        0,
     )?;
     let deadline = now_ms
         .checked_add(CURATOR_QUEUE_LIFETIME_MS)
@@ -877,7 +889,7 @@ pub fn complete_frozen_selection_in_tx(
     })
 }
 
-/// The terminal write for one frozen row: `state`, references and cursor dropped, allowance released, scan audit retired. Callers decide whether the deadline permits it.
+/// The terminal write for one frozen row: `state`, references and cursor dropped, allowance released. The scan audit of the references is retired with them unless they became jobs (`Enqueued`), whose rows keep the same identities for the store incarnation and so keep their audit. Callers decide whether the deadline permits it.
 fn retire_frozen_page_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -893,6 +905,9 @@ fn retire_frozen_page_in_tx(
           WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3 AND state = 'frozen'",
         params![project, slot_id, selection_attempt, state.as_str(), now_ms],
     )?;
+    if state == FrozenSelectionState::Enqueued {
+        return Ok(());
+    }
     release_frozen_page_scans(conn, project, slot_id, selection_attempt)
 }
 
@@ -990,15 +1005,7 @@ pub fn enqueue_frozen_selection_in_tx(
         .page
         .as_ref()
         .ok_or_else(|| refuse(CuratorJobRefusal::Missing))?;
-    // The page leaves `frozen` first so headroom is judged against the committed state: its own allowance is released by this transaction, and a deferral rolls the state change back with everything else. Headroom is judged once for the whole page: the capacity and quota aggregates scan the incarnation's permanent receipts, and a page either fits entirely or is deferred entirely.
-    complete_frozen_selection_in_tx(
-        conn,
-        project,
-        &selection.slot_id,
-        &selection.selection_attempt,
-        FrozenSelectionState::Enqueued,
-        now_ms,
-    )?;
+    // Headroom is judged once for the whole page against the committed state, crediting the allowance the page releases when it leaves `frozen` later in this transaction; nothing is written before the judgement, so a `Deferred` outcome leaves the row untouched whatever the caller does with its transaction. A page either fits entirely or is deferred entirely.
     producer.validate().map_err(refuse)?;
     let mut fresh = Vec::with_capacity(page.references.len());
     let mut replayed = 0usize;
@@ -1016,7 +1023,8 @@ pub fn enqueue_frozen_selection_in_tx(
         }
     }
     if !fresh.is_empty()
-        && let Err(error) = check_reservation_headroom(conn, project, fresh.len())
+        && let Err(error) =
+            check_reservation_headroom(conn, project, fresh.len(), FROZEN_SELECTION_ALLOWANCE_BYTES)
     {
         return match refusal_of(&error) {
             Some(
@@ -1043,6 +1051,14 @@ pub fn enqueue_frozen_selection_in_tx(
             now_ms,
         )?;
     }
+    complete_frozen_selection_in_tx(
+        conn,
+        project,
+        &selection.slot_id,
+        &selection.selection_attempt,
+        FrozenSelectionState::Enqueued,
+        now_ms,
+    )?;
     advance_selection_cursor_in_tx(
         conn,
         project,

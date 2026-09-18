@@ -1260,6 +1260,10 @@ fn a_selection_cursor_carrying_a_secret_is_refused_on_insert_and_upsert() {
         advance_selection_cursor_in_tx(conn, "proj", "slot-1", Some(&secret), NOW + 1)
     });
     assert!(upsert.is_err(), "an upsert carrying a secret is refused");
+    let keyed: Result<(), _> = store.with_fenced_conn_for_test(|conn| {
+        advance_selection_cursor_in_tx(conn, "proj", &format!("slot-{AWS_KEY}"), None, NOW)
+    });
+    assert!(keyed.is_err(), "a slot id carrying a secret is refused");
     let stored: Vec<String> = store
         .with_conn_for_test(|conn| {
             let mut rows = conn.prepare("SELECT cursor FROM curator_selection_cursors")?;
@@ -1290,6 +1294,89 @@ fn a_cursor_for_an_overlong_project_is_refused_before_it_is_written() {
         })
         .unwrap();
     assert_eq!(rows, 0);
+}
+
+/// The transaction-local enqueue writes nothing when it defers: a caller that commits its own transaction around a `Deferred` outcome must find the page still frozen with its references, not a committed `enqueued` row without jobs.
+#[test]
+fn a_deferred_enqueue_leaves_the_page_frozen_even_when_its_transaction_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    for index in 0..MAX_PENDING_CURATOR_JOBS_PER_PROJECT {
+        reserved(
+            store
+                .reserve_curator_job(
+                    "proj",
+                    &producer("fill"),
+                    &inputs(&format!("fill-{index}")),
+                    NOW,
+                )
+                .unwrap(),
+        );
+    }
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1")],
+        next_cursor: Some("cursor-2".to_string()),
+    };
+    let frozen = store
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    let outcome = store
+        .with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), NOW + 1)
+        })
+        .unwrap();
+    assert_eq!(
+        outcome,
+        EnqueueOutcome::Deferred(CuratorJobRefusal::ProjectCapacity)
+    );
+    let row = store
+        .lookup_frozen_selection("proj", "slot-1", "attempt-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, FrozenSelectionState::Frozen);
+    assert_eq!(
+        row.page,
+        Some(page),
+        "the deferred page keeps its references"
+    );
+}
+
+/// A page whose references became jobs keeps the scan audit of those identities: the audit now describes the job rows, which retain the same target, template, signals, and evidence text for the store incarnation.
+#[test]
+fn an_enqueued_page_keeps_the_scan_audit_of_its_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1")],
+        next_cursor: None,
+    };
+    let frozen = store
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    let outcome = store
+        .with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), NOW + 1)
+        })
+        .unwrap();
+    assert!(
+        matches!(outcome, EnqueueOutcome::Enqueued { jobs: 1, .. }),
+        "{outcome:?}"
+    );
+    let scans: Vec<String> = store
+        .with_conn_for_test(|conn| {
+            conn.prepare("SELECT DISTINCT field_id FROM scan_owner_copies ORDER BY field_id")?
+                .query_map([], |row| row.get(0))?
+                .collect()
+        })
+        .unwrap();
+    assert!(
+        scans.iter().any(|field| field == "candidate_id"),
+        "the job's target identity keeps its audit: {scans:?}"
+    );
+    assert!(
+        scans.iter().any(|field| field == "question_template"),
+        "{scans:?}"
+    );
 }
 
 /// A page that reaches its deadline between the slot's sweep and its enqueue is recorded as the slot's failure inside the enqueue transaction, not refused back to the caller for another retry.
