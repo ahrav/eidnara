@@ -13467,6 +13467,20 @@ impl HandlerCore {
         self.kernel.kernel_store().ok()
     }
 
+    /// The installed Memory Store, for tests that write ledger rows the daemon then reads.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn memory_store_for_test(&self) -> Option<Arc<MemoryStore>> {
+        self.store()
+    }
+
+    /// The Kernel project digest a bound route stages and reads review inputs under.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn project_digest_for_test(&self, channel: RouteHandle) -> Option<String> {
+        self.facade_binding(channel)
+            .ok()
+            .map(|binding| binding.kernel_project.digest().to_string())
+    }
+
     /// Runs one health sample at `now_ms` instead of waiting for the sampler tick.
     #[cfg(feature = "test-support")]
     pub async fn sample_kernel_health_for_test(&self, now_ms: i64) {
@@ -13660,6 +13674,8 @@ impl HandlerCore {
                 edit_receipts::PREPARE => self.handle_retrieval_prepare(channel, request),
                 edit_receipts::APPLY => self.handle_retrieval_apply(channel, request),
                 edit_receipts::CONFIRM => self.handle_retrieval_confirm(channel, request),
+                curator::wire::LIST => self.handle_review_list(channel, request).await,
+                curator::wire::READ => self.handle_review_read(channel, request).await,
                 // The handler echoes only explicit wire-debugging requests.
                 // Unknown request bodies must fail so misrouted callers cannot mistake an echo for success.
                 // An unconditional echo lets a misrouted caller mistake an echo for success.

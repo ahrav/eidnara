@@ -650,11 +650,11 @@ mod tests {
                 t0,
             )
             .unwrap();
-        // A review input whose queue deadline the sweep clock will have passed.
+        // A review input whose queue deadline the sweep clock will have passed. The Kernel refuses a deadline the wall clock has already reached, so the deadline sits a minute out, well past any pause between reading `t0` and staging.
         let (staged, binding) =
-            stage_review_input(&kernel_store, &live.causal_identity, t0, t0 + 1_000);
+            stage_review_input(&kernel_store, &live.causal_identity, t0, t0 + 60_000);
 
-        let sweep_at = t0 + 2_000;
+        let sweep_at = t0 + 120_000;
         let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &|| false)
             .expect("not cancelled");
         assert!(pass.healthy);

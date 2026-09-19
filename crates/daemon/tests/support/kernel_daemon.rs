@@ -176,6 +176,25 @@ impl KernelDaemon {
         route
     }
 
+    pub async fn bind_root(&self, channel: u16, root: &Path) -> RouteHandle {
+        let route = RouteHandle { channel, epoch: 1 };
+        let identity = RouteIdentity {
+            project_root: root.to_path_buf(),
+            harness: "test".to_owned(),
+            session: SESSION.to_owned(),
+            consumer_module_id: None,
+            consumer_launch_nonce: None,
+            consumer_capabilities: Vec::new(),
+            admission_facts: None,
+            credential_fingerprints: std::collections::BTreeMap::new(),
+        };
+        assert!(matches!(
+            self.handler.bind(route, identity).await,
+            BindOutcome::Accept
+        ));
+        route
+    }
+
     pub async fn outcome_observed(
         &self,
         request: Value,
@@ -187,7 +206,11 @@ impl KernelDaemon {
     }
 
     pub async fn call(&self, request: Value) -> Value {
-        match self.outcome(request).await {
+        self.call_on(self.route, request).await
+    }
+
+    pub async fn call_on(&self, route: RouteHandle, request: Value) -> Value {
+        match self.outcome_on(route, request).await {
             PreparedOutcome::Response(output) => {
                 let mut bytes = Vec::new();
                 output.measure().unwrap().write_to(&mut bytes).unwrap();
@@ -243,6 +266,16 @@ impl KernelDaemon {
 
     pub fn store(&self) -> Arc<kernel::KernelStore> {
         self.handler.kernel_store_for_test().unwrap()
+    }
+
+    /// The Memory Store the daemon installed, so a test can write ledger rows the daemon then reads.
+    pub fn memory_store(&self) -> Option<Arc<memory_store::MemoryStore>> {
+        self.handler.memory_store_for_test()
+    }
+
+    /// The Kernel project digest the bound route stages review inputs under.
+    pub fn project_digest(&self) -> String {
+        self.handler.project_digest_for_test(self.route).unwrap()
     }
 
     pub fn tip(&self) -> i64 {

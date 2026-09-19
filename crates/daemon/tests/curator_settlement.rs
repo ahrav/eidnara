@@ -583,14 +583,7 @@ impl Fixture {
     }
 
     fn read(&self, now: i64) -> Result<SelectedProposal, ReadRefusal> {
-        read_selected_proposal(
-            &self.store,
-            &self.ledger,
-            PROJECT,
-            &self.identity,
-            &self.review_binding(),
-            now,
-        )
+        read_selected_proposal(&self.store, &self.ledger, PROJECT, &self.identity, now)
     }
 
     /// Commits one attempt marker under the fixture's claim and, when `terminal` is given, records it.
@@ -812,10 +805,11 @@ fn a_completed_receipt_selects_the_staged_proposal_and_reads_pass_the_kernel() {
     // Selection moved the row's deadline with the hold: readable past the 24-hour queue deadline, refused at the review expiry.
     assert!(fixture.read(fixture.now + 25 * HOUR_MS).is_ok());
     assert!(fixture.read(hold.expires_at - 1).is_ok());
-    assert!(matches!(
+    assert_eq!(
         fixture.read(hold.expires_at),
-        Err(ReadRefusal::Kernel(ReviewReadRefusal::Expired) | ReadRefusal::ReviewExpired)
-    ));
+        Err(ReadRefusal::ReviewExpired),
+        "the moved deadline is the review expiry, not a Kernel refusal"
+    );
     // The list pages by causal identity: a full page carries a cursor, and the page after it is empty.
     let page = list_review_outcomes(&fixture.ledger, PROJECT, None, 1).unwrap();
     assert_eq!(page.outcomes.len(), 1);
@@ -1932,14 +1926,13 @@ fn a_selected_result_is_readable_only_through_its_live_review_hold() {
         let store = Arc::clone(&fixture.store);
         let ledger = Arc::clone(&fixture.ledger);
         let identity = fixture.identity.clone();
-        let binding = fixture.review_binding();
         let barrier = Arc::clone(&barrier);
         let now = fixture.now + 7;
         std::thread::spawn(move || {
             barrier.wait();
             (0..200)
                 .map(|_| {
-                    read_selected_proposal(&store, &ledger, PROJECT, &identity, &binding, now)
+                    read_selected_proposal(&store, &ledger, PROJECT, &identity, now)
                         .map(|selected| selected.reference)
                 })
                 .collect::<Vec<_>>()
@@ -2031,7 +2024,6 @@ fn a_hold_ended_between_lookup_and_validation_reads_as_the_review_expiring() {
             &fixture.ledger,
             PROJECT,
             &fixture.identity,
-            &fixture.review_binding(),
             fixture.now + 7,
             &end_hold,
         );

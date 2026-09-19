@@ -622,7 +622,6 @@ async fn run_case(case: &Case) {
                 &fixture.ledger,
                 PROJECT,
                 &fixture.identity,
-                &fixture.binding(),
                 fixture.now + 6,
             )
             .unwrap();
@@ -966,7 +965,6 @@ async fn invalidation_after_disclosure_abstains_at_settlement() {
             &fixture.ledger,
             PROJECT,
             &fixture.identity,
-            &fixture.binding(),
             fixture.now + 6,
         ),
         Err(ReadRefusal::NotSelected)
@@ -1408,7 +1406,6 @@ async fn a_selected_eligible_memory_becomes_a_published_proposal_through_the_sha
         &fixture.ledger,
         PROJECT,
         &job.causal_identity,
-        &binding,
         fixture.now + 6,
     )
     .unwrap();
@@ -1671,7 +1668,6 @@ async fn a_rangeless_citation_of_a_partial_disclosure_binds_to_the_disclosed_byt
         &fixture.ledger,
         PROJECT,
         &fixture.identity,
-        &fixture.binding(),
         fixture.now + 6,
     )
     .unwrap()
@@ -1801,7 +1797,6 @@ async fn a_memory_target_names_the_snapshot_and_the_subjects_last_change_as_comm
         &fixture.ledger,
         PROJECT,
         &fixture.identity,
-        &fixture.binding(),
         fixture.now + 6,
     )
     .unwrap()
@@ -1996,7 +1991,6 @@ async fn expanded_citations_are_deduplicated_and_bounded() {
         &fixture.ledger,
         PROJECT,
         &fixture.identity,
-        &fixture.binding(),
         fixture.now + 6,
     )
     .unwrap()
@@ -2178,7 +2172,6 @@ async fn a_rangeless_citation_after_adjacent_reads_publishes_one_reference_per_r
         &fixture.ledger,
         PROJECT,
         &fixture.identity,
-        &fixture.binding(),
         fixture.now + 6,
     )
     .unwrap()

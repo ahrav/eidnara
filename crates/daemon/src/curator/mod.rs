@@ -15,6 +15,7 @@ pub mod related_memories;
 pub mod selection;
 pub mod settlement;
 pub mod steps;
+pub(crate) mod wire;
 pub mod worker;
 
 /// Per-hit excerpt bound (Q19), in bytes of the referenced artifact.
