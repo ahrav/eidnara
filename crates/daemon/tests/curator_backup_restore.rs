@@ -1,8 +1,8 @@
-//! The both-store backup and restore rehearsal over real files: a published proposal survives restoring the Kernel through its own verified backup and the Memory Store from its closed file family, taken as one pair; every mismatched restore is refused rather than reconciled. A backup Memory Store beside a replaced Kernel refuses the receipt's binding, the read, and the activation gate; a replaced Memory Store beside the restored Kernel holds no receipt, so nothing reads and the gate closes on its incarnation. No path migrates, resets, or rebinds anything.
+//! These tests verify restoration of matched Kernel and Memory Store backups, required artifacts, and mismatched-pair refusal.
 
 mod support;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use daemon::curator::activation::{
@@ -11,7 +11,7 @@ use daemon::curator::activation::{
 use daemon::curator::settlement::{ReadRefusal, read_selected_proposal};
 use daemon::curator::steps::STEP_VERSION;
 use daemon::curator::worker::job_binding;
-use kernel::KernelStore;
+use kernel::{KernelError, KernelStore};
 use memory_store::MemoryStore;
 use memory_store::curator_ledger::{CuratorLedgerError, CuratorLedgerRefusal};
 use support::curator_publish::{
@@ -20,14 +20,38 @@ use support::curator_publish::{
 };
 
 const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const EVIDENCE: &[u8] = b"the workspace builds with bun";
 
-fn open_pair(kernel_dir: &Path, store_dir: &Path) -> (Arc<KernelStore>, Arc<MemoryStore>) {
-    (
-        Arc::new(KernelStore::open(kernel_dir).unwrap()),
-        Arc::new(
-            MemoryStore::open(&MemoryStore::test_descriptor(store_dir, "eidnara-restore")).unwrap(),
-        ),
-    )
+/// The daemon stores the Memory Store at `eidnara/context/` and the Kernel at `eidnara/context/kernel/`.
+struct DataDir {
+    root: PathBuf,
+}
+
+impl DataDir {
+    fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn context(&self) -> PathBuf {
+        self.root.join("eidnara").join("context")
+    }
+
+    fn kernel(&self) -> PathBuf {
+        self.context().join("kernel")
+    }
+
+    fn open_kernel(&self) -> Arc<KernelStore> {
+        private_dir(&self.kernel());
+        Arc::new(KernelStore::open(self.kernel()).unwrap())
+    }
+
+    fn open_store(&self) -> Result<Arc<MemoryStore>, memory_store::MemoryStoreError> {
+        MemoryStore::open(&daemon::managed_store_descriptor(&self.root).unwrap()).map(Arc::new)
+    }
+
+    fn open_pair(&self) -> (Arc<KernelStore>, Arc<MemoryStore>) {
+        (self.open_kernel(), self.open_store().unwrap())
+    }
 }
 
 /// A private directory, as the Kernel's backup destination and every store root require.
@@ -40,15 +64,63 @@ fn private_dir(path: &Path) {
         .unwrap();
 }
 
-/// The Memory Store's backup is its closed SQLite family copied file for file; it publishes no backup of its own.
-fn copy_store(from: &Path, to: &Path) {
+/// Copies the closed `store.db` files; the `.lease` sidecar and the `kernel/` root beside them are left behind.
+fn copy_store_family(from: &Path, to: &Path) {
     private_dir(to);
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
-        if entry.file_type().unwrap().is_file() {
-            std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type().unwrap().is_file() && name.starts_with("store.db") {
+            std::fs::copy(entry.path(), to.join(&name)).unwrap();
         }
     }
+}
+
+/// Copies the Kernel's artifact objects, which the database backup does not carry.
+fn copy_artifacts(from_root: &Path, to_root: &Path) {
+    fn copy_tree(from: &Path, to: &Path) {
+        private_dir(to);
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+    let objects = Path::new("artifacts").join("objects");
+    copy_tree(&from_root.join(&objects), &to_root.join(&objects));
+}
+
+/// One evidence artifact in the memory domain, as ingestion leaves it.
+fn ingest_evidence(kernel: &KernelStore) -> kernel::ArtifactHandle {
+    kernel
+        .ingest_artifact(kernel::ArtifactIngestRequest {
+            intent: kernel::CommitIntent {
+                producer: "curator-test".to_string(),
+                operation_key: "evidence".to_string(),
+                request_digest: "1".repeat(64),
+                actor: "test".to_string(),
+                cause: "fixture".to_string(),
+            },
+            payload: EVIDENCE.to_vec(),
+            evidence_id: "evidence-1".to_string(),
+            object_id: "evidence-object-1".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: "memory".to_string(),
+            source_kind: "repository".to_string(),
+            source_id: "src/build.md".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: kernel::Sensitivity::Normal,
+            provider_egress: kernel::ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap()
 }
 
 /// The owner's record for one deployment pair.
@@ -91,17 +163,15 @@ fn live(kernel: &KernelStore, store: &MemoryStore) -> LiveIdentity {
 #[test]
 fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
     let root = tempfile::tempdir().unwrap();
-    let kernel_dir = root.path().join("kernel");
-    let store_dir = root.path().join("store");
+    let live_dir = DataDir::new(root.path().join("live"));
     let backup = root.path().join("backup");
-    private_dir(&kernel_dir);
-    private_dir(&store_dir);
     private_dir(&backup.join("kernel"));
     let now = now_ms();
-    // The pair is backed up together, with no publication between the two captures: the Kernel through its verified backup, the Memory Store as its closed file family.
-    let (identity, binding, kernel_id, store_id, kernel_backup) = {
-        let (kernel, store) = open_pair(&kernel_dir, &store_dir);
+    // The live pair: a committed memory domain, one evidence artifact, and a published proposal.
+    let (identity, binding, evidence) = {
+        let (kernel, store) = live_dir.open_pair();
         commit_memory_domain(&kernel);
+        let evidence = ingest_evidence(&kernel);
         let generation = activate_module_authority(&store, &root.path().join("project"));
         let kernel_id = kernel_incarnation(&kernel);
         let begun = begin_job(&store, &kernel_id, generation, 1, now);
@@ -118,7 +188,11 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
             )
             .is_ok()
         );
-        let store_id = store.curator_store_incarnation().unwrap();
+        (begun.job.causal_identity, binding, evidence)
+    };
+    // A second open advances the Memory Store's writer epoch, as a deployment that has restarted stands. The pair is backed up together, with no publication between the two captures: the Kernel through its verified backup, the Memory Store as its closed file family.
+    let (kernel_id, store_id, kernel_backup) = {
+        let (kernel, store) = live_dir.open_pair();
         let manifest = kernel
             .backup(kernel::BackupRequest {
                 destination_directory: backup.join("kernel"),
@@ -126,24 +200,36 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
                 capture_pin_expires_at: None,
             })
             .unwrap();
+        assert!(
+            manifest.capture_pin_id.is_some(),
+            "live evidence pins the capture; the artifact bytes stay in the live root"
+        );
         (
-            begun.job.causal_identity,
-            binding,
-            kernel_id,
-            store_id,
+            kernel_incarnation(&kernel),
+            store.curator_store_incarnation().unwrap(),
             manifest.destination_path,
         )
     };
-    copy_store(&store_dir, &backup.join("store"));
+    copy_store_family(&live_dir.context(), &backup.join("store"));
     let owner_record = record(&kernel_id, &store_id);
 
-    // Both restored from the pair into fresh directories: the same incarnations, the receipt still selects the proposal, the review hold is live, and the owner's record still matches.
-    let restored = root.path().join("restored");
-    private_dir(&restored.join("kernel"));
-    copy_store(&backup.join("store"), &restored.join("store"));
+    // Both restored from the pair into a fresh data directory. The Kernel backup carries no artifact bytes, so the restore is refused until the live root's objects are carried too; the Memory Store family opens without its lease sidecar because the lease is issued above the fence epoch the family records. Then the same incarnations, the receipt still selects the proposal, the review hold is live, the evidence reads, and the owner's record still matches.
+    let restored = DataDir::new(root.path().join("restored"));
     {
-        let (kernel, store) = open_pair(&restored.join("kernel"), &restored.join("store"));
+        let kernel = restored.open_kernel();
+        assert_eq!(
+            kernel.restore(&kernel_backup).unwrap_err(),
+            KernelError::InvalidRestore,
+            "a root without the referenced artifacts refuses the backup"
+        );
+        copy_artifacts(&live_dir.kernel(), &restored.kernel());
         kernel.restore(&kernel_backup).unwrap();
+        assert_eq!(kernel_incarnation(&kernel), kernel_id);
+        assert_eq!(kernel.read_artifact(&evidence).unwrap(), EVIDENCE);
+    }
+    copy_store_family(&backup.join("store"), &restored.context());
+    {
+        let (kernel, store) = restored.open_pair();
         assert_eq!(kernel_incarnation(&kernel), kernel_id);
         assert_eq!(store.curator_store_incarnation().unwrap(), store_id);
         let read =
@@ -156,7 +242,8 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
     let replaced_kernel = root.path().join("replaced-kernel");
     private_dir(&replaced_kernel);
     {
-        let (kernel, store) = open_pair(&replaced_kernel, &restored.join("store"));
+        let kernel = Arc::new(KernelStore::open(&replaced_kernel).unwrap());
+        let store = restored.open_store().unwrap();
         assert_ne!(kernel_incarnation(&kernel), kernel_id);
         assert_eq!(
             read_selected_proposal(&kernel, &store, PROJECT, &identity, &binding, now + 3),
@@ -190,10 +277,10 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
     }
 
     // Restored Kernel beside a replaced Memory Store: no receipt exists, so nothing is selected, and the gate closes on the store's incarnation; the Kernel's staged proposal is not served on anyone's say-so.
-    let replaced_store = root.path().join("replaced-store");
-    private_dir(&replaced_store);
+    let replaced_store = DataDir::new(root.path().join("replaced-store"));
     {
-        let (kernel, store) = open_pair(&restored.join("kernel"), &replaced_store);
+        let kernel = restored.open_kernel();
+        let store = replaced_store.open_store().unwrap();
         assert_eq!(kernel_incarnation(&kernel), kernel_id);
         assert_ne!(store.curator_store_incarnation().unwrap(), store_id);
         assert_eq!(

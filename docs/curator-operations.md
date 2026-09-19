@@ -40,9 +40,9 @@ The directory must be mode `0700` and the file mode `0600`, both owned by the da
 | `credential_fingerprint` | Lower-hex SHA-256 over `eidnara-curator-credential-v1`, a NUL byte, the credential name, a NUL byte, and the secret. |
 | `provider_retention` | `{attested_by, attested_on, retention_terms, finite_work_exposure_acknowledged}`: the owner's statement about the provider account's data retention and an explicit `true` acknowledging that every run spends bounded provider work. |
 
-Every term is compared against the live deployment on every pass and again before every job. Any mismatch closes the gate naming the field, and the worker runs nothing and sends nothing. The record therefore has to be rewritten when the binary changes (any compiled version or baseline digest), when either store is replaced (its incarnation changes), when the provider or endpoint changes, or when the secret is rotated (its fingerprint changes). That is the Q38 rule made mechanical: owner approval of provider retention and finite work exposure precedes the first remote call for exactly this deployment, and no approval carries over to a deployment it did not name.
+Every term is compared against the live deployment on every pass and again before every job. Any mismatch closes the gate, and the worker runs nothing and sends nothing. The record therefore has to be rewritten when the binary changes (any compiled version or baseline digest), when either store is replaced (its incarnation changes), when the provider or endpoint changes, or when the secret is rotated (its fingerprint changes). That is the Q38 rule made mechanical: owner approval of provider retention and finite work exposure precedes the first remote call for exactly this deployment, and no approval carries over to a deployment it did not name.
 
-The compiled versions and digests are what the worker compares against; the simplest way to fill them in is to read the closed reason from the status block after writing a draft record (`identity_mismatch` names the field) and correct one field at a time. Nothing reads the record except the worker; there is no operator command that writes it, and the daemon never writes one.
+The status block reports only the closed kind (`identity_mismatch`), never which term differs. The term and the deployment's live value are written to the daemon's log, `<data home>/.eidnara-coordination/eidnara.log`, once per distinct reason: `daemon: curator activation gate closed: activation record names another kernel incarnation; the live value is <id>`. Every term except the credential fingerprint is reported this way, so a draft record can be corrected one term at a time from the log; the fingerprint derives from the secret and is never written, and the owner computes it from the derivation above. The compiled versions and digests are not published on any other operator surface. Nothing reads the record except the worker; there is no operator command that writes it, and the daemon never writes one.
 
 The credential is read from the startup envelope's credentials, never from the process environment. The host always hands the daemon its Model Execution supervisor and the envelope's credentials; a record naming a credential the envelope does not carry closes the gate as `unknown_credential`.
 
@@ -60,31 +60,38 @@ The scheduler enqueues Memory Classifier review selections only while the gate i
 
 The Kernel and the Memory Store are two SQLite families that reference each other only by recorded incarnation ids. A Curator receipt binds the Kernel incarnation and the Memory Store incarnation it was written under; a Kernel hold binds both; the activation record names both. That is the whole restore contract: the two stores are backed up as one pair and restored as one pair, and every mismatch is refused where it is met.
 
+Both families live under `<data home>/eidnara/context/`: the Memory Store as `store.db` with its `-wal` and `-shm` sidecars, the Kernel as the `kernel/` root holding `kernel.sqlite` and the artifact object store `kernel/artifacts/objects/`. A `.lease` sidecar beside `store.db` records the store's writer epoch; it is not part of a backup, because an open issues its lease above the fence epoch the family itself records.
+
+No operator command performs a Kernel backup or restore in this milestone. `KernelStore::backup` and `KernelStore::restore` exist as library operations on an open store and are what the rehearsal below drives; wrapping them in a command is not in this milestone. The procedure below states what a backup must contain and what a restore is refused for, so that the command, when it exists, and any interim tooling meet the same contract.
+
 Backup:
 
 1. Stop the daemon. The worker is joined before the stores are released, so a stopped daemon has no run in flight; a receipt still `in_progress` at that point is taken over on the next pass after restart.
-2. Kernel: `KernelStore::backup` publishes a verified copy into a private directory and returns its path and the captured commit sequence. This is the only supported Kernel backup; a file copy of a live Kernel family is not.
-3. Memory Store: copy the closed `memory.sqlite` family (the database and any write-ahead log beside it). The store publishes no backup of its own.
-4. Record the pair together with the binary's version and both baseline digests. A backup pair belongs to the binary that wrote it.
+2. Kernel database: `KernelStore::backup` publishes a verified copy of `kernel.sqlite` into a private directory (owned by the daemon's user, mode `0700`, not a symlink; anything else is refused as an unsafe destination) and returns its path and the captured commit sequence. This is the only supported Kernel database backup; a file copy of a live Kernel family is not.
+3. Kernel artifacts: the database backup carries no artifact bytes. Copy `kernel/artifacts/objects/` beside it. The capture pins the evidence the backup references in the live store, but only for 24 hours unless `capture_pin_expires_at` says otherwise; after the pin lapses, reclamation may remove an object the live database no longer references, and a backup whose evidence names an object the target root does not hold is refused at restore. The objects copy is what makes a backup restorable past that window and into a fresh root.
+4. Memory Store: copy the closed `store.db` family (`store.db`, `store.db-wal`, `store.db-shm` when present). The destination must be a directory owned by the daemon's user with mode `0700`, and the copied files must stay `0600`; the store narrows its live family to `0600` on open but nothing guards a copy. The store publishes no backup of its own.
+5. Record the pair together with the binary's version and both baseline digests. A backup pair belongs to the binary that wrote it.
 
 Restore of the pair:
 
 1. Stop the daemon.
-2. Kernel: open the target directory and call `KernelStore::restore` with the backup path. The restored database keeps its incarnation id, its staged rows, its holds, and its purge tombstones; a backup missing a purge this store committed is refused before anything is displaced.
-3. Memory Store: replace the file family with the copied one. It keeps its incarnation id and every receipt.
+2. Kernel: place the artifact objects under the target root's `kernel/artifacts/objects/`, open the target root with the same binary that wrote the backup, and call `KernelStore::restore` with the backup path. The restored database keeps its incarnation id, its staged rows, its holds, and its purge tombstones. The restore is refused before anything is displaced when the backup lacks a purge this store committed, or when its live evidence references an object the root does not hold or holds as bytes that fail verification.
+3. Memory Store: replace `store.db` and its sidecars with the copied family. It keeps its incarnation id and every receipt.
 4. Start the daemon. A proposal selected before the backup reads again through `review.read` while its review hold is live, and the owner's activation record still matches because neither incarnation changed.
 
-Mismatch refusal, as the rehearsal test `crates/daemon/tests/curator_backup_restore.rs` proves over real files:
+Mismatch refusal, as the rehearsal test `crates/daemon/tests/curator_backup_restore.rs` proves over the data-directory layout above:
 
 | Restored | Beside | What happens |
 | --- | --- | --- |
+| Kernel database from backup | a root without the referenced artifact objects | `KernelStore::restore` is refused as an invalid restore and the root is left as it was; carrying `kernel/artifacts/objects/` makes the same restore succeed and the evidence readable. |
 | Memory Store from backup | a replaced (fresh) Kernel | `review.read` answers `incarnation_mismatch`; resuming the receipt is refused as a binding mismatch; the activation gate closes on `kernel incarnation`. The receipt row stays exactly as backed up. |
 | Kernel from backup | a replaced (fresh) Memory Store | No receipt exists, so `review.read` answers `not_selected`; the gate closes on `memory store incarnation`. The Kernel's staged proposal is not served on anyone's say-so. |
-| either store | a different binary | The gate closes on the baseline digest or compiled version that differs. Receipts and staged rows are untouched. |
+| either store | a binary whose compiled versions differ but whose schema baselines match | The gate closes on the compiled version that differs (`identity_mismatch`; the log names the term). Receipts and staged rows are untouched. |
+| either store | a binary whose schema baseline differs | The store refuses to open: the Kernel reports `kernel_state: unavailable` with `unavailable_reason: store_unsupported`, and the Memory Store's open fails on its baseline. Neither file is touched, and the activation gate is never evaluated because there is no store to evaluate it against. Nothing migrates a family to another baseline. |
 
 Nothing reconciles a mismatched pair. No migration rewrites incarnation ids, no reset clears receipts, and no code path adopts a staged proposal whose receipt is missing.
 
-Rollback rule: rolling back to an earlier release means the retained old binary together with the backup pair that binary wrote. If no matching pair exists, the only alternative is an owner-authorized fresh baseline: both stores start empty, the owner writes a new activation record for the new incarnations, and the pending proposals of the abandoned pair are documented as nonportable, because they are bound to incarnations that no longer exist and cannot be carried into the new pair. There is no supported path that keeps one store and replaces the other.
+Rollback rule: rolling back to an earlier release means the retained old binary together with the backup pair that binary wrote, restored by that binary. When the release being rolled back changed a schema baseline, the old binary cannot open the current live family to restore into it (the row above), so the live `kernel.sqlite` family and `store.db` family are moved aside first and the old binary restores into the emptied root, with the artifact objects carried as in Restore step 2. If no matching pair exists, the only alternative is an owner-authorized fresh baseline: both stores start empty, the owner writes a new activation record for the new incarnations, and the pending proposals of the abandoned pair are documented as nonportable, because they are bound to incarnations that no longer exist and cannot be carried into the new pair. There is no supported path that keeps one store and replaces the other.
 
 ## 6. Exposure bounds (Q38)
 
@@ -165,8 +172,10 @@ The parent property portfolio was not published before dependent implementation,
 | Default-Sensitive subjects abstain without a request, a canonical write, or invented provenance | `curator_coordinator::a_staged_subject_is_policy_blocked_for_a_remote_model_and_abstains`; `curator_worker::a_closed_gate_runs_nothing_and_an_open_gate_runs_the_job_to_policy_blocked_abstention` |
 | A genuinely eligible memory becomes a published proposal | `curator_coordinator::a_selected_eligible_memory_becomes_a_published_proposal_through_the_shared_path` |
 | The activation gate closes on every identity mismatch and opens only for an attested owner-only record | `curator::activation` unit test; `curator_worker` |
+| A closed gate names the mismatched term and its live value in the log, once per distinct reason, and never the credential fingerprint | `curator_worker::a_closed_gate_reports_the_mismatched_term_and_its_live_value_once_per_change`; `curator::lifecycle::a_closed_reason_changes_once_per_distinct_reason_and_an_open_gate_clears_it` |
 | Status counters are bounded and content-free | `curator::lifecycle` tests; `host-runtime` `curator_block_tests` |
-| Both-store backup and restore, and mismatch refusal | `crates/daemon/tests/curator_backup_restore.rs` |
+| Both-store backup and restore over the data-directory layout, artifact objects required at restore, and mismatch refusal | `crates/daemon/tests/curator_backup_restore.rs`; `kernel_backup::a_dangling_reference_is_refused_even_when_integrity_check_passes`, `a_backup_whose_evidence_was_purged_after_capture_cannot_be_restored` |
+| A family whose schema baseline differs from the binary is refused at open and left untouched | `kernel_open::every_conclusive_kernel_mismatch_is_refused_and_left_untouched`; `storage::a_refused_foreign_database_keeps_its_bytes_and_gains_no_sidecars` |
 | Shutdown joins owned work before store release | `curator_coordinator::an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt`; `curator_worker::a_cancelled_worker_loop_returns_before_the_stores_are_released`; the daemon's `shutdown_cancels_and_joins_tracked_*` tests |
 | Cleanup is finite and kind-specific | `curator::lifecycle` maintenance test |
 | Review outcomes list and read only through the receipt-selected path | `crates/daemon/tests/curator_wire.rs` |
