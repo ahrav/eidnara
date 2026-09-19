@@ -76,7 +76,6 @@
         "zod": "4.4.3",
       },
       "devDependencies": {
-        "@eidnara/fs-observer": "0.1.0",
         "@types/better-sqlite3": "^7.6.13",
         "@types/bun": "1.3.14",
         "@types/node": "^22.20.0",

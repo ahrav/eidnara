@@ -23,8 +23,6 @@ export interface HiddenAgentRegistration {
     allowedTools: readonly string[];
     maxSteps: number;
     overrides?: Record<string, unknown>;
-    /** `lockPermissions` drops user `permission` overrides for privacy-critical agents. */
-    lockPermissions?: boolean;
 }
 
 export function buildHiddenAgentRegistrations(args: {
@@ -54,38 +52,22 @@ export function buildHiddenAgentConfig(
     maxSteps: number,
     overrides?: Record<string, unknown>,
     agentLabel?: string,
-    lockPermissions = false,
     description?: string,
 ) {
     const {
         permission: overridePermission,
-        tools: overrideTools,
-        // Destructuring `prompt` and `system` lets locked configs discard them and prevents `...rest` from overwriting `prompt`.
         prompt: overridePrompt,
-        system: overrideSystem,
         ...rest
     } = (overrides ?? {}) as {
         permission?: Record<string, unknown>;
-        tools?: Record<string, boolean>;
         prompt?: unknown;
-        system?: unknown;
         [key: string]: unknown;
     };
-    // When `lockPermissions` is true, excluding user `tools`, `prompt`, and `system` overrides prevents users from re-enabling denied tools or replacing configured prompts.
-    // A user `tools` override could otherwise re-enable a tool denied by `basePermission`.
-    const promptOverrides: Record<string, unknown> = lockPermissions
-        ? {}
-        : {
-              ...(overridePrompt !== undefined ? { prompt: overridePrompt } : {}),
-              ...(overrideSystem !== undefined ? { system: overrideSystem } : {}),
-          };
-    const restOverrides: Record<string, unknown> = lockPermissions
-        ? { ...rest, ...promptOverrides }
-        : {
-              ...rest,
-              ...promptOverrides,
-              ...(overrideTools !== undefined ? { tools: overrideTools } : {}),
-          };
+    // An override `prompt` replaces the built-in prompt only when it is defined.
+    const restOverrides: Record<string, unknown> = {
+        ...rest,
+        ...(overridePrompt !== undefined ? { prompt: overridePrompt } : {}),
+    };
     const basePermission = buildAllowOnlyPermission(allowedTools, agentLabel);
     return {
         prompt,
@@ -94,10 +76,9 @@ export function buildHiddenAgentConfig(
         steps: clampHiddenAgentStepLimit(restOverrides.steps, maxSteps),
         maxSteps: clampHiddenAgentStepLimit(restOverrides.maxSteps, maxSteps),
         // `permission` follows `restOverrides` so `restOverrides` cannot override the deny baseline.
-        // When `lockPermissions` is true, excluding `overridePermission` preserves the denied tools in `basePermission`.
         permission: {
             ...basePermission,
-            ...(lockPermissions ? {} : (overridePermission ?? {})),
+            ...(overridePermission ?? {}),
         },
         mode: "primary" as const,
         hidden: true,

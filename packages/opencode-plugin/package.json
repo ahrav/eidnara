@@ -25,12 +25,12 @@
         "!src/**/__tests__"
     ],
     "scripts": {
-        "build": "bun run clean && tsc -p ../fs-observer/tsconfig.build.json && bun run build:tui && bun build src/index.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @opencode-ai/plugin --external bun:sqlite --external node:sqlite --external jsonc-parser && tsc -p tsconfig.declarations.json --emitDeclarationOnly",
+        "build": "bun run clean && bun run build:tui && bun build src/index.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @opencode-ai/plugin --external bun:sqlite --external node:sqlite --external jsonc-parser && tsc -p tsconfig.declarations.json --emitDeclarationOnly",
         "build:tui": "bun scripts/build-tui.ts",
         "smoke:tui-import": "bun scripts/smoke-tui-import.ts",
         "smoke": "bun run smoke:tui-import",
         "context:concat": "bun scripts/context-dump/run-context-concat.ts",
-        "typecheck": "tsc -p ../fs-observer/tsconfig.build.json && tsc --noEmit && tsc -p tsconfig.scripts.json && tsc -p tsconfig.tui.json",
+        "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json && tsc -p tsconfig.tui.json",
         "test": "bun test",
         "lint": "biome check .",
         "lint:fix": "biome check --write .",
@@ -48,7 +48,6 @@
         "zod": "4.4.3"
     },
     "devDependencies": {
-        "@eidnara/fs-observer": "0.1.0",
         "@types/better-sqlite3": "^7.6.13",
         "@types/bun": "1.3.14",
         "@types/node": "^22.20.0",

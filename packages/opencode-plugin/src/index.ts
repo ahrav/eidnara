@@ -283,7 +283,6 @@ const server: Plugin = async (ctx) => {
                         reg.maxSteps,
                         reg.overrides,
                         reg.id,
-                        reg.lockPermissions === true,
                         reg.description,
                     );
                 }

@@ -41,6 +41,27 @@ describe("buildHiddenAgentConfig", () => {
         expect(config.prompt).toBe("x");
     });
 
+    it("passes user tools and system overrides through and keeps the built-in prompt when none is given", () => {
+        const config = buildHiddenAgentConfig(
+            "p",
+            ["eidnara_search"],
+            40,
+            { tools: { bash: true }, system: "s", fallback_models: ["m"] },
+            "context-researcher",
+            "d",
+        );
+        expect(config).toMatchObject({
+            prompt: "p",
+            tools: { bash: true },
+            system: "s",
+            fallback_models: ["m"],
+            description: "d",
+            mode: "primary",
+            hidden: true,
+        });
+        expect(config.permission).toEqual({ "*": "deny", eidnara_search: "allow" });
+    });
+
     it("falls back to cap for invalid limits", () => {
         for (const bad of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY, "7", null]) {
             const config = buildHiddenAgentConfig("p", [], 40, { steps: bad, maxSteps: bad });

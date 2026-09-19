@@ -95,6 +95,8 @@ export function prepareExplicitQuery(raw: string): ExplicitQueryPreparation {
         return { ok: false, violation: "bytes", limit: MAX_QUERY_BYTES, actual: bytes };
     }
     const trimmed = raw.trim();
+    // An empty query is reported as missing by the caller; it needs no atom or token count.
+    if (trimmed === "") return { ok: true, query: trimmed };
     const atoms = countQueryAtoms(trimmed);
     if (atoms > MAX_QUERY_ATOMS) {
         return { ok: false, violation: "atoms", limit: MAX_QUERY_ATOMS, actual: atoms };
