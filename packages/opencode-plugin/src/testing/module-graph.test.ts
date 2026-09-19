@@ -145,6 +145,23 @@ describe("module graph over the landed tree", () => {
         expect(readFileSync(join(SRC, "index.ts"), "utf8")).not.toContain("preloadTokenizer");
     });
 
+    test("deleted TypeScript engines and migration contracts cannot return to production", () => {
+        const forbidden =
+            /ContextApplication|context-application|range-parser|note-condition-compiler|quickjs|noteEvaluationAvailable|authorityState|RustAuthority(?:State|Domain)|condition-compiler|sandbox-runner/;
+        const hits = MODULES.flatMap((file) => {
+            const source = readFileSync(file, "utf8");
+            return forbidden.test(`${relative(SRC, file)}\n${source}`) ? [relative(SRC, file)] : [];
+        });
+        expect(hits).toEqual([]);
+
+        for (const manifest of [
+            join(SRC, "../package.json"),
+            join(SRC, "../../pi-plugin/package.json"),
+        ]) {
+            expect(readFileSync(manifest, "utf8")).not.toMatch(/quickjs/i);
+        }
+    });
+
     test("retained modules carry no claim.* or memory_classifier.* operation literal", () => {
         expect(OPERATION_LITERAL.test('"claim.intent.stage"')).toBe(true);
         expect(OPERATION_LITERAL.test("'memory_classifier.run_task'")).toBe(true);

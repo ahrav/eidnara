@@ -6,7 +6,6 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildHiddenAgentRegistrations } from "../../agents/hidden-agent-registrations";
-import { NOTE_CONDITION_COMPILER_SYSTEM_PROMPT } from "../../features/context/conditional-notes/compiler-prompt";
 import { CONTEXT_RESEARCHER_SYSTEM_PROMPT } from "../../features/context/context-researcher/agent";
 import { sessionLog } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
@@ -302,7 +301,6 @@ describe("system-prompt-hash skips Eidnara internal child agents", () => {
     for (const [label, head] of [
         ["history_summarizer", HISTORY_SUMMARIZER_HEAD],
         ["context-researcher", CONTEXT_RESEARCHER_SYSTEM_PROMPT],
-        ["note-condition-compiler", NOTE_CONDITION_COMPILER_SYSTEM_PROMPT],
     ] as const) {
         it(`skips tracking for the ${label} agent (prompt signature)`, async () => {
             useTempDataHome(`sph-skip-eidnara-${label}-`);
@@ -317,7 +315,6 @@ describe("system-prompt-hash skips Eidnara internal child agents", () => {
 
     it("detects every registered hidden-agent prompt", () => {
         const registrations = buildHiddenAgentRegistrations({
-            noteConditionCompilerPrompt: NOTE_CONDITION_COMPILER_SYSTEM_PROMPT,
             context_researcherPrompt: CONTEXT_RESEARCHER_SYSTEM_PROMPT,
         });
 

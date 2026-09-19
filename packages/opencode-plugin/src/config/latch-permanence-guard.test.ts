@@ -21,11 +21,6 @@ const KNOWN_SLOTS: Record<string, KnownSlot> = {
         classification: "VERDICT",
         reason: "DEFECT: a transient PRAGMA/read failure is cached as incompatible until the writable DB is closed.",
     },
-    "packages/opencode-plugin/src/features/context/conditional-notes/sandbox-runner.ts:asyncModulePromise":
-        {
-            classification: "VERDICT",
-            reason: "DEFECT: a rejected dynamic-import/WASM-init promise is retained for every later conditional-note check.",
-        },
     "packages/opencode-plugin/src/hooks/context/eidnara-reduce-availability.ts:eidnaraReduceRegisteredGlobally":
         {
             classification: "VERDICT",

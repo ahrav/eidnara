@@ -1,6 +1,5 @@
 import { buildAllowOnlyPermission } from "./permissions";
 
-// Hidden-agent caps are 40 for context_researcher and 8 for the conditional-note compiler.
 /** A step budget below one cannot run a turn, and the host rejects a fractional count, so only a positive integer at or under `cap` is kept. */
 function clampHiddenAgentStepLimit(value: unknown, cap: number): number {
     return typeof value === "number" && Number.isInteger(value) && value >= 1
@@ -29,22 +28,10 @@ export interface HiddenAgentRegistration {
 }
 
 export function buildHiddenAgentRegistrations(args: {
-    noteConditionCompilerPrompt: string | undefined;
     context_researcherPrompt: string | undefined;
     context_researcherOverrides?: Record<string, unknown>;
 }): HiddenAgentRegistration[] {
     return [
-        {
-            id: "note-condition-compiler",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.noteConditionCompilerPrompt,
-            allowedTools: [],
-            maxSteps: 8,
-            // `lockPermissions` prevents user overrides from granting compiler tools.
-            lockPermissions: true,
-        },
         {
             id: "context-researcher",
             mode: "primary",

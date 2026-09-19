@@ -7,10 +7,6 @@ Actions:
 - read: list notes, newest first. Default: latest active session notes + ready conditional notes; page older ones with limit/offset, or inspect other states with filter.
 - update / dismiss: change or retire a note by note_id.
 
-Conditional notes: pass surface_condition and the note stays hidden until a background checker confirms the condition — using ONLY externally verifiable signals (GitHub state via gh, files on disk, git history, web pages). It cannot see this conversation, so the condition must be checkable from outside:
-✓ "When PR #42 in ahrav/eidnara is merged"
-✓ "When the latest release tag is >= v0.22.0"
-✓ "When packages/opencode-plugin/src/foo.ts contains a function named bar"
-✗ "When the user mentions X" / "when we revisit Y" / "after we finish this refactor" — no external signal; write a regular note instead.
+Conditional notes are unsupported unless another host registers a live evaluator. Rust refuses conditioned writes and updates rather than storing an inactive condition. When a scheduled-wake integration is active, conditioned writes become plain notes with scheduling guidance; conditioned updates remain refused.
 
 Example: eidnara_note(action="write", content="Re-run the perf benchmark once the boundary rework ships", surface_condition="When the latest release tag is >= v0.23.0")`;

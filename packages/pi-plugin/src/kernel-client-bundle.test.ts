@@ -68,20 +68,7 @@ const NOT_PORTED =
  * Runtime-unreachable modules require a documented exclusion here; an entry
  * leaves this map when a runtime import reaches its module.
  */
-const AWAITING_CONSUMER = new Map<string, string>([
-    [
-        "context-application-pi.ts",
-        "its consumer is the system-prompt packing pass, which waits on a daemon route that produces a packed body",
-    ],
-    [
-        "pi-pressure.ts",
-        "its consumer wrote session pressure to a session-meta database this package does not port",
-    ],
-    [
-        "read-session-pi.ts",
-        "its consumers were the message index and the history_summarizer, which read Pi transcripts in TypeScript; the daemon reads transcripts itself",
-    ],
-]);
+const AWAITING_CONSUMER = new Map<string, string>();
 
 function sourceFiles(dir: string, acc: string[] = []): string[] {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {

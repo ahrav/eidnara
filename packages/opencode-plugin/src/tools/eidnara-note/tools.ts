@@ -1,16 +1,6 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
-import {
-    compileSurfaceCondition,
-    conditionCompileReplySuffix,
-    conditionCompileStorageFields,
-} from "../../features/context/conditional-notes/condition-compiler";
 import { wakePlaneStatus } from "../../features/context/conditional-notes/wake-plane";
-import { resolveProjectRootDirectory } from "../../features/context/project-identity";
-import type {
-    RustAuthorityState,
-    RustNoteToolRequest,
-    RustToolBackends,
-} from "../../plugin/rust-tool-backends";
+import type { RustNoteToolRequest, RustToolBackends } from "../../plugin/rust-tool-backends";
 import {
     boundedCommandId,
     isRustAuthorityDrainingError,
@@ -24,11 +14,6 @@ import type { EidnaraNoteArgs } from "./types";
 export { EIDNARA_NOTE_LIGHT_DESCRIPTION } from "../light-descriptions";
 
 export interface EidnaraNoteToolDeps {
-    /**
-     * Optional authority and condition-evaluation hooks use this identity.
-     * The Rust note backend owns the authoritative route and project identity.
-     */
-    resolveProjectPath?: (directory: string) => string | undefined;
     rustToolBackends: RustToolBackends;
 }
 
@@ -120,7 +105,7 @@ const eidnaraNoteArgsShape = {
         .string()
         .optional()
         .describe(
-            "Externally verifiable condition for conditional notes. The daemon's note evaluator checks this using gh CLI, web fetches, file reads, git, etc. — NOT your conversation history. Use only for things like GitHub PR/issue state, release tags, file contents, or workflow runs. DO NOT use for 'when the user mentions X' / 'when we revisit Y' / 'when relevant to current task' — the evaluator has no access to session context. For session-relative reminders, omit this and write a regular note.",
+            "Externally verifiable condition for conditional notes. No evaluator ships with this plugin, so Rust refuses conditioned notes unless another host has registered a live evaluator. Scheduled-wake integrations may instead store a plain note and return scheduling guidance.",
         ),
     filter: tool.schema
         .enum(["all", "active", "pending", "ready", "dismissed"])
@@ -197,48 +182,9 @@ function createEidnaraNoteTool(deps: EidnaraNoteToolDeps): ToolDefinition {
             }
             const surfaceCondition = wakePlaneActive ? undefined : args.surface_condition?.trim();
 
-            const needsProjectIdentity =
-                deps.rustToolBackends.authorityState !== undefined ||
-                deps.rustToolBackends.noteEvaluationAvailable !== undefined;
-            const projectIdentity = needsProjectIdentity
-                ? deps.resolveProjectPath?.(toolContext.directory)
-                : undefined;
-            if (needsProjectIdentity && !projectIdentity) {
-                return "Error: Could not resolve project identity for eidnara_note preflight checks.";
-            }
-
-            let notesAuthority: RustAuthorityState | null = null;
-            if (deps.rustToolBackends.authorityState && projectIdentity) {
-                try {
-                    notesAuthority = await deps.rustToolBackends.authorityState({
-                        projectPath: projectIdentity,
-                        projectRoot: toolContext.directory,
-                        domain: "notes",
-                    });
-                } catch (error) {
-                    return `Error: Rust notes authority is unavailable. ${error instanceof Error ? error.message : String(error)}`;
-                }
-            }
-            if (notesAuthority !== null && notesAuthority !== "MODULE") {
-                return noteAuthorityRefusal(args, action);
-            }
-
             const rustNote = deps.rustToolBackends.note;
             if (!rustNote) {
                 return "Error: Rust notes authority is active, but this module transport does not support eidnara_note.";
-            }
-            let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
-            // Only a live local evaluator compiles the condition; the daemon's `refuse_conditioned_note_without_evaluator` owns the uncompiled case.
-            if (
-                (action === "write" || action === "update") &&
-                surfaceCondition &&
-                projectIdentity !== undefined &&
-                deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true
-            ) {
-                // Resolve relative paths and default repository predicates against the repository root.
-                compilation = await compileSurfaceCondition(surfaceCondition, {
-                    projectPath: resolveProjectRootDirectory(toolContext.directory),
-                });
             }
             const request: RustNoteToolRequest = {
                 ...(commandId ? { commandId } : {}),
@@ -246,7 +192,6 @@ function createEidnaraNoteTool(deps: EidnaraNoteToolDeps): ToolDefinition {
                 action,
                 content: args.content,
                 surfaceCondition,
-                ...(compilation ? conditionCompileStorageFields(compilation) : {}),
                 filter: args.filter,
                 limit: pageNumber(args.limit, 1),
                 offset: pageNumber(args.offset, 0),
@@ -261,7 +206,6 @@ function createEidnaraNoteTool(deps: EidnaraNoteToolDeps): ToolDefinition {
                 if (wakePlaneActive) {
                     return `${text}\nwake plane active — create a scheduled wake instead; stored as a plain note.`;
                 }
-                if (compilation) return text + conditionCompileReplySuffix(compilation);
                 return text;
             } catch (error) {
                 if (isRustToolSessionDeletedError(error)) {

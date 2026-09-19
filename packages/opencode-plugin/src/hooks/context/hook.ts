@@ -231,10 +231,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             action,
             content,
             surfaceCondition,
-            compiledProvider,
-            compiledConfig,
-            compiledAt,
-            compileStatus,
             filter,
             limit,
             offset,
@@ -260,14 +256,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                         content,
                         memory_project: memoryProject,
                         surface_condition: surfaceCondition,
-                        ...(compileStatus
-                            ? {
-                                  compiled_provider: compiledProvider,
-                                  compiled_config: compiledConfig,
-                                  compiled_at: compiledAt,
-                                  compile_status: compileStatus,
-                              }
-                            : {}),
                         filter,
                         limit,
                         offset,
@@ -276,7 +264,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 },
             });
         },
-        // No `noteEvaluationAvailable`: conditioned notes require a live `note.evaluation.register` heartbeat.
     };
 
     // Guidance comes from the daemon, which is already on the prompt path and serves the tags

@@ -793,7 +793,6 @@ describe("eidnara hook", () => {
         expect("config" in hook).toBe(false);
         expect(Object.keys(hook.rustToolBackends).sort()).toEqual(["note", "reduce"]);
         expect(typeof hook.resolveSessionDirectory).toBe("function");
-        expect("noteEvaluationAvailable" in hook.rustToolBackends).toBe(false);
     });
 
     it("returns null and records no_project when no project identity resolves", () => {
@@ -1127,10 +1126,6 @@ describe("eidnara hook", () => {
             action: "write",
             content: "Remember the build flag",
             surfaceCondition: "file exists",
-            compiledProvider: "quickjs",
-            compiledConfig: "{}",
-            compiledAt: 123,
-            compileStatus: "compiled",
         });
 
         expect(response).toEqual({ result: { note_id: 7 } });
@@ -1147,10 +1142,6 @@ describe("eidnara hook", () => {
                         content: "Remember the build flag",
                         memory_project: memoryProject,
                         surface_condition: "file exists",
-                        compiled_provider: "quickjs",
-                        compiled_config: "{}",
-                        compiled_at: 123,
-                        compile_status: "compiled",
                         filter: undefined,
                         limit: undefined,
                         offset: undefined,
@@ -1161,7 +1152,7 @@ describe("eidnara hook", () => {
         ]);
     });
 
-    it("omits compiled fields from eidnara_note arguments without a compile status", async () => {
+    it("routes plain eidnara_note arguments without compiler metadata", async () => {
         useTempDataHome("hook-note-plain-");
         const fake = createFakeModuleClient();
         const hook = requireHook(

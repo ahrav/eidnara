@@ -9,7 +9,6 @@ import { denyTaskRoutingToCallerAgents } from "./agents/permissions";
 import { loadPluginConfigDetailed } from "./config";
 import { isCompactionEnabled } from "./config/agent-disable";
 import { getEidnaraBuiltinCommands } from "./features/builtin-commands/commands";
-import { NOTE_CONDITION_COMPILER_SYSTEM_PROMPT } from "./features/context/conditional-notes/compiler-prompt";
 import { CONTEXT_RESEARCHER_SYSTEM_PROMPT } from "./features/context/context-researcher/agent";
 import { createLiveSessionState } from "./hooks/context/live-session-state";
 import {
@@ -264,7 +263,6 @@ const server: Plugin = async (ctx) => {
                       })()
                     : undefined;
                 const registrations = buildHiddenAgentRegistrations({
-                    noteConditionCompilerPrompt: NOTE_CONDITION_COMPILER_SYSTEM_PROMPT,
                     context_researcherPrompt: CONTEXT_RESEARCHER_SYSTEM_PROMPT,
                     context_researcherOverrides: context_researcherAgentOverrides,
                 });
