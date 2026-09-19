@@ -36,7 +36,7 @@ pub struct RuntimeIdentityRecord {
     pub provider: String,
     /// The startup-envelope credential name the sender dials with.
     pub credential: String,
-    /// The fingerprint of that credential's secret as [`credential_fingerprint`](super::worker::credential_fingerprint) derives it: the attestation is about one provider account, so a rotated secret closes the gate until the owner re-attests.
+    /// The credential's identity as the harness selection file stores it under `credential_identities`; rotating its secret requires re-attestation.
     pub credential_fingerprint: String,
     pub provider_retention: ProviderRetention,
 }

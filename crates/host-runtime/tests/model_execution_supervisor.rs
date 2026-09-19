@@ -145,8 +145,9 @@ fn default_limits_and_resource_declaration_match_the_fixed_caps() {
     assert_eq!(capture.max_stderr_bytes, 64 * 1024);
     assert_eq!(config::MAX_ROUTE_PROJECT_ROOT_BYTES, 4096);
     assert_eq!(config::MAX_ROUTE_SESSION_BYTES, 256);
-    assert_eq!(config::MAX_ROUTE_CREDENTIAL_FINGERPRINTS, 3);
-    assert_eq!(resources.retained_resident_bytes, 292_700_160);
+    // One fingerprint row per supported provider: anthropic, amazon-bedrock, gemini, openai.
+    assert_eq!(config::MAX_ROUTE_CREDENTIAL_FINGERPRINTS, 4);
+    assert_eq!(resources.retained_resident_bytes, 292_782_080);
     assert_eq!(resources.route_class, host_runtime::RouteClass::Reserved);
 }
 

@@ -399,6 +399,8 @@ pub(crate) fn state_only(state: KernelOutcome) -> PreparedOutcome {
 pub(crate) struct RouteScope {
     pub(crate) store: Arc<KernelStore>,
     pub(crate) project: ProjectBinding,
+    /// The root as the route bound it, without canonicalization; `project` holds the canonical form.
+    pub(crate) project_root: std::path::PathBuf,
     pub(crate) harness: String,
     pub(crate) context_capabilities: crate::context_capabilities::LatchedCapabilities,
 }
@@ -426,6 +428,7 @@ impl HandlerCore {
         Ok(RouteScope {
             store,
             project,
+            project_root: binding.project_root,
             harness: binding.harness,
             context_capabilities: binding.context_capabilities,
         })

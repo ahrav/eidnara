@@ -16,9 +16,11 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_changefeed_domain_seq"),
     ("index", "idx_channel1_appends_session"),
     ("index", "idx_chunk_transcripts_session_range"),
+    ("index", "idx_curator_frozen_selections_deadline"),
     ("index", "idx_curator_frozen_selections_state"),
     ("index", "idx_curator_jobs_pending"),
     ("index", "idx_curator_jobs_state"),
+    ("index", "idx_curator_receipts_state"),
     ("index", "idx_facade_mutation_ledger_scope_newest"),
     ("index", "idx_field_scans_batch"),
     ("index", "idx_history_segment_events_session"),
@@ -103,7 +105,11 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "curator_jobs_reject_secret_update"),
     ("trigger", "curator_receipts_deadlines_immutable"),
     ("trigger", "curator_receipts_no_delete"),
+    ("trigger", "curator_receipts_reject_secret_update"),
+    ("trigger", "curator_selection_cursors_reject_secret_insert"),
+    ("trigger", "curator_selection_cursors_reject_secret_update"),
     ("trigger", "curator_store_identity_no_delete"),
+    ("trigger", "curator_store_identity_no_reinsert"),
     ("trigger", "curator_store_identity_no_update"),
     ("trigger", "notes_facade_authority_delete"),
     ("trigger", "notes_facade_authority_insert"),
@@ -194,6 +200,20 @@ fn fresh_open_creates_memory_sqlite_with_the_eidnara_identity_and_the_whole_base
             "infrastructure table {table} is not pinned"
         );
     }
+}
+
+#[test]
+fn the_published_baseline_digest_is_the_one_every_open_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(MemoryStore::open_for_test(dir.path(), "eidnara-test"));
+    let stored: String = inspect(dir.path())
+        .query_row(
+            "SELECT baseline_sha256 FROM format_marker WHERE id = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(memory_store::baseline_digest(), stored);
 }
 
 /// `notes` triggers require scalar functions that only `MemoryStore::open` registers,

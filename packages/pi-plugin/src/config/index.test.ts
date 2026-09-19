@@ -113,7 +113,7 @@ describe("loadPiConfig", () => {
         expect(result.loadedFromPaths).toEqual([projectPath]);
     });
 
-    it("loads the shared transform_mode field without Pi-specific warnings", () => {
+    it("drops the removed transform_mode key with one warning", () => {
         const cwd = makeTempRoot("eidnara-pi-cwd-");
         const home = makeTempRoot("eidnara-pi-home-");
         withHome(home);
@@ -121,8 +121,8 @@ describe("loadPiConfig", () => {
 
         const result = loadPiConfig({ cwd });
 
-        expect(result.config.transform_mode).toBe("rust");
-        expect(result.warnings).toEqual([]);
+        expect("transform_mode" in result.config).toBe(false);
+        expect(result.warnings.join("\n")).toContain("transform_mode was removed");
     });
 
     it("loads user config only", () => {

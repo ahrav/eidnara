@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as logger from "../shared/logger";
 import { createMessagesTransformHandler } from "./messages-transform";
 
@@ -19,45 +19,7 @@ function makeOutput(): Output {
     };
 }
 
-const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
-
-afterEach(() => {
-    warnSpy.mockClear();
-});
-
-describe("createMessagesTransformHandler — ts mode", () => {
-    it("returns the same array instance unchanged and does not call the inner hook", async () => {
-        let called = false;
-        const handler = createMessagesTransformHandler({
-            eidnara: {
-                "experimental.chat.messages.transform": async () => {
-                    called = true;
-                },
-            },
-            transformMode: "ts",
-        });
-
-        const output = makeOutput();
-        const result = await handler({}, output);
-
-        expect(result).toBe(output.messages);
-        expect(result).toHaveLength(1);
-        expect(called).toBe(false);
-    });
-
-    it("warns once per handler across repeated calls", async () => {
-        const handler = createMessagesTransformHandler({ eidnara: null, transformMode: "ts" });
-
-        await handler({}, makeOutput());
-        await handler({}, makeOutput());
-        await handler({}, makeOutput());
-
-        expect(warnSpy).toHaveBeenCalledTimes(1);
-        expect(String(warnSpy.mock.calls[0]?.[0])).toContain("transform_mode ts");
-    });
-});
-
-describe("createMessagesTransformHandler — rust mode", () => {
+describe("createMessagesTransformHandler", () => {
     it.each([
         "entry",
         "await",
@@ -76,7 +38,6 @@ describe("createMessagesTransformHandler — rust mode", () => {
                     await release.promise;
                 },
             },
-            transformMode: "rust",
         });
         const output = makeOutput();
         const array = output.messages;
@@ -137,7 +98,6 @@ describe("createMessagesTransformHandler — rust mode", () => {
                         await release.promise;
                     },
                 },
-                transformMode: "rust",
             });
             const output = makeOutput();
             const array = output.messages;
@@ -182,7 +142,6 @@ describe("createMessagesTransformHandler — rust mode", () => {
                     hookCalls += 1;
                 },
             },
-            transformMode: "rust",
         });
         const output = makeOutput();
         const saved = Object.getOwnPropertyDescriptor(Object.prototype, "agent");
@@ -220,7 +179,6 @@ describe("createMessagesTransformHandler — rust mode", () => {
                     });
                 },
             },
-            transformMode: "rust",
         });
         const output = makeOutput();
         const array = output.messages;
@@ -245,7 +203,6 @@ describe("createMessagesTransformHandler — rust mode", () => {
                     await release.promise;
                 },
             },
-            transformMode: "rust",
         });
         const output = makeOutput();
         const array = output.messages;
@@ -279,7 +236,6 @@ describe("createMessagesTransformHandler — rust mode", () => {
                     } as unknown as Message);
                 },
             },
-            transformMode: "rust",
         });
 
         const output = makeOutput();
@@ -287,7 +243,9 @@ describe("createMessagesTransformHandler — rust mode", () => {
 
         expect(result).toBe(output.messages);
         expect(result).toHaveLength(2);
-        expect((result?.[1]?.info as { id?: string }).id).toBe("injected");
+        const injected = result ? result[1] : undefined;
+        if (!injected) throw new Error("expected the injected message");
+        expect((injected.info as { id?: string }).id).toBe("injected");
     });
 
     it("keeps the current host contents when the inner hook mutates then throws", async () => {
@@ -302,7 +260,6 @@ describe("createMessagesTransformHandler — rust mode", () => {
                     throw new Error("inner hook failed after host mutation");
                 },
             },
-            transformMode: "rust",
         });
 
         const output = makeOutput();
@@ -329,7 +286,6 @@ describe("createMessagesTransformHandler — rust mode", () => {
                         throw new Error("failed after concurrent host edit");
                     },
                 },
-                transformMode: "rust",
             });
             const output = makeOutput();
             const originalArray = output.messages;
@@ -351,7 +307,7 @@ describe("createMessagesTransformHandler — rust mode", () => {
     }
 
     it("no-ops when eidnara is null", async () => {
-        const handler = createMessagesTransformHandler({ eidnara: null, transformMode: "rust" });
+        const handler = createMessagesTransformHandler({ eidnara: null });
 
         const output = makeOutput();
         const result = await handler({}, output);
@@ -374,7 +330,6 @@ describe("createMessagesTransformHandler — rust mode", () => {
                     dynamicCalled = true;
                 },
             }),
-            transformMode: "rust",
         });
 
         await handler({}, makeOutput());

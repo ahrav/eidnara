@@ -49,18 +49,17 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings[0]).toContain("prompt_surface.guidance_override_path/tool_descriptions");
     });
 
-    it("allows project transform_mode while still stripping project host routing", () => {
+    it("strips project host routing", () => {
         const raw: Record<string, unknown> = {
-            transform_mode: "rust",
+            protected_tags: 3,
             host: { connection_file: "/tmp/project-controlled.sock" },
         };
 
         const warnings = stripUnsafeProjectConfigFields(raw);
 
-        expect(raw.transform_mode).toBe("rust");
+        expect(raw.protected_tags).toBe(3);
         expect(raw).not.toHaveProperty("host");
         expect(warnings.some((w) => w.includes("host"))).toBe(true);
-        expect(warnings.some((w) => w.includes("transform_mode"))).toBe(false);
     });
 
     it("strips sqlite.* from project config (resource-exhaustion vector)", () => {
@@ -372,12 +371,12 @@ describe("stripUnsafeProjectConfigFields", () => {
             history_summarizer: null,
             context_researcher: false,
             memory: 7,
-            transform_mode: "ts",
+            protected_tags: 3,
         };
 
         const warnings = stripUnsafeProjectConfigFields(raw);
 
-        expect(raw).toEqual({ transform_mode: "ts" });
+        expect(raw).toEqual({ protected_tags: 3 });
         expect(warnings).toHaveLength(8);
         for (const key of [
             "compaction",

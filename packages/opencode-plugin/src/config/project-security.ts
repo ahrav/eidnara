@@ -326,10 +326,6 @@ function bareBaseline<T extends number | undefined>(
  * Only user config may set `storage.enforce_private_permissions` because it changes the shared store's confidentiality.
  * Changing `storage.enforce_private_permissions` affects every session's local-memory confidentiality.
  * Only user config may enable an externally managed trusted-group deployment.
- * `transform_mode` may come from project config, but Rust activation also requires user-tier consent.
- * A project `transform_mode` selection can opt that project's runtime into the Rust pipeline.
- * Rust activation requires user-level `transform_mode` or trusted user-level `host` configuration.
- * Rust can demand-start the managed native-host lifecycle only after user-tier consent.
  * Only user config may set `history_summarizer.model` or `history_summarizer.fallback_models` to prevent repositories from forcing compaction cost.
  * Only user config may set `history_summarizer.disallowed_tools`: the project tier merges over the user tier, so a project array would replace the user's removals and restore the history_summarizer's default tools.
  * Only user config may set `system_prompt_injection`: a project `enabled: true` or a replaced `skip_signatures` array would undo the user's injection opt-outs.

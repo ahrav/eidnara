@@ -14,11 +14,19 @@ use memory_store::curator_jobs::{
     CausalInputs, EvidenceAvailability, FrozenSelectionPage, MAX_SELECTION_REFERENCES, ReviewTarget,
 };
 
-/// Descriptor classes the production selector walks: the memories the Memory Classifier reviews.
+/// Descriptor classes the production selector walks: the memories the Memory Classifier reviews. The coordinator resolves both only through their originating decision (Q21), which `resolve_descriptor` does not do yet: a job over either class settles `Unsupported` before investigation and its causal row then suppresses the target under the same inputs. Activating the selection kind (Q36) therefore waits on Q21, or on narrowing this list to classes the coordinator resolves.
 pub const MEMORY_CLASSES: &[OccurrenceClass] = &[
     OccurrenceClass::CanonicalClaims,
     OccurrenceClass::PromotedMemory,
 ];
+
+pub fn resolvable_classes() -> Vec<OccurrenceClass> {
+    MEMORY_CLASSES
+        .iter()
+        .copied()
+        .filter(|class| super::coordinator::resolves_class(*class))
+        .collect()
+}
 /// Live descriptors examined per selection page, so one slot's work is bounded whatever the inventory's size.
 pub const MAX_EXAMINED_PER_PAGE: usize = 256;
 
@@ -57,13 +65,23 @@ impl Cursor {
     }
 }
 
-/// Why no page could be selected; a store failure keeps the slot due, and nothing else refuses.
+/// A failed selection. `Kernel` retains its error class because retryability depends on it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SelectionError {
     #[error("kernel {0}")]
-    Kernel(String),
+    Kernel(kernel::KernelError),
     #[error("ledger {0}")]
     Ledger(String),
+}
+
+impl SelectionError {
+    /// Returns whether retrying the unchanged selection may succeed: a busy reader, an exhausted budget, or a ledger read failure. A corrupt row or a refused request at this cursor cannot clear until the store changes.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Kernel(error) => error.is_retryable() || *error == kernel::KernelError::Deadline,
+            Self::Ledger(_) => true,
+        }
+    }
 }
 
 /// What one project's selection is scoped and fingerprinted by.
@@ -92,15 +110,16 @@ pub fn select_review_targets(
         classes,
         policy_versions,
     } = *scope;
-    let kernel = |error: kernel::KernelError| SelectionError::Kernel(error.to_string());
+    let kernel = SelectionError::Kernel;
     if classes.is_empty() {
         return Ok(finish(Vec::new(), None));
     }
     let mut cursor = Cursor::decode(cursor, classes.len());
-    let tip = store.tip().map_err(kernel)?;
+    let tip = store.tip_within_budget(budget).map_err(kernel)?;
     let mut references = Vec::new();
     let mut examined = 0usize;
-    loop {
+    // A page that filled at the end of a batch returns before another batch is read and judged.
+    while references.len() < MAX_SELECTION_REFERENCES {
         let remaining = MAX_EXAMINED_PER_PAGE.saturating_sub(examined);
         let Some(max_rows) = NonZeroUsize::new(remaining.min(MAX_SELECTION_REFERENCES * 4)) else {
             break;
@@ -145,14 +164,9 @@ pub fn select_review_targets(
                 return Ok(finish(references, Some(cursor)));
             }
             if verdict.permits()
-                && let Some(inputs) = causal_inputs(row, policy_versions)
+                && let Some((inputs, causal_identity)) = causal_inputs(row, policy_versions)
                 && ledger
-                    .lookup_curator_job(
-                        ledger_project,
-                        &inputs
-                            .causal_identity()
-                            .map_err(|error| SelectionError::Ledger(error.to_string()))?,
-                    )
+                    .lookup_curator_job(ledger_project, &causal_identity)
                     .map_err(|error| SelectionError::Ledger(error.to_string()))?
                     .is_none()
             {
@@ -179,12 +193,12 @@ fn finish(references: Vec<CausalInputs>, cursor: Option<Cursor>) -> FrozenSelect
     }
 }
 
-/// The causal inputs one live descriptor is reviewed under: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available, and the caller's policy versions.
+/// The causal inputs one live descriptor is reviewed under, with their identity: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available, and the caller's policy versions. `None` when the ledger cannot bind them (an unparseable revision, an id past the ledger's identity bound): such a descriptor has no job to look up or reserve, so it is passed rather than held as a ledger failure the slot would retry every poll.
 fn causal_inputs(
     row: &LiveDescriptor,
     policy_versions: &std::collections::BTreeMap<String, String>,
-) -> Option<CausalInputs> {
-    Some(CausalInputs {
+) -> Option<(CausalInputs, String)> {
+    let inputs = CausalInputs {
         target: ReviewTarget::Memory {
             object_id: row.object_id.clone(),
             source_revision: row.detail.revision.parse().ok()?,
@@ -198,12 +212,64 @@ fn causal_inputs(
             available: true,
         }],
         policy_versions: policy_versions.clone(),
-    })
+    };
+    let causal_identity = inputs.causal_identity().ok()?;
+    Some((inputs, causal_identity))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Cursor;
+    use super::{Cursor, SelectionError, causal_inputs};
+
+    /// A live descriptor the Kernel admits with an id past the ledger's identity bound has no job to look up or reserve; it is passed like an ineligible row instead of holding the walk on a refusal that never clears.
+    #[test]
+    fn a_descriptor_the_ledger_cannot_bind_is_passed_not_retried() {
+        let row = |evidence_id: String| kernel::LiveDescriptor {
+            object_id: "object-1".to_string(),
+            domain_id: "domain".to_string(),
+            sensitivity: kernel::Sensitivity::Normal,
+            created_commit_seq: 1,
+            detail: kernel::SourceDescriptorDetail {
+                descriptor_version: kernel::SOURCE_DESCRIPTOR_DETAIL_VERSION,
+                source_policy: kernel::SourceDescriptorPolicy::Native,
+                class: "git_commits".to_string(),
+                identity: Vec::new(),
+                revision: "1".to_string(),
+                representation: "summary".to_string(),
+                span: None,
+                occurrence_id: "occurrence".to_string(),
+                occurrence_tuple: Vec::new(),
+                lineage_id: "lineage".to_string(),
+                payload_id: "payload".to_string(),
+                artifact_digest: "0d".repeat(32),
+                evidence_id,
+            },
+        };
+        let versions = std::collections::BTreeMap::new();
+        assert!(causal_inputs(&row("evidence-1".to_string()), &versions).is_some());
+        // The Kernel accepts text fields up to 1024 bytes; the ledger binds identities up to 256.
+        assert!(
+            causal_inputs(&row("e".repeat(300)), &versions).is_none(),
+            "an evidence id the ledger refuses yields no inputs"
+        );
+    }
+
+    #[test]
+    fn only_a_busy_reader_or_an_exhausted_budget_is_transient() {
+        for error in kernel::KernelError::ALL {
+            assert_eq!(
+                SelectionError::Kernel(*error).is_transient(),
+                matches!(
+                    error,
+                    kernel::KernelError::Busy
+                        | kernel::KernelError::Held
+                        | kernel::KernelError::Deadline
+                ),
+                "{error}"
+            );
+        }
+        assert!(SelectionError::Ledger("locked".to_string()).is_transient());
+    }
 
     #[test]
     fn cursors_round_trip_and_malformed_tokens_restart() {

@@ -1,6 +1,6 @@
 //! Review inputs: extraction subjects and Curator proposals staged through the stager shared with the public `StagingCandidateSpec` path.
 //!
-//! `provenance_witness` carries `kind: "review"` plus a `binding` object naming the daemon-supplied project digest, domain, owner, subject source, and reference sources. The `review` kind is one `validate_provenance` rejects and `load_candidate_facts` filters out, so admission never resolves a review row. Review rows carry no caller provenance, so `run_sensitivity` classifies them `Sensitive`; a private read cannot upgrade that classification.
+//! `provenance_witness` carries `kind: "review"` plus a `binding` object naming the daemon-supplied project digest, domain, owner, subject source, and reference sources. `validate_provenance` rejects the `review` kind, `load_candidate_facts` filters the review `candidate_kind` literals, and the public staging path refuses those literals, so admission never resolves a review row. Review rows carry no caller provenance, so `run_sensitivity` classifies them `Sensitive`; a private read cannot upgrade that classification.
 //!
 //! `lease_expires_at` is an absolute queue deadline no later than [`REVIEW_QUEUE_LIFETIME_MS`] after `recorded_at`; the public one-hour lease cap and renewal path are unchanged, and `renew_staging_run` refuses review runs. Reads require completed run and candidate states, a matching stored digest and binding, and a deadline strictly after both the caller's clock and the store clock. Restaging, reads, expiry, and abandonment never extend a deadline. The existing staging sweep abandons unsealed rows at the deadline; the existing thirty-day terminal cleanup deletes sealed rows. Moving a still-live deadline to a review expiry belongs to the hold owner, not to this module.
 
@@ -17,6 +17,7 @@ use super::envelope::{
 use super::redaction::{RedactedField, contains_redaction_placeholder};
 use super::source_identity::identity_digest;
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
+use crate::cas::is_artifact_digest;
 
 /// Queue deadline bound for a review input, measured from `recorded_at`.
 pub const REVIEW_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
@@ -30,7 +31,8 @@ pub const REVIEW_WITNESS_KIND: &str = "review";
 pub const REVIEW_PAYLOAD_VERSION: u32 = 2;
 /// Serialized payload bound, checked before per-field validation runs.
 pub const MAX_REVIEW_PAYLOAD_BYTES: usize = 64 * 1024;
-pub const MAX_REVIEW_IDENTITY_BYTES: usize = 256;
+/// Identity bound for every id a review payload names. A project-text capture id ([`crate::local_file_capture_id`]) is over 300 bytes, and a proposal must be able to cite one, so this is not the 256 the shorter Kernel ids fit in.
+pub const MAX_REVIEW_IDENTITY_BYTES: usize = 512;
 pub const MAX_REVIEW_TEXT_BYTES: usize = 32 * 1024;
 pub const MAX_REVIEW_REFERENCES: usize = 256;
 /// Optional starting references beside the subject source.
@@ -39,7 +41,6 @@ pub const MAX_REVIEW_FACTS: usize = 64;
 /// Spans one extracted fact may cite.
 pub const MAX_FACT_SPANS: usize = 8;
 pub const MAX_REVIEW_LIMITATIONS: usize = 16;
-const DIGEST_HEX_LEN: usize = 64;
 const RESULT_ID_SEPARATOR: u8 = 0x1f;
 
 /// One source lineage a review input depends on.
@@ -146,6 +147,23 @@ pub enum ProposalAction {
     NoChange,
 }
 
+impl ProposalAction {
+    /// Whether the action is legal for its target kind and text: create targets a staged candidate and needs text; revise targets a memory and needs text; retain and retire target a memory without text; no-change takes either target without text.
+    pub const fn admits(self, targets_memory: bool, has_text: bool) -> bool {
+        let (needs_memory, needs_text) = match self {
+            Self::Create => (Some(false), true),
+            Self::Revise => (Some(true), true),
+            Self::Retain | Self::Retire => (Some(true), false),
+            Self::NoChange => (None, false),
+        };
+        let target_ok = match needs_memory {
+            Some(needs) => needs == targets_memory,
+            None => true,
+        };
+        target_ok && needs_text == has_text
+    }
+}
+
 /// A canonical memory named by object id, source revision, and the snapshot the proposer read; `commit_token` is the last change commit the proposer observed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,6 +251,12 @@ struct VersionedPayload {
 struct ReviewWitness {
     kind: String,
     binding: ReviewBinding,
+}
+
+/// Lifecycle guards deserialize `WitnessKind` rather than `ReviewWitness` so rows with obsolete bindings remain non-renewable.
+#[derive(Deserialize)]
+struct WitnessKind {
+    kind: String,
 }
 
 /// The run and candidate ids of one review input. A proposal's ids are the [`provisional_result_identity`] the caller recorded before dispatch; staging re-derives them from the owner and refuses a mismatch, so a stale recorded identity cannot write into another generation's row.
@@ -466,6 +490,19 @@ impl ReviewSubject {
                 return Err(ReviewStageRefusal::Invalid);
             }
         }
+        // And the reverse: an origin or range no fact cites would assert provenance nothing supports.
+        for origin in &self.origins {
+            for range in &origin.ranges {
+                let cited = self
+                    .facts
+                    .iter()
+                    .flat_map(|fact| &fact.spans)
+                    .any(|span| span.alias == origin.alias && span.range() == *range);
+                if !cited {
+                    return Err(ReviewStageRefusal::Invalid);
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -504,7 +541,6 @@ impl EvidenceReference {
 }
 
 impl ReviewProposal {
-    /// Create targets a staged candidate and needs text; revise targets a memory and needs text; retain and retire target a memory without text; no-change takes either target without text.
     fn validate(&self) -> Result<(), ReviewStageRefusal> {
         let targets_memory = match &self.target {
             ProposalTarget::StagedCandidate { candidate_id } => {
@@ -519,15 +555,7 @@ impl ReviewProposal {
                 true
             }
         };
-        let (needs_memory, needs_text) = match self.action {
-            ProposalAction::Create => (Some(false), true),
-            ProposalAction::Revise => (Some(true), true),
-            ProposalAction::Retain | ProposalAction::Retire => (Some(true), false),
-            ProposalAction::NoChange => (None, false),
-        };
-        if needs_memory.is_some_and(|needs| needs != targets_memory)
-            || needs_text != self.new_text.is_some()
-        {
+        if !self.action.admits(targets_memory, self.new_text.is_some()) {
             return Err(ReviewStageRefusal::Invalid);
         }
         if let Some(text) = &self.new_text {
@@ -618,9 +646,16 @@ impl ReviewBinding {
     }
 }
 
-/// `true` when the stored witness names a review binding.
+/// Only the two public witness kinds are renewable; decode failures and unknown kinds count as review so that a row the current build cannot classify never becomes renewable.
 pub(super) fn is_review_witness(bytes: &[u8]) -> bool {
-    ReviewBinding::from_witness(bytes).is_some()
+    serde_json::from_slice::<WitnessKind>(bytes).map_or(true, |witness| {
+        !matches!(witness.kind.as_str(), "repository" | "unclassified")
+    })
+}
+
+/// The public staging path refuses these kinds, so a review `candidate_kind` always pairs with a review witness.
+pub(super) fn is_review_kind(candidate_kind: &str) -> bool {
+    candidate_kind == REVIEW_SUBJECT_KIND || candidate_kind == REVIEW_PROPOSAL_KIND
 }
 
 impl ReviewStagingSpec {
@@ -721,15 +756,54 @@ impl KernelStore {
         expected: &ReviewBinding,
         now: i64,
     ) -> Result<ReviewStagedRow, ReviewReadError> {
+        let expected = expected
+            .clone()
+            .normalized()
+            .map_err(|_| ReviewReadError::Invalid)?;
+        let (row, sealed_at, binding) = self.load_staged_review(reference, now)?;
+        if binding != expected {
+            return Err(ReviewReadRefusal::ScopeMismatch.into());
+        }
+        let payload =
+            ReviewPayload::decode(&row.payload).map_err(|_| ReviewReadRefusal::DecodeRefused)?;
+        if payload.kind() != row.candidate_kind {
+            return Err(ReviewReadRefusal::DecodeRefused.into());
+        }
+        Ok(ReviewStagedRow {
+            binding,
+            payload,
+            // A review row is never public; a stored class below that floor is not trusted.
+            sensitivity: Sensitivity::from_stored(&row.sensitivity)
+                .restrictive(Sensitivity::Sensitive),
+            lifecycle: ReviewLifecycle {
+                created_at: row.created_at,
+                queue_deadline_at: row.deadline_at,
+                sealed_at,
+            },
+        })
+    }
+
+    /// The binding a sealed, unexpired staged row was written under, without asserting one: the caller that holds only the job row learns which scope and owner the subject belongs to before it reads. No payload byte leaves.
+    pub fn staged_review_binding(
+        &self,
+        reference: &ReviewStagedReference,
+        now: i64,
+    ) -> Result<ReviewBinding, ReviewReadError> {
+        let (_, _, binding) = self.load_staged_review(reference, now)?;
+        Ok(binding)
+    }
+
+    /// The sealed, unexpired, byte-identical row `reference` names, its sealing time, and its stored binding.
+    fn load_staged_review(
+        &self,
+        reference: &ReviewStagedReference,
+        now: i64,
+    ) -> Result<(StoredReviewRow, i64, ReviewBinding), ReviewReadError> {
         if now < 0 {
             return Err(ReviewReadError::Invalid);
         }
         check_identity(&reference.candidate_id).map_err(|_| ReviewReadError::Invalid)?;
         check_digest(&reference.payload_digest).map_err(|_| ReviewReadError::Invalid)?;
-        let expected = expected
-            .clone()
-            .normalized()
-            .map_err(|_| ReviewReadError::Invalid)?;
         let reader = self.lock_reader().map_err(ReviewReadError::Store)?;
         let incarnation =
             super::open::database_incarnation_id_via(&reader).map_err(ReviewReadError::Store)?;
@@ -780,24 +854,7 @@ impl KernelStore {
         }
         let binding =
             ReviewBinding::from_witness(&row.witness).ok_or(ReviewReadRefusal::ScopeMismatch)?;
-        if binding != expected {
-            return Err(ReviewReadRefusal::ScopeMismatch.into());
-        }
-        let payload =
-            ReviewPayload::decode(&row.payload).map_err(|_| ReviewReadRefusal::DecodeRefused)?;
-        if payload.kind() != row.candidate_kind {
-            return Err(ReviewReadRefusal::DecodeRefused.into());
-        }
-        Ok(ReviewStagedRow {
-            binding,
-            payload,
-            sensitivity: Sensitivity::from_stored(&row.sensitivity),
-            lifecycle: ReviewLifecycle {
-                created_at: row.created_at,
-                queue_deadline_at: row.deadline_at,
-                sealed_at,
-            },
-        })
+        Ok((row, sealed_at, binding))
     }
 }
 
@@ -832,22 +889,27 @@ fn classify_replay(tx: &Transaction<'_>, spec: &RedactedCandidate) -> Result<(),
     }
     let candidate = tx
         .query_row_cached(
-            "SELECT extraction_run_id,candidate_kind,payload FROM candidates WHERE candidate_id=?1",
+            "SELECT extraction_run_id,candidate_kind,payload,provenance_witness,lease_expires_at
+             FROM candidates WHERE candidate_id=?1",
             [spec.candidate_id.as_str()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             },
         )
         .optional()
         .map_err(store)?;
-    if let Some((run_id, kind, payload)) = candidate
+    if let Some((run_id, kind, payload, witness, lease_expires_at)) = candidate
         && (run_id != spec.extraction_run_id
             || kind != spec.candidate_kind.text
-            || payload != spec.payload.text.as_bytes())
+            || payload != spec.payload.text.as_bytes()
+            || witness != spec.witness
+            || lease_expires_at != spec.lease_expires_at)
     {
         return Err(ReviewStageRefusal::Changed.into());
     }
@@ -875,18 +937,15 @@ fn check_identity(value: &str) -> Result<(), ReviewStageRefusal> {
 }
 
 pub(super) fn check_digest(value: &str) -> Result<(), ReviewStageRefusal> {
-    if value.len() != DIGEST_HEX_LEN
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(ReviewStageRefusal::Invalid);
+    if is_artifact_digest(value) {
+        Ok(())
+    } else {
+        Err(ReviewStageRefusal::Invalid)
     }
-    Ok(())
 }
 
 fn check_text(value: &str) -> Result<(), ReviewStageRefusal> {
-    if value.len() > MAX_REVIEW_TEXT_BYTES {
+    if value.trim().is_empty() || value.len() > MAX_REVIEW_TEXT_BYTES {
         return Err(ReviewStageRefusal::Invalid);
     }
     check_secret_free(value)

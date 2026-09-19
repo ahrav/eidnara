@@ -96,7 +96,8 @@ function resolveUserConfigDirectory(
     return sharedBase === undefined ? undefined : dirname(sharedBase);
 }
 
-function markerCount(content: string): number {
+/** Number of `## Eidnara` heading lines in `content`; prose that mentions the marker does not count. */
+export function guidanceMarkerCount(content: string): number {
     return content.match(GUIDANCE_MARKER_LINE)?.length ?? 0;
 }
 
@@ -197,7 +198,7 @@ export function createPromptSurfaceRuntime(
             return undefined;
         }
 
-        const markers = markerCount(content);
+        const markers = guidanceMarkerCount(content);
         if (markers !== 1) {
             warnOnce(
                 `guidance-marker-count:${path}:${markers}`,
@@ -259,6 +260,33 @@ interface GuidanceEpoch {
     configIdentity: string;
     modelKey: string | undefined;
     selection: PromptSurfaceGuidanceSelection;
+}
+
+/**
+ * The `prompt_surface_*` fields every daemon route that selects guidance receives. The daemon
+ * freezes the first selection it sees for a session, so the transform and `guidance.get` must
+ * send the same fields; `model_key` is passed through as given so a transform body is unchanged.
+ */
+export function promptSurfaceWireFields(
+    runtime: PromptSurfaceRuntime | undefined,
+    config: PromptSurfaceConfig | undefined,
+    modelKey: string | null | undefined,
+): {
+    prompt_surface_preset: PromptSurfacePreset;
+    prompt_surface_model_key: string | null | undefined;
+    prompt_surface_config_identity: string;
+    prompt_surface_tool_descriptions: Readonly<Record<string, string>>;
+    prompt_surface_guidance_override: string | undefined;
+} {
+    const guidance = runtime?.resolveGuidance(config, modelKey ?? undefined);
+    return {
+        prompt_surface_preset: (guidance ?? resolvePromptSurface(config, modelKey ?? undefined))
+            .preset,
+        prompt_surface_model_key: modelKey,
+        prompt_surface_config_identity: promptSurfaceConfigIdentity(config),
+        prompt_surface_tool_descriptions: config?.tool_descriptions ?? {},
+        prompt_surface_guidance_override: guidance?.primaryOverride,
+    };
 }
 
 /** Each model-key epoch retains its preset selection and materialized override bytes. */

@@ -3,7 +3,8 @@ use std::ffi::OsString;
 use host_runtime::harness_closure::{ClosureManifest, manifest_digest};
 use host_runtime::model_execution::subprocess::{
     CREDENTIAL_FINGERPRINT_CANONICALIZATION, CREDENTIAL_FINGERPRINT_DOMAIN,
-    CREDENTIAL_VALUE_CAP_BYTES, EnvSnapshot,
+    CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, EnvSnapshot,
+    credential_variable_mechanism,
 };
 
 fn release_file(name: &str) -> serde_json::Value {
@@ -120,7 +121,67 @@ fn provider_credential_matrix_matches_the_published_doc() {
                 selected, published,
                 "published variables for {harness}/{provider} must match the runtime row selection"
             );
+            // Each published optional variable is one the runtime row forms without; dropping
+            // a required one leaves no row.
+            let optional: Vec<&str> = row["optional_variables"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mechanism = row["mechanism"].as_str().expect("mechanism is published");
+            for name in &published {
+                let published_mechanism = match credential_variable_mechanism(name) {
+                    Some(CredentialMechanism::DirectApiKey) => "direct_api_key",
+                    Some(CredentialMechanism::StaticCredentials) => "static_credentials",
+                    None => panic!("{harness}/{provider} publishes unknown variable {name}"),
+                };
+                assert_eq!(
+                    published_mechanism, mechanism,
+                    "{harness}/{provider} mechanism must match the runtime row for {name}"
+                );
+            }
+            for absent in &published {
+                let snapshot = EnvSnapshot::capture_from(
+                    published
+                        .iter()
+                        .filter(|name| name != &absent)
+                        .map(|name| (OsString::from(name), OsString::from("secret"))),
+                )
+                .expect("published variables fit the snapshot ceiling");
+                let row = snapshot.provider_row(harness, provider);
+                if optional.contains(absent) {
+                    let selected: Vec<String> = row
+                        .expect("a row forms without an optional variable")
+                        .into_iter()
+                        .map(|(name, _)| name.into_string().expect("variable name is UTF-8"))
+                        .collect();
+                    assert!(
+                        !selected.iter().any(|name| name == absent),
+                        "{harness}/{provider} row must omit the absent optional {absent}"
+                    );
+                } else {
+                    assert!(
+                        row.is_err(),
+                        "{harness}/{provider} must not form a row without required {absent}"
+                    );
+                }
+            }
         }
+        let published_variables: std::collections::BTreeSet<&str> = providers
+            .values()
+            .flat_map(|row| row["credential_variables"].as_array())
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert_eq!(
+            published_variables,
+            CREDENTIAL_VARIABLES.iter().copied().collect(),
+            "every launcher-admitted credential variable for {harness} is a published row variable"
+        );
         let aliases = spec["aliases"]
             .as_object()
             .expect("aliases object is published");

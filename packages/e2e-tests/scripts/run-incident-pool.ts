@@ -189,7 +189,8 @@ async function main(): Promise<number> {
     }
     const harnesses: Harness[] = ["rust"];
     const lanes: Lane[] = [...EXECUTABLE_LANES];
-    const workspaceParentDir = mkdtempSync(join(tmpdir(), "incident-pool-"));
+    // Short on purpose: each case workspace hosts a Unix socket path bounded by `SUN_LEN`.
+    const workspaceParentDir = mkdtempSync(join(tmpdir(), "ip-"));
     const prereqs = detectRustPrerequisites({ allowBuild: true });
     if (!prereqs.ok) {
         console.error(

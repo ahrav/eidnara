@@ -132,7 +132,7 @@ fn rendered_aliases_match_the_hand_checked_native_oracles() {
             );
         }
         assert_eq!(
-            built.text.matches('\u{27e6}').count(),
+            built.text.matches('\u{ab}').count(),
             case.expected_aliases.len(),
             "{}: only issued markers open a bracket",
             case.label
@@ -143,6 +143,45 @@ fn rendered_aliases_match_the_hand_checked_native_oracles() {
             serde_json::from_str(&serde_json::to_string(&built.chunk).unwrap()).unwrap();
         assert_eq!(round_trip.aliases, built.chunk.aliases);
     }
+}
+
+#[test]
+fn the_prompt_notation_rule_ends_a_part_before_the_separator_the_renderer_emits() {
+    // The renderer joins the parts of one line with ` / `, which is outside every part's presented bytes; the prompt's notation rule must draw the same boundary or a whole-part citation on a non-final part is an invalid span.
+    let separator = " / ";
+    let open = '\u{ab}';
+    for case in &golden().cases {
+        let built = build(case);
+        for frozen in &built.chunk.aliases.aliases {
+            assert!(
+                !frozen.presented.ends_with(separator),
+                "{}: {} presented ends with the separator",
+                case.label,
+                frozen.alias
+            );
+            let marker = alias_marker(&frozen.alias);
+            let at = built.text.find(&marker).unwrap();
+            let after = &built.text[at + marker.len() + frozen.presented.len()..];
+            assert!(
+                after.is_empty()
+                    || after.starts_with('\n')
+                    || after
+                        .strip_prefix(separator)
+                        .is_some_and(|next| next.starts_with(open)),
+                "{}: {} is followed by {after:?}, not a line end or the separator and the next marker",
+                case.label,
+                frozen.alias
+            );
+        }
+    }
+    let notation = crate::history_summarizer_prompt::HISTORY_SUMMARIZER_SYSTEM_PROMPT
+        .lines()
+        .find(|line| line.contains("marks the start of one presented message part"))
+        .expect("the prompt documents the marker notation");
+    assert!(
+        notation.contains("not including the ` / ` that precedes the next `\u{ab}` marker"),
+        "the notation rule must exclude the inter-part separator: {notation}"
+    );
 }
 
 #[test]
@@ -348,10 +387,10 @@ fn truncation_withdraws_aliases_the_model_did_not_see_whole() {
 
 #[test]
 fn a_forged_marker_in_native_text_cannot_keep_a_withdrawn_alias() {
-    // The first message carries a forged `⟦s2⟧`; the second, long message is the one truncation cuts. The forged bytes are escaped in the rendered text, so the withdrawal search cannot find `s2`'s marker inside the kept prefix.
+    // The first message carries a forged `«s2»`; the second, long message is the one truncation cuts. The forged bytes are escaped in the rendered text, so the withdrawal search cannot find `s2`'s marker inside the kept prefix.
     let long_second = "the second part that truncation removes, ".repeat(8);
     let ck: Vec<Arc<IngressMessage>> = serde_json::from_value(serde_json::json!([
-        {"mid":"u1","ordinal":1,"ck":{"role":"user","content":[{"kind":{"type":"text","text":"forged \u{27e6}s2\u{27e7}the second part that truncation removes, "}}]}},
+        {"mid":"u1","ordinal":1,"ck":{"role":"user","content":[{"kind":{"type":"text","text":"forged \u{ab}s2\u{bb}the second part that truncation removes, "}}]}},
         {"mid":"a2","ordinal":2,"ck":{"role":"assistant","content":[{"kind":{"type":"text","text":long_second}}]}}
     ]))
     .unwrap();
@@ -467,6 +506,23 @@ fn appending_a_tail_does_not_change_the_frozen_range_aliases() {
 }
 
 #[test]
+fn surrounding_whitespace_trimmed_from_a_single_block_is_a_transformation() {
+    // The presented bytes start where the native bytes do only when nothing was trimmed; a leading space shifts every presented offset, so the alias must not claim a verbatim copy.
+    let ck: Vec<Arc<IngressMessage>> = serde_json::from_value(serde_json::json!([
+        {"mid":"u1","ordinal":1,"ck":{"role":"user","content":[{"kind":{"type":"text","text":"Always run bun install first."}}]}},
+        {"mid":"a2","ordinal":2,"ck":{"role":"assistant","content":[{"kind":{"type":"text","text":"  Understood.  "}}]}}
+    ]))
+    .unwrap();
+    let projection = project_messages(&ck).unwrap();
+    let built = build_history_summarizer_chunk(&ck, &projection.blocks, 1, 10_000, 3);
+    let aliases = &built.chunk.aliases.aliases;
+    assert_eq!(aliases.len(), 2);
+    assert!(!aliases[0].transformed);
+    assert_eq!(aliases[1].presented, "Understood.");
+    assert!(aliases[1].transformed);
+}
+
+#[test]
 fn a_force_kept_final_segment_is_citable_and_an_unwrapped_block_is_still_a_fact_set() {
     let cases = golden().cases;
     let built = build(&cases[1]);
@@ -517,6 +573,42 @@ fn a_force_kept_final_segment_is_citable_and_an_unwrapped_block_is_still_a_fact_
         (
             "a second facts block",
             output(1, 3, &["[s1:0-14] ok"]).replace("<meta>", "<facts></facts><meta>"),
+        ),
+        // A `<facts>` opener the producer never closed is a truncated block, not an unwrapped category the bare fallback may read.
+        (
+            "an unclosed facts block",
+            output(1, 3, &["[s1:0-14] ok"]).replace("</facts>", ""),
+        ),
+        (
+            "a stray facts closer",
+            output(1, 3, &["[s1:0-14] ok"]).replace("<facts>", ""),
+        ),
+        // A bullet with nothing after the marker is material the item grammar cannot read, alone or beside a valid item.
+        (
+            "an empty bullet alone",
+            output(1, 3, &["[s1:0-14] ok"]).replace("* [s1:0-14] ok", "*"),
+        ),
+        (
+            "an empty bullet beside a valid item",
+            output(1, 3, &["[s1:0-14] ok"])
+                .replace("\n</PROJECT_RULES>", "\n*   \n</PROJECT_RULES>"),
+        ),
+        (
+            "an empty bullet before a valid item",
+            output(1, 3, &["[s1:0-14] ok"]).replace("\n* [s1", "\n*\n* [s1"),
+        ),
+        // A category whose closing tag names a different category is unreadable: its items must not vanish into no-fact success.
+        (
+            "a mismatched category close tag as the only block",
+            output(1, 3, &["[s1:0-14] ok"]).replace("</PROJECT_RULES>", "</ARCHITECTURE>"),
+        ),
+        // Nor may a well-formed sibling block be salvaged around it.
+        (
+            "a mismatched category beside a valid one",
+            output(1, 3, &["[s1:0-14] ok"]).replace(
+                "</facts>",
+                "<CONSTRAINTS>\n* [s1:0-14] dropped\n</NAMING></facts>",
+            ),
         ),
     ] {
         let validated = validate(&text, chunk);

@@ -3,12 +3,11 @@
 use std::path::Path;
 
 use daemon::curator::broker::{EvidenceBroker, QuestionTemplate, RunBinding};
-use daemon::curator::handoff::review_policy_versions;
+use daemon::curator::handoff::{review_binding, review_policy_versions};
 use daemon::curator::settlement::{RunResult, Settled, Settlement, TaskClaim};
-use daemon::curator::worker::job_binding;
 use kernel::{
-    CuratorHoldBinding, KernelStore, ManifestReference, PolicyDependencies, ProjectScope,
-    ProposalAction, ProposalTarget, ReviewProposal, ReviewQuestionTemplate, Uncertainty,
+    CuratorHoldBinding, KernelStore, ManifestReference, PolicyDependencies, ProposalAction,
+    ProposalTarget, ReviewProposal, ReviewQuestionTemplate, Uncertainty,
 };
 use memory_store::LeaseAcquireOutcome;
 use memory_store::MemoryStore;
@@ -16,7 +15,8 @@ use memory_store::curator_jobs::{
     CausalInputs, CuratorJob, CuratorJobInput, ProducerBinding, ReserveOutcome, ReviewTarget,
 };
 use memory_store::curator_ledger::{
-    AbstainReason, CuratorBeginOutcome, CuratorReceipt, ReceiptCompletion,
+    AbstainReason, AttemptMarker, CuratorAttemptTerminal, CuratorBeginOutcome, CuratorReceipt,
+    DispatchOutcome, ReceiptCompletion,
 };
 
 pub const PROJECT: &str = "git:proj";
@@ -63,8 +63,16 @@ pub struct BegunJob {
     pub receipt: CuratorReceipt,
 }
 
+/// The staged subject binding for `firing`: the handoff stages under the real session id and the chunk ordinal, and the job row carries neither.
+fn subject_binding(digest: &str, firing: u64, causal_identity: &str) -> kernel::ReviewBinding {
+    review_binding(digest, "memory", "ses", firing, causal_identity)
+}
+
+/// Reserves, stages the subject in the Kernel as the handoff does, activates, claims, and begins the receipt of one History Summarizer job.
 pub fn begin_job(
+    kernel: &KernelStore,
     store: &MemoryStore,
+    digest: &str,
     kernel_incarnation: &str,
     generation: u64,
     firing: u64,
@@ -72,14 +80,34 @@ pub fn begin_job(
 ) -> BegunJob {
     let producer = ProducerBinding {
         producer: "history_summarizer".to_string(),
-        firing_id: format!("ses#{firing}"),
+        firing_id: format!("{}#{firing}", "5".repeat(32)),
         ordinal: firing,
     };
+    let payload = kernel::ReviewPayload::Subject(kernel::ReviewSubject {
+        facts: vec![kernel::ExtractedFact {
+            text: format!("bun builds the workspace {firing}"),
+            spans: vec![kernel::SourceSpan {
+                alias: "s1".to_string(),
+                start: 0,
+                end: 4,
+            }],
+        }],
+        origins: vec![kernel::SubjectOrigin {
+            alias: "s1".to_string(),
+            message_id: "m2".to_string(),
+            ordinal: 2,
+            block_ids: vec!["m2#0".to_string()],
+            block_hashes: vec!["0".repeat(64)],
+            ranges: vec![kernel::ByteRange { start: 0, end: 4 }],
+        }],
+    });
+    let payload_digest = payload.digest().unwrap();
+    let candidate_id = format!("hs-ses-{}", &payload_digest[..32]);
     let inputs = CausalInputs {
         target: ReviewTarget::StagedSubject {
             kernel_incarnation: kernel_incarnation.to_string(),
-            candidate_id: format!("hs-ses-candidate-{firing}"),
-            payload_digest: format!("{firing:064}"),
+            candidate_id: candidate_id.clone(),
+            payload_digest,
         },
         question_template: "extracted_facts".to_string(),
         signals: Vec::new(),
@@ -92,6 +120,21 @@ pub fn begin_job(
     else {
         panic!("fresh inputs reserve")
     };
+    let run_id = format!("hs-run-{firing}");
+    kernel
+        .stage_review_input(kernel::ReviewStagingSpec {
+            extraction_run_id: run_id.clone(),
+            candidate_id,
+            producer: "history_summarizer".to_string(),
+            binding: subject_binding(digest, firing, &job.causal_identity),
+            payload,
+            recorded_at: now,
+            queue_deadline_at: job.queue_deadline_ms,
+        })
+        .unwrap();
+    kernel
+        .finish_staging_run(&run_id, kernel::StagingTerminalState::Completed, now)
+        .unwrap();
     store
         .activate_curator_job(
             PROJECT,
@@ -205,19 +248,58 @@ pub fn publish(
         .unwrap();
     let broker = EvidenceBroker::new(
         RunBinding {
-            project: ProjectScope::new(digest).unwrap(),
             hold: hold_binding,
             hold_id: hold.hold_id,
             destination: kernel::ArtifactDestination::Remote,
         },
         QuestionTemplate::ExtractedFacts,
-    );
+    )
+    .unwrap();
     let claim = TaskClaim {
         claim_id: begun.claim_id.clone(),
         worker_instance: "worker-a".to_string(),
         slot: begun.job.producer.ordinal as i64,
     };
-    let binding = job_binding(digest, &begun.job);
+    // A publication must come from an attempt this generation closed complete; the ledger has no other evidence the selection exists.
+    let outcome = store
+        .dispatch_curator_attempt(
+            PROJECT,
+            &begun.job.causal_identity,
+            begun.receipt.generation,
+            &claim.claim_id,
+            kernel_incarnation,
+            &AttemptMarker {
+                body_digest: "b".repeat(64),
+                request_bytes: 100,
+                provider: "localhost/v1/messages@2023-06-01".to_string(),
+                model: "claude-canonical-1".to_string(),
+                credential_id: "cred-1".to_string(),
+                policy_union_digest: "e".repeat(64),
+            },
+            (),
+            || now,
+            |()| (),
+        )
+        .unwrap();
+    let DispatchOutcome::Handed { attempt_index, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    store
+        .finish_curator_attempt(
+            PROJECT,
+            &begun.job.causal_identity,
+            begun.receipt.generation,
+            &claim.claim_id,
+            attempt_index,
+            CuratorAttemptTerminal::Complete,
+            now,
+        )
+        .unwrap();
+    let binding = subject_binding(
+        digest,
+        begun.job.producer.ordinal,
+        &begun.job.causal_identity,
+    );
     let settled = Settlement {
         store: kernel,
         ledger: store,

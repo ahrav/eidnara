@@ -8,8 +8,8 @@ use daemon::dispatch::PreparedOutcome;
 use kernel::ReviewProposal;
 use serde_json::{Value, json};
 use support::curator_publish::{
-    abstain, activate_module_authority, begin_job, commit_memory_domain, kernel_incarnation,
-    now_ms, publish,
+    PROJECT, abstain, activate_module_authority, begin_job, commit_memory_domain,
+    kernel_incarnation, now_ms, publish,
 };
 use support::kernel_daemon::{KernelDaemon, SESSION};
 
@@ -61,10 +61,34 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
         json!({ "kind": "page", "items": [], "next": null })
     );
     let now = now_ms();
-    let abstained = begin_job(&store, &kernel_incarnation, generation, 1, now);
+    let abstained = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        1,
+        now,
+    );
     abstain(&store, &kernel_incarnation, &abstained, now);
-    let in_progress = begin_job(&store, &kernel_incarnation, generation, 2, now);
-    let published = begin_job(&store, &kernel_incarnation, generation, 3, now);
+    let in_progress = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        2,
+        now,
+    );
+    let published = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        3,
+        now,
+    );
     let expected_proposal = publish(
         &kernel,
         &store,
@@ -101,6 +125,17 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
     assert_eq!(first["kind"], json!("page"));
     assert_eq!(first["items"], json!(expected_items[..1]));
     assert_eq!(first["next"], json!(identities[0].0));
+    // A null cursor is the absent one: the spelling a response's `next` uses for the end of a walk starts the next walk.
+    assert_eq!(
+        daemon
+            .call(envelope(
+                "review.list",
+                &project,
+                json!({ "limit": 1, "after": null })
+            ))
+            .await,
+        first
+    );
     let second = daemon
         .call(envelope(
             "review.list",
@@ -134,6 +169,13 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
         .await;
     assert_eq!(all["items"], json!(expected_items));
     assert_eq!(all["next"], Value::Null);
+    // A null limit is the absent one, clamped like an oversized one.
+    assert_eq!(
+        daemon
+            .call(envelope("review.list", &project, json!({ "limit": null })))
+            .await,
+        all
+    );
     let listed = serde_json::to_string(&all).unwrap();
     assert!(!listed.contains("bun"), "no payload text lists");
     assert!(
@@ -209,8 +251,12 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
     }
 
     // Bodies are strict: an unknown field and a malformed identity are transport errors, never a page.
+    // A malformed cursor is refused too: `after` that is not a causal identity would otherwise compare
+    // as text and skip or return every outcome.
     for (method, body) in [
         ("review.list", json!({ "limit": 1, "page": 2 })),
+        ("review.list", json!({ "after": "z" })),
+        ("review.list", json!({ "after": "0" })),
         ("review.read", json!({ "causal_identity": "not-a-digest" })),
         ("review.read", json!({})),
     ] {
@@ -221,5 +267,61 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
             PreparedOutcome::Error { code, .. } => assert_eq!(code, "invalid_params", "{body}"),
             other => panic!("{method} {body}: {other:?}"),
         }
+    }
+}
+
+/// Proposal reads use the digest recorded when the proposal was staged, not the newest bound root's.
+#[tokio::test]
+async fn a_published_proposal_reads_from_every_root_after_a_newer_root_binds() {
+    let daemon = KernelDaemon::start().await;
+    let first_root = daemon.project().to_path_buf();
+    let store = daemon
+        .memory_store()
+        .expect("the daemon installed its store");
+    let kernel = daemon.store();
+    let generation = activate_module_authority(&store, &first_root);
+    commit_memory_domain(&kernel);
+    let kernel_incarnation = kernel_incarnation(&kernel);
+    let now = now_ms();
+    let digest = daemon.project_digest();
+    let published = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        1,
+        now,
+    );
+    publish(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        &published,
+        now,
+    );
+
+    let second_root = daemon.data_home().join("project-second");
+    std::fs::create_dir_all(&second_root).unwrap();
+    let second_route = daemon.bind_root(8, &second_root).await;
+    store
+        .bind_authority_route("ctx", PROJECT, second_root.to_str().unwrap())
+        .unwrap();
+
+    let body = json!({ "causal_identity": published.job.causal_identity });
+    for (route, root) in [(None, &first_root), (Some(second_route), &second_root)] {
+        let request = envelope("review.read", root, body.clone());
+        let read = match route {
+            Some(route) => daemon.call_on(route, request).await,
+            None => daemon.call(request).await,
+        };
+        assert_eq!(
+            read["kind"],
+            json!("proposal"),
+            "{}: {read}",
+            root.display()
+        );
+        assert_eq!(read["causal_identity"], body["causal_identity"]);
     }
 }

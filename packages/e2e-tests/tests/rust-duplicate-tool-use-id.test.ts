@@ -59,7 +59,6 @@ describe.skipIf(!rustPrereqs.ok)("rust incident regression: duplicate tool-use i
             eidnaraConfig: {
                 execute_threshold_percentage: 25,
                 protected_tags: 1,
-                compressor: { enabled: false },
             },
         });
     });

@@ -10,7 +10,6 @@ use daemon::curator::activation::{
 };
 use daemon::curator::settlement::{ReadRefusal, read_selected_proposal};
 use daemon::curator::steps::STEP_VERSION;
-use daemon::curator::worker::job_binding;
 use kernel::{KernelError, KernelStore};
 use memory_store::MemoryStore;
 use memory_store::curator_ledger::{CuratorLedgerError, CuratorLedgerRefusal};
@@ -168,27 +167,25 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
     private_dir(&backup.join("kernel"));
     let now = now_ms();
     // The live pair: a committed memory domain, one evidence artifact, and a published proposal.
-    let (identity, binding, evidence) = {
+    let (identity, evidence) = {
         let (kernel, store) = live_dir.open_pair();
         commit_memory_domain(&kernel);
         let evidence = ingest_evidence(&kernel);
         let generation = activate_module_authority(&store, &root.path().join("project"));
         let kernel_id = kernel_incarnation(&kernel);
-        let begun = begin_job(&store, &kernel_id, generation, 1, now);
+        let begun = begin_job(&kernel, &store, DIGEST, &kernel_id, generation, 1, now);
         publish(&kernel, &store, DIGEST, &kernel_id, &begun, now);
-        let binding = job_binding(DIGEST, &begun.job);
         assert!(
             read_selected_proposal(
                 &kernel,
                 &store,
                 PROJECT,
                 &begun.job.causal_identity,
-                &binding,
                 now + 1
             )
             .is_ok()
         );
-        (begun.job.causal_identity, binding, evidence)
+        (begun.job.causal_identity, evidence)
     };
     // A second open advances the Memory Store's writer epoch, as a deployment that has restarted stands. The pair is backed up together, with no publication between the two captures: the Kernel through its verified backup, the Memory Store as its closed file family.
     let (kernel_id, store_id, kernel_backup) = {
@@ -232,8 +229,7 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
         let (kernel, store) = restored.open_pair();
         assert_eq!(kernel_incarnation(&kernel), kernel_id);
         assert_eq!(store.curator_store_incarnation().unwrap(), store_id);
-        let read =
-            read_selected_proposal(&kernel, &store, PROJECT, &identity, &binding, now + 2).unwrap();
+        let read = read_selected_proposal(&kernel, &store, PROJECT, &identity, now + 2).unwrap();
         assert!(read.review_expires_at > now);
         assert!(evaluate(&owner_record, &live(&kernel, &store)).is_ok());
     }
@@ -246,7 +242,7 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
         let store = restored.open_store().unwrap();
         assert_ne!(kernel_incarnation(&kernel), kernel_id);
         assert_eq!(
-            read_selected_proposal(&kernel, &store, PROJECT, &identity, &binding, now + 3),
+            read_selected_proposal(&kernel, &store, PROJECT, &identity, now + 3),
             Err(ReadRefusal::IncarnationMismatch)
         );
         let resumed = store.begin_curator_receipt(
@@ -284,7 +280,7 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
         assert_eq!(kernel_incarnation(&kernel), kernel_id);
         assert_ne!(store.curator_store_incarnation().unwrap(), store_id);
         assert_eq!(
-            read_selected_proposal(&kernel, &store, PROJECT, &identity, &binding, now + 4),
+            read_selected_proposal(&kernel, &store, PROJECT, &identity, now + 4),
             Err(ReadRefusal::NotSelected)
         );
         assert_eq!(

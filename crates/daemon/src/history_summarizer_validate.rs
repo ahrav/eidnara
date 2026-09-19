@@ -135,15 +135,11 @@ pub struct ParsedHistorySegment {
     pub episode_type: Option<String>,
 }
 
-/// The struct stores a fact extracted from the `<facts>` block.
+/// A fact extracted from the `<facts>` block. A fact proves its source through its citations' native ordinals, so it carries no segment anchor; a legacy `[at_history_segment=N]` prefix is stripped and ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactCandidate {
     pub category: String,
     pub content: String,
-    /// TypeScript facts are unanchored.
-    /// When boundary healing discards the last history_segment, validation skips a fact without `origin_history_segment_index` because it cannot prove the fact's source history_segment.
-    #[serde(default)]
-    pub origin_history_segment_index: Option<u64>,
     /// Frozen-alias citations the fact carried, checked by `check_fact_set` before the set is accepted.
     #[serde(default)]
     pub citations: Vec<Citation>,
@@ -261,6 +257,8 @@ fn validation_error(message: impl Into<String>) -> HistorySummarizerValidationEr
 pub fn parse_history_segment_output(
     text: &str,
 ) -> Result<ParsedHistorySegmentOutput, HistorySummarizerValidationError> {
+    // Models wrap the document in a Markdown fence or add a sentence after it; the one
+    // complete root is still required, and everything outside it is ignored rather than fatal.
     let Some(root) = output_document_regex().captures(text) else {
         return Err(validation_error(
             "HistorySummarizer output must be one complete <output> root document.",
@@ -270,11 +268,14 @@ pub fn parse_history_segment_output(
         .name("body")
         .map(|capture| capture.as_str())
         .unwrap_or_default();
-    if output_tag_regex().is_match(root_body) {
+    // The root's own open and close tags are the only `output` tags allowed anywhere.
+    if output_tag_regex().find_iter(text).count() != 2 {
         return Err(validation_error(
             "HistorySummarizer output must contain exactly one <output> root document.",
         ));
     }
+    // Every structure below is read from the root document only.
+    let text = root_body;
 
     let mut history_segments = Vec::new();
     let mut facts = Vec::new();
@@ -347,25 +348,33 @@ pub fn parse_history_segment_output(
     let facts_block = facts_block_regex().captures(text);
     let facts_block_present = facts_block.is_some();
     let mut fact_syntax_failure = None;
+    // A `<facts>` tag without its partner is a truncated or malformed block, never an unwrapped category the bare fallback may read.
+    let facts_blocks = facts_block_regex().captures_iter(text).count();
+    let stray_facts_tag = text.matches("<facts>").count() != facts_blocks
+        || text.matches("</facts>").count() != facts_blocks;
     let facts_scope = if let Some(caps) = facts_block {
         let scope = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
-        // Q30: anything inside `<facts>` that the item grammar does not read is malformed material, never an absent fact. A second `<facts>` block is likewise unreadable rather than ignored.
+        // Anything inside `<facts>` that the item grammar does not read is malformed material, never an absent fact. A category whose closing tag names another category, and a second `<facts>` block, are likewise unreadable rather than ignored.
         let leftover = category_block_regex().replace_all(scope, "");
-        if facts_block_regex().captures_iter(text).count() > 1
+        if facts_blocks > 1
+            || stray_facts_tag
             || !leftover.trim().is_empty()
             || category_block_regex().captures_iter(scope).any(|category| {
-                category.get(2).is_some_and(|block| {
-                    block
-                        .as_str()
-                        .lines()
-                        .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with('*'))
-                })
+                category.get(1).map(|m| m.as_str()) != category.get(3).map(|m| m.as_str())
+                    || category.get(2).is_some_and(|block| {
+                        block.as_str().lines().any(|line| {
+                            !line.trim().is_empty() && !line.trim_start().starts_with('*')
+                        })
+                    })
             })
         {
             fact_syntax_failure = Some(ExtractionFailure::MalformedFacts);
         }
         scope.to_string()
     } else {
+        if stray_facts_tag {
+            fact_syntax_failure = Some(ExtractionFailure::MalformedFacts);
+        }
         let without_events = events_block_regex().replace_all(text, "");
         history_segment_regex()
             .replace_all(&without_events, "")
@@ -382,7 +391,7 @@ pub fn parse_history_segment_output(
         for item_caps in fact_item_regex().captures_iter(block) {
             let raw = item_caps.get(1).map(|m| m.as_str()).unwrap_or_default();
             let unescaped = unescape_xml(raw.trim());
-            let (origin_history_segment_index, content) = split_anchor_prefix(&unescaped);
+            let (_, content) = split_anchor_prefix(&unescaped);
             let (citations, content) = match split_citations(&content) {
                 Ok((citations, content)) => (citations, content.to_string()),
                 Err(failure) => {
@@ -390,18 +399,20 @@ pub fn parse_history_segment_output(
                     (Vec::new(), content)
                 }
             };
-            // An item that is citations with no text is malformed, not an absent fact: dropping it would turn a bad item into apparent no-fact success.
-            if content.is_empty() && !citations.is_empty() {
-                fact_syntax_failure.get_or_insert(ExtractionFailure::MalformedCitation);
-            }
-            if !content.is_empty() {
-                facts.push(FactCandidate {
-                    category: category.to_string(),
-                    content,
-                    origin_history_segment_index,
-                    citations,
+            // An item with no text is malformed, not an absent fact: dropping it would turn a bad item into apparent no-fact success. Citations alone are a bad citation; a bare bullet is unreadable material.
+            if content.is_empty() {
+                fact_syntax_failure.get_or_insert(if citations.is_empty() {
+                    ExtractionFailure::MalformedFacts
+                } else {
+                    ExtractionFailure::MalformedCitation
                 });
+                continue;
             }
+            facts.push(FactCandidate {
+                category: category.to_string(),
+                content,
+                citations,
+            });
         }
     }
 
@@ -1214,9 +1225,10 @@ fn unescape_xml(s: &str) -> String {
 
 fn output_document_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?is)\A\s*<output(?:\s[^>]*)?>(?P<body>.*)</output\s*>\s*\z").unwrap()
-    })
+    // Unanchored and lazy: the first complete root wins, and the caller rejects any other
+    // `output` tag before or after it, so a fenced or prose-wrapped document parses while two
+    // documents still fail.
+    RE.get_or_init(|| Regex::new(r"(?is)<output(?:\s[^>]*)?>(?P<body>.*?)</output\s*>").unwrap())
 }
 
 fn output_tag_regex() -> &'static Regex {
@@ -1305,7 +1317,7 @@ fn category_block_regex() -> &'static Regex {
 
 fn fact_item_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(?m)^\s*\*\s*(.+)$"#).unwrap())
+    RE.get_or_init(|| Regex::new(r#"(?m)^[ \t]*\*[ \t]*(.*)$"#).unwrap())
 }
 
 fn unprocessed_regex() -> &'static Regex {
@@ -1695,6 +1707,34 @@ full narrative
             let error = parse_history_segment_output(malformed).expect_err("invalid root rejected");
             assert!(error.message.contains("<output> root document"));
         }
+        // Two complete documents are still two, wherever the second one sits.
+        let doubled = format!(
+            "{}\n{}",
+            xml(&[(1, 1, "first")], 2, ""),
+            xml(&[(1, 1, "second")], 2, "")
+        );
+        let error = parse_history_segment_output(&doubled).expect_err("two roots rejected");
+        assert!(error.message.contains("exactly one <output>"));
+        // A stray tag before the root counts too.
+        let prefixed = format!("</output>\n{}", xml(&[(1, 1, "first")], 2, ""));
+        let error = parse_history_segment_output(&prefixed).expect_err("stray prefix tag rejected");
+        assert!(error.message.contains("exactly one <output>"));
+    }
+
+    /// A model that fences the document in Markdown or adds a sentence after it still
+    /// delivered one complete root; the parser reads that root and ignores the wrapper.
+    #[test]
+    fn parser_ignores_a_markdown_fence_and_prose_around_the_single_root() {
+        let document = xml(&[(1, 1, "fenced")], 2, "");
+        let wrapped = format!(
+            "Here is the summary:\n```xml\n{document}\n```\n\nACK. Message [1] processed; nothing else was extracted."
+        );
+        let parsed = parse_history_segment_output(&wrapped).expect("fenced root parses");
+        assert_eq!(parsed.history_segments.len(), 1);
+        assert_eq!(parsed.history_segments[0].title, "fenced");
+        assert_eq!(parsed.unprocessed_from, Some(2));
+        let bare = parse_history_segment_output(&document).expect("bare root parses");
+        assert_eq!(parsed.history_segments, bare.history_segments);
     }
 
     #[test]

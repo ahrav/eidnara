@@ -1225,6 +1225,7 @@ impl HandlerCore {
         let RouteScope {
             store,
             project,
+            project_root: _,
             harness: _,
             context_capabilities: _,
         } = scope;

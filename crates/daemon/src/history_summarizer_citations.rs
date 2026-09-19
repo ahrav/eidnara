@@ -80,29 +80,26 @@ pub enum ExtractionOutcome {
     Rejected { failure: ExtractionFailure },
 }
 
-/// Parses the citation prefix of one fact item: `[s3:12-40][s4:0-9] text`. Returns the citations and the remaining text; an item with no prefix has no citations, and a bracket that is not citation-shaped belongs to the text.
+/// Parses the citation prefix of one fact item: `[s3:12-40][s4:0-9] text`. Returns the citations and the remaining text; an item with no prefix has no citations, and a bracket that is not alias-shaped (`[sN:` with at least one digit) belongs to the text. An alias-shaped bracket is judged strictly: its range must be two runs of ASCII digits joined by `-`, and it must close.
 pub fn split_citations(item: &str) -> Result<(Vec<Citation>, &str), ExtractionFailure> {
     let mut rest = item.trim_start();
     let mut citations = Vec::new();
     while let Some(after_open) = rest.strip_prefix('[') {
+        let Some((alias, _)) = after_open.split_once(':') else {
+            break;
+        };
+        if !is_alias_shaped(alias) {
+            break;
+        }
         let Some(close) = after_open.find(']') else {
             return Err(ExtractionFailure::MalformedCitation);
         };
-        let body = &after_open[..close];
-        let Some((alias, range)) = body.split_once(':') else {
-            break;
-        };
-        if !alias.starts_with('s')
-            || !alias[1..]
-                .chars()
-                .all(|character| character.is_ascii_digit())
-        {
-            break;
-        }
+        // A shaped alias is digits only, so the first `:` lies before the `]` and the range is the rest of the body.
+        let range = &after_open[alias.len() + 1..close];
         let Some((start, end)) = range.split_once('-') else {
             return Err(ExtractionFailure::MalformedCitation);
         };
-        let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) else {
+        let (Some(start), Some(end)) = (parse_offset(start), parse_offset(end)) else {
             return Err(ExtractionFailure::MalformedCitation);
         };
         citations.push(Citation {
@@ -116,6 +113,20 @@ pub fn split_citations(item: &str) -> Result<(Vec<Citation>, &str), ExtractionFa
         rest = after_open[close + 1..].trim_start();
     }
     Ok((citations, rest))
+}
+
+/// `s` followed by one or more ASCII digits: the only alias shape the table issues and the shape the TypeScript reader recognizes.
+fn is_alias_shaped(alias: &str) -> bool {
+    alias.strip_prefix('s').is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+/// A byte offset as a run of ASCII digits; `usize::from_str` alone would also admit a leading `+`.
+fn parse_offset(text: &str) -> Option<usize> {
+    (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| text.parse().ok())
+        .flatten()
 }
 
 /// Checks every fact's citations against the alias table and the ordinals of the finally accepted segments. Any failure rejects the whole set (Q30); a set with no failure is accepted whole.
@@ -162,7 +173,6 @@ mod tests {
         FactCandidate {
             category: "PROJECT_RULES".into(),
             content: "rule".into(),
-            origin_history_segment_index: None,
             citations,
         }
     }
@@ -261,25 +271,55 @@ mod tests {
     }
 
     #[test]
+    fn a_set_past_the_fact_bound_is_rejected_whole() {
+        let one = || {
+            fact(vec![Citation {
+                alias: "s1".into(),
+                start: 0,
+                end: 1,
+            }])
+        };
+        let at_bound: Vec<FactCandidate> = (0..MAX_FACTS_PER_SET).map(|_| one()).collect();
+        assert_eq!(
+            check_fact_set(&at_bound, &table("0123456789"), Some(1..=1)),
+            Ok(())
+        );
+        let over: Vec<FactCandidate> = (0..=MAX_FACTS_PER_SET).map(|_| one()).collect();
+        assert_eq!(
+            check_fact_set(&over, &table("0123456789"), Some(1..=1)),
+            Err(ExtractionFailure::TooManyFacts)
+        );
+    }
+
+    #[test]
     fn malformed_shapes_and_non_citation_brackets() {
-        for item in ["[s1:0-x] a", "[s1:0] a", "[s1:0-5 a", "[s1:-] a"] {
+        // Alias-shaped bodies are judged strictly: a bad range or an unclosed alias-shaped bracket is malformed.
+        for item in [
+            "[s1:0-x] a",
+            "[s1:0] a",
+            "[s1:0-5 a",
+            "[s1:-] a",
+            "[s1:+5-9] a",
+            "[s1: 0-5] a",
+        ] {
             assert_eq!(
                 split_citations(item),
                 Err(ExtractionFailure::MalformedCitation),
                 "{item}"
             );
         }
-        assert_eq!(
-            split_citations("[note] keep me").unwrap(),
-            (Vec::new(), "[note] keep me")
-        );
+        // Brackets that are not alias-shaped belong to the text, exactly as the TypeScript reader keeps them.
+        for item in [
+            "[note] keep me",
+            "[x1:0-2] not an alias",
+            "[s:0-5] no digits is not an alias",
+            "[unclosed bracket stays text",
+        ] {
+            assert_eq!(split_citations(item), Ok((Vec::new(), item)), "{item}");
+        }
         assert_eq!(
             split_citations("[s1:0-2] [note] keep me").unwrap().1,
             "[note] keep me"
-        );
-        assert_eq!(
-            split_citations("[x1:0-2] not an alias").unwrap(),
-            (Vec::new(), "[x1:0-2] not an alias")
         );
     }
 

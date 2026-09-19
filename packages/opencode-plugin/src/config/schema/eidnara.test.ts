@@ -1,9 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import {
+    assertKnownConfigKeys,
     DEFAULT_HISTORY_BUDGET_PERCENTAGE,
     DEFAULT_HISTORY_SUMMARIZER_TIMEOUT_MS,
+    dropRemovedConfigKeys,
     type EidnaraConfig,
     EidnaraConfigSchema,
+    REMOVED_CONFIG_KEYS,
 } from "./eidnara";
 
 describe("EidnaraConfigSchema", () => {
@@ -15,7 +18,6 @@ describe("EidnaraConfigSchema", () => {
                 enabled: true,
                 allow_home_project: false,
                 fail_closed_blocking: true,
-                transform_mode: "ts",
                 storage: { enforce_private_permissions: true },
                 cache_ttl: "5m",
                 prompt_surface: { default: "full" },
@@ -68,7 +70,6 @@ describe("EidnaraConfigSchema", () => {
                 enabled: true,
                 allow_home_project: false,
                 fail_closed_blocking: true,
-                transform_mode: "ts",
                 toast_duration_ms: 5000,
                 cache_ttl: "10m",
                 prompt_surface: { default: "full" },
@@ -181,12 +182,15 @@ describe("EidnaraConfigSchema", () => {
             expect("enabled" in (result.context_researcher as Record<string, unknown>)).toBe(false);
         });
 
-        it("parses ts and rust transform modes and rejects an unknown one", () => {
-            expect(EidnaraConfigSchema.parse({ transform_mode: "ts" }).transform_mode).toBe("ts");
-            expect(EidnaraConfigSchema.parse({ transform_mode: "rust" }).transform_mode).toBe(
-                "rust",
+        it("has no transform_mode: the daemon transform is the only transform", () => {
+            expect("transform_mode" in EidnaraConfigSchema.parse({})).toBe(false);
+            expect(() => assertKnownConfigKeys({ transform_mode: "rust" })).toThrow(
+                /Unknown Eidnara configuration key/,
             );
-            expect(() => EidnaraConfigSchema.parse({ transform_mode: "wasm" })).toThrow();
+            const raw: Record<string, unknown> = { transform_mode: "ts", enabled: true };
+            expect(dropRemovedConfigKeys(raw)).toEqual([REMOVED_CONFIG_KEYS.transform_mode]);
+            expect(raw).toEqual({ enabled: true });
+            expect(dropRemovedConfigKeys(raw)).toEqual([]);
         });
 
         it("rejects removed configuration keys", () => {

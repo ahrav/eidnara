@@ -5,16 +5,16 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use context_core::canonical_json::is_lower_hex;
+
 use crate::dispatch::{PreparedOutcome, PreparedOutput};
-use crate::kernel_routes::state::{InvalidReason, KernelOutcome};
-use crate::kernel_routes::{blocking, parse_request_body, state_only};
+use crate::kernel_routes::blocking;
 use crate::{HandlerCore, MemoriesAuthority, memories_authority_for_route};
 use host_runtime::RouteHandle;
-use memory_store::MemoryStore;
 use memory_store::curator_ledger::MAX_RECEIPT_PAGE;
+use memory_store::{MemoryStore, MemoryStoreError};
 
 use super::settlement::{ReadRefusal, ReviewOutcome, list_review_outcomes, read_selected_proposal};
-use super::worker::{job_binding, module_projects};
 
 pub(crate) const LIST: &str = "review.list";
 pub(crate) const READ: &str = "review.read";
@@ -40,8 +40,6 @@ struct ReviewScope {
     kernel: Arc<kernel::KernelStore>,
     ledger: Arc<MemoryStore>,
     project: String,
-    /// The Kernel project digest jobs of this authority project are staged and read under: the worker's one-route-per-project rule, so a read on any bound root of the project resolves what the worker staged.
-    project_digest: String,
 }
 
 fn response(body: Value) -> PreparedOutcome {
@@ -50,6 +48,21 @@ fn response(body: Value) -> PreparedOutcome {
 
 fn terminal(code: &str) -> PreparedOutcome {
     response(json!({ "kind": "terminal", "terminal": code }))
+}
+
+/// A causal identity on the wire is a lower-hex sha256; any other spelling, as a read target or as a list cursor, is `invalid_params` rather than a text comparison that skips or repeats outcomes.
+fn require_causal_identity(
+    operation: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), PreparedOutcome> {
+    if is_lower_hex(value, 64) {
+        Ok(())
+    } else {
+        Err(crate::invalid_params_error(format!(
+            "{operation} requires a lower-hex sha256 {field}"
+        )))
+    }
 }
 
 /// The wire spelling of why a selected proposal was not returned: a closed set, never the refusal's text.
@@ -62,6 +75,16 @@ fn read_terminal(refusal: &ReadRefusal) -> &'static str {
         ReadRefusal::ReviewExpired => "review_expired",
         ReadRefusal::Dependency(_) => "dependency_refused",
         ReadRefusal::Store(_) => "store_unavailable",
+    }
+}
+
+fn authority_project(
+    authority: Result<MemoriesAuthority, MemoryStoreError>,
+) -> Result<String, &'static str> {
+    match authority {
+        Ok(MemoriesAuthority::Module(authority)) => Ok(authority.project),
+        Ok(MemoriesAuthority::NotModule { .. }) => Err("disabled"),
+        Err(_) => Err("store_unavailable"),
     }
 }
 
@@ -84,62 +107,38 @@ struct Bound {
     kernel: Arc<kernel::KernelStore>,
     ledger: Arc<MemoryStore>,
     root: String,
-    bindings: Arc<std::sync::Mutex<crate::RouteBindings>>,
 }
 
 impl Bound {
-    /// The authority route binding is keyed by the root as the route bound it, the spelling every other authority lookup uses. A root whose memories authority is not MODULE has no ledger project to answer for.
     fn review_scope(self) -> Result<ReviewScope, &'static str> {
-        let project = match memories_authority_for_route(&self.ledger, &self.root) {
-            Ok(MemoriesAuthority::Module(authority)) => authority.project,
-            Ok(MemoriesAuthority::NotModule { .. }) | Err(_) => return Err("disabled"),
-        };
-        let project_digest = module_projects(&self.ledger, &self.bindings)
-            .into_iter()
-            .find(|route| route.project == project)
-            .map(|route| route.project_digest)
-            .ok_or("disabled")?;
+        let project = authority_project(memories_authority_for_route(&self.ledger, &self.root))?;
         Ok(ReviewScope {
             kernel: self.kernel,
             ledger: self.ledger,
             project,
-            project_digest,
         })
     }
 }
 
 impl HandlerCore {
-    /// The route must be bound to the requested root and the Kernel ready, answered as the kernel routes answer them; an uninstalled Memory Store is `disabled`.
-    fn bind_review(
+    fn bind_review<T: serde::de::DeserializeOwned>(
         &self,
         channel: RouteHandle,
-        request: &Value,
+        request: Value,
         operation: &str,
-    ) -> Result<Bound, PreparedOutcome> {
-        let (_, binding) = self.management_binding(channel, request, operation)?;
-        let Some(requested_root) = request.get("project_root").and_then(Value::as_str) else {
-            return Err(crate::invalid_params_error(format!(
-                "{operation} requires project_root"
-            )));
-        };
-        if !binding
-            .kernel_project
-            .accepts(std::path::Path::new(requested_root))
-        {
-            return Err(state_only(KernelOutcome::invalid(
-                InvalidReason::ProjectMismatch,
-            )));
-        }
-        let kernel = self.kernel.kernel_store().map_err(state_only)?;
+    ) -> Result<(Bound, T), PreparedOutcome> {
+        let (scope, parsed) = self.kernel_request::<T>(channel, request, operation)?;
         let Some(ledger) = self.store() else {
             return Err(terminal("disabled"));
         };
-        Ok(Bound {
-            kernel,
-            ledger,
-            root: binding.project_root.to_string_lossy().to_string(),
-            bindings: Arc::clone(&self.bindings),
-        })
+        Ok((
+            Bound {
+                kernel: scope.store,
+                ledger,
+                root: scope.project_root.to_string_lossy().to_string(),
+            },
+            parsed,
+        ))
     }
 
     pub(crate) async fn handle_review_list(
@@ -147,18 +146,16 @@ impl HandlerCore {
         channel: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
-        let bound = match self.bind_review(channel, &request, LIST) {
+        let (bound, parsed) = match self.bind_review::<ListRequest>(channel, request, LIST) {
             Ok(bound) => bound,
             Err(outcome) => return outcome,
         };
-        let parsed: ListRequest = match parse_request_body(request, LIST) {
-            Ok(parsed) => parsed,
-            Err(outcome) => return outcome,
-        };
-        let limit = parsed
-            .limit
-            .unwrap_or(MAX_RECEIPT_PAGE)
-            .clamp(1, MAX_RECEIPT_PAGE);
+        if let Some(after) = parsed.after.as_deref()
+            && let Err(outcome) = require_causal_identity(LIST, "after", after)
+        {
+            return outcome;
+        }
+        let limit = parsed.limit.unwrap_or(MAX_RECEIPT_PAGE);
         let page = blocking(move || {
             let scope = bound.review_scope()?;
             list_review_outcomes(
@@ -186,38 +183,27 @@ impl HandlerCore {
         channel: RouteHandle,
         request: Value,
     ) -> PreparedOutcome {
-        let bound = match self.bind_review(channel, &request, READ) {
+        let (bound, parsed) = match self.bind_review::<ReadRequest>(channel, request, READ) {
             Ok(bound) => bound,
             Err(outcome) => return outcome,
         };
-        let parsed: ReadRequest = match parse_request_body(request, READ) {
-            Ok(parsed) => parsed,
-            Err(outcome) => return outcome,
-        };
-        if parsed.causal_identity.len() != 64
-            || !parsed
-                .causal_identity
-                .bytes()
-                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        if let Err(outcome) =
+            require_causal_identity(READ, "causal_identity", &parsed.causal_identity)
         {
-            return crate::invalid_params_error(format!(
-                "{READ} requires a lower-hex sha256 causal_identity"
-            ));
+            return outcome;
         }
         let read = blocking(move || {
             let scope = bound.review_scope()?;
-            let job = scope
+            scope
                 .ledger
                 .lookup_curator_job(&scope.project, &parsed.causal_identity)
                 .map_err(|_| "store_unavailable")?
                 .ok_or("not_selected")?;
-            let binding = job_binding(&scope.project_digest, &job);
             read_selected_proposal(
                 &scope.kernel,
                 &scope.ledger,
                 &scope.project,
                 &parsed.causal_identity,
-                &binding,
                 crate::now_ms(),
             )
             .map(|selected| (parsed.causal_identity, selected))
@@ -235,5 +221,56 @@ impl HandlerCore {
             Ok(Err(code)) => terminal(code),
             Err(_) => terminal("store_unavailable"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ModuleMemoriesAuthority;
+    use memory_store::curator_ledger::AbstainReason;
+
+    /// Every abstention reason a receipt can record is a literal the protocol's `review.list` item vocabulary names; a strict client rejects a page carrying an undocumented one.
+    #[test]
+    fn every_abstention_reason_is_a_documented_review_list_literal() {
+        let wire = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/host-wire-protocol.md"
+        ))
+        .unwrap();
+        let vocabulary = wire
+            .lines()
+            .find(|line| line.starts_with("`review.list` carries"))
+            .expect("the review.list paragraph");
+        for reason in AbstainReason::ALL {
+            assert!(
+                vocabulary.contains(&format!("`{}`", reason.as_str())),
+                "{} is not in the review.list reason vocabulary",
+                reason.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn authority_project_separates_a_store_fault_from_a_root_outside_module_authority() {
+        assert_eq!(
+            authority_project(Ok(MemoriesAuthority::Module(ModuleMemoriesAuthority {
+                context_store_uuid: "ctx".to_string(),
+                project: "git:proj".to_string(),
+                generation: 1,
+            }))),
+            Ok("git:proj".to_string())
+        );
+        assert_eq!(
+            authority_project(Ok(MemoriesAuthority::NotModule {
+                message: "memories authority is PREPARING".to_string(),
+            })),
+            Err("disabled")
+        );
+        assert_eq!(
+            authority_project(Err(MemoryStoreError::Serde("read failed".to_string()))),
+            Err("store_unavailable"),
+            "a store that could not be read is not a disabled capability"
+        );
     }
 }

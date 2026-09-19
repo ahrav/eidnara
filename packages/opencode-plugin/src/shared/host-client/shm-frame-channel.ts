@@ -558,6 +558,12 @@ export class ShmFrameChannel implements SetupFrameChannel {
     }
 
     send(frame: OutboundFrame, hooks?: FrameSendHooks): FrameSendTicket {
+        if (frame.header.len !== frame.body.byteLength) {
+            throw new HostCallError(
+                "not_sent",
+                "frame header length disagrees with its body; nothing published",
+            );
+        }
         return this.produce(
             frame.header,
             {

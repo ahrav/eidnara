@@ -14,7 +14,7 @@ import {
 
 const result = probeCapabilities();
 assert.ok(result.napiVersion === null || result.napiVersion >= 1);
-// A claimed source-build target must load its addon. Node can load the addon and report `detachment_unavailable`, so this assertion cannot require `available`; `addon_unavailable` is the only reason returned before the addon loads.
+// A claimed source-build target must load its addon; `addon_unavailable` is the only reason returned before the addon loads.
 if (
     process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1" &&
     !result.available
@@ -30,7 +30,7 @@ if (result.available) {
     assert.equal(result.externalArrayBuffer, true);
     assert.equal(result.exactBounds, true);
     assert.equal(result.detachment, true);
-    assert.equal(result.transferPrevention, true);
+    assert.equal(result.transferPrevention, result.transferPreventionMechanism !== "none");
     assert.equal(result.cleanupHooks, true);
     runAttachBoundary();
     runNativeLifecycle();
@@ -127,9 +127,13 @@ function runNativeLifecycle(): void {
     const subarray = alias.subarray(1);
     const dataView = new DataView(alias.buffer, 1);
     const buffer = Buffer.from(alias.buffer);
-    assert.throws(() =>
-        structuredClone(alias.buffer, { transfer: [alias.buffer] }),
-    );
+    // Transfer prevention is reported, not gated; a runtime without it (Bun 1.3.x) would
+    // detach the alias here itself, so the attempt is made only where it must be refused.
+    if (result.transferPrevention) {
+        assert.throws(() =>
+            structuredClone(alias.buffer, { transfer: [alias.buffer] }),
+        );
+    }
     lease.release();
     assert.equal(alias.byteLength, 0);
     assert.equal(subarray.byteLength, 0);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
     filesForMode,
+    hasLiveTests,
     type ModeManifest,
     validateManifestDocument,
     validateModeManifest,
@@ -81,7 +82,7 @@ describe("mode manifest validator", () => {
                 ]),
                 validation.files,
             ),
-        ).toThrow(/must contain exactly path, tier, rationale, contract_refs/);
+        ).toThrow(/must contain path, tier, rationale, contract_refs/);
         expect(() =>
             validateManifestDocument(
                 manifestWith([{ ...entries[0]!, contract_refs: [] }, ...entries.slice(1)]),
@@ -103,5 +104,66 @@ describe("mode manifest validator", () => {
             ),
         ).toThrow(/does not import bun:test/);
         expect(() => validateTestSource("tests/ok.test.ts", VALID_TEST_SOURCE)).not.toThrow();
+    });
+
+    it("tells live tests from skipped ones", () => {
+        const skippedOnly =
+            'import { describe, it } from "bun:test";\ndescribe("d", () => { it.skip("x", () => {}); it.todo("y"); });\n';
+        const skippedSuite =
+            'import { describe, it } from "bun:test";\ndescribe.skip("d", () => { it("x", () => {}); });\n';
+        const live =
+            'import { describe, it, test } from "bun:test";\ndescribe("d", () => { it.skip("x", () => {}); test.each([1])("y %i", () => {}); });\n';
+        expect(hasLiveTests("tests/a.test.ts", skippedOnly)).toBe(false);
+        expect(hasLiveTests("tests/b.test.ts", skippedSuite)).toBe(false);
+        expect(hasLiveTests("tests/c.test.ts", live)).toBe(true);
+        expect(hasLiveTests("tests/d.test.ts", VALID_TEST_SOURCE)).toBe(true);
+    });
+
+    it("requires a quarantine reason on an entry with no live tests, and only there", () => {
+        const entries = validation.manifest.entries;
+        const skippedOnly = 'import { it } from "bun:test";\nit.skip("x", () => {});\n';
+        const unmarked = entries.map(({ quarantined: _, ...entry }) => entry);
+        expect(() =>
+            validateManifestDocument(manifestWith(unmarked), validation.files, (path) =>
+                path === entries[0]!.path ? skippedOnly : VALID_TEST_SOURCE,
+            ),
+        ).toThrow(/has no live tests and no quarantined reason/);
+        const marked = [
+            { ...unmarked[0]!, quarantined: "fixture drift; tracked in PR #697" },
+            ...unmarked.slice(1),
+        ];
+        expect(() =>
+            validateManifestDocument(manifestWith(marked), validation.files, (path) =>
+                path === entries[0]!.path ? skippedOnly : VALID_TEST_SOURCE,
+            ),
+        ).not.toThrow();
+        // A revived file must drop its marker so the quarantine list stays truthful.
+        expect(() =>
+            validateManifestDocument(
+                manifestWith(marked),
+                validation.files,
+                () => VALID_TEST_SOURCE,
+            ),
+        ).toThrow(/is marked quarantined but has live tests/);
+        expect(() =>
+            validateManifestDocument(
+                manifestWith([{ ...unmarked[0]!, quarantined: " " }, ...unmarked.slice(1)]),
+                validation.files,
+                () => VALID_TEST_SOURCE,
+            ),
+        ).toThrow(/quarantined must be a non-empty reason/);
+    });
+
+    it("lists the committed quarantines so the weakened gate is visible", () => {
+        const quarantined = validation.manifest.entries
+            .filter((entry) => entry.quarantined !== undefined)
+            .map((entry) => entry.path)
+            .sort();
+        expect(quarantined).toEqual([
+            "tests/rust-eidnara-reduce-roundtrip.test.ts",
+            "tests/rust-fm-oc-3.test.ts",
+            "tests/rust-multi-frame-delta.test.ts",
+            "tests/rust-removal-self-heal.test.ts",
+        ]);
     });
 });
