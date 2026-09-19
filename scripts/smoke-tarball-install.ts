@@ -148,18 +148,27 @@ const PREDECESSOR_TOKENS = new RegExp(
 // Exits non-zero unless each package exposes the entry point its host loads.
 // OpenCode reads `{ id, server }` from the root export and `{ id, tui }` from `./tui`.
 // Pi calls the default export with its extension API.
+// The installed payload must expose a tokenizer that returns a positive safe integer.
 const IMPORT_PROBE = [
     'const a = await import("@eidnara/opencode");',
     'const t = await import("@eidnara/opencode/tui");',
     'const p = await import("@eidnara/pi");',
+    'const n = await import("@eidnara/shm-native");',
     "const problems = [];",
     'if (typeof a.default?.id !== "string" || typeof a.default?.server !== "function")',
     '    problems.push("@eidnara/opencode default lacks { id, server }");',
     'if (typeof t.default?.id !== "string" || typeof t.default?.tui !== "function")',
     '    problems.push("@eidnara/opencode/tui default lacks { id, tui }");',
     'if (typeof p.default !== "function") problems.push("@eidnara/pi default is not callable");',
+    "try {",
+    '    const count = n.estimateTokens("hello world");',
+    "    if (!Number.isSafeInteger(count) || count < 1)",
+    '        problems.push(`@eidnara/shm-native estimateTokens returned ${String(count)}`);',
+    "} catch (error) {",
+    '    problems.push(`@eidnara/shm-native estimateTokens threw: ${error instanceof Error ? error.message : String(error)}`);',
+    "}",
     'if (problems.length > 0) { console.error(problems.join("\\n")); process.exit(1); }',
-    'console.log("opencode, opencode/tui, pi");',
+    'console.log("opencode, opencode/tui, pi, shm-native tokenizer");',
 ].join("\n");
 const START_TIMEOUT_MS = 180_000;
 const DEFAULT_TIMEOUT_MS = 60_000;

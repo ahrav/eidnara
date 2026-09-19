@@ -83,6 +83,17 @@ function writeExecutable(path: string, contents: string): void {
     chmodSync(path, 0o755);
 }
 
+/** CommonJS stand-in for the native addon: the two build probes plus a token counter that answers like the Rust binding does for a non-empty string. `estimateTokens` is omitted when `null` and replaced when a body is supplied. */
+function fakeAddonModule(
+    profile: string,
+    target: string,
+    estimateTokens: string | null = "(text) => text.split(/\\s+/).length",
+): string {
+    const counter =
+        estimateTokens === null ? "" : `, estimateTokens: ${estimateTokens}`;
+    return `module.exports = { buildProfile: () => ${JSON.stringify(profile)}, buildTarget: () => ${JSON.stringify(target)}${counter} };\n`;
+}
+
 describe("build-host-payload", () => {
     let tmp: string;
     let launcherPath: string;
@@ -102,15 +113,9 @@ describe("build-host-payload", () => {
             fakeLauncherScript(contractPath, lockSha256),
         );
         releaseAddon = join(tmp, "release-addon.cjs");
-        writeFileSync(
-            releaseAddon,
-            'module.exports = { buildProfile: () => "release", buildTarget: () => "linux-x86_64" };\n',
-        );
+        writeFileSync(releaseAddon, fakeAddonModule("release", "linux-x86_64"));
         debugAddon = join(tmp, "debug-addon.cjs");
-        writeFileSync(
-            debugAddon,
-            'module.exports = { buildProfile: () => "debug", buildTarget: () => "linux-x86_64" };\n',
-        );
+        writeFileSync(debugAddon, fakeAddonModule("debug", "linux-x86_64"));
         built = buildDevPayload(rootDir, {
             outDir: join(tmp, "out"),
             launcherPath,
@@ -259,10 +264,7 @@ describe("build-host-payload", () => {
 
     test("an addon built for another native target is refused", () => {
         const foreignAddon = join(tmp, "foreign-addon.cjs");
-        writeFileSync(
-            foreignAddon,
-            'module.exports = { buildProfile: () => "release", buildTarget: () => "darwin-arm64" };\n',
-        );
+        writeFileSync(foreignAddon, fakeAddonModule("release", "darwin-arm64"));
         expect(() =>
             buildDevPayload(rootDir, {
                 outDir: join(tmp, "out-foreign"),
@@ -270,6 +272,40 @@ describe("build-host-payload", () => {
                 addonPath: foreignAddon,
             }),
         ).toThrow(/linux-x86_64 addon; .* reports darwin-arm64/);
+    });
+
+    test("an addon without the estimateTokens export is refused", () => {
+        const stale = join(tmp, "stale-addon.cjs");
+        writeFileSync(stale, fakeAddonModule("release", "linux-x86_64", null));
+        expect(() =>
+            buildDevPayload(rootDir, {
+                outDir: join(tmp, "out-stale"),
+                launcherPath,
+                addonPath: stale,
+            }),
+        ).toThrow(/estimateTokens/);
+        expect(existsSync(join(tmp, "out-stale", "payload"))).toBe(false);
+    });
+
+    test("an estimateTokens export that cannot count a probe string is refused", () => {
+        for (const [name, body] of [
+            ["zero", "() => 0"],
+            ["fraction", "() => 1.5"],
+            ["string", '() => "3"'],
+            ["throws", '() => { throw new Error("no vocabulary"); }'],
+        ] as const) {
+            const broken = join(tmp, `broken-${name}-addon.cjs`);
+            writeFileSync(broken, fakeAddonModule("release", "linux-x86_64", body));
+            expect(
+                () =>
+                    buildDevPayload(rootDir, {
+                        outDir: join(tmp, `out-broken-${name}`),
+                        launcherPath,
+                        addonPath: broken,
+                    }),
+                name,
+            ).toThrow(/estimateTokens/);
+        }
     });
 
     test("relative launcher, addon, and out paths resolve against the working directory", () => {
