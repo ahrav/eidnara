@@ -3819,7 +3819,7 @@ impl Handler {
         self
     }
 
-    /// Attaches the supervisor and credentials the Curator worker runs review jobs under. The credentials are the startup envelope's, by name; the activation record names which one the sender dials with.
+    /// Attaches the supervisor and credentials the Curator worker runs review jobs under. The credentials are the startup envelope's, by name; the activation record names which one the sender dials with. Attach before `initialize`: `begin_store_open` reads the host once, and one attached later is never seen by the worker.
     pub fn with_curator_host(self, host: Arc<curator::worker::CuratorHost>) -> Self {
         *self
             .curator_host
@@ -32994,9 +32994,9 @@ mod tests {
         assert!(bridge.scheduled_projects().unwrap().is_empty());
     }
 
-    /// Selection requires an open gate and at least one resolvable class.
+    /// Selection requires an open gate and at least one resolvable class. No walked class resolves until the coordinator reads canonical and promoted descriptors through their originating decision (Q21), so an open gate alone schedules no selection; when `resolves_class` admits a memory class, this test must assert the selection task instead.
     #[tokio::test(flavor = "current_thread")]
-    async fn curator_review_selection_is_scheduled_only_for_classes_the_coordinator_resolves() {
+    async fn curator_review_selection_is_not_scheduled_while_no_walked_class_resolves() {
         use memory_classifier_scheduler::{ScheduledTask, SchedulerHost};
         let producer = Arc::new(ProducerState::default());
         let harness = MemoryClassifierHarness::start(&producer).await;
@@ -33016,22 +33016,15 @@ mod tests {
             .handler
             .curator_status
             .set_activation(curator::lifecycle::ActivationState::Open);
-        let resolvable = curator::selection::resolvable_classes();
-        if resolvable.is_empty() {
-            assert_eq!(
-                tasks(&bridge),
-                vec![ScheduledTask::ReviewUserMemories],
-                "no walked class resolves, so an open gate schedules no selection"
-            );
-        } else {
-            assert_eq!(
-                tasks(&bridge),
-                vec![
-                    ScheduledTask::ReviewUserMemories,
-                    ScheduledTask::CuratorReviewSelection
-                ]
-            );
-        }
+        assert!(
+            curator::selection::resolvable_classes().is_empty(),
+            "a walked class now resolves: assert CuratorReviewSelection is scheduled under an open gate"
+        );
+        assert_eq!(
+            tasks(&bridge),
+            vec![ScheduledTask::ReviewUserMemories],
+            "no walked class resolves, so an open gate schedules no selection"
+        );
     }
 
     /// A failed authority lookup must return an error rather than an empty
