@@ -2,7 +2,9 @@
 
 System: `/local/home/ahrav/scratch/eidnara`. Base:
 `cb259ee05a610ad56beea8f3bd2c414e1b3eb771` (the tip of the RP2.7.U1 branch the
-U1 change was authored against).
+U1 change was authored against). Current witness review:
+`d34ff88300ec947c5d3ed0ed5162422993a98d34` before the 2026-09-19 cleanup
+update.
 
 A marker names one independent precondition of a vulnerable window. Names are
 constant and globally unique; a check fires a marker by constructing the
@@ -54,32 +56,40 @@ firing check is an open obligation, not a passed one.
 | `packing.serialization.transport_maximum_exceeded` | daemon | `sometimes` | packing-body-serialized-once-through-the-guard | `crates/daemon/tests/prepared_output.rs` `cap_plus_one_and_arithmetic_overflow_fail_before_write`, at the guard only; the packing path cannot reach the arm under manifest-derived bounds. |
 | `packing.serialization.malformed_packing_group` | daemon | `sometimes` | packing-limits-fail-closed-at-manifest-parse | `an_unapproved_partial_unknown_mismatched_or_zero_packing_group_is_refused`. |
 | `packing.serialization.cache_state_varied` | daemon | `sometimes` | packing-output-byte-identical-across-cache-states | `identical_inputs_give_byte_identical_output_across_cache_states_threads_and_processes`. |
-| `packing.application.profile_echo_mismatch` | opencode | `sometimes` | apply-stale-preparation-is-rejected-before-edit (`../fusion-routes/application/catalog.md`) | `crates/daemon/tests/edit_receipts.rs` `the_daemon_binds_its_profile_at_prepare_and_an_apply_must_echo_it_exactly`; `packages/opencode-plugin/src/hooks/context/context-application.test.ts` `reports typed refusals without publishing and never retries a non-capability terminal`. |
+| `packing.application.profile_echo_mismatch` | opencode | `sometimes` | apply-stale-preparation-is-rejected-before-edit (`../fusion-routes/application/catalog.md`) | `crates/daemon/tests/edit_receipts.rs` `the_daemon_binds_its_profile_at_prepare_and_an_apply_must_echo_it_exactly`. The deleted OpenCode `context-application.test.ts` witness is retired. |
 | `packing.application.profile_withdrawn` | opencode | `sometimes` | apply-stale-preparation-is-rejected-before-edit | `the_daemon_binds_its_profile_at_prepare_and_an_apply_must_echo_it_exactly` after `withdraw_accounting_profile`. |
 | `packing.application.invocation_over_limit` | opencode | `sometimes` | apply-adapter-validates-entire-assembled-invocation | `invocation-budget.test.ts` `admits at the limit, refuses one below it when the surface grows, and never refuses a shrinking surface`; `rust-mode-transform.test.ts` `declines the pass when the whole invocation exceeds the context limit`, `gates nothing for a model models.dev cannot name, although its usage sample inverts to the 128k default`. |
-| `packing.application.empty_replace` | opencode | `sometimes` | apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement | `context-application.test.ts` `treats an empty replacement as a replacement that leaves the slot absent`. |
-| `packing.application.acknowledgment_lost` | opencode | `sometimes` | apply-daemon-receipt-does-not-mark-harness-edit-applied | `context-application.test.ts` `never reports applied when the acknowledgment is lost, whatever the daemon answers`, `never reports applied from a daemon receipt alone`, `reports unknown, not an error, when the confirm cannot reach the daemon after publication`, `reports unknown, never refused, when the daemon answers the confirm with a terminal after publication`; `crates/daemon/tests/edit_receipts.rs` `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`. |
-| `packing.application.capability_denied_then_rebound` | opencode | `sometimes` | apply-context-capabilities-default-closed-per-harness | `context-application.test.ts` `falls back to append once when the class is unsupported and latches it for the route`, `denies a class for the rest of the route epoch and forgets it on rebind`. |
+| `packing.application.empty_replace` | opencode | `sometimes` | apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement | Unfired on a host path. Retired witness: deleted OpenCode `context-application.test.ts` `treats an empty replacement as a replacement that leaves the slot absent`. |
+| `packing.application.acknowledgment_lost` | opencode | `sometimes` | apply-daemon-receipt-does-not-mark-harness-edit-applied | `crates/daemon/tests/edit_receipts.rs` `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`. The deleted OpenCode client tests are retired, so post-publication host behavior remains unfired. |
+| `packing.application.capability_denied_then_rebound` | opencode | `sometimes` | apply-context-capabilities-default-closed-per-harness | `crates/daemon/tests/context_capabilities.rs` `the_declaration_is_latched_at_bind_and_reread_by_a_new_bind`. The deleted OpenCode adapter fallback witness is retired. |
 | `packing.application.zero_write_episode` | opencode | `sometimes` | apply-unknown-outcome-never-replays-blindly | `crates/daemon/tests/edit_receipts.rs` `every_application_outcome_leaves_the_kernel_tip_and_write_counters_unchanged`. |
-
-| `packing.application.pi_gated_class_presented` | pi | `sometimes` | apply-enabled-outcomes-are-proven-on-real-harness-paths | `crates/daemon/tests/context_capabilities.rs` `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing`: `replace`, `suppress`, and `reuse` are each sent to a bound `pi` route; the `capability_unsupported x3` outcome is the separate safety assertion. `packages/pi-plugin/src/context-application-pi.test.ts` `never simulates a denied class`: a `replace` intent is presented to the client. |
+| `packing.application.pi_gated_class_presented` | pi | `sometimes` | apply-enabled-outcomes-are-proven-on-real-harness-paths | `crates/daemon/tests/context_capabilities.rs` `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing`: `replace`, `suppress`, and `reuse` are each sent to a bound `pi` route; the `capability_unsupported x3` outcome is a separate safety assertion. The deleted Pi adapter test is retired. |
 | `packing.application.pi_consumer_strings_advertised` | pi | `sometimes` | apply-consumer-capability-strings-never-authorize-edits | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (two binds, one outcome set). |
-| `packing.application.pi_profile_echoed` | pi | `sometimes` | apply-stale-preparation-is-rejected-before-edit | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (apply carries the prepared profile; a `pi-heuristic` echo is `profile_mismatch`); `context-application-pi.test.ts` `resolves a lost acknowledgment to unknown and leaves nothing applied on a refusal` (`profile_unavailable`, `profile_mismatch`, `stale_preparation`). |
-| `packing.application.pi_acknowledgment_lost` | pi | `sometimes` | apply-daemon-receipt-does-not-mark-harness-edit-applied | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (`lost:unknown`); `context-application-pi.test.ts` lost acknowledgment. |
-| `packing.application.pi_invocation_over_limit` | pi | `sometimes` | apply-adapter-validates-entire-assembled-invocation | `context-application-pi.test.ts` `keeps the prompt unchanged when the candidate would grow past the usable window`. |
-| `packing.application.pi_open_delimiter_in_block_presented` | pi | `sometimes` | apply-enabled-outcomes-are-proven-on-real-harness-paths | `context-application-pi.test.ts` `never writes a block whose body or id reproduces the open delimiter, so the owned block stays locatable`: a body with the open delimiter mid-text, a body starting with it, and an id carrying a close and a second open are each asserted to contain the delimiter before the edit is invoked; the refusal (`keep`, one block, prompt unchanged) is the separate safety assertion. |
-| `packing.application.unminted_preparation_id_presented` | opencode, pi | `sometimes` | apply-enabled-outcomes-are-proven-on-real-harness-paths | `packages/opencode-plugin/src/hooks/context/context-application.test.ts` `treats a preparation id outside the minted shape as a malformed answer and never applies it`: a prepared answer whose id is outside `<16 hex>-<64 hex>` is presented to the shared client. |
-| `packing.application.pi_preparation_failure` | pi | `sometimes` | apply-append-allowance-and-replacement-capacity-are-bound-before-preparation | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (`oversized:preparation_failure:append_allowance`); `context-application-pi.test.ts` `reports a preparation failure by its reason and leaves the prompt unchanged`. |
+| `packing.application.pi_profile_echoed` | pi | `sometimes` | apply-stale-preparation-is-rejected-before-edit | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (apply carries the prepared profile; a `pi-heuristic` echo is `profile_mismatch`). The deleted Pi host-adapter witness is retired. |
+| `packing.application.pi_acknowledgment_lost` | pi | `sometimes` | apply-daemon-receipt-does-not-mark-harness-edit-applied | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (`lost:unknown`) exercises the daemon receipt. The deleted Pi host publication witness is retired. |
+| `packing.application.pi_invocation_over_limit` | pi | `sometimes` | apply-adapter-validates-entire-assembled-invocation | Unfired. Retired witness: deleted `context-application-pi.test.ts` `keeps the prompt unchanged when the candidate would grow past the usable window`; no current Pi assembled-invocation adapter exists. |
+| `packing.application.pi_open_delimiter_in_block_presented` | pi | `sometimes` | apply-enabled-outcomes-are-proven-on-real-harness-paths | Unfired. Retired witness: deleted `context-application-pi.test.ts` `never writes a block whose body or id reproduces the open delimiter, so the owned block stays locatable`. |
+| `packing.application.unminted_preparation_id_presented` | opencode, pi | `sometimes` | apply-enabled-outcomes-are-proven-on-real-harness-paths | Unfired on current host paths. Retired witness: deleted OpenCode `context-application.test.ts` `treats a preparation id outside the minted shape as a malformed answer and never applies it`. |
+| `packing.application.pi_preparation_failure` | pi | `sometimes` | apply-append-allowance-and-replacement-capacity-are-bound-before-preparation | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (`oversized:preparation_failure:append_allowance`). The deleted Pi prompt-adapter witness is retired. |
 | `packing.application.pi_zero_write_episode` | pi | `sometimes` | apply-unknown-outcome-never-replays-blindly | `pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing` (tip and projection counter unchanged). |
 
-Unfired markers by harness: OpenCode, `packing.application.real_server_outcome`
-(the end-to-end run against a real OpenCode server). `packages/e2e-tests`
-already starts a real `opencode serve` with the built plugin against the
-daemon's `direct_host_fixture`; what is missing is the scenario, because no
-daemon route produces a packed body and nothing wires `ContextApplication`
-into the transform, so the harness has no application path to drive yet. Pi,
-`packing.application.pi_runner_outcome` (the run through
-`packages/e2e-tests/src/pi-runner/` against a built plugin; not performed
-here). Gated outcomes on Pi stay unsupported until the Pi assembled invocation
-is ruled (parent Q6); the exercised set is pure packing plus
-`preparation_failure`.
+Unfired markers by harness:
+
+- OpenCode: `packing.application.empty_replace`, the host-publication arm of
+  `packing.application.acknowledgment_lost`,
+  `packing.application.unminted_preparation_id_presented`, and
+  `packing.application.real_server_outcome`. The deleted
+  `context-application.ts` and `context-application.test.ts` were the scripted
+  host witnesses. No daemon route produces a packed body, and no current
+  OpenCode adapter publishes one.
+- Pi: `packing.application.pi_invocation_over_limit`,
+  `packing.application.pi_open_delimiter_in_block_presented`, the
+  host-publication arm of `packing.application.pi_acknowledgment_lost`,
+  `packing.application.unminted_preparation_id_presented`, and
+  `packing.application.pi_runner_outcome`. The deleted
+  `context-application-pi.ts` and `context-application-pi.test.ts` were the Pi
+  system-prompt witnesses. Current Rust tests still exercise the closed Pi
+  gate, preparation failure, profile mismatch, receipt states, and zero kernel
+  writes, but they do not prove an absent Pi host adapter. Gated Pi outcomes
+  stay unsupported until a future adapter owns the assembled invocation and
+  revision token.

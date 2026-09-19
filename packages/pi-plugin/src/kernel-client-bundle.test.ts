@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import {
     bundleModuleGraph,
@@ -70,6 +70,11 @@ const NOT_PORTED =
  */
 const AWAITING_CONSUMER = new Map<string, string>();
 
+/** Runtime tokenizer substitutes and deleted TypeScript engines may not re-enter either shipped bundle. */
+const FORBIDDEN_RUNTIME_IMPORT = /ai-tokenizer|test-token-counter/;
+const RETIRED_ENGINE =
+    /ContextApplication|context-application|range-parser|note-condition-compiler|condition-compiler|sandbox-runner|quickjs|noteEvaluationAvailable|authorityState|RustAuthority(?:State|Domain)|pi-pressure|read-session-pi/;
+
 function sourceFiles(dir: string, acc: string[] = []): string[] {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name);
@@ -112,6 +117,33 @@ describe("Pi kernel-client bundle reachability", () => {
         }
         expect(sources.size).toBeGreaterThan(0);
         expect(operationLiteralHits([...sources])).toEqual([]);
+    }, 120_000);
+
+    it("shipped entry graphs contain no tokenizer substitute or deleted TypeScript engine", () => {
+        const hits: string[] = [];
+        for (const graph of Object.values(buildEntryGraphs())) {
+            for (const path of [...graph.inputs, ...graph.externals]) {
+                if (FORBIDDEN_RUNTIME_IMPORT.test(path) || RETIRED_ENGINE.test(path)) {
+                    hits.push(path);
+                }
+            }
+            for (const path of graph.inputs) {
+                if (path.includes("/node_modules/")) continue;
+                const source = readFileSync(resolve(PACKAGE_ROOT, path), "utf8");
+                if (RETIRED_ENGINE.test(source)) hits.push(`${path} source`);
+            }
+            for (const [path, imports] of Object.entries(graph.imports)) {
+                for (const specifier of imports) {
+                    if (
+                        FORBIDDEN_RUNTIME_IMPORT.test(specifier) ||
+                        RETIRED_ENGINE.test(specifier)
+                    ) {
+                        hits.push(`${path} -> ${specifier}`);
+                    }
+                }
+            }
+        }
+        expect(hits).toEqual([]);
     }, 120_000);
 
     it("the memory disposition command ships in the main entry through the shared kernel client", () => {

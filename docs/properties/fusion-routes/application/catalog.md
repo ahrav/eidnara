@@ -93,7 +93,7 @@ witnesses drive a `KernelDaemon` through `dispatch_value_for_test` in
 | [apply-idempotency-key-binds-tuple-and-dedups-by-digest](#apply-idempotency-key-binds-tuple-and-dedups-by-digest) | safety | test-only | always | active | high |
 | [apply-stale-preparation-is-rejected-before-edit](#apply-stale-preparation-is-rejected-before-edit) | safety | test-only | always | active | high |
 | [apply-unknown-outcome-never-replays-blindly](#apply-unknown-outcome-never-replays-blindly) | safety | test-only | always | active | high |
-| [apply-daemon-receipt-does-not-mark-harness-edit-applied](#apply-daemon-receipt-does-not-mark-harness-edit-applied) | safety | test-only | always | active | high |
+| [apply-daemon-receipt-does-not-mark-harness-edit-applied](#apply-daemon-receipt-does-not-mark-harness-edit-applied) | safety | test-only | always | active | medium |
 | [apply-receipt-retention-is-bounded-and-eviction-cannot-authorize-replay](#apply-receipt-retention-is-bounded-and-eviction-cannot-authorize-replay) | safety | test-only | always | active | medium |
 | [apply-receipt-belongs-to-the-project-that-prepared-it](#apply-receipt-belongs-to-the-project-that-prepared-it) | safety | test-only | always | active | high |
 | [apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement](#apply-outcomes-are-distinct-and-empty-replacement-is-applied-replacement) | safety | test-only | always | active | high |
@@ -102,7 +102,7 @@ witnesses drive a `KernelDaemon` through `dispatch_value_for_test` in
 | [apply-context-capabilities-default-closed-per-harness](#apply-context-capabilities-default-closed-per-harness) | safety | test-only | always | active | high |
 | [apply-consumer-capability-strings-never-authorize-edits](#apply-consumer-capability-strings-never-authorize-edits) | safety | test-only | always | active | high |
 | [apply-suppression-requires-confirmed-surviving-span](#apply-suppression-requires-confirmed-surviving-span) | safety | test-only | always | active | high |
-| [apply-adapter-validates-entire-assembled-invocation](#apply-adapter-validates-entire-assembled-invocation) | safety | test-only | always | active | low |
+| [apply-adapter-validates-entire-assembled-invocation](#apply-adapter-validates-entire-assembled-invocation) | safety | default-production | always | active | medium |
 | [apply-enabled-outcomes-are-proven-on-real-harness-paths](#apply-enabled-outcomes-are-proven-on-real-harness-paths) | safety | test-only | always | active | low |
 
 ## Records
@@ -176,16 +176,42 @@ Open questions: None.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: yes - `crates/daemon/tests/edit_receipts.rs` `a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`; `crates/daemon/tests/edit_receipts.rs` `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`; `packages/opencode-plugin/src/hooks/context/context-application.test.ts` `never reports applied when the acknowledgment is lost, whatever the daemon answers`, `never reports applied from a daemon receipt alone`, `reports unknown, not an error, when the confirm cannot reach the daemon after publication`, and `reports unknown, never refused, when the daemon answers the confirm with a terminal after publication`.
-Guarantee: The daemon records the attempt and the forwarded identity before answering `forwarded`, and marks the receipt complete only on a confirm carrying an applied identity equal to that forwarded identity; a receipt alone, a confirm without an applied identity, or a confirm naming another forward never completes it. On the plugin side, `refused` is answered only before publication; once `publish` has run, a confirm the daemon refuses (`receipt_unavailable`, `conflict`, `disabled`, or a capability terminal) or cannot receive is `unknown` carrying the preparation, forwarded, and applied identities and the daemon's terminal, because the host may hold the edit whatever the daemon says.
-Check: `always` - a confirm for a never-forwarded preparation is `conflict`; a confirm with a forwarded identity other than the recorded one is `conflict`; a confirm without an applied identity is `unknown`; only the exact identity completes; the plugin publishes exactly once and answers `unknown` with the identities and the terminal for each of `receipt_unavailable`, `conflict`, and `disabled` on confirm. `always` because the acknowledgment is the only path to `complete` and the plugin's result kinds are decided after publication by whether the daemon confirmed the applied identity, never by the refusal shape.
+Exercised: partial - `crates/daemon/tests/edit_receipts.rs`
+`a_lost_acknowledgment_is_sticky_unknown_and_a_fenced_confirm_is_a_conflict`
+and `a_restart_leaves_forwarded_and_unforwarded_keys_unknown_until_read_back`
+exercise the receipt side. The deleted OpenCode `ContextApplication` client and
+`context-application.test.ts` were the only host publication witnesses, so the
+plugin-side clause is not exercised on current HEAD.
+Guarantee: The daemon records the attempt and the forwarded identity before
+answering `forwarded`, and marks the receipt complete only on a confirm carrying
+an applied identity equal to that forwarded identity; a receipt alone, a confirm
+without an applied identity, or a confirm naming another forward never completes
+it. A future host adapter must answer `refused` only before publication; after
+publication, a confirm refused as `receipt_unavailable`, `conflict`, `disabled`,
+or a capability terminal, or one the daemon cannot receive, must remain
+`unknown` carrying the preparation, forwarded, and applied identities and the
+daemon terminal, because the host may hold the edit whatever the daemon says.
+Check: `always` - a confirm for a never-forwarded preparation is `conflict`; a
+confirm with a forwarded identity other than the recorded one is `conflict`; a
+confirm without an applied identity is `unknown`; only the exact identity
+completes. Any future host adapter publishes exactly once and reports an
+unconfirmed post-publication result as `unknown`, never `refused`, with all
+three identities and the terminal for each refusal shape. `always` because only
+the host acknowledgment can prove application.
 Fault/timing angle: A stale apply acknowledging after a newer forward.
-Required faults and enabling state: A forwarded receipt and confirms with wrong or absent identities.
-Confidence: high - [evidence](evidence/apply-daemon-receipt-does-not-mark-harness-edit-applied.md).
-The forwarded identity is derived from the preparation identity and digest, so an acknowledgment cannot be forged from the tuple alone.
-Existing check: `crates/daemon/tests/kernel_routes.rs` idempotent `kernel.commit` replay tests, status unaudited.
+Required faults and enabling state: A forwarded receipt and confirms with wrong
+or absent identities; for the unexercised clause, a reachable host adapter and a
+lost or refused post-publication confirm.
+Confidence: medium - [evidence](evidence/apply-daemon-receipt-does-not-mark-harness-edit-applied.md).
+The daemon witnesses remain. The retired OpenCode client tests do not establish
+behavior for an absent adapter.
+Existing check: `crates/daemon/tests/kernel_routes.rs` idempotent `kernel.commit`
+replay tests, status unaudited.
 Impact: A daemon-side receipt could claim an edit the harness never applied.
-Open questions: None.
+Open questions:
+
+- Which future host adapter will restore the publication and lost-acknowledgment
+  witness? (needs human input)
 
 ### apply-receipt-retention-is-bounded-and-eviction-cannot-authorize-replay
 
@@ -380,126 +406,100 @@ Open questions: None.
 ### apply-adapter-validates-entire-assembled-invocation
 
 Type: safety
-Reachability: default-production - the OpenCode plugin validates every
-candidate surface before `replaceHostArrayContents` in
-`packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts`.
+Reachability: default-production - the OpenCode transform calls
+`validateInvocation` before `replaceHostArrayContents` at
+`packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts:1603-1619`.
+No Pi application adapter is reachable on current HEAD.
 Status: active
-Exercised: yes - the daemon's boundary is the capacity check in
-`crates/daemon/tests/edit_receipts.rs`
-`outcomes_are_distinct_and_capacity_is_bound_before_preparation`; the
-adapter's whole-invocation validation is
-`packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts`; on Pi,
-`packages/pi-plugin/src/context-application-pi.test.ts` charges the whole
-system prompt under the `pi-heuristic` profile inside `editSystemPrompt`, so a
-candidate the prompt's token budget refuses is `keep` with the prompt
-unchanged; and,
-through the OpenCode transform's publication step,
-`packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts`
-`publishes when the whole invocation fits the context limit with headroom`,
-`declines the pass when the whole invocation exceeds the context limit`,
-`publishes a candidate over the context limit when it is no larger than the
-incoming surface`, and `gates nothing for a model models.dev cannot name,
-although its usage sample inverts to the 128k default`.
+Exercised: partial - `packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts:30-54`
+checks the byte-budget boundary and shrink rule. The publication path is checked
+by `packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts:552-681`.
+The daemon capacity boundary remains checked by
+`crates/daemon/tests/edit_receipts.rs:827`. The deleted
+`packages/pi-plugin/src/context-application-pi.test.ts` was the Pi witness, so
+Pi whole-invocation validation is not exercised.
 Guarantee: The daemon binds append allowance and replacement capacity before
-preparation, and each plugin charges its whole assembled surface under its own
-heuristic profile, the estimator's heuristic ratio plus headroom: the OpenCode
-plugin every entry of the candidate message-entry surface by its canonical
-length, the Pi plugin the whole system prompt by its UTF-8 byte length; each declines
-publication when the charge exceeds the limit and the candidate is larger than
-the incoming surface, the OpenCode plugin against the model's reported context
-limit and the Pi plugin against the token budget its caller leaves for the
-prompt, Pi's usable window (the window less its output reserve) less the
-caller's charge for the messages and tool schemas the adapter never sees; a
-payload that fits alone but not in the invocation is
-refused by the adapter, never applied; a candidate no larger than the incoming
-surface is never refused for the window's own size; a limit the host has not
-reported gates nothing, and the usage sample's percentage is not a report,
-because the producers compute it against the 128k default for a model
-models.dev cannot name; and the local estimate is labeled heuristic under the
-estimator generation, never exact.
-Check: `always` - the charge equals the ceiling of the summed lengths over the
-heuristic ratio, then times one plus the headroom, and equals `estimateTokens`
-under the forced heuristic for the same length; the transform reads the bound
-from `resolveTrustedContextLimit` alone, admits at the limit, refuses one below
-it with the host array unchanged, and publishes a shrinking candidate under a
-one-token limit; a growing candidate charged over 128k tokens publishes for an
-unknown model whose usage sample inverts to the default; the profile carries
-the heuristic authority and the estimator generation as its revision. `always`
-because every application crosses both bounds.
+preparation. Every reachable host adapter charges the whole assembled surface
+under its harness-owned heuristic profile and declines a growing publication
+whose charge exceeds the trusted limit. A payload that fits alone but not in
+the invocation is never applied. A candidate no larger than the incoming
+surface is not refused for the window's own size, and an unreported host limit
+gates nothing. OpenCode charges every candidate entry by canonical UTF-8 length.
+A Pi adapter must charge its complete system-prompt slot against the usable
+window less the caller's charge for messages and tool schemas it cannot see.
+A usage sample's percentage is not a trusted context-limit report: unknown
+models can report a percentage computed against the 128k default. The local
+byte-budget projection stays labeled heuristic and never substitutes for native
+token counting.
+Check: `always` - OpenCode sums every candidate entry's UTF-8 byte length,
+divides by 3.5 with upward rounding, adds permille headroom with upward
+rounding, and uses fixed revision `utf8-bytes-div-3.5-v1`; the transform reads
+`resolveTrustedContextLimit`, admits at the limit, refuses one below it with
+the host array unchanged, publishes a shrinking candidate under a one-token
+limit, and gates nothing for an unknown limit even when its usage percentage
+inverts to the 128k default. A future Pi adapter must perform the same
+whole-invocation check for the surface it assembles. `always` because every
+application must cross the harness-owned bound.
 Fault/timing angle: None.
-Required faults and enabling state: A models.dev limit one below the charged
-total while the usage sample inverts to the opposite verdict; a model
-models.dev cannot name with a usage sample computed against the default; an
-estimator swap that moves the generation.
-Confidence: high - [evidence](evidence/apply-adapter-validates-entire-assembled-invocation.md).
+Required faults and enabling state: An OpenCode trusted limit one below the
+charged total; a shrinking candidate; an unknown trusted limit. Pi additionally
+needs a reachable adapter that sees its assembled invocation.
+Confidence: medium - [evidence](evidence/apply-adapter-validates-entire-assembled-invocation.md).
+OpenCode source and tests establish its clause. No current source establishes
+the Pi clause.
 Existing check: None found.
 Impact: An edit that fits its own bound could overflow the invocation.
 Open questions:
 
-- On Pi the adapter charges the system prompt alone; the caller's charge for
-  the messages and tool schemas that complete the invocation has no production
-  caller yet and is ruled with the Pi assembled invocation (parent Q6).
+- Pi has no application adapter or assembled-invocation witness on current
+  HEAD. Future Pi transform and packing work must supply both. (needs human input)
 
 ### apply-enabled-outcomes-are-proven-on-real-harness-paths
 
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: partial - `crates/daemon/tests/context_capabilities.rs`
-`the_real_harness_tables_allow_exactly_the_recorded_classes` drives the
-recorded OpenCode and Pi declarations through bound routes;
-`packages/opencode-plugin/src/hooks/context/context-application.test.ts`
-drives the plugin's prepare, apply, and confirm client against a scripted
-daemon and witnesses the applied identity, the lost acknowledgment under both
-daemon answers, the receipt-alone negative control, the confirm that cannot
-reach the daemon after publication, and the capability fallback latched per
-route; the client has no production caller because no daemon route yet
-produces a packed body, and the run against a real OpenCode server is not
-performed. On Pi, `crates/daemon/tests/context_capabilities.rs`
-`pi_pure_packing_yields_one_outcome_set_whatever_the_consumer_advertises_and_writes_nothing`
-drives every gated class, an over-allowance preparation, a foreign profile
-echo, and the append lifecycle through two `pi` binds, and
-`packages/pi-plugin/src/context-application-pi.test.ts` drives the same client
-with the system-prompt slot; neither plugin has a production caller for the
-client because no daemon route yet produces a packed body, and the run through
-the Pi runner is not performed.
-Guarantee: On the OpenCode path each enabled class has a witnessed outcome
-carrying plugin-supplied applied identity; on the Pi path every gated class is
-denied, pure packing appends one owned block to the system prompt, a denied
-class is never simulated, two binds differing only in advertised consumer
-strings yield one outcome set, and a lost acknowledgment is `unknown`; a
-plugin build without the transform hook never produces an applied outcome.
-Check: `always` - the Pi denials and the pure-packing append are witnessed
-through a bound `pi` route with the daemon's profile echoed at apply, the
-outcome set is `[capability_unsupported x3, preparation_failure
+Exercised: partial - `crates/daemon/tests/context_capabilities.rs:263` drives
+the recorded OpenCode and Pi declarations through bound routes, and
+`crates/daemon/tests/context_capabilities.rs:703` drives Pi denials, preparation
+failure, profile mismatch, append completion, and lost acknowledgment inside
+the daemon fixture. The deleted OpenCode `ContextApplication` test and Pi
+`context-application-pi.test.ts` were the host-surface witnesses. No current
+host adapter supplies an applied identity or edits a Pi system-prompt slot.
+Guarantee: Each class declared enabled has an outcome witnessed on its real
+host path with a host-supplied applied identity. Pi gated classes remain denied
+until Pi owns an assembled invocation and revision token; pure packing appends
+one owned block to the system prompt and never simulates a denied class.
+Consumer capability strings never widen the host declaration, lost
+acknowledgment remains `unknown`, and a build without an application hook never
+claims an applied outcome.
+Check: `always` - daemon route tests prove only gate and receipt behavior. An
+enablement claim additionally requires the built OpenCode or Pi harness to
+prepare, apply, publish on its owned surface, and confirm with the identity
+returned by that publication. A denied class is never simulated by a host
+fallback, and a lost acknowledgment is never reported applied. The Pi route's
+outcome set remains `[capability_unsupported x3, preparation_failure
 append_allowance, profile_mismatch, append complete, lost unknown]` under both
-consumer-string sets with the kernel tip and projection counter unchanged; the plugin's `replace` intent on Pi falls back to `append` once,
-latches the denial, and a second run keeps the existing block rather than
-writing a second; a block whose id or body reproduces the open delimiter is
-never written and confirms as `keep` with the prompt unchanged, so the owned
-block stays the last open delimiter before the trailing close
-(`context-application-pi.test.ts` `never writes a block whose body or id
-reproduces the open delimiter, so the owned block stays locatable`); a prepared
-answer whose `preparation_id` is outside the minted
-`<incarnation>-<identity>` shape is `malformed_prepare_answer` before any
-adapter edit (`context-application.test.ts` `treats a preparation id outside
-the minted shape as a malformed answer and never applies it`); the OpenCode
-allowed set is witnessed at the gate; the
-OpenCode applied-identity witnesses come from the scripted daemon. `always`
-because every enablement claim needs its witness.
+consumer-string sets, with kernel tip and projection counter unchanged. A future
+host client may fall back from a denied replacement to append once, must latch
+the denial for its route, and must keep the existing block on a second run. A
+block whose id or body reproduces the open delimiter is never published and
+confirms as `keep`; a preparation id outside the minted `<16 hex>-<64 hex>`
+shape is rejected before any edit. These retired host-side checks remain
+obligations, not evidence. `always` because daemon success cannot prove an
+absent host adapter applied an edit.
 Fault/timing angle: None.
-Required faults and enabling state: A running OpenCode server driving the
-plugin's `ContextApplication` client against the daemon; the Pi runner with a
-built plugin for the Pi arm.
-Confidence: medium - [evidence](evidence/apply-enabled-outcomes-are-proven-on-real-harness-paths.md).
+Required faults and enabling state: A reachable host application adapter, a
+daemon-produced packed body, and a built OpenCode server or Pi runner path that
+returns the host publication identity.
+Confidence: low - [evidence](evidence/apply-enabled-outcomes-are-proven-on-real-harness-paths.md).
+The gate and receipt outcomes remain exercised. Both host-surface witnesses
+were retired, and neither real harness application path exists on current HEAD.
 Existing check: `crates/daemon/tests/model_execution_roundtrip.rs` real harness
-subprocess runs, status unaudited.
+subprocess runs, status unaudited; it does not apply packed context edits.
 Impact: A class could be declared enabled without a harness ever proving it.
 Open questions:
 
-- The end-to-end run against a real OpenCode server is outstanding; the
-  scripted-daemon witnesses stand in for it. The server harness exists
-  (`packages/e2e-tests`, a real `opencode serve` against
-  `direct_host_fixture`); the missing piece is the scenario, since no daemon
-  route produces a packed body and no production caller wires
-  `ContextApplication`. (needs human input)
+- OpenCode needs a new reachable application adapter and a real-server scenario
+  before any enabled outcome is proven on its host surface. Pi needs a new
+  assembled-invocation adapter and Pi-runner scenario. (needs human input)
