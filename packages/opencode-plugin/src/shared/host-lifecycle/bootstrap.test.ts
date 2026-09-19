@@ -470,7 +470,12 @@ describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
             return originalStat(file, options);
         });
         try {
-            const options = { sourcePath: source, destDir: store, expectedSha256: digest };
+            const options = {
+                sourcePath: source,
+                destDir: store,
+                expectedSha256: digest,
+                availableBytesOverride: 1n << 40n,
+            };
             if (failure !== null) {
                 expect(() => stageBootstrap(options)).toThrow(failure);
             } else {
