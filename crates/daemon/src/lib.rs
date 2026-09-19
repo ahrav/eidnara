@@ -17945,7 +17945,7 @@ fn eidnara_search_description() -> String {
 }
 
 fn eidnara_note_description() -> String {
-    "Save or inspect durable session notes for future follow-ups. surface_condition is accepted and recorded, but condition evaluation arrives later on this leg.".to_string()
+    "Save or inspect durable session notes for future follow-ups. No evaluator ships with the plugin: writes and updates that set or change surface_condition are refused unless an external host registered a live evaluator.".to_string()
 }
 
 fn eidnara_memory_schema() -> Value {
@@ -18090,7 +18090,7 @@ fn eidnara_note_schema() -> Value {
             "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25, "description": "Maximum active notes to return." },
             "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest notes in each section." },
             "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Optional read filter. Defaults to active session notes plus ready conditional notes." },
-            "surface_condition": { "type": "string", "maxLength": 4096, "description": "Optional externally checkable condition to record with the note. Evaluation arrives later." },
+            "surface_condition": { "type": "string", "maxLength": 4096, "description": "Optional externally checkable condition. Setting or changing it is refused unless a live evaluator is registered." },
             "memory_project": { "type": "string", "description": "Resolved project identity supplied by the host transport." },
         }
     })
@@ -19793,6 +19793,18 @@ mod tests {
                 !text.contains("Eidnara") && !text.contains("transform") && !text.contains('§')
             }));
         }
+        assert_eq!(
+            by_name["eidnara_note"].description.as_deref(),
+            Some(
+                "Save or inspect durable session notes for future follow-ups. No evaluator ships with the plugin: writes and updates that set or change surface_condition are refused unless an external host registered a live evaluator."
+            )
+        );
+        assert_eq!(
+            by_name["eidnara_note"].schema["properties"]["surface_condition"]["description"],
+            json!(
+                "Optional externally checkable condition. Setting or changing it is refused unless a live evaluator is registered."
+            )
+        );
         assert_eq!(
             by_name["eidnara_memory"].execution_mode,
             prompt_surface::ExecutionMode::Mutating
@@ -28357,7 +28369,7 @@ mod tests {
             resolver,
         );
         let route_root = project.to_str().unwrap().to_string();
-        activate_notes_module_authority_via_finish_prepare(&store, &route_root);
+        let identity = activate_notes_module_authority_via_finish_prepare(&store, &route_root);
 
         let conditioned = json!({
             "action": "write",
@@ -28366,6 +28378,28 @@ mod tests {
         });
         let refused = call_facade(&handler, "eidnara_note", conditioned.clone()).await;
         assert!(tool_text(refused).contains("Conditional-note evaluation is unavailable"));
+        let note_statuses = [
+            "active",
+            "pending",
+            "ready",
+            "surfacing",
+            "surfaced",
+            "dismissed",
+        ];
+        assert!(
+            store
+                .read_project_notes(&identity, Some("ses"), &note_statuses, 100, 0)
+                .unwrap()
+                .is_empty(),
+            "refused conditioned write must not create a session note"
+        );
+        assert!(
+            store
+                .read_conditional_notes(&identity, &note_statuses, 100, 0)
+                .unwrap()
+                .is_empty(),
+            "refused conditioned write must not create a smart note"
+        );
 
         let plain = call_facade(
             &handler,
@@ -28436,6 +28470,29 @@ mod tests {
         )
         .await;
         assert_eq!(unregistered["ok"], json!(true));
+        let original = store
+            .get_note_by_id(&identity, "ses", note_id)
+            .unwrap()
+            .unwrap();
+        let refused_update = call_facade(
+            &handler,
+            "eidnara_note",
+            json!({
+                "action": "update",
+                "note_id": note_id,
+                "content": "changed without evaluator",
+                "surface_condition": "when changed",
+            }),
+        )
+        .await;
+        assert!(tool_text(refused_update).contains("the note was not updated"));
+        let unchanged = store
+            .get_note_by_id(&identity, "ses", note_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.content, original.content);
+        assert_eq!(unchanged.surface_condition, original.surface_condition);
+
         let refused_again = call_facade(&handler, "eidnara_note", conditioned.clone()).await;
         assert!(tool_text(refused_again).contains("Conditional-note evaluation is unavailable"));
 

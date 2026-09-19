@@ -22,6 +22,8 @@ const TOKEN_FIXTURES = [
     ["valueOf", 2],
     ["before <EOT> mid <META_START> after <SOS> end", 16],
     ["a".repeat(300) + " " + "=".repeat(100) + " ".repeat(51) + "x", 25],
+    // Matches tokenizer's over_long_piece_is_chunked_and_bounded Rust reference fixture.
+    [`prefix ${"a".repeat(4096 * 3 + 17)} suffix`, 775],
 ] as const;
 
 const hostile = "hostile-tokenizer-input-5f917ed8";

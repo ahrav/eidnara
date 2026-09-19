@@ -5,10 +5,12 @@ import { join } from "node:path";
 import * as shmNative from "@eidnara/shm-native";
 import { deterministicTestTokenCount } from "../test-token-counter";
 
-mock.module("@eidnara/shm-native", () => ({
-    ...shmNative,
-    estimateTokens: deterministicTestTokenCount,
-}));
+if (process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET !== "1") {
+    mock.module("@eidnara/shm-native", () => ({
+        ...shmNative,
+        estimateTokens: deterministicTestTokenCount,
+    }));
+}
 
 const isolatedRoot = mkdtempSync(join(tmpdir(), "eidnara-plugin-test-xdg-"));
 const isolatedDataHome = join(isolatedRoot, "data");

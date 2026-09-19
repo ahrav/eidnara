@@ -186,7 +186,7 @@ Guarantee: The daemon records the attempt and the forwarded identity before
 answering `forwarded`, and marks the receipt complete only on a confirm carrying
 an applied identity equal to that forwarded identity; a receipt alone, a confirm
 without an applied identity, or a confirm naming another forward never completes
-it. A future host adapter must answer `refused` only before publication; after
+it; a future host adapter must answer `refused` only before publication; after
 publication, a confirm refused as `receipt_unavailable`, `conflict`, `disabled`,
 or a capability terminal, or one the daemon cannot receive, must remain
 `unknown` carrying the preparation, forwarded, and applied identities and the
@@ -411,7 +411,7 @@ Reachability: default-production - the OpenCode transform calls
 `packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts:1603-1619`.
 No Pi application adapter is reachable on current HEAD.
 Status: active
-Exercised: partial - `packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts:30-54`
+Exercised: partial - `packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts:25-54`
 checks the byte-budget boundary and shrink rule. The publication path is checked
 by `packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts:552-681`.
 The daemon capacity boundary remains checked by
@@ -419,16 +419,16 @@ The daemon capacity boundary remains checked by
 `packages/pi-plugin/src/context-application-pi.test.ts` was the Pi witness, so
 Pi whole-invocation validation is not exercised.
 Guarantee: The daemon binds append allowance and replacement capacity before
-preparation. Every reachable host adapter charges the whole assembled surface
+preparation; every reachable host adapter charges the whole assembled surface
 under its harness-owned heuristic profile and declines a growing publication
-whose charge exceeds the trusted limit. A payload that fits alone but not in
-the invocation is never applied. A candidate no larger than the incoming
+whose charge exceeds the trusted limit; a payload that fits alone but not in
+the invocation is never applied; a candidate no larger than the incoming
 surface is not refused for the window's own size, and an unreported host limit
-gates nothing. OpenCode charges every candidate entry by canonical UTF-8 length.
-A Pi adapter must charge its complete system-prompt slot against the usable
-window less the caller's charge for messages and tool schemas it cannot see.
-A usage sample's percentage is not a trusted context-limit report: unknown
-models can report a percentage computed against the 128k default. The local
+gates nothing; OpenCode charges every candidate entry by canonical UTF-8 length;
+a Pi adapter must charge its complete system-prompt slot against the usable
+window less the caller's charge for messages and tool schemas it cannot see;
+a usage sample's percentage is not a trusted context-limit report: unknown
+models can report a percentage computed against the 128k default; the local
 byte-budget projection stays labeled heuristic and never substitutes for native
 token counting.
 Check: `always` - OpenCode sums every candidate entry's UTF-8 byte length,
@@ -467,10 +467,10 @@ the daemon fixture. The deleted OpenCode `ContextApplication` test and Pi
 `context-application-pi.test.ts` were the host-surface witnesses. No current
 host adapter supplies an applied identity or edits a Pi system-prompt slot.
 Guarantee: Each class declared enabled has an outcome witnessed on its real
-host path with a host-supplied applied identity. Pi gated classes remain denied
+host path with a host-supplied applied identity; Pi gated classes remain denied
 until Pi owns an assembled invocation and revision token; pure packing appends
-one owned block to the system prompt and never simulates a denied class.
-Consumer capability strings never widen the host declaration, lost
+one owned block to the system prompt and never simulates a denied class;
+consumer capability strings never widen the host declaration, lost
 acknowledgment remains `unknown`, and a build without an application hook never
 claims an applied outcome.
 Check: `always` - daemon route tests prove only gate and receipt behavior. An

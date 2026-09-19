@@ -20,7 +20,7 @@ Repository: `/local/home/ahrav/scratch/eidnara-stack`; inspected 2026-09-19 at
 - `packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts:1603-1619`
   validates `application.lengths` against all `inputLengths` before
   `replaceHostArrayContents` publishes the candidate.
-- `packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts:30-59`
+- `packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts:25-54`
   checks admission at the limit, refusal one below it, shrinking admission,
   and unknown-limit admission.
 - `packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts:552-681`

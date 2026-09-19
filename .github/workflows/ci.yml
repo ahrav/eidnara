@@ -96,6 +96,8 @@ jobs:
               - *workflow
               - *cargo
               - 'crates/shm-transport/**'
+              # The native addon links the tokenizer directly.
+              - 'crates/tokenizer/**'
               # The direct-host E2E fixture links host-runtime. Changes there
               # select this job even when no package file moves.
               - 'crates/host-runtime/**'
@@ -845,12 +847,14 @@ jobs:
         # detachment through N-API.
         run: |
           bun run --cwd packages/shm-native build:native
+          bun run --cwd packages/shm-native build:js
           bun run --cwd packages/shm-native typecheck
           bun run --cwd packages/shm-native test
           bun run --cwd packages/shm-native test:capability:bun
           bun run --cwd packages/shm-native test:node
           bun run --cwd packages/shm-native test:capability:node
-          bun run --cwd packages/opencode-plugin test src/shared/host-client
+          bun run --cwd packages/opencode-plugin test
+          bun run --cwd packages/pi-plugin test
 
       - name: Payload and tarball smoke
         run: |

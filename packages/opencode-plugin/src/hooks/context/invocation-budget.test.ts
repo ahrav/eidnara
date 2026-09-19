@@ -1,10 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-    BYTE_BUDGET_REVISION,
-    chargeInvocation,
-    harnessProfile,
-    validateInvocation,
-} from "./invocation-budget";
+import { chargeInvocation, harnessProfile, validateInvocation } from "./invocation-budget";
 
 const BUDGET = { headroomPermille: 250, profile: "opencode-heuristic" } as const;
 
@@ -18,10 +13,10 @@ describe("invocation budget", () => {
         expect(charge.chargedTokens).toBe(Math.ceil((charge.estimatedTokens * 1250) / 1000));
         expect(charge.profile).toEqual({
             identity: "opencode-heuristic",
-            revision: BYTE_BUDGET_REVISION,
+            revision: "utf8-bytes-div-3.5-v1",
             authority: "heuristic",
         });
-        expect(harnessProfile("pi-heuristic").revision).toBe(BYTE_BUDGET_REVISION);
+        expect(harnessProfile("pi-heuristic").revision).toBe("utf8-bytes-div-3.5-v1");
         expect(chargeInvocation([lengths[2]!], BUDGET).chargedTokens).toBeLessThan(
             charge.chargedTokens,
         );

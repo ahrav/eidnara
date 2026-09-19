@@ -1,5 +1,5 @@
 const BYTE_BUDGET_BYTES_PER_TOKEN = 3.5;
-export const BYTE_BUDGET_REVISION = "utf8-bytes-div-3.5-v1";
+const BYTE_BUDGET_REVISION = "utf8-bytes-div-3.5-v1";
 
 /** A harness's own estimator validates the invocation locally; it is never the daemon's bound profile and never labeled exact. */
 export type HarnessProfileIdentity = "opencode-heuristic" | "pi-heuristic";
