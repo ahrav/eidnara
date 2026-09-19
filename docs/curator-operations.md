@@ -36,15 +36,15 @@ The directory must be mode `0700` and the file mode `0600`, both owned by the da
 | `kernel_incarnation` | The Kernel database incarnation id of this deployment. |
 | `memstore_incarnation` | The Memory Store incarnation id of this deployment. |
 | `provider` | `<host>/v1/messages@<anthropic-version>`, as the sender identifies the endpoint it dials. |
-| `credential` | The startup-envelope credential name the sender dials with, for example `ANTHROPIC_API_KEY`. |
-| `credential_fingerprint` | Lower-hex SHA-256 over `eidnara-curator-credential-v1`, a NUL byte, the credential name, a NUL byte, and the secret. |
+| `credential` | `ANTHROPIC_API_KEY`: the one startup-envelope credential the sender's protocol writes into its request. Any other name closes the gate as `unknown_credential`, even when the envelope carries it. |
+| `credential_fingerprint` | The identity the daemon's committed harness selection, `<data home>/eidnara/harness-closures/active-selection.json`, records under `credential_identities` for that credential: an HMAC keyed under this start's connection key, never the secret itself. The key is fresh at every daemon start, so the value changes at every start. |
 | `provider_retention` | `{attested_by, attested_on, retention_terms, finite_work_exposure_acknowledged}`: the owner's statement about the provider account's data retention and an explicit `true` acknowledging that every run spends bounded provider work. |
 
-Every term is compared against the live deployment on every pass and again before every job. Any mismatch closes the gate, and the worker runs nothing and sends nothing. The record therefore has to be rewritten when the binary changes (any compiled version or baseline digest), when either store is replaced (its incarnation changes), when the provider or endpoint changes, or when the secret is rotated (its fingerprint changes). That is the Q38 rule made mechanical: owner approval of provider retention and finite work exposure precedes the first remote call for exactly this deployment, and no approval carries over to a deployment it did not name.
+Every term is compared against the live deployment on every pass and again before every job. Any mismatch closes the gate, and the worker runs nothing and sends nothing. The record therefore has to be rewritten when a binary changes any compiled version or baseline digest the record names (the gate binds those terms, not a build identity, so a binary that changes none of them is admitted by the existing record), when either store is replaced (its incarnation changes), when the provider or endpoint changes, when the secret is rotated, and after every daemon start, because the credential identity is derived under that start's connection key. That is the Q38 rule made mechanical: owner approval of provider retention and finite work exposure precedes the first remote call for exactly the deployment the record's terms describe, and no approval carries over to a deployment they do not name.
 
-The status block reports only the closed kind (`identity_mismatch`), never which term differs. The term and the deployment's live value are written to the daemon's log, `<data home>/.eidnara-coordination/eidnara.log`, once per distinct reason: `daemon: curator activation gate closed: activation record names another kernel incarnation; the live value is <id>`. Every term except the credential fingerprint is reported this way, so a draft record can be corrected one term at a time from the log; the fingerprint derives from the secret and is never written, and the owner computes it from the derivation above. The compiled versions and digests are not published on any other operator surface. Nothing reads the record except the worker; there is no operator command that writes it, and the daemon never writes one.
+The status block reports only the closed kind (`identity_mismatch`), never which term differs. The term and the deployment's live value are written to the daemon's log, `<data home>/.eidnara-coordination/eidnara.log`, once per distinct reason: `daemon: curator activation gate closed: activation record names another kernel incarnation; the live value is <id>`. Every identity term is reported this way, so a draft record can be corrected one term at a time from the log. The credential is not: a name the sender does not dial with closes the gate as `unknown_credential`, and a mismatched identity logs only `activation record names another credential`, with no live value. The owner copies the identity from the selection file named above. The compiled versions and digests are not published on any other operator surface. Nothing reads the record except the worker; there is no operator command that writes it, and the daemon never writes one.
 
-The credential is read from the startup envelope's credentials, never from the process environment. The host always hands the daemon its Model Execution supervisor and the envelope's credentials; a record naming a credential the envelope does not carry closes the gate as `unknown_credential`.
+The credential is read from the startup envelope's credentials, never from the process environment. The host always hands the daemon its Model Execution supervisor and the envelope's credentials; a record naming a credential the sender does not dial with closes the gate as `unknown_credential`. Until the daemon has committed its harness selection for this start, no credential identity exists and the gate reports `unreadable`.
 
 ## 3. Status
 
@@ -66,7 +66,7 @@ No operator command performs a Kernel backup or restore in this milestone. `Kern
 
 Backup:
 
-1. Stop the daemon. The worker is joined before the stores are released, so a stopped daemon has no run in flight; a receipt still `in_progress` at that point is taken over on the next pass after restart.
+1. Stop the daemon. The worker is joined before the stores are released, so a stopped daemon has no run in flight. A receipt still `in_progress` at that point is finished by a later pass: the first pass after restart resumes it under the same claim when the same binary reacquires its own slot claim before that claim lapses (`CURATOR_TASK_LEASE_MS`, 40 s from its last renewal; the worker instance derives from the payload manifest digest); otherwise the claim fences the job until it lapses, and the first pass after that takes the receipt over at the next generation.
 2. Kernel database: `KernelStore::backup` publishes a verified copy of `kernel.sqlite` into a private directory (owned by the daemon's user, mode `0700`, not a symlink; anything else is refused as an unsafe destination) and returns its path and the captured commit sequence. This is the only supported Kernel database backup; a file copy of a live Kernel family is not.
 3. Kernel artifacts: the database backup carries no artifact bytes. Copy `kernel/artifacts/objects/` beside it. The capture pins the evidence the backup references in the live store, but only for 24 hours unless `capture_pin_expires_at` says otherwise; after the pin lapses, reclamation may remove an object the live database no longer references, and a backup whose evidence names an object the target root does not hold is refused at restore. The objects copy is what makes a backup restorable past that window and into a fresh root.
 4. Memory Store: copy the closed `store.db` family (`store.db`, `store.db-wal`, `store.db-shm` when present). The destination must be a directory owned by the daemon's user with mode `0700`, and the copied files must stay `0600`; the store narrows its live family to `0600` on open but nothing guards a copy. The store publishes no backup of its own.
@@ -77,7 +77,7 @@ Restore of the pair:
 1. Stop the daemon.
 2. Kernel: place the artifact objects under the target root's `kernel/artifacts/objects/`, open the target root with the same binary that wrote the backup, and call `KernelStore::restore` with the backup path. The restored database keeps its incarnation id, its staged rows, its holds, and its purge tombstones. The restore is refused before anything is displaced when the backup lacks a purge this store committed, or when its live evidence references an object the root does not hold or holds as bytes that fail verification.
 3. Memory Store: replace `store.db` and its sidecars with the copied family. It keeps its incarnation id and every receipt.
-4. Start the daemon. A proposal selected before the backup reads again through `review.read` while its review hold is live, and the owner's activation record still matches because neither incarnation changed.
+4. Start the daemon. A proposal selected before the backup reads again through `review.read` while its review hold is live. Neither incarnation changed, so the owner's activation record needs only the new start's credential identity, as after any start.
 
 Mismatch refusal, as the rehearsal test `crates/daemon/tests/curator_backup_restore.rs` proves over the data-directory layout above:
 
@@ -123,7 +123,7 @@ The scripted corpus (`crates/daemon/tests/support/curator_corpus.rs`) is eight h
 | Abstentions | 1 (`model_declined`, injected instructions) | 8 cases | scripted |
 | Relations covered | supports, contradicts, supersedes, shared origin, decisive evidence outside initial context, protected source, incomplete search, injected instructions | 8 relations | each once |
 | Citation validity | every cited alias in a published case names disclosed bytes; a citation outside disclosed bytes is refused before binding | 7 published cases | 7 of 7 valid, by construction |
-| Contradictions cited | the contradiction case cites its contradicting source | 1 case with a contradicting source | 1 of 1, by construction |
+| Contradictions cited | both cases with a contradicting source (`contradiction`, `decisive evidence outside initial context`) cite it | 2 cases with a contradicting source | 2 of 2, by construction |
 
 These figures are the corpus's own labels replayed; they are not precision, yield, or recall of a model.
 
@@ -135,7 +135,7 @@ These figures are the corpus's own labels replayed; they are not precision, yiel
 | Useful yield | useful published proposals | jobs run | N/A (0 run) |
 | Unnecessary abstention | abstentions a reviewer judged unnecessary | abstentions | N/A (0) |
 | Missed contradictions | contradicting sources in evidence not cited | proposals with a contradicting source in evidence | N/A (0) |
-| Physical requests per useful proposal | committed attempt markers | useful published proposals | N/A (0) |
+| Physical requests per useful proposal | committed attempt markers not terminated `not_dispatched` (a marker that committed and sent nothing is proof of no disclosure, not a request) | useful published proposals | N/A (0) |
 | Citation validity | citations naming disclosed bytes | citations | N/A (0) |
 | Failures and nonadmissions retained | | | none observed; the ledger keeps every `failed`, `unknown`, `expired`, and nonadmitted outcome when they occur |
 
