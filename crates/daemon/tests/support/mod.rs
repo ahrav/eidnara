@@ -2,6 +2,7 @@
 
 pub mod applied;
 pub mod curator_corpus;
+pub mod curator_publish;
 pub mod dense_projection;
 #[cfg(unix)]
 pub mod direct_host;

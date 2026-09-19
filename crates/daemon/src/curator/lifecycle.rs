@@ -118,11 +118,19 @@ struct Published {
     stale_at: Instant,
 }
 
+/// The worker's latest gate evaluation. `reason` is the operator-facing closed reason, which the wire block does not carry.
+struct GateEvaluation {
+    state: ActivationState,
+    reason: Option<String>,
+    /// When the evaluation stops being current: a worker that stopped evaluating must not keep reporting `open`.
+    stale_at: Instant,
+}
+
 /// The sampler's published projection; `health()` reads it and never touches the store. The activation state is the worker's, published beside the sampler's block.
 pub struct CuratorStatus {
     snapshot: ArcSwap<Published>,
-    /// The worker's latest gate evaluation and when it stops being current: a worker that stopped evaluating must not keep reporting `open`. `None` until the first evaluation, which nothing can age.
-    activation: ArcSwap<Option<(ActivationState, Instant)>>,
+    /// `None` until the first evaluation, which nothing can age.
+    activation: ArcSwap<Option<GateEvaluation>>,
 }
 
 impl Default for CuratorStatus {
@@ -148,17 +156,38 @@ impl CuratorStatus {
             } else {
                 published.block.clone()
             };
-        block.activation_state = ActivationStateText(match **self.activation.load() {
+        block.activation_state = ActivationStateText(match &**self.activation.load() {
             None => ActivationState::Closed("unknown"),
-            Some((_, stale_at)) if now >= stale_at => ActivationState::Closed("stale"),
-            Some((activation, _)) => activation,
+            Some(evaluation) if now >= evaluation.stale_at => ActivationState::Closed("stale"),
+            Some(evaluation) => evaluation.state,
         });
         block
     }
 
     pub fn set_activation(&self, state: ActivationState) {
-        self.activation
-            .store(Arc::new(Some((state, Instant::now() + SAMPLE_STALE_AFTER))));
+        self.activation.store(Arc::new(Some(GateEvaluation {
+            state,
+            reason: None,
+            stale_at: Instant::now() + SAMPLE_STALE_AFTER,
+        })));
+    }
+
+    /// Records a closed gate with its reason and returns whether the reason differs from the one recorded before, so a caller can report each distinct reason once rather than on every pass.
+    pub fn set_closed(&self, state: ActivationState, reason: String) -> bool {
+        let changed = self.closed_reason().as_deref() != Some(reason.as_str());
+        self.activation.store(Arc::new(Some(GateEvaluation {
+            state,
+            reason: Some(reason),
+            stale_at: Instant::now() + SAMPLE_STALE_AFTER,
+        })));
+        changed
+    }
+
+    /// The closed reason recorded with the latest gate evaluation; `None` before the first evaluation, while the gate is open, or when its closure carries no reason.
+    pub fn closed_reason(&self) -> Option<String> {
+        (**self.activation.load())
+            .as_ref()
+            .and_then(|evaluation| evaluation.reason.clone())
     }
 
     fn last_sampled_at_ms(&self) -> Option<i64> {
@@ -179,8 +208,13 @@ impl CuratorStatus {
             block: current.block.clone(),
             stale_at: Instant::now(),
         });
-        self.activation
-            .rcu(|current| current.map(|(state, _)| (state, Instant::now())));
+        self.activation.rcu(|current| {
+            (**current).as_ref().map(|evaluation| GateEvaluation {
+                state: evaluation.state,
+                reason: evaluation.reason.clone(),
+                stale_at: Instant::now(),
+            })
+        });
     }
 }
 
@@ -748,6 +782,39 @@ mod tests {
             CuratorJobState::Terminal(CuratorJobOutcome::Expired),
             "the expired reservation keeps its recorded outcome and is not reopened"
         );
+    }
+
+    /// A repeated reason is not a change; an open gate clears the remembered reason, so the next closure is reported even when its reason matches the prior closure.
+    #[test]
+    fn a_closed_reason_changes_once_per_distinct_reason_and_an_open_gate_clears_it() {
+        let status = CuratorStatus::default();
+        assert_eq!(status.closed_reason(), None);
+        assert!(status.set_closed(
+            ActivationState::Closed("identity_mismatch"),
+            "names another kernel incarnation".to_string()
+        ));
+        assert!(!status.set_closed(
+            ActivationState::Closed("identity_mismatch"),
+            "names another kernel incarnation".to_string()
+        ));
+        assert!(status.set_closed(
+            ActivationState::Closed("identity_mismatch"),
+            "names another provider".to_string()
+        ));
+        assert_eq!(
+            status.closed_reason(),
+            Some("names another provider".to_string())
+        );
+        assert_eq!(
+            status.reported().activation_state.0,
+            ActivationState::Closed("identity_mismatch")
+        );
+        status.set_activation(ActivationState::Open);
+        assert_eq!(status.closed_reason(), None);
+        assert!(status.set_closed(
+            ActivationState::Closed("identity_mismatch"),
+            "names another provider".to_string()
+        ));
     }
 
     /// Before the worker's first evaluation nothing can go stale: `unknown` outlives the staleness bound. An evaluation does age into `stale`.

@@ -219,12 +219,26 @@ impl Rig {
 
     /// The owner's activation record for exactly this deployment.
     fn write_activation(&self) {
-        self.write_activation_naming(CREDENTIAL, CREDENTIAL_IDENTITY);
+        self.write_activation_record(self.activation_record());
     }
 
     fn write_activation_naming(&self, credential: &str, credential_fingerprint: &str) {
+        self.write_activation_record(
+            self.activation_record_naming(credential, credential_fingerprint),
+        );
+    }
+
+    fn activation_record(&self) -> serde_json::Value {
+        self.activation_record_naming(CREDENTIAL, CREDENTIAL_IDENTITY)
+    }
+
+    fn activation_record_naming(
+        &self,
+        credential: &str,
+        credential_fingerprint: &str,
+    ) -> serde_json::Value {
         let provider = self.peer.sender().provider_identity();
-        let record = serde_json::json!({
+        serde_json::json!({
             "schema": IDENTITY_SCHEMA,
             "model": "claude-test",
             "prompt_template_version": LiveIdentity::prompt_template_version(),
@@ -244,7 +258,10 @@ impl Rig {
                 "retention_terms": "test peer; nothing leaves the host",
                 "finite_work_exposure_acknowledged": true
             }
-        });
+        })
+    }
+
+    fn write_activation_record(&self, record: serde_json::Value) {
         let dir = self.home.join(ACTIVATION_DIR);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -565,6 +582,102 @@ async fn a_cancelled_worker_loop_returns_before_the_stores_are_released() {
         rig.status.reported().activation_state.0,
         ActivationState::Closed("missing")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_receipt_left_in_progress_is_taken_over_at_the_next_generation_and_settled() {
+    // Another worker's run began the receipt a minute ago and never settled: its claim has lapsed, its receipt is in progress at generation 1. While that claim was live the job was fenced; once it lapsed, the next pass takes the receipt over under its own claim at generation 2 and settles it, so an abandoned run never wedges a job behind a stale fence.
+    let rig = Rig::open().await;
+    let now = now_ms() - 60_000;
+    let identity = rig.ready_history_summarizer_job(now);
+    let memory_store::LeaseAcquireOutcome::Claim { claim, .. } = rig
+        .store
+        .acquire_curator_task(
+            PROJECT,
+            "acq-other",
+            "worker-b",
+            0,
+            i64::try_from(rig.generation).unwrap(),
+            &identity,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("the job is claimed")
+    };
+    let memory_store::curator_ledger::CuratorBeginOutcome::Begun(abandoned) = rig
+        .store
+        .begin_curator_receipt(
+            PROJECT,
+            &identity,
+            &rig.kernel_incarnation,
+            &claim.claim_id,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("the receipt begins")
+    };
+    assert_eq!(abandoned.generation, 1);
+    let worker = rig.worker();
+    rig.write_activation();
+    assert_eq!(worker.pass(&CancellationToken::new()).await, 1);
+    let receipt = rig
+        .store
+        .lookup_curator_receipt(PROJECT, &identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receipt.generation, 2,
+        "the takeover advanced the generation"
+    );
+    assert_ne!(
+        receipt.claim_id, claim.claim_id,
+        "under the taker's own claim"
+    );
+    assert_eq!(receipt.terminal, Some(CuratorReceiptTerminal::Abstained));
+    assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_gate_reports_the_mismatched_term_and_its_live_value_once_per_change() {
+    // The owner fills the record in against the running deployment, so a mismatch has to say which term differs and what the deployment's value is; the status block carries only the closed kind. The reason is reported when it changes, not on every pass, and a matching record clears it.
+    let rig = Rig::open().await;
+    let worker = rig.worker();
+    let cancel = CancellationToken::new();
+    let mut record = rig.activation_record();
+    record["kernel_incarnation"] = serde_json::json!("another-kernel");
+    rig.write_activation_record(record.clone());
+    assert_eq!(worker.pass(&cancel).await, 0);
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Closed("identity_mismatch")
+    );
+    let reason = format!(
+        "activation record names another kernel incarnation; the live value is {}",
+        rig.kernel_incarnation
+    );
+    assert_eq!(rig.status.closed_reason(), Some(reason.clone()));
+    assert_eq!(worker.pass(&cancel).await, 0);
+    assert_eq!(rig.status.closed_reason(), Some(reason));
+
+    // The credential fingerprint is derived from the secret, so its live value is never reported.
+    record["kernel_incarnation"] = serde_json::json!(rig.kernel_incarnation);
+    record["credential_fingerprint"] = serde_json::json!("fp-other");
+    rig.write_activation_record(record);
+    assert_eq!(worker.pass(&cancel).await, 0);
+    assert_eq!(
+        rig.status.closed_reason(),
+        Some("activation record names another credential".to_string())
+    );
+
+    rig.write_activation();
+    assert_eq!(worker.pass(&cancel).await, 0, "no job is ready");
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Open
+    );
+    assert_eq!(rig.status.closed_reason(), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

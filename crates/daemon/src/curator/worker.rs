@@ -49,6 +49,20 @@ pub struct CuratorHost {
     pub worker_instance: String,
 }
 
+/// The operator-facing text of a closed gate. An identity mismatch carries the live value of the term that differs; the credential fingerprint has no entry in [`activation::identity_terms`], so a credential mismatch reports no value.
+fn closed_reason(closed: &Closed, live: Option<&LiveIdentity>) -> String {
+    match (closed, live) {
+        (Closed::IdentityMismatch(field), Some(live)) => activation::identity_terms(live)
+            .into_iter()
+            .find(|(term, _)| term == field)
+            .map_or_else(
+                || closed.to_string(),
+                |(_, value)| format!("{closed}; the live value is {value}"),
+            ),
+        _ => closed.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectRoute {
     pub project: String,
@@ -155,16 +169,24 @@ impl Worker {
         })
     }
 
-    /// The gate as of now, with the closed state published for the operator surface.
     fn gate(&self, kernel: &kernel::KernelStore) -> Result<Activation, Closed> {
-        let gate = self
-            .live_identity(kernel)
-            .ok_or_else(|| Closed::Unreadable("store identity".to_string()))
-            .and_then(|live| activation::read_gate(&self.home, &live));
-        self.status.set_activation(match &gate {
-            Ok(_) => ActivationState::Open,
-            Err(closed) => ActivationState::from(closed),
-        });
+        let live = self.live_identity(kernel);
+        let gate = match &live {
+            Some(live) => activation::read_gate(&self.home, live),
+            None => Err(Closed::Unreadable("store identity".to_string())),
+        };
+        match &gate {
+            Ok(_) => self.status.set_activation(ActivationState::Open),
+            Err(closed) => {
+                let reason = closed_reason(closed, live.as_ref());
+                if self
+                    .status
+                    .set_closed(ActivationState::from(closed), reason.clone())
+                {
+                    eprintln!("daemon: curator activation gate closed: {reason}");
+                }
+            }
+        }
         gate
     }
 
