@@ -1,4 +1,5 @@
-import { estimateTokensFromLength, tokenEstimatorGeneration } from "../../shared/token-estimator";
+const BYTE_BUDGET_BYTES_PER_TOKEN = 3.5;
+export const BYTE_BUDGET_REVISION = "utf8-bytes-div-3.5-v1";
 
 /** A harness's own estimator validates the invocation locally; it is never the daemon's bound profile and never labeled exact. */
 export type HarnessProfileIdentity = "opencode-heuristic" | "pi-heuristic";
@@ -12,7 +13,7 @@ export interface HarnessProfile {
 export function harnessProfile(identity: HarnessProfileIdentity): HarnessProfile {
     return {
         identity,
-        revision: `generation:${tokenEstimatorGeneration()}`,
+        revision: BYTE_BUDGET_REVISION,
         authority: "heuristic",
     };
 }
@@ -37,9 +38,8 @@ export type InvocationValidation =
     | { ok: false; candidate: InvocationCharge; incoming: InvocationCharge; limit: number };
 
 /**
- * `entryLengths` are UTF-8 byte counts, so the charge is bytes over the character ratio. For
- * multibyte text that reads higher than `estimateTokens(text)`'s fallback and closer to the real
- * tokenizer (1000 CJK characters: 1358 exact, 858 by bytes, 286 by characters); it never reads lower.
+ * `entryLengths` are UTF-8 byte counts. This separate admission heuristic keeps its existing
+ * byte ratio and never substitutes for native token counting.
  */
 export function chargeInvocation(
     entryLengths: readonly number[],
@@ -47,7 +47,7 @@ export function chargeInvocation(
 ): InvocationCharge {
     let bytes = 0;
     for (const length of entryLengths) bytes += length;
-    const estimatedTokens = estimateTokensFromLength(bytes);
+    const estimatedTokens = Math.ceil(bytes / BYTE_BUDGET_BYTES_PER_TOKEN);
     return {
         profile: harnessProfile(budget.profile),
         entries: entryLengths.length,

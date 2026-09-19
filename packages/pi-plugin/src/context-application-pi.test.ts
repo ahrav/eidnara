@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import {
     type ApplicationTarget,
     CapabilityLatch,
@@ -6,21 +6,13 @@ import {
     type PackedAction,
     type RouteKey,
 } from "@eidnara/opencode/hooks/context/context-application";
-import {
-    installTokenizerForTest,
-    resetTokenEstimatorForTest,
-    tokenEstimatorGeneration,
-} from "@eidnara/opencode/shared/token-estimator";
+import { BYTE_BUDGET_REVISION } from "@eidnara/opencode/hooks/context/invocation-budget";
 import {
     editSystemPrompt,
     hasPackedBlock,
     PI_INVOCATION_HEADROOM_PERMILLE,
     validatePiInvocation,
 } from "./context-application-pi";
-
-afterEach(() => {
-    resetTokenEstimatorForTest();
-});
 
 const PROMPT = "You are Pi.\nToday's date: Thu Sep 17 2026";
 const ROUTE: RouteKey = { sessionId: "pi-1", projectRoot: "/workspace", routeEpoch: 3 };
@@ -142,7 +134,7 @@ describe("Pi whole-invocation validation", () => {
         expect(fits.candidate.entries).toBe(1);
         expect(fits.candidate.profile).toEqual({
             identity: "pi-heuristic",
-            revision: `generation:${tokenEstimatorGeneration()}`,
+            revision: BYTE_BUDGET_REVISION,
             authority: "heuristic",
         });
         expect(fits.candidate.chargedTokens).toBe(
@@ -162,15 +154,6 @@ describe("Pi whole-invocation validation", () => {
         const refused = validatePiInvocation(candidate, PROMPT, codeUnitCharge);
         expect(refused.candidate.bytes).toBe(Buffer.byteLength(candidate));
         expect(refused.ok).toBe(false);
-    });
-
-    it("moves the profile revision with the estimator generation and never labels it exact", () => {
-        const before = validatePiInvocation(PROMPT, PROMPT, undefined).candidate.profile;
-        installTokenizerForTest({ encode: (text: string) => Array.from(text, (_, i) => i) });
-        const after = validatePiInvocation(PROMPT, PROMPT, undefined).candidate.profile;
-        expect(after.revision).not.toBe(before.revision);
-        expect(after.authority).toBe("heuristic");
-        expect(after.identity).toBe("pi-heuristic");
     });
 });
 

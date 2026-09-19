@@ -2,6 +2,16 @@ import { expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { BunPlugin } from "bun";
+
+const TEST_TOKEN_COUNTER_PLUGIN: BunPlugin = {
+    name: "test-token-counter",
+    setup(build) {
+        build.onResolve({ filter: /^@eidnara\/shm-native$/ }, () => ({
+            path: join(import.meta.dir, "../../../../test-token-counter.ts"),
+        }));
+    },
+};
 
 it("reuses and invalidates session DB statements on Bun and node:sqlite", async () => {
     const dir = mkdtempSync(join(tmpdir(), "session-db-runtime-"));
@@ -12,6 +22,7 @@ it("reuses and invalidates session DB statements on Bun and node:sqlite", async 
             target: "node",
             format: "esm",
             naming: "[name].mjs",
+            plugins: [TEST_TOKEN_COUNTER_PLUGIN],
         });
         expect(built.success, String(built.logs)).toBe(true);
         const results = [];

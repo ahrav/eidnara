@@ -1,34 +1,20 @@
 import { describe, expect, it } from "bun:test";
+import { estimateTokens as estimateTokensFromNative } from "@eidnara/shm-native";
 import { estimateTokens as estimateTokensFromHook } from "../hooks/context/read-session-formatting";
 import { estimateTokens } from "./token-estimator";
 
 describe("token estimator", () => {
-    it("returns 0 for empty text", () => {
-        expect(estimateTokens("")).toBe(0);
-    });
-
-    it("returns a positive count for ordinary text and for literal special-token strings", () => {
-        expect(estimateTokens("bounded search queries")).toBeGreaterThan(0);
-        expect(
-            estimateTokens("tool output contains <EOT> and <|endoftext|> literally"),
-        ).toBeGreaterThan(0);
-    });
-
-    it("is monotone for repeated text", () => {
-        const once = estimateTokens("hard bounds ");
-        const many = estimateTokens("hard bounds ".repeat(100));
-        expect(many).toBeGreaterThan(once);
-    });
-
-    it("matches the compatibility re-export exactly", () => {
-        const samples = [
+    it("is the native binding across every public re-export", () => {
+        for (const sample of [
+            "",
             "plain words",
             "<EOT> literal special tokens",
             "multibyte — émoji 🎉 text",
             "x".repeat(5000),
-        ];
-        for (const sample of samples) {
-            expect(estimateTokensFromHook(sample)).toBe(estimateTokens(sample));
+        ]) {
+            const expected = estimateTokensFromNative(sample);
+            expect(estimateTokens(sample)).toBe(expected);
+            expect(estimateTokensFromHook(sample)).toBe(expected);
         }
     });
 });

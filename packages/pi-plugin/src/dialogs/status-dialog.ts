@@ -75,7 +75,7 @@ interface StatusDialogDetail {
     sessionId: string;
     usagePercentage: number;
     inputTokens: number;
-    systemPromptTokens: number;
+    systemPromptTokens: number | null;
     history_segmentCount: number;
     /** Rows the kernel serves this project on the `explicit_search` surface. */
     memoryCount: number;
@@ -323,6 +323,7 @@ function renderInner(s: StatusDialogDetail, theme: Theme, innerWidth: number): s
             theme.bold(`${s.usagePercentage.toFixed(1)}%`),
         )} · ${fmt(s.inputTokens)} / ${s.contextLimit > 0 ? fmt(s.contextLimit) : "?"} tokens`,
     );
+    if (s.systemPromptTokens === null) lines.push("System prompt tokens unavailable");
     if (s.windowGeometry) {
         lines.push(
             formatWindowDerivationLine(s.inputTokens, s.windowGeometry).replace(
@@ -452,14 +453,18 @@ export function buildPiStatusDetail(
     const history_summarizerRunning = daemonStatus?.wrapup_active === true;
     const tailHygiene = resolveTailHygieneStatus(daemonStatus?.tail_hygiene);
 
-    let systemPromptTokens = piSystemPromptStateFor(sessionId)?.systemPromptTokens ?? 0;
+    const storedSystemPromptTokens = piSystemPromptStateFor(sessionId)?.systemPromptTokens;
+    let systemPromptTokens: number | null = storedSystemPromptTokens ?? 0;
+    if (storedSystemPromptTokens === null) systemPromptTokens = null;
     try {
         const sysPrompt =
             typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : undefined;
         if (typeof sysPrompt === "string" && sysPrompt.length > 0) {
             systemPromptTokens = estimateTokens(sysPrompt);
         }
-    } catch {}
+    } catch {
+        systemPromptTokens = null;
+    }
 
     // Provider tool-definition token counts are estimates, not wire-payload counts.
     let toolDefinitionTokens = 0;
@@ -477,7 +482,7 @@ export function buildPiStatusDetail(
     const modelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
     const calibrated = calibrateBuckets({
         inputTokens,
-        systemLocal: systemPromptTokens,
+        systemLocal: systemPromptTokens ?? 0,
         toolDefsLocal: toolDefinitionTokens,
         history_segmentsLocal: history_segmentTokens,
         factsLocal: 0,
@@ -514,7 +519,7 @@ export function buildPiStatusDetail(
         sessionId,
         usagePercentage,
         inputTokens,
-        systemPromptTokens: calibrated.systemTokens,
+        systemPromptTokens: systemPromptTokens === null ? null : calibrated.systemTokens,
         history_segmentCount,
         // Expired anti-memories stay out of the count, matching the surface filter list and search apply.
         memoryCount: memory.rows.filter((row) => isServedMemoryDecisionRow(row, Date.now())).length,
@@ -579,7 +584,7 @@ function breakdownSegments(s: StatusDialogDetail): Array<{
         color: string;
         detail?: string;
     }> = [];
-    if (s.systemPromptTokens > 0)
+    if (s.systemPromptTokens !== null && s.systemPromptTokens > 0)
         segs.push({
             label: "System",
             tokens: s.systemPromptTokens,

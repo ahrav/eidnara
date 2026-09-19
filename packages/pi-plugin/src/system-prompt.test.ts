@@ -44,7 +44,8 @@ describe("Pi prompt-surface guidance epochs", () => {
             });
             expect(first.hashChanged).toBe(false);
             expect(piSystemPromptStateFor(sessionId)?.systemPromptHash).toBe(first.currentHash);
-            expect(piSystemPromptStateFor(sessionId)?.systemPromptTokens).toBeGreaterThan(0);
+            expect(piSystemPromptStateFor(sessionId)?.systemPromptTokens).not.toBeNull();
+            expect(piSystemPromptStateFor(sessionId)?.systemPromptTokens ?? 0).toBeGreaterThan(0);
 
             for (let pass = 0; pass < 5; pass++) {
                 const frozenSelection = epochs.resolve(sessionId, config, "provider/full");

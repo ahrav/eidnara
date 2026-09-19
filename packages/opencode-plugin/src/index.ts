@@ -18,7 +18,6 @@ import {
     createLazyManagedDemandStart,
     type HostModuleClient,
 } from "./hooks/context/module-transport";
-import { preloadTokenizer } from "./hooks/context/read-session-formatting";
 import {
     type ConfigWarningDelivery,
     createConfigWarningDelivery,
@@ -228,8 +227,6 @@ const server: Plugin = async (ctx) => {
             await eidnara?.["command.execute.before"]?.(input, output);
         },
         "chat.message": async (input, _output) => {
-            // The first prompt awaits `preloadTokenizer()` so later synchronous estimates use the installed package.
-            await preloadTokenizer();
             // Fire-and-forget: a pending delivery must not delay the user's prompt.
             if (configWarning?.pending && input.sessionID) {
                 void configWarning.deliverTo(input.sessionID);
