@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { loadPluginConfig, loadPluginConfigDetailed } from "./index";
-import { RUST_COMPACTION_OFF_WARNING } from "./transform-mode";
+import { REMOVED_CONFIG_KEYS } from "./schema/eidnara";
 
 /**
  *
@@ -40,12 +40,12 @@ function loadWithUserConfig(configText: string, extraEnv: Record<string, string>
         try {
             rmSync(xdg, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         } catch {
-            /* */
+            // Temp-dir removal is best effort; a leftover directory does not affect the assertions.
         }
         try {
             rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         } catch {
-            /* */
+            // Temp-dir removal is best effort; a leftover directory does not affect the assertions.
         }
     }
 }
@@ -72,12 +72,12 @@ function loadDetailedWithUserConfig(configText: string) {
         try {
             rmSync(xdg, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         } catch {
-            /* */
+            // Temp-dir removal is best effort; a leftover directory does not affect the assertions.
         }
         try {
             rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         } catch {
-            /* */
+            // Temp-dir removal is best effort; a leftover directory does not affect the assertions.
         }
     }
 }
@@ -119,12 +119,12 @@ function loadDetailedWithUserAndProjectConfig(
         try {
             rmSync(xdg, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         } catch {
-            /* */
+            // Temp-dir removal is best effort; a leftover directory does not affect the assertions.
         }
         try {
             rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         } catch {
-            /* */
+            // Temp-dir removal is best effort; a leftover directory does not affect the assertions.
         }
     }
 }
@@ -137,34 +137,27 @@ function loadWithUserAndProjectConfig(
     return loadDetailedWithUserAndProjectConfig(userConfigText, projectConfigText, extraEnv).config;
 }
 
-describe("loadPluginConfig — transform mode resolution", () => {
-    it("downgrades rust when compaction is off and emits one boot warning", () => {
+describe("loadPluginConfig — removed transform_mode key", () => {
+    it("drops a stale user-tier transform_mode with a warning instead of failing startup", () => {
         const result = loadWithUserConfig(
-            JSON.stringify({
-                compaction: { enabled: false },
-                transform_mode: "rust",
-                host: { connection_file: "/tmp/host.sock" },
-            }),
+            JSON.stringify({ transform_mode: "ts", host: { connection_file: "/tmp/host.sock" } }),
         );
 
-        expect(result.transform_mode).toBe("ts");
-        expect(result.configWarnings?.filter((warning) => warning.includes("rust"))).toEqual([
-            `[config] ${RUST_COMPACTION_OFF_WARNING}`,
-        ]);
+        expect("transform_mode" in result).toBe(false);
+        expect(
+            result.configWarnings?.filter((warning) => warning.includes("transform_mode")),
+        ).toEqual([`[user config] ${REMOVED_CONFIG_KEYS.transform_mode}`]);
     });
 
-    it("keeps rust when compaction is on", () => {
-        const result = loadWithUserConfig(
-            JSON.stringify({
-                compaction: { enabled: true },
-                transform_mode: "rust",
-                host: { connection_file: "/tmp/host.sock" },
-            }),
+    it("drops a stale project-tier transform_mode with a project warning", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({}),
+            JSON.stringify({ transform_mode: "rust" }),
         );
 
-        expect(result.transform_mode).toBe("rust");
-        expect(result.configWarnings ?? []).not.toContain(
-            expect.stringContaining(RUST_COMPACTION_OFF_WARNING),
+        expect("transform_mode" in result).toBe(false);
+        expect(result.configWarnings?.join("\n")).toContain(
+            `[project config] ${REMOVED_CONFIG_KEYS.transform_mode}`,
         );
     });
 });
@@ -995,50 +988,6 @@ describe("loadPluginConfig — raw merge preserves user fields not set in projec
         );
 
         expect(result.disabled_hooks?.sort()).toEqual(["a", "b", "c"]);
-    });
-});
-
-describe("transform_mode resolution", () => {
-    it("keeps project rust mode only with user-tier consent", () => {
-        const withExplicitDaemon = loadWithUserAndProjectConfig(
-            JSON.stringify({ host: { connection_file: "~/.local/share/eidnara/host.json" } }),
-            JSON.stringify({ transform_mode: "rust" }),
-        );
-        expect(withExplicitDaemon.transform_mode).toBe("rust");
-
-        const withUserRust = loadWithUserAndProjectConfig(
-            JSON.stringify({ transform_mode: "rust" }),
-            JSON.stringify({}),
-        );
-        expect(withUserRust.transform_mode).toBe("rust");
-        expect(withUserRust.configWarnings?.join("\n") ?? "").not.toContain(
-            "rust mode requires user-level consent",
-        );
-
-        const withoutConsent = loadWithUserAndProjectConfig(
-            JSON.stringify({}),
-            JSON.stringify({ transform_mode: "rust" }),
-        );
-        expect(withoutConsent.transform_mode).toBe("ts");
-        expect(withoutConsent.configWarnings?.join("\n")).toContain(
-            "rust mode requires user-level consent",
-        );
-    });
-
-    it("passes the resolved rust mode to the plugin config without mutating project trust", () => {
-        const result = loadWithUserAndProjectConfig(
-            JSON.stringify({
-                host: { connection_file: "~/.local/share/eidnara/host.json" },
-            }),
-            JSON.stringify({
-                transform_mode: "rust",
-                host: { connection_file: "/tmp/project-controlled.sock" },
-            }),
-        );
-
-        expect(result.transform_mode).toBe("rust");
-        const { host } = result;
-        expect(host?.connection_file).not.toContain("project-controlled.sock");
     });
 });
 

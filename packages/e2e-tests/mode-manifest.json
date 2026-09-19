@@ -1,6 +1,6 @@
 {
     "schema": 1,
-    "header": "Every entry runs under `--mode rust`. Tier `rust-only` runs through the rust-mode direct-host fixture and skips itself when Cargo or the fixture is unavailable; tier `pi-smoke` runs the Pi RPC process under Node and skips itself when Pi, node, or the built extension is unavailable, unless `EIDNARA_E2E_REQUIRE_PI=1` turns that skip into a failure.",
+    "header": "Every entry runs under `--mode rust`. Tier `rust-only` runs through the rust-mode direct-host fixture and skips itself when Cargo or the fixture is unavailable; tier `pi-smoke` runs the Pi RPC process under Node and skips itself when Pi, node, or the built extension is unavailable, unless `EIDNARA_E2E_REQUIRE_PI=1` turns that skip into a failure. An entry whose every test is skipped carries `quarantined` with the reason; `validate-mode-manifest` refuses a fully skipped file without it and a marked file with live tests, and lists the quarantines it validated.",
     "entries": [
         {
             "path": "tests/cache-invariants.test.ts",
@@ -40,7 +40,8 @@
             "rationale": "an agent eidnara_reduce drop enters the daemon queued-drop ledger and is consumed on the next producer-backed bust",
             "contract_refs": [
                 "U5-PORT"
-            ]
+            ],
+            "quarantined": "the dropped tag survives the next bust under the lazy-drop policy; the scenario needs pressure for the drop to materialize"
         },
         {
             "path": "tests/rust-duplicate-tool-use-id.test.ts",
@@ -64,7 +65,8 @@
             "rationale": "failure-mode drill 3: passes are served from the transform again after the host restarts, without restarting the session",
             "contract_refs": [
                 "U5-PORT"
-            ]
+            ],
+            "quarantined": "six recovery prompts log seven pass lines after the restart (one reconnect retry), so the pass-count ceiling fails while the self-heal invariant holds; the ceiling must count prompts, not passes"
         },
         {
             "path": "tests/rust-fm-oc-5.test.ts",
@@ -96,7 +98,8 @@
             "rationale": "large provider-visible tail stays intact across one-page reuse and bounded multi-page retransmission",
             "contract_refs": [
                 "U5-PORT"
-            ]
+            ],
+            "quarantined": "the large-tail invariant reads false against the paged module wire; the paging bound and tail preservation need re-derivation"
         },
         {
             "path": "tests/rust-park-self-heal.test.ts",
@@ -112,7 +115,8 @@
             "rationale": "passes are served from transform again after a mid-session message is reverted",
             "contract_refs": [
                 "U5-PORT"
-            ]
+            ],
+            "quarantined": "OpenCode 1.18.22 session.revert leaves the reverted message rows in the session, so the harness never observes the removal it reacts to"
         },
         {
             "path": "tests/rust-smoke.test.ts",

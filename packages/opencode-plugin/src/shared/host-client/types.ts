@@ -15,7 +15,7 @@ export interface BindIdentity {
 }
 
 /** The only keys `identity.credential_fingerprints` may carry on the wire. */
-export type ModelExecutionProvider = "anthropic" | "google" | "openai";
+export type ModelExecutionProvider = "anthropic" | "google" | "openai" | "amazon-bedrock";
 
 /** Partial because `docs/host-wire-protocol.md` reads an absent provider as no claim, not a denied one. */
 export type CredentialFingerprints = Readonly<Partial<Record<ModelExecutionProvider, string>>>;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 
 import * as loggerModule from "@eidnara/opencode/shared/logger";
 
-import { __test } from "./index";
+import { __test, handlePiSessionBeforeCompact, PI_TRANSFORM_AVAILABLE } from "./index";
 
 afterEach(() => {
     __test.resetLoggedPiConfigDirs();
@@ -53,5 +53,18 @@ describe("Pi config load logging", () => {
         } finally {
             logSpy.mockRestore();
         }
+    });
+});
+
+describe("Pi compaction gate", () => {
+    it("runs compaction-off until a Pi context transform exists", async () => {
+        // Cancelling `session_before_compact` without a transform leaves the session to overflow.
+        expect(PI_TRANSFORM_AVAILABLE).toBe(false);
+        expect(
+            await handlePiSessionBeforeCompact({ compactionOff: true, ctx: {} }),
+        ).toBeUndefined();
+        expect(await handlePiSessionBeforeCompact({ compactionOff: false, ctx: {} })).toEqual({
+            cancel: true,
+        });
     });
 });

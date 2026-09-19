@@ -679,6 +679,8 @@ const HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS: i64 =
     history_summarizer::HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS;
 const SESSION_UNRESOLVED_MESSAGE: &str = "session unresolved; launch Claude Code through the Eidnara wrapper so eidnara_* can bind to this conversation";
 const OPENCODE_HARNESS: &str = "opencode";
+/// Pi binds routes with its own session id and has no transform, so no lineage proof exists for it.
+const PI_HARNESS: &str = "pi";
 const STATE_SYNC_SEED_MAX_ID_BYTES: usize = 128;
 const STATE_SYNC_SEED_MAX_STAGED_BYTES: usize = 32 * 1024 * 1024;
 /// The final seed batch must carry every one of these; the sender emits them unconditionally.
@@ -4973,6 +4975,10 @@ impl HandlerCore {
             .ok_or(BindingError::Unbound)
     }
 
+    /// Whether `session_id` is proven on `project_root`: an in-process root observation, a
+    /// durable root plus cache state, or a live transform route on that root. Root-scoped
+    /// counterpart of `session_has_transform_lineage`; both walk the same three sources and
+    /// must change together when a lineage source is added or removed.
     fn module_knows_transform_session(&self, session_id: &str, project_root: &Path) -> bool {
         let canonical_project_root = canonical_root(project_root);
         let root_observed = self
@@ -5020,6 +5026,33 @@ impl HandlerCore {
             .any(|(session, root)| {
                 session == session_id && canonical_root(root) == canonical_project_root
             })
+    }
+
+    /// Whether any transform lineage exists for `session_id` under any root: an in-process root,
+    /// durable cache state, or a live transform route. A session with lineage is proven only on
+    /// its own roots; `module_knows_transform_session` answers that root-scoped question over
+    /// the same three sources.
+    fn session_has_transform_lineage(&self, session_id: &str) -> bool {
+        if self
+            .transform_session_roots
+            .lock()
+            .expect("transform session roots mutex")
+            .get(session_id)
+            .is_some_and(|roots| !roots.is_empty())
+        {
+            return true;
+        }
+        if self
+            .store()
+            .is_some_and(|store| store.has_cache_state(session_id).unwrap_or(false))
+        {
+            return true;
+        }
+        self.transform_route_channels
+            .lock()
+            .expect("transform route channels mutex")
+            .values()
+            .any(|(session, _)| session == session_id)
     }
 
     /// Route binding persists the transport-to-identity mapping when a route becomes bound to an authority-managed project.
@@ -5430,6 +5463,7 @@ impl HandlerCore {
                                         publication_fence: Some(publication_fence.as_ref()),
                                         collect_user_memory_candidates: config
                                             .user_memory_collection_enabled,
+                                        memory_enabled: config.memory_enabled,
                                     },
                                 )
                                 .map(history_summarizer::HistorySummarizerReattachOutcome::Republished);
@@ -5522,6 +5556,7 @@ impl HandlerCore {
                                     publication_fence: Some(publication_fence.as_ref()),
                                     collect_user_memory_candidates: config
                                         .user_memory_collection_enabled,
+                                    memory_enabled: config.memory_enabled,
                                 },
                             )
                             .map(|_| ())
@@ -8204,7 +8239,9 @@ impl HandlerCore {
             requested_selection.guidance_override = binding.config.prompt_surface_guidance_override;
         }
         let selection = self.freeze_prompt_surface_selection(session_id, requested_selection);
-        let active = cc_u1_active(profile, tool_present);
+        // The full variant explains the `§N§` tags and `eidnara_reduce`; it goes to every
+        // profile whose transform renders that overlay, which is Claude Code and OpenCode.
+        let active = tagging_surface_active(profile, tool_present);
         let expected_variant = if active { "full" } else { "no_reduce" };
         if let Some(variant) = request.get("variant").and_then(Value::as_str)
             && variant != expected_variant
@@ -11322,9 +11359,21 @@ impl HandlerCore {
             return Err(session_unresolved_error());
         }
 
-        let conversation_key = if binding.harness == OPENCODE_HARNESS
-            && self.module_knows_transform_session(bound_session, &binding.project_root)
-        {
+        // A transform accepted on this root proves the session, and a session with lineage
+        // under another root cannot be rebound here. A session without any transform lineage
+        // (Pi has no transform; an OpenCode session before its first accepted transform, or
+        // one running compaction-off, has sent none) has nothing to contradict the route-bound
+        // identity, and the plugins bind their harness's
+        // own session id, so the bound session is the conversation. The same predicate applies
+        // to both harnesses: `harness` is a client claim, not authority (§7.2).
+        let harness_session_is_conversation = match binding.harness.as_str() {
+            OPENCODE_HARNESS | PI_HARNESS => {
+                self.module_knows_transform_session(bound_session, &binding.project_root)
+                    || !self.session_has_transform_lineage(bound_session)
+            }
+            _ => false,
+        };
+        let conversation_key = if harness_session_is_conversation {
             bound_session.to_string()
         } else {
             match self
@@ -27626,6 +27675,30 @@ mod tests {
             )
             .await;
         assert_eq!(error_code(contradictory), "bad_request");
+        // OpenCode's transform renders the same tag overlay, so its profile selects the full
+        // variant too; Pi has no transform and never sees `eidnara_reduce`.
+        let opencode = call_dispatch_request(
+            &handler,
+            json!({
+                "kind": "guidance.get",
+                "session_id": "ses",
+                "tool_present": true,
+                "serializer_profile": "opencode-aisdk"
+            }),
+        )
+        .await;
+        assert_eq!(opencode["bytes"], full["bytes"]);
+        let pi = call_dispatch_request(
+            &handler,
+            json!({
+                "kind": "guidance.get",
+                "session_id": "ses",
+                "tool_present": true,
+                "serializer_profile": "pi"
+            }),
+        )
+        .await;
+        assert_eq!(pi["bytes"], trimmed["bytes"]);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -29513,8 +29586,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn claimed_opencode_harness_cannot_bypass_resolution_for_unknown_session() {
-        let resolver = FakeSessionResolver::with(&[("wrapper-instance", FakeResolve::None)]);
+    async fn opencode_session_without_transform_lineage_is_keyed_by_the_bound_session() {
+        // A session that has not yet sent a transform (first facade call, or compaction-off) has
+        // no lineage to contradict the route-bound identity; the bound session is the
+        // conversation and no resolver runs.
+        let resolver = FakeSessionResolver::with(&[("ses-no-lineage", FakeResolve::None)]);
         let (handler, store, _dir, project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
             default_test_config(),
@@ -29525,21 +29601,54 @@ mod tests {
             binding_with_harness(
                 project.to_str().unwrap(),
                 OPENCODE_HARNESS,
-                "wrapper-instance",
+                "ses-no-lineage",
             ),
         );
-
         let outcome = call_facade(
             &handler,
             "eidnara_note",
-            json!({ "action": "write", "content": "must not be token keyed" }),
+            json!({ "action": "write", "content": "keyed by the bound session" }),
         )
         .await;
-        assert_eq!(error_code(outcome), "session_unresolved");
-        assert_eq!(resolver.calls(), vec!["wrapper-instance"]);
+        assert!(!tool_is_error(outcome));
+        assert!(resolver.calls().is_empty());
         assert!(
-            store
-                .search_notes_like(project.to_str().unwrap(), "wrapper-instance", "token keyed")
+            !store
+                .search_notes_like(project.to_str().unwrap(), "ses-no-lineage", "bound session")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pi_bound_session_writes_notes_without_transform_proof() {
+        let resolver = FakeSessionResolver::with(&[("pi-ses", FakeResolve::None)]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver.clone(),
+        );
+        handler.bind_route(
+            test_route(7),
+            binding_with_harness(project.to_str().unwrap(), PI_HARNESS, "pi-ses"),
+        );
+        let outcome = call_facade(
+            &handler,
+            "eidnara_note",
+            json!({ "action": "write", "content": "keyed by the pi session" }),
+        )
+        .await;
+        assert!(
+            !tool_is_error(outcome),
+            "pi note write must not need a resolver"
+        );
+        assert!(
+            resolver.calls().is_empty(),
+            "pi never consults the session resolver"
+        );
+        assert!(
+            !store
+                .search_notes_like(project.to_str().unwrap(), "pi-ses", "pi session")
                 .unwrap()
                 .is_empty()
         );
@@ -29577,6 +29686,92 @@ mod tests {
                 "content": "must not cross roots",
                 "memory_project": "git:identity",
             }),
+        )
+        .await;
+        assert_eq!(error_code(outcome), "session_unresolved");
+        assert_eq!(resolver.calls(), vec!["ses"]);
+        assert_eq!(
+            store
+                .authority_project_for_route(root_b, "memories")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pi_bound_session_with_lineage_under_another_root_is_refused() {
+        // The harness is a client claim: a Pi binding for a session id whose lineage lives under
+        // another root takes the same refusal as an OpenCode binding would.
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::None)]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver.clone(),
+        );
+        let root_a = project.to_str().unwrap();
+        handler.bind_route(
+            test_route(7),
+            binding_with_harness(root_a, OPENCODE_HARNESS, "ses"),
+        );
+        let transformed =
+            call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")])).await;
+        assert_eq!(transformed["action"], "HARD");
+        let root_b = project.join("other-root");
+        std::fs::create_dir_all(&root_b).unwrap();
+        let root_b = root_b.to_str().unwrap();
+        handler.bind_route(
+            test_route(8),
+            binding_with_harness(root_b, PI_HARNESS, "ses"),
+        );
+        let outcome = call_facade_on_channel(
+            &handler,
+            8,
+            "eidnara_note",
+            json!({ "action": "write", "content": "must not cross roots" }),
+        )
+        .await;
+        assert_eq!(error_code(outcome), "session_unresolved");
+        assert_eq!(resolver.calls(), vec!["ses"]);
+        assert_eq!(
+            store
+                .authority_project_for_route(root_b, "memories")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opencode_live_transform_route_does_not_authorize_a_second_project_root() {
+        // A route bound for transforms on root A is lineage even before a transform completes;
+        // the same session bound on root B is not the conversation there.
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::None)]);
+        let (handler, store, _dir, project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver.clone(),
+        );
+        let root_a = project.to_str().unwrap();
+        handler.bind_route(
+            test_route(7),
+            binding_with_harness(root_a, OPENCODE_HARNESS, "ses"),
+        );
+        handler
+            .transform_route_channels
+            .lock()
+            .unwrap()
+            .insert(test_route(7), ("ses".to_string(), canonical_root(root_a)));
+        let root_b = project.join("other-root");
+        std::fs::create_dir_all(&root_b).unwrap();
+        let root_b = root_b.to_str().unwrap();
+        handler.bind_route(
+            test_route(8),
+            binding_with_harness(root_b, OPENCODE_HARNESS, "ses"),
+        );
+        let outcome = call_facade_on_channel(
+            &handler,
+            8,
+            "eidnara_note",
+            json!({ "action": "write", "content": "must not cross roots" }),
         )
         .await;
         assert_eq!(error_code(outcome), "session_unresolved");

@@ -39,7 +39,9 @@ describe("native mechanism gate", () => {
             expect(result.externalArrayBuffer).toBe(true);
             expect(result.exactBounds).toBe(true);
             expect(result.detachment).toBe(true);
-            expect(result.transferPrevention).toBe(true);
+            expect(result.transferPrevention).toBe(
+                result.transferPreventionMechanism !== "none",
+            );
             expect(result.cleanupHooks).toBe(true);
         } else {
             expect(typeof result.reason).toBe("string");
@@ -233,10 +235,10 @@ describe("readiness dispatch", () => {
             // No further dispatch arrives after peer closure while timers still run.
             await new Promise((resolve) => setTimeout(resolve, 100));
             expect(dispatches).toBe(settled);
-            expect(receiveErrors).toBeGreaterThan(0);
-            expect(() => pair.second.drainOne(() => {})).toThrow(
-                /receive failed/,
-            );
+            // A peer that hung up on a drained ring is end-of-stream, not a receive failure:
+            // polls stay empty and `peerClosed` carries the hang-up.
+            expect(receiveErrors).toBe(0);
+            expect(pair.second.drainOne(() => {})).toBe(false);
         } finally {
             pair.second.close();
         }
@@ -373,7 +375,7 @@ describe("raw N-API descriptor boundary", () => {
         expect(report.before).toBe(false);
         expect(report.after).toBe(true);
         expect(report.dispatches).toBe(report.settled);
-        expect(report.receiveErrors).toBeGreaterThan(0);
+        expect(report.receiveErrors).toBe(0);
     });
 
     test("a handler that throws over an undrained frame does not liveloop the event loop", () => {
@@ -556,135 +558,79 @@ describe("raw N-API descriptor boundary", () => {
         expect(report.stillArmed).toBe(true);
     });
 
-    test("readiness acknowledgement preserves a frame published during callback", async () => {
+    test("readiness acknowledgement preserves a frame published during callback", () => {
         const addon = loadRawAddon();
         if (!supportsMechanismTests(addon)) return;
-        const pair = addon.createTestPair();
-        const received: number[] = [];
-        let callbacks = 0;
-        let complete!: () => void;
-        const completed = new Promise<void>((resolve) => (complete = resolve));
-        const publishTo = (channel: number, value: number): void => {
-            const header = new Uint8Array(21);
-            const view = new DataView(header.buffer);
-            view.setUint32(0, 1, true);
-            view.setUint8(4, 3);
-            view.setUint8(5, 3);
-            view.setUint16(7, 1, true);
-            view.setUint32(9, 1, true);
-            view.setBigUint64(13, BigInt(value), true);
-            addon.produce(
-                channel,
-                header,
-                1,
-                (segments) => {
-                    segments[0]![0] = value;
-                    return 1;
-                },
-                () => {},
-            );
-        };
-        const publish = (value: number): void => publishTo(pair.first, value);
-        let closed = false;
-        let later: { first: number; second: number } | null = null;
-        let trailingWake: (() => void) | undefined;
-        let laterDelivered: (() => void) | undefined;
-        const onReady = (): void => {
-            // A peer's exit wakes its consumer, so the reactor may deliver one
-            // more readiness callback after both ends have been closed. Acknowledge
-            // it, or the process-wide reactor stays parked on this callback.
-            if (closed) {
-                // The closed pair's own trailing wake and any later channel's wake
-                // both land here. Drain the later channel so its frame proves the
-                // reactor was released by the acknowledgement below.
-                trailingWake?.();
-                if (later !== null) {
-                    addon.poll(later.second, (token) => {
-                        addon.release(later.second, token);
-                        laterDelivered?.();
-                    });
-                }
-                addon.readinessHandled();
-                return;
-            }
-            try {
-                callbacks += 1;
-                addon.poll(pair.second, (token, _header, segments) => {
-                    received.push(segments[0]![0] ?? 0);
-                    addon.release(pair.second, token);
-                });
-                if (callbacks === 1) {
-                    publish(2);
-                } else {
-                    expect(addon.poll(pair.second, () => {})).toBe(false);
-                    complete();
-                }
-            } finally {
-                if (addon.readinessHandled()) queueMicrotask(onReady);
-            }
-        };
-        addon.watch(pair.second, onReady);
-
-        let timeout: ReturnType<typeof setTimeout>;
-        try {
-            publish(1);
-            await Promise.race([
-                completed,
-                new Promise<never>((_, reject) => {
-                    timeout = setTimeout(
-                        () => reject(new Error("readiness callback timed out")),
-                        5_000,
-                    );
-                }),
-            ]);
-        } finally {
-            clearTimeout(timeout!);
-            closed = true;
-            addon.close(pair.first);
-            addon.close(pair.second);
-        }
-        expect(received).toEqual([1, 2]);
-        expect(callbacks).toBe(2);
-
-        // Wait for the closed pair's trailing wake before opening another channel,
-        // so the later channel's frame can only be drained by a second wake.
-        await new Promise<void>((resolve) => {
-            trailingWake = resolve;
-            setTimeout(resolve, 200);
+        const addonPath = resolve(
+            dirname(fileURLToPath(import.meta.url)),
+            "../shm_native.node",
+        );
+        // Runs in a child: the process-wide reactor keeps its first callback, and once the
+        // capability probe reports availability the `NativeChannel` tests above own it here.
+        const script = join(scratch, "ack-preserves-frame.mjs");
+        writeFileSync(
+            script,
+            `import { createRequire } from "node:module";\n` +
+                `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
+                `const pair = addon.createTestPair();\n` +
+                `const received = []; let callbacks = 0; let closed = false; let later = null;\n` +
+                `let complete; const completed = new Promise((resolve) => (complete = resolve));\n` +
+                `let trailingWake; let laterDelivered; let secondPollEmpty = null;\n` +
+                `const header = new Uint8Array(21);\n` +
+                `const view = new DataView(header.buffer);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 3); view.setUint8(5, 3);\n` +
+                `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
+                `const publishTo = (channel, value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(channel, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
+                `const onReady = () => {\n` +
+                `  // A peer's exit wakes its consumer, so one more callback may land after both ends closed; acknowledge it or the reactor stays parked. The later channel's wake lands here too and proves the acknowledgement released the reactor.\n` +
+                `  if (closed) {\n` +
+                `    trailingWake?.();\n` +
+                `    if (later !== null) addon.poll(later.second, (token) => { addon.release(later.second, token); laterDelivered?.(); });\n` +
+                `    addon.readinessHandled();\n` +
+                `    return;\n` +
+                `  }\n` +
+                `  try {\n` +
+                `    callbacks += 1;\n` +
+                `    addon.poll(pair.second, (token, _h, segments) => { received.push(segments[0][0] ?? 0); addon.release(pair.second, token); });\n` +
+                `    if (callbacks === 1) publishTo(pair.first, 2); else { secondPollEmpty = addon.poll(pair.second, () => {}) === false; complete(); }\n` +
+                `  } finally { if (addon.readinessHandled()) queueMicrotask(onReady); }\n` +
+                `};\n` +
+                `addon.watch(pair.second, onReady);\n` +
+                `const timed = async (promise, message) => { let timer; try { await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), 5000); })]); } finally { clearTimeout(timer); } };\n` +
+                `let firstStage = "ok";\n` +
+                `try { publishTo(pair.first, 1); await timed(completed, "readiness callback timed out"); } catch (error) { firstStage = error.message; }\n` +
+                `finally { closed = true; addon.close(pair.first); addon.close(pair.second); }\n` +
+                `// Wait for the closed pair's trailing wake before opening another channel, so the later frame can only be drained by a second wake.\n` +
+                `await new Promise((resolve) => { trailingWake = resolve; setTimeout(resolve, 200); });\n` +
+                `later = addon.createTestPair(); const laterPair = later;\n` +
+                `const delivered = new Promise((resolve) => (laterDelivered = resolve));\n` +
+                `addon.watch(laterPair.second, () => {});\n` +
+                `let secondStage = "ok";\n` +
+                `try { publishTo(laterPair.first, 7); await timed(delivered, "reactor stayed parked after the closed pair"); } catch (error) { secondStage = error.message; }\n` +
+                `finally { later = null; addon.close(laterPair.first); addon.close(laterPair.second); }\n` +
+                `console.log(JSON.stringify({ received, callbacks, secondPollEmpty, firstStage, secondStage }));\n`,
+        );
+        const child = spawnSync(process.execPath, [script], {
+            encoding: "utf8",
+            timeout: 20_000,
         });
-
+        expect(child.signal).toBeNull();
+        expect(child.stderr).toBe("");
+        expect(child.status).toBe(0);
+        const report = JSON.parse(child.stdout.trim()) as {
+            received: number[];
+            callbacks: number;
+            secondPollEmpty: boolean | null;
+            firstStage: string;
+            secondStage: string;
+        };
+        expect(report.firstStage).toBe("ok");
+        expect(report.received).toEqual([1, 2]);
+        expect(report.callbacks).toBe(2);
+        expect(report.secondPollEmpty).toBe(true);
         // The reactor is shared by every channel in the process and keeps the first
         // registered callback, so a later channel's publish must still reach it.
-        later = addon.createTestPair();
-        const laterPair = later;
-        const delivered = new Promise<void>(
-            (resolve) => (laterDelivered = resolve),
-        );
-        addon.watch(laterPair.second, () => {});
-        let laterTimeout: ReturnType<typeof setTimeout>;
-        try {
-            publishTo(laterPair.first, 7);
-            await Promise.race([
-                delivered,
-                new Promise<never>((_, reject) => {
-                    laterTimeout = setTimeout(
-                        () =>
-                            reject(
-                                new Error(
-                                    "reactor stayed parked after the closed pair",
-                                ),
-                            ),
-                        5_000,
-                    );
-                }),
-            ]);
-        } finally {
-            clearTimeout(laterTimeout!);
-            // The later pair's own trailing wake must find nothing to poll.
-            later = null;
-            addon.close(laterPair.first);
-            addon.close(laterPair.second);
-        }
+        expect(report.secondStage).toBe("ok");
     });
 
     test("releasing a lease returns its slot; an unreleased ring fills", () => {

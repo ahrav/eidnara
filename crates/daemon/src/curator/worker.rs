@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use host_runtime::model_execution::subprocess::CREDENTIAL_VALUE_CAP_BYTES;
+use host_runtime::model_execution::subprocess::{CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES};
 use host_runtime::model_execution::supervisor::Supervisor;
 use kernel::{
     ReviewBinding, ReviewOwner, ReviewReadError, ReviewReadRefusal, ReviewStagedReference,
@@ -39,8 +39,8 @@ pub const IDLE_INTERVAL: Duration = Duration::from_secs(30);
 pub const JOBS_PER_PASS: usize = 8;
 /// Output budget and sampling every Curator request carries; the model id comes from the activation record.
 pub const MAX_TOKENS: u32 = 4096;
-/// Credential names the host may hand the daemon; `eidnara_host` asserts its name list against this.
-pub const MAX_CREDENTIALS: usize = 3;
+/// Credential variables the host may hand the daemon: every name the startup envelope admits.
+pub const MAX_CREDENTIALS: usize = CREDENTIAL_VARIABLES.len();
 /// Bytes [`CuratorHost`] retains for the process lifetime: one value under [`CREDENTIAL_VALUE_CAP_BYTES`] per credential, its name, and its keyed identity. Declared under the daemon's retained-resident bytes.
 pub const RETAINED_CREDENTIAL_BYTES: u64 =
     MAX_CREDENTIALS as u64 * (CREDENTIAL_VALUE_CAP_BYTES as u64 + 256);

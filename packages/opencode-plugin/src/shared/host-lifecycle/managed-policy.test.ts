@@ -139,6 +139,55 @@ describe("managed authenticated compatibility probe", () => {
         expect(calls).toEqual(["catalog.list", "host.status"]);
     });
 
+    test("a host that has not published its first health snapshot is polled, not judged", async () => {
+        // The host answers `{"components": {}}` until its first health probe lands.
+        const calls: string[] = [];
+        let reads = 0;
+        const starting: ManagedCompatibilityClient = {
+            authenticated: peer(),
+            catalogList: async () => {
+                calls.push("catalog.list");
+                return catalog;
+            },
+            hostStatus: async () => {
+                calls.push("host.status");
+                reads += 1;
+                return reads < 3
+                    ? { health: "degraded", metrics: { components: {} } }
+                    : {
+                          health: "ok",
+                          metrics: { components: { context: { metrics: wireEpochs() } } },
+                      };
+            },
+        };
+        const snapshot = await readCompatibilitySnapshot(starting, performance.now() + 1_000);
+
+        expect(verdict(snapshot).ok).toBe(true);
+        expect(snapshot.epochs).toEqual({ ...hostRelease.epochs });
+        expect(calls).toEqual(["catalog.list", "host.status", "host.status", "host.status"]);
+    });
+
+    test("a host still without a context component at the deadline is judged on the last read", async () => {
+        const calls: string[] = [];
+        const snapshot = await readCompatibilitySnapshot(
+            {
+                authenticated: peer(),
+                catalogList: async () => {
+                    calls.push("catalog.list");
+                    return catalog;
+                },
+                hostStatus: async () => {
+                    calls.push("host.status");
+                    return { health: "degraded", metrics: { components: {} } };
+                },
+            },
+            performance.now() + 120,
+        );
+
+        expect(verdict(snapshot)).toMatchObject({ ok: false, reason: "incompatible_epochs" });
+        expect(calls.filter((call) => call === "host.status").length).toBeGreaterThan(1);
+    });
+
     test("epoch mismatch uses one bounded host status request", async () => {
         const calls: string[] = [];
         const snapshot = await readCompatibilitySnapshot(
@@ -194,6 +243,31 @@ describe("managed authenticated compatibility probe", () => {
             readCompatibilitySnapshot(detaching, performance.now() + 1_000, controller.signal),
         ).rejects.toThrow("detached");
         expect(calls).toEqual(["catalog.list"]);
+    });
+
+    test("detachment during the first-snapshot wait sends no further host status request", async () => {
+        const calls: string[] = [];
+        const controller = new AbortController();
+        const starting: ManagedCompatibilityClient = {
+            authenticated: peer(),
+            catalogList: async () => {
+                calls.push("catalog.list");
+                return catalog;
+            },
+            hostStatus: async () => {
+                calls.push("host.status");
+                // The abort lands while the probe sleeps before its next read.
+                setTimeout(() => controller.abort(new Error("detached")), 5);
+                return { health: "degraded", metrics: { components: {} } };
+            },
+        };
+        const startedAt = performance.now();
+        await expect(
+            readCompatibilitySnapshot(starting, startedAt + 1_000, controller.signal),
+        ).rejects.toThrow("detached");
+        expect(calls).toEqual(["catalog.list", "host.status"]);
+        // The sleep ended on the abort, not on the 50 ms poll cadence.
+        expect(performance.now() - startedAt).toBeLessThan(45);
     });
 
     test("an expired probe deadline sends no host status request", async () => {

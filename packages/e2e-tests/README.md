@@ -9,9 +9,9 @@ The package is private and never published.
   with the built plugin bundle (`packages/opencode-plugin/dist/index.js`,
   loaded by `file://` URL) against the daemon's `direct_host_fixture`
   (`crates/daemon`, built with `--features direct-host-fixture`). The runner
-  writes user-tier consent for `transform_mode: "rust"` plus the fixture's
-  `host.connection_file`, so the plugin routes every transform through the
-  daemon. There is no TypeScript transform mode and no plugin database; the
+  writes the fixture's `host.connection_file` into the user tier, and the
+  plugin routes every transform through the daemon. There is no other
+  transform mode and no plugin database; the
   harness reads nothing but OpenCode's own session store and the daemon's
   `session.status` route.
 - **Pi load smoke.** `pi-smoke` starts a Pi RPC process with the built Pi
@@ -29,7 +29,11 @@ The package is private and never published.
 entry is `tier: "rust-only"` and the Pi entry is `tier: "pi-smoke"`, all with
 `contract_refs: ["U5-PORT"]`, and
 `validate-mode-manifest` fails when a test file lacks an entry or an entry
-lacks a file. The retained set is:
+lacks a file. A file whose every test is `it.skip` must carry a
+`quarantined` reason in its entry; the validator refuses a fully skipped
+file without one, refuses a marked file that has live tests again, and
+prints the quarantines it validated so a green `test:rust` never hides
+them. The retained set is:
 
 ```
 cache-invariants            rust-fm-oc-2                 rust-park-self-heal
@@ -49,10 +53,12 @@ Every Rust-mode test is wrapped in `describe.skipIf(!rustPrereqs.ok)`.
 Linux, `cargo`, the workspace's `direct_host_fixture` example, and a
 shared-memory channel the current runtime can start. The plugin reaches the
 daemon only through that channel, and OpenCode embeds the same Bun release
-the test runner uses, so the probe predicts the plugin. Bun 1.3.14 lacks
-`worker_threads.markAsUntransferable`, which the channel's capability probe
-needs; on that runtime the suite skips and prints
-`shared-memory channel unavailable on this runtime: runtime_mechanism_unavailable`.
+the test runner uses, so the probe predicts the plugin. The probe gates exact
+external-buffer bounds, detachment, and cleanup hooks; transfer prevention is
+reported (`transferPreventionMechanism`), not gated, because Bun 1.3.x has no
+working `worker_threads.markAsUntransferable` and Node refuses to transfer
+external buffers on its own. A runtime that fails a gated mechanism skips the
+suite and prints `shared-memory channel unavailable on this runtime: <reason>`.
 
 `pi-smoke` is wrapped in `describe.skipIf(!piPrereqs.ok)`. `detectPiPrereqs()`
 (`src/pi-runner/spawn.ts`) requires `@earendil-works/pi-coding-agent`

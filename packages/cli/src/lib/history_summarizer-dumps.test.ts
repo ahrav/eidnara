@@ -48,26 +48,53 @@ describe("parseHistorySummarizerDumpMeta", () => {
             "cut-after-history_segment.xml",
             `<output>\n<history_segments>\n${history_segment(1, 4)}\n</history_segments>\n<facts>`,
         );
-        const trailingProse = writeDump(
-            dir,
-            "trailing-prose.xml",
-            `${outputDocument([1, 2])}Here is the summary you asked for.`,
-        );
 
         const expected = { error: "not one complete <output> document" };
         expect(parseHistorySummarizerDumpMeta(garbage)).toEqual(expected);
         expect(parseHistorySummarizerDumpMeta(noRoot)).toEqual(expected);
         expect(parseHistorySummarizerDumpMeta(cutInHistorySegment)).toEqual(expected);
         expect(parseHistorySummarizerDumpMeta(cutAfterHistorySegment)).toEqual(expected);
-        expect(parseHistorySummarizerDumpMeta(trailingProse)).toEqual(expected);
     });
 
-    it("rejects a second <output> document inside the root", () => {
+    it("accepts a fenced or prose-wrapped root the daemon accepts", () => {
+        // Mirrors `parse_history_segment_output` in the daemon: the one complete root is read
+        // and everything around it is ignored.
+        const dir = dumpDir();
+        const trailingProse = writeDump(
+            dir,
+            "trailing-prose.xml",
+            `${outputDocument([1, 2])}Here is the summary you asked for.`,
+        );
+        const fenced = writeDump(
+            dir,
+            "fenced.xml",
+            `Here is the summary:\n\`\`\`xml\n${outputDocument([1, 2])}\n\`\`\`\nACK.`,
+        );
+        for (const path of [trailingProse, fenced]) {
+            const meta = parseHistorySummarizerDumpMeta(path);
+            if ("error" in meta) throw new Error(meta.error);
+            expect(meta.history_segmentCount).toBe(1);
+        }
+    });
+
+    it("rejects any output tag other than the root's own pair", () => {
         const dir = dumpDir();
         const doubled = writeDump(dir, "doubled.xml", `<output>${outputDocument([1, 2])}</output>`);
-        expect(parseHistorySummarizerDumpMeta(doubled)).toEqual({
-            error: "more than one <output> document",
-        });
+        const sequential = writeDump(
+            dir,
+            "sequential.xml",
+            `${outputDocument([1, 2])}\n${outputDocument([3, 4])}`,
+        );
+        const strayPrefix = writeDump(
+            dir,
+            "stray-prefix.xml",
+            `</output>\n${outputDocument([1, 2])}`,
+        );
+        for (const path of [doubled, sequential, strayPrefix]) {
+            expect(parseHistorySummarizerDumpMeta(path)).toEqual({
+                error: "more than one <output> document",
+            });
+        }
     });
 
     it("rejects a complete document with no usable history_segment", () => {

@@ -271,6 +271,27 @@ mod tests {
     }
 
     #[test]
+    fn a_set_past_the_fact_bound_is_rejected_whole() {
+        let one = || {
+            fact(vec![Citation {
+                alias: "s1".into(),
+                start: 0,
+                end: 1,
+            }])
+        };
+        let at_bound: Vec<FactCandidate> = (0..MAX_FACTS_PER_SET).map(|_| one()).collect();
+        assert_eq!(
+            check_fact_set(&at_bound, &table("0123456789"), Some(1..=1)),
+            Ok(())
+        );
+        let over: Vec<FactCandidate> = (0..=MAX_FACTS_PER_SET).map(|_| one()).collect();
+        assert_eq!(
+            check_fact_set(&over, &table("0123456789"), Some(1..=1)),
+            Err(ExtractionFailure::TooManyFacts)
+        );
+    }
+
+    #[test]
     fn malformed_shapes_and_non_citation_brackets() {
         // Alias-shaped bodies are judged strictly: a bad range or an unclosed alias-shaped bracket is malformed.
         for item in [

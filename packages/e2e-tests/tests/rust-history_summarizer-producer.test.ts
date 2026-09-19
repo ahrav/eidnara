@@ -17,7 +17,6 @@ describe.skipIf(!rustPrereqs.ok)("rust history_summarizer: direct ModelExecution
                 execute_threshold_percentage: 25,
                 protected_tags: 1,
                 history_summarizer: { model: "fixture/deterministic" },
-                compressor: { enabled: false },
             },
         });
     });
