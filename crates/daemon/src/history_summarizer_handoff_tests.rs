@@ -4,29 +4,29 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::*;
-use crate::curator::handoff::{
-    Handoff, HandoffError, HandoffRequest, HandoffTarget, PRODUCER, SUBJECT_SOURCE_KIND,
-    handoff_key, reserve_and_stage, review_binding, review_policy_versions, review_subject,
-};
 use crate::history_summarizer::{ValidatedPublishRequest, publish_validated_chunk};
 use crate::history_summarizer_citations::{Citation, FrozenAlias, FrozenAliasTable};
 use crate::history_summarizer_validate::{
     FactCandidate, UserObservationCandidate, ValidatedChunk, ValidatedHistorySegment,
+};
+use crate::memory_reviewer::handoff::{
+    Handoff, HandoffError, HandoffRequest, HandoffTarget, PRODUCER, SUBJECT_SOURCE_KIND,
+    handoff_key, reserve_and_stage, review_binding, review_policy_versions, review_subject,
 };
 use kernel::{
     ByteRange, KernelStore, ReviewPayload, ReviewReadError, ReviewReadRefusal,
     ReviewStagedReference,
 };
 use memory_store::HistorySummarizerPublishPredicate;
-use memory_store::curator_jobs::{
-    CURATOR_QUEUE_LIFETIME_MS, CausalInputs, CuratorJobOutcome, CuratorJobState,
-    MAX_PENDING_CURATOR_JOBS_PER_PROJECT, ProducerBinding, ReviewTarget,
+use memory_store::memory_reviewer_jobs::{
+    CausalInputs, MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT, MEMORY_REVIEWER_QUEUE_LIFETIME_MS,
+    MemoryReviewerJobOutcome, MemoryReviewerJobState, ProducerBinding, ReviewTarget,
 };
 use memory_store::{
-    BlockIdentity, CuratorActivationOutcome, CuratorNonadmissionCode, HistorySegmentSetGeneration,
-    HistorySummarizerChunkRange, HistorySummarizerDurableState, HistorySummarizerPhase,
-    HistorySummarizerPublishError, HistorySummarizerSelectedMessageIdentity, MemoryStore,
-    ModuleMeta,
+    BlockIdentity, HistorySegmentSetGeneration, HistorySummarizerChunkRange,
+    HistorySummarizerDurableState, HistorySummarizerPhase, HistorySummarizerPublishError,
+    HistorySummarizerSelectedMessageIdentity, MemoryReviewerActivationOutcome,
+    MemoryReviewerNonadmissionCode, MemoryStore, ModuleMeta,
 };
 
 const PROJECT: &str = "git:proj";
@@ -93,9 +93,9 @@ impl Rig {
     }
 
     /// The reservation the durable state records for the current firing.
-    fn reservation(&self) -> memory_store::CuratorReservation {
+    fn reservation(&self) -> memory_store::MemoryReviewerReservation {
         self.state()
-            .curator_reservation
+            .memory_reviewer_reservation
             .expect("the reservation is recorded")
     }
 
@@ -117,7 +117,7 @@ impl Rig {
     fn handoff_observing(
         &self,
         now_ms: i64,
-        observe: impl FnOnce(&memory_store::CuratorReservation),
+        observe: impl FnOnce(&memory_store::MemoryReviewerReservation),
     ) -> Result<Handoff, HandoffError> {
         let firing = self.state();
         reserve_and_stage(
@@ -140,12 +140,12 @@ impl Rig {
 
     fn retain(
         &self,
-        reservation: &memory_store::CuratorReservation,
+        reservation: &memory_store::MemoryReviewerReservation,
         pending: &memory_store::PendingPublication,
     ) -> u64 {
         let row_version = self.store.load(SESSION).unwrap().row_version.unwrap();
         self.store
-            .record_curator_reservation(SESSION, row_version, reservation, pending)
+            .record_memory_reviewer_reservation(SESSION, row_version, reservation, pending)
             .unwrap()
     }
 
@@ -176,7 +176,7 @@ impl Rig {
             store: &self.store,
             session_id: SESSION,
             project_path: PROJECT,
-            curator_handoff: target,
+            memory_reviewer_handoff: target,
             now_ms,
             failure_backoff_at_ms: now_ms + 60_000,
             publication_fence: None,
@@ -200,7 +200,7 @@ impl Rig {
     fn publish(
         &self,
         activation: Option<&PreparedActivation>,
-        nonadmission: Option<CuratorNonadmissionCode>,
+        nonadmission: Option<MemoryReviewerNonadmissionCode>,
         now_ms: i64,
     ) -> Result<memory_store::HistorySummarizerPublishResult, HistorySummarizerStateError> {
         self.publish_range(activation, nonadmission, now_ms, 2, 4)
@@ -209,7 +209,7 @@ impl Rig {
     fn publish_range(
         &self,
         activation: Option<&PreparedActivation>,
-        nonadmission: Option<CuratorNonadmissionCode>,
+        nonadmission: Option<MemoryReviewerNonadmissionCode>,
         now_ms: i64,
         start: u64,
         end: u64,
@@ -234,7 +234,7 @@ impl Rig {
         expected_row_version: Option<u64>,
         predicate: &HistorySummarizerPublishPredicate,
         activation: Option<&PreparedActivation>,
-        nonadmission: Option<CuratorNonadmissionCode>,
+        nonadmission: Option<MemoryReviewerNonadmissionCode>,
         now_ms: i64,
         start: u64,
         end: u64,
@@ -258,22 +258,22 @@ impl Rig {
                 now_ms,
                 failure_backoff_at_ms: now_ms + 60_000,
                 publication_fence: None,
-                curator_nonadmission: nonadmission,
-                curator_activation: activation,
+                memory_reviewer_nonadmission: nonadmission,
+                memory_reviewer_activation: activation,
             },
         )
     }
 
-    fn job(&self, causal_identity: &str) -> memory_store::curator_jobs::CuratorJob {
+    fn job(&self, causal_identity: &str) -> memory_store::memory_reviewer_jobs::MemoryReviewerJob {
         self.store
-            .lookup_curator_job(PROJECT, causal_identity)
+            .lookup_memory_reviewer_job(PROJECT, causal_identity)
             .unwrap()
             .expect("the job row exists")
     }
 
     fn read_subject(
         &self,
-        reservation: &memory_store::CuratorReservation,
+        reservation: &memory_store::MemoryReviewerReservation,
         now_ms: i64,
     ) -> Result<kernel::ReviewStagedRow, ReviewReadError> {
         self.kernel.read_review_input(
@@ -455,27 +455,30 @@ fn a_reservation_left_by_an_abandoned_firing_does_not_block_the_next_firing() {
     let stale = rig.reservation();
     // Firing 3 fails after the reservation exists and recovery abandons it with the reservation retained.
     let abandoned = abandon_with_detail(&rig.state(), t0() + 1, Some("crash".to_string()));
-    assert_eq!(abandoned.curator_reservation, Some(stale.clone()));
+    assert_eq!(abandoned.memory_reviewer_reservation, Some(stale.clone()));
     rig.persist(abandoned);
     // Firing 4 summarizes the next chunk and extracts nothing to hand off; the stale reservation is not its to publish, so `fire` drops it.
     let next = next_publishing_firing(&rig, 5, 6);
     assert_eq!(next.firing_seq, 4);
-    assert_eq!(next.curator_reservation, None);
+    assert_eq!(next.memory_reviewer_reservation, None);
     rig.persist(next);
     let result = rig.publish_range(None, None, t0() + 10, 5, 6).unwrap();
-    assert_eq!(result.curator_activation, None);
-    assert_eq!(result.curator_nonadmission_count, 0);
+    assert_eq!(result.memory_reviewer_activation, None);
+    assert_eq!(result.memory_reviewer_nonadmission_count, 0);
     let after = rig.store.load(SESSION).unwrap();
     assert_eq!(after.meta.publication_floor_ordinal, Some(7));
     assert_eq!(
         after.meta.history_summarizer.state,
         HistorySummarizerPhase::Idle
     );
-    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
+    assert_eq!(
+        after.meta.history_summarizer.memory_reviewer_reservation,
+        None
+    );
     // The orphaned job is untouched; the expiry sweep closes it.
     assert_eq!(
         rig.job(&orphaned.causal_identity).state,
-        CuratorJobState::Reserved
+        MemoryReviewerJobState::Reserved
     );
 }
 
@@ -491,12 +494,12 @@ fn identical_facts_from_the_next_firing_adopt_the_orphaned_reservation() {
     ));
     // Firing 4 re-summarizes the same chunk and extracts the same facts.
     rig.persist(next_publishing_firing(&rig, 2, 4));
-    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
+    let headroom_before = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
     let adopted = activation(rig.handoff(t0() + 10).unwrap());
     assert_eq!(adopted.causal_identity, first.causal_identity);
     assert_eq!(adopted.producer.firing_id, format!("{}#4", rig_key()));
     assert_eq!(
-        rig.store.curator_headroom(PROJECT).unwrap(),
+        rig.store.memory_reviewer_headroom(PROJECT).unwrap(),
         headroom_before,
         "adoption reserves nothing new"
     );
@@ -507,23 +510,23 @@ fn identical_facts_from_the_next_firing_adopt_the_orphaned_reservation() {
     assert_eq!(reservation.candidate_id, orphaned.candidate_id);
     assert_eq!(reservation.queue_deadline_ms, orphaned.queue_deadline_ms);
     let job = rig.job(&first.causal_identity);
-    assert_eq!(job.state, CuratorJobState::Reserved);
+    assert_eq!(job.state, MemoryReviewerJobState::Reserved);
     assert_eq!(job.producer, adopted.producer);
     assert_eq!(job.queue_deadline_ms, orphaned.queue_deadline_ms);
     // The fenced publication activates the adopted job with this firing's history.
     let result = rig.publish(Some(&adopted), None, t0() + 11).unwrap();
     assert_eq!(
-        result.curator_activation,
-        Some(CuratorActivationOutcome::Activated)
+        result.memory_reviewer_activation,
+        Some(MemoryReviewerActivationOutcome::Activated)
     );
     assert_eq!(
         rig.store
-            .ready_curator_jobs(PROJECT, 8, t0() + 11)
+            .ready_memory_reviewer_jobs(PROJECT, 8, t0() + 11)
             .unwrap()
             .len(),
         1
     );
-    assert_eq!(rig.state().curator_reservation, None);
+    assert_eq!(rig.state().memory_reviewer_reservation, None);
 }
 
 #[test]
@@ -564,7 +567,7 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
             // Inside the persistence step the job row is Reserved and nothing is staged yet.
             assert_eq!(
                 rig.job(&reservation.causal_identity).state,
-                CuratorJobState::Reserved
+                MemoryReviewerJobState::Reserved
             );
             assert!(matches!(
                 rig.read_subject(reservation, t0()),
@@ -577,7 +580,7 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
     let state = rig.state();
     assert_eq!(state.state, HistorySummarizerPhase::Publishing);
     let reservation = state
-        .curator_reservation
+        .memory_reviewer_reservation
         .clone()
         .expect("recorded before staging");
     assert_eq!(reservation.causal_identity, prepared.causal_identity);
@@ -589,10 +592,10 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
     assert_eq!(reservation.firing_seq, 3);
     assert_eq!(
         reservation.queue_deadline_ms,
-        t0() + CURATOR_QUEUE_LIFETIME_MS
+        t0() + MEMORY_REVIEWER_QUEUE_LIFETIME_MS
     );
     let job = rig.job(&reservation.causal_identity);
-    assert_eq!(job.state, CuratorJobState::Reserved);
+    assert_eq!(job.state, MemoryReviewerJobState::Reserved);
     assert_eq!(
         job.producer,
         ProducerBinding {
@@ -629,13 +632,13 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
 
     let result = rig.publish(Some(&prepared), None, t0() + 2).unwrap();
     assert_eq!(
-        result.curator_activation,
-        Some(CuratorActivationOutcome::Activated)
+        result.memory_reviewer_activation,
+        Some(MemoryReviewerActivationOutcome::Activated)
     );
-    assert_eq!(result.curator_nonadmission_count, 0);
+    assert_eq!(result.memory_reviewer_nonadmission_count, 0);
     let job = rig.job(&reservation.causal_identity);
     match job.state {
-        CuratorJobState::Ready(input) => {
+        MemoryReviewerJobState::Ready(input) => {
             assert_eq!(input.subject, job.target);
             assert!(input.starting_references.is_empty());
         }
@@ -647,12 +650,22 @@ fn reservation_precedes_staging_and_publication_activates_with_progress() {
         after.meta.history_summarizer.state,
         HistorySummarizerPhase::Idle
     );
-    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
-    assert_eq!(after.meta.history_summarizer.curator_nonadmission.count, 0);
+    assert_eq!(
+        after.meta.history_summarizer.memory_reviewer_reservation,
+        None
+    );
+    assert_eq!(
+        after
+            .meta
+            .history_summarizer
+            .memory_reviewer_nonadmission
+            .count,
+        0
+    );
     assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
     assert_eq!(
         rig.store
-            .ready_curator_jobs(PROJECT, 8, t0() + 2)
+            .ready_memory_reviewer_jobs(PROJECT, 8, t0() + 2)
             .unwrap()
             .len(),
         1
@@ -682,12 +695,12 @@ fn every_interruption_between_reservation_and_publication_converges_on_one_job()
         },
     );
     assert!(matches!(first, Err(HandoffError::Persist(_))), "{first:?}");
-    assert_eq!(rig.state().curator_reservation, None);
-    let rows_after_window_1 = rig.store.curator_headroom(PROJECT).unwrap();
+    assert_eq!(rig.state().memory_reviewer_reservation, None);
+    let rows_after_window_1 = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
     // Window 2: the state is written but staging never ran (simulated by a fresh call that finds its own reservation).
     let prepared = activation(rig.handoff(t0() + 10).unwrap());
     assert_eq!(
-        rig.store.curator_headroom(PROJECT).unwrap(),
+        rig.store.memory_reviewer_headroom(PROJECT).unwrap(),
         rows_after_window_1
     );
     // Windows 3 and 4: staging and sealing are repeated; the same reference and the same job come back.
@@ -711,7 +724,7 @@ fn every_interruption_between_reservation_and_publication_converges_on_one_job()
             refused,
             Err(
                 crate::history_summarizer::HistorySummarizerStateError::Publish(
-                    HistorySummarizerPublishError::CuratorActivation(_)
+                    HistorySummarizerPublishError::MemoryReviewerActivation(_)
                 )
             )
         ),
@@ -719,13 +732,16 @@ fn every_interruption_between_reservation_and_publication_converges_on_one_job()
     );
     assert_eq!(
         rig.job(&prepared.causal_identity).state,
-        CuratorJobState::Reserved
+        MemoryReviewerJobState::Reserved
     );
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
     let retained = rig.state();
     assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
-    assert_eq!(retained.curator_reservation, Some(reservation.clone()));
-    assert_eq!(retained.curator_nonadmission.count, 0);
+    assert_eq!(
+        retained.memory_reviewer_reservation,
+        Some(reservation.clone())
+    );
+    assert_eq!(retained.memory_reviewer_nonadmission.count, 0);
     // The retry reconciles against the retained reservation and publishes once.
     let retried = activation(rig.handoff(t0() + 40).unwrap());
     assert_eq!(retried.causal_identity, prepared.causal_identity);
@@ -736,12 +752,12 @@ fn every_interruption_between_reservation_and_publication_converges_on_one_job()
     );
     let result = rig.publish(Some(&retried), None, t0() + 41).unwrap();
     assert_eq!(
-        result.curator_activation,
-        Some(CuratorActivationOutcome::Activated)
+        result.memory_reviewer_activation,
+        Some(MemoryReviewerActivationOutcome::Activated)
     );
     assert_eq!(
         rig.store
-            .ready_curator_jobs(PROJECT, 8, t0() + 41)
+            .ready_memory_reviewer_jobs(PROJECT, 8, t0() + 41)
             .unwrap()
             .len(),
         1
@@ -774,7 +790,7 @@ fn a_fence_refusal_after_the_reservation_settles_the_job_without_progress() {
     );
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
     );
     let after = rig.store.load(SESSION).unwrap();
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
@@ -783,12 +799,22 @@ fn a_fence_refusal_after_the_reservation_settles_the_job_without_progress() {
         after.meta.history_summarizer.state,
         HistorySummarizerPhase::Idle
     );
-    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
+    assert_eq!(
+        after.meta.history_summarizer.memory_reviewer_reservation,
+        None
+    );
     assert_eq!(rig.pending(), None);
-    assert_eq!(after.meta.history_summarizer.curator_nonadmission.count, 0);
+    assert_eq!(
+        after
+            .meta
+            .history_summarizer
+            .memory_reviewer_nonadmission
+            .count,
+        0
+    );
     assert!(
         rig.store
-            .ready_curator_jobs(PROJECT, 8, t0())
+            .ready_memory_reviewer_jobs(PROJECT, 8, t0())
             .unwrap()
             .is_empty()
     );
@@ -821,9 +847,9 @@ fn a_fence_refusal_after_the_reservation_settles_the_job_without_progress() {
     ));
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
     );
-    assert_eq!(rig.state().curator_reservation, None);
+    assert_eq!(rig.state().memory_reviewer_reservation, None);
 }
 
 #[test]
@@ -831,16 +857,16 @@ fn a_late_publication_records_expiry_and_never_resurrects_the_reservation() {
     let rig = Rig::open();
     let prepared = activation(rig.handoff(t0()).unwrap());
     let reservation = rig.reservation();
-    let late = t0() + CURATOR_QUEUE_LIFETIME_MS;
+    let late = t0() + MEMORY_REVIEWER_QUEUE_LIFETIME_MS;
     let result = rig.publish(Some(&prepared), None, late).unwrap();
     assert_eq!(
-        result.curator_activation,
-        Some(CuratorActivationOutcome::Expired)
+        result.memory_reviewer_activation,
+        Some(MemoryReviewerActivationOutcome::Expired)
     );
     let job = rig.job(&prepared.causal_identity);
     assert_eq!(
         job.state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Expired)
     );
     assert_eq!(
         job.queue_deadline_ms, reservation.queue_deadline_ms,
@@ -852,9 +878,17 @@ fn a_late_publication_records_expiry_and_never_resurrects_the_reservation() {
         Some(5),
         "valid history still advances"
     );
-    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
     assert_eq!(
-        after.meta.history_summarizer.curator_nonadmission.count, 0,
+        after.meta.history_summarizer.memory_reviewer_reservation,
+        None
+    );
+    assert_eq!(
+        after
+            .meta
+            .history_summarizer
+            .memory_reviewer_nonadmission
+            .count,
+        0,
         "expiry after reservation is a terminal outcome, not a nonadmission"
     );
     // The staged subject is past its deadline too.
@@ -864,7 +898,7 @@ fn a_late_publication_records_expiry_and_never_resurrects_the_reservation() {
     ));
     assert!(
         rig.store
-            .ready_curator_jobs(PROJECT, 8, late)
+            .ready_memory_reviewer_jobs(PROJECT, 8, late)
             .unwrap()
             .is_empty()
     );
@@ -878,20 +912,20 @@ fn identical_inputs_neither_duplicate_a_job_nor_reopen_a_settled_one() {
     // A later firing with the same accepted facts finds the Ready row and hands off nothing.
     rig.persist(publishing_state(4));
     assert_eq!(rig.handoff(t0() + 2).unwrap(), Handoff::Settled);
-    assert_eq!(rig.state().curator_reservation, None);
+    assert_eq!(rig.state().memory_reviewer_reservation, None);
     assert_eq!(
         rig.store
-            .ready_curator_jobs(PROJECT, 8, t0() + 2)
+            .ready_memory_reviewer_jobs(PROJECT, 8, t0() + 2)
             .unwrap()
             .len(),
         1
     );
     // Once the job is terminal, the same inputs stay settled.
     rig.store
-        .finish_curator_job(
+        .finish_memory_reviewer_job(
             PROJECT,
             &prepared.causal_identity,
-            CuratorJobOutcome::Failed,
+            MemoryReviewerJobOutcome::Failed,
             t0() + 3,
         )
         .unwrap();
@@ -913,7 +947,7 @@ fn identical_inputs_neither_duplicate_a_job_nor_reopen_a_settled_one() {
         Some(7)
     );
     assert_eq!(
-        publication.curator_nonadmission_count, 0,
+        publication.memory_reviewer_nonadmission_count, 0,
         "settled inputs are not a nonadmission"
     );
 }
@@ -922,9 +956,9 @@ fn identical_inputs_neither_duplicate_a_job_nor_reopen_a_settled_one() {
 fn capacity_refusal_before_the_reservation_is_the_recorded_nonadmission() {
     let rig = Rig::open();
     // Fill the project's pending capacity with unrelated reservations.
-    for index in 0..MAX_PENDING_CURATOR_JOBS_PER_PROJECT {
+    for index in 0..MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
         rig.store
-            .reserve_curator_job(
+            .reserve_memory_reviewer_job(
                 PROJECT,
                 &ProducerBinding {
                     producer: "filler".to_string(),
@@ -948,10 +982,10 @@ fn capacity_refusal_before_the_reservation_is_the_recorded_nonadmission() {
     let handoff = rig.handoff(t0() + 1).unwrap();
     assert_eq!(
         handoff,
-        Handoff::Nonadmission(CuratorNonadmissionCode::CapacityFull)
+        Handoff::Nonadmission(MemoryReviewerNonadmissionCode::CapacityFull)
     );
     assert_eq!(
-        rig.state().curator_reservation,
+        rig.state().memory_reviewer_reservation,
         None,
         "no reservation was persisted"
     );
@@ -970,17 +1004,24 @@ fn capacity_refusal_before_the_reservation_is_the_recorded_nonadmission() {
     );
     // The publication records the refusal with its progress.
     let published = rig
-        .publish(None, Some(CuratorNonadmissionCode::CapacityFull), t0() + 2)
+        .publish(
+            None,
+            Some(MemoryReviewerNonadmissionCode::CapacityFull),
+            t0() + 2,
+        )
         .unwrap();
-    assert_eq!(published.curator_nonadmission_count, 1);
+    assert_eq!(published.memory_reviewer_nonadmission_count, 1);
     let state = rig.state();
     assert_eq!(
-        state.curator_nonadmission.latest.map(|latest| latest.code),
-        Some(CuratorNonadmissionCode::CapacityFull)
+        state
+            .memory_reviewer_nonadmission
+            .latest
+            .map(|latest| latest.code),
+        Some(MemoryReviewerNonadmissionCode::CapacityFull)
     );
     assert_eq!(
         state
-            .curator_nonadmission
+            .memory_reviewer_nonadmission
             .latest
             .map(|latest| latest.firing_seq),
         Some(3)
@@ -1060,7 +1101,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
             failure_backoff_at_ms: 0,
             completion_now_ms: t0,
             publication_fence: None,
-            curator_handoff: Some(&target),
+            memory_reviewer_handoff: Some(&target),
         })
     };
 
@@ -1076,13 +1117,26 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
         after.meta.history_summarizer.state,
         HistorySummarizerPhase::Idle
     );
-    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
-    assert_eq!(after.meta.history_summarizer.curator_nonadmission.count, 0);
-    let ready = rig.store.ready_curator_jobs(PROJECT, 8, t0()).unwrap();
+    assert_eq!(
+        after.meta.history_summarizer.memory_reviewer_reservation,
+        None
+    );
+    assert_eq!(
+        after
+            .meta
+            .history_summarizer
+            .memory_reviewer_nonadmission
+            .count,
+        0
+    );
+    let ready = rig
+        .store
+        .ready_memory_reviewer_jobs(PROJECT, 8, t0())
+        .unwrap();
     assert_eq!(ready.len(), 1);
     let job = &ready[0];
     assert_eq!(job.producer.firing_id, format!("{}#3", rig_key()));
-    let CuratorJobState::Ready(input) = &job.state else {
+    let MemoryReviewerJobState::Ready(input) = &job.state else {
         panic!("{:?}", job.state);
     };
     let ReviewTarget::StagedSubject {
@@ -1129,7 +1183,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
         max_sequence: 1,
         count: 1,
     };
-    next.curator_nonadmission = after.meta.history_summarizer.curator_nonadmission;
+    next.memory_reviewer_nonadmission = after.meta.history_summarizer.memory_reviewer_nonadmission;
     rig.persist(next);
     let later = HistorySummarizerChunk {
         aliases: FrozenAliasTable::default(),
@@ -1163,17 +1217,20 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     )
     .expect("history publishes beside the rejected set");
     let state = rig.state();
-    assert_eq!(state.curator_nonadmission.count, 1);
+    assert_eq!(state.memory_reviewer_nonadmission.count, 1);
     assert_eq!(
-        state.curator_nonadmission.latest.map(|latest| latest.code),
-        Some(CuratorNonadmissionCode::FactSetRejected {
+        state
+            .memory_reviewer_nonadmission
+            .latest
+            .map(|latest| latest.code),
+        Some(MemoryReviewerNonadmissionCode::FactSetRejected {
             failure: ExtractionFailure::UnknownAlias,
         })
     );
-    assert_eq!(state.curator_reservation, None);
+    assert_eq!(state.memory_reviewer_reservation, None);
     assert_eq!(
         rig.store
-            .ready_curator_jobs(PROJECT, 8, t0())
+            .ready_memory_reviewer_jobs(PROJECT, 8, t0())
             .unwrap()
             .len(),
         1
@@ -1193,8 +1250,8 @@ fn an_activation_that_cannot_apply_rolls_the_whole_publication_back() {
         matches!(
             refused,
             Err(HistorySummarizerStateError::Publish(
-                HistorySummarizerPublishError::CuratorActivation(
-                    memory_store::curator_jobs::CuratorJobRefusal::ProducerMismatch
+                HistorySummarizerPublishError::MemoryReviewerActivation(
+                    memory_store::memory_reviewer_jobs::MemoryReviewerJobRefusal::ProducerMismatch
                 )
             ))
         ),
@@ -1209,12 +1266,12 @@ fn an_activation_that_cannot_apply_rolls_the_whole_publication_back() {
         HistorySummarizerPhase::Publishing
     );
     assert_eq!(
-        state.meta.history_summarizer.curator_reservation,
+        state.meta.history_summarizer.memory_reviewer_reservation,
         Some(reservation.clone())
     );
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Reserved
+        MemoryReviewerJobState::Reserved
     );
     assert!(rig.read_subject(&reservation, t0() + 2).is_ok());
 
@@ -1224,8 +1281,8 @@ fn an_activation_that_cannot_apply_rolls_the_whole_publication_back() {
         matches!(
             refused,
             Err(HistorySummarizerStateError::Publish(
-                HistorySummarizerPublishError::CuratorActivation(
-                    memory_store::curator_jobs::CuratorJobRefusal::InvalidRequest
+                HistorySummarizerPublishError::MemoryReviewerActivation(
+                    memory_store::memory_reviewer_jobs::MemoryReviewerJobRefusal::InvalidRequest
                 )
             ))
         ),
@@ -1234,14 +1291,14 @@ fn an_activation_that_cannot_apply_rolls_the_whole_publication_back() {
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Reserved
+        MemoryReviewerJobState::Reserved
     );
 
     // The matching activation then publishes once.
     let result = rig.publish(Some(&prepared), None, t0() + 4).unwrap();
     assert_eq!(
-        result.curator_activation,
-        Some(CuratorActivationOutcome::Activated)
+        result.memory_reviewer_activation,
+        Some(MemoryReviewerActivationOutcome::Activated)
     );
     assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
 }
@@ -1251,21 +1308,24 @@ fn a_reservation_the_sweep_already_expired_reads_as_expired_at_late_publication(
     let rig = Rig::open();
     let prepared = activation(rig.handoff(t0()).unwrap());
     let reservation = rig.reservation();
-    let late = t0() + CURATOR_QUEUE_LIFETIME_MS + 1;
-    let (jobs, _) = rig.store.expire_curator_work(late).unwrap();
+    let late = t0() + MEMORY_REVIEWER_QUEUE_LIFETIME_MS + 1;
+    let (jobs, _) = rig.store.expire_memory_reviewer_work(late).unwrap();
     assert_eq!(jobs, 1);
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Expired)
     );
     let result = rig.publish(Some(&prepared), None, late).unwrap();
     assert_eq!(
-        result.curator_activation,
-        Some(CuratorActivationOutcome::Expired)
+        result.memory_reviewer_activation,
+        Some(MemoryReviewerActivationOutcome::Expired)
     );
     let after = rig.store.load(SESSION).unwrap();
     assert_eq!(after.meta.publication_floor_ordinal, Some(5));
-    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
+    assert_eq!(
+        after.meta.history_summarizer.memory_reviewer_reservation,
+        None
+    );
     assert_eq!(
         rig.job(&reservation.causal_identity).queue_deadline_ms,
         reservation.queue_deadline_ms
@@ -1286,7 +1346,10 @@ fn restart_republishes_a_reserved_firing_without_a_model_run() {
     assert_eq!(rig.state().state, HistorySummarizerPhase::Publishing);
     // Without the Kernel the staged subject cannot be verified; nothing moves.
     assert_eq!(rig.republish(None, t0() + 1), RepublishOutcome::Retained);
-    assert_eq!(rig.state().curator_reservation, Some(reservation.clone()));
+    assert_eq!(
+        rig.state().memory_reviewer_reservation,
+        Some(reservation.clone())
+    );
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
     // With it, the retained publication commits and activates the same job.
     let target = rig.target();
@@ -1294,7 +1357,7 @@ fn restart_republishes_a_reserved_firing_without_a_model_run() {
     assert_eq!(outcome, RepublishOutcome::Published);
     let job = rig.job(&reservation.causal_identity);
     assert!(
-        matches!(job.state, CuratorJobState::Ready(_)),
+        matches!(job.state, MemoryReviewerJobState::Ready(_)),
         "{:?}",
         job.state
     );
@@ -1305,7 +1368,10 @@ fn restart_republishes_a_reserved_firing_without_a_model_run() {
         after.meta.history_summarizer.state,
         HistorySummarizerPhase::Idle
     );
-    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
+    assert_eq!(
+        after.meta.history_summarizer.memory_reviewer_reservation,
+        None
+    );
     assert_eq!(rig.pending(), None);
     assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
     // A second restart finds nothing to do.
@@ -1339,11 +1405,11 @@ fn restart_settles_a_reserved_firing_whose_input_changed_or_expired() {
     );
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
     );
     let after = rig.state();
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
-    assert_eq!(after.curator_reservation, None);
+    assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
     assert_eq!(
@@ -1360,13 +1426,13 @@ fn restart_settles_a_reserved_firing_whose_input_changed_or_expired() {
     let _ = activation(rig.handoff(t0()).unwrap());
     let reservation = rig.reservation();
     rig.reopen();
-    let late = t0() + CURATOR_QUEUE_LIFETIME_MS + 1;
+    let late = t0() + MEMORY_REVIEWER_QUEUE_LIFETIME_MS + 1;
     let target = rig.target();
     let outcome = rig.republish(Some(&target), late);
     assert_eq!(outcome, RepublishOutcome::Published);
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Expired)
     );
     assert_eq!(
         rig.store
@@ -1453,7 +1519,7 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
         failure_backoff_at_ms: 0,
         completion_now_ms: t0,
         publication_fence: Some(&fence),
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
     });
     assert!(
         matches!(
@@ -1468,7 +1534,10 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
     );
     let retained = rig.state();
     assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
-    let reservation = retained.curator_reservation.clone().expect("retained");
+    let reservation = retained
+        .memory_reviewer_reservation
+        .clone()
+        .expect("retained");
     assert_eq!(retained.consecutive_publish_failures, 1);
     let (firing_seq, pending) = rig.pending().expect("the retained publication is stored");
     assert_eq!(firing_seq, 3);
@@ -1480,7 +1549,7 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Reserved
+        MemoryReviewerJobState::Reserved
     );
 
     // After a restart, recovery republishes the retained output: no model, one activation, history advanced to exactly what the firing validated.
@@ -1500,14 +1569,17 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
         after.meta.history_summarizer.state,
         HistorySummarizerPhase::Idle
     );
-    assert_eq!(after.meta.history_summarizer.curator_reservation, None);
+    assert_eq!(
+        after.meta.history_summarizer.memory_reviewer_reservation,
+        None
+    );
     assert_eq!(rig.pending(), None);
     let segments = rig.store.load_history_segments(SESSION).unwrap();
     assert_eq!(segments.len(), 1);
     assert_eq!((segments[0].start_message, segments[0].end_message), (2, 3));
     assert!(matches!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Ready(_)
+        MemoryReviewerJobState::Ready(_)
     ));
     assert_eq!(
         rig.store
@@ -1520,7 +1592,7 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
 
     // A reservation left by an earlier firing is not carried into the next one.
     let mut stale = after.meta.history_summarizer.clone();
-    stale.curator_reservation = Some(reservation.clone());
+    stale.memory_reviewer_reservation = Some(reservation.clone());
     rig.persist(stale);
     let fired = match fire(
         &rig.state(),
@@ -1540,7 +1612,7 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
         FireOutcome::Fired(state) => state,
         FireOutcome::Busy(_) => unreachable!(),
     };
-    assert_eq!(fired.curator_reservation, None);
+    assert_eq!(fired.memory_reviewer_reservation, None);
     assert_eq!(fired.firing_seq, 4);
 }
 
@@ -1575,11 +1647,11 @@ fn a_row_conflict_retains_the_reservation_and_a_duplicate_settle_spares_a_ready_
     );
     let state = rig.state();
     assert_eq!(state.state, HistorySummarizerPhase::Publishing);
-    assert_eq!(state.curator_reservation, Some(reservation.clone()));
+    assert_eq!(state.memory_reviewer_reservation, Some(reservation.clone()));
     assert!(rig.pending().is_some());
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Reserved
+        MemoryReviewerJobState::Reserved
     );
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
     // Recovery publishes it.
@@ -1590,7 +1662,7 @@ fn a_row_conflict_retains_the_reservation_and_a_duplicate_settle_spares_a_ready_
     );
     assert!(matches!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Ready(_)
+        MemoryReviewerJobState::Ready(_)
     ));
     // A late duplicate publication of the same activation is refused by the row version and does not settle the Ready job.
     let late = rig.publish_at(
@@ -1611,7 +1683,7 @@ fn a_row_conflict_retains_the_reservation_and_a_duplicate_settle_spares_a_ready_
     ));
     assert!(matches!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Ready(_)
+        MemoryReviewerJobState::Ready(_)
     ));
 }
 
@@ -1633,7 +1705,7 @@ fn an_unreadable_retained_publication_settles_the_reservation_instead_of_strandi
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
         now_ms: t0() + 1,
         failure_backoff_at_ms: t0() + 60_000,
         publication_fence: None,
@@ -1646,11 +1718,11 @@ fn an_unreadable_retained_publication_settles_the_reservation_instead_of_strandi
     );
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
     );
     let after = rig.state();
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
-    assert_eq!(after.curator_reservation, None);
+    assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
     assert_eq!(
@@ -1675,16 +1747,19 @@ fn a_reincarnated_kernel_settles_the_reservation_without_reserving_a_second_job(
     );
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
     );
     assert_eq!(
-        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        rig.store
+            .memory_reviewer_headroom(PROJECT)
+            .unwrap()
+            .pending_jobs,
         0,
         "no job was reserved under the new incarnation"
     );
     let after = rig.state();
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
-    assert_eq!(after.curator_reservation, None);
+    assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
 }
@@ -1700,7 +1775,10 @@ fn every_retained_republish_arms_the_backoff() {
     assert_eq!(rig.republish(None, t0() + 1), RepublishOutcome::Retained);
     let retained = rig.state();
     assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
-    assert_eq!(retained.curator_reservation, Some(reservation.clone()));
+    assert_eq!(
+        retained.memory_reviewer_reservation,
+        Some(reservation.clone())
+    );
     assert_eq!(retained.failure_backoff_at_ms, Some(t0() + 1 + 60_000));
     // Another writer moved the session row under the publication.
     let rig = Rig::open();
@@ -1726,7 +1804,7 @@ fn every_retained_republish_arms_the_backoff() {
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
         now_ms: t0() + 1,
         failure_backoff_at_ms: t0() + 1 + 60_000,
         publication_fence: Some(&fence),
@@ -1765,8 +1843,8 @@ fn a_settle_from_a_stale_snapshot_spares_a_later_firing_and_the_job_the_publicat
                 &later_reservation(),
                 &pending_publication(&validated_range(5, 6)),
             );
-            Err(HistorySummarizerPublishError::CuratorActivation(
-                CuratorJobRefusal::InvalidRequest,
+            Err(HistorySummarizerPublishError::MemoryReviewerActivation(
+                MemoryReviewerJobRefusal::InvalidRequest,
             ))
         }
     }
@@ -1776,7 +1854,7 @@ fn a_settle_from_a_stale_snapshot_spares_a_later_firing_and_the_job_the_publicat
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
         now_ms: t0() + 1,
         failure_backoff_at_ms: t0() + 1 + 60_000,
         publication_fence: Some(&fence),
@@ -1788,7 +1866,7 @@ fn a_settle_from_a_stale_snapshot_spares_a_later_firing_and_the_job_the_publicat
     assert!(
         matches!(
             rig.job(&reservation.causal_identity).state,
-            CuratorJobState::Ready(_)
+            MemoryReviewerJobState::Ready(_)
         ),
         "{:?}",
         rig.job(&reservation.causal_identity).state
@@ -1796,20 +1874,20 @@ fn a_settle_from_a_stale_snapshot_spares_a_later_firing_and_the_job_the_publicat
     let later = rig.state();
     assert_eq!(later.state, HistorySummarizerPhase::Publishing);
     assert_eq!(later.firing_seq, 4);
-    assert_eq!(later.curator_reservation, Some(later_reservation()));
+    assert_eq!(later.memory_reviewer_reservation, Some(later_reservation()));
     assert_eq!(rig.pending().map(|(firing_seq, _)| firing_seq), Some(4));
     assert_eq!(outcome, RepublishOutcome::Retained);
 }
 
 /// A reservation firing 4 records for a job of its own.
-fn later_reservation() -> memory_store::CuratorReservation {
-    memory_store::CuratorReservation {
+fn later_reservation() -> memory_store::MemoryReviewerReservation {
+    memory_store::MemoryReviewerReservation {
         firing_seq: 4,
         causal_identity: "later-job".to_string(),
         candidate_id: "hs-ses-later".to_string(),
         payload_digest: "later".to_string(),
         kernel_incarnation: "kernel".to_string(),
-        queue_deadline_ms: t0() + CURATOR_QUEUE_LIFETIME_MS,
+        queue_deadline_ms: t0() + MEMORY_REVIEWER_QUEUE_LIFETIME_MS,
     }
 }
 
@@ -1819,7 +1897,7 @@ fn a_retained_publication_the_store_refuses_is_a_nonadmission_before_any_reserva
     let target = rig.target();
     let decide = |pending: PendingPublication| {
         let loaded = rig.store.load(SESSION).unwrap();
-        curator_decision_before_publish(CuratorDecisionRequest {
+        memory_reviewer_decision_before_publish(MemoryReviewerDecisionRequest {
             store: &rig.store,
             session_id: SESSION,
             project_path: PROJECT,
@@ -1828,7 +1906,7 @@ fn a_retained_publication_the_store_refuses_is_a_nonadmission_before_any_reserva
             validated: &accepted_range(2, 4),
             aliases: &aliases(),
             pending,
-            curator_handoff: Some(&target),
+            memory_reviewer_handoff: Some(&target),
             failure_started_at_ms: t0(),
             failure_backoff_at_ms: t0() + 60_000,
             completion_now_ms: t0,
@@ -1839,7 +1917,7 @@ fn a_retained_publication_the_store_refuses_is_a_nonadmission_before_any_reserva
     pending.chunk_transcript = incompressible_text(400 * 1024, 1);
     pending.aliases_json = serde_json::to_string(&incompressible_text(400 * 1024, 2)).unwrap();
     let decision = decide(pending).unwrap();
-    assert!(decision.curator_activation.is_some());
+    assert!(decision.memory_reviewer_activation.is_some());
     assert_eq!(rig.pending().map(|(firing_seq, _)| firing_seq), Some(3));
     // Past the envelope, the store refuses the payload before any job is reserved: the publication records a nonadmission, nothing is reserved, and the firing is not abandoned.
     let rig = Rig::open();
@@ -1848,9 +1926,9 @@ fn a_retained_publication_the_store_refuses_is_a_nonadmission_before_any_reserva
     pending.chunk_transcript = incompressible_text(500 * 1024, 3);
     pending.aliases_json = serde_json::to_string(&incompressible_text(500 * 1024, 4)).unwrap();
     pending.validated_json = serde_json::to_string(&incompressible_text(500 * 1024, 5)).unwrap();
-    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
+    let headroom_before = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
     let loaded = rig.store.load(SESSION).unwrap();
-    let decision = curator_decision_before_publish(CuratorDecisionRequest {
+    let decision = memory_reviewer_decision_before_publish(MemoryReviewerDecisionRequest {
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
@@ -1859,19 +1937,22 @@ fn a_retained_publication_the_store_refuses_is_a_nonadmission_before_any_reserva
         validated: &accepted_range(2, 4),
         aliases: &aliases(),
         pending,
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
         failure_started_at_ms: t0(),
         failure_backoff_at_ms: t0() + 60_000,
         completion_now_ms: t0,
     })
     .unwrap();
     assert_eq!(
-        decision.curator_nonadmission,
-        Some(CuratorNonadmissionCode::SubjectRefused)
+        decision.memory_reviewer_nonadmission,
+        Some(MemoryReviewerNonadmissionCode::SubjectRefused)
     );
-    assert!(decision.curator_activation.is_none());
+    assert!(decision.memory_reviewer_activation.is_none());
     assert_eq!(
-        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        rig.store
+            .memory_reviewer_headroom(PROJECT)
+            .unwrap()
+            .pending_jobs,
         headroom_before.pending_jobs
     );
     assert_eq!(rig.state().state, HistorySummarizerPhase::Publishing);
@@ -1915,7 +1996,7 @@ fn a_retain_that_loses_the_row_to_a_publication_writes_nothing_back() {
     assert_eq!(outcome, RepublishOutcome::Retained);
     let state = rig.state();
     assert_eq!(state.state, HistorySummarizerPhase::Idle);
-    assert_eq!(state.curator_reservation, None);
+    assert_eq!(state.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
     // Nothing was resurrected, so the next pass finds nothing to settle and the activated job stands.
     assert_eq!(
@@ -1924,7 +2005,7 @@ fn a_retain_that_loses_the_row_to_a_publication_writes_nothing_back() {
     );
     assert!(matches!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Ready(_)
+        MemoryReviewerJobState::Ready(_)
     ));
 }
 
@@ -1994,9 +2075,9 @@ fn a_retained_publication_the_scanner_would_rewrite_is_a_nonadmission_before_any
         "aliases": [{"presented": "the user typed password=hunter-two and moved on"}]
     }))
     .unwrap();
-    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
+    let headroom_before = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
     let loaded = rig.store.load(SESSION).unwrap();
-    let decision = curator_decision_before_publish(CuratorDecisionRequest {
+    let decision = memory_reviewer_decision_before_publish(MemoryReviewerDecisionRequest {
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
@@ -2005,19 +2086,22 @@ fn a_retained_publication_the_scanner_would_rewrite_is_a_nonadmission_before_any
         validated: &accepted_range(2, 4),
         aliases: &aliases(),
         pending,
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
         failure_started_at_ms: t0(),
         failure_backoff_at_ms: t0() + 60_000,
         completion_now_ms: t0,
     })
     .unwrap();
     assert_eq!(
-        decision.curator_nonadmission,
-        Some(CuratorNonadmissionCode::SubjectRefused)
+        decision.memory_reviewer_nonadmission,
+        Some(MemoryReviewerNonadmissionCode::SubjectRefused)
     );
-    assert!(decision.curator_activation.is_none());
+    assert!(decision.memory_reviewer_activation.is_none());
     assert_eq!(
-        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        rig.store
+            .memory_reviewer_headroom(PROJECT)
+            .unwrap()
+            .pending_jobs,
         headroom_before.pending_jobs
     );
     assert_eq!(rig.pending(), None);
@@ -2042,7 +2126,7 @@ fn a_reservation_made_under_an_earlier_memories_authority_settles_instead_of_mig
     )
     .unwrap();
     let earlier = activation(handoff);
-    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
+    let headroom_before = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
     let target = rig.target();
     assert_eq!(
         rig.republish(Some(&target), t0() + 1),
@@ -2050,22 +2134,25 @@ fn a_reservation_made_under_an_earlier_memories_authority_settles_instead_of_mig
     );
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
     assert_eq!(
-        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        rig.store
+            .memory_reviewer_headroom(PROJECT)
+            .unwrap()
+            .pending_jobs,
         headroom_before.pending_jobs,
         "no replacement job is reserved under the current authority"
     );
     // The earlier project's job is left to its expiry sweep.
     assert_eq!(
         rig.store
-            .lookup_curator_job("git:other", &earlier.causal_identity)
+            .lookup_memory_reviewer_job("git:other", &earlier.causal_identity)
             .unwrap()
             .unwrap()
             .state,
-        CuratorJobState::Reserved
+        MemoryReviewerJobState::Reserved
     );
     let after = rig.state();
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
-    assert_eq!(after.curator_reservation, None);
+    assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
 }
 
@@ -2076,10 +2163,10 @@ fn a_reservation_whose_job_is_no_longer_reserved_for_its_firing_settles() {
     let prepared = activation(rig.handoff(t0()).unwrap());
     let reservation = rig.reservation();
     rig.store
-        .finish_curator_job(
+        .finish_memory_reviewer_job(
             PROJECT,
             &prepared.causal_identity,
-            CuratorJobOutcome::Nonadmitted,
+            MemoryReviewerJobOutcome::Nonadmitted,
             t0() + 1,
         )
         .unwrap();
@@ -2090,11 +2177,11 @@ fn a_reservation_whose_job_is_no_longer_reserved_for_its_firing_settles() {
     );
     let after = rig.state();
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
-    assert_eq!(after.curator_reservation, None);
+    assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
     );
 }
 
@@ -2135,7 +2222,7 @@ fn a_fence_refusal_still_abandons_the_firing_when_its_job_is_not_under_the_curre
     );
     let after = rig.state();
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
-    assert_eq!(after.curator_reservation, None);
+    assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
 }
 
@@ -2176,7 +2263,7 @@ fn a_session_id_at_the_wire_bound_still_hands_off() {
 /// A recorded reservation names this firing's job only when it is the job this firing would reserve now. One made under other policy versions, as before a process upgrade, is left to expire and the new policy gets its own job (Q25/Q29).
 #[test]
 fn a_reservation_under_other_policy_versions_is_not_adopted() {
-    use crate::curator::broker::QuestionTemplate;
+    use crate::memory_reviewer::broker::QuestionTemplate;
 
     let rig = Rig::open();
     let reference = rig.staged_reference();
@@ -2204,15 +2291,15 @@ fn a_reservation_under_other_policy_versions_is_not_adopted() {
     )]));
     let previous = match rig
         .store
-        .reserve_curator_job(PROJECT, &prior, &previous_policy, t0())
+        .reserve_memory_reviewer_job(PROJECT, &prior, &previous_policy, t0())
         .unwrap()
     {
-        memory_store::curator_jobs::ReserveOutcome::Reserved(job) => job,
+        memory_store::memory_reviewer_jobs::ReserveOutcome::Reserved(job) => job,
         other => panic!("{other:?}"),
     };
     assert_ne!(previous.causal_identity, current);
     let mut state = publishing_state(3);
-    state.curator_reservation = Some(memory_store::CuratorReservation {
+    state.memory_reviewer_reservation = Some(memory_store::MemoryReviewerReservation {
         firing_seq: 2,
         causal_identity: previous.causal_identity.clone(),
         candidate_id: reference.candidate_id,
@@ -2228,7 +2315,7 @@ fn a_reservation_under_other_policy_versions_is_not_adopted() {
     );
     assert_eq!(
         rig.job(&previous.causal_identity).state,
-        CuratorJobState::Reserved,
+        MemoryReviewerJobState::Reserved,
         "the previous policy's reservation is left for the sweep"
     );
 }
@@ -2246,7 +2333,7 @@ fn a_handoff_failure_abandons_only_the_firing_that_reserved() {
     let mut validated = validated_range(2, 4);
     validated.extraction = ExtractionOutcome::Accepted { count: 2 };
     let target = rig.target();
-    let result = curator_decision_before_publish(CuratorDecisionRequest {
+    let result = memory_reviewer_decision_before_publish(MemoryReviewerDecisionRequest {
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
@@ -2255,7 +2342,7 @@ fn a_handoff_failure_abandons_only_the_firing_that_reserved() {
         validated: &validated,
         aliases: &aliases(),
         pending: pending_publication(&validated),
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
         failure_started_at_ms: t0(),
         failure_backoff_at_ms: 0,
         completion_now_ms: t0,
@@ -2263,7 +2350,7 @@ fn a_handoff_failure_abandons_only_the_firing_that_reserved() {
     assert!(
         matches!(
             result,
-            Err(HistorySummarizerDriveError::CuratorHandoff(
+            Err(HistorySummarizerDriveError::MemoryReviewerHandoff(
                 HandoffError::Persist(HistorySummarizerStateError::Publish(
                     HistorySummarizerPublishError::CasConflict { .. }
                 ))
@@ -2327,7 +2414,7 @@ fn the_queue_deadline_starts_at_the_reservation_not_the_firing() {
     let mut validated = validated_range(2, 4);
     validated.extraction = ExtractionOutcome::Accepted { count: 2 };
     let target = rig.target();
-    let decision = curator_decision_before_publish(CuratorDecisionRequest {
+    let decision = memory_reviewer_decision_before_publish(MemoryReviewerDecisionRequest {
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
@@ -2336,17 +2423,17 @@ fn the_queue_deadline_starts_at_the_reservation_not_the_firing() {
         validated: &validated,
         aliases: &aliases(),
         pending: pending_publication(&validated),
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
         // The firing started ten minutes before its producer completed.
         failure_started_at_ms: t0() - 600_000,
         failure_backoff_at_ms: 0,
         completion_now_ms: t0,
     })
     .unwrap();
-    assert!(decision.curator_activation.is_some());
+    assert!(decision.memory_reviewer_activation.is_some());
     assert_eq!(
         rig.reservation().queue_deadline_ms,
-        t0() + CURATOR_QUEUE_LIFETIME_MS
+        t0() + MEMORY_REVIEWER_QUEUE_LIFETIME_MS
     );
 }
 
@@ -2401,8 +2488,8 @@ fn a_refused_publication_settles_only_the_reservation_it_attempted() {
             now_ms: t0() + 3,
             failure_backoff_at_ms: t0() + 60_000,
             publication_fence: Some(&fence),
-            curator_nonadmission: None,
-            curator_activation: Some(&prepared),
+            memory_reviewer_nonadmission: None,
+            memory_reviewer_activation: Some(&prepared),
         },
     );
     assert!(
@@ -2419,14 +2506,14 @@ fn a_refused_publication_settles_only_the_reservation_it_attempted() {
     assert_eq!(later.state, HistorySummarizerPhase::Publishing);
     assert_eq!(later.firing_seq, 4);
     let adopted = later
-        .curator_reservation
+        .memory_reviewer_reservation
         .expect("firing 4 holds its reservation");
     assert_eq!(adopted.firing_seq, 4);
     assert_eq!(adopted.causal_identity, attempted.causal_identity);
     assert_eq!(rig.pending().map(|(firing_seq, _)| firing_seq), Some(4));
     assert_eq!(
         rig.job(&attempted.causal_identity).state,
-        CuratorJobState::Reserved
+        MemoryReviewerJobState::Reserved
     );
 }
 
@@ -2477,8 +2564,8 @@ fn a_recut_firing_adopts_the_reservation_under_the_staged_binding() {
         .publish_range(Some(&adopted), None, t0() + 12, 3, 4)
         .unwrap();
     assert_eq!(
-        result.curator_activation,
-        Some(CuratorActivationOutcome::Activated)
+        result.memory_reviewer_activation,
+        Some(MemoryReviewerActivationOutcome::Activated)
     );
 }
 
@@ -2500,7 +2587,7 @@ fn an_unpublishable_reservation_settled_past_its_deadline_records_expiry_and_fre
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
-        curator_handoff: None,
+        memory_reviewer_handoff: None,
         now_ms: late,
         failure_backoff_at_ms: late + 60_000,
         publication_fence: None,
@@ -2513,11 +2600,11 @@ fn an_unpublishable_reservation_settled_past_its_deadline_records_expiry_and_fre
     );
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Expired)
     );
     let after = rig.state();
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
-    assert_eq!(after.curator_reservation, None);
+    assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
 }
 
@@ -2549,7 +2636,7 @@ fn a_stale_retain_leaves_a_later_firing_untouched() {
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
         now_ms: t0() + 3,
         failure_backoff_at_ms: t0() + 3 + 60_000,
         publication_fence: Some(&fence),
@@ -2568,7 +2655,7 @@ fn a_stale_retain_leaves_a_later_firing_untouched() {
 
 #[test]
 fn a_republication_under_other_policy_versions_settles_instead_of_reserving_a_second_job() {
-    use crate::curator::broker::QuestionTemplate;
+    use crate::memory_reviewer::broker::QuestionTemplate;
 
     // The firing reserved and retained under a previous step schema; the daemon that recovers it computes a different causal identity for the same subject. The retained output cannot publish under the recorded reservation, so it settles: no second job is reserved for the recovering daemon's policy.
     let rig = Rig::open();
@@ -2591,14 +2678,14 @@ fn a_republication_under_other_policy_versions_settles_instead_of_reserving_a_se
     };
     let previous = match rig
         .store
-        .reserve_curator_job(PROJECT, &producer, &previous_policy, t0())
+        .reserve_memory_reviewer_job(PROJECT, &producer, &previous_policy, t0())
         .unwrap()
     {
-        memory_store::curator_jobs::ReserveOutcome::Reserved(job) => job,
+        memory_store::memory_reviewer_jobs::ReserveOutcome::Reserved(job) => job,
         other => panic!("{other:?}"),
     };
     rig.retain(
-        &memory_store::CuratorReservation {
+        &memory_store::MemoryReviewerReservation {
             firing_seq: 3,
             causal_identity: previous.causal_identity.clone(),
             candidate_id: reference.candidate_id.clone(),
@@ -2608,7 +2695,7 @@ fn a_republication_under_other_policy_versions_settles_instead_of_reserving_a_se
         },
         &pending_publication(&validated_range(2, 4)),
     );
-    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
+    let headroom_before = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
     let target = rig.target();
     assert_eq!(
         rig.republish(Some(&target), t0() + 1),
@@ -2616,16 +2703,19 @@ fn a_republication_under_other_policy_versions_settles_instead_of_reserving_a_se
     );
     assert_eq!(
         rig.job(&previous.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
     );
     assert_eq!(
-        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        rig.store
+            .memory_reviewer_headroom(PROJECT)
+            .unwrap()
+            .pending_jobs,
         headroom_before.pending_jobs - 1,
         "the previous policy's job closed and no job was reserved for the current one"
     );
     let after = rig.state();
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
-    assert_eq!(after.curator_reservation, None);
+    assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
 }
 
@@ -2641,7 +2731,7 @@ fn a_publication_without_an_activation_drops_a_retained_publication_no_reservati
     ));
     assert_eq!(rig.pending().map(|(firing_seq, _)| firing_seq), Some(3));
     rig.persist(next_publishing_firing(&rig, 5, 6));
-    assert_eq!(rig.state().curator_reservation, None);
+    assert_eq!(rig.state().memory_reviewer_reservation, None);
     rig.publish_range(None, None, t0() + 10, 5, 6).unwrap();
     assert_eq!(rig.state().state, HistorySummarizerPhase::Idle);
     assert_eq!(rig.pending(), None);
@@ -2664,7 +2754,7 @@ fn a_handoff_failure_retains_only_the_firing_whose_handoff_failed() {
     assert_eq!(before.last_failure, None);
     // Firing 3's handoff fails at persistence: its row version is stale.
     let target = rig.target();
-    let result = curator_decision_before_publish(CuratorDecisionRequest {
+    let result = memory_reviewer_decision_before_publish(MemoryReviewerDecisionRequest {
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
@@ -2673,13 +2763,16 @@ fn a_handoff_failure_retains_only_the_firing_whose_handoff_failed() {
         validated: &accepted_range(2, 4),
         aliases: &aliases(),
         pending: pending_publication(&validated_range(2, 4)),
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
         failure_started_at_ms: t0(),
         failure_backoff_at_ms: t0() + 60_000,
         completion_now_ms: t0,
     });
     assert!(
-        matches!(result, Err(HistorySummarizerDriveError::CuratorHandoff(_))),
+        matches!(
+            result,
+            Err(HistorySummarizerDriveError::MemoryReviewerHandoff(_))
+        ),
         "{:?}",
         result.err()
     );
@@ -2687,7 +2780,7 @@ fn a_handoff_failure_retains_only_the_firing_whose_handoff_failed() {
     let after = rig.state();
     assert_eq!(after.firing_seq, 4);
     assert_eq!(after.state, HistorySummarizerPhase::Publishing);
-    assert_eq!(after.curator_reservation, Some(later_reservation()));
+    assert_eq!(after.memory_reviewer_reservation, Some(later_reservation()));
     assert_eq!(after.last_failure, None);
     assert_eq!(after.failure_backoff_at_ms, None);
     assert_eq!(
@@ -2698,7 +2791,7 @@ fn a_handoff_failure_retains_only_the_firing_whose_handoff_failed() {
 
 #[test]
 fn a_republication_with_memory_disabled_settles_instead_of_activating() {
-    // Memory was disabled after the firing retained its accepted facts; recovery does not hand them to the Curator. The reservation settles and the firing refires under the current configuration.
+    // Memory was disabled after the firing retained its accepted facts; recovery does not hand them to the MemoryReviewer. The reservation settles and the firing refires under the current configuration.
     let rig = Rig::open();
     let _ = activation(rig.handoff(t0()).unwrap());
     let reservation = rig.reservation();
@@ -2707,7 +2800,7 @@ fn a_republication_with_memory_disabled_settles_instead_of_activating() {
         store: &rig.store,
         session_id: SESSION,
         project_path: PROJECT,
-        curator_handoff: Some(&target),
+        memory_reviewer_handoff: Some(&target),
         now_ms: t0() + 1,
         failure_backoff_at_ms: t0() + 60_000,
         publication_fence: None,
@@ -2718,11 +2811,11 @@ fn a_republication_with_memory_disabled_settles_instead_of_activating() {
     assert_eq!(outcome, RepublishOutcome::Settled);
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
     );
     let after = rig.state();
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
-    assert_eq!(after.curator_reservation, None);
+    assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
     assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
 }
@@ -2739,7 +2832,7 @@ fn a_firing_holding_its_reservation_does_not_take_back_a_job_another_firing_adop
         ..prepared.producer.clone()
     };
     rig.store
-        .rebind_reserved_curator_job(PROJECT, &prepared.causal_identity, &adopter, t0() + 1)
+        .rebind_reserved_memory_reviewer_job(PROJECT, &prepared.causal_identity, &adopter, t0() + 1)
         .unwrap();
     let handoff = reserve_and_stage(
         &rig.target(),
@@ -2767,7 +2860,7 @@ fn a_recovery_clocked_before_the_deadline_still_publishes_a_job_the_sweep_expire
     let reservation = rig.reservation();
     let (jobs, _) = rig
         .store
-        .expire_curator_work(reservation.queue_deadline_ms + 1)
+        .expire_memory_reviewer_work(reservation.queue_deadline_ms + 1)
         .unwrap();
     assert_eq!(jobs, 1);
     let target = rig.target();
@@ -2778,10 +2871,10 @@ fn a_recovery_clocked_before_the_deadline_still_publishes_a_job_the_sweep_expire
     assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
     assert_eq!(
         rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Expired)
     );
     let after = rig.state();
     assert_eq!(after.state, HistorySummarizerPhase::Idle);
-    assert_eq!(after.curator_reservation, None);
+    assert_eq!(after.memory_reviewer_reservation, None);
     assert_eq!(rig.pending(), None);
 }

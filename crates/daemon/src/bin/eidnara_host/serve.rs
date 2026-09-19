@@ -417,17 +417,17 @@ fn hmac_sha256(key: &[u8], segments: &[&[u8]]) -> [u8; 32] {
     mac.finalize().into_bytes().into()
 }
 
-/// The activation record names a credential by the identity the selection file shows for it, so the Curator host receives the map from the same derivation that the selection commits.
+/// The activation record names a credential by the identity the selection file shows for it, so the MemoryReviewer host receives the map from the same derivation that the selection commits.
 fn selection_commit_hook(
     selection: HarnessSelection,
     credentials: BTreeMap<String, String>,
     selection_root: PathBuf,
-    curator_host: Arc<daemon::curator::worker::CuratorHost>,
+    memory_reviewer_host: Arc<daemon::memory_reviewer::worker::MemoryReviewerHost>,
 ) -> daemon::ConnectionKeyHook {
     Box::new(move |key| {
         let mut selection = selection;
         selection.credential_identities = credential_identities(&credentials, &key);
-        let _ = curator_host
+        let _ = memory_reviewer_host
             .credential_identities
             .set(selection.credential_identities.clone());
         write_selection(&selection_root, &selection)
@@ -1153,7 +1153,7 @@ pub fn run() -> Result<(), &'static str> {
         credential_identities: BTreeMap::new(),
     };
     let selection_credentials = envelope.credentials.clone();
-    let curator_host = Arc::new(daemon::curator::worker::CuratorHost {
+    let memory_reviewer_host = Arc::new(daemon::memory_reviewer::worker::MemoryReviewerHost {
         supervisor: model_execution.supervisor(),
         credentials: envelope
             .credentials
@@ -1162,7 +1162,7 @@ pub fn run() -> Result<(), &'static str> {
             .collect(),
         credential_identities: OnceLock::new(),
         worker_instance: format!(
-            "curator-worker:{}",
+            "memory_reviewer-worker:{}",
             &envelope.payload_manifest_digest[..envelope.payload_manifest_digest.len().min(16)]
         ),
     });
@@ -1170,14 +1170,14 @@ pub fn run() -> Result<(), &'static str> {
         selection,
         selection_credentials,
         selection_root,
-        Arc::clone(&curator_host),
+        Arc::clone(&memory_reviewer_host),
     );
     let composite = StaticComposite::new(
         daemon::Handler::new_with_connection_file(Some(publication))
             .with_connection_key_hook(commit_selection)
             .with_capability_source(capability_source)
             .with_local_embeddings(local_embeddings.clone())
-            .with_curator_host(curator_host),
+            .with_memory_reviewer_host(memory_reviewer_host),
         local_embeddings,
         model_execution,
     )
@@ -1557,9 +1557,9 @@ mod tests {
         assert_eq!(mode, 0o600);
     }
 
-    /// The commit hook gives `CuratorHost` the same keyed credential identities written to the selection.
+    /// The commit hook gives `MemoryReviewerHost` the same keyed credential identities written to the selection.
     #[test]
-    fn the_curator_host_receives_the_credential_identities_the_selection_commits() {
+    fn the_memory_reviewer_host_receives_the_credential_identities_the_selection_commits() {
         let root = tempfile::tempdir().expect("selection root");
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
             .expect("selection root mode");
@@ -1568,7 +1568,7 @@ mod tests {
             "ANTHROPIC_API_KEY".to_owned(),
             "credential-value".to_owned(),
         )]);
-        let curator_host = Arc::new(daemon::curator::worker::CuratorHost {
+        let memory_reviewer_host = Arc::new(daemon::memory_reviewer::worker::MemoryReviewerHost {
             supervisor: Arc::new(host_runtime::model_execution::supervisor::Supervisor::new(
                 Arc::new(UnavailableBackend { subreason: "test" }),
             )),
@@ -1577,9 +1577,9 @@ mod tests {
                 .map(|(name, value)| (name.clone(), zeroize::Zeroizing::new(value.clone())))
                 .collect(),
             credential_identities: OnceLock::new(),
-            worker_instance: "curator-worker:test".to_owned(),
+            worker_instance: "memory_reviewer-worker:test".to_owned(),
         });
-        assert!(curator_host.credential_identities.get().is_none());
+        assert!(memory_reviewer_host.credential_identities.get().is_none());
         let hook = selection_commit_hook(
             HarnessSelection {
                 schema: 1,
@@ -1589,7 +1589,7 @@ mod tests {
             },
             credentials.clone(),
             root.path().to_path_buf(),
-            Arc::clone(&curator_host),
+            Arc::clone(&memory_reviewer_host),
         );
         hook([11; 32]).expect("commit");
 
@@ -1599,10 +1599,10 @@ mod tests {
             SelectionState::Active(loaded) => loaded,
             _ => panic!("a committed selection must read back as active"),
         };
-        let identities = curator_host
+        let identities = memory_reviewer_host
             .credential_identities
             .get()
-            .expect("the hook hands the identities to the Curator host");
+            .expect("the hook hands the identities to the MemoryReviewer host");
         assert_eq!(identities, &loaded.credential_identities);
         assert_eq!(identities, &credential_identities(&credentials, &[11; 32]));
         let identity = &identities["ANTHROPIC_API_KEY"];

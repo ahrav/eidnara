@@ -1,14 +1,16 @@
-//! Local-file captures record project text read by a Curator run as evidence and a typed observation.
+//! Local-file captures record project text read by a MemoryReviewer run as evidence and a typed observation.
 //!
-//! The evidence row carries the bytes' identity and the finite acquisition reference (`retain_until`); the observation carries the typed detail: the trusted project, the relative path, the capture time, the whole-buffer digest, and the captured range. The detail is a versioned JSON document in `ObservationPayload.detail`, not a descriptor class, so the frozen `OccurrenceClass` set and every descriptor reader are untouched. Generic observation writers cannot use this kind or these id prefixes, or retire an observation under them, and the writer here accepts a detail only when it agrees with the live Curator-capture evidence row it cites. Expiry retires the observation and then the evidence; the artifact bytes stay for as long as any other live reference names their digest.
+//! The evidence row carries the bytes' identity and the finite acquisition reference (`retain_until`); the observation carries the typed detail: the trusted project, the relative path, the capture time, the whole-buffer digest, and the captured range. The detail is a versioned JSON document in `ObservationPayload.detail`, not a descriptor class, so the frozen `OccurrenceClass` set and every descriptor reader are untouched. Generic observation writers cannot use this kind or these id prefixes, or retire an observation under them, and the writer here accepts a detail only when it agrees with the live MemoryReviewer-capture evidence row it cites. Expiry retires the observation and then the evidence; the artifact bytes stay for as long as any other live reference names their digest.
 
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use super::cas::ProviderEgress;
-use super::curator_hold::{CuratorHoldBinding, CuratorHoldKind, load_valid_hold};
 use super::envelope::commit_with_writer;
+use super::memory_reviewer_hold::{
+    MemoryReviewerHoldBinding, MemoryReviewerHoldKind, load_valid_hold,
+};
 use super::redaction::identity;
 use super::review_staging::check_digest;
 use super::slice::{EVIDENCE_CITED_SQL, ObservationPayload, ObservationSpec};
@@ -68,7 +70,7 @@ pub struct LocalFileCaptureRequest<'a> {
     pub captured_at: i64,
     pub domain_id: &'a str,
     pub scope_id: Option<&'a str>,
-    /// The live Curator-capture evidence row holding the captured bytes.
+    /// The live MemoryReviewer-capture evidence row holding the captured bytes.
     pub evidence_id: &'a str,
     pub artifact_digest: &'a str,
     pub byte_length: u64,
@@ -81,7 +83,7 @@ pub(crate) fn is_local_file_object(object_id: &str) -> bool {
 
 /// The evidence id of the capture a run under `hold` takes of the file at `relative_path` whose whole buffer has `artifact_digest`. The identity is the run's (project, MemoryStore incarnation, subject, generation), the bytes, and the path, so two projects, two MemoryStore incarnations, two runs, or two paths with identical bytes are distinct captures over one stored object. The path is hashed so the id stays within the store's field bound; the Kernel incarnation is not part of it because a hold binding already refuses another Kernel store.
 pub fn local_file_capture_id(
-    hold: &CuratorHoldBinding,
+    hold: &MemoryReviewerHoldBinding,
     artifact_digest: &str,
     relative_path: &str,
 ) -> String {
@@ -103,11 +105,11 @@ pub(crate) fn uses_local_file_namespace(spec: &ObservationSpec) -> bool {
 }
 
 impl Envelope<'_> {
-    /// Records the typed observation for one capture. The cited evidence must be a live, local-only Curator capture whose digest, length, and finite `retain_until` agree with the request, registered as an evidence object of the request's domain under [`LOCAL_FILE_SOURCE_KIND`] with the relative path as its source id; the observation's sensitivity is the evidence row's, never weaker. The observation cites the evidence, so `retire_evidence` conflicts until the observation is retired first. The detail claims project-confined provenance, so its shape is checked here rather than trusted from the caller: the project digest is a lowercase hex digest and the relative path is ordinary components only. A relative path the redaction scanner would rewrite is refused, because a stored path must equal the path the run named.
+    /// Records the typed observation for one capture. The cited evidence must be a live, local-only MemoryReviewer capture whose digest, length, and finite `retain_until` agree with the request, registered as an evidence object of the request's domain under [`LOCAL_FILE_SOURCE_KIND`] with the relative path as its source id; the observation's sensitivity is the evidence row's, never weaker. The observation cites the evidence, so `retire_evidence` conflicts until the observation is retired first. The detail claims project-confined provenance, so its shape is checked here rather than trusted from the caller: the project digest is a lowercase hex digest and the relative path is ordinary components only. A relative path the redaction scanner would rewrite is refused, because a stored path must equal the path the run named.
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::InvalidInput`] for an empty evidence id, a malformed project digest or relative path, a detail the scanner rewrites, or a serialization failure; [`KernelError::NotFound`] when no live, local-only Curator-capture row registered that way matches the request; and the observation writer's errors otherwise.
+    /// Returns [`KernelError::InvalidInput`] for an empty evidence id, a malformed project digest or relative path, a detail the scanner rewrites, or a serialization failure; [`KernelError::NotFound`] when no live, local-only MemoryReviewer-capture row registered that way matches the request; and the observation writer's errors otherwise.
     pub fn record_local_file_capture(
         &mut self,
         request: &LocalFileCaptureRequest<'_>,
@@ -133,7 +135,7 @@ impl Envelope<'_> {
                     request.evidence_id,
                     request.artifact_digest,
                     i64::try_from(request.byte_length).map_err(|_| KernelError::InvalidInput)?,
-                    super::cas::CURATOR_CAPTURE_RETENTION_CLASS,
+                    super::cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
                     ProviderEgress::LocalOnly.as_str(),
                     request.domain_id,
                     LOCAL_FILE_SOURCE_KIND,
@@ -189,7 +191,7 @@ impl Envelope<'_> {
 }
 
 impl KernelStore {
-    /// Retires the capture observation and evidence of every Curator capture whose `retain_until` has passed and that no live hold still pins, at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] per call, one commit per capture keyed by `now` and the evidence id. A capture that some other live row still cites keeps its evidence: its own observation is retired, and the capture leaves the sweep until that citation is gone, so a retained capture costs nothing on later calls and never displaces a newer expired one from the page. Ownership ends here; the artifact bytes are reclaimed later only if no other live reference names the digest. Returns how many captures were retired outright and how many were retained for a citation; either is work done, and a call that did neither found nothing to do in the page.
+    /// Retires the capture observation and evidence of every MemoryReviewer capture whose `retain_until` has passed and that no live hold still pins, at most [`MAX_EXPIRED_CAPTURES_PER_CALL`] per call, one commit per capture keyed by `now` and the evidence id. A capture that some other live row still cites keeps its evidence: its own observation is retired, and the capture leaves the sweep until that citation is gone, so a retained capture costs nothing on later calls and never displaces a newer expired one from the page. Ownership ends here; the artifact bytes are reclaimed later only if no other live reference names the digest. Returns how many captures were retired outright and how many were retained for a citation; either is work done, and a call that did neither found nothing to do in the page.
     ///
     /// Candidates are chosen under a reader lock; each commit re-evaluates the expiry and pin predicate under the writer, so a hold acquired or extended over a candidate in between keeps it. A capture whose retirement the store refuses (`NotFound`, `Conflict`, or `InvalidInput` from its own commit) is skipped and the sweep continues, so one such row cannot hold every capture behind it in the page; a row whose registry object is not a live evidence object can never be retired and is not a candidate at all. Receipts are written under a reserved producer, so no caller can seat a receipt under an expiry key and have it replayed in place of the retirement.
     ///
@@ -230,11 +232,11 @@ impl KernelStore {
     ///
     /// # Errors
     ///
-    /// Returns [`KernelError::Conflict`] when the hold is not live and owned by `binding`, when a live hold pins the evidence (it belongs to a run and is left alone), or when another live row cites it after its own observations are retired; [`KernelError::NotFound`] when no live Curator-capture evidence row has the derived id; and storage, lock, or fence errors otherwise.
+    /// Returns [`KernelError::Conflict`] when the hold is not live and owned by `binding`, when a live hold pins the evidence (it belongs to a run and is left alone), or when another live row cites it after its own observations are retired; [`KernelError::NotFound`] when no live MemoryReviewer-capture evidence row has the derived id; and storage, lock, or fence errors otherwise.
     pub fn abandon_local_file_capture(
         &self,
         hold_id: &str,
-        binding: &CuratorHoldBinding,
+        binding: &MemoryReviewerHoldBinding,
         artifact_digest: &str,
         relative_path: &str,
     ) -> Result<(), KernelError> {
@@ -259,7 +261,7 @@ impl KernelStore {
                 load_valid_hold(
                     envelope.tx,
                     hold_id,
-                    CuratorHoldKind::Execution,
+                    MemoryReviewerHoldKind::Execution,
                     binding,
                     super::current_time_ms(),
                 )
@@ -274,7 +276,10 @@ impl KernelStore {
                          FROM evidence_meta e
                          WHERE e.evidence_id=?1 AND e.retention_class=?2
                            AND e.invalidated_commit_seq IS NULL",
-                        params![evidence_id, super::cas::CURATOR_CAPTURE_RETENTION_CLASS],
+                        params![
+                            evidence_id,
+                            super::cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS
+                        ],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .optional()
@@ -368,7 +373,7 @@ fn retire_expired_capture(
                                WHERE e.evidence_id=?3 AND {EXPIRED_UNPINNED_SQL})"
             ),
             params![
-                super::cas::CURATOR_CAPTURE_RETENTION_CLASS,
+                super::cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
                 now,
                 evidence_id
             ],
@@ -398,7 +403,7 @@ fn is_relative_path(path: &str) -> bool {
             .all(|component| !matches!(component, "" | "." | ".."))
 }
 
-/// SQL predicate over an `evidence_meta` row aliased `e`: a live Curator capture (`?1` the retention class) whose acquisition reference has passed at `?2` and that no live hold pins at `?2`. A live hold is unreleased, not purge-degraded, and unexpired, the same three conditions a hold must meet to be used. The candidate query and the per-capture recheck evaluate this same text.
+/// SQL predicate over an `evidence_meta` row aliased `e`: a live MemoryReviewer capture (`?1` the retention class) whose acquisition reference has passed at `?2` and that no live hold pins at `?2`. A live hold is unreleased, not purge-degraded, and unexpired, the same three conditions a hold must meet to be used. The candidate query and the per-capture recheck evaluate this same text.
 const EXPIRED_UNPINNED_SQL: &str = "e.retention_class=?1 AND e.invalidated_commit_seq IS NULL
            AND e.retain_until IS NOT NULL AND e.retain_until<=?2
            AND NOT EXISTS(SELECT 1 FROM capture_pin_refs r
@@ -408,7 +413,7 @@ const EXPIRED_UNPINNED_SQL: &str = "e.retention_class=?1 AND e.invalidated_commi
                               AND p.purge_degraded_at IS NULL
                               AND (p.expires_at IS NULL OR p.expires_at>?2))";
 
-/// Live Curator captures whose acquisition reference has passed, that no live hold pins, whose registry object is a live evidence object, and that the sweep still has work for: `(evidence_id, evidence object id)`, oldest expiry first. A capture whose observation is already retired and whose evidence another live row cites has nothing left to retire until that citation goes, so it is not a candidate.
+/// Live MemoryReviewer captures whose acquisition reference has passed, that no live hold pins, whose registry object is a live evidence object, and that the sweep still has work for: `(evidence_id, evidence object id)`, oldest expiry first. A capture whose observation is already retired and whose evidence another live row cites has nothing left to retire until that citation goes, so it is not a candidate.
 fn expired_captures(
     connection: &rusqlite::Connection,
     now: i64,
@@ -419,7 +424,7 @@ fn expired_captures(
     let rows = statement
         .query_map(
             params![
-                super::cas::CURATOR_CAPTURE_RETENTION_CLASS,
+                super::cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
                 now,
                 i64::try_from(MAX_EXPIRED_CAPTURES_PER_CALL).unwrap_or(i64::MAX),
                 LOCAL_FILE_KIND
@@ -495,11 +500,11 @@ mod tests {
         CaptureExpiry, LOCAL_FILE_KIND, LocalFileCaptureRequest, MAX_EXPIRED_CAPTURES_PER_CALL,
         commit_with_writer, expired_captures_sql, expiry_intent, retire_expired_capture,
     };
-    use crate::cas::CURATOR_CAPTURE_RETENTION_CLASS;
+    use crate::cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS;
     use crate::schema::apply_kernel_schema;
     use crate::{
-        ArtifactIngestRequest, CommitIntent, CuratorHoldBinding, DomainSpec, KernelError,
-        KernelStore, ProviderEgress, Sensitivity,
+        ArtifactIngestRequest, CommitIntent, DomainSpec, KernelError, KernelStore,
+        MemoryReviewerHoldBinding, ProviderEgress, Sensitivity,
     };
 
     const NOW: i64 = 10_000;
@@ -517,7 +522,7 @@ mod tests {
     /// A store holding one capture whose acquisition reference lapses at the returned time, and the hold binding of a run over it. Ingest requires the reference to be live when the capture is created, so the time is the wall clock's.
     fn store_with_lapsing_capture(
         root: &std::path::Path,
-    ) -> (KernelStore, CuratorHoldBinding, i64) {
+    ) -> (KernelStore, MemoryReviewerHoldBinding, i64) {
         let lapses_at = crate::current_time_ms() + 60_000;
         let store = KernelStore::open(root).unwrap();
         store
@@ -548,7 +553,7 @@ mod tests {
                 source_id: "a.txt".to_string(),
                 source_revision: 1,
                 media_type: "text/plain".to_string(),
-                retention_class: CURATOR_CAPTURE_RETENTION_CLASS.to_string(),
+                retention_class: MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS.to_string(),
                 retain_until: Some(lapses_at),
                 asserted_sensitivity: Sensitivity::Sensitive,
                 provider_egress: ProviderEgress::LocalOnly,
@@ -581,7 +586,7 @@ mod tests {
             |row| row.get(0),
         )
         .unwrap();
-        let binding = CuratorHoldBinding {
+        let binding = MemoryReviewerHoldBinding {
             project_digest: "a".repeat(64),
             kernel_incarnation,
             memstore_incarnation: "m".repeat(32),
@@ -703,7 +708,7 @@ mod tests {
             params![
                 id,
                 format!("{id}-object"),
-                CURATOR_CAPTURE_RETENTION_CLASS,
+                MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
                 retain_until,
                 invalidated
             ],
@@ -746,7 +751,7 @@ mod tests {
                  delete_commit_seq,created_at,completed_at) VALUES ('barrier','live','object',2,0,NULL);
              INSERT INTO capture_pins(capture_pin_id,pin_kind,owner_id,commit_seq,lease_epoch,writer_epoch,
                  created_at,expires_at,released_at,purge_degraded_at,purge_barrier_id)
-             VALUES ('pin','curator_execution_hold','owner',1,1,1,0,1000000,NULL,5,'barrier');
+             VALUES ('pin','memory_reviewer_execution_hold','owner',1,1,1,0,1000000,NULL,5,'barrier');
              INSERT INTO capture_pin_refs(capture_pin_id,evidence_id,expires_at) VALUES ('pin','live',1000000);",
         )
         .unwrap();
@@ -754,7 +759,7 @@ mod tests {
         let found: Vec<String> = statement
             .query_map(
                 params![
-                    CURATOR_CAPTURE_RETENTION_CLASS,
+                    MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
                     NOW,
                     i64::try_from(MAX_EXPIRED_CAPTURES_PER_CALL).unwrap(),
                     LOCAL_FILE_KIND
@@ -778,7 +783,7 @@ mod tests {
         let found: Vec<String> = statement
             .query_map(
                 params![
-                    CURATOR_CAPTURE_RETENTION_CLASS,
+                    MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
                     NOW,
                     i64::try_from(MAX_EXPIRED_CAPTURES_PER_CALL).unwrap(),
                     LOCAL_FILE_KIND

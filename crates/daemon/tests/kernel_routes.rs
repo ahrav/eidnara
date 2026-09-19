@@ -417,21 +417,21 @@ fn capacity_warn_health(core_file_warn: bool, artifact_warn: bool) -> host_runti
     }
 }
 
-/// The sanitizer drops daemon-emitted `curator` fields absent from its allowlist.
+/// The sanitizer drops daemon-emitted `memory_reviewer` fields absent from its allowlist.
 /// The daemon's test validates the wire document but bypasses the sanitizer
 /// allowlist, so a full `ready` block goes through the real sanitizer here.
 #[test]
-fn sanitized_status_keeps_every_curator_counter_the_daemon_emits() {
-    use daemon::curator::lifecycle::{
-        ActivationState, ActivationStateText, CuratorHealthBlock, CuratorState,
+fn sanitized_status_keeps_every_memory_reviewer_counter_the_daemon_emits() {
+    use daemon::memory_reviewer::lifecycle::{
+        ActivationState, ActivationStateText, MemoryReviewerHealthBlock, MemoryReviewerState,
     };
-    let block = CuratorHealthBlock {
-        curator_state: CuratorState::Ready,
+    let block = MemoryReviewerHealthBlock {
+        memory_reviewer_state: MemoryReviewerState::Ready,
         activation_state: ActivationStateText(ActivationState::Open),
         sampled_at_ms: Some(now_ms()),
         swept_jobs: 1,
         swept_selections: 2,
-        facts: Some(memory_store::CuratorStatusFacts::default()),
+        facts: Some(memory_store::MemoryReviewerStatusFacts::default()),
     }
     .to_json();
     let health = host_runtime::HealthReport {
@@ -439,10 +439,10 @@ fn sanitized_status_keeps_every_curator_counter_the_daemon_emits() {
         detail: None,
         metrics: Some(serde_json::json!({
             "storage_state": "ready",
-            "curator": block,
+            "memory_reviewer": block,
         })),
     };
-    let sanitized = sanitized_module_metrics(&health)["curator"].clone();
+    let sanitized = sanitized_module_metrics(&health)["memory_reviewer"].clone();
     let mut emitted: Vec<&str> = block
         .as_object()
         .unwrap()
@@ -451,7 +451,7 @@ fn sanitized_status_keeps_every_curator_counter_the_daemon_emits() {
         .collect();
     let mut kept: Vec<&str> = sanitized
         .as_object()
-        .expect("curator block survives sanitization")
+        .expect("memory_reviewer block survives sanitization")
         .keys()
         .map(String::as_str)
         .collect();

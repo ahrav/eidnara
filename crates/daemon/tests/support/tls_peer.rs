@@ -1,4 +1,4 @@
-//! A scripted local TLS peer for the Curator sender proofs: a test-only authority and leaf for `localhost`, an encrypted-byte counter on the peer's socket, and one connection per scripted exchange.
+//! A scripted local TLS peer for the MemoryReviewer sender proofs: a test-only authority and leaf for `localhost`, an encrypted-byte counter on the peer's socket, and one connection per scripted exchange.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use daemon::curator::model_request::{Credential, Endpoint, Sender};
+use daemon::memory_reviewer::model_request::{Credential, Endpoint, Sender};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};

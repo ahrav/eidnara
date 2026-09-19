@@ -6,8 +6,8 @@
 #![forbid(unsafe_code)]
 
 pub mod canonical_json;
-pub mod curator_policy_union;
 pub mod decay;
+pub mod memory_reviewer_policy_union;
 pub mod redaction;
 
 /// Defaults to [`Unknown`](Self::Unknown) so a defaulted input is rejected rather than destructively rebuilt.

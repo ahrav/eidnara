@@ -386,32 +386,32 @@ CREATE TABLE memory_classifier_attempts (
 CREATE INDEX idx_memory_classifier_attempts_project_dispatched
             ON memory_classifier_attempts(project, dispatched_at_ms);
 
--- Curator review work. `curator_store_identity` holds the store's own durable
+-- MemoryReviewer review work. `memory_reviewer_store_identity` holds the store's own durable
 -- incarnation, written once at genesis; a replaced file gets a new one. Job rows
 -- are permanent receipts for the incarnation: `state` moves reserved -> ready ->
 -- terminal and nothing deletes a row. `(project, causal_identity)` is the causal
 -- review identity, so identical inputs deduplicate onto one row across firings.
-CREATE TABLE curator_store_identity (
+CREATE TABLE memory_reviewer_store_identity (
             id INTEGER PRIMARY KEY CHECK (id = 0),
             database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) = 32),
             created_at_ms INTEGER NOT NULL
         );
 
-CREATE TRIGGER curator_store_identity_no_update BEFORE UPDATE ON curator_store_identity
+CREATE TRIGGER memory_reviewer_store_identity_no_update BEFORE UPDATE ON memory_reviewer_store_identity
 BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 
-CREATE TRIGGER curator_store_identity_no_delete BEFORE DELETE ON curator_store_identity
+CREATE TRIGGER memory_reviewer_store_identity_no_delete BEFORE DELETE ON memory_reviewer_store_identity
 BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 
 -- REPLACE runs as delete-then-insert and skips the delete trigger unless
 -- `recursive_triggers` is on, so a second insert is refused outright.
-CREATE TRIGGER curator_store_identity_no_reinsert BEFORE INSERT ON curator_store_identity
-WHEN EXISTS (SELECT 1 FROM curator_store_identity)
+CREATE TRIGGER memory_reviewer_store_identity_no_reinsert BEFORE INSERT ON memory_reviewer_store_identity
+WHEN EXISTS (SELECT 1 FROM memory_reviewer_store_identity)
 BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 
--- `job_id` is the task id a Curator claim persists; a declared integer key survives a
+-- `job_id` is the task id a MemoryReviewer claim persists; a declared integer key survives a
 -- rebuild, where a hidden rowid may be renumbered.
-CREATE TABLE curator_jobs (
+CREATE TABLE memory_reviewer_jobs (
             job_id INTEGER PRIMARY KEY,
             project TEXT NOT NULL CHECK (length(project) > 0),
             causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
@@ -435,16 +435,16 @@ CREATE TABLE curator_jobs (
             CHECK (state <> 'reserved' OR input_json IS NULL)
         );
 
-CREATE INDEX idx_curator_jobs_pending
-            ON curator_jobs(project, state, queue_deadline_ms);
+CREATE INDEX idx_memory_reviewer_jobs_pending
+            ON memory_reviewer_jobs(project, state, queue_deadline_ms);
 
-CREATE INDEX idx_curator_jobs_state
-            ON curator_jobs(state, queue_deadline_ms);
+CREATE INDEX idx_memory_reviewer_jobs_state
+            ON memory_reviewer_jobs(state, queue_deadline_ms);
 
 -- Caller text in a job row is identity: a detected secret refuses the row at every
 -- entry point, including transaction-local composition, instead of being redacted.
--- Fingerprinted causal fields never reach a column; `reserve_curator_job_in_tx` scans them.
-CREATE TRIGGER curator_jobs_reject_secret_insert BEFORE INSERT ON curator_jobs
+-- Fingerprinted causal fields never reach a column; `reserve_memory_reviewer_job_in_tx` scans them.
+CREATE TRIGGER memory_reviewer_jobs_reject_secret_insert BEFORE INSERT ON memory_reviewer_jobs
 BEGIN
     SELECT reject_transaction_text(NEW.producer),
            reject_transaction_text(NEW.firing_id),
@@ -453,7 +453,7 @@ BEGIN
            reject_transaction_text(COALESCE(NEW.input_json, ''));
 END;
 
-CREATE TRIGGER curator_jobs_reject_secret_update BEFORE UPDATE OF input_json ON curator_jobs
+CREATE TRIGGER memory_reviewer_jobs_reject_secret_update BEFORE UPDATE OF input_json ON memory_reviewer_jobs
 BEGIN
     SELECT reject_transaction_text(COALESCE(NEW.input_json, ''));
 END;
@@ -463,8 +463,8 @@ END;
 -- `frozen` counts against capacity, and a capacity deferral leaves it frozen. A frozen
 -- page keeps its references and continuation cursor so an enqueue commits both or
 -- neither; a terminal row drops both and keeps its receipt charge, so the table is
--- bounded by the metadata quota the same way `curator_jobs` is.
-CREATE TABLE curator_frozen_selections (
+-- bounded by the metadata quota the same way `memory_reviewer_jobs` is.
+CREATE TABLE memory_reviewer_frozen_selections (
             project TEXT NOT NULL CHECK (length(project) > 0),
             slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),
             selection_attempt TEXT NOT NULL CHECK (length(selection_attempt) BETWEEN 1 AND 256),
@@ -482,8 +482,8 @@ CREATE TABLE curator_frozen_selections (
             CHECK (state = 'frozen' OR next_cursor IS NULL)
         );
 
-CREATE INDEX idx_curator_frozen_selections_state
-            ON curator_frozen_selections(project, state, selection_deadline_ms);
+CREATE INDEX idx_memory_reviewer_frozen_selections_state
+            ON memory_reviewer_frozen_selections(project, state, selection_deadline_ms);
 
 -- One keyset continuation per project and selection task: where the next
 -- selection resumes. It advances in the same transaction that enqueues a
@@ -496,7 +496,7 @@ CREATE TABLE history_summarizer_pending_publications (
             created_at_ms       INTEGER NOT NULL
         );
 
-CREATE TABLE curator_selection_cursors (
+CREATE TABLE memory_reviewer_selection_cursors (
             project TEXT NOT NULL CHECK (length(project) > 0),
             slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),
             cursor TEXT CHECK (cursor IS NULL OR length(cursor) <= 512),
@@ -504,11 +504,11 @@ CREATE TABLE curator_selection_cursors (
             PRIMARY KEY (project, slot_id)
         );
 
-CREATE INDEX idx_curator_frozen_selections_deadline
-            ON curator_frozen_selections(state, selection_deadline_ms);
+CREATE INDEX idx_memory_reviewer_frozen_selections_deadline
+            ON memory_reviewer_frozen_selections(state, selection_deadline_ms);
 
-CREATE TRIGGER curator_frozen_selections_reject_secret_insert
-BEFORE INSERT ON curator_frozen_selections
+CREATE TRIGGER memory_reviewer_frozen_selections_reject_secret_insert
+BEFORE INSERT ON memory_reviewer_frozen_selections
 BEGIN
     SELECT reject_transaction_text(NEW.slot_id),
            reject_transaction_text(NEW.selection_attempt),
@@ -517,23 +517,23 @@ END;
 
 -- The slot id and cursor are caller text bound into the same family: a detected secret
 -- refuses the row on insert and on the upsert that advances the cursor.
-CREATE TRIGGER curator_selection_cursors_reject_secret_insert
-BEFORE INSERT ON curator_selection_cursors
+CREATE TRIGGER memory_reviewer_selection_cursors_reject_secret_insert
+BEFORE INSERT ON memory_reviewer_selection_cursors
 BEGIN
     SELECT reject_transaction_text(NEW.slot_id),
            reject_transaction_text(COALESCE(NEW.cursor, ''));
 END;
 
-CREATE TRIGGER curator_selection_cursors_reject_secret_update
-BEFORE UPDATE OF cursor ON curator_selection_cursors
+CREATE TRIGGER memory_reviewer_selection_cursors_reject_secret_update
+BEFORE UPDATE OF cursor ON memory_reviewer_selection_cursors
 BEGIN SELECT reject_transaction_text(COALESCE(NEW.cursor, '')); END;
 
--- One Curator receipt per admitted job: the run deadline and execution cutoff are
+-- One MemoryReviewer receipt per admitted job: the run deadline and execution cutoff are
 -- written at the first claim and inherited unchanged by every takeover; the
 -- generation fences every later write; completion selects exactly one Kernel result.
 -- Attempt rows are the KTD7 markers. Every committed row stays consumed, sent or not,
 -- and the count across generations is the attempt allowance.
-CREATE TABLE curator_receipts (
+CREATE TABLE memory_reviewer_receipts (
             project TEXT NOT NULL CHECK (length(project) > 0),
             causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
             database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) = 32),
@@ -557,7 +557,7 @@ CREATE TABLE curator_receipts (
             created_at_ms INTEGER NOT NULL,
             updated_at_ms INTEGER NOT NULL,
             PRIMARY KEY (project, causal_identity),
-            FOREIGN KEY (project, causal_identity) REFERENCES curator_jobs(project, causal_identity),
+            FOREIGN KEY (project, causal_identity) REFERENCES memory_reviewer_jobs(project, causal_identity),
             CHECK ((state = 'complete') = (terminal_kind IS NOT NULL)),
             CHECK ((selected_candidate_id IS NULL) = (selected_payload_digest IS NULL)),
             CHECK ((selected_candidate_id IS NULL) = (selected_project_digest IS NULL)),
@@ -567,10 +567,10 @@ CREATE TABLE curator_receipts (
         );
 
 -- Receipts survive for the store incarnation; the expiry sweep reads only the in-progress ones by deadline.
-CREATE INDEX idx_curator_receipts_state
-            ON curator_receipts(state, run_deadline_ms);
+CREATE INDEX idx_memory_reviewer_receipts_state
+            ON memory_reviewer_receipts(state, run_deadline_ms);
 
-CREATE TABLE curator_attempts (
+CREATE TABLE memory_reviewer_attempts (
             project TEXT NOT NULL,
             causal_identity TEXT NOT NULL,
             generation INTEGER NOT NULL CHECK (generation >= 1),
@@ -586,35 +586,35 @@ CREATE TABLE curator_attempts (
             terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown', 'not_dispatched')),
             terminal_at_ms INTEGER,
             PRIMARY KEY (project, causal_identity, generation, attempt_index),
-            FOREIGN KEY (project, causal_identity) REFERENCES curator_receipts(project, causal_identity),
+            FOREIGN KEY (project, causal_identity) REFERENCES memory_reviewer_receipts(project, causal_identity),
             CHECK ((terminal_kind IS NULL) = (terminal_at_ms IS NULL))
         );
 
-CREATE TRIGGER curator_receipts_no_delete BEFORE DELETE ON curator_receipts
-BEGIN SELECT RAISE(ABORT, 'curator receipts survive for the store incarnation'); END;
+CREATE TRIGGER memory_reviewer_receipts_no_delete BEFORE DELETE ON memory_reviewer_receipts
+BEGIN SELECT RAISE(ABORT, 'memory_reviewer receipts survive for the store incarnation'); END;
 
-CREATE TRIGGER curator_receipts_deadlines_immutable
+CREATE TRIGGER memory_reviewer_receipts_deadlines_immutable
 BEFORE UPDATE OF run_deadline_ms, execution_cutoff_ms, created_at_ms, database_incarnation_id, kernel_incarnation_id, authority_generation, authority_context_store
-ON curator_receipts
-BEGIN SELECT RAISE(ABORT, 'curator receipt deadlines, incarnations, and authority are written once'); END;
+ON memory_reviewer_receipts
+BEGIN SELECT RAISE(ABORT, 'memory_reviewer receipt deadlines, incarnations, and authority are written once'); END;
 
 -- The selected candidate is caller text a completion writes once: a detected secret
--- refuses the completion instead of being redacted, as every other Curator identity is.
-CREATE TRIGGER curator_receipts_reject_secret_update BEFORE UPDATE OF selected_candidate_id ON curator_receipts
+-- refuses the completion instead of being redacted, as every other MemoryReviewer identity is.
+CREATE TRIGGER memory_reviewer_receipts_reject_secret_update BEFORE UPDATE OF selected_candidate_id ON memory_reviewer_receipts
 BEGIN
     SELECT reject_transaction_text(COALESCE(NEW.selected_candidate_id, ''));
 END;
 
-CREATE TRIGGER curator_attempts_no_delete BEFORE DELETE ON curator_attempts
-BEGIN SELECT RAISE(ABORT, 'a committed curator attempt stays consumed'); END;
+CREATE TRIGGER memory_reviewer_attempts_no_delete BEFORE DELETE ON memory_reviewer_attempts
+BEGIN SELECT RAISE(ABORT, 'a committed memory_reviewer attempt stays consumed'); END;
 
-CREATE TRIGGER curator_attempts_marker_immutable
+CREATE TRIGGER memory_reviewer_attempts_marker_immutable
 BEFORE UPDATE OF generation, attempt_index, body_digest, request_bytes, provider, model,
     credential_id, policy_union_digest, attempt_deadline_ms, committed_at_ms
-ON curator_attempts
-BEGIN SELECT RAISE(ABORT, 'a curator attempt marker is written once'); END;
+ON memory_reviewer_attempts
+BEGIN SELECT RAISE(ABORT, 'a memory_reviewer attempt marker is written once'); END;
 
-CREATE TRIGGER curator_attempts_reject_secret_insert BEFORE INSERT ON curator_attempts
+CREATE TRIGGER memory_reviewer_attempts_reject_secret_insert BEFORE INSERT ON memory_reviewer_attempts
 BEGIN
     SELECT reject_transaction_text(NEW.provider),
            reject_transaction_text(NEW.model),

@@ -15,13 +15,13 @@ mod claim_causality;
 mod claim_facts;
 mod commit_read;
 mod consumer_obligations;
-mod curator_hold;
 mod current_input;
 mod durable_fs;
 mod eligibility;
 mod envelope;
 mod facts;
 mod local_file;
+mod memory_reviewer_hold;
 mod object_write;
 pub(crate) mod open;
 mod outbox;
@@ -59,7 +59,7 @@ pub use backup::{
     RestoreFault, RestorePhase, owner_is_current_for_test, restore_marker_is_valid_for_test,
     sensitivity_bearing_tables_for_test, verify_backup_with_deadline_for_test,
 };
-pub use cas::CURATOR_CAPTURE_RETENTION_CLASS;
+pub use cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS;
 pub use cas::{
     ARTIFACT_DELETION_SOURCE_KIND, ArtifactDeletionIdentity, ArtifactDeletionKind,
     ArtifactDeletionRequest, ArtifactDeletionResult, ArtifactDestination, ArtifactEgressFacts,
@@ -88,12 +88,6 @@ pub use commit_read::{
     CommitReadTarget, CommitSpan, CompleteCommit, PageEnd,
 };
 pub use consumer_obligations::{ConsumerObligation, ConsumerObligationError};
-pub use curator_hold::{
-    CURATOR_EXECUTION_HOLD_KIND, CURATOR_REVIEW_HOLD_KIND, CuratorHold, CuratorHoldBinding,
-    CuratorHoldError, CuratorHoldKind, CuratorHoldRefusal, HeldEvidence,
-    MAX_CURATOR_HOLD_REFERENCES, MAX_RUN_BUFFER_BYTES, REVIEW_EXPIRY_MAX_MS, RunBufferMap,
-    RunBufferRefusal,
-};
 pub use current_input::{
     CurrentInputDescriptor, CurrentInputExpectation, CurrentInputGuard, EligibilityBinding,
     StaleCurrentInput, StaleInput,
@@ -114,6 +108,12 @@ pub use local_file::{
     CaptureExpiry, LOCAL_FILE_DETAIL_VERSION, LOCAL_FILE_KIND, LOCAL_FILE_SOURCE_KIND,
     LocalFileCapture, LocalFileCaptureRequest, LocalFileDetail, MAX_EXPIRED_CAPTURES_PER_CALL,
     local_file_capture_id,
+};
+pub use memory_reviewer_hold::{
+    HeldEvidence, MAX_MEMORY_REVIEWER_HOLD_REFERENCES, MAX_RUN_BUFFER_BYTES,
+    MEMORY_REVIEWER_EXECUTION_HOLD_KIND, MEMORY_REVIEWER_REVIEW_HOLD_KIND, MemoryReviewerHold,
+    MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldKind,
+    MemoryReviewerHoldRefusal, REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
 };
 #[cfg(feature = "test-support")]
 pub use open::OpenPhase;

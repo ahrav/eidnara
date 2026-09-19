@@ -13,9 +13,9 @@
 
 #![forbid(unsafe_code)]
 
-pub mod curator_jobs;
-pub mod curator_ledger;
 pub mod memory_classifier_ledger;
+pub mod memory_reviewer_jobs;
+pub mod memory_reviewer_ledger;
 pub(crate) mod task_lease;
 
 use cache_stability::{DurabilityClass, FrozenUnit};
@@ -564,12 +564,12 @@ pub enum ExtractionFailure {
     MissingCitation,
 }
 
-/// Why a History Summarizer firing's fact candidates were not admitted to Curator review before any reservation was made (Q31). Closed and content-free.
+/// Why a History Summarizer firing's fact candidates were not admitted to MemoryReviewer review before any reservation was made (Q31). Closed and content-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
-pub enum CuratorNonadmissionCode {
-    /// No Curator handoff could take the candidates.
-    CuratorUnavailable,
+pub enum MemoryReviewerNonadmissionCode {
+    /// No MemoryReviewer handoff could take the candidates.
+    MemoryReviewerUnavailable,
     /// Review capacity for the project or host was full.
     CapacityFull,
     /// Evidence the candidates require is not available for retention.
@@ -582,20 +582,20 @@ pub enum CuratorNonadmissionCode {
     Unrecognized,
 }
 
-/// Maps a recorded code this build cannot read to [`CuratorNonadmissionCode::Unrecognized`] so a session written by a later build still loads.
-fn recorded_nonadmission_code<'de, D>(deserializer: D) -> Result<CuratorNonadmissionCode, D::Error>
+/// Maps a recorded code this build cannot read to [`MemoryReviewerNonadmissionCode::Unrecognized`] so a session written by a later build still loads.
+fn recorded_nonadmission_code<'de, D>(
+    deserializer: D,
+) -> Result<MemoryReviewerNonadmissionCode, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(
-        CuratorNonadmissionCode::deserialize(value)
-            .unwrap_or(CuratorNonadmissionCode::Unrecognized),
-    )
+    Ok(MemoryReviewerNonadmissionCode::deserialize(value)
+        .unwrap_or(MemoryReviewerNonadmissionCode::Unrecognized))
 }
 
-impl CuratorNonadmissionCode {
-    pub const CURATOR_UNAVAILABLE_TAG: &'static str = "curator_unavailable";
+impl MemoryReviewerNonadmissionCode {
+    pub const MEMORY_REVIEWER_UNAVAILABLE_TAG: &'static str = "memory_reviewer_unavailable";
     pub const CAPACITY_FULL_TAG: &'static str = "capacity_full";
     pub const EVIDENCE_UNAVAILABLE_TAG: &'static str = "evidence_unavailable";
     pub const FACT_SET_REJECTED_TAG: &'static str = "fact_set_rejected";
@@ -605,7 +605,7 @@ impl CuratorNonadmissionCode {
     /// The `code` tag serde writes into the session metadata for this variant. The sampler groups sessions by the stored tag, so its SQL and this mapping must agree; a test holds both to serde's output. `Unrecognized` has no per-code counter: such a session counts only toward `nonadmissions`.
     pub fn tag(&self) -> &'static str {
         match self {
-            Self::CuratorUnavailable => Self::CURATOR_UNAVAILABLE_TAG,
+            Self::MemoryReviewerUnavailable => Self::MEMORY_REVIEWER_UNAVAILABLE_TAG,
             Self::CapacityFull => Self::CAPACITY_FULL_TAG,
             Self::EvidenceUnavailable => Self::EVIDENCE_UNAVAILABLE_TAG,
             Self::FactSetRejected { .. } => Self::FACT_SET_REJECTED_TAG,
@@ -620,12 +620,12 @@ impl CuratorNonadmissionCode {
 pub struct RecordedNonadmission {
     pub firing_seq: u64,
     #[serde(deserialize_with = "recorded_nonadmission_code")]
-    pub code: CuratorNonadmissionCode,
+    pub code: MemoryReviewerNonadmissionCode,
 }
 
-/// The Curator job a firing reserved for its accepted facts before staging them (KTD3). Recorded in the durable state so a failed publication retains the reservation and its candidate identity without progress, and so recovery reconciles against it instead of reserving again.
+/// The MemoryReviewer job a firing reserved for its accepted facts before staging them (KTD3). Recorded in the durable state so a failed publication retains the reservation and its candidate identity without progress, and so recovery reconciles against it instead of reserving again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CuratorReservation {
+pub struct MemoryReviewerReservation {
     pub firing_seq: u64,
     pub causal_identity: String,
     pub candidate_id: String,
@@ -635,9 +635,9 @@ pub struct CuratorReservation {
     pub queue_deadline_ms: i64,
 }
 
-/// Content-free, low-cardinality facts about Curator work in this store incarnation, sampled for the operator surface. Every field is a count or a byte total from the ledger tables and the producers' durable state; nothing here carries an identity, a payload, or a reason string outside the closed code sets.
+/// Content-free, low-cardinality facts about MemoryReviewer work in this store incarnation, sampled for the operator surface. Every field is a count or a byte total from the ledger tables and the producers' durable state; nothing here carries an identity, a payload, or a reason string outside the closed code sets.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct CuratorStatusFacts {
+pub struct MemoryReviewerStatusFacts {
     pub jobs_reserved: u64,
     pub jobs_ready: u64,
     pub jobs_expired: u64,
@@ -673,16 +673,19 @@ pub struct CuratorStatusFacts {
     /// Producer-owned facts summed over every session: nonadmissions recorded, sessions with a recorded reservation, and the latest reason per session by closed code.
     pub nonadmissions: u64,
     pub sessions_with_reservation: u64,
-    pub latest_nonadmission_curator_unavailable: u64,
+    pub latest_nonadmission_memory_reviewer_unavailable: u64,
     pub latest_nonadmission_capacity_full: u64,
     pub latest_nonadmission_evidence_unavailable: u64,
     pub latest_nonadmission_fact_set_rejected: u64,
     pub latest_nonadmission_subject_refused: u64,
 }
 
-impl CuratorStatusFacts {
-    fn job_outcome_slot(&mut self, outcome: curator_jobs::CuratorJobOutcome) -> &mut u64 {
-        use curator_jobs::CuratorJobOutcome as Outcome;
+impl MemoryReviewerStatusFacts {
+    fn job_outcome_slot(
+        &mut self,
+        outcome: memory_reviewer_jobs::MemoryReviewerJobOutcome,
+    ) -> &mut u64 {
+        use memory_reviewer_jobs::MemoryReviewerJobOutcome as Outcome;
         match outcome {
             Outcome::Expired => &mut self.jobs_expired,
             Outcome::Nonadmitted => &mut self.jobs_nonadmitted,
@@ -693,8 +696,8 @@ impl CuratorStatusFacts {
         }
     }
 
-    fn selection_slot(&mut self, state: curator_jobs::FrozenSelectionState) -> &mut u64 {
-        use curator_jobs::FrozenSelectionState as State;
+    fn selection_slot(&mut self, state: memory_reviewer_jobs::FrozenSelectionState) -> &mut u64 {
+        use memory_reviewer_jobs::FrozenSelectionState as State;
         match state {
             State::Frozen => &mut self.selections_frozen,
             State::Enqueued => &mut self.selections_enqueued,
@@ -703,8 +706,11 @@ impl CuratorStatusFacts {
         }
     }
 
-    fn attempt_slot(&mut self, kind: curator_ledger::CuratorAttemptTerminal) -> &mut u64 {
-        use curator_ledger::CuratorAttemptTerminal as Kind;
+    fn attempt_slot(
+        &mut self,
+        kind: memory_reviewer_ledger::MemoryReviewerAttemptTerminal,
+    ) -> &mut u64 {
+        use memory_reviewer_ledger::MemoryReviewerAttemptTerminal as Kind;
         match kind {
             Kind::Complete => &mut self.attempts_acknowledged,
             Kind::Failed => &mut self.attempts_failed,
@@ -715,10 +721,10 @@ impl CuratorStatusFacts {
     }
 
     fn latest_nonadmission_slot(&mut self, tag: &str) -> Option<&mut u64> {
-        use CuratorNonadmissionCode as Code;
+        use MemoryReviewerNonadmissionCode as Code;
         match tag {
-            Code::CURATOR_UNAVAILABLE_TAG => {
-                Some(&mut self.latest_nonadmission_curator_unavailable)
+            Code::MEMORY_REVIEWER_UNAVAILABLE_TAG => {
+                Some(&mut self.latest_nonadmission_memory_reviewer_unavailable)
             }
             Code::CAPACITY_FULL_TAG => Some(&mut self.latest_nonadmission_capacity_full),
             Code::EVIDENCE_UNAVAILABLE_TAG => {
@@ -732,8 +738,10 @@ impl CuratorStatusFacts {
 }
 
 impl MemoryStore {
-    /// Samples the Curator facts in one grouped pass per ledger table plus one over the sessions' metadata, so the store's single connection is held for eight statements however many rows the tables hold. Group keys are parsed back through the same mappings the writers use, so a renamed state cannot leave a counter silently at zero.
-    pub fn curator_status_facts(&self) -> Result<CuratorStatusFacts, MemoryStoreError> {
+    /// Samples the MemoryReviewer facts in one grouped pass per ledger table plus one over the sessions' metadata, so the store's single connection is held for eight statements however many rows the tables hold. Group keys are parsed back through the same mappings the writers use, so a renamed state cannot leave a counter silently at zero.
+    pub fn memory_reviewer_status_facts(
+        &self,
+    ) -> Result<MemoryReviewerStatusFacts, MemoryStoreError> {
         fn unsigned(value: i64) -> u64 {
             u64::try_from(value).unwrap_or_default()
         }
@@ -751,14 +759,14 @@ impl MemoryStore {
         }
         self.inner
             .with_conn(|conn| {
-                let mut facts = CuratorStatusFacts {
-                    metadata_quota_bytes: curator_jobs::MAX_CURATOR_METADATA_BYTES_PER_HOST,
-                    ..CuratorStatusFacts::default()
+                let mut facts = MemoryReviewerStatusFacts {
+                    metadata_quota_bytes: memory_reviewer_jobs::MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST,
+                    ..MemoryReviewerStatusFacts::default()
                 };
                 grouped::<String>(
                     conn,
                     "SELECT state, outcome, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
-                     FROM curator_jobs GROUP BY state, outcome",
+                     FROM memory_reviewer_jobs GROUP BY state, outcome",
                     |state, row| {
                         let outcome: Option<String> = row.get(1)?;
                         let count = unsigned(row.get(2)?);
@@ -771,7 +779,7 @@ impl MemoryStore {
                             "terminal" => {
                                 if let Some(outcome) = outcome
                                     .as_deref()
-                                    .and_then(curator_jobs::CuratorJobOutcome::parse)
+                                    .and_then(memory_reviewer_jobs::MemoryReviewerJobOutcome::parse)
                                 {
                                     *facts.job_outcome_slot(outcome) += count;
                                 }
@@ -782,24 +790,24 @@ impl MemoryStore {
                     },
                 )?;
                 facts.jobs_expired_unseen = unsigned(conn.query_row(
-                    "SELECT COUNT(*) FROM curator_jobs job
+                    "SELECT COUNT(*) FROM memory_reviewer_jobs job
                      WHERE job.state = 'terminal' AND job.outcome = ?1
-                       AND NOT EXISTS (SELECT 1 FROM curator_receipts receipt
+                       AND NOT EXISTS (SELECT 1 FROM memory_reviewer_receipts receipt
                                        WHERE receipt.project = job.project
                                          AND receipt.causal_identity = job.causal_identity)",
-                    [curator_jobs::CuratorJobOutcome::Expired.as_str()],
+                    [memory_reviewer_jobs::MemoryReviewerJobOutcome::Expired.as_str()],
                     |row| row.get(0),
                 )?);
                 grouped::<String>(
                     conn,
                     "SELECT state, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
-                     FROM curator_frozen_selections GROUP BY state",
+                     FROM memory_reviewer_frozen_selections GROUP BY state",
                     |state, row| {
                         // A page's receipt charge is permanent whatever its state; only its allowance is released at a terminal.
                         facts.receipt_charge_bytes = facts
                             .receipt_charge_bytes
                             .saturating_add(unsigned(row.get(2)?));
-                        if let Some(state) = curator_jobs::FrozenSelectionState::parse(&state) {
+                        if let Some(state) = memory_reviewer_jobs::FrozenSelectionState::parse(&state) {
                             *facts.selection_slot(state) += unsigned(row.get(1)?);
                         }
                         Ok(())
@@ -807,11 +815,11 @@ impl MemoryStore {
                 )?;
                 grouped::<Option<String>>(
                     conn,
-                    "SELECT terminal_kind, COUNT(*) FROM curator_attempts GROUP BY terminal_kind",
+                    "SELECT terminal_kind, COUNT(*) FROM memory_reviewer_attempts GROUP BY terminal_kind",
                     |kind, row| {
                         let count = unsigned(row.get(1)?);
                         facts.attempts_attempted += count;
-                        match kind.as_deref().map(curator_ledger::CuratorAttemptTerminal::parse) {
+                        match kind.as_deref().map(memory_reviewer_ledger::MemoryReviewerAttemptTerminal::parse) {
                             None => facts.attempts_open += count,
                             Some(Some(kind)) => *facts.attempt_slot(kind) += count,
                             Some(None) => {}
@@ -821,7 +829,7 @@ impl MemoryStore {
                 )?;
                 grouped::<String>(
                     conn,
-                    "SELECT state, COUNT(*) FROM curator_receipts GROUP BY state",
+                    "SELECT state, COUNT(*) FROM memory_reviewer_receipts GROUP BY state",
                     |state, row| {
                         let count = unsigned(row.get(1)?);
                         match state.as_str() {
@@ -832,7 +840,7 @@ impl MemoryStore {
                         Ok(())
                     },
                 )?;
-                facts.metadata_bytes = curator_jobs::metadata_bytes(conn, None)?;
+                facts.metadata_bytes = memory_reviewer_jobs::metadata_bytes(conn, None)?;
                 // Everything charged that is not a permanent receipt is a temporary allowance: job allowances plus the frozen pages' charges.
                 facts.allowance_bytes = facts
                     .metadata_bytes
@@ -842,10 +850,10 @@ impl MemoryStore {
                     .saturating_sub(facts.metadata_bytes);
                 grouped::<Option<String>>(
                     conn,
-                    "SELECT json_extract(meta, '$.history_summarizer.curator_nonadmission.latest.code.code'),
+                    "SELECT json_extract(meta, '$.history_summarizer.memory_reviewer_nonadmission.latest.code.code'),
                             COUNT(*),
-                            COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_nonadmission.count')), 0),
-                            COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_reservation') IS NOT NULL), 0)
+                            COALESCE(SUM(json_extract(meta, '$.history_summarizer.memory_reviewer_nonadmission.count')), 0),
+                            COALESCE(SUM(json_extract(meta, '$.history_summarizer.memory_reviewer_reservation') IS NOT NULL), 0)
                      FROM cache_state
                      GROUP BY 1",
                     |code, row| {
@@ -885,7 +893,7 @@ pub struct PendingPublication {
 
 /// Producer-owned nonadmission facts. `count` only grows; both survive every phase transition, abandonment, and reset of the producer state within the session's store lifetime, and are written only by the fenced publication that also advances history.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CuratorNonadmission {
+pub struct MemoryReviewerNonadmission {
     #[serde(default)]
     pub count: u64,
     #[serde(default)]
@@ -955,10 +963,10 @@ pub struct HistorySummarizerDurableState {
     pub consecutive_publish_failures: u32,
     /// Q31 nonadmission count and latest reason. Unlike the fields above, these are not cleared by any transition: every constructor carries them from the prior state.
     #[serde(default)]
-    pub curator_nonadmission: CuratorNonadmission,
+    pub memory_reviewer_nonadmission: MemoryReviewerNonadmission,
     /// The reservation the current or last firing made for its accepted facts. Cleared when the publication that activates it commits; kept through abandonment so the reservation is never downgraded to a pre-reservation refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub curator_reservation: Option<CuratorReservation>,
+    pub memory_reviewer_reservation: Option<MemoryReviewerReservation>,
 }
 
 impl Default for HistorySummarizerDurableState {
@@ -979,8 +987,8 @@ impl Default for HistorySummarizerDurableState {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
-            curator_nonadmission: CuratorNonadmission::default(),
-            curator_reservation: None,
+            memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
+            memory_reviewer_reservation: None,
         }
     }
 }
@@ -990,7 +998,7 @@ impl HistorySummarizerDurableState {
     pub fn cleared_of_in_flight_firing(&self) -> Self {
         HistorySummarizerDurableState {
             firing_seq: self.firing_seq,
-            curator_nonadmission: self.curator_nonadmission,
+            memory_reviewer_nonadmission: self.memory_reviewer_nonadmission,
             ..HistorySummarizerDurableState::default()
         }
     }
@@ -1180,9 +1188,9 @@ pub struct HistorySummarizerPublishPredicate {
 pub struct HistorySummarizerPublishResult {
     pub row_version: u64,
     /// The nonadmission count after this publication; it grew by one exactly when the request carried a code.
-    pub curator_nonadmission_count: u64,
+    pub memory_reviewer_nonadmission_count: u64,
     /// Present exactly when the request carried an activation.
-    pub curator_activation: Option<CuratorActivationOutcome>,
+    pub memory_reviewer_activation: Option<MemoryReviewerActivationOutcome>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1236,24 +1244,24 @@ pub struct HistorySummarizerPublishRequest<'a> {
     pub user_memory_candidates: &'a [HistorySummarizerUserMemoryCandidate],
     pub publication_floor_ordinal: u64,
     pub chunk_transcript: Option<&'a str>,
-    /// Q31: the reason this firing's fact candidates were not admitted to Curator review, recorded in the same transaction that advances history. `None` for an intentional no-fact or extraction-free run.
-    pub curator_nonadmission: Option<CuratorNonadmissionCode>,
-    /// KTD3: the reserved Curator job this publication activates with its reference-only input, in the same transaction as the history. A reservation past its queue deadline is finished as expired instead, and the publication still commits.
-    pub curator_activation: Option<CuratorActivation<'a>>,
+    /// Q31: the reason this firing's fact candidates were not admitted to MemoryReviewer review, recorded in the same transaction that advances history. `None` for an intentional no-fact or extraction-free run.
+    pub memory_reviewer_nonadmission: Option<MemoryReviewerNonadmissionCode>,
+    /// KTD3: the reserved MemoryReviewer job this publication activates with its reference-only input, in the same transaction as the history. A reservation past its queue deadline is finished as expired instead, and the publication still commits.
+    pub memory_reviewer_activation: Option<MemoryReviewerActivation<'a>>,
 }
 
 /// The reserved job a History Summarizer publication moves to `Ready`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CuratorActivation<'a> {
+pub struct MemoryReviewerActivation<'a> {
     pub causal_identity: &'a str,
-    pub producer: &'a curator_jobs::ProducerBinding,
-    pub input: &'a curator_jobs::CuratorJobInput,
+    pub producer: &'a memory_reviewer_jobs::ProducerBinding,
+    pub input: &'a memory_reviewer_jobs::MemoryReviewerJobInput,
     pub now_ms: i64,
 }
 
 /// What the publication did with its reserved job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CuratorActivationOutcome {
+pub enum MemoryReviewerActivationOutcome {
     Activated,
     /// The queue deadline had passed; the job was finished as expired and nothing was resurrected.
     Expired,
@@ -1295,9 +1303,9 @@ pub enum HistorySummarizerPublishError {
     },
     #[error("history_summarizer publish invalid state: {state}")]
     InvalidState { state: String },
-    /// The reserved Curator job could not be activated; nothing was written. The reservation stays as it was.
-    #[error("curator activation refused: {0}")]
-    CuratorActivation(curator_jobs::CuratorJobRefusal),
+    /// The reserved MemoryReviewer job could not be activated; nothing was written. The reservation stays as it was.
+    #[error("memory_reviewer activation refused: {0}")]
+    MemoryReviewerActivation(memory_reviewer_jobs::MemoryReviewerJobRefusal),
     #[error("serde: {0}")]
     Serde(String),
 }
@@ -3386,7 +3394,7 @@ pub enum DurableWriteFamily {
     KernelAlignmentProjection,
     KernelConsumerControl,
     RedactionReceipts,
-    CuratorJobs,
+    MemoryReviewerJobs,
 }
 
 impl DurableWriteFamily {
@@ -3415,7 +3423,7 @@ impl DurableWriteFamily {
         Self::KernelAlignmentProjection,
         Self::KernelConsumerControl,
         Self::RedactionReceipts,
-        Self::CuratorJobs,
+        Self::MemoryReviewerJobs,
     ];
 
     pub const fn owner_kind(self) -> &'static str {
@@ -3442,7 +3450,7 @@ impl DurableWriteFamily {
             Self::KernelAlignmentProjection => "kernel_alignment_projection",
             Self::KernelConsumerControl => "kernel_consumer_control",
             Self::RedactionReceipts => "redaction_receipts",
-            Self::CuratorJobs => "curator_jobs",
+            Self::MemoryReviewerJobs => "memory_reviewer_jobs",
         }
     }
 }
@@ -3593,10 +3601,10 @@ pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
         test: "production_redaction::active_note_scan_audit_is_atomic_complete_and_opaque",
     },
     DurableWriteRegistration {
-        family: DurableWriteFamily::CuratorJobs,
+        family: DurableWriteFamily::MemoryReviewerJobs,
         policy: DurableFieldPolicy::Reject,
         preparation: "exact causal replay then identity rejection; reference-only input JSON rejects protected text",
-        test: "curator_jobs::identities_and_inputs_reject_secrets_and_stay_reference_only",
+        test: "memory_reviewer_jobs::identities_and_inputs_reject_secrets_and_stay_reference_only",
     },
 ];
 
@@ -4399,7 +4407,7 @@ pub const MEMORY_CLASSIFIER_TASK: TaskLeaseKind = TaskLeaseKind {
 const LEASE_KINDS: [&TaskLeaseKind; 3] = [
     &NOTE_EVALUATION,
     &MEMORY_CLASSIFIER_TASK,
-    &curator_ledger::CURATOR_REVIEW_TASK,
+    &memory_reviewer_ledger::MEMORY_REVIEWER_REVIEW_TASK,
 ];
 
 pub use task_lease::{
@@ -6146,7 +6154,7 @@ impl MemoryStore {
             memory_classifier_task_complete_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
         store.prune_transform_session_roots()?;
-        store.ensure_curator_store_identity(current_time_ms())?;
+        store.ensure_memory_reviewer_store_identity(current_time_ms())?;
         Ok(store)
     }
 
@@ -11095,8 +11103,12 @@ impl MemoryStore {
             )?;
             // The reset metadata records no reservation, so nothing could consume the retained publication or find the job it named; both go with the reset.
             delete_pending_publication_tx(tx, session_id)?;
-            if let Some(reservation) = prior_meta.history_summarizer.curator_reservation.as_ref() {
-                curator_jobs::close_reserved_jobs_of_identity_tx(
+            if let Some(reservation) = prior_meta
+                .history_summarizer
+                .memory_reviewer_reservation
+                .as_ref()
+            {
+                memory_reviewer_jobs::close_reserved_jobs_of_identity_tx(
                     tx,
                     &reservation.causal_identity,
                     current_time_ms(),
@@ -11427,8 +11439,8 @@ impl MemoryStore {
                 } else {
                     history_summarizer.consecutive_publish_failures
                 },
-                curator_nonadmission: history_summarizer.curator_nonadmission,
-                curator_reservation: history_summarizer.curator_reservation.clone(),
+                memory_reviewer_nonadmission: history_summarizer.memory_reviewer_nonadmission,
+                memory_reviewer_reservation: history_summarizer.memory_reviewer_reservation.clone(),
                 ..HistorySummarizerDurableState::default()
             };
             let next = next_row_version(current)?;
@@ -11482,12 +11494,12 @@ impl MemoryStore {
     /// Increment publication health without changing the in-flight state. This covers
     /// failures before a publish transaction can safely abandon the producer run, such
     /// as side-channel outbox preparation errors.
-    /// Records a firing's Curator reservation and the publication it retains in one fenced write: the session row must still be at `expected_row_version` in `Publishing` for `reservation.firing_seq`, the retained payload is scanned and stored compressed in its own row, and the reservation lands in the durable state. Returns the new row version.
-    pub fn record_curator_reservation(
+    /// Records a firing's MemoryReviewer reservation and the publication it retains in one fenced write: the session row must still be at `expected_row_version` in `Publishing` for `reservation.firing_seq`, the retained payload is scanned and stored compressed in its own row, and the reservation lands in the durable state. Returns the new row version.
+    pub fn record_memory_reviewer_reservation(
         &self,
         session_id: &str,
         expected_row_version: u64,
-        reservation: &CuratorReservation,
+        reservation: &MemoryReviewerReservation,
         pending: &PendingPublication,
     ) -> Result<u64, HistorySummarizerPublishError> {
         let (write, payload_deflate) = prepare_pending_publication(session_id, pending)?;
@@ -11525,7 +11537,7 @@ impl MemoryStore {
                     meta.history_summarizer.state.as_str().to_string(),
                 )));
             }
-            meta.history_summarizer.curator_reservation = Some(reservation.clone());
+            meta.history_summarizer.memory_reviewer_reservation = Some(reservation.clone());
             let next = next_row_version(current)?;
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
@@ -11561,8 +11573,11 @@ impl MemoryStore {
             Ok(WriteDisposition::Applied(PublishTxnOutcome::Committed(
                 HistorySummarizerPublishResult {
                     row_version: next,
-                    curator_nonadmission_count: meta.history_summarizer.curator_nonadmission.count,
-                    curator_activation: None,
+                    memory_reviewer_nonadmission_count: meta
+                        .history_summarizer
+                        .memory_reviewer_nonadmission
+                        .count,
+                    memory_reviewer_activation: None,
                 },
             )))
         })?;
@@ -11589,7 +11604,7 @@ impl MemoryStore {
         }
     }
 
-    /// Whether [`Self::record_curator_reservation`] would store `pending`: every field passes the durable scan and the compressed payload fits the retention envelope. `Ok(false)` is a payload the store refuses, so the caller records a nonadmission instead of reserving a job whose publication it could never retain.
+    /// Whether [`Self::record_memory_reviewer_reservation`] would store `pending`: every field passes the durable scan and the compressed payload fits the retention envelope. `Ok(false)` is a payload the store refuses, so the caller records a nonadmission instead of reserving a job whose publication it could never retain.
     pub fn pending_publication_retainable(
         &self,
         session_id: &str,
@@ -11630,14 +11645,16 @@ impl MemoryStore {
     }
 
     /// Settles `expected`, a reservation whose publication can never commit, in one fenced write: the reservation and its retained publication are dropped and the job it names is closed, as expired when its queue deadline has passed and as not admitted otherwise. A state that records a different reservation, or none, belongs to a firing this caller did not settle: nothing is touched and `false` is returned. A job already closed, gone, or no longer `Reserved` is left as it is; the reservation is dropped either way. The state's in-flight fields are left as they are; the caller decides the phase.
-    pub fn settle_curator_reservation(
+    pub fn settle_memory_reviewer_reservation(
         &self,
         session_id: &str,
-        expected: &CuratorReservation,
+        expected: &MemoryReviewerReservation,
         project: &str,
         now_ms: i64,
-    ) -> Result<bool, curator_jobs::CuratorJobError> {
-        curator_jobs::settle_curator_reservation(self, session_id, expected, project, now_ms)
+    ) -> Result<bool, memory_reviewer_jobs::MemoryReviewerJobError> {
+        memory_reviewer_jobs::settle_memory_reviewer_reservation(
+            self, session_id, expected, project, now_ms,
+        )
     }
 
     pub fn record_history_summarizer_publish_failure_if_matching(
@@ -11843,8 +11860,8 @@ impl MemoryStore {
             );
             // An activation must name the job this firing reserved; a reservation another firing left behind is accepted only without an activation. Either mismatch refuses before anything is written.
             match (
-                meta.history_summarizer.curator_reservation.as_ref(),
-                request.curator_activation.as_ref(),
+                meta.history_summarizer.memory_reviewer_reservation.as_ref(),
+                request.memory_reviewer_activation.as_ref(),
             ) {
                 (None, None) => {}
                 (Some(reservation), Some(activation))
@@ -11852,21 +11869,21 @@ impl MemoryStore {
                 (Some(reservation), None)
                     if reservation.firing_seq != meta.history_summarizer.firing_seq => {}
                 _ => {
-                    return Err(curator_jobs::refuse(
-                        curator_jobs::CuratorJobRefusal::InvalidRequest,
+                    return Err(memory_reviewer_jobs::refuse(
+                        memory_reviewer_jobs::MemoryReviewerJobRefusal::InvalidRequest,
                     ));
                 }
             }
             meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing();
-            if let Some(code) = request.curator_nonadmission {
-                let nonadmission = &mut meta.history_summarizer.curator_nonadmission;
+            if let Some(code) = request.memory_reviewer_nonadmission {
+                let nonadmission = &mut meta.history_summarizer.memory_reviewer_nonadmission;
                 nonadmission.count = nonadmission.count.saturating_add(1);
                 nonadmission.latest = Some(RecordedNonadmission {
                     firing_seq: meta.history_summarizer.firing_seq,
                     code,
                 });
             }
-            let curator_nonadmission_count = meta.history_summarizer.curator_nonadmission.count;
+            let memory_reviewer_nonadmission_count = meta.history_summarizer.memory_reviewer_nonadmission.count;
             let next = next_row_version(current)?;
             let scanned_meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
@@ -11908,11 +11925,11 @@ impl MemoryStore {
             // The publication ends the firing and clears its reservation, so no reservation names a retained publication after it: the row this firing retained, or one a dropped reservation left behind, goes with it.
             delete_pending_publication_tx(tx, session_id)?;
             // The reserved job moves to Ready here, past every `Ok` bail-out, so activation and progress commit together or not at all; a refusal is raised as an error and rolls the whole publication back. A reservation past its deadline is closed as expired with progress and never resurrected; one the sweep already closed reads the same way.
-            let curator_activation = match request.curator_activation.as_ref() {
+            let memory_reviewer_activation = match request.memory_reviewer_activation.as_ref() {
                 None => None,
                 Some(activation) => {
                     let now_ms = activation.now_ms.max(current_time_ms());
-                    match curator_jobs::activate_curator_job_in_tx(
+                    match memory_reviewer_jobs::activate_memory_reviewer_job_in_tx(
                         coordinated.tx(),
                         request.project_path,
                         activation.causal_identity,
@@ -11920,31 +11937,31 @@ impl MemoryStore {
                         activation.input,
                         now_ms,
                     ) {
-                        Ok(_) => Some(CuratorActivationOutcome::Activated),
-                        Err(error) => match curator_jobs::refusal_of(&error) {
-                            Some(curator_jobs::CuratorJobRefusal::Expired) => {
-                                curator_jobs::expire_reserved_curator_job_in_tx(
+                        Ok(_) => Some(MemoryReviewerActivationOutcome::Activated),
+                        Err(error) => match memory_reviewer_jobs::refusal_of(&error) {
+                            Some(memory_reviewer_jobs::MemoryReviewerJobRefusal::Expired) => {
+                                memory_reviewer_jobs::expire_reserved_memory_reviewer_job_in_tx(
                                     coordinated.tx(),
                                     request.project_path,
                                     activation.causal_identity,
                                     now_ms,
                                 )?;
-                                Some(CuratorActivationOutcome::Expired)
+                                Some(MemoryReviewerActivationOutcome::Expired)
                             }
-                            Some(curator_jobs::CuratorJobRefusal::Terminal)
-                                if curator_jobs::load_curator_job(
+                            Some(memory_reviewer_jobs::MemoryReviewerJobRefusal::Terminal)
+                                if memory_reviewer_jobs::load_memory_reviewer_job(
                                     coordinated.tx(),
                                     request.project_path,
                                     activation.causal_identity,
                                 )?
                                 .is_some_and(|job| {
                                     job.state
-                                        == curator_jobs::CuratorJobState::Terminal(
-                                            curator_jobs::CuratorJobOutcome::Expired,
+                                        == memory_reviewer_jobs::MemoryReviewerJobState::Terminal(
+                                            memory_reviewer_jobs::MemoryReviewerJobOutcome::Expired,
                                         )
                                 }) =>
                             {
-                                Some(CuratorActivationOutcome::Expired)
+                                Some(MemoryReviewerActivationOutcome::Expired)
                             }
                             _ => return Err(error),
                         },
@@ -11960,11 +11977,11 @@ impl MemoryStore {
 
             Ok(PublishTxnOutcome::Committed(HistorySummarizerPublishResult {
                 row_version: next,
-                curator_nonadmission_count,
-                curator_activation,
+                memory_reviewer_nonadmission_count,
+                memory_reviewer_activation,
             }))
             })()
-            .inspect_err(|error| activation_refusal.set(curator_jobs::refusal_of(error)))?;
+            .inspect_err(|error| activation_refusal.set(memory_reviewer_jobs::refusal_of(error)))?;
             Ok(match outcome {
                 PublishTxnOutcome::Committed(_) => WriteDisposition::Applied(outcome),
                 _ => WriteDisposition::Replay(outcome),
@@ -11972,7 +11989,9 @@ impl MemoryStore {
         });
         let outcome = match (outcome, activation_refusal.get()) {
             (Err(_), Some(refusal)) => {
-                return Err(HistorySummarizerPublishError::CuratorActivation(refusal));
+                return Err(HistorySummarizerPublishError::MemoryReviewerActivation(
+                    refusal,
+                ));
             }
             (outcome, _) => outcome?,
         };
@@ -15230,7 +15249,7 @@ fn evict_chunk_transcripts_tx(tx: &GuardedConn<'_>, session_id: &str) -> rusqlit
 /// Compressed bound of one retained publication: the chunk transcript envelope for the transcript and its serialized siblings (the validated output and the alias table, which presents the same text again), the same multiple `decompress_bytes` allows inflated.
 const MAX_PENDING_PUBLICATION_COMPRESSED_BYTES: usize = MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES * 4;
 
-/// Scans, serializes, and compresses a retained publication as `record_curator_reservation` stores it. A field the durable scan rejects or would rewrite in the subject-bearing fields, or a payload past `MAX_PENDING_PUBLICATION_INFLATED_BYTES` serialized or `MAX_PENDING_PUBLICATION_COMPRESSED_BYTES` deflated, is `MemoryStoreError::Redaction`: the store refuses to retain it.
+/// Scans, serializes, and compresses a retained publication as `record_memory_reviewer_reservation` stores it. A field the durable scan rejects or would rewrite in the subject-bearing fields, or a payload past `MAX_PENDING_PUBLICATION_INFLATED_BYTES` serialized or `MAX_PENDING_PUBLICATION_COMPRESSED_BYTES` deflated, is `MemoryStoreError::Redaction`: the store refuses to retain it.
 fn prepare_pending_publication(
     session_id: &str,
     pending: &PendingPublication,
@@ -15277,10 +15296,10 @@ fn prepare_pending_publication(
 }
 
 /// Drops `expected` from the session's durable state together with its retained publication, bumping the row version; a state that records anything else is left untouched with `Ok(false)`. Unreadable metadata is reported through `refuse_serde`.
-fn clear_curator_reservation_tx(
+fn clear_memory_reviewer_reservation_tx(
     tx: &GuardedConn<'_>,
     session_id: &str,
-    expected: &CuratorReservation,
+    expected: &MemoryReviewerReservation,
 ) -> rusqlite::Result<bool> {
     let row = tx
         .query_row(CACHE_STATE_META_SELECT, params![session_id], |row| {
@@ -15292,10 +15311,10 @@ fn clear_curator_reservation_tx(
     };
     let mut meta: ModuleMeta =
         serde_json::from_str(&meta_json).map_err(|error| refuse_serde(error.to_string()))?;
-    if meta.history_summarizer.curator_reservation.as_ref() != Some(expected) {
+    if meta.history_summarizer.memory_reviewer_reservation.as_ref() != Some(expected) {
         return Ok(false);
     }
-    meta.history_summarizer.curator_reservation = None;
+    meta.history_summarizer.memory_reviewer_reservation = None;
     delete_pending_publication_tx(tx, session_id)?;
     let next = next_row_version(current)?;
     let meta_json =
@@ -17320,8 +17339,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap();
         let after_publish = scan_audit_rows(&store);
@@ -21024,8 +21043,8 @@ mod tests {
                 last_failure: None,
                 last_no_fire: None,
                 consecutive_publish_failures: 0,
-                curator_nonadmission: CuratorNonadmission::default(),
-                curator_reservation: None,
+                memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
+                memory_reviewer_reservation: None,
             },
             ..Default::default()
         }
@@ -21236,8 +21255,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -21301,8 +21320,8 @@ mod tests {
                     user_memory_candidates: std::slice::from_ref(&observation),
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
-                    curator_nonadmission: None,
-                    curator_activation: None,
+                    memory_reviewer_nonadmission: None,
+                    memory_reviewer_activation: None,
                 })
                 .unwrap();
 
@@ -21439,8 +21458,8 @@ mod tests {
                     user_memory_candidates: observations,
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
-                    curator_nonadmission: None,
-                    curator_activation: None,
+                    memory_reviewer_nonadmission: None,
+                    memory_reviewer_activation: None,
                 })
                 .unwrap_err();
             assert!(
@@ -21516,8 +21535,8 @@ mod tests {
                 user_memory_candidates: std::slice::from_ref(&observation),
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap();
         assert_eq!(
@@ -21665,8 +21684,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap();
         assert_eq!(
@@ -21700,26 +21719,29 @@ mod tests {
     #[test]
     fn an_unrecognized_nonadmission_code_loads_without_failing_the_state() {
         let known: HistorySummarizerDurableState = serde_json::from_str(
-            r#"{"curator_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"fact_set_rejected","failure":"invalid_span"}}}}"#,
+            r#"{"memory_reviewer_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"fact_set_rejected","failure":"invalid_span"}}}}"#,
         )
         .unwrap();
         assert_eq!(
-            known.curator_nonadmission.latest.map(|latest| latest.code),
-            Some(CuratorNonadmissionCode::FactSetRejected {
+            known
+                .memory_reviewer_nonadmission
+                .latest
+                .map(|latest| latest.code),
+            Some(MemoryReviewerNonadmissionCode::FactSetRejected {
                 failure: ExtractionFailure::InvalidSpan,
             })
         );
         for encoded in [
-            r#"{"curator_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"from_a_later_build"}}}}"#,
-            r#"{"curator_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"fact_set_rejected","failure":"from_a_later_build"}}}}"#,
+            r#"{"memory_reviewer_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"from_a_later_build"}}}}"#,
+            r#"{"memory_reviewer_nonadmission":{"count":1,"latest":{"firing_seq":3,"code":{"code":"fact_set_rejected","failure":"from_a_later_build"}}}}"#,
         ] {
             let state: HistorySummarizerDurableState = serde_json::from_str(encoded).unwrap();
-            let latest = state.curator_nonadmission.latest.unwrap();
+            let latest = state.memory_reviewer_nonadmission.latest.unwrap();
             assert_eq!(latest.firing_seq, 3);
-            assert_eq!(latest.code, CuratorNonadmissionCode::Unrecognized);
-            assert_eq!(state.curator_nonadmission.count, 1);
+            assert_eq!(latest.code, MemoryReviewerNonadmissionCode::Unrecognized);
+            assert_eq!(state.memory_reviewer_nonadmission.count, 1);
         }
-        let reencoded = serde_json::to_value(CuratorNonadmissionCode::Unrecognized).unwrap();
+        let reencoded = serde_json::to_value(MemoryReviewerNonadmissionCode::Unrecognized).unwrap();
         assert_eq!(reencoded, serde_json::json!({"code": "unrecognized"}));
     }
 
@@ -21740,10 +21762,10 @@ mod tests {
             .commit("ses", None, &CoreState::empty(), &meta)
             .unwrap();
         store
-            .record_curator_reservation(
+            .record_memory_reviewer_reservation(
                 "ses",
                 row_version,
-                &CuratorReservation {
+                &MemoryReviewerReservation {
                     firing_seq: 1,
                     causal_identity: "job".to_string(),
                     candidate_id: "hs-ses-job".to_string(),
@@ -21771,18 +21793,18 @@ mod tests {
                 .unwrap()
                 .meta
                 .history_summarizer
-                .curator_reservation,
+                .memory_reviewer_reservation,
             None
         );
         assert_eq!(store.load_pending_publication("ses").unwrap(), None);
     }
 
-    /// A full-session reset closes the job the dropped reservation named, so a reset during a retained firing does not hold a Curator slot until the queue deadline.
+    /// A full-session reset closes the job the dropped reservation named, so a reset during a retained firing does not hold a MemoryReviewer slot until the queue deadline.
     #[test]
     fn a_session_reset_closes_the_reserved_job() {
-        use curator_jobs::{
-            CausalInputs, CuratorJobOutcome, CuratorJobState, ProducerBinding, ReserveOutcome,
-            ReviewTarget,
+        use memory_reviewer_jobs::{
+            CausalInputs, MemoryReviewerJobOutcome, MemoryReviewerJobState, ProducerBinding,
+            ReserveOutcome, ReviewTarget,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -21815,16 +21837,16 @@ mod tests {
             policy_versions: BTreeMap::from([("disclosure".to_string(), "3".to_string())]),
         };
         let ReserveOutcome::Reserved(job) = store
-            .reserve_curator_job("proj", &producer, &inputs, current_time_ms())
+            .reserve_memory_reviewer_job("proj", &producer, &inputs, current_time_ms())
             .unwrap()
         else {
             panic!("a fresh reservation");
         };
         store
-            .record_curator_reservation(
+            .record_memory_reviewer_reservation(
                 "ses",
                 row_version,
-                &CuratorReservation {
+                &MemoryReviewerReservation {
                     firing_seq: 1,
                     causal_identity: job.causal_identity.clone(),
                     candidate_id: "hs-ses-candidate".to_string(),
@@ -21848,11 +21870,11 @@ mod tests {
         assert_eq!(store.load_pending_publication("ses").unwrap(), None);
         assert_eq!(
             store
-                .lookup_curator_job("proj", &job.causal_identity)
+                .lookup_memory_reviewer_job("proj", &job.causal_identity)
                 .unwrap()
                 .unwrap()
                 .state,
-            CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+            MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
         );
     }
 
@@ -21926,13 +21948,13 @@ mod tests {
     fn publish_records_a_nonadmission_only_with_committed_progress() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let code = CuratorNonadmissionCode::FactSetRejected {
+        let code = MemoryReviewerNonadmissionCode::FactSetRejected {
             failure: ExtractionFailure::InvalidSpan,
         };
         let publish =
             |expected_row_version: Option<u64>,
              predicate: &HistorySummarizerPublishPredicate,
-             code: Option<CuratorNonadmissionCode>,
+             code: Option<MemoryReviewerNonadmissionCode>,
              segment: StoredHistorySegment|
              -> Result<HistorySummarizerPublishResult, HistorySummarizerPublishError> {
                 store.publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
@@ -21947,8 +21969,8 @@ mod tests {
                     user_memory_candidates: &[],
                     publication_floor_ordinal: 21,
                     chunk_transcript: None,
-                    curator_nonadmission: code,
-                    curator_activation: None,
+                    memory_reviewer_nonadmission: code,
+                    memory_reviewer_activation: None,
                 })
             };
         let nonadmission = || {
@@ -21957,19 +21979,19 @@ mod tests {
                 .unwrap()
                 .meta
                 .history_summarizer
-                .curator_nonadmission
+                .memory_reviewer_nonadmission
         };
         // Puts the session into Publishing for `firing_seq` over the loaded row, with the state and the predicate carrying the same identity so the publication reaches the fence under test rather than the state-mismatch check.
         let seed_publishing = |firing_seq: u64,
                                generation: HistorySegmentSetGeneration,
-                               facts: CuratorNonadmission|
+                               facts: MemoryReviewerNonadmission|
          -> (u64, HistorySummarizerPublishPredicate) {
             let loaded = store.load("ses").unwrap();
             let mut meta = loaded.meta.clone();
             meta.history_summarizer = publishing_meta().history_summarizer;
             meta.history_summarizer.firing_seq = firing_seq;
             meta.history_summarizer.history_segment_set_generation = generation;
-            meta.history_summarizer.curator_nonadmission = facts;
+            meta.history_summarizer.memory_reviewer_nonadmission = facts;
             let rv = store
                 .commit("ses", loaded.row_version, &loaded.core, &meta)
                 .unwrap();
@@ -22007,7 +22029,7 @@ mod tests {
             store.load("ses").unwrap().meta.publication_floor_ordinal,
             None
         );
-        assert_eq!(nonadmission(), CuratorNonadmission::default());
+        assert_eq!(nonadmission(), MemoryReviewerNonadmission::default());
 
         // The committed publication records the count and binds the reason to firing 7.
         let published = publish(
@@ -22017,7 +22039,7 @@ mod tests {
             publish_history_segment(),
         )
         .unwrap();
-        assert_eq!(published.curator_nonadmission_count, 1);
+        assert_eq!(published.memory_reviewer_nonadmission_count, 1);
         let after = store.load("ses").unwrap();
         assert_eq!(after.meta.publication_floor_ordinal, Some(21));
         assert_eq!(
@@ -22025,16 +22047,19 @@ mod tests {
             HistorySummarizerPhase::Idle
         );
         assert_eq!(after.meta.history_summarizer.firing_seq, 7);
-        let recorded = CuratorNonadmission {
+        let recorded = MemoryReviewerNonadmission {
             count: 1,
             latest: Some(RecordedNonadmission {
                 firing_seq: 7,
                 code,
             }),
         };
-        assert_eq!(after.meta.history_summarizer.curator_nonadmission, recorded);
+        assert_eq!(
+            after.meta.history_summarizer.memory_reviewer_nonadmission,
+            recorded
+        );
         // The sampler reads the same producer facts through the session metadata.
-        let facts = store.curator_status_facts().unwrap();
+        let facts = store.memory_reviewer_status_facts().unwrap();
         assert_eq!(facts.nonadmissions, 1);
         assert_eq!(facts.latest_nonadmission_fact_set_rejected, 1);
         assert_eq!(facts.latest_nonadmission_capacity_full, 0);
@@ -22064,7 +22089,10 @@ mod tests {
         let after_fence = store.load("ses").unwrap();
         assert_eq!(after_fence.meta.publication_floor_ordinal, Some(21));
         assert_eq!(
-            after_fence.meta.history_summarizer.curator_nonadmission,
+            after_fence
+                .meta
+                .history_summarizer
+                .memory_reviewer_nonadmission,
             recorded
         );
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 1);
@@ -22091,7 +22119,7 @@ mod tests {
         // A later no-fact publication advances history and leaves the facts where they were.
         let (rv, predicate) = seed_publishing(9, one_row, recorded);
         let second = publish(Some(rv), &predicate, None, later_segment()).unwrap();
-        assert_eq!(second.curator_nonadmission_count, 1);
+        assert_eq!(second.memory_reviewer_nonadmission_count, 1);
         assert_eq!(nonadmission(), recorded);
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
     }
@@ -22100,17 +22128,17 @@ mod tests {
     #[test]
     fn nonadmission_code_tags_match_what_serde_stores() {
         for code in [
-            CuratorNonadmissionCode::CuratorUnavailable,
-            CuratorNonadmissionCode::CapacityFull,
-            CuratorNonadmissionCode::EvidenceUnavailable,
-            CuratorNonadmissionCode::FactSetRejected {
+            MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable,
+            MemoryReviewerNonadmissionCode::CapacityFull,
+            MemoryReviewerNonadmissionCode::EvidenceUnavailable,
+            MemoryReviewerNonadmissionCode::FactSetRejected {
                 failure: ExtractionFailure::MissingCitation,
             },
-            CuratorNonadmissionCode::SubjectRefused,
+            MemoryReviewerNonadmissionCode::SubjectRefused,
         ] {
             let stored = serde_json::to_value(code).unwrap();
             assert_eq!(stored["code"], code.tag(), "{code:?}");
-            let mut facts = CuratorStatusFacts::default();
+            let mut facts = MemoryReviewerStatusFacts::default();
             assert!(
                 facts.latest_nonadmission_slot(code.tag()).is_some(),
                 "{code:?} has no counter"
@@ -22123,12 +22151,12 @@ mod tests {
     fn frozen_page_receipt_charges_are_permanent_not_allowances_in_the_sample() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
-        let receipt = curator_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES;
-        let allowance = curator_jobs::FROZEN_SELECTION_ALLOWANCE_BYTES;
+        let receipt = memory_reviewer_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES;
+        let allowance = memory_reviewer_jobs::FROZEN_SELECTION_ALLOWANCE_BYTES;
         store
             .with_fenced_conn_for_test(|conn| {
                 conn.execute(
-                    "INSERT INTO curator_frozen_selections (
+                    "INSERT INTO memory_reviewer_frozen_selections (
                          project, slot_id, selection_attempt, page_json, reference_count, next_cursor,
                          state, selection_deadline_ms, allowance_bytes, receipt_charge_bytes,
                          created_at_ms, updated_at_ms
@@ -22142,7 +22170,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let facts = store.curator_status_facts().unwrap();
+        let facts = store.memory_reviewer_status_facts().unwrap();
         assert_eq!(facts.metadata_bytes, 2 * receipt + allowance);
         assert_eq!(
             facts.receipt_charge_bytes,
@@ -22180,8 +22208,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: Some("U: orphan"),
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -22232,8 +22260,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: Some(&transcript),
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -22281,8 +22309,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 25,
                 chunk_transcript: Some("U: bounded row"),
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap();
 
@@ -22344,8 +22372,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 101,
                 chunk_transcript: Some(&oversized),
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -23567,8 +23595,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap_err();
         assert!(
@@ -23770,8 +23798,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -27115,11 +27143,11 @@ mod lineage_descent_tests {
             state: HistorySummarizerPhase::Publishing,
             firing_seq: 5,
             producer_run_id: Some("run-5".into()),
-            curator_nonadmission: CuratorNonadmission {
+            memory_reviewer_nonadmission: MemoryReviewerNonadmission {
                 count: 3,
                 latest: Some(RecordedNonadmission {
                     firing_seq: 4,
-                    code: CuratorNonadmissionCode::CapacityFull,
+                    code: MemoryReviewerNonadmissionCode::CapacityFull,
                 }),
             },
             ..HistorySummarizerDurableState::default()
@@ -27148,8 +27176,8 @@ mod lineage_descent_tests {
         assert_eq!(target.producer_run_id, None);
         assert_eq!(target.firing_seq, 5);
         assert_eq!(
-            target.curator_nonadmission,
-            meta.history_summarizer.curator_nonadmission
+            target.memory_reviewer_nonadmission,
+            meta.history_summarizer.memory_reviewer_nonadmission
         );
     }
 
@@ -27165,11 +27193,11 @@ mod lineage_descent_tests {
             state: HistorySummarizerPhase::Publishing,
             firing_seq: 5,
             producer_run_id: Some("run-5".into()),
-            curator_nonadmission: CuratorNonadmission {
+            memory_reviewer_nonadmission: MemoryReviewerNonadmission {
                 count: 3,
                 latest: Some(RecordedNonadmission {
                     firing_seq: 4,
-                    code: CuratorNonadmissionCode::CapacityFull,
+                    code: MemoryReviewerNonadmissionCode::CapacityFull,
                 }),
             },
             ..HistorySummarizerDurableState::default()
@@ -27186,8 +27214,8 @@ mod lineage_descent_tests {
         assert_eq!(reset.history_summarizer.producer_run_id, None);
         assert_eq!(reset.history_summarizer.firing_seq, 5);
         assert_eq!(
-            reset.history_summarizer.curator_nonadmission,
-            meta.history_summarizer.curator_nonadmission
+            reset.history_summarizer.memory_reviewer_nonadmission,
+            meta.history_summarizer.memory_reviewer_nonadmission
         );
     }
 

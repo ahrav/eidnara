@@ -50,7 +50,7 @@ impl ProjectBinding {
         &self.scope
     }
 
-    /// `sha256(root)` as lower hex: the project identity Kernel review inputs and Curator holds are scoped under.
+    /// `sha256(root)` as lower hex: the project identity Kernel review inputs and MemoryReviewer holds are scoped under.
     pub(crate) fn digest(&self) -> &str {
         &self.digest
     }

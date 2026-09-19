@@ -196,7 +196,7 @@ fn proposal_spec(job_id: &str, generation: u64, proposal: ReviewProposal) -> Rev
     ReviewStagingSpec {
         extraction_run_id: identity.extraction_run_id,
         candidate_id: identity.candidate_id,
-        producer: "curator".to_string(),
+        producer: "memory_reviewer".to_string(),
         binding: binding(ReviewOwner::Proposal {
             job_id: job_id.to_string(),
             generation,

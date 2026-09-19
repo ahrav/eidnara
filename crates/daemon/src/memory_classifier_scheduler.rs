@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use memory_store::curator_jobs::{
-    CuratorJobError, CuratorJobRefusal, EnqueueOutcome, FrozenSelection, FrozenSelectionPage,
-    FrozenSelectionState, ProducerBinding,
+use memory_store::memory_reviewer_jobs::{
+    EnqueueOutcome, FrozenSelection, FrozenSelectionPage, FrozenSelectionState,
+    MemoryReviewerJobError, MemoryReviewerJobRefusal, ProducerBinding,
 };
 use memory_store::{LeaseAcquireOutcome, LeaseClaim, LeaseCompleteOutcome, MemoryStore};
 use serde_json::{Value, json};
@@ -33,11 +33,11 @@ pub(crate) const REVIEW_USER_MEMORIES_TASK_ID: i64 = 1;
 /// The bounded reclamation of obsolete message-index state.
 pub(crate) const MESSAGE_INDEX_CLEANUP_TASK: &str = "message-index-cleanup";
 pub(crate) const MESSAGE_INDEX_CLEANUP_TASK_ID: i64 = 2;
-/// Selection of review targets for the Curator: freezes one page of eligible memories and enqueues them as review jobs.
-pub(crate) const CURATOR_REVIEW_SELECTION_TASK: &str = "curator-review-selection";
-pub(crate) const CURATOR_REVIEW_SELECTION_TASK_ID: i64 = 3;
+/// Selection of review targets for the MemoryReviewer: freezes one page of eligible memories and enqueues them as review jobs.
+pub(crate) const MEMORY_REVIEWER_REVIEW_SELECTION_TASK: &str = "memory_reviewer-review-selection";
+pub(crate) const MEMORY_REVIEWER_REVIEW_SELECTION_TASK_ID: i64 = 3;
 /// The producer every scheduler-selected review job is reserved under.
-pub(crate) const CURATOR_SELECTION_PRODUCER: &str = "memory-classifier-selection";
+pub(crate) const MEMORY_REVIEWER_SELECTION_PRODUCER: &str = "memory-classifier-selection";
 
 /// The task a scheduled slot runs. Every kind is leased through the same ledger under its own task identity and its own ledger slot, so a claim a dead scheduler left on one kind is recovered by that kind's next acquisition and never consumes another kind's slot; the host decides what a kind does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -46,8 +46,8 @@ pub(crate) enum ScheduledTask {
     /// No production host returns this kind: message-index cleanup has no enable path until its evidence gates exist, so only test hosts schedule it.
     #[cfg_attr(not(test), expect(dead_code))]
     MessageIndexCleanup,
-    /// No production host returns this kind yet: Curator selection is enabled by the deployment activation gate, which does not exist until the lifecycle owner installs it, so only test hosts schedule it.
-    CuratorReviewSelection,
+    /// No production host returns this kind yet: MemoryReviewer selection is enabled by the deployment activation gate, which does not exist until the lifecycle owner installs it, so only test hosts schedule it.
+    MemoryReviewerReviewSelection,
 }
 
 impl ScheduledTask {
@@ -55,7 +55,7 @@ impl ScheduledTask {
         match self {
             Self::ReviewUserMemories => REVIEW_USER_MEMORIES_TASK,
             Self::MessageIndexCleanup => MESSAGE_INDEX_CLEANUP_TASK,
-            Self::CuratorReviewSelection => CURATOR_REVIEW_SELECTION_TASK,
+            Self::MemoryReviewerReviewSelection => MEMORY_REVIEWER_REVIEW_SELECTION_TASK,
         }
     }
 
@@ -63,7 +63,7 @@ impl ScheduledTask {
         match self {
             Self::ReviewUserMemories => REVIEW_USER_MEMORIES_TASK_ID,
             Self::MessageIndexCleanup => MESSAGE_INDEX_CLEANUP_TASK_ID,
-            Self::CuratorReviewSelection => CURATOR_REVIEW_SELECTION_TASK_ID,
+            Self::MemoryReviewerReviewSelection => MEMORY_REVIEWER_REVIEW_SELECTION_TASK_ID,
         }
     }
 
@@ -72,7 +72,7 @@ impl ScheduledTask {
         match self {
             Self::ReviewUserMemories => SCHEDULER_SLOT,
             Self::MessageIndexCleanup => SCHEDULER_SLOT + 1,
-            Self::CuratorReviewSelection => SCHEDULER_SLOT + 2,
+            Self::MemoryReviewerReviewSelection => SCHEDULER_SLOT + 2,
         }
     }
 }
@@ -195,7 +195,7 @@ pub(crate) enum TickEvent {
     /// The host could not report its projects, so nothing ran and no due
     /// instant moved; the next tick sees the same slots.
     Deferred { reason: String },
-    /// The slot's frozen page could not be enqueued because pending review capacity is full. The page stays frozen in its slot, the claim stays live, and the due instant does not move; the next tick offers the same page again, and the capacity drains as jobs finish or expire. The due table is this instance's memory: after a restart the page is durable but its slot is not, so the project's next cron slot resumes it, and a page older than its 24-hour lifetime by then records `curator_selection_expired` and the slot after that re-selects from the unchanged cursor.
+    /// The slot's frozen page could not be enqueued because pending review capacity is full. The page stays frozen in its slot, the claim stays live, and the due instant does not move; the next tick offers the same page again, and the capacity drains as jobs finish or expire. The due table is this instance's memory: after a restart the page is durable but its slot is not, so the project's next cron slot resumes it, and a page older than its 24-hour lifetime by then records `memory_reviewer_selection_expired` and the slot after that re-selects from the unchanged cursor.
     CapacityDeferred {
         project: String,
         due_at_ms: i64,
@@ -455,7 +455,7 @@ impl MemoryClassifierScheduler {
         // this slot's for a fresh claim, an earlier one for a rebound claim.
         let leased_due_at_ms = claim.source_revision;
         let command_id = slot_command_id(project.task.name(), leased_due_at_ms);
-        if project.task == ScheduledTask::CuratorReviewSelection {
+        if project.task == ScheduledTask::MemoryReviewerReviewSelection {
             // The selection slot completes inside the enqueue transaction, so the lease, the page, and the jobs move together or not at all.
             return match self.run_selection_slot(host, project, &claim, &command_id) {
                 Ok(SelectionStep::Ran(outcome)) => TickEvent::Ran {
@@ -521,15 +521,15 @@ enum SelectionStep {
 }
 
 /// Whether a refusal clears on its own as pending jobs finish or expire. Only those refusals are worth re-offering a frozen page at the idle-poll cadence; the metadata quota is a ceiling for the store incarnation and the selection caps are cleared by slots, not jobs.
-fn drains_as_jobs_finish(refusal: CuratorJobRefusal) -> bool {
+fn drains_as_jobs_finish(refusal: MemoryReviewerJobRefusal) -> bool {
     matches!(
         refusal,
-        CuratorJobRefusal::ProjectCapacity | CuratorJobRefusal::HostCapacity
+        MemoryReviewerJobRefusal::ProjectCapacity | MemoryReviewerJobRefusal::HostCapacity
     )
 }
 
 impl MemoryClassifierScheduler {
-    /// One Curator selection slot: resume the project's frozen page if one exists, else select a page from the last enqueued cursor and freeze it under this slot's attempt, then enqueue it and complete the slot in one transaction. An empty selection completes the slot with nothing frozen; a frozen page that pending-job capacity refuses stays frozen with the slot claimed for a later tick; every other refusal, an expired page, and a walk the inventory refuses complete the slot as failed without moving the cursor, so the next cron slot tries again. `Err` keeps the slot due.
+    /// One MemoryReviewer selection slot: resume the project's frozen page if one exists, else select a page from the last enqueued cursor and freeze it under this slot's attempt, then enqueue it and complete the slot in one transaction. An empty selection completes the slot with nothing frozen; a frozen page that pending-job capacity refuses stays frozen with the slot claimed for a later tick; every other refusal, an expired page, and a walk the inventory refuses complete the slot as failed without moving the cursor, so the next cron slot tries again. `Err` keeps the slot due.
     fn run_selection_slot(
         &self,
         host: &dyn SchedulerHost,
@@ -540,14 +540,14 @@ impl MemoryClassifierScheduler {
         let store = host.store();
         let now_ms = self.clock.now_ms();
         let producer = ProducerBinding {
-            producer: CURATOR_SELECTION_PRODUCER.to_string(),
+            producer: MEMORY_REVIEWER_SELECTION_PRODUCER.to_string(),
             firing_id: command_id.to_string(),
             ordinal: 0,
         };
         // The sweep runs before any page is looked up or retried: it is the only production writer that retires jobs and pages past their deadlines, so a page deferred by pending capacity sees the capacity its expired blockers held, and frozen pages of projects no slot runs any more stop holding the host's frozen-page cap.
         store
-            .expire_curator_work(now_ms)
-            .map_err(|error| format!("expiring curator work failed: {error}"))?;
+            .expire_memory_reviewer_work(now_ms)
+            .map_err(|error| format!("expiring memory_reviewer work failed: {error}"))?;
         // This slot's own page first: a page it froze and could not enqueue resumes; one that expired or was already enqueued records that outcome and selects nothing new under this attempt.
         if let Some(own) = store
             .lookup_frozen_selection(&project.project, project.task.name(), command_id)
@@ -556,9 +556,9 @@ impl MemoryClassifierScheduler {
         {
             let enqueued = own.state == FrozenSelectionState::Enqueued;
             let code = if enqueued {
-                "curator_selection_enqueued"
+                "memory_reviewer_selection_enqueued"
             } else {
-                "curator_selection_expired"
+                "memory_reviewer_selection_expired"
             };
             return self.complete_selection_slot(
                 store,
@@ -588,7 +588,7 @@ impl MemoryClassifierScheduler {
                             claim,
                             command_id,
                             None,
-                            json!({"ok": false, "code": "curator_selection_failed", "reason": reason}),
+                            json!({"ok": false, "code": "memory_reviewer_selection_failed", "reason": reason}),
                         );
                     }
                 };
@@ -600,7 +600,7 @@ impl MemoryClassifierScheduler {
                         claim,
                         command_id,
                         Some(page.next_cursor.as_deref()),
-                        json!({"ok": true, "code": "curator_selection_empty", "next_cursor": page.next_cursor}),
+                        json!({"ok": true, "code": "memory_reviewer_selection_empty", "next_cursor": page.next_cursor}),
                     );
                 }
                 match store.freeze_selection(
@@ -612,17 +612,17 @@ impl MemoryClassifierScheduler {
                 ) {
                     Ok(frozen) => frozen,
                     // Nothing was persisted, so holding the slot due would repeat the whole selection every idle poll; the cron slot selects from the same cursor once headroom returns, and the metadata quota never returns.
-                    Err(CuratorJobError::Refused(refusal)) => {
+                    Err(MemoryReviewerJobError::Refused(refusal)) => {
                         return self.complete_selection_slot(
                             store,
                             project,
                             claim,
                             command_id,
                             None,
-                            json!({"ok": false, "code": "curator_selection_refused", "refusal": refusal.to_string()}),
+                            json!({"ok": false, "code": "memory_reviewer_selection_refused", "refusal": refusal.to_string()}),
                         );
                     }
-                    Err(CuratorJobError::Store(error)) => {
+                    Err(MemoryReviewerJobError::Store(error)) => {
                         return Err(format!("freezing the selection failed: {error}"));
                     }
                 }
@@ -661,13 +661,13 @@ impl MemoryClassifierScheduler {
                 replayed,
                 next_cursor,
             }) => Ok(SelectionStep::Ran(TaskRunOutcome::Ran {
-                response: json!({"ok": true, "code": "curator_selection_enqueued", "jobs": jobs, "replayed": replayed, "next_cursor": next_cursor}),
+                response: json!({"ok": true, "code": "memory_reviewer_selection_enqueued", "jobs": jobs, "replayed": replayed, "next_cursor": next_cursor}),
             })),
             Ok(EnqueueOutcome::Expired) => Ok(SelectionStep::Ran(TaskRunOutcome::Ran {
-                response: json!({"ok": false, "code": "curator_selection_expired"}),
+                response: json!({"ok": false, "code": "memory_reviewer_selection_expired"}),
             })),
             Ok(EnqueueOutcome::Replayed) => Ok(SelectionStep::Ran(TaskRunOutcome::Ran {
-                response: json!({"ok": true, "code": "curator_selection_replayed"}),
+                response: json!({"ok": true, "code": "memory_reviewer_selection_replayed"}),
             })),
             // Nothing moved and the page stays frozen. Pending capacity drains as jobs finish, so the claim stays live for the next tick; the metadata quota does not, so the slot completes and the next cron slot offers the same page.
             Ok(EnqueueOutcome::Deferred(refusal)) if drains_as_jobs_finish(refusal) => {
@@ -679,7 +679,7 @@ impl MemoryClassifierScheduler {
                 claim,
                 command_id,
                 None,
-                json!({"ok": false, "code": "curator_selection_refused", "refusal": refusal.to_string()}),
+                json!({"ok": false, "code": "memory_reviewer_selection_refused", "refusal": refusal.to_string()}),
             ),
             Err(error) => Err(format!("enqueue failed: {error}")),
         }
@@ -1777,17 +1777,19 @@ mod tests {
     fn selection_page(first: usize, count: usize, next: Option<&str>) -> FrozenSelectionPage {
         FrozenSelectionPage {
             references: (first..first + count)
-                .map(|index| memory_store::curator_jobs::CausalInputs {
-                    target: memory_store::curator_jobs::ReviewTarget::Memory {
+                .map(|index| memory_store::memory_reviewer_jobs::CausalInputs {
+                    target: memory_store::memory_reviewer_jobs::ReviewTarget::Memory {
                         object_id: format!("memory-{index}"),
                         source_revision: 1,
                     },
                     question_template: "extracted_facts".to_string(),
                     signals: Vec::new(),
-                    required_evidence: vec![memory_store::curator_jobs::EvidenceAvailability {
-                        evidence_id: format!("evidence-{index}"),
-                        available: true,
-                    }],
+                    required_evidence: vec![
+                        memory_store::memory_reviewer_jobs::EvidenceAvailability {
+                            evidence_id: format!("evidence-{index}"),
+                            available: true,
+                        },
+                    ],
                     policy_versions: std::collections::BTreeMap::new(),
                 })
                 .collect(),
@@ -1797,13 +1799,16 @@ mod tests {
 
     fn selection_project(store: &MemoryStore, identity: &str) -> ScheduledProject {
         ScheduledProject {
-            task: ScheduledTask::CuratorReviewSelection,
+            task: ScheduledTask::MemoryReviewerReviewSelection,
             ..project(store, identity, "*/15 * * * *")
         }
     }
 
     fn ready_jobs(store: &MemoryStore, identity: &str) -> usize {
-        store.ready_curator_jobs(identity, 256, 0).unwrap().len()
+        store
+            .ready_memory_reviewer_jobs(identity, 256, 0)
+            .unwrap()
+            .len()
     }
 
     #[tokio::test]
@@ -1828,7 +1833,7 @@ mod tests {
         assert_eq!(
             *outcome,
             TaskRunOutcome::Ran {
-                response: json!({"ok": true, "code": "curator_selection_enqueued", "jobs": 3, "replayed": 0, "next_cursor": "cursor-3"})
+                response: json!({"ok": true, "code": "memory_reviewer_selection_enqueued", "jobs": 3, "replayed": 0, "next_cursor": "cursor-3"})
             }
         );
         assert_eq!(
@@ -1839,7 +1844,7 @@ mod tests {
         assert_eq!(store.frozen_selection_for_project("git:a").unwrap(), None);
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap()
                 .as_deref(),
             Some("cursor-3")
@@ -1849,11 +1854,11 @@ mod tests {
         let terminal = store
             .acquire_memory_classifier_task(
                 "git:a",
-                &slot_command_id(CURATOR_REVIEW_SELECTION_TASK, T0 + 15 * MINUTE_MS),
+                &slot_command_id(MEMORY_REVIEWER_REVIEW_SELECTION_TASK, T0 + 15 * MINUTE_MS),
                 SCHEDULER_INSTANCE,
-                ScheduledTask::CuratorReviewSelection.ledger_slot(),
+                ScheduledTask::MemoryReviewerReviewSelection.ledger_slot(),
                 i64::MAX,
-                CURATOR_REVIEW_SELECTION_TASK_ID,
+                MEMORY_REVIEWER_REVIEW_SELECTION_TASK_ID,
                 T0 + 15 * MINUTE_MS,
                 T0 + 16 * MINUTE_MS,
             )
@@ -1871,7 +1876,7 @@ mod tests {
         assert_eq!(
             *outcome,
             TaskRunOutcome::Ran {
-                response: json!({"ok": true, "code": "curator_selection_enqueued", "jobs": 2, "replayed": 3, "next_cursor": null})
+                response: json!({"ok": true, "code": "memory_reviewer_selection_enqueued", "jobs": 2, "replayed": 3, "next_cursor": null})
             }
         );
         assert_eq!(ready_jobs(&store, "git:a"), 5);
@@ -1881,7 +1886,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap(),
             None
         );
@@ -1894,7 +1899,7 @@ mod tests {
         assert_eq!(
             *outcome,
             TaskRunOutcome::Ran {
-                response: json!({"ok": true, "code": "curator_selection_empty", "next_cursor": null})
+                response: json!({"ok": true, "code": "memory_reviewer_selection_empty", "next_cursor": null})
             }
         );
         assert_eq!(ready_jobs(&store, "git:a"), 5);
@@ -1916,10 +1921,12 @@ mod tests {
             ordinal: 0,
         };
         let mut filled = 0;
-        while filled < memory_store::curator_jobs::MAX_PENDING_CURATOR_JOBS_PER_PROJECT - 1 {
+        while filled
+            < memory_store::memory_reviewer_jobs::MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT - 1
+        {
             let page = selection_page(1_000 + filled, 1, None);
             store
-                .reserve_curator_job("git:a", &producer, &page.references[0], T0)
+                .reserve_memory_reviewer_job("git:a", &producer, &page.references[0], T0)
                 .unwrap();
             filled += 1;
         }
@@ -1933,7 +1940,7 @@ mod tests {
         assert_eq!(ready_jobs(&store, "git:a"), 0);
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap(),
             None
         );
@@ -1959,10 +1966,10 @@ mod tests {
         for index in 0..3 {
             let inputs = &selection_page(1_000 + index, 1, None).references[0];
             store
-                .finish_curator_job(
+                .finish_memory_reviewer_job(
                     "git:a",
                     &inputs.causal_identity().unwrap(),
-                    memory_store::curator_jobs::CuratorJobOutcome::Nonadmitted,
+                    memory_store::memory_reviewer_jobs::MemoryReviewerJobOutcome::Nonadmitted,
                     T0 + 1,
                 )
                 .unwrap();
@@ -1973,7 +1980,7 @@ mod tests {
         assert_eq!(ready_jobs(&store, "git:a"), 3);
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap()
                 .as_deref(),
             Some("cursor-3")
@@ -1982,8 +1989,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_deferred_page_is_enqueued_once_the_blocking_jobs_pass_their_deadline() {
-        use memory_store::curator_jobs::{
-            CURATOR_QUEUE_LIFETIME_MS, MAX_PENDING_CURATOR_JOBS_PER_PROJECT,
+        use memory_store::memory_reviewer_jobs::{
+            MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT, MEMORY_REVIEWER_QUEUE_LIFETIME_MS,
         };
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());
@@ -1997,11 +2004,11 @@ mod tests {
             firing_id: "f".to_string(),
             ordinal: 0,
         };
-        let reserved_at = T0 + 16 * MINUTE_MS - CURATOR_QUEUE_LIFETIME_MS;
-        for index in 0..MAX_PENDING_CURATOR_JOBS_PER_PROJECT {
+        let reserved_at = T0 + 16 * MINUTE_MS - MEMORY_REVIEWER_QUEUE_LIFETIME_MS;
+        for index in 0..MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT {
             let page = selection_page(1_000 + index, 1, None);
             store
-                .reserve_curator_job("git:a", &producer, &page.references[0], reserved_at)
+                .reserve_memory_reviewer_job("git:a", &producer, &page.references[0], reserved_at)
                 .unwrap();
         }
         *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 3, Some("cursor-3")))];
@@ -2015,12 +2022,15 @@ mod tests {
         clock.advance(MINUTE);
         let events = scheduler.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued" && response["jobs"] == 3),
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_enqueued" && response["jobs"] == 3),
             "{events:?}"
         );
         assert_eq!(ready_jobs(&store, "git:a"), 3);
         assert_eq!(
-            store.curator_headroom("git:a").unwrap().pending_jobs,
+            store
+                .memory_reviewer_headroom("git:a")
+                .unwrap()
+                .pending_jobs,
             3,
             "the expired jobs left the pending count"
         );
@@ -2038,11 +2048,11 @@ mod tests {
         let host = scripted(&store, vec![selection_project(&store, "git:a")]);
         // A scheduler froze a page and died before enqueueing it.
         let due = T0 + 15 * MINUTE_MS;
-        let command = slot_command_id(CURATOR_REVIEW_SELECTION_TASK, due);
+        let command = slot_command_id(MEMORY_REVIEWER_REVIEW_SELECTION_TASK, due);
         store
             .freeze_selection(
                 "git:a",
-                CURATOR_REVIEW_SELECTION_TASK,
+                MEMORY_REVIEWER_REVIEW_SELECTION_TASK,
                 &command,
                 &selection_page(0, 2, Some("c")),
                 due,
@@ -2061,18 +2071,18 @@ mod tests {
         assert_eq!(ready_jobs(&store, "git:a"), 2);
         // A page left frozen past its 24-hour selection deadline is expired by the sweep; the next slot records a failed slot, enqueues nothing, and leaves the cursor untouched.
         let later = due + 15 * MINUTE_MS;
-        let command = slot_command_id(CURATOR_REVIEW_SELECTION_TASK, later);
+        let command = slot_command_id(MEMORY_REVIEWER_REVIEW_SELECTION_TASK, later);
         store
             .freeze_selection(
                 "git:a",
-                CURATOR_REVIEW_SELECTION_TASK,
+                MEMORY_REVIEWER_REVIEW_SELECTION_TASK,
                 &command,
                 &selection_page(10, 2, Some("stale")),
                 later,
             )
             .unwrap();
         clock.advance(Duration::from_millis(25 * 60 * MINUTE_MS as u64));
-        store.expire_curator_work(clock.now_ms()).unwrap();
+        store.expire_memory_reviewer_work(clock.now_ms()).unwrap();
         // The slot whose page expired records that and enqueues nothing; the cursor stays at the last enqueued page.
         assert_eq!(store.frozen_selection_for_project("git:a").unwrap(), None);
         let events = scheduler.tick(&host).await;
@@ -2082,7 +2092,7 @@ mod tests {
         assert_eq!(
             *outcome,
             TaskRunOutcome::Ran {
-                response: json!({"ok": false, "code": "curator_selection_expired"})
+                response: json!({"ok": false, "code": "memory_reviewer_selection_expired"})
             }
         );
         // The first page's jobs reached their own 24-hour deadline and expired with the sweep; the expired page's targets never had a job at all.
@@ -2090,7 +2100,7 @@ mod tests {
         for inputs in &selection_page(10, 2, None).references {
             assert_eq!(
                 store
-                    .lookup_curator_job("git:a", &inputs.causal_identity().unwrap())
+                    .lookup_memory_reviewer_job("git:a", &inputs.causal_identity().unwrap())
                     .unwrap(),
                 None,
                 "the expired page's targets were never enqueued"
@@ -2098,7 +2108,7 @@ mod tests {
         }
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap()
                 .as_deref(),
             Some("c")
@@ -2108,7 +2118,7 @@ mod tests {
         clock.advance(15 * MINUTE);
         let events = scheduler.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued"),
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_enqueued"),
             "{events:?}"
         );
         assert_eq!(
@@ -2138,12 +2148,12 @@ mod tests {
         clock.advance(15 * MINUTE);
         let events = scheduler.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_empty"),
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_empty"),
             "{events:?}"
         );
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap()
                 .as_deref(),
             Some("0\u{1f}object-256")
@@ -2166,7 +2176,7 @@ mod tests {
         let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
         assert!(scheduler.tick(&host).await.is_empty());
         // Thirty-two frozen pages across other projects fill the host. Nothing drains that cap as jobs finish, so the slot completes as refused at the cron cadence rather than holding the slot due and re-selecting every idle poll.
-        for index in 0..memory_store::curator_jobs::MAX_FROZEN_SELECTIONS_PER_HOST {
+        for index in 0..memory_store::memory_reviewer_jobs::MAX_FROZEN_SELECTIONS_PER_HOST {
             store
                 .freeze_selection(
                     &format!("other:{index}"),
@@ -2181,19 +2191,23 @@ mod tests {
         clock.advance(15 * MINUTE);
         let events = scheduler.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["ok"] == false && response["code"] == "curator_selection_refused"),
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["ok"] == false && response["code"] == "memory_reviewer_selection_refused"),
             "{events:?}"
         );
         assert_eq!(store.frozen_selection_for_project("git:a").unwrap(), None);
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap(),
             None,
             "the cursor stays where the last completed slot left it"
         );
         assert!(
-            holds_no_live_claim(&store, "git:a", ScheduledTask::CuratorReviewSelection),
+            holds_no_live_claim(
+                &store,
+                "git:a",
+                ScheduledTask::MemoryReviewerReviewSelection
+            ),
             "the refused slot is complete on the ledger"
         );
         // The slot advanced to its next cron instant: an idle poll later runs nothing.
@@ -2205,18 +2219,18 @@ mod tests {
         *host.selections.lock().unwrap() = vec![Ok(selection_page(50, 1, Some("c")))];
         let events = scheduler.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued"),
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_enqueued"),
             "{events:?}"
         );
         assert_eq!(ready_jobs(&store, "git:a"), 1);
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap()
                 .as_deref(),
             Some("c")
         );
-        for index in 0..memory_store::curator_jobs::MAX_FROZEN_SELECTIONS_PER_HOST {
+        for index in 0..memory_store::memory_reviewer_jobs::MAX_FROZEN_SELECTIONS_PER_HOST {
             assert_eq!(
                 store
                     .lookup_frozen_selection(&format!("other:{index}"), "slot", "attempt")
@@ -2251,18 +2265,18 @@ mod tests {
         clock.advance(15 * MINUTE);
         let events = scheduler.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued"),
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_enqueued"),
             "{events:?}"
         );
         clock.advance(15 * MINUTE);
         let events = scheduler.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["ok"] == false && response["code"] == "curator_selection_failed"),
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["ok"] == false && response["code"] == "memory_reviewer_selection_failed"),
             "{events:?}"
         );
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap()
                 .as_deref(),
             Some("c"),
@@ -2271,7 +2285,7 @@ mod tests {
         assert!(holds_no_live_claim(
             &store,
             "git:a",
-            ScheduledTask::CuratorReviewSelection
+            ScheduledTask::MemoryReviewerReviewSelection
         ));
         clock.advance(MINUTE);
         assert!(
@@ -2288,7 +2302,7 @@ mod tests {
         clock.advance(MINUTE);
         let events = scheduler.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { due_at_ms, outcome: TaskRunOutcome::Ran { response }, .. } if *due_at_ms == T0 + 45 * MINUTE_MS && response["code"] == "curator_selection_enqueued"),
+            matches!(&events[0], TickEvent::Ran { due_at_ms, outcome: TaskRunOutcome::Ran { response }, .. } if *due_at_ms == T0 + 45 * MINUTE_MS && response["code"] == "memory_reviewer_selection_enqueued"),
             "{events:?}"
         );
         assert_eq!(
@@ -2305,12 +2319,13 @@ mod tests {
 
     #[test]
     fn only_pending_job_capacity_defers_a_frozen_page() {
-        for refusal in CuratorJobRefusal::ALL {
+        for refusal in MemoryReviewerJobRefusal::ALL {
             assert_eq!(
                 drains_as_jobs_finish(refusal),
                 matches!(
                     refusal,
-                    CuratorJobRefusal::ProjectCapacity | CuratorJobRefusal::HostCapacity
+                    MemoryReviewerJobRefusal::ProjectCapacity
+                        | MemoryReviewerJobRefusal::HostCapacity
                 ),
                 "{refusal:?}"
             );
@@ -2331,15 +2346,15 @@ mod tests {
             firing_id: "f".to_string(),
             ordinal: 0,
         };
-        let cap = memory_store::curator_jobs::MAX_PENDING_CURATOR_JOBS_PER_PROJECT;
+        let cap = memory_store::memory_reviewer_jobs::MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT;
         for index in 0..cap - 2 {
             let page = selection_page(1_000 + index, 1, None);
             store
-                .reserve_curator_job("git:a", &producer, &page.references[0], T0)
+                .reserve_memory_reviewer_job("git:a", &producer, &page.references[0], T0)
                 .unwrap();
         }
         store
-            .reserve_curator_job(
+            .reserve_memory_reviewer_job(
                 "git:a",
                 &producer,
                 &selection_page(0, 1, None).references[0],
@@ -2355,18 +2370,24 @@ mod tests {
         assert_eq!(
             *outcome,
             TaskRunOutcome::Ran {
-                response: json!({"ok": true, "code": "curator_selection_enqueued", "jobs": 1, "replayed": 1, "next_cursor": "c"})
+                response: json!({"ok": true, "code": "memory_reviewer_selection_enqueued", "jobs": 1, "replayed": 1, "next_cursor": "c"})
             }
         );
-        assert_eq!(store.curator_headroom("git:a").unwrap().pending_jobs, cap);
+        assert_eq!(
+            store
+                .memory_reviewer_headroom("git:a")
+                .unwrap()
+                .pending_jobs,
+            cap
+        );
     }
 
     #[tokio::test]
     async fn an_exhausted_metadata_quota_completes_the_slot_and_keeps_the_page_for_the_next_cron_slot()
      {
-        use memory_store::curator_jobs::{
-            CURATOR_JOB_ALLOWANCE_BYTES, FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
-            FROZEN_SELECTION_ALLOWANCE_BYTES, MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+        use memory_store::memory_reviewer_jobs::{
+            FROZEN_PAGE_RECEIPT_CHARGE_BYTES, FROZEN_SELECTION_ALLOWANCE_BYTES,
+            MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT, MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
         };
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());
@@ -2382,11 +2403,11 @@ mod tests {
         };
         let filler = selection_page(1_000, 1, None).references[0].clone();
         store
-            .reserve_curator_job("git:a", &producer, &filler, T0)
+            .reserve_memory_reviewer_job("git:a", &producer, &filler, T0)
             .unwrap();
         let near_quota = i64::try_from(
-            MAX_CURATOR_METADATA_BYTES_PER_PROJECT
-                - CURATOR_JOB_ALLOWANCE_BYTES
+            MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT
+                - MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES
                 - FROZEN_SELECTION_ALLOWANCE_BYTES
                 - FROZEN_PAGE_RECEIPT_CHARGE_BYTES,
         )
@@ -2394,7 +2415,7 @@ mod tests {
         store
             .with_fenced_conn_for_test(|conn| {
                 conn.execute(
-                    "UPDATE curator_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
+                    "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
                     rusqlite::params![near_quota, filler.causal_identity().unwrap()],
                 )
             })
@@ -2404,11 +2425,17 @@ mod tests {
         let events = scheduler.tick(&host).await;
         // The quota is a ceiling for the store incarnation, so the slot completes rather than holding the claim: the page stays frozen, no reference is written, and the cursor does not move.
         assert!(
-            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["ok"] == false && response["code"] == "curator_selection_refused" && response["refusal"].as_str().unwrap().contains("quota")),
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["ok"] == false && response["code"] == "memory_reviewer_selection_refused" && response["refusal"].as_str().unwrap().contains("quota")),
             "{events:?}"
         );
         assert_eq!(ready_jobs(&store, "git:a"), 0);
-        assert_eq!(store.curator_headroom("git:a").unwrap().pending_jobs, 1);
+        assert_eq!(
+            store
+                .memory_reviewer_headroom("git:a")
+                .unwrap()
+                .pending_jobs,
+            1
+        );
         let frozen = store
             .frozen_selection_for_project("git:a")
             .unwrap()
@@ -2416,14 +2443,14 @@ mod tests {
         assert_eq!(frozen.state, FrozenSelectionState::Frozen);
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap(),
             None
         );
         assert!(holds_no_live_claim(
             &store,
             "git:a",
-            ScheduledTask::CuratorReviewSelection
+            ScheduledTask::MemoryReviewerReviewSelection
         ));
         // An idle poll later nothing runs; the next cron slot offers the same frozen page again without selecting.
         clock.advance(MINUTE);
@@ -2431,7 +2458,7 @@ mod tests {
         clock.advance(14 * MINUTE);
         let events = scheduler.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_refused"),
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_refused"),
             "{events:?}"
         );
         assert_eq!(host.selection_cursors.lock().unwrap().len(), 1);
@@ -2443,9 +2470,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_page_that_fits_once_its_own_allowance_is_released_is_enqueued() {
-        use memory_store::curator_jobs::{
-            CURATOR_JOB_ALLOWANCE_BYTES, CURATOR_RECEIPT_CHARGE_BYTES,
-            MAX_CURATOR_METADATA_BYTES_PER_PROJECT,
+        use memory_store::memory_reviewer_jobs::{
+            MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT, MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES,
+            MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
         };
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path());
@@ -2461,19 +2488,19 @@ mod tests {
         };
         let filler = selection_page(1_000, 1, None).references[0].clone();
         store
-            .reserve_curator_job("git:a", &producer, &filler, T0)
+            .reserve_memory_reviewer_job("git:a", &producer, &filler, T0)
             .unwrap();
         let near_quota = i64::try_from(
-            MAX_CURATOR_METADATA_BYTES_PER_PROJECT
-                - CURATOR_JOB_ALLOWANCE_BYTES
-                - memory_store::curator_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES
-                - 2 * (CURATOR_JOB_ALLOWANCE_BYTES + CURATOR_RECEIPT_CHARGE_BYTES),
+            MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT
+                - MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES
+                - memory_store::memory_reviewer_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES
+                - 2 * (MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES + MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES),
         )
         .unwrap();
         store
             .with_fenced_conn_for_test(|conn| {
                 conn.execute(
-                    "UPDATE curator_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
+                    "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = ?1 WHERE causal_identity = ?2",
                     rusqlite::params![near_quota, filler.causal_identity().unwrap()],
                 )
             })
@@ -2482,13 +2509,13 @@ mod tests {
         clock.advance(15 * MINUTE);
         let events = scheduler.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "curator_selection_enqueued" && response["jobs"] == 2),
+            matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["code"] == "memory_reviewer_selection_enqueued" && response["jobs"] == 2),
             "{events:?}"
         );
         assert_eq!(ready_jobs(&store, "git:a"), 2);
         assert_eq!(
             store
-                .curator_headroom("git:a")
+                .memory_reviewer_headroom("git:a")
                 .unwrap()
                 .project_metadata_remaining,
             0
@@ -2501,16 +2528,16 @@ mod tests {
         let store = open_store(dir.path());
         let scheduled = selection_project(&store, "git:a");
         let due = T0 + 15 * MINUTE_MS;
-        let command = slot_command_id(CURATOR_REVIEW_SELECTION_TASK, due);
+        let command = slot_command_id(MEMORY_REVIEWER_REVIEW_SELECTION_TASK, due);
         // A predecessor leased the slot, froze its page, and died with the claim live and the page frozen.
         match store
             .acquire_memory_classifier_task(
                 "git:a",
                 &command,
                 SCHEDULER_INSTANCE,
-                ScheduledTask::CuratorReviewSelection.ledger_slot(),
+                ScheduledTask::MemoryReviewerReviewSelection.ledger_slot(),
                 7,
-                CURATOR_REVIEW_SELECTION_TASK_ID,
+                MEMORY_REVIEWER_REVIEW_SELECTION_TASK_ID,
                 due,
                 due,
             )
@@ -2522,7 +2549,7 @@ mod tests {
         store
             .freeze_selection(
                 "git:a",
-                CURATOR_REVIEW_SELECTION_TASK,
+                MEMORY_REVIEWER_REVIEW_SELECTION_TASK,
                 &command,
                 &selection_page(0, 2, Some("c")),
                 due,
@@ -2536,14 +2563,14 @@ mod tests {
         clock.advance(15 * MINUTE);
         let events = successor.tick(&host).await;
         assert!(
-            matches!(&events[0], TickEvent::Ran { due_at_ms, outcome: TaskRunOutcome::Ran { response }, .. } if *due_at_ms == due && response["code"] == "curator_selection_enqueued"),
+            matches!(&events[0], TickEvent::Ran { due_at_ms, outcome: TaskRunOutcome::Ran { response }, .. } if *due_at_ms == due && response["code"] == "memory_reviewer_selection_enqueued"),
             "{events:?}"
         );
         assert!(host.selection_cursors.lock().unwrap().is_empty());
         assert_eq!(ready_jobs(&store, "git:a"), 2);
         assert_eq!(
             store
-                .selection_cursor("git:a", CURATOR_REVIEW_SELECTION_TASK)
+                .selection_cursor("git:a", MEMORY_REVIEWER_REVIEW_SELECTION_TASK)
                 .unwrap()
                 .as_deref(),
             Some("c")
