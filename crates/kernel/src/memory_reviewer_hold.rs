@@ -18,8 +18,10 @@ use super::review_staging::{
 };
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
 
-pub const MEMORY_REVIEWER_EXECUTION_HOLD_KIND: &str = "memory_reviewer_execution";
-pub const MEMORY_REVIEWER_REVIEW_HOLD_KIND: &str = "memory_reviewer_review";
+/// Storage-format value matched byte for byte against stored pins; independent of its Rust identifier.
+pub const MEMORY_REVIEWER_EXECUTION_HOLD_KIND: &str = "curator_execution";
+/// Storage-format value matched byte for byte against stored pins; independent of its Rust identifier.
+pub const MEMORY_REVIEWER_REVIEW_HOLD_KIND: &str = "curator_review";
 pub use super::cas::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS;
 /// Review expiry bound for a selected proposal, measured from result creation.
 pub const REVIEW_EXPIRY_MAX_MS: i64 = 7 * 24 * 60 * 60 * 1_000;

@@ -280,6 +280,28 @@ impl Fixture {
             .unwrap()
         })
     }
+
+    fn retention_class(&self, evidence_id: &str) -> String {
+        inspect(self.root(), |conn| {
+            conn.query_row(
+                "SELECT retention_class FROM evidence_meta WHERE evidence_id=?1",
+                [evidence_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        })
+    }
+
+    fn invalidated(&self, evidence_id: &str) -> bool {
+        inspect(self.root(), |conn| {
+            conn.query_row(
+                "SELECT invalidated_commit_seq IS NOT NULL FROM evidence_meta WHERE evidence_id=?1",
+                [evidence_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        })
+    }
 }
 
 fn refusal(error: MemoryReviewerHoldError) -> MemoryReviewerHoldRefusal {
@@ -1748,4 +1770,96 @@ fn a_degraded_hold_is_recovered_but_gains_no_references() {
         .store
         .release_execution_hold(&retried.hold_id, &binding)
         .unwrap();
+}
+
+/// The pin kinds and the capture retention class are storage-format text: a store's
+/// rows carry them exactly as written, whatever the role is called in code. A hold and
+/// a capture stored under that text are still recognized by every reader keyed on it:
+/// hold validation and release, and the capture expiry sweep.
+#[test]
+fn stored_hold_kinds_and_capture_class_are_recognized_by_their_on_disk_text() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let evidence = fixture.ingest("stored", b"stored capture", Some(now + HOUR_MS));
+    let binding = fixture.binding("job-stored", 1);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&binding, std::slice::from_ref(&evidence), now + HOUR_MS)
+        .unwrap();
+    // The rows as an existing store holds them.
+    mutate(
+        fixture.root(),
+        "UPDATE evidence_meta SET retention_class='curator_capture' WHERE evidence_id=?1",
+        [&evidence],
+    );
+    mutate(
+        fixture.root(),
+        "UPDATE capture_pins SET pin_kind='curator_execution' WHERE capture_pin_id=?1",
+        [&hold.hold_id],
+    );
+    assert_eq!(
+        fixture.pin(&hold.hold_id).0,
+        MEMORY_REVIEWER_EXECUTION_HOLD_KIND
+    );
+    assert_eq!(
+        fixture.retention_class(&evidence),
+        MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS
+    );
+
+    let held = fixture
+        .store
+        .validate_held_evidence(
+            &hold.hold_id,
+            MemoryReviewerHoldKind::Execution,
+            &binding,
+            std::slice::from_ref(&evidence),
+            now,
+        )
+        .expect("a stored execution hold validates for its owner");
+    assert_eq!(held.len(), 1);
+    fixture
+        .store
+        .release_execution_hold(&hold.hold_id, &binding)
+        .expect("a stored execution hold releases for its owner");
+
+    // Once its acquisition reference lapses and nothing pins it, the sweep retires it.
+    mutate(
+        fixture.root(),
+        "UPDATE evidence_meta SET retain_until=?1 WHERE evidence_id=?2",
+        rusqlite::params![now - 1, evidence],
+    );
+    let swept = fixture.store.expire_local_file_captures(now).unwrap();
+    assert_eq!(
+        swept.retired, 1,
+        "a stored capture past its reference is retired"
+    );
+    assert!(
+        fixture.invalidated(&evidence),
+        "the retired capture's evidence row is invalidated"
+    );
+
+    // A review hold stored under its text is likewise recognized.
+    let review_evidence = fixture.ingest("stored-review", b"stored review", Some(now + HOUR_MS));
+    let review_binding = fixture.binding("job-stored-review", 1);
+    let review = fixture
+        .store
+        .acquire_execution_hold(
+            &review_binding,
+            std::slice::from_ref(&review_evidence),
+            now + HOUR_MS,
+        )
+        .unwrap();
+    mutate(
+        fixture.root(),
+        "UPDATE capture_pins SET pin_kind='curator_review' WHERE capture_pin_id=?1",
+        [&review.hold_id],
+    );
+    assert_eq!(
+        fixture.pin(&review.hold_id).0,
+        MEMORY_REVIEWER_REVIEW_HOLD_KIND
+    );
+    fixture
+        .store
+        .release_review_hold(&review.hold_id, &review_binding)
+        .expect("a stored review hold releases for its owner");
 }
