@@ -26,6 +26,8 @@ use shm_transport::profile::host_payload_pool_profile;
 use napi_buffers::ExternalRef;
 
 const PROFILE: &str = shm_transport::profile::HOST_PAYLOAD_POOL_PROFILE;
+const TOKENIZER_INPUT_ERROR: &str = "tokenizer input must be a string";
+const TOKENIZER_FAILURE: &str = "native tokenizer failed";
 
 /// The one bounded, redacted failure every malformed raw descriptor maps
 /// to. Grant bytes, pids, fds, and key names never reach error messages.
@@ -508,6 +510,17 @@ fn ensure_cleanup(env: &Env, registry: &mut Registry) -> Result<()> {
     env.add_async_cleanup_hook(raw, cleanup_env)?;
     registry.cleanup_registered = true;
     Ok(())
+}
+
+#[napi]
+pub fn estimate_tokens(text: Unknown<'_>) -> Result<u32> {
+    if text.get_type().map_err(|_| error(TOKENIZER_INPUT_ERROR))? != ValueType::String {
+        return Err(error(TOKENIZER_INPUT_ERROR));
+    }
+    // SAFETY: the value was type-checked as String above.
+    let text: String =
+        unsafe { text.cast::<String>() }.map_err(|_| error(TOKENIZER_INPUT_ERROR))?;
+    u32::try_from(tokenizer::estimate_tokens(&text)).map_err(|_| error(TOKENIZER_FAILURE))
 }
 
 #[napi]

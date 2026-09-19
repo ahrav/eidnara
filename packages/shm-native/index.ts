@@ -91,6 +91,7 @@ export type NativeStartupFailureReason =
     | "debug_build"
     | "wrong_platform_binary"
     | "addon_load_failed"
+    | "tokenizer_export_unavailable"
     | "capability_unavailable";
 
 /** Bounded startup failure safe for cross-package classification. */
@@ -98,6 +99,22 @@ export class NativeStartupError extends Error {
     constructor(readonly reason: NativeStartupFailureReason) {
         super(`shared-memory native startup failed: ${reason}`);
         this.name = "NativeStartupError";
+    }
+}
+
+/** Counts Claude tokens synchronously with the Rust tokenizer. */
+export function estimateTokens(text: string): number {
+    if (typeof text !== "string") {
+        throw new TypeError("native tokenizer input must be a string");
+    }
+    const count = requireAddon().estimateTokens;
+    if (typeof count !== "function") {
+        throw new NativeStartupError("tokenizer_export_unavailable");
+    }
+    try {
+        return count(text);
+    } catch {
+        throw new Error("native tokenizer failed");
     }
 }
 
@@ -138,6 +155,7 @@ interface NativeAddon {
     buildTarget(): string;
     descriptorSchemaVersion(): number;
     qualifiedTestProfile(): string;
+    estimateTokens?: (text: string) => number;
     createExternalProbe(length: number): Uint8Array;
     detachArrayBuffer(buffer: ArrayBuffer): boolean;
     registerCleanupProbe(path: string): void;

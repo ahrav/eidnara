@@ -4,7 +4,9 @@ import { setFlagsFromString } from "node:v8";
 import {
     activeExternalRefs,
     activeNativeChannels,
+    estimateTokens,
     NativeChannel,
+    NativeStartupError,
     type NativeDescriptor,
     type NativeReceiveLease,
     probeCapabilities,
@@ -12,13 +14,48 @@ import {
     setExternalViewCreationFailpoint,
 } from "../index.ts";
 
+const TOKEN_FIXTURES = [
+    ["", 0],
+    ["hello world", 2],
+    ["café résumé naïve Zürich piñata Malmö", 17],
+    ["x\u{feff}\n", 3],
+    ["valueOf", 2],
+    ["before <EOT> mid <META_START> after <SOS> end", 16],
+    ["a".repeat(300) + " " + "=".repeat(100) + " ".repeat(51) + "x", 25],
+] as const;
+
+const hostile = "hostile-tokenizer-input-5f917ed8";
+for (const value of [null, 1, { [hostile]: true }]) {
+    assert.throws(
+        () => estimateTokens(value as never),
+        (error: unknown) =>
+            error instanceof Error && !error.message.includes(hostile),
+    );
+}
+
+// Counting must work before, and independently of, the transport capability probe.
+let tokenizerAvailable = false;
+let tokenizerReason: string | undefined;
+try {
+    for (const [text, expected] of TOKEN_FIXTURES) {
+        assert.equal(estimateTokens(text), expected, JSON.stringify(text));
+    }
+    tokenizerAvailable = true;
+} catch (error) {
+    assert.ok(error instanceof NativeStartupError);
+    assert.notEqual(
+        process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET,
+        "1",
+        `claimed native tokenizer unavailable: ${error.reason}`,
+    );
+    assert.ok(!error.message.includes(hostile));
+    tokenizerReason = error.reason;
+}
+
 const result = probeCapabilities();
 assert.ok(result.napiVersion === null || result.napiVersion >= 1);
 // A claimed source-build target must load its addon; `addon_unavailable` is the only reason returned before the addon loads.
-if (
-    process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1" &&
-    !result.available
-) {
+if (process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET === "1" && !result.available) {
     assert.notEqual(
         result.reason,
         "addon_unavailable",
@@ -37,7 +74,9 @@ if (result.available) {
 } else {
     assert.ok(result.reason && result.reason.length > 0);
 }
-console.log(JSON.stringify({ runtime: process.release.name, ...result }));
+console.log(
+    JSON.stringify({ runtime: process.release.name, tokenizerAvailable, tokenizerReason, ...result }),
+);
 
 function runAttachBoundary(): void {
     const hostile: unknown[] = [
