@@ -331,6 +331,11 @@ pub enum MediaKind {
 /// store identity `storage::open_sqlite` checks on every open.
 const BASELINE: &str = include_str!("../baseline.sql");
 
+/// The store identity `storage::open_sqlite` checks on every open and a fresh file records in `format_marker`: the digest of the storage crate's baseline followed by this crate's, not of this crate's alone.
+pub fn baseline_digest() -> String {
+    storage::baseline_digest(BASELINE)
+}
+
 /// Bytes of page cache the store connection holds; `PRAGMA cache_size` is derived from
 /// this and the file's measured page size, so a file with a different page size holds the
 /// same bytes. The daemon counts this budget in its retained-resident declaration. The

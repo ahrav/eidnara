@@ -422,9 +422,12 @@ fn capacity_warn_health(core_file_warn: bool, artifact_warn: bool) -> host_runti
 /// allowlist, so a full `ready` block goes through the real sanitizer here.
 #[test]
 fn sanitized_status_keeps_every_curator_counter_the_daemon_emits() {
-    use daemon::curator::lifecycle::{CuratorHealthBlock, CuratorState};
+    use daemon::curator::lifecycle::{
+        ActivationState, ActivationStateText, CuratorHealthBlock, CuratorState,
+    };
     let block = CuratorHealthBlock {
         curator_state: CuratorState::Ready,
+        activation_state: ActivationStateText(ActivationState::Open),
         sampled_at_ms: Some(now_ms()),
         swept_jobs: 1,
         swept_selections: 2,

@@ -159,6 +159,8 @@ pub struct Disclosed {
 pub struct Disclosure<'a> {
     pub store: &'a KernelStore,
     pub ledger: &'a MemoryStore,
+    /// The Memory Store project the job's attempt rows live under: the authority key, not the Kernel project digest the hold is scoped by.
+    pub project: &'a str,
     pub broker: &'a EvidenceBroker,
     pub sender: &'a Sender,
     pub approval: Option<&'a DisclosureApproval>,
@@ -293,7 +295,7 @@ impl Disclosure<'_> {
         let outcome = self
             .ledger
             .dispatch_curator_attempt(
-                &hold.project_digest,
+                self.project,
                 &hold.subject,
                 hold.generation,
                 self.claim_id,
@@ -316,7 +318,7 @@ impl Disclosure<'_> {
                 if !finished {
                     eprintln!(
                         "daemon: curator disclosure terminal NotDispatched not recorded for {}/{} attempt {attempt_index}: {reason}",
-                        hold.project_digest, hold.subject
+                        self.project, hold.subject
                     );
                 }
                 return Err(DisclosureRefusal::ChargedNotDispatched {
@@ -495,7 +497,7 @@ impl Disclosure<'_> {
                 let hold = &self.broker.binding().hold;
                 eprintln!(
                     "daemon: curator disclosure terminal {terminal:?} not recorded for {}/{} attempt {attempt_index} ({refusal}): {error}",
-                    hold.project_digest, hold.subject
+                    self.project, hold.subject
                 );
                 DisclosureRefusal::TerminalNotRecorded {
                     attempt_index,
@@ -509,7 +511,7 @@ impl Disclosure<'_> {
         let hold = &self.broker.binding().hold;
         self.ledger
             .finish_curator_attempt(
-                &hold.project_digest,
+                self.project,
                 &hold.subject,
                 hold.generation,
                 self.claim_id,

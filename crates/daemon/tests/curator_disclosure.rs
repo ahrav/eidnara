@@ -436,6 +436,7 @@ async fn attempt(
     Disclosure {
         store: &fixture.store,
         ledger: &fixture.ledger,
+        project: PROJECT,
         broker,
         sender: &sender,
         approval,
@@ -634,6 +635,7 @@ async fn nothing_is_sent_without_approval_under_cancellation_or_when_the_marker_
     let outcome = Disclosure {
         store: &fixture.store,
         ledger: &fixture.ledger,
+        project: PROJECT,
         broker: &broker,
         sender: &sender,
         approval: Some(&approved),
@@ -1018,6 +1020,7 @@ async fn the_network_wait_begins_only_after_both_owners_release() {
     let disclosure = Disclosure {
         store: &fixture.store,
         ledger: &fixture.ledger,
+        project: PROJECT,
         broker: &broker,
         sender: &sender,
         approval: Some(&fixture.approval()),
@@ -1099,6 +1102,7 @@ async fn attempt_with_sender(
     Disclosure {
         store: &fixture.store,
         ledger: &fixture.ledger,
+        project: PROJECT,
         broker,
         sender,
         approval: Some(&fixture.approval()),

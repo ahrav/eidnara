@@ -2416,13 +2416,21 @@ mod sqlite_backend {
         objects: Vec<SchemaObject>,
     }
 
+    /// The lowercase SHA-256 of `STORE_BASELINE`, a newline, and `consumer`. `open_sqlite` verifies each file against this digest; fresh files store it in `format_marker`.
+    pub fn baseline_digest(consumer: &str) -> String {
+        format!(
+            "{:x}",
+            Sha256::digest(format!("{STORE_BASELINE}\n{consumer}").as_bytes())
+        )
+    }
+
     impl ExpectedIdentity {
         /// The inventory comes from applying the text to an in-memory database, so
         /// the comparison uses SQLite's own normalization of the DDL rather than a
         /// second parser.
         pub(crate) fn for_baseline(consumer: &str) -> Result<Self, StoreError> {
             let text = format!("{STORE_BASELINE}\n{consumer}");
-            let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+            let digest = baseline_digest(consumer);
             let scratch =
                 Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
             // The authorizer runs before each statement, so an `ATTACH` is refused before
@@ -3133,8 +3141,9 @@ pub use sqlite_backend::library_memory_used;
 pub use sqlite_backend::{
     APPLICATION_ID, CachedStatement, GuardedConn, HandoffOutcome, INFRASTRUCTURE_TABLES,
     MaintenanceConn, SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND, STORE_BASELINE, SchemaObject,
-    SqliteStore, USER_VERSION, delete_sqlite_family, immutable_uri, inspection_scratch_tag,
-    is_interrupted, open_sqlite, schema_inventory, verify_baseline, verify_sqlite_family_removed,
+    SqliteStore, USER_VERSION, baseline_digest, delete_sqlite_family, immutable_uri,
+    inspection_scratch_tag, is_interrupted, open_sqlite, schema_inventory, verify_baseline,
+    verify_sqlite_family_removed,
 };
 
 #[cfg(all(test, feature = "sqlite"))]

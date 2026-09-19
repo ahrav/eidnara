@@ -19,6 +19,14 @@ pub const MEMORY_CLASSES: &[OccurrenceClass] = &[
     OccurrenceClass::CanonicalClaims,
     OccurrenceClass::PromotedMemory,
 ];
+
+pub fn resolvable_classes() -> Vec<OccurrenceClass> {
+    MEMORY_CLASSES
+        .iter()
+        .copied()
+        .filter(|class| super::coordinator::resolves_class(*class))
+        .collect()
+}
 /// Live descriptors examined per selection page, so one slot's work is bounded whatever the inventory's size.
 pub const MAX_EXAMINED_PER_PAGE: usize = 256;
 
@@ -78,8 +86,10 @@ impl SelectionError {
 
 /// What one project's selection is scoped and fingerprinted by.
 pub struct SelectionScope<'a> {
+    /// The Kernel scope eligibility is judged in: the only Kernel-scoped member.
     pub project: &'a ProjectScope,
-    pub project_digest: &'a str,
+    /// The Memory Store project the review jobs live under: the authority key, not the Kernel digest.
+    pub ledger_project: &'a str,
     /// Descriptor classes walked, in order; production passes [`MEMORY_CLASSES`].
     pub classes: &'a [OccurrenceClass],
     /// The policies the review depends on, so a policy change permits one new job at an unchanged target.
@@ -96,7 +106,7 @@ pub fn select_review_targets(
 ) -> Result<FrozenSelectionPage, SelectionError> {
     let SelectionScope {
         project,
-        project_digest,
+        ledger_project,
         classes,
         policy_versions,
     } = *scope;
@@ -156,7 +166,7 @@ pub fn select_review_targets(
             if verdict.permits()
                 && let Some((inputs, causal_identity)) = causal_inputs(row, policy_versions)
                 && ledger
-                    .lookup_curator_job(project_digest, &causal_identity)
+                    .lookup_curator_job(ledger_project, &causal_identity)
                     .map_err(|error| SelectionError::Ledger(error.to_string()))?
                     .is_none()
             {

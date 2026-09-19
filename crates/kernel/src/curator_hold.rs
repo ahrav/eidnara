@@ -186,7 +186,7 @@ pub(crate) struct StoredHold {
 }
 
 impl KernelStore {
-    /// Pins `evidence_ids` for one job until `expires_at`, the job's run cutoff, after validating every id, the reference count, the active-hold counts, and the distinct backing bytes the project and host would hold. Nothing is written when any check fails. A binding that already owns a live hold gets that hold back with the ids added and its expiry unchanged, so a retried acquisition never allocates a second hold.
+    /// Pins `evidence_ids` for one job until `expires_at`, the job's run cutoff, after validating every id, the reference count, the active-hold counts, and the distinct backing bytes the project and host would hold. Nothing is written when any check fails. A binding that already owns a live hold gets that hold back with the ids added and its expiry unchanged, so a retried acquisition never allocates a second hold. `evidence_ids` may be empty: a job whose subject is a staged review input, which staging itself retains until its queue deadline, starts with no captured evidence and grows the hold through [`Self::extend_execution_hold`] as the investigation reads.
     pub fn acquire_execution_hold(
         &self,
         binding: &CuratorHoldBinding,
@@ -485,9 +485,6 @@ impl KernelStore {
         quota: BackingQuota,
     ) -> Result<CuratorHold, CuratorHoldError> {
         binding.validate()?;
-        if evidence_ids.is_empty() {
-            return Err(CuratorHoldRefusal::InvalidRequest.into());
-        }
         if evidence_ids.len() > MAX_CURATOR_HOLD_REFERENCES {
             return Err(CuratorHoldRefusal::TooManyReferences.into());
         }

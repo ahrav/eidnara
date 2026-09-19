@@ -649,6 +649,7 @@ payload, a reason string, or a project.
 | field | type | rule |
 | --- | --- | --- |
 | `curator_state` | `"ready" \| "starting" \| "unavailable"` | required; any other value, a non-string, or a non-object block drops `curator` whole |
+| `activation_state` | `"open" \| "unknown" \| "stale" \| "missing" \| "refused" \| "unreadable" \| "malformed" \| "identity_mismatch" \| "unacknowledged" \| "unknown_credential" \| "unavailable" \| "store"` | whether the deployment owner's activation record admits Curator disclosure, as the worker last evaluated it; `unknown` before its first pass; `stale` once that evaluation is older than 300 s; any other value drops the field |
 | `sampled_at_ms` | unsigned integer or `null` | `null` means no sample yet; a `ready` block older than five minutes reports as `unavailable` |
 | `swept_jobs`, `swept_selections` | unsigned integer | jobs and frozen selections the last expiry sweep closed |
 | `jobs_reserved`, `jobs_ready` | unsigned integer | pending review jobs by state |

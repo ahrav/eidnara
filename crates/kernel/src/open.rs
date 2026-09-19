@@ -696,6 +696,11 @@ fn expected_identity() -> Result<&'static ExpectedIdentity, KernelError> {
     EXPECTED_IDENTITY.as_ref().ok_or(KernelError::Io)
 }
 
+/// The lowercase SHA-256 the shipped Kernel schema installs and every open checks against: the identity a deployment record names when it binds itself to one baseline.
+pub fn kernel_baseline_digest() -> Result<&'static str, KernelError> {
+    expected_identity().map(|identity| identity.digest.as_str())
+}
+
 /// Classification must leave the database and its `-wal` byte-identical.
 ///
 /// The `Foreign` and `Inconclusive` outcomes promise untouched durable content.

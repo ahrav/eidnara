@@ -2,6 +2,7 @@
 
 use std::ops::Range;
 
+pub mod activation;
 pub mod broker;
 pub mod coordinator;
 pub mod disclosure;
@@ -14,6 +15,7 @@ pub mod related_memories;
 pub mod selection;
 pub mod settlement;
 pub mod steps;
+pub mod worker;
 
 /// Per-hit excerpt bound (Q19), in bytes of the referenced artifact.
 pub const MAX_EXCERPT_BYTES: usize = 512;

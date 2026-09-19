@@ -261,7 +261,7 @@ impl Fixture {
             &self.ledger,
             &SelectionScope {
                 project: &ProjectScope::new(PROJECT).unwrap(),
-                project_digest: PROJECT,
+                ledger_project: PROJECT,
                 classes,
                 policy_versions: &BTreeMap::new(),
             },
@@ -361,7 +361,7 @@ fn targets_with_a_job_and_targets_the_remote_fold_denies_are_passed_over() {
         &fixture.ledger,
         &SelectionScope {
             project: &ProjectScope::new(PROJECT).unwrap(),
-            project_digest: PROJECT,
+            ledger_project: PROJECT,
             classes: &[OccurrenceClass::GitCommits],
             policy_versions: &BTreeMap::from([("egress".to_string(), "v3".to_string())]),
         },

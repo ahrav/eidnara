@@ -1221,7 +1221,7 @@ async fn a_selected_eligible_memory_becomes_a_published_proposal_through_the_sha
         &fixture.ledger,
         &SelectionScope {
             project: &kernel::ProjectScope::new(PROJECT).unwrap(),
-            project_digest: PROJECT,
+            ledger_project: PROJECT,
             classes: &[kernel::source_identity::OccurrenceClass::GitCommits],
             policy_versions: &BTreeMap::new(),
         },
@@ -1313,7 +1313,7 @@ async fn a_selected_eligible_memory_becomes_a_published_proposal_through_the_sha
         &fixture.ledger,
         &SelectionScope {
             project: &kernel::ProjectScope::new(PROJECT).unwrap(),
-            project_digest: PROJECT,
+            ledger_project: PROJECT,
             classes: &[kernel::source_identity::OccurrenceClass::GitCommits],
             policy_versions: &BTreeMap::new(),
         },
@@ -1487,8 +1487,8 @@ async fn a_cutoff_lapsed_on_the_wall_clock_abstains_as_budget_exhausted_without_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_staged_subject_with_no_linked_references_abstains_without_a_hold() {
-    // With no evidence to protect there is no execution hold to acquire, and the broker reads a staged row only under a live hold: the read is refused before the remote-destination policy is judged, nothing is sent, and the run settles on that refusal.
+async fn a_staged_subject_with_no_linked_references_is_read_under_an_empty_hold() {
+    // A staged subject starts with no captured evidence: the run takes an empty execution hold, the broker reads the staged row under it, and the default-Sensitive subject is refused by the remote-destination policy. Nothing is sent, and the run settles on the subject's own sensitivity, not on a missing hold.
     let mut fixture = Fixture::open(CASES[6].sources);
     assert!(fixture.input.starting_references.is_empty());
     let reference = fixture
@@ -1538,10 +1538,7 @@ async fn a_staged_subject_with_no_linked_references_abstains_without_a_hold() {
         .run(&peer, Some(fixture.approval()), &CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(
-        settled,
-        Settled::Abstained(AbstainReason::ExpectationChanged)
-    );
+    assert_eq!(settled, Settled::Abstained(AbstainReason::OwnerSensitive));
     assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
     assert_eq!(
         fixture.receipt().terminal,
@@ -2052,11 +2049,11 @@ async fn expanded_citations_are_deduplicated_and_bounded() {
     );
 }
 
-/// The network wait ends at the ledger's attempt deadline, which the claim expiry bounds, so a dispatched request cannot outlive the authority that must record it.
+/// The task lease is shorter than a run, so the run renews its claim before every attempt: a claim one second from lapsing no longer cuts the request short. The renewed claim expires a full lease later, past the request bound, and the request runs to the peer's answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_dispatched_request_ends_at_the_attempt_deadline_the_claim_bounds() {
+async fn a_claim_about_to_lapse_is_renewed_before_the_attempt_so_the_request_completes() {
     let fixture = Fixture::open(CASES[0].sources);
-    // One second before the claim lapses: the attempt deadline is the claim expiry, well under the 30-second request bound.
+    // One second before the claim lapses. Without renewal the attempt deadline would be the claim expiry and the held request would end there as exhausted.
     fixture.clock.store(
         fixture.now + memory_store::curator_ledger::CURATOR_TASK_LEASE_MS - 1_000,
         Ordering::SeqCst,
@@ -2071,7 +2068,7 @@ async fn a_dispatched_request_ends_at_the_attempt_deadline_the_claim_bounds() {
         }),
         |_| text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"late"}}"#),
     );
-    // The peer is released once the first attempt has lapsed, so its listener closes and the remaining rounds fail to connect at once; only the first wait measures the deadline.
+    // The peer answers only after the old claim expiry has passed; a request still waiting then is one the renewed claim carried.
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
         release_tx.send(()).ok();
@@ -2083,9 +2080,9 @@ async fn a_dispatched_request_ends_at_the_attempt_deadline_the_claim_bounds() {
     .await;
     let _ = server.await;
     let settled = outcome
-        .expect("every attempt ends at the claim-bounded deadline, not the 30-second request bound")
+        .expect("the request ends at the peer's answer, not the 30-second request bound")
         .unwrap();
-    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
 }
 
 /// A model profile the request encoder refuses is a configuration fault: the run reports it unavailable and leaves the receipt open, instead of durably abstaining the job as budget exhaustion.

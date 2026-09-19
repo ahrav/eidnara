@@ -599,6 +599,21 @@ fn sanitize_kernel_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
 pub(crate) const CURATOR_KEY: &str = "curator";
 const CURATOR_STATE_KEY: &str = "curator_state";
 const CURATOR_STATES: [&str; 3] = ["ready", STATE_STARTING, STATE_UNAVAILABLE];
+/// `activation_state` values: the gate is open, or closed for one of the record's closed reasons, or not yet evaluated.
+const CURATOR_ACTIVATION_STATES: [&str; 12] = [
+    "open",
+    "unknown",
+    "stale",
+    "missing",
+    "refused",
+    "unreadable",
+    "malformed",
+    "identity_mismatch",
+    "unacknowledged",
+    "unknown_credential",
+    "unavailable",
+    "store",
+];
 /// Every Curator counter the wire contract names (`docs/host-wire-protocol.md`, `metrics.curator`); an unknown field is dropped.
 const CURATOR_COUNTERS: [&str; 36] = [
     "swept_jobs",
@@ -654,6 +669,16 @@ fn sanitize_curator_block(raw: &serde_json::Value) -> Option<serde_json::Value> 
         CURATOR_STATE_KEY.to_owned(),
         serde_json::Value::String(state.to_owned()),
     );
+    if let Some(activation) = raw
+        .get("activation_state")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| CURATOR_ACTIVATION_STATES.contains(value))
+    {
+        block.insert(
+            "activation_state".to_owned(),
+            serde_json::Value::String(activation.to_owned()),
+        );
+    }
     match raw.get("sampled_at_ms") {
         Some(serde_json::Value::Null) => {
             block.insert("sampled_at_ms".to_owned(), serde_json::Value::Null);
@@ -1676,6 +1701,7 @@ mod curator_block_tests {
     fn curator_block_is_sanitized_field_by_field() {
         let mut full = serde_json::Map::new();
         full.insert("curator_state".into(), "ready".into());
+        full.insert("activation_state".into(), "identity_mismatch".into());
         full.insert("sampled_at_ms".into(), 1_700_000_000_000_u64.into());
         for (index, name) in CURATOR_COUNTERS.iter().enumerate() {
             full.insert((*name).to_owned(), (index as u64).into());
@@ -1683,7 +1709,8 @@ mod curator_block_tests {
         full.insert("job_ids".into(), serde_json::json!(["a", "b"]));
         let kept = curator_of(&report(serde_json::Value::Object(full.clone()))).expect("kept");
         let kept = kept.as_object().unwrap();
-        assert_eq!(kept.len(), 2 + CURATOR_COUNTERS.len());
+        assert_eq!(kept.len(), 3 + CURATOR_COUNTERS.len());
+        assert_eq!(kept["activation_state"], "identity_mismatch");
         assert!(kept.get("job_ids").is_none(), "unknown fields are dropped");
         for (index, name) in CURATOR_COUNTERS.iter().enumerate() {
             assert_eq!(kept[*name], serde_json::Value::from(index as u64), "{name}");
@@ -1691,6 +1718,7 @@ mod curator_block_tests {
 
         let partial = curator_of(&report(serde_json::json!({
             "curator_state": "starting",
+            "activation_state": "because I said so",
             "sampled_at_ms": null,
             "jobs_ready": -1,
             "jobs_reserved": "many",

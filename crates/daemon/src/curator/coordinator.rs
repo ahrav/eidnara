@@ -209,14 +209,15 @@ impl Coordinator {
         settled
     }
 
-    /// Resolves the subject and linked references and acquires the execution hold over their evidence. The hold is taken only for a run that will read: the Kernel refuses a hold expiring at or before its own clock, a refused subject sends nothing, and an evidence-free staged subject has nothing to protect. Each of those runs settles without a hold, so an empty `hold_id` reaches the broker for them.
+    /// Resolves the subject and linked references and acquires the execution hold over their evidence. The hold is taken only for a run that will read: the Kernel refuses a hold expiring at or before its own clock, and a refused subject sends nothing. Those runs settle without a hold, so an empty `hold_id` reaches the broker for them. A staged subject starts with no captured evidence and still takes a hold, empty: the broker reads the staged row under the run's live hold and grows it through extension as the investigation reads.
     fn prepare(&self, context: &JobContext<'_>) -> Result<Prepared, InvestigationError> {
         let memstore_incarnation = self
             .ledger
             .curator_store_incarnation()
             .map_err(|_| InvestigationError::Kernel(RefusalCode::Store))?;
+        // The hold is scoped by the Kernel project digest the binding carries; the ledger project is the authority key the job row lives under and need not be a digest.
         let hold_binding = CuratorHoldBinding {
-            project_digest: context.job.project.clone(),
+            project_digest: context.binding.project_digest.clone(),
             kernel_incarnation: context.receipt.kernel_incarnation_id.clone(),
             memstore_incarnation,
             subject: context.job.causal_identity.clone(),
@@ -243,7 +244,7 @@ impl Coordinator {
         protected.sort();
         protected.dedup();
         let before_cutoff = (self.now_ms)() < context.receipt.execution_cutoff_ms;
-        let hold_id = if before_cutoff && subject.is_ok() && !protected.is_empty() {
+        let hold_id = if before_cutoff && subject.is_ok() {
             match self.store.acquire_execution_hold(
                 &hold_binding,
                 &protected,
@@ -274,7 +275,7 @@ struct Prepared {
     hold_binding: CuratorHoldBinding,
     subject: Result<ReferenceExpectation, RefusalCode>,
     starting: Vec<ReferenceExpectation>,
-    /// `hold_id` is empty when the run holds no evidence.
+    /// `hold_id` is empty when the run took no hold: past the cutoff or with a refused subject.
     hold_id: String,
 }
 
@@ -302,6 +303,27 @@ fn marker_token() -> String {
 }
 
 impl Run<'_> {
+    /// The task lease is shorter than a run: one attempt plus the settlement reserve. A live worker renews before each attempt; a lease that will not renew is another worker's fence, and the run ends without settling.
+    fn renew_claim(&self) -> Result<(), InvestigationError> {
+        let claim = self.context.claim;
+        match self
+            .coordinator
+            .ledger
+            .renew_curator_task(
+                &self.context.job.project,
+                &claim.claim_id,
+                &claim.worker_instance,
+                claim.slot,
+                i64::try_from(self.context.receipt.authority_generation).unwrap_or(i64::MAX),
+                (self.coordinator.now_ms)(),
+            )
+            .map_err(|error| InvestigationError::Store(error.to_string()))?
+        {
+            memory_store::NoteEvalRenewOutcome::Renewed { .. } => Ok(()),
+            _ => Err(InvestigationError::Fenced),
+        }
+    }
+
     async fn investigate(
         &mut self,
         subject: Result<ReferenceExpectation, RefusalCode>,
@@ -337,6 +359,7 @@ impl Run<'_> {
             if (self.coordinator.now_ms)() >= self.context.receipt.execution_cutoff_ms {
                 return self.settle_now(RunResult::Exhausted).await;
             }
+            self.renew_claim()?;
             let attempt_index = u32::try_from(round).unwrap_or(u32::MAX);
             let attempt = self.attempt(attempt_index, cancel).await?;
             // A cancellation that landed while the attempt completed still belongs to the owner: no result of that attempt settles the receipt.
@@ -461,6 +484,7 @@ impl Run<'_> {
             Settlement {
                 store: &self.coordinator.store,
                 ledger: &self.coordinator.ledger,
+                project: &self.context.job.project,
                 binding: self.context.binding,
                 claim: self.context.claim,
                 now_ms: &move || now_ms(),
@@ -543,6 +567,7 @@ impl Run<'_> {
             let approval = coordinator.approval.clone();
             let now_ms = Arc::clone(&coordinator.now_ms);
             let claim_id = self.context.claim.claim_id.clone();
+            let project = self.context.job.project.clone();
             let outcome = Arc::clone(&outcome);
             move |sink: EventSink, token: CancellationToken| {
                 Box::pin(async move {
@@ -550,6 +575,7 @@ impl Run<'_> {
                     let disclosure = Disclosure {
                         store: &store,
                         ledger: &ledger,
+                        project: &project,
                         broker: &broker,
                         sender: &sender,
                         approval: approval.as_ref(),
@@ -916,23 +942,28 @@ fn resolve_descriptor(
         Some(revision) => revision,
         None => detail.revision.parse().map_err(|_| unsupported())?,
     };
-    // Canonical and promoted descriptors resolve through their originating decision (Q21); no producer targets one, so the class is refused rather than resolved untested.
-    let expectation = match class {
-        OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory => {
-            return Err(unsupported());
-        }
-        OccurrenceClass::Messages | OccurrenceClass::GitCommits | OccurrenceClass::RawToolSpans => {
-            ReferenceExpectation::NativeSource {
-                object_id: object_id.to_string(),
-                class,
-                source_revision,
-                artifact_digest: detail.artifact_digest.clone(),
-                evidence_id: detail.evidence_id.clone(),
-                occurrence_tuple: detail.occurrence_tuple.clone(),
-            }
-        }
+    if !resolves_class(class) {
+        return Err(InvestigationError::Refused(RefusalCode::Unsupported));
+    }
+    let expectation = ReferenceExpectation::NativeSource {
+        object_id: object_id.to_string(),
+        class,
+        source_revision,
+        artifact_digest: detail.artifact_digest.clone(),
+        evidence_id: detail.evidence_id.clone(),
+        occurrence_tuple: detail.occurrence_tuple.clone(),
     };
     Ok((expectation, vec![detail.evidence_id]))
+}
+
+/// Whether a descriptor of `class` resolves to a subject the run can read. Canonical and promoted descriptors resolve through their originating decision, a path this run does not implement, so they are refused; the selector walks only classes this admits.
+pub fn resolves_class(class: OccurrenceClass) -> bool {
+    match class {
+        OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory => false,
+        OccurrenceClass::Messages | OccurrenceClass::GitCommits | OccurrenceClass::RawToolSpans => {
+            true
+        }
+    }
 }
 
 /// Binds the model's outcome into a proposal: every citation resolves to disclosed evidence through the broker, names only bytes the model was shown, and is recorded as a citation; the target is the job's subject; the manifest reference digests the disclosed spans; policy dependencies are left for settlement to fill from the broker.
