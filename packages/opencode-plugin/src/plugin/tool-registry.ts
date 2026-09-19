@@ -45,7 +45,7 @@ export function createToolRegistry(args: {
     const kernelClient = kernelClientResolver(pluginConfig);
     const allTools: Record<string, ToolDefinition> = {
         ...(compactionOff ? {} : createEidnaraReduceTools({ rustToolBackends })),
-        ...createEidnaraNoteTools({ resolveProjectPath, rustToolBackends }),
+        ...createEidnaraNoteTools({ rustToolBackends }),
         ...createEidnaraSearchTools({
             kernelClient,
             resolveProjectPath,

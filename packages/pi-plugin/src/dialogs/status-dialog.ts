@@ -75,7 +75,7 @@ interface StatusDialogDetail {
     sessionId: string;
     usagePercentage: number;
     inputTokens: number;
-    systemPromptTokens: number;
+    systemPromptTokens: number | null;
     history_segmentCount: number;
     /** Rows the kernel serves this project on the `explicit_search` surface. */
     memoryCount: number;
@@ -114,7 +114,7 @@ interface StatusDialogDetail {
     profileTokens: number;
     conversationTokens: number;
     toolCallTokens: number;
-    toolDefinitionTokens: number;
+    toolDefinitionTokens: number | null;
     tailHygiene?: TailHygieneStatus;
     newWorkTokens: number;
     totalInputTokens: number;
@@ -323,6 +323,8 @@ function renderInner(s: StatusDialogDetail, theme: Theme, innerWidth: number): s
             theme.bold(`${s.usagePercentage.toFixed(1)}%`),
         )} · ${fmt(s.inputTokens)} / ${s.contextLimit > 0 ? fmt(s.contextLimit) : "?"} tokens`,
     );
+    const tokenCountsAvailable = s.systemPromptTokens !== null && s.toolDefinitionTokens !== null;
+    if (!tokenCountsAvailable) lines.push("Token counts unavailable; breakdown unavailable");
     if (s.windowGeometry) {
         lines.push(
             formatWindowDerivationLine(s.inputTokens, s.windowGeometry).replace(
@@ -344,7 +346,9 @@ function renderInner(s: StatusDialogDetail, theme: Theme, innerWidth: number): s
         const right = theme.fg("muted", `${fmt(seg.tokens)} (${pct}%)`);
         lines.push(`${left}   ${right}`);
     }
-    lines.push("* Conversation includes model Reasoning; hygiene excludes it.");
+    if (tokenCountsAvailable) {
+        lines.push("* Conversation includes model Reasoning; hygiene excludes it.");
+    }
     lines.push("");
 
     lines.push(
@@ -452,17 +456,21 @@ export function buildPiStatusDetail(
     const history_summarizerRunning = daemonStatus?.wrapup_active === true;
     const tailHygiene = resolveTailHygieneStatus(daemonStatus?.tail_hygiene);
 
-    let systemPromptTokens = piSystemPromptStateFor(sessionId)?.systemPromptTokens ?? 0;
+    const storedSystemPromptTokens = piSystemPromptStateFor(sessionId)?.systemPromptTokens;
+    let systemPromptTokens: number | null =
+        storedSystemPromptTokens === undefined ? 0 : storedSystemPromptTokens;
     try {
         const sysPrompt =
             typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : undefined;
         if (typeof sysPrompt === "string" && sysPrompt.length > 0) {
             systemPromptTokens = estimateTokens(sysPrompt);
         }
-    } catch {}
+    } catch {
+        systemPromptTokens = null;
+    }
 
     // Provider tool-definition token counts are estimates, not wire-payload counts.
-    let toolDefinitionTokens = 0;
+    let toolDefinitionTokens: number | null = 0;
     try {
         const tools = pi.getAllTools?.() ?? [];
         for (const tool of tools) {
@@ -471,14 +479,14 @@ export function buildPiStatusDetail(
             );
         }
     } catch {
-        // best effort
+        toolDefinitionTokens = null;
     }
 
     const modelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
     const calibrated = calibrateBuckets({
         inputTokens,
-        systemLocal: systemPromptTokens,
-        toolDefsLocal: toolDefinitionTokens,
+        systemLocal: systemPromptTokens ?? 0,
+        toolDefsLocal: toolDefinitionTokens ?? 0,
         history_segmentsLocal: history_segmentTokens,
         factsLocal: 0,
         memoriesLocal: 0,
@@ -514,7 +522,7 @@ export function buildPiStatusDetail(
         sessionId,
         usagePercentage,
         inputTokens,
-        systemPromptTokens: calibrated.systemTokens,
+        systemPromptTokens: systemPromptTokens === null ? null : calibrated.systemTokens,
         history_segmentCount,
         // Expired anti-memories stay out of the count, matching the surface filter list and search apply.
         memoryCount: memory.rows.filter((row) => isServedMemoryDecisionRow(row, Date.now())).length,
@@ -551,7 +559,8 @@ export function buildPiStatusDetail(
         profileTokens: calibrated.profileTokens,
         conversationTokens: calibrated.conversationTokens,
         toolCallTokens: calibrated.toolCallTokens,
-        toolDefinitionTokens: calibrated.toolDefinitionTokens,
+        toolDefinitionTokens:
+            toolDefinitionTokens === null ? null : calibrated.toolDefinitionTokens,
         ...(tailHygiene === undefined ? {} : { tailHygiene }),
         newWorkTokens: 0,
         totalInputTokens: 0,
@@ -579,6 +588,7 @@ function breakdownSegments(s: StatusDialogDetail): Array<{
         color: string;
         detail?: string;
     }> = [];
+    if (s.systemPromptTokens === null || s.toolDefinitionTokens === null) return segs;
     if (s.systemPromptTokens > 0)
         segs.push({
             label: "System",

@@ -126,6 +126,42 @@ describe("module graph over the landed tree", () => {
         expect(orphans).toEqual([...AWAITING_CONSUMER.keys()].sort());
     }, 120_000);
 
+    test("runtime token counting stays a thin native binding without fallback or preload machinery", () => {
+        const estimator = readFileSync(join(SRC, "shared/token-estimator.ts"), "utf8");
+        expect(estimator).toContain('export { estimateTokens } from "@eidnara/shm-native";');
+        expect(estimator).not.toMatch(
+            /preloadTokenizer|ai-tokenizer|estimateTokensFromLength|tokenizerGeneration/,
+        );
+
+        const forbiddenRuntimeImports = MODULES.flatMap((file) => {
+            const source = readFileSync(file, "utf8");
+            return /(?:from\s+|import\s*\(|require\s*\()["'](?:ai-tokenizer(?:\/[^"']*)?|[^"']*test-token-counter)["']/.test(
+                source,
+            )
+                ? [relative(SRC, file)]
+                : [];
+        });
+        expect(forbiddenRuntimeImports).toEqual([]);
+        expect(readFileSync(join(SRC, "index.ts"), "utf8")).not.toContain("preloadTokenizer");
+    });
+
+    test("deleted TypeScript engines and migration contracts cannot return to production", () => {
+        const forbidden =
+            /ContextApplication|context-application|range-parser|note-condition-compiler|quickjs|noteEvaluationAvailable|authorityState|RustAuthority(?:State|Domain)|condition-compiler|sandbox-runner/;
+        const hits = MODULES.flatMap((file) => {
+            const source = readFileSync(file, "utf8");
+            return forbidden.test(`${relative(SRC, file)}\n${source}`) ? [relative(SRC, file)] : [];
+        });
+        expect(hits).toEqual([]);
+
+        for (const manifest of [
+            join(SRC, "../package.json"),
+            join(SRC, "../../pi-plugin/package.json"),
+        ]) {
+            expect(readFileSync(manifest, "utf8")).not.toMatch(/quickjs/i);
+        }
+    });
+
     test("retained modules carry no claim.* or memory_classifier.* operation literal", () => {
         expect(OPERATION_LITERAL.test('"claim.intent.stage"')).toBe(true);
         expect(OPERATION_LITERAL.test("'memory_classifier.run_task'")).toBe(true);

@@ -46,14 +46,3 @@ export function parseProviderModel(spec: string): { providerID: string; modelID:
     if (providerID.length === 0 || modelID.length === 0) return null;
     return { providerID, modelID };
 }
-
-/**
- * `client.session.prompt` body.
- */
-export function modelBodyField(spec: string | undefined): {
-    model?: { providerID: string; modelID: string };
-} {
-    if (!spec) return {};
-    const parsed = parseProviderModel(spec);
-    return parsed ? { model: parsed } : {};
-}

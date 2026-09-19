@@ -1,15 +1,7 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import {
-    compileSurfaceCondition,
-    conditionCompileReplySuffix,
-    conditionCompileStorageFields,
-} from "@eidnara/opencode/features/context/conditional-notes/condition-compiler";
 import { wakePlaneStatus } from "@eidnara/opencode/features/context/conditional-notes/wake-plane";
 import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
-import type {
-    RustAuthorityState,
-    RustNoteToolRequest,
-} from "@eidnara/opencode/plugin/rust-tool-backends";
+import type { RustNoteToolRequest } from "@eidnara/opencode/plugin/rust-tool-backends";
 import { isRustAuthorityDrainingError } from "@eidnara/opencode/plugin/rust-tool-backends";
 import { EIDNARA_NOTE_DESCRIPTION } from "@eidnara/opencode/tools/eidnara-note/constants";
 import type { EidnaraNoteArgs } from "@eidnara/opencode/tools/eidnara-note/types";
@@ -38,7 +30,7 @@ const ParamsSchema = Type.Object(
         surface_condition: Type.Optional(
             Type.String({
                 description:
-                    "Externally verifiable condition for conditional notes. The daemon's note evaluator checks this using gh CLI, web fetches, file reads, git, etc. — NOT your conversation history. Use only for things like GitHub PR/issue state, release tags, file contents, or workflow runs. DO NOT use for 'when the user mentions X' / 'when we revisit Y' / 'when relevant to current task' — the evaluator has no access to session context. For session-relative reminders, omit this and write a regular note.",
+                    "Externally verifiable condition for conditional notes. No evaluator ships with this plugin, so Rust refuses conditioned notes unless another host has registered a live evaluator. Scheduled-wake integrations may instead store a plain note and return scheduling guidance.",
             }),
         ),
         filter: Type.Optional(
@@ -172,10 +164,24 @@ export function createEidnaraNoteTool(
             const projectRoot = resolveProjectRootDirectory(ctx.cwd);
             // A string-only check would classify empty content as write and reject it.
             const action = args.action ?? (args.content?.trim() ? "write" : "read");
+            const callId = toolCallId?.trim();
+            if (action !== "read" && !callId) {
+                const outcome =
+                    action === "write" ? "written" : action === "update" ? "updated" : "dismissed";
+                return err(
+                    `Error: eidnara_note ${action} requires a stable tool-call identity from the host; the note was not ${outcome}.`,
+                );
+            }
+            const commandId = callId ? boundedCommandId(callId) : undefined;
             const wakePlaneActive =
-                action === "write" &&
+                (action === "write" || action === "update") &&
                 Boolean(args.surface_condition?.trim()) &&
                 (await wakePlaneStatus()) === "present";
+            if (wakePlaneActive && action === "update") {
+                return err(
+                    "Error: wake plane active — scheduled wakes own condition evaluation; resend the update without surface_condition, or create a scheduled wake instead. Note not updated.",
+                );
+            }
             const surfaceCondition = wakePlaneActive ? undefined : args.surface_condition?.trim();
 
             const projectIdentity = deps.resolveProjectPath?.(projectRoot);
@@ -183,43 +189,11 @@ export function createEidnaraNoteTool(
                 return err("Error: Could not resolve project identity for eidnara_note.");
             }
 
-            let notesAuthority: RustAuthorityState | null = null;
-            if (deps.rustToolBackends.authorityState) {
-                try {
-                    notesAuthority = await deps.rustToolBackends.authorityState({
-                        projectPath: projectIdentity,
-                        projectRoot,
-                        domain: "notes",
-                    });
-                } catch (error) {
-                    return err(
-                        `Error: Rust notes authority is unavailable. ${error instanceof Error ? error.message : String(error)}`,
-                    );
-                }
-            }
-            if (notesAuthority !== null && notesAuthority !== "MODULE") {
-                return err(noteAuthorityRefusal(args, action));
-            }
-
             const rustNote = deps.rustToolBackends.note;
             if (!rustNote) {
                 return err(
                     "Error: Rust notes authority is active, but this module transport does not support eidnara_note.",
                 );
-            }
-            const callId = toolCallId?.trim();
-            const commandId = callId ? boundedCommandId(callId) : undefined;
-            let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
-            if ((action === "write" || action === "update") && surfaceCondition) {
-                if (deps.rustToolBackends.noteEvaluationAvailable?.(projectIdentity) === true) {
-                    compilation = await compileSurfaceCondition(surfaceCondition, {
-                        projectPath: projectRoot,
-                    });
-                } else if (!commandId) {
-                    return err(
-                        "Error: Conditional-note evaluation is unavailable for this Rust-authority project; the note was not written.",
-                    );
-                }
             }
             const request: PiRustNoteToolRequest = {
                 ...(commandId ? { commandId } : {}),
@@ -229,7 +203,6 @@ export function createEidnaraNoteTool(
                 action,
                 content: args.content,
                 surfaceCondition,
-                ...(compilation ? conditionCompileStorageFields(compilation) : {}),
                 filter: args.filter,
                 limit: args.limit,
                 offset: args.offset,
@@ -247,7 +220,6 @@ export function createEidnaraNoteTool(
                         `${text}\nwake plane active — create a scheduled wake instead; stored as a plain note.`,
                     );
                 }
-                if (compilation) return ok(text + conditionCompileReplySuffix(compilation));
                 return ok(text);
             } catch (error) {
                 if (isRustAuthorityDrainingError(error)) {

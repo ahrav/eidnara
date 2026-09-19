@@ -9,7 +9,8 @@ import { promptSurfaceHashMaterial } from "@eidnara/opencode/shared/prompt-surfa
 export interface PiSystemPromptState {
     /** `systemPromptHash` covers prompt content and the prompt-surface preset. */
     systemPromptHash: string;
-    systemPromptTokens: number;
+    /** Native count, or `null` when native token counting is unavailable. */
+    systemPromptTokens: number | null;
     /** `stickyDate` is the `Today's date` line frozen into the prompt. */
     stickyDate?: string;
 }
@@ -103,13 +104,27 @@ export function processSystemPromptForCache(args: {
         );
     }
 
-    // The next turn compares against the stored hash; a token drift beyond 50 refreshes the estimate alone.
-    const systemPromptTokens = estimateTokens(frozenPrompt);
+    // Counting failure does not block prompt freezing, hashing, or guidance delivery.
+    let systemPromptTokens: number | null = null;
+    try {
+        systemPromptTokens = estimateTokens(frozenPrompt);
+    } catch {
+        // Unavailable count is explicit state; prompt processing still completes.
+    }
+    const tokenCountDrifted =
+        systemPromptTokens !== null &&
+        previousState?.systemPromptTokens !== null &&
+        previousState?.systemPromptTokens !== undefined &&
+        Math.abs(previousState.systemPromptTokens - systemPromptTokens) > 50;
+    const tokenAvailabilityChanged =
+        previousState !== undefined &&
+        (previousState.systemPromptTokens === null) !== (systemPromptTokens === null);
     if (
         previousState === undefined ||
         currentHash !== previousHash ||
         nextStickyDate !== stickyDate ||
-        Math.abs(previousState.systemPromptTokens - systemPromptTokens) > 50
+        tokenCountDrifted ||
+        tokenAvailabilityChanged
     ) {
         systemPromptStateBySession.set(sessionId, {
             systemPromptHash: currentHash,

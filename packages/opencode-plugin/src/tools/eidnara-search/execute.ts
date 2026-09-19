@@ -6,6 +6,7 @@
  */
 
 import { resolveProjectRootDirectory } from "../../features/context/project-identity";
+import { getErrorMessage } from "../../shared/error-message";
 import {
     isAvailable,
     type MemoryState,
@@ -15,6 +16,7 @@ import {
 import {
     boundDynamicField,
     describeQueryBoundsViolation,
+    type ExplicitQueryPreparation,
     normalizeSearchResultLimit,
 } from "./bounds";
 import {
@@ -24,10 +26,18 @@ import {
     searchKernelMemoryRows,
 } from "./kernel-memory-search";
 import { normalizeEidnaraSearchArgs, prepareQueryFromNormalizedArgs } from "./query-input";
-import { type ExplicitDeliveryReason, packSearchResults } from "./render";
+import { type ExplicitDeliveryReason, type PackedSearchResults, packSearchResults } from "./render";
 import type { EidnaraSearchArgs, EidnaraSearchSource, EidnaraSearchToolDeps } from "./types";
 
 const VALID_SOURCES: ReadonlySet<EidnaraSearchSource> = new Set(["memory"]);
+
+/** Refusing keeps `MAX_QUERY_TOKENS` and `MAX_RENDERED_RESULT_TOKENS` enforced when the counter cannot run. */
+function tokenCountingUnavailable(error: unknown): EidnaraSearchExecution {
+    return {
+        status: "invalid",
+        text: `Error: eidnara_search cannot bound its query or output because native token counting is unavailable; no results were returned. ${getErrorMessage(error)}`,
+    };
+}
 
 /**
  * `undefined` means `sources` was omitted; preserve [] so the search reads no sources.
@@ -110,7 +120,12 @@ export async function executeEidnaraSearch(
 ): Promise<EidnaraSearchExecution> {
     const args = normalizeEidnaraSearchArgs(rawArgs);
     // Non-string model-supplied `query` values are treated as missing rather than throwing.
-    const preflight = prepareQueryFromNormalizedArgs(args);
+    let preflight: ExplicitQueryPreparation;
+    try {
+        preflight = prepareQueryFromNormalizedArgs(args);
+    } catch (error) {
+        return tokenCountingUnavailable(error);
+    }
     if (!preflight.ok) {
         return { status: "invalid", text: `Error: ${describeQueryBoundsViolation(preflight)}` };
     }
@@ -136,7 +151,12 @@ export async function executeEidnaraSearch(
         results: KernelMemorySearchResult[],
         memoryNote?: string,
     ): EidnaraSearchExecution => {
-        const packed = packSearchResults(query, results, memoryNote);
+        let packed: PackedSearchResults;
+        try {
+            packed = packSearchResults(query, results, memoryNote);
+        } catch (error) {
+            return tokenCountingUnavailable(error);
+        }
         return {
             status: "complete",
             text: packed.text,

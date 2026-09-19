@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { modelBodyField, parseProviderModel, resolveFallbackChain } from "./resolve-fallbacks";
+import { parseProviderModel, resolveFallbackChain } from "./resolve-fallbacks";
 
 describe("resolveFallbackChain", () => {
     // resolveFallbackChain has no built-in provider-agnostic fallback chain.
@@ -89,18 +89,5 @@ describe("parseProviderModel", () => {
         ]) {
             expect(parseProviderModel(input), JSON.stringify(input)).toBeNull();
         }
-    });
-});
-
-describe("modelBodyField", () => {
-    test("omits the model field when a part is whitespace-only", () => {
-        expect(modelBodyField("anthropic/ ")).toEqual({});
-        expect(modelBodyField(" /claude-sonnet-4-6")).toEqual({});
-    });
-
-    test("carries a trimmed provider/model pair", () => {
-        expect(modelBodyField(" anthropic/claude-sonnet-4-6 ")).toEqual({
-            model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
-        });
     });
 });

@@ -194,7 +194,7 @@ function truncateArg(value: string, maxLen = 60): string {
     return `${codePoints.slice(0, maxLen).join("")}…`;
 }
 
-export { estimateTokens, preloadTokenizer } from "../../shared/token-estimator";
+export { estimateTokens } from "../../shared/token-estimator";
 
 export function normalizeText(text: string): string {
     // `\s` omits U+0085 NEXT LINE, which Unicode `White_Space` includes; the daemon's `split_whitespace` collapses it.

@@ -21,14 +21,7 @@
         "types": [
             "bun",
             "node"
-        ],
-        "baseUrl": ".",
-        "paths": {
-            "@eidnara/fs-observer/*": [
-                "../fs-observer/dist/types/*",
-                "../fs-observer/src/*"
-            ]
-        }
+        ]
     },
     "include": [
         "src/**/*.ts",
@@ -40,10 +33,5 @@
         "scripts",
         "src/**/*.test.ts",
         "src/**/__tests__/**"
-    ],
-    "references": [
-        {
-            "path": "../fs-observer/tsconfig.build.json"
-        }
     ]
 }

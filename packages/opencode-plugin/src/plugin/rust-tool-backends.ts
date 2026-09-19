@@ -1,8 +1,5 @@
 import { createHash } from "node:crypto";
 
-export type RustAuthorityDomain = "memories" | "notes";
-export type RustAuthorityState = "TS" | "PREPARING" | "MODULE" | "DRAINING";
-
 export interface RustNoteToolRequest {
     /** The host assigns this MCP tool-use ID. */
     commandId?: string;
@@ -13,10 +10,6 @@ export interface RustNoteToolRequest {
     action: "write" | "read" | "update" | "dismiss";
     content?: string;
     surfaceCondition?: string;
-    compiledProvider?: string | null;
-    compiledConfig?: string | null;
-    compiledAt?: number | null;
-    compileStatus?: "compiled" | "plain" | "refused";
     filter?: "all" | "active" | "pending" | "ready" | "dismissed";
     limit?: number;
     offset?: number;
@@ -56,13 +49,7 @@ export interface RustToolBackends {
         drop: string;
         commandId: string;
     }) => Promise<unknown>;
-    authorityState?: (args: {
-        projectPath: string;
-        projectRoot: string;
-        domain: RustAuthorityDomain;
-    }) => Promise<RustAuthorityState | null>;
     note?: (args: RustNoteToolRequest) => Promise<unknown>;
-    noteEvaluationAvailable?: (projectPath: string) => boolean;
 }
 
 export class RustToolSessionDeletedError extends Error {

@@ -1,4 +1,3 @@
-import { tokenEstimatorGeneration } from "../../shared/token-estimator";
 import { refreshOpenCodeDbPresence, withReadOnlySessionDb } from "./read-session-db";
 import {
     type ChunkBlock,
@@ -47,21 +46,14 @@ export { extractTexts, hasMeaningfulUserText } from "./read-session-formatting";
  *
  * `blockTokenMemo` evicts least-recently-used entries past 2,048 entries or 4 Mi retained
  * characters; exact string keys avoid hash collisions. A block larger than the character budget
- * is tokenized but not retained. Entries hold counts from one estimator generation; the memo is
- * cleared when the generation changes, so a heuristic count never outlives tokenizer activation.
+ * is tokenized but not retained. Native tokenizer identity stays stable for the process, so
+ * exact-text entries need no estimator-generation invalidation.
  */
 const BLOCK_TOKEN_MEMO_MAX_ENTRIES = 2048;
 const BLOCK_TOKEN_MEMO_MAX_CHARS = 4 * 1024 * 1024;
 const blockTokenMemo = new Map<string, number>();
 let blockTokenMemoChars = 0;
-let blockTokenMemoGeneration = -1;
 function estimateBlockTokens(blockText: string): number {
-    const generation = tokenEstimatorGeneration();
-    if (generation !== blockTokenMemoGeneration) {
-        blockTokenMemo.clear();
-        blockTokenMemoChars = 0;
-        blockTokenMemoGeneration = generation;
-    }
     const cached = blockTokenMemo.get(blockText);
     if (cached !== undefined) {
         // `delete` and `set` refresh recency because `Map` preserves insertion order.
@@ -196,6 +188,7 @@ function withScopedCleanup<T>(fn: () => T, cleanup: () => void): T {
         typeof result === "object" &&
         typeof (result as { then?: unknown }).then === "function"
     ) {
+        // SAFETY: Promise-like T remains same async result type after cleanup is attached.
         return Promise.resolve(result).finally(cleanup) as unknown as T;
     }
     cleanup();

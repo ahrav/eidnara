@@ -1,8 +1,5 @@
 import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/rust-mode-transform";
-import type {
-    RustNoteToolRequest,
-    RustToolBackends,
-} from "@eidnara/opencode/plugin/rust-tool-backends";
+import type { RustNoteToolRequest } from "@eidnara/opencode/plugin/rust-tool-backends";
 
 /** Pi's daemon tool backends take the project root per invocation because a Pi process has no live-session map: `/cd` and multi-root sessions move the root between calls, and the daemon keys routes and lineage by `(session, root)`, where OpenCode pins the root by session instead. */
 export interface PiRustReduceRequest {
@@ -21,10 +18,7 @@ export interface PiRustNoteToolRequest extends RustNoteToolRequest {
     signal?: AbortSignal;
 }
 
-export type PiRustToolBackends = Pick<
-    RustToolBackends,
-    "authorityState" | "noteEvaluationAvailable"
-> & {
+export type PiRustToolBackends = {
     reduce?: (args: PiRustReduceRequest) => Promise<unknown>;
     note?: (args: PiRustNoteToolRequest) => Promise<unknown>;
 };
@@ -53,10 +47,6 @@ export function createPiRustToolBackends(moduleClient: RustModeModuleClient): Pi
             action,
             content,
             surfaceCondition,
-            compiledProvider,
-            compiledConfig,
-            compiledAt,
-            compileStatus,
             filter,
             limit,
             offset,
@@ -75,14 +65,6 @@ export function createPiRustToolBackends(moduleClient: RustModeModuleClient): Pi
                         content,
                         memory_project: memoryProject,
                         surface_condition: surfaceCondition,
-                        ...(compileStatus
-                            ? {
-                                  compiled_provider: compiledProvider,
-                                  compiled_config: compiledConfig,
-                                  compiled_at: compiledAt,
-                                  compile_status: compileStatus,
-                              }
-                            : {}),
                         filter,
                         limit,
                         offset,
@@ -91,6 +73,5 @@ export function createPiRustToolBackends(moduleClient: RustModeModuleClient): Pi
                 },
                 ...(signal ? { signal } : {}),
             }),
-        // `noteEvaluationAvailable` stays absent: the daemon accepts a conditioned write only while a `note.evaluation.register` heartbeat is live for the project, and no shipped host registers one, so the tool must surface the daemon's refusal instead of compiling the condition.
     };
 }

@@ -9,7 +9,6 @@ import { denyTaskRoutingToCallerAgents } from "./agents/permissions";
 import { loadPluginConfigDetailed } from "./config";
 import { isCompactionEnabled } from "./config/agent-disable";
 import { getEidnaraBuiltinCommands } from "./features/builtin-commands/commands";
-import { NOTE_CONDITION_COMPILER_SYSTEM_PROMPT } from "./features/context/conditional-notes/compiler-prompt";
 import { CONTEXT_RESEARCHER_SYSTEM_PROMPT } from "./features/context/context-researcher/agent";
 import { createLiveSessionState } from "./hooks/context/live-session-state";
 import {
@@ -18,7 +17,6 @@ import {
     createLazyManagedDemandStart,
     type HostModuleClient,
 } from "./hooks/context/module-transport";
-import { preloadTokenizer } from "./hooks/context/read-session-formatting";
 import {
     type ConfigWarningDelivery,
     createConfigWarningDelivery,
@@ -228,8 +226,6 @@ const server: Plugin = async (ctx) => {
             await eidnara?.["command.execute.before"]?.(input, output);
         },
         "chat.message": async (input, _output) => {
-            // The first prompt awaits `preloadTokenizer()` so later synchronous estimates use the installed package.
-            await preloadTokenizer();
             // Fire-and-forget: a pending delivery must not delay the user's prompt.
             if (configWarning?.pending && input.sessionID) {
                 void configWarning.deliverTo(input.sessionID);
@@ -267,7 +263,6 @@ const server: Plugin = async (ctx) => {
                       })()
                     : undefined;
                 const registrations = buildHiddenAgentRegistrations({
-                    noteConditionCompilerPrompt: NOTE_CONDITION_COMPILER_SYSTEM_PROMPT,
                     context_researcherPrompt: CONTEXT_RESEARCHER_SYSTEM_PROMPT,
                     context_researcherOverrides: context_researcherAgentOverrides,
                 });
@@ -288,7 +283,6 @@ const server: Plugin = async (ctx) => {
                         reg.maxSteps,
                         reg.overrides,
                         reg.id,
-                        reg.lockPermissions === true,
                         reg.description,
                     );
                 }
