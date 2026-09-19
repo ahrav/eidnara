@@ -1321,7 +1321,7 @@ fn cmd_start(
         Err(_) => return DaemonResult::new(command, false, "stopped", "internal_error"),
     };
 
-    let _tx = match LifecycleTransactionLock::acquire_exclusive(None) {
+    let _tx = match LifecycleTransactionLock::acquire_exclusive_until(None, outer) {
         Ok(tx) => tx,
         Err(error) => {
             let (state, reason) = instance_failure(&error);

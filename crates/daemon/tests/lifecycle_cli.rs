@@ -386,6 +386,36 @@ fn start_reports_lifecycle_busy_while_transaction_lock_is_held() {
     assert_eq!(value["remediation"], "wait_and_retry");
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn start_waits_for_a_concurrent_lifecycle_transaction_to_finish() {
+    require_debug_build();
+    let root = tempfile::tempdir().expect("root");
+    let data = root.path().join("data");
+    let payload = root.path().join("payload");
+    write_payload(&payload);
+    let holder = host_runtime::LifecycleTransactionLock::acquire_exclusive(Some(&data))
+        .expect("hold the transaction lock");
+    let waiting_root = data.clone();
+    let waiter = std::thread::spawn(move || {
+        run(
+            &waiting_root,
+            &["start", "--payload-dir", payload.to_str().expect("payload")],
+        )
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    drop(holder);
+    let out = waiter.join().expect("startup waiter joins");
+    let stopped = run(&data, &["stop"]);
+    assert_eq!(
+        stopped.code, 0,
+        "cleanup: {} {}",
+        stopped.stdout, stopped.stderr
+    );
+    assert_eq!(out.code, 0, "startup: {} {}", out.stdout, out.stderr);
+    assert_result(&out.json(), "start", true, "running", "started");
+}
+
 /// Pins concrete check ids per state and holds every emitted id to the contract's `cli.check_ids`.
 /// A held lifetime fence with no runtime dir is the `wedged` state, which `stop` reports while leaving the lock file in place.
 #[cfg(target_os = "linux")]
