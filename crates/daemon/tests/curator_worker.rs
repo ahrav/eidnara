@@ -184,7 +184,11 @@ impl Rig {
         })
     }
 
+    /// Binds every root to the project in the store, as the daemon does when a session binds, so the worker's dispatch-time route check finds the mapping its snapshot was taken from.
     fn worker_for(&self, host: Arc<CuratorHost>, roots: Vec<RootScope>) -> Arc<Worker> {
+        for root in &roots {
+            self.bind_route(&root.project_root, PROJECT);
+        }
         let kernel = Arc::clone(&self.kernel);
         Arc::new(Worker {
             host,
@@ -205,6 +209,12 @@ impl Rig {
             permits: Arc::new(InvestigationPermits::default()),
             endpoint: self.endpoint(),
         })
+    }
+
+    fn bind_route(&self, root: &std::path::Path, project: &str) {
+        self.store
+            .bind_authority_route("ctx", project, root.to_str().unwrap())
+            .unwrap();
     }
 
     /// The owner's activation record for exactly this deployment.
@@ -492,6 +502,35 @@ async fn a_record_naming_another_providers_credential_closes_the_gate() {
         rig.status.reported().activation_state.0,
         ActivationState::Closed("unknown_credential")
     );
+    assert!(
+        rig.store
+            .lookup_curator_receipt(PROJECT, &identity)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_root_moved_to_another_project_after_the_pass_began_is_not_dispatched() {
+    // The pass snapshots root-to-project routes once. A root rebound to another project before its job is claimed must not be read or staged under the stale project.
+    let rig = Rig::open().await;
+    let now = now_ms();
+    let identity = rig.ready_history_summarizer_job(now);
+    let root = rig.root("project", PROJECT_DIGEST);
+    let worker = rig.worker_with_roots(vec![root.clone()]);
+    rig.write_activation();
+    rig.bind_route(&root.project_root, "git:other");
+
+    assert_eq!(worker.pass(&CancellationToken::new()).await, 0);
+    assert!(matches!(
+        rig.store
+            .lookup_curator_job(PROJECT, &identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        CuratorJobState::Ready(_)
+    ));
     assert!(
         rig.store
             .lookup_curator_receipt(PROJECT, &identity)

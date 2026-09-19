@@ -359,6 +359,17 @@ impl Worker {
         };
         let store_error =
             |error: &dyn std::fmt::Display| InvestigationError::Store(error.to_string());
+        // The pass snapshotted routes once; the root's live mapping is read again here, before the claim, so a root rebound to another project since is not read or staged under the stale one. The lease fences the project's authority, not this mapping.
+        let live = memories_authority_for_route(&self.store, &root.project_root.to_string_lossy())
+            .map_err(|error| store_error(&error))?;
+        if !matches!(&live, MemoriesAuthority::Module(authority) if authority.project == route.project && authority.generation == route.authority_generation)
+        {
+            eprintln!(
+                "daemon: curator job {}/{} is staged under a root that no longer resolves to its project at the pass's authority generation; it is left for the next pass",
+                project, job.causal_identity
+            );
+            return Ok(None);
+        }
         let acquisition_id = format!("curator:{}:{now}", job.causal_identity);
         let claim = match self
             .store
