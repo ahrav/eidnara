@@ -30,7 +30,6 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: fold under pressure", () => {
             eidnaraConfig: {
                 execute_threshold_percentage: 25,
                 protected_tags: 1,
-                compressor: { enabled: false },
             },
         });
     });

@@ -20,8 +20,8 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a1-7",
-                        "fingerprint": "caa136d080a500e76c431cd9a8ab2362c88176d4c52c90c97cbcae47796d7e08"
+                        "id": "rev-parity-a1-8",
+                        "fingerprint": "a6d041525f139cd2ca5e96afc0ecf35b831c7cfb046d1c3303cf8e39b891b5be"
                     },
                     "normative_checks": [
                         "check-a1-defer-request-floor",
@@ -61,8 +61,8 @@
                         "omitted": []
                     },
                     "semantic_revision": {
-                        "id": "rev-parity-a3-10",
-                        "fingerprint": "b1ee11e9a9d42ad06a9f78e887206ec77b64de8062745ea7ee52688f1741792b"
+                        "id": "rev-parity-a3-11",
+                        "fingerprint": "d6dfb5095240fab510ca22768b5ece970cd8b6b0c36e193be77680a39d93303d"
                     },
                     "normative_checks": [
                         "check-a3-defer-request-floor",

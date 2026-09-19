@@ -738,7 +738,9 @@ export function buildStatusDetail(
                 detail.compressionBudget = budget;
                 detail.compressionUsage = `${((histTokens / budget) * 100).toFixed(0)}%`;
             }
-        } catch {}
+        } catch {
+            // A malformed status block leaves the compression fields unset; the surface still renders.
+        }
     } catch (err) {
         log("[rpc] status-detail error:", err);
     }
@@ -786,6 +788,7 @@ export function registerRpcHandlers(
         );
 
     // RPC results serialize to JSON, so handler-map values use the JSON-object envelope.
+    // SAFETY: the loaded config is a plain data object; the RPC layer reads it by key for the sidebar.
     const rawConfig = config as unknown as Record<string, unknown>;
 
     // The status surface reports what an explicit search would see, lag included,
@@ -813,9 +816,7 @@ export function registerRpcHandlers(
     ): Promise<{ moduleStatus?: RustSessionStatus; memory: KernelMemorySnapshot } | undefined> => {
         try {
             const [moduleStatus, memory] = await Promise.all([
-                config.transform_mode === "rust"
-                    ? loadRustSessionStatus(rustModeModuleClient, sessionId, dir)
-                    : Promise.resolve(undefined),
+                loadRustSessionStatus(rustModeModuleClient, sessionId, dir),
                 readMemory(sessionId, dir),
             ]);
             return { moduleStatus, memory };
@@ -850,6 +851,7 @@ export function registerRpcHandlers(
         const dir = await routeRootFor(sessionId, params.directory);
         const inputs = await loadPollInputs(sessionId, dir);
         if (!inputs) return { error: "status detail unavailable" };
+        // SAFETY: same JSON-serializable status-detail record as the snapshot above.
         return buildStatusDetail(
             sessionId,
             dir,

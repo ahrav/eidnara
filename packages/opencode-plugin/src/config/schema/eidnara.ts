@@ -150,8 +150,6 @@ export interface EidnaraConfig {
     enabled: boolean;
     /** User-level setting that lets a session started exactly in the canonical home directory use a deterministic directory identity. */
     allow_home_project: boolean;
-    /** Selects the runtime implementation for this project. Rust mode is experimental and requires user-level host configuration. */
-    transform_mode: "ts" | "rust";
     /** Only user config can set the output language for generated Eidnara prose. */
     language?: string;
     history_summarizer?: HistorySummarizerConfig;
@@ -319,12 +317,6 @@ export const EidnaraConfigSchema = z
             .default(false)
             .describe(
                 "Allow Eidnara sessions launched from the exact canonical home directory. The home session uses its deterministic dir: identity so pre-gate memories reconnect. USER-LEVEL ONLY: project config is ignored. The home identity is excluded from registry seed exports, never resolves descendants by containment, and cannot join a workspace.",
-            ),
-        transform_mode: z
-            .enum(["ts", "rust"])
-            .default("ts")
-            .describe(
-                'Experimental: routes the project through the direct Rust daemon (requires the user-level host.connection_file path); "ts" is the current TypeScript pipeline.',
             ),
         language: LanguageCodeSchema.optional().describe(
             "Output language for Eidnara's generated content and guidance, as a " +
@@ -737,6 +729,28 @@ export const EidnaraConfigSchema = z
     });
 
 /** Unknown owned keys fail before project filtering or tool registration; invalid known values retain their existing recovery policy. */
+/**
+ * Keys that used to exist and no longer mean anything. `transform_mode` selected between the
+ * daemon transform and a TypeScript pipeline that no longer exists; the daemon transform is
+ * always active. A stale key is dropped with a warning instead of failing startup.
+ */
+export const REMOVED_CONFIG_KEYS: Readonly<Record<string, string>> = {
+    transform_mode:
+        "transform_mode was removed: the daemon (rust) transform is the only transform; delete the key",
+};
+
+/** Deletes removed keys from `raw` in place and returns one warning per key that was present. */
+export function dropRemovedConfigKeys(raw: Record<string, unknown>): string[] {
+    const warnings: string[] = [];
+    for (const [key, warning] of Object.entries(REMOVED_CONFIG_KEYS)) {
+        if (key in raw) {
+            delete raw[key];
+            warnings.push(warning);
+        }
+    }
+    return warnings;
+}
+
 export function assertKnownConfigKeys(raw: Record<string, unknown>): void {
     const result = EidnaraConfigSchema.safeParse(raw);
     if (

@@ -23,7 +23,6 @@ function createForwardingHook(options?: {
                 app: { agents: async () => ({ data: [] }) },
                 session: { get: async () => ({ data: {} }) },
             } as never),
-        transformMode: "rust",
         todoStateSet: async (input) => {
             calls.push(input);
         },
@@ -32,23 +31,18 @@ function createForwardingHook(options?: {
 }
 
 describe("createToolExecuteAfterHook todo snapshots", () => {
-    test("ts mode does not forward todo state", async () => {
-        const calls: TodoStateCall[] = [];
+    test("no forwarder means todo state is not captured", async () => {
         const hook = createToolExecuteAfterHook({
             subagentSessions: new Set(),
-            transformMode: "ts",
-            todoStateSet: async (input) => {
-                calls.push(input);
-            },
         });
-        await hook({
-            tool: "todowrite",
-            sessionID: "ses-ts-todo",
-            args: { todos: [{ status: "pending", priority: "high", content: "Stay local" }] },
-        });
-        expect(calls).toEqual([]);
+        await expect(
+            hook({
+                tool: "todowrite",
+                sessionID: "ses-no-forwarder",
+                args: { todos: [{ id: "1", content: "x", status: "pending" }] },
+            }),
+        ).resolves.toBeUndefined();
     });
-
     test("permission-denied todowrite capture is refused, including lookalike calls", async () => {
         let denied = true;
         const client = {

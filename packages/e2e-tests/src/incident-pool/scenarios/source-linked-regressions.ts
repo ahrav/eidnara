@@ -7,7 +7,7 @@
 
 import { detectRustPrerequisites } from "../../../scripts/check-rust-prerequisites";
 import { analyzePasses, formatBustReport, mainAgentRequests } from "../../cache-analysis";
-import type { RustTestHarness, RustTestHarnessOptions } from "../../rust-harness";
+import type { RustPassLine, RustTestHarness, RustTestHarnessOptions } from "../../rust-harness";
 import { DEFAULT_SCRIPTED_TOOL_USAGE } from "../../scripted-tool-call";
 import type {
     CaseDriverContext,
@@ -92,6 +92,8 @@ export interface CacheStabilityEvidence extends Record<string, JsonValue> {
     transformServedPassCount: number;
     /** Passes whose decision is `SOFT+`, the transform's defer label; a low-pressure drill that executes instead has left the pure-defer path it claims to measure. */
     deferredPassCount: number;
+    /** `HARD` passes that are the session's initial render or its one hash-persisting re-render; see `isInitialRenderPass`. */
+    renderPassCount: number;
 }
 
 export interface FirstRenderDeferObservation extends CacheStabilityEvidence {}
@@ -136,7 +138,22 @@ async function collectCacheStabilityEvidence(
         rustPassCount: passes.length,
         transformServedPassCount: passes.filter((pass) => pass.servedFrom === "transform").length,
         deferredPassCount: passes.filter((pass) => pass.decision === "SOFT+").length,
+        renderPassCount: passes.slice(0, INITIAL_RENDER_PASSES).filter(isInitialRenderPass).length,
     };
+}
+
+/**
+ * The first pass of a session renders (`first_render`), and the second re-renders once the
+ * system-prompt hash persists after the eidnara_reduce verdict freezes (`epoch_change`); the
+ * daemon reports both as `HARD`. Neither is a defer pass, and neither can bust a cached prefix
+ * the provider has not built yet, so the pure-defer check counts passes after them. Only the
+ * head of the pass list qualifies: a later `epoch_change` is a real re-render and stays counted.
+ */
+function isInitialRenderPass(pass: RustPassLine): boolean {
+    return (
+        pass.decision === "HARD" &&
+        (pass.reason === "first_render" || pass.reason === "epoch_change")
+    );
 }
 
 function cacheStabilityChecks(
@@ -169,7 +186,9 @@ function cacheStabilityChecks(
             id: `check-${prefix}-pure-defer`,
             passed:
                 observation.rustPassCount > 0 &&
-                observation.deferredPassCount === observation.rustPassCount,
+                observation.renderPassCount <= INITIAL_RENDER_PASSES &&
+                observation.deferredPassCount ===
+                    observation.rustPassCount - observation.renderPassCount,
         },
     };
 }
@@ -573,6 +592,8 @@ export interface ThinkingNudgeAnchorObservation extends Record<string, JsonValue
     requestsWithoutAssistant: number;
     nudgeMarkerFound: boolean;
     thinkingBlockCount: number;
+    /** Thinking blocks on the wire whose `thinking` text or `signature` differs from what the provider sent; any such block is the Anthropic 400. */
+    thinkingBlockMutations: number;
 }
 
 export async function driveThinkingNudgeAnchor(
@@ -625,6 +646,17 @@ export async function driveThinkingNudgeAnchor(
             (count, body) => count + findThinkingBlocks(body).length,
             0,
         ),
+        thinkingBlockMutations: inspected.reduce(
+            (count, body) =>
+                count +
+                findThinkingBlocks(body).filter(
+                    (block) =>
+                        block.type !== "thinking" ||
+                        block.thinking !== signedThinking ||
+                        block.signature !== signature,
+                ).length,
+            0,
+        ),
     };
 }
 
@@ -637,9 +669,10 @@ export function verifyThinkingNudgeAnchor(
             passed: !observation.nudgeMarkerFound,
         },
         {
-            // The transform clears historical reasoning, so no signed thinking block reaches the wire.
+            // Reasoning younger than `clear_reasoning_age` stays on the wire; every block that
+            // does must reach the provider with its text and signature byte-identical.
             id: "check-thinking-a-signature-byte-stable",
-            passed: observation.thinkingBlockCount === 0,
+            passed: observation.thinkingBlockMutations === 0,
         },
         {
             // A request with no assistant cannot show the nudge, so every inspected request must carry one.
@@ -809,7 +842,8 @@ export async function driveThinkingImageSurvival(
 
     // The request uses the raw client because the text-only prompt helper cannot include a file part.
     const sdk = await import("@opencode-ai/sdk");
-    // The server accepts file parts although the published prompt type omits them.
+    // SAFETY: the server accepts file parts although the published prompt type omits them; the
+    // narrowed shape below names only `session.prompt`, which the real client provides.
     const rawClient = sdk.createOpencodeClient({
         baseUrl: h.opencode.url,
     }) as unknown as {
@@ -933,9 +967,13 @@ const RUST_CACHE_IMPLEMENTATION_FILES = [
     "crates/daemon/src/transform.rs",
 ];
 
+/** Passes the pure-defer checks accept as `HARD` at the head of a session: `first_render`, then the `epoch_change` re-render once the system-prompt hash persists. */
+const INITIAL_RENDER_PASSES = 2;
+
 export const FIRST_RENDER_A1_FIXTURE = {
     scenario: "pure-defer-growth",
     turns: 6,
+    initialRenderPasses: INITIAL_RENDER_PASSES,
     modelContextLimit: 100_000,
     executeThresholdPercentage: 20,
 } as const;
@@ -948,6 +986,7 @@ export const FIRST_RENDER_A3_FIXTURE = {
     drop: "99999",
     callId: "toolu_incident_a3_eidnara_reduce",
     requiredWireEvidence: "matching eidnara_reduce tool_use and tool_result blocks",
+    initialRenderPasses: INITIAL_RENDER_PASSES,
     modelContextLimit: 100_000,
     executeThresholdPercentage: 20,
 } as const;
@@ -1000,6 +1039,7 @@ const CACHE_STABILITY_FIELDS = {
     rustPassCount: "number",
     transformServedPassCount: "number",
     deferredPassCount: "number",
+    renderPassCount: "number",
 } as const;
 
 function cacheStabilityFields(value: Record<string, JsonValue>): CacheStabilityEvidence {
@@ -1012,6 +1052,7 @@ function cacheStabilityFields(value: Record<string, JsonValue>): CacheStabilityE
         rustPassCount: numberField(value, "rustPassCount"),
         transformServedPassCount: numberField(value, "transformServedPassCount"),
         deferredPassCount: numberField(value, "deferredPassCount"),
+        renderPassCount: numberField(value, "renderPassCount"),
     };
 }
 

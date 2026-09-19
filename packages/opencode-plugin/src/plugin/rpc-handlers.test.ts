@@ -80,7 +80,6 @@ function register(
     registerRpcHandlers(server, {
         directory: process.cwd(),
         config: EidnaraConfigSchema.parse({
-            transform_mode: "rust",
             host: { connection_file: MISSING_CONNECTION_FILE },
             ...configOverrides,
         }),
@@ -207,7 +206,6 @@ describe("registerRpcHandlers", () => {
         registerRpcHandlers(server, {
             directory: rootA,
             config: EidnaraConfigSchema.parse({
-                transform_mode: "rust",
                 host: { connection_file: MISSING_CONNECTION_FILE },
             }),
             client: {
@@ -264,7 +262,6 @@ describe("registerRpcHandlers", () => {
         registerRpcHandlers(server, {
             directory: process.cwd(),
             config: EidnaraConfigSchema.parse({
-                transform_mode: "rust",
                 host: { connection_file: MISSING_CONNECTION_FILE },
             }),
             client: {
@@ -311,7 +308,6 @@ describe("registerRpcHandlers", () => {
         registerRpcHandlers(server, {
             directory: process.cwd(),
             config: EidnaraConfigSchema.parse({
-                transform_mode: "rust",
                 host: { connection_file: MISSING_CONNECTION_FILE },
             }),
             client: null,
@@ -343,7 +339,6 @@ describe("registerRpcHandlers", () => {
         registerRpcHandlers(server, {
             directory: process.cwd(),
             config: EidnaraConfigSchema.parse({
-                transform_mode: "rust",
                 host: { connection_file: MISSING_CONNECTION_FILE },
             }),
             client: null,
@@ -432,7 +427,6 @@ describe("registerRpcHandlers", () => {
         registerRpcHandlers(server, {
             directory: process.cwd(),
             config: EidnaraConfigSchema.parse({
-                transform_mode: "rust",
                 host: { connection_file: MISSING_CONNECTION_FILE },
             }),
             client: null,
@@ -487,7 +481,6 @@ describe("registerRpcHandlers", () => {
             registerRpcHandlers(server, {
                 directory: process.cwd(),
                 config: EidnaraConfigSchema.parse({
-                    transform_mode: "rust",
                     host: { connection_file: MISSING_CONNECTION_FILE },
                     ...configOverrides,
                 }),
@@ -574,38 +567,6 @@ describe("registerRpcHandlers", () => {
             sessionId,
         })) as unknown as SidebarSnapshot;
         expect(otherModel.inputTokens).toBe(42_000);
-    });
-
-    test("ts mode serves the live event usage without contacting the daemon", async () => {
-        const sessionId = "ses-handler-ts-mode";
-        const live = createLiveSessionState();
-        live.liveModelBySession.set(sessionId, {
-            providerID: "test-provider",
-            modelID: "test-model",
-        });
-        live.contextUsageBySession.set(sessionId, {
-            usage: { percentage: 50, inputTokens: 64_000 },
-            updatedAt: Date.now(),
-            lastResponseTime: Date.now(),
-            hasUsageTokens: true,
-            model: { providerID: "test-provider", modelID: "test-model" },
-        });
-        const { handlers, calls } = register({ transform_mode: "ts" }, DAEMON_STATUS, live);
-
-        const snapshot = (await handlers.get("sidebar-snapshot")?.({
-            sessionId,
-        })) as unknown as SidebarSnapshot;
-        expect(calls).toEqual([]);
-        expect(snapshot.inputTokens).toBe(64_000);
-        expect(snapshot.usagePercentage).toBe(50);
-        expect(snapshot.history_segmentCount).toBe(0);
-
-        const detail = (await handlers.get("status-detail")?.({
-            sessionId,
-        })) as unknown as StatusDetail;
-        expect(calls).toEqual([]);
-        expect(detail.inputTokens).toBe(64_000);
-        expect(detail.lastResponseTime).toBeGreaterThan(0);
     });
 });
 

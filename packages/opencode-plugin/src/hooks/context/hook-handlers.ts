@@ -240,7 +240,6 @@ export function createToolExecuteAfterHook(args: {
     /** Sessions created with a `parentID`; the hook skips task-list capture for them. */
     subagentSessions: ReadonlySet<string>;
     client?: PluginContext["client"];
-    transformMode?: "ts" | "rust";
     todoStateSet?: (input: {
         sessionId: string;
         stateJson: string;
@@ -272,7 +271,7 @@ export function createToolExecuteAfterHook(args: {
         if (!Array.isArray(todos)) return;
         const normalizedTodos = normalizeTodoStateJson(todos);
         if (normalizedTodos === null) return;
-        if (args.transformMode !== "rust" || !args.todoStateSet) return;
+        if (!args.todoStateSet) return;
 
         const todoSessionId = typedInput.sessionID;
         const rawArgs =

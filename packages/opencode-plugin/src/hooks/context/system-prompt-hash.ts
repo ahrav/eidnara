@@ -3,7 +3,10 @@ import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import { type PromptSurfaceConfig, resolvePromptSurface } from "../../shared/prompt-surface";
-import { promptSurfaceHashMaterial } from "../../shared/prompt-surface-runtime";
+import {
+    guidanceMarkerCount,
+    promptSurfaceHashMaterial,
+} from "../../shared/prompt-surface-runtime";
 import { resolveEidnaraReduceAvailability } from "./eidnara-reduce-availability";
 import {
     EIDNARA_INTERNAL_AGENT_SIGNATURES,
@@ -24,10 +27,25 @@ interface SessionTracking {
     /** Sticky dates change only on cache-busting passes, preventing midnight cache rebuilds. */
     stickyDate?: string;
     prompt?: SystemPromptState;
+    /** Set once the guidance fetch has failed and been logged; later failures stay quiet. */
+    guidanceFailureLogged?: boolean;
 }
 
 /** One entry per tracked session; the LRU bound matches the eidnara_reduce verdict caches. */
 const SYSTEM_PROMPT_STATE_CAPACITY = 1000;
+
+/** Appended between the host system prompt and the daemon-rendered guidance block, which opens with its own `## Eidnara` heading line. */
+const SYSTEM_PROMPT_GUIDANCE_SEPARATOR = "\n\n";
+
+/** Inputs the daemon's `guidance.get` route needs to select and pin the guidance block for one call. */
+export interface GuidanceFetchArgs {
+    sessionId: string;
+    /** Whether `eidnara_reduce` is callable in this session; selects the full or no-reduce variant. */
+    toolPresent: boolean;
+    modelKey: string | undefined;
+    /** A cache-busting pass may advance the pinned date, so cached bytes are not reused for it. */
+    isCacheBusting: boolean;
+}
 
 /**
  * The host emits `Today's date: ${new Date().toDateString()}`, e.g. `Today's date: Tue Sep 08 2026`.
@@ -81,6 +99,12 @@ export function createSystemPromptHashHandler(deps: {
     injectionSkipSignatures?: string[];
     /** Prompt signatures identify hidden children before session-created tracking adds them to `internalChildSessions`. */
     internalChildSessions?: Set<string>;
+    /**
+     * Returns the daemon-rendered guidance block (`guidance.get` bytes) for the call, or
+     * `undefined` to inject nothing. A rejection is logged once per session and the call
+     * proceeds without guidance; the prompt hash then covers whatever was injected.
+     */
+    fetchGuidance?: (args: GuidanceFetchArgs) => Promise<string | undefined>;
 }): {
     handler: (
         input: {
@@ -147,6 +171,43 @@ export function createSystemPromptHashHandler(deps: {
         const promptSurface = resolvePromptSurface(deps.promptSurface, modelKey);
 
         const isCacheBusting = deps.systemPromptRefreshSessions.has(sessionId);
+
+        // The guidance block explains the tags, `<session-history>`, and memory tools the
+        // transform serves; without it the model meets that structure unannounced. OpenAI-
+        // compatible templates allow one system message, so it is appended to the host entry.
+        // A prompt that already carries the heading line is not injected twice; prose that
+        // mentions the marker does not count.
+        if (
+            deps.fetchGuidance &&
+            output.system.length > 0 &&
+            guidanceMarkerCount(fullPromptForDetection) === 0
+        ) {
+            try {
+                const guidance = await deps.fetchGuidance({
+                    sessionId,
+                    toolPresent: availability.callable,
+                    modelKey,
+                    isCacheBusting,
+                });
+                if (guidance && guidance.length > 0) {
+                    output.system[0] = `${output.system[0]}${SYSTEM_PROMPT_GUIDANCE_SEPARATOR}${guidance}`;
+                    sessionLog(
+                        sessionId,
+                        `injected guidance into system prompt (toolPresent=${availability.callable}, bytes=${guidance.length})`,
+                    );
+                }
+            } catch (error) {
+                const tracked = trackingBySession.peek(sessionId) ?? {};
+                if (!tracked.guidanceFailureLogged) {
+                    trackingBySession.set(sessionId, { ...tracked, guidanceFailureLogged: true });
+                    sessionLog.warn(
+                        sessionId,
+                        "guidance fetch failed; system prompt continues without the Eidnara block:",
+                        error,
+                    );
+                }
+            }
+        }
 
         const liveSystemContent = output.system.join("\n");
         if (liveSystemContent.length === 0) return;

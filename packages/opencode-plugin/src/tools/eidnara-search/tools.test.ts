@@ -359,6 +359,44 @@ describe("createEidnaraSearchTools", () => {
         expect(implicit).toBe(memoryOnly);
     });
 
+    it("re-reads ungated from the canonical tip when no consumer is registered, and says so", async () => {
+        const harness = kernelHarness();
+        seed(harness.kernel, OBJECT_A, "The cache must stay offline.", "CONSTRAINTS");
+        harness.kernel.gatedSurfaceStates.set("explicit_search", {
+            kind: "unavailable",
+            reason: "no_required_consumer",
+        });
+        const tools = createEidnaraSearchTools(harness.deps);
+        const result = await tools.eidnara_search.execute(
+            { query: "offline cache" },
+            toolContext(),
+        );
+        expect(result).toContain(`id=${OBJECT_A}`);
+        expect(result).toContain("Results are read from the canonical tip.");
+        expect(
+            harness.transport.calls.map((call) => (call.body as { gated: boolean }).gated),
+        ).toEqual([true, false]);
+
+        // An id query takes the same fallback through the chunked read.
+        harness.transport.calls.length = 0;
+        const byId = await tools.eidnara_search.execute({ query: OBJECT_A }, toolContext());
+        expect(byId).toContain(`id=${OBJECT_A}`);
+        expect(byId).toContain("Results are read from the canonical tip.");
+        expect(
+            harness.transport.calls.map((call) => (call.body as { gated: boolean }).gated),
+        ).toEqual([true, false]);
+
+        // Any other refusal stays an error after one read.
+        harness.transport.calls.length = 0;
+        harness.kernel.gatedSurfaceStates.set("explicit_search", {
+            kind: "unavailable",
+            reason: "store_busy",
+        });
+        const busy = await tools.eidnara_search.execute({ query: "anything" }, toolContext());
+        expect(busy).toStartWith("Error: ");
+        expect(harness.transport.calls).toHaveLength(1);
+    });
+
     it("renders the disabled state from a disabled kernel client", async () => {
         const harness = kernelHarness(new FakeKernel(), false);
         const tools = createEidnaraSearchTools(harness.deps);

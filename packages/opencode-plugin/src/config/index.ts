@@ -9,7 +9,6 @@ import { setOutputReserveConfig } from "../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import { isRecord } from "../shared/record-type-guard";
 import { setWindowOverlayPath } from "../shared/window-geometry";
-import { isCompactionEnabled } from "./agent-disable";
 import { eidnaraProjectConfigBasePath, eidnaraUserConfigBasePath } from "./config-paths";
 import type { LoadOutcome } from "./load-outcome";
 import {
@@ -17,9 +16,13 @@ import {
     stripUnsafeProjectConfigFields,
 } from "./project-security";
 import { pruneNestedConfigLeaf } from "./prune-config-leaf";
-import { assertKnownConfigKeys, type EidnaraConfig, EidnaraConfigSchema } from "./schema/eidnara";
+import {
+    assertKnownConfigKeys,
+    dropRemovedConfigKeys,
+    type EidnaraConfig,
+    EidnaraConfigSchema,
+} from "./schema/eidnara";
 import { redactConfigIssuePath } from "./schema/issue-path";
-import { resolveTransformMode } from "./transform-mode";
 import { type SubstituteFailure, substituteConfigVariables } from "./variable";
 
 export type { LoadOutcome } from "./load-outcome";
@@ -247,7 +250,7 @@ function parsePluginConfig(
     rawConfig: Record<string, unknown>,
     recoveries: ConfigRecovery[] = [],
 ): EidnaraPluginConfig & { configWarnings?: string[] } {
-    const preMigrationWarnings: string[] = [];
+    const preMigrationWarnings: string[] = dropRemovedConfigKeys(rawConfig);
     assertKnownConfigKeys(rawConfig);
     const migrated = rawConfig;
     const parsed = EidnaraConfigSchema.safeParse(migrated);
@@ -345,6 +348,7 @@ function parsePluginConfig(
         // `redactConfigValue` reports type and length, not resolved values, because `{env:...}` and `{file:...}` substitutions may expand secrets into `rawConfig`.
         delete patched[key];
         // Optional blocks such as `history_summarizer` have no default and are omitted after validation fails.
+        // SAFETY: `defaults` is the parsed schema object; indexing it by a top-level key name only reads own data properties.
         const defaultVal = (defaults as unknown as Record<string, unknown>)[key];
         const reason = customMessagesByKey.get(key);
         const fallback =
@@ -380,13 +384,6 @@ export function loadPluginConfig(
     directory: string,
 ): EidnaraPluginConfig & { configWarnings?: string[] } {
     return loadPluginConfigDetailed(directory).config;
-}
-
-function hasUserTierExplicitDaemonConfig(config: Record<string, unknown> | undefined): boolean {
-    const { host } = config ?? {};
-    if (typeof host !== "object" || host === null || Array.isArray(host)) return false;
-    const connectionFile = (host as Record<string, unknown>).connection_file;
-    return typeof connectionFile === "string" && connectionFile.trim().length > 0;
 }
 
 function bindSubstitutionFailures(
@@ -461,6 +458,11 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     const allWarnings: string[] = [];
     let mergedRaw: Record<string, unknown> = {};
     const userRecoveries: ConfigRecovery[] = [];
+    if (userLoaded) {
+        allWarnings.push(
+            ...dropRemovedConfigKeys(userLoaded.config).map((w) => `[user config] ${w}`),
+        );
+    }
     const trustedBaseConfig = parsePluginConfig(userLoaded?.config ?? {}, userRecoveries);
 
     if (userLoaded) {
@@ -473,6 +475,9 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
         allWarnings.push();
+        allWarnings.push(
+            ...dropRemovedConfigKeys(projectLoaded.config).map((w) => `[project config] ${w}`),
+        );
         assertKnownConfigKeys(projectLoaded.config);
         projectRaw = { ...projectLoaded.config };
         // Every sanitizer warning marks a project value the loader did not accept as written.
@@ -510,15 +515,6 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
             }),
         );
     }
-
-    const resolvedTransformMode = resolveTransformMode({
-        configured: config.transform_mode,
-        userTierConfiguredRust: userLoaded?.config?.transform_mode === "rust",
-        userTierHasExplicitDaemon: hasUserTierExplicitDaemonConfig(userLoaded?.config),
-        compactionEnabled: isCompactionEnabled(config),
-    });
-    config.transform_mode = resolvedTransformMode.mode;
-    allWarnings.push(...resolvedTransformMode.warnings.map((warning) => `[config] ${warning}`));
 
     if (allWarnings.length > 0) {
         config.configWarnings = allWarnings;

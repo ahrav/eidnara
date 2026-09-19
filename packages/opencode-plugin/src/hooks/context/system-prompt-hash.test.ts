@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { buildHiddenAgentRegistrations } from "../../agents/hidden-agent-registrations";
 import { NOTE_CONDITION_COMPILER_SYSTEM_PROMPT } from "../../features/context/conditional-notes/compiler-prompt";
 import { CONTEXT_RESEARCHER_SYSTEM_PROMPT } from "../../features/context/context-researcher/agent";
+import { sessionLog } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { clearEidnaraReduceAvailability } from "./eidnara-reduce-availability";
 import { createSystemPromptHashHandler, isEidnaraInternalAgent } from "./system-prompt-hash";
@@ -29,7 +30,7 @@ afterEach(() => {
         try {
             rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         } catch {
-            /* */
+            // Removing a scratch data home is best effort.
         }
     }
     tempDirs.length = 0;
@@ -571,5 +572,104 @@ describe("provisional eidnara_reduce availability (pre-first-user race)", () => 
         await handler({ sessionID: sessionId }, { system: ["Base agent prompt"] });
 
         expect(promptStateFor(sessionId)?.systemPromptHash).toMatch(/^[0-9a-f]{32}$/);
+    });
+});
+
+describe("system-prompt-hash guidance injection", () => {
+    it("appends the fetched block to the host entry once and skips a prompt that already carries it", async () => {
+        useTempDataHome("sph-guidance-append-");
+        const sessionId = "ses-guidance";
+        const calls: { toolPresent: boolean; isCacheBusting: boolean }[] = [];
+        const { handler } = buildHandler({
+            fetchGuidance: async (args) => {
+                calls.push({ toolPresent: args.toolPresent, isCacheBusting: args.isCacheBusting });
+                return "## Eidnara\n\nGuidance block.";
+            },
+        });
+
+        const output = { system: ["Host prompt", "Second entry"] };
+        await handler({ sessionID: sessionId }, output);
+        expect(output.system).toEqual([
+            "Host prompt\n\n## Eidnara\n\nGuidance block.",
+            "Second entry",
+        ]);
+        // No opencode.db: the eidnara_reduce verdict is fail-open, so the tool reads as present.
+        expect(calls).toEqual([{ toolPresent: true, isCacheBusting: false }]);
+
+        // The marker is already present: no second fetch, no second block.
+        await handler({ sessionID: sessionId }, output);
+        expect(output.system[0]).toBe("Host prompt\n\n## Eidnara\n\nGuidance block.");
+        expect(calls).toHaveLength(1);
+
+        // Nothing to append to means nothing is fetched.
+        await handler({ sessionID: sessionId }, { system: [] });
+        expect(calls).toHaveLength(1);
+    });
+
+    it("injects when the prompt only mentions the marker in prose, not as a heading line", async () => {
+        useTempDataHome("sph-guidance-prose-marker-");
+        let calls = 0;
+        const { handler } = buildHandler({
+            fetchGuidance: async () => {
+                calls += 1;
+                return "## Eidnara\n\nGuidance block.";
+            },
+        });
+
+        const output = { system: ["Never emit a `## Eidnara` heading yourself; it is reserved."] };
+        await handler({ sessionID: "ses-guidance-prose" }, output);
+        expect(calls).toBe(1);
+        expect(output.system[0]).toEndWith("\n\n## Eidnara\n\nGuidance block.");
+
+        // Now the heading line is present: no second fetch.
+        await handler({ sessionID: "ses-guidance-prose" }, output);
+        expect(calls).toBe(1);
+    });
+
+    it("keeps the prompt unchanged and warns once per session when the fetch fails", async () => {
+        useTempDataHome("sph-guidance-fail-open-");
+        const sessionId = "ses-guidance-fail";
+        let attempts = 0;
+        const { handler, promptStateFor } = buildHandler({
+            fetchGuidance: async () => {
+                attempts += 1;
+                throw new Error("daemon unavailable");
+            },
+        });
+
+        const output = { system: ["Host prompt"] };
+        await handler({ sessionID: sessionId }, output);
+        await handler({ sessionID: sessionId }, output);
+        expect(output.system).toEqual(["Host prompt"]);
+        expect(attempts).toBe(2);
+        expect(promptStateFor(sessionId)).toBeDefined();
+    });
+
+    it("forgets the once-per-session warning with the rest of an evicted session's state", async () => {
+        useTempDataHome("sph-guidance-warn-bound-");
+        const warn = spyOn(sessionLog, "warn").mockImplementation(() => {});
+        try {
+            const { handler, promptStateFor } = buildHandler({
+                fetchGuidance: async () => {
+                    throw new Error("daemon unavailable");
+                },
+            });
+            const guidanceWarnings = (): number =>
+                warn.mock.calls.filter(([, message]) =>
+                    String(message).startsWith("guidance fetch failed"),
+                ).length;
+            await handler({ sessionID: "ses-first" }, { system: ["Host prompt"] });
+            await handler({ sessionID: "ses-first" }, { system: ["Host prompt"] });
+            expect(guidanceWarnings()).toBe(1);
+            // One thousand later sessions evict the first from every per-session structure.
+            for (let index = 0; index < 1000; index += 1) {
+                await handler({ sessionID: `ses-${index}` }, { system: ["Host prompt"] });
+            }
+            expect(promptStateFor("ses-first")).toBeUndefined();
+            await handler({ sessionID: "ses-first" }, { system: ["Host prompt"] });
+            expect(guidanceWarnings()).toBe(1002);
+        } finally {
+            warn.mockRestore();
+        }
     });
 });

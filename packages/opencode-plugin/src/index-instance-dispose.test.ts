@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostModuleTransport } from "./hooks/context/module-transport";
@@ -71,20 +71,8 @@ describe("daemon transport teardown on instance disposal", () => {
         }
     });
 
-    // The user tier alone consents to rust mode, so the user config selects the mode under test.
-    function writeUserTransformMode(mode: "ts" | "rust"): void {
-        const userConfigDir = join(configHome, "eidnara");
-        mkdirSync(userConfigDir, { recursive: true });
-        writeFileSync(
-            join(userConfigDir, "eidnara.jsonc"),
-            JSON.stringify({ transform_mode: mode }),
-            "utf8",
-        );
-    }
-
-    for (const mode of ["ts", "rust"] as const) {
-        test(`${mode} mode: disposing the instance's own directory disconnects its transport, another directory does not`, async () => {
-            writeUserTransformMode(mode);
+    test("disposing the instance's own directory disconnects its transport, another directory does not", async () => {
+        {
             const server = await freshPluginServer();
             const hooks = await server({ directory, client: fakeClient() });
             expect(rpcStartSpy).toHaveBeenCalledTimes(1);
@@ -94,6 +82,6 @@ describe("daemon transport teardown on instance disposal", () => {
 
             await dispose(hooks, directory);
             expect(disconnectSpy).toHaveBeenCalledTimes(1);
-        });
-    }
+        }
+    });
 });

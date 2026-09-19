@@ -51,7 +51,8 @@ describe.skipIf(!rustPrereqs.ok)("incident pool baseline-green wrappers (rust)",
                 process.env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN = prereqs.fixtureBin;
             }
         }
-        workspaceParentDir = mkdtempSync(join(tmpdir(), "incident-green-"));
+        // Short on purpose: the case workspace hosts a Unix socket path bounded by `SUN_LEN`.
+        workspaceParentDir = mkdtempSync(join(tmpdir(), "ig-"));
     });
 
     afterAll(() => {

@@ -345,13 +345,14 @@ describe("opencode child lifecycle", () => {
                 transform_mode?: string;
                 host?: { connection_file?: string };
             };
-            expect(user.transform_mode).toBe("rust");
+            // The daemon transform is the only transform; there is no mode key to write.
+            expect(user.transform_mode).toBeUndefined();
             expect(user.host?.connection_file).toBe(connectionFile);
 
             const project = JSON.parse(
                 readFileSync(join(env.workdir, ".eidnara", "eidnara.jsonc"), "utf8"),
             ) as { transform_mode?: string; protected_tags?: number };
-            expect(project.transform_mode).toBe("rust");
+            expect(project.transform_mode).toBeUndefined();
             expect(project.protected_tags).toBe(1);
         } finally {
             rmSync(root, { recursive: true, force: true });

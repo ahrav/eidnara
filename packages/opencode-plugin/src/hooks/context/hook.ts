@@ -1,6 +1,5 @@
 import { isCompactionEnabled, isContextResearcherRunnable } from "../../config/agent-disable";
 import type { ContextResearcherConfig } from "../../config/schema/eidnara";
-import type { ResolvedTransformMode } from "../../config/transform-mode";
 import {
     clearHookInitFailure,
     recordHookInitFailure,
@@ -18,6 +17,7 @@ import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import { createEidnaraCommandHandler } from "./command-handler";
 import { invalidateToolPermissionDenied } from "./eidnara-reduce-availability";
 import { type ContextUsageEntry, createEventHandler } from "./event-handler";
+import { createGuidanceFetcher } from "./guidance-fetch";
 import {
     createChatMessageHook,
     createCommandExecuteBeforeHook,
@@ -75,7 +75,6 @@ export interface EidnaraDeps {
             enabled: boolean;
             min_chars: number;
         };
-        transform_mode?: ResolvedTransformMode;
         host?: { connection_file: string };
         /** Compaction-off mode gate. Resolved ONCE here at the
          *  session-hook construction boundary via isCompactionEnabled; the
@@ -208,8 +207,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const context_researcherConfig = isContextResearcherRunnable(deps.config)
         ? deps.config.context_researcher
         : undefined;
-    const rustMode = deps.config.transform_mode === "rust";
-
     const moduleClient = deps.rustModeModuleClient;
 
     const rustToolBackends: RustToolBackends = {
@@ -282,9 +279,20 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         // No `noteEvaluationAvailable`: conditioned notes require a live `note.evaluation.register` heartbeat.
     };
 
+    // Guidance comes from the daemon, which is already on the prompt path and serves the tags
+    // and blocks the guidance explains.
+    const fetchGuidance = createGuidanceFetcher({
+        moduleClient,
+        projectRootForSession: projectRootForLiveSession,
+        promptSurfaceRuntime: deps.promptSurfaceRuntime,
+        promptSurface: deps.config.prompt_surface,
+        language: deps.config.language,
+    });
+
     const systemPromptHash = createSystemPromptHashHandler({
         promptSurface: deps.config.prompt_surface,
         resolveModel: resolveLiveModel,
+        fetchGuidance,
         isSubagentSession: (sessionId) => subagentSessions.has(sessionId),
         historyRefreshSessions,
         systemPromptRefreshSessions,
@@ -335,16 +343,16 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         { moduleClient },
     );
 
-    // `ts` mode leaves messages untouched; the plugin-level adapter passes them through.
-    const messagesTransform = rustMode
-        ? async (_input: unknown, output: { messages: unknown[] }): Promise<void> => {
-              const messages = readOwnDataProperty(output, "messages") as MessageLike[];
-              const sessionId = resolveSessionId(messages);
-              if (!sessionId) return;
-              if (deletedSessions.has(sessionId)) return;
-              await rustTransform.run(sessionId, output);
-          }
-        : async (): Promise<void> => {};
+    const messagesTransform = async (
+        _input: unknown,
+        output: { messages: unknown[] },
+    ): Promise<void> => {
+        const messages = readOwnDataProperty(output, "messages") as MessageLike[];
+        const sessionId = resolveSessionId(messages);
+        if (!sessionId) return;
+        if (deletedSessions.has(sessionId)) return;
+        await rustTransform.run(sessionId, output);
+    };
 
     const eventHandler = createEventHandler({
         contextUsageMap,
@@ -367,14 +375,11 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             if (directory && !sessionDirectoryBySession.has(sessionId)) {
                 sessionDirectoryBySession.set(sessionId, directory);
             }
-            if (rustMode || moduleClient.hasSessionRoute?.(sessionId)) {
-                rustTransform.clearSession(sessionId);
-            } else {
-                moduleClient.closeSession?.(sessionId);
-            }
+            rustTransform.clearSession(sessionId);
             // Memory reads from hooks, tools, and sidebar polls hold kernel routes on the shared transport; host route capacity is finite.
             closeKernelSession(deps.config, sessionId);
             systemPromptHash.clearSession(sessionId);
+            fetchGuidance.clearSession(sessionId);
             lastHeuristicsTurnId.delete(sessionId);
             variantBySession.delete(sessionId);
             liveModelBySession.delete(sessionId);
@@ -463,35 +468,32 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         "tool.execute.after": createToolExecuteAfterHook({
             subagentSessions,
             client: deps.client,
-            transformMode: deps.config.transform_mode,
-            todoStateSet: rustMode
-                ? async ({ sessionId, stateJson, ownerMessageId }) => {
-                      if (deletedSessions.has(sessionId) || subagentSessions.has(sessionId)) {
-                          return undefined;
-                      }
-                      const projectRoot = await sessionDirectoryFor(sessionId);
-                      // Session deletion and child classification may complete during the directory read.
-                      if (deletedSessions.has(sessionId)) {
-                          clearDeletedSessionRoutingState(sessionId);
-                          return undefined;
-                      }
-                      if (subagentSessions.has(sessionId)) {
-                          return undefined;
-                      }
-                      return moduleClient.call({
-                          sessionId,
-                          projectRoot,
-                          method: "todo_state.set",
-                          body: {
-                              method: "todo_state.set",
-                              v: 1,
-                              session_id: sessionId,
-                              state_json: stateJson,
-                              owner_message_id: ownerMessageId,
-                          },
-                      });
-                  }
-                : undefined,
+            todoStateSet: async ({ sessionId, stateJson, ownerMessageId }) => {
+                if (deletedSessions.has(sessionId) || subagentSessions.has(sessionId)) {
+                    return undefined;
+                }
+                const projectRoot = await sessionDirectoryFor(sessionId);
+                // Session deletion and child classification may complete during the directory read.
+                if (deletedSessions.has(sessionId)) {
+                    clearDeletedSessionRoutingState(sessionId);
+                    return undefined;
+                }
+                if (subagentSessions.has(sessionId)) {
+                    return undefined;
+                }
+                return moduleClient.call({
+                    sessionId,
+                    projectRoot,
+                    method: "todo_state.set",
+                    body: {
+                        method: "todo_state.set",
+                        v: 1,
+                        session_id: sessionId,
+                        state_json: stateJson,
+                        owner_message_id: ownerMessageId,
+                    },
+                });
+            },
         }),
     };
     const hooksWithBackends = hooks as typeof hooks & {

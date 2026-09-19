@@ -47,9 +47,12 @@ export function fileSize(path: string): number {
     }
 }
 
-// Mirrors `output_document_regex` and `output_tag_regex` in the daemon's `history_summarizer_validate`.
-const OUTPUT_DOCUMENT_REGEX = /^\s*<output(?:\s[^>]*)?>([\s\S]*)<\/output\s*>\s*$/i;
-const OUTPUT_TAG_REGEX = /<\/?output(?:\s[^>]*)?>/i;
+// Mirrors `output_document_regex` and `output_tag_regex` in the daemon's
+// `history_summarizer_validate`: the first complete root wins wherever it sits, and the root's
+// own open and close tags are the only `output` tags allowed anywhere.
+const OUTPUT_DOCUMENT_REGEX = /<output(?:\s[^>]*)?>([\s\S]*?)<\/output\s*>/i;
+const OUTPUT_TAG_REGEX = /<\/?output(?:\s[^>]*)?>/gi;
+const ROOT_OUTPUT_TAG_COUNT = 2;
 
 export function parseHistorySummarizerDumpMeta(
     path: string,
@@ -60,10 +63,10 @@ export function parseHistorySummarizerDumpMeta(
         if (!root) {
             return { error: "not one complete <output> document" };
         }
-        if (OUTPUT_TAG_REGEX.test(root[1])) {
+        if ([...xml.matchAll(OUTPUT_TAG_REGEX)].length !== ROOT_OUTPUT_TAG_COUNT) {
             return { error: "more than one <output> document" };
         }
-        const parsed = parseHistorySegmentOutput(xml);
+        const parsed = parseHistorySegmentOutput(root[1]);
         if (parsed.history_segments.length === 0) {
             return { error: "no usable <history_segment> elements" };
         }
