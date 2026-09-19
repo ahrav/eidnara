@@ -589,6 +589,27 @@ where
     )
 }
 
+impl CuratorNonadmissionCode {
+    pub const CURATOR_UNAVAILABLE_TAG: &'static str = "curator_unavailable";
+    pub const CAPACITY_FULL_TAG: &'static str = "capacity_full";
+    pub const EVIDENCE_UNAVAILABLE_TAG: &'static str = "evidence_unavailable";
+    pub const FACT_SET_REJECTED_TAG: &'static str = "fact_set_rejected";
+    pub const SUBJECT_REFUSED_TAG: &'static str = "subject_refused";
+    pub const UNRECOGNIZED_TAG: &'static str = "unrecognized";
+
+    /// The `code` tag serde writes into the session metadata for this variant. The sampler groups sessions by the stored tag, so its SQL and this mapping must agree; a test holds both to serde's output. `Unrecognized` has no per-code counter: such a session counts only toward `nonadmissions`.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::CuratorUnavailable => Self::CURATOR_UNAVAILABLE_TAG,
+            Self::CapacityFull => Self::CAPACITY_FULL_TAG,
+            Self::EvidenceUnavailable => Self::EVIDENCE_UNAVAILABLE_TAG,
+            Self::FactSetRejected { .. } => Self::FACT_SET_REJECTED_TAG,
+            Self::SubjectRefused => Self::SUBJECT_REFUSED_TAG,
+            Self::Unrecognized => Self::UNRECOGNIZED_TAG,
+        }
+    }
+}
+
 /// The latest recorded nonadmission, bound to the firing that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedNonadmission {
@@ -607,6 +628,240 @@ pub struct CuratorReservation {
     pub payload_digest: String,
     pub kernel_incarnation: String,
     pub queue_deadline_ms: i64,
+}
+
+/// Content-free, low-cardinality facts about Curator work in this store incarnation, sampled for the operator surface. Every field is a count or a byte total from the ledger tables and the producers' durable state; nothing here carries an identity, a payload, or a reason string outside the closed code sets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CuratorStatusFacts {
+    pub jobs_reserved: u64,
+    pub jobs_ready: u64,
+    pub jobs_expired: u64,
+    /// Expired jobs that no receipt ever claimed: work that expired unseen.
+    pub jobs_expired_unseen: u64,
+    pub jobs_nonadmitted: u64,
+    pub jobs_failed: u64,
+    pub jobs_unknown: u64,
+    pub jobs_completed: u64,
+    pub jobs_abstained: u64,
+    pub selections_frozen: u64,
+    pub selections_enqueued: u64,
+    pub selections_expired: u64,
+    pub selections_failed_slot: u64,
+    /// Attempt rows consumed, whatever they ended as.
+    pub attempts_attempted: u64,
+    /// Attempts whose provider response was acknowledged as complete.
+    pub attempts_acknowledged: u64,
+    pub attempts_failed: u64,
+    pub attempts_cancelled: u64,
+    pub attempts_unknown: u64,
+    pub attempts_not_dispatched: u64,
+    pub attempts_open: u64,
+    pub receipts_in_progress: u64,
+    pub receipts_complete: u64,
+    /// Permanent receipt charges every admitted job keeps; these never shrink for the incarnation.
+    pub receipt_charge_bytes: u64,
+    /// Temporary allowances still held by non-terminal jobs and frozen selection pages; released when the work is terminal.
+    pub allowance_bytes: u64,
+    pub metadata_bytes: u64,
+    pub metadata_quota_bytes: u64,
+    pub metadata_headroom_bytes: u64,
+    /// Producer-owned facts summed over every session: nonadmissions recorded, sessions with a recorded reservation, and the latest reason per session by closed code.
+    pub nonadmissions: u64,
+    pub sessions_with_reservation: u64,
+    pub latest_nonadmission_curator_unavailable: u64,
+    pub latest_nonadmission_capacity_full: u64,
+    pub latest_nonadmission_evidence_unavailable: u64,
+    pub latest_nonadmission_fact_set_rejected: u64,
+    pub latest_nonadmission_subject_refused: u64,
+}
+
+impl CuratorStatusFacts {
+    fn job_outcome_slot(&mut self, outcome: curator_jobs::CuratorJobOutcome) -> &mut u64 {
+        use curator_jobs::CuratorJobOutcome as Outcome;
+        match outcome {
+            Outcome::Expired => &mut self.jobs_expired,
+            Outcome::Nonadmitted => &mut self.jobs_nonadmitted,
+            Outcome::Failed => &mut self.jobs_failed,
+            Outcome::Unknown => &mut self.jobs_unknown,
+            Outcome::Completed => &mut self.jobs_completed,
+            Outcome::Abstained => &mut self.jobs_abstained,
+        }
+    }
+
+    fn selection_slot(&mut self, state: curator_jobs::FrozenSelectionState) -> &mut u64 {
+        use curator_jobs::FrozenSelectionState as State;
+        match state {
+            State::Frozen => &mut self.selections_frozen,
+            State::Enqueued => &mut self.selections_enqueued,
+            State::Expired => &mut self.selections_expired,
+            State::FailedSlot => &mut self.selections_failed_slot,
+        }
+    }
+
+    fn attempt_slot(&mut self, kind: curator_ledger::CuratorAttemptTerminal) -> &mut u64 {
+        use curator_ledger::CuratorAttemptTerminal as Kind;
+        match kind {
+            Kind::Complete => &mut self.attempts_acknowledged,
+            Kind::Failed => &mut self.attempts_failed,
+            Kind::Cancelled => &mut self.attempts_cancelled,
+            Kind::Unknown => &mut self.attempts_unknown,
+            Kind::NotDispatched => &mut self.attempts_not_dispatched,
+        }
+    }
+
+    fn latest_nonadmission_slot(&mut self, tag: &str) -> Option<&mut u64> {
+        use CuratorNonadmissionCode as Code;
+        match tag {
+            Code::CURATOR_UNAVAILABLE_TAG => {
+                Some(&mut self.latest_nonadmission_curator_unavailable)
+            }
+            Code::CAPACITY_FULL_TAG => Some(&mut self.latest_nonadmission_capacity_full),
+            Code::EVIDENCE_UNAVAILABLE_TAG => {
+                Some(&mut self.latest_nonadmission_evidence_unavailable)
+            }
+            Code::FACT_SET_REJECTED_TAG => Some(&mut self.latest_nonadmission_fact_set_rejected),
+            Code::SUBJECT_REFUSED_TAG => Some(&mut self.latest_nonadmission_subject_refused),
+            _ => None,
+        }
+    }
+}
+
+impl MemoryStore {
+    /// Samples the Curator facts in one grouped pass per ledger table plus one over the sessions' metadata, so the store's single connection is held for eight statements however many rows the tables hold. Group keys are parsed back through the same mappings the writers use, so a renamed state cannot leave a counter silently at zero.
+    pub fn curator_status_facts(&self) -> Result<CuratorStatusFacts, MemoryStoreError> {
+        fn unsigned(value: i64) -> u64 {
+            u64::try_from(value).unwrap_or_default()
+        }
+        fn grouped<K: rusqlite::types::FromSql>(
+            conn: &GuardedConn<'_>,
+            sql: &str,
+            mut visit: impl FnMut(K, &rusqlite::Row<'_>) -> rusqlite::Result<()>,
+        ) -> rusqlite::Result<()> {
+            let mut statement = conn.prepare(sql)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                visit(row.get(0)?, row)?;
+            }
+            Ok(())
+        }
+        self.inner
+            .with_conn(|conn| {
+                let mut facts = CuratorStatusFacts {
+                    metadata_quota_bytes: curator_jobs::MAX_CURATOR_METADATA_BYTES_PER_HOST,
+                    ..CuratorStatusFacts::default()
+                };
+                grouped::<String>(
+                    conn,
+                    "SELECT state, outcome, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
+                     FROM curator_jobs GROUP BY state, outcome",
+                    |state, row| {
+                        let outcome: Option<String> = row.get(1)?;
+                        let count = unsigned(row.get(2)?);
+                        facts.receipt_charge_bytes = facts
+                            .receipt_charge_bytes
+                            .saturating_add(unsigned(row.get(3)?));
+                        match state.as_str() {
+                            "reserved" => facts.jobs_reserved += count,
+                            "ready" => facts.jobs_ready += count,
+                            "terminal" => {
+                                if let Some(outcome) = outcome
+                                    .as_deref()
+                                    .and_then(curator_jobs::CuratorJobOutcome::parse)
+                                {
+                                    *facts.job_outcome_slot(outcome) += count;
+                                }
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    },
+                )?;
+                facts.jobs_expired_unseen = unsigned(conn.query_row(
+                    "SELECT COUNT(*) FROM curator_jobs job
+                     WHERE job.state = 'terminal' AND job.outcome = ?1
+                       AND NOT EXISTS (SELECT 1 FROM curator_receipts receipt
+                                       WHERE receipt.project = job.project
+                                         AND receipt.causal_identity = job.causal_identity)",
+                    [curator_jobs::CuratorJobOutcome::Expired.as_str()],
+                    |row| row.get(0),
+                )?);
+                grouped::<String>(
+                    conn,
+                    "SELECT state, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
+                     FROM curator_frozen_selections GROUP BY state",
+                    |state, row| {
+                        // A page's receipt charge is permanent whatever its state; only its allowance is released at a terminal.
+                        facts.receipt_charge_bytes = facts
+                            .receipt_charge_bytes
+                            .saturating_add(unsigned(row.get(2)?));
+                        if let Some(state) = curator_jobs::FrozenSelectionState::parse(&state) {
+                            *facts.selection_slot(state) += unsigned(row.get(1)?);
+                        }
+                        Ok(())
+                    },
+                )?;
+                grouped::<Option<String>>(
+                    conn,
+                    "SELECT terminal_kind, COUNT(*) FROM curator_attempts GROUP BY terminal_kind",
+                    |kind, row| {
+                        let count = unsigned(row.get(1)?);
+                        facts.attempts_attempted += count;
+                        match kind.as_deref().map(curator_ledger::CuratorAttemptTerminal::parse) {
+                            None => facts.attempts_open += count,
+                            Some(Some(kind)) => *facts.attempt_slot(kind) += count,
+                            Some(None) => {}
+                        }
+                        Ok(())
+                    },
+                )?;
+                grouped::<String>(
+                    conn,
+                    "SELECT state, COUNT(*) FROM curator_receipts GROUP BY state",
+                    |state, row| {
+                        let count = unsigned(row.get(1)?);
+                        match state.as_str() {
+                            "in_progress" => facts.receipts_in_progress += count,
+                            "complete" => facts.receipts_complete += count,
+                            _ => {}
+                        }
+                        Ok(())
+                    },
+                )?;
+                facts.metadata_bytes = curator_jobs::metadata_bytes(conn, None)?;
+                // Everything charged that is not a permanent receipt is a temporary allowance: job allowances plus the frozen pages' charges.
+                facts.allowance_bytes = facts
+                    .metadata_bytes
+                    .saturating_sub(facts.receipt_charge_bytes);
+                facts.metadata_headroom_bytes = facts
+                    .metadata_quota_bytes
+                    .saturating_sub(facts.metadata_bytes);
+                grouped::<Option<String>>(
+                    conn,
+                    "SELECT json_extract(meta, '$.history_summarizer.curator_nonadmission.latest.code.code'),
+                            COUNT(*),
+                            COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_nonadmission.count')), 0),
+                            COALESCE(SUM(json_extract(meta, '$.history_summarizer.curator_reservation') IS NOT NULL), 0)
+                     FROM cache_state
+                     GROUP BY 1",
+                    |code, row| {
+                        let sessions = unsigned(row.get(1)?);
+                        facts.nonadmissions = facts.nonadmissions.saturating_add(unsigned(row.get(2)?));
+                        facts.sessions_with_reservation = facts
+                            .sessions_with_reservation
+                            .saturating_add(unsigned(row.get(3)?));
+                        if let Some(slot) = code
+                            .as_deref()
+                            .and_then(|code| facts.latest_nonadmission_slot(code))
+                        {
+                            *slot += sessions;
+                        }
+                        Ok(())
+                    },
+                )?;
+                Ok(facts)
+            })
+            .map_err(Into::into)
+    }
 }
 
 /// Everything a reserved firing's publication needs to run again locally after an interruption, so recovery neither reruns the model nor reconstructs the validated output: the validated chunk as the daemon serializes it, and the publication inputs beside it. Stored compressed in its own row, written and cleared with the reservation it belongs to.
@@ -21773,6 +22028,12 @@ mod tests {
             }),
         };
         assert_eq!(after.meta.history_summarizer.curator_nonadmission, recorded);
+        // The sampler reads the same producer facts through the session metadata.
+        let facts = store.curator_status_facts().unwrap();
+        assert_eq!(facts.nonadmissions, 1);
+        assert_eq!(facts.latest_nonadmission_fact_set_rejected, 1);
+        assert_eq!(facts.latest_nonadmission_capacity_full, 0);
+        assert_eq!(facts.sessions_with_reservation, 0);
 
         // Resending the original request after its outcome settled is refused by the row version it carried and counts nothing.
         let resent = publish(
@@ -21828,6 +22089,65 @@ mod tests {
         assert_eq!(second.curator_nonadmission_count, 1);
         assert_eq!(nonadmission(), recorded);
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
+    }
+
+    /// The sampler groups sessions by serde's `code` tag, which must match every variant's counter tag.
+    #[test]
+    fn nonadmission_code_tags_match_what_serde_stores() {
+        for code in [
+            CuratorNonadmissionCode::CuratorUnavailable,
+            CuratorNonadmissionCode::CapacityFull,
+            CuratorNonadmissionCode::EvidenceUnavailable,
+            CuratorNonadmissionCode::FactSetRejected {
+                failure: ExtractionFailure::MissingCitation,
+            },
+            CuratorNonadmissionCode::SubjectRefused,
+        ] {
+            let stored = serde_json::to_value(code).unwrap();
+            assert_eq!(stored["code"], code.tag(), "{code:?}");
+            let mut facts = CuratorStatusFacts::default();
+            assert!(
+                facts.latest_nonadmission_slot(code.tag()).is_some(),
+                "{code:?} has no counter"
+            );
+        }
+    }
+
+    /// A frozen page's receipt charge is permanent and its allowance temporary; the sampler must attribute each to the right counter, including once the page is terminal and only the receipt charge remains.
+    #[test]
+    fn frozen_page_receipt_charges_are_permanent_not_allowances_in_the_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let receipt = curator_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES;
+        let allowance = curator_jobs::FROZEN_SELECTION_ALLOWANCE_BYTES;
+        store
+            .with_fenced_conn_for_test(|conn| {
+                conn.execute(
+                    "INSERT INTO curator_frozen_selections (
+                         project, slot_id, selection_attempt, page_json, reference_count, next_cursor,
+                         state, selection_deadline_ms, allowance_bytes, receipt_charge_bytes,
+                         created_at_ms, updated_at_ms
+                     ) VALUES ('p', 'slot', 'a1', '{}', 1, NULL, 'frozen', 10, ?1, ?2, 1, 1),
+                              ('p', 'slot', 'a0', NULL, 1, NULL, 'enqueued', 10, 0, ?2, 1, 1)",
+                    rusqlite::params![
+                        i64::try_from(allowance).unwrap(),
+                        i64::try_from(receipt).unwrap()
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let facts = store.curator_status_facts().unwrap();
+        assert_eq!(facts.metadata_bytes, 2 * receipt + allowance);
+        assert_eq!(
+            facts.receipt_charge_bytes,
+            2 * receipt,
+            "both pages' receipt charges are permanent"
+        );
+        assert_eq!(
+            facts.allowance_bytes, allowance,
+            "only the frozen page still holds an allowance"
+        );
     }
 
     #[test]

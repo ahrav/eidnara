@@ -638,6 +638,36 @@ tolerate a missing optional field and MUST NOT fail on a new one. While
 `kernel_state` is `starting` the host treats activation as still in progress
 and polls health on the bounded 50 ms cadence described above.
 
+The `context` component MAY also carry a sanitized `metrics.curator` object
+describing Curator review work in the Memory Store, produced by its own
+sampler with its own sample time and staleness. Like `kernel`, the block is
+sanitized field by field: it survives when `curator_state` is valid, and every
+counter is kept or dropped on its own. Every counter is content-free: a count
+of rows in one closed state, or a byte total. No field carries an identity, a
+payload, a reason string, or a project.
+
+| field | type | rule |
+| --- | --- | --- |
+| `curator_state` | `"ready" \| "starting" \| "unavailable"` | required; any other value, a non-string, or a non-object block drops `curator` whole |
+| `sampled_at_ms` | unsigned integer or `null` | `null` means no sample yet; a `ready` block older than five minutes reports as `unavailable` |
+| `swept_jobs`, `swept_selections` | unsigned integer | jobs and frozen selections the last expiry sweep closed |
+| `jobs_reserved`, `jobs_ready` | unsigned integer | pending review jobs by state |
+| `jobs_expired`, `jobs_expired_unseen`, `jobs_nonadmitted`, `jobs_failed`, `jobs_unknown`, `jobs_completed`, `jobs_abstained` | unsigned integer | terminal jobs by outcome; `jobs_expired_unseen` are expired jobs no receipt ever claimed |
+| `selections_frozen`, `selections_enqueued`, `selections_expired`, `selections_failed_slot` | unsigned integer | Memory Classifier selection pages by state |
+| `attempts_attempted`, `attempts_acknowledged`, `attempts_failed`, `attempts_cancelled`, `attempts_unknown`, `attempts_not_dispatched`, `attempts_open` | unsigned integer | model attempts consumed, by terminal kind; `acknowledged` is a complete provider response, `open` has no terminal yet |
+| `receipts_in_progress`, `receipts_complete` | unsigned integer | execution receipts by state |
+| `receipt_charge_bytes`, `allowance_bytes`, `metadata_bytes`, `metadata_quota_bytes`, `metadata_headroom_bytes` | unsigned integer | permanent receipt charges, temporary allowances still held by jobs and frozen selection pages, their total, the host quota, and what remains under it |
+| `nonadmissions`, `sessions_with_reservation` | unsigned integer | producer-owned History Summarizer nonadmissions summed over sessions, and sessions whose producer state records a Curator reservation |
+| `latest_nonadmission_curator_unavailable`, `latest_nonadmission_capacity_full`, `latest_nonadmission_evidence_unavailable`, `latest_nonadmission_fact_set_rejected`, `latest_nonadmission_subject_refused` | unsigned integer | sessions whose latest nonadmission carries each closed code |
+
+The same integer rules as `kernel` apply: every counter MUST be no greater
+than 2^53; a larger, negative, non-integer, or `null` counter is dropped to
+absent, never reported as `null`; unknown fields are dropped; fields are
+additive. Permanent receipt charges never shrink within a store incarnation,
+so `metadata_headroom_bytes` reaching zero means new review work is refused
+until a new incarnation; it is a safety ceiling, not a measured service
+lifetime.
+
 `host.shutdown` is the authenticated host-global stop. Request and success response are both compact tagged objects; unknown request fields are ignored under the Section 7.1 bounds:
 
 ```json

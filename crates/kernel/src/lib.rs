@@ -111,14 +111,17 @@ pub use envelope::{
 };
 pub use facts::{ArtifactBudgetFacts, KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};
 pub use local_file::{
-    LOCAL_FILE_DETAIL_VERSION, LOCAL_FILE_KIND, LOCAL_FILE_SOURCE_KIND, LocalFileCapture,
-    LocalFileCaptureRequest, LocalFileDetail, MAX_EXPIRED_CAPTURES_PER_CALL, local_file_capture_id,
+    CaptureExpiry, LOCAL_FILE_DETAIL_VERSION, LOCAL_FILE_KIND, LOCAL_FILE_SOURCE_KIND,
+    LocalFileCapture, LocalFileCaptureRequest, LocalFileDetail, MAX_EXPIRED_CAPTURES_PER_CALL,
+    local_file_capture_id,
 };
 #[cfg(feature = "test-support")]
 pub use open::OpenPhase;
 pub use open::{KernelError, KernelStore};
 pub use outbox::{ConsumerAbandonment, OutboxEntry, OutboxPruneResult};
-pub use retention::{STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState};
+pub use retention::{
+    STAGING_DELETE_BATCH_RUNS, STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState,
+};
 pub use review_staging::{
     ByteRange, CanonicalTarget, EvidenceReference, ExtractedFact, MAX_FACT_SPANS, MAX_REVIEW_FACTS,
     MAX_REVIEW_IDENTITY_BYTES, MAX_REVIEW_LIMITATIONS, MAX_REVIEW_PAYLOAD_BYTES,

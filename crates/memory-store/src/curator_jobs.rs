@@ -112,7 +112,7 @@ pub enum CuratorJobOutcome {
 }
 
 impl CuratorJobOutcome {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Expired => "expired",
             Self::Nonadmitted => "nonadmitted",
@@ -132,7 +132,7 @@ impl CuratorJobOutcome {
         Self::Abstained,
     ];
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|outcome| outcome.as_str() == value)
@@ -203,7 +203,7 @@ impl FrozenSelectionState {
         Self::FailedSlot,
     ];
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|state| state.as_str() == value)
     }
 }
@@ -561,7 +561,11 @@ fn scalar(
     }
 }
 
-fn metadata_bytes(conn: &GuardedConn<'_>, project: Option<&str>) -> rusqlite::Result<u64> {
+/// Receipt charges of every row plus allowances of non-terminal rows and frozen pages.
+pub(crate) fn metadata_bytes(
+    conn: &GuardedConn<'_>,
+    project: Option<&str>,
+) -> rusqlite::Result<u64> {
     let jobs = scalar(
         conn,
         project,
