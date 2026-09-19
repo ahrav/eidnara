@@ -1,10 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import * as fs from "node:fs";
 import {
     chmodSync,
     closeSync,
     existsSync,
+    fstatSync,
     linkSync,
     lstatSync,
     mkdirSync,
@@ -12,6 +14,7 @@ import {
     openSync,
     readdirSync,
     readFileSync,
+    renameSync,
     rmSync,
     symlinkSync,
     truncateSync,
@@ -433,6 +436,62 @@ describe("capacity preflight (U3 scenario 7)", () => {
 // ---------------------------------------------------------------------------
 
 describe("bootstrap staging (U3 scenarios 3 and 6)", () => {
+    test.each([
+        ["identical", null],
+        ["wrong-bytes", "digest mismatch"],
+        ["owner-writable", "owner-writable"],
+        ["symlink", "not openable"],
+        ["extra-link", "not single-link"],
+        ["continuous", "identity drifted"],
+    ] as const)("concurrent publisher replacement %s is bounded and fully validated", (kind, failure) => {
+        const dir = tempDir("eidnara-stage-race-");
+        const source = path.join(dir, "launcher");
+        const bytes = Buffer.from("concurrent-launcher\n");
+        const digest = sha256(bytes);
+        const store = path.join(dir, "store");
+        const finalPath = path.join(store, digest);
+        writeFileSync(source, bytes, { mode: 0o755 });
+        const originalStat = fs.lstatSync;
+        let replacements = 0;
+        const stat = spyOn(fs, "lstatSync").mockImplementation((file, options) => {
+            if (file === finalPath && (replacements === 0 || kind === "continuous")) {
+                replacements++;
+                const winner = path.join(store, `concurrent-winner-${replacements}`);
+                if (kind === "symlink") {
+                    symlinkSync(source, winner);
+                } else {
+                    writeFileSync(winner, kind === "wrong-bytes" ? "wrong launcher\n" : bytes, {
+                        mode: kind === "owner-writable" ? 0o700 : 0o500,
+                    });
+                    if (kind === "extra-link") linkSync(winner, path.join(store, "extra-link"));
+                }
+                renameSync(winner, finalPath);
+            }
+            return originalStat(file, options);
+        });
+        try {
+            const options = { sourcePath: source, destDir: store, expectedSha256: digest };
+            if (failure !== null) {
+                expect(() => stageBootstrap(options)).toThrow(failure);
+            } else {
+                const staged = stageBootstrap(options);
+                try {
+                    expect(fstatSync(staged.fd).ino).toBe(originalStat(finalPath).ino);
+                    expect(fstatSync(staged.fd).nlink).toBe(1);
+                    expect(fstatSync(staged.fd).mode & 0o777).toBe(0o500);
+                    expect(readFileSync(staged.fd)).toEqual(bytes);
+                    expect(staged.sha256).toBe(digest);
+                } finally {
+                    closeSync(staged.fd);
+                }
+            }
+            expect(replacements).toBe(kind === "continuous" ? 3 : 1);
+        } finally {
+            stat.mockRestore();
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     test("a regular source stages into a single-link owner-only executable", () => {
         const dir = tempDir("eidnara-stage-");
         try {

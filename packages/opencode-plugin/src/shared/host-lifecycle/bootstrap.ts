@@ -646,6 +646,7 @@ export function revalidateRetainedBootstrap(
 }
 
 const STAGING_TEMP_PREFIX = ".staging-";
+const BOOTSTRAP_REVALIDATION_ATTEMPTS = 3;
 const STAGING_TEMP_NAME = /^\.staging-(\d+)-(\d+)-\d+$/;
 
 /**
@@ -844,7 +845,19 @@ export function stageBootstrap(options: {
             throw invalid("staging destination identity drifted during staging");
         }
         fsyncSync(destFd);
-        return revalidateRetainedBootstrap(finalPath, expectedSha256);
+        for (let attempt = 1; ; attempt++) {
+            try {
+                return revalidateRetainedBootstrap(finalPath, expectedSha256);
+            } catch (error) {
+                if (
+                    !(error instanceof BootstrapError) ||
+                    error.reason !== "native_payload_invalid" ||
+                    attempt === BOOTSTRAP_REVALIDATION_ATTEMPTS
+                ) {
+                    throw error;
+                }
+            }
+        }
     } catch (error) {
         // This module's contract is that every failure is one closed lifecycle
         // reason, but the syscalls above can still fail in ways no explicit
