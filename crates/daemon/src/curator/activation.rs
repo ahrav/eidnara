@@ -112,6 +112,51 @@ pub fn read_gate(home: &Path, live: &LiveIdentity) -> Result<Activation, Closed>
     evaluate(&record, live)
 }
 
+/// The identity terms a record must match, each with the live deployment's value, ordered as `evaluate` compares them.
+pub fn identity_terms(live: &LiveIdentity) -> [(&'static str, String); 9] {
+    [
+        (
+            "prompt template version",
+            LiveIdentity::prompt_template_version(),
+        ),
+        ("step schema version", STEP_VERSION.to_string()),
+        (
+            "scanner ruleset version",
+            LiveIdentity::scanner_ruleset_version(),
+        ),
+        (
+            "egress policy version",
+            CURATOR_POLICY_UNION_VERSION.to_string(),
+        ),
+        ("kernel baseline", live.kernel_baseline_digest.clone()),
+        (
+            "memory store baseline",
+            live.memstore_baseline_digest.clone(),
+        ),
+        ("kernel incarnation", live.kernel_incarnation.clone()),
+        (
+            "memory store incarnation",
+            live.memstore_incarnation.clone(),
+        ),
+        ("provider", live.provider.clone()),
+    ]
+}
+
+/// The record's value for each term of [`identity_terms`], in the same order.
+fn recorded_terms(record: &RuntimeIdentityRecord) -> [String; 9] {
+    [
+        record.prompt_template_version.clone(),
+        record.step_schema_version.to_string(),
+        record.scanner_ruleset_version.clone(),
+        record.egress_policy_version.to_string(),
+        record.kernel_baseline_digest.clone(),
+        record.memstore_baseline_digest.clone(),
+        record.kernel_incarnation.clone(),
+        record.memstore_incarnation.clone(),
+        record.provider.clone(),
+    ]
+}
+
 /// The match every activation requires: schema, every identity term, an attestation with bounded fields, and a credential the envelope carries.
 pub fn evaluate(record: &RuntimeIdentityRecord, live: &LiveIdentity) -> Result<Activation, Closed> {
     if record.schema != IDENTITY_SCHEMA {
@@ -129,45 +174,12 @@ pub fn evaluate(record: &RuntimeIdentityRecord, live: &LiveIdentity) -> Result<A
     {
         return Err(Closed::Malformed);
     }
-    let mismatches: [(&'static str, bool); 8] = [
-        (
-            "prompt template version",
-            record.prompt_template_version != LiveIdentity::prompt_template_version(),
-        ),
-        (
-            "step schema version",
-            record.step_schema_version != STEP_VERSION,
-        ),
-        (
-            "scanner ruleset version",
-            record.scanner_ruleset_version != LiveIdentity::scanner_ruleset_version(),
-        ),
-        (
-            "egress policy version",
-            record.egress_policy_version != CURATOR_POLICY_UNION_VERSION,
-        ),
-        (
-            "kernel baseline",
-            record.kernel_baseline_digest != live.kernel_baseline_digest,
-        ),
-        (
-            "memory store baseline",
-            record.memstore_baseline_digest != live.memstore_baseline_digest,
-        ),
-        (
-            "kernel incarnation",
-            record.kernel_incarnation != live.kernel_incarnation,
-        ),
-        (
-            "memory store incarnation",
-            record.memstore_incarnation != live.memstore_incarnation,
-        ),
-    ];
-    if let Some((field, _)) = mismatches.iter().find(|(_, differs)| *differs) {
+    if let Some(((field, _), _)) = identity_terms(live)
+        .iter()
+        .zip(recorded_terms(record).iter())
+        .find(|((_, live_value), recorded)| live_value != *recorded)
+    {
         return Err(Closed::IdentityMismatch(field));
-    }
-    if record.provider != live.provider {
-        return Err(Closed::IdentityMismatch("provider"));
     }
     if !attestation.finite_work_exposure_acknowledged {
         return Err(Closed::Unacknowledged);
@@ -323,7 +335,28 @@ mod tests {
             let mut changed = record();
             changed[field] = value;
             write(home.path(), &changed, 0o600);
-            assert_eq!(read_gate(home.path(), &live()), Err(expected), "{field}");
+            assert_eq!(
+                read_gate(home.path(), &live()),
+                Err(expected.clone()),
+                "{field}"
+            );
+            // Every identity term the gate can name carries the live value the owner has to write; the credential fingerprint is derived from the secret and is not a term.
+            if let Closed::IdentityMismatch(term) = expected {
+                let live_value = identity_terms(&live())
+                    .into_iter()
+                    .find(|(name, _)| *name == term)
+                    .map(|(_, value)| value);
+                if term == "credential" {
+                    assert_eq!(live_value, None, "{field}");
+                } else {
+                    let expected_value = record()[field].clone();
+                    let expected_value = expected_value
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| expected_value.to_string());
+                    assert_eq!(live_value, Some(expected_value), "{field}");
+                }
+            }
         }
         let mut unacknowledged = record();
         unacknowledged["provider_retention"]["finite_work_exposure_acknowledged"] =

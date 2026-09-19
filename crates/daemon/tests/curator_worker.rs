@@ -176,8 +176,12 @@ impl Rig {
 
     /// The owner's activation record for exactly this deployment.
     fn write_activation(&self) {
+        self.write_activation_record(self.activation_record());
+    }
+
+    fn activation_record(&self) -> serde_json::Value {
         let provider = self.peer.sender().provider_identity();
-        let record = serde_json::json!({
+        serde_json::json!({
             "schema": IDENTITY_SCHEMA,
             "model": "claude-test",
             "prompt_template_version": LiveIdentity::prompt_template_version(),
@@ -197,7 +201,10 @@ impl Rig {
                 "retention_terms": "test peer; nothing leaves the host",
                 "finite_work_exposure_acknowledged": true
             }
-        });
+        })
+    }
+
+    fn write_activation_record(&self, record: serde_json::Value) {
         let dir = self.home.join(ACTIVATION_DIR);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -436,4 +443,45 @@ async fn a_receipt_left_in_progress_is_taken_over_at_the_next_generation_and_set
     );
     assert_eq!(receipt.terminal, Some(CuratorReceiptTerminal::Abstained));
     assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_closed_gate_reports_the_mismatched_term_and_its_live_value_once_per_change() {
+    // The owner fills the record in against the running deployment, so a mismatch has to say which term differs and what the deployment's value is; the status block carries only the closed kind. The reason is reported when it changes, not on every pass, and a matching record clears it.
+    let rig = Rig::open().await;
+    let worker = rig.worker();
+    let cancel = CancellationToken::new();
+    let mut record = rig.activation_record();
+    record["kernel_incarnation"] = serde_json::json!("another-kernel");
+    rig.write_activation_record(record.clone());
+    assert_eq!(worker.pass(&cancel).await, 0);
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Closed("identity_mismatch")
+    );
+    let reason = format!(
+        "activation record names another kernel incarnation; the live value is {}",
+        rig.kernel_incarnation
+    );
+    assert_eq!(rig.status.closed_reason(), Some(reason.clone()));
+    assert_eq!(worker.pass(&cancel).await, 0);
+    assert_eq!(rig.status.closed_reason(), Some(reason));
+
+    // The credential fingerprint is derived from the secret, so its live value is never reported.
+    record["kernel_incarnation"] = serde_json::json!(rig.kernel_incarnation);
+    record["credential_fingerprint"] = serde_json::json!("fp-other");
+    rig.write_activation_record(record);
+    assert_eq!(worker.pass(&cancel).await, 0);
+    assert_eq!(
+        rig.status.closed_reason(),
+        Some("activation record names another credential".to_string())
+    );
+
+    rig.write_activation();
+    assert_eq!(worker.pass(&cancel).await, 0, "no job is ready");
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Open
+    );
+    assert_eq!(rig.status.closed_reason(), None);
 }
