@@ -131,8 +131,8 @@ impl PreparedArtifact {
             || request.retention_class.trim().is_empty()
             || request.source_revision < 0
             || request.retain_until.is_some_and(|value| value < 0)
-            // A Curator capture carries a finite acquisition reference; its liveness is judged in the reference commit, after the receipt lookup, so an identical committed request still replays.
-            || (request.retention_class == super::CURATOR_CAPTURE_RETENTION_CLASS
+            // A MemoryReviewer capture carries a finite acquisition reference; its liveness is judged in the reference commit, after the receipt lookup, so an identical committed request still replays.
+            || (request.retention_class == super::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS
                 && request.retain_until.is_none())
         {
             return Err(ArtifactError::new(ArtifactErrorKind::InvalidInput));
@@ -856,8 +856,8 @@ fn insert_reference(
         *refusal = Some(ArtifactErrorKind::ReAdmissionBlocked);
         return Err(KernelError::Conflict);
     }
-    // A new Curator capture reference must still be live when it commits; a replayed receipt never reaches this point.
-    if prepared.request.retention_class == super::CURATOR_CAPTURE_RETENTION_CLASS
+    // A new MemoryReviewer capture reference must still be live when it commits; a replayed receipt never reaches this point.
+    if prepared.request.retention_class == super::MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS
         && !prepared
             .request
             .retain_until

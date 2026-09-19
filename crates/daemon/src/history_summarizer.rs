@@ -7,22 +7,20 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use memory_store::curator_jobs::{
-    CuratorJobError, CuratorJobOutcome, CuratorJobRefusal, CuratorJobState,
+use memory_store::memory_reviewer_jobs::{
+    MemoryReviewerJobError, MemoryReviewerJobOutcome, MemoryReviewerJobRefusal,
+    MemoryReviewerJobState,
 };
 use memory_store::{
-    CuratorActivation, CuratorNonadmissionCode, HistorySegmentSetGeneration,
-    HistorySummarizerChunkRange, HistorySummarizerDurableState, HistorySummarizerEventCandidate,
-    HistorySummarizerPhase, HistorySummarizerPrimerCandidate, HistorySummarizerPublishError,
-    HistorySummarizerPublishPredicate, HistorySummarizerPublishRequest,
-    HistorySummarizerPublishResult, HistorySummarizerSelectedMessageIdentity,
-    HistorySummarizerUserMemoryCandidate, LoadedState, MemoryStore, MemoryStoreError,
+    HistorySegmentSetGeneration, HistorySummarizerChunkRange, HistorySummarizerDurableState,
+    HistorySummarizerEventCandidate, HistorySummarizerPhase, HistorySummarizerPrimerCandidate,
+    HistorySummarizerPublishError, HistorySummarizerPublishPredicate,
+    HistorySummarizerPublishRequest, HistorySummarizerPublishResult,
+    HistorySummarizerSelectedMessageIdentity, HistorySummarizerUserMemoryCandidate, LoadedState,
+    MemoryReviewerActivation, MemoryReviewerNonadmissionCode, MemoryStore, MemoryStoreError,
     PendingPublication, StoredHistorySegment,
 };
 
-use crate::curator::handoff::{
-    self, Handoff, HandoffError, HandoffRequest, HandoffTarget, PreparedActivation,
-};
 use crate::history_summarizer_citations::{ExtractionOutcome, FrozenAliasTable};
 use crate::history_summarizer_producer::{
     ErrorClass, ErrorClassification, HistorySummarizerProducer, HistorySummarizerProducerError,
@@ -31,6 +29,9 @@ use crate::history_summarizer_producer::{
 use crate::history_summarizer_validate::{
     HistorySummarizerChunk, HistorySummarizerValidationError, StoredHistorySegmentRange,
     ValidateOptions, ValidatedChunk, ValidatedHistorySegment, validate_history_summarizer_output,
+};
+use crate::memory_reviewer::handoff::{
+    self, Handoff, HandoffError, HandoffRequest, HandoffTarget, PreparedActivation,
 };
 
 /// `HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS` sets a 60-second cooldown after an abandoned history_summarizer firing.
@@ -249,9 +250,9 @@ pub fn fire(
         // A fire clears the prior skip reason.
         last_no_fire: None,
         consecutive_publish_failures: current.consecutive_publish_failures,
-        curator_nonadmission: current.curator_nonadmission,
+        memory_reviewer_nonadmission: current.memory_reviewer_nonadmission,
         // A reservation left by an earlier firing is not this firing's to publish; its job stays a capped reservation the expiry sweep closes.
-        curator_reservation: None,
+        memory_reviewer_reservation: None,
     }))
 }
 
@@ -338,13 +339,13 @@ pub fn abandon_with_detail(
         failure_backoff_at_ms: Some(failure_backoff_at_ms),
         last_failure: detail.or_else(|| current.last_failure.clone()),
         consecutive_publish_failures: current.consecutive_publish_failures,
-        curator_nonadmission: current.curator_nonadmission,
-        curator_reservation: current.curator_reservation.clone(),
+        memory_reviewer_nonadmission: current.memory_reviewer_nonadmission,
+        memory_reviewer_reservation: current.memory_reviewer_reservation.clone(),
         ..HistorySummarizerDurableState::default()
     }
 }
 
-/// Keeps a Publishing firing that holds a Curator reservation in place with the failure recorded, so recovery reconciles it against the reservation instead of refiring the model.
+/// Keeps a Publishing firing that holds a MemoryReviewer reservation in place with the failure recorded, so recovery reconciles it against the reservation instead of refiring the model.
 pub fn retain_with_detail(
     current: &HistorySummarizerDurableState,
     failure_backoff_at_ms: i64,
@@ -374,7 +375,7 @@ pub(crate) trait HoldsReservation {
 
 impl HoldsReservation for HistorySummarizerDurableState {
     fn holds_reservation(&self) -> bool {
-        self.curator_reservation
+        self.memory_reviewer_reservation
             .as_ref()
             .is_some_and(|held| held.firing_seq == self.firing_seq)
     }
@@ -470,10 +471,10 @@ pub struct ValidatedPublishRequest<'a> {
     pub boundary_dates: &'a BTreeMap<String, String>,
     pub failure_backoff_at_ms: i64,
     pub publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
-    /// Q31: why this firing's fact candidates were not admitted to Curator review, committed with the history. The caller decides it because the answer depends on what happened before publication (validation verdict, reservation refusal), not on the validated chunk alone.
-    pub curator_nonadmission: Option<CuratorNonadmissionCode>,
+    /// Q31: why this firing's fact candidates were not admitted to MemoryReviewer review, committed with the history. The caller decides it because the answer depends on what happened before publication (validation verdict, reservation refusal), not on the validated chunk alone.
+    pub memory_reviewer_nonadmission: Option<MemoryReviewerNonadmissionCode>,
     /// KTD3: the reserved and staged job this publication activates with its history.
-    pub curator_activation: Option<&'a PreparedActivation>,
+    pub memory_reviewer_activation: Option<&'a PreparedActivation>,
 }
 
 /// The commit re-checks the chunk fingerprint and abandons the matching firing before returning `HistorySummarizerStateError::FingerprintMismatch`.
@@ -565,15 +566,15 @@ pub fn publish_validated_chunk(
         user_memory_candidates: &user_memory_candidates,
         publication_floor_ordinal: request.publication_floor_ordinal,
         chunk_transcript: Some(request.chunk_transcript),
-        curator_nonadmission: request.curator_nonadmission,
-        curator_activation: request
-            .curator_activation
-            .map(|prepared| CuratorActivation {
+        memory_reviewer_nonadmission: request.memory_reviewer_nonadmission,
+        memory_reviewer_activation: request.memory_reviewer_activation.map(|prepared| {
+            MemoryReviewerActivation {
                 causal_identity: &prepared.causal_identity,
                 producer: &prepared.producer,
                 input: &prepared.input,
                 now_ms: request.now_ms,
-            }),
+            }
+        }),
     };
     let publish_result = match request.publication_fence {
         Some(fence) => fence.publish(store, publish_request),
@@ -596,7 +597,7 @@ pub fn publish_validated_chunk(
         }
         Err(HistorySummarizerPublishError::CallerFenceRejected { reason }) => {
             // The caller's own fence (a retired transform snapshot) refused before any write. Without a reservation the run returns to `Idle` for an immediate retry with a fresh snapshot; with one it stays in `Publishing` so recovery republishes the retained output.
-            if request.curator_activation.is_some() {
+            if request.memory_reviewer_activation.is_some() {
                 let _ = store.record_history_summarizer_publish_failure_if_matching(
                     request.session_id,
                     request.predicate,
@@ -632,7 +633,7 @@ pub fn publish_validated_chunk(
             reason,
         }) => {
             // A reasoned conflict is a re-cut session, which no retry can publish into; a bare row-version conflict is another writer's ordinary commit, which a reserved firing retries.
-            if request.curator_activation.is_some() && reason.is_none() {
+            if request.memory_reviewer_activation.is_some() && reason.is_none() {
                 let _ = store.record_history_summarizer_publish_failure_if_matching(
                     request.session_id,
                     request.predicate,
@@ -677,11 +678,16 @@ fn settle_unpublishable_reservation(
     store: &MemoryStore,
     request: &ValidatedPublishRequest<'_>,
 ) -> Result<(), HistorySummarizerStateError> {
-    let Some(activation) = request.curator_activation else {
+    let Some(activation) = request.memory_reviewer_activation else {
         return Ok(());
     };
     let loaded = store.load(request.session_id)?;
-    let Some(held) = loaded.meta.history_summarizer.curator_reservation.as_ref() else {
+    let Some(held) = loaded
+        .meta
+        .history_summarizer
+        .memory_reviewer_reservation
+        .as_ref()
+    else {
         return Ok(());
     };
     if held.firing_seq != request.predicate.firing_seq
@@ -704,15 +710,15 @@ fn settle_reservation(
     store: &MemoryStore,
     session_id: &str,
     project_path: &str,
-    held: &memory_store::CuratorReservation,
+    held: &memory_store::MemoryReviewerReservation,
     now_ms: i64,
 ) -> Result<bool, HistorySummarizerStateError> {
-    match store.settle_curator_reservation(session_id, held, project_path, now_ms) {
+    match store.settle_memory_reviewer_reservation(session_id, held, project_path, now_ms) {
         Ok(settled) => Ok(settled),
-        Err(CuratorJobError::Refused(refusal)) => Err(HistorySummarizerStateError::Publish(
-            HistorySummarizerPublishError::CuratorActivation(refusal),
+        Err(MemoryReviewerJobError::Refused(refusal)) => Err(HistorySummarizerStateError::Publish(
+            HistorySummarizerPublishError::MemoryReviewerActivation(refusal),
         )),
-        Err(CuratorJobError::Store(error)) => Err(error.into()),
+        Err(MemoryReviewerJobError::Store(error)) => Err(error.into()),
     }
 }
 
@@ -732,7 +738,7 @@ pub enum RestartAction {
     AbandonedAndRefireEligible {
         firing_seq: u64,
     },
-    /// The firing reserved a Curator job and retained its publication; recovery republishes it locally under the same fences instead of refiring.
+    /// The firing reserved a MemoryReviewer job and retained its publication; recovery republishes it locally under the same fences instead of refiring.
     RepublishReserved {
         firing_seq: u64,
     },
@@ -789,13 +795,13 @@ pub struct RepublishRequest<'a> {
     pub store: &'a MemoryStore,
     pub session_id: &'a str,
     pub project_path: &'a str,
-    pub curator_handoff: Option<&'a HandoffTarget>,
+    pub memory_reviewer_handoff: Option<&'a HandoffTarget>,
     pub now_ms: i64,
     pub failure_backoff_at_ms: i64,
     pub publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
     /// The privacy gate as configured now; user observations the firing retained are written only if it was open then and is open still.
     pub collect_user_memory_candidates: bool,
-    /// The memory gate as configured now. Facts accepted under a configuration that has since disabled memory are not handed to the Curator: the reservation settles and the firing refires under the current configuration, as the producer reattach drops them through its validation options.
+    /// The memory gate as configured now. Facts accepted under a configuration that has since disabled memory are not handed to the MemoryReviewer: the reservation settles and the firing refires under the current configuration, as the producer reattach drops them through its validation options.
     pub memory_enabled: bool,
 }
 
@@ -817,7 +823,7 @@ pub fn republish_reserved(
         store,
         session_id,
         project_path,
-        curator_handoff,
+        memory_reviewer_handoff,
         now_ms,
         failure_backoff_at_ms,
         publication_fence,
@@ -833,7 +839,7 @@ pub fn republish_reserved(
     };
     let (Some(reservation), Some(row_version)) = (
         publishing
-            .curator_reservation
+            .memory_reviewer_reservation
             .clone()
             .filter(|_| publishing.holds_reservation()),
         loaded.row_version,
@@ -856,14 +862,14 @@ pub fn republish_reserved(
     }
     // A job the sweep already closed as expired proves the deadline passed, whatever clock this pass was given before it was spawned.
     let job = store
-        .lookup_curator_job(project_path, &reservation.causal_identity)
+        .lookup_memory_reviewer_job(project_path, &reservation.causal_identity)
         .map_err(HistorySummarizerStateError::Store)?;
-    let swept_expired = job
-        .as_ref()
-        .is_some_and(|job| job.state == CuratorJobState::Terminal(CuratorJobOutcome::Expired));
+    let swept_expired = job.as_ref().is_some_and(|job| {
+        job.state == MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Expired)
+    });
     let expired = swept_expired || reservation.queue_deadline_ms <= now_ms;
     // Before the deadline the subject must be verified through the Kernel, so without a target nothing can be decided and the payload is not worth reading.
-    let target = match (expired, curator_handoff) {
+    let target = match (expired, memory_reviewer_handoff) {
         (true, _) => None,
         (false, Some(target)) => Some(target),
         (false, None) => {
@@ -871,7 +877,7 @@ pub fn republish_reserved(
                 retain_with_detail(
                     current,
                     failure_backoff_at_ms,
-                    Some("curator republish: no Curator handoff target".to_string()),
+                    Some("memory_reviewer republish: no MemoryReviewer handoff target".to_string()),
                 )
             });
         }
@@ -879,7 +885,7 @@ pub fn republish_reserved(
     // Recovery publishes only against the job the reservation names, as this firing reserved it. A job that is gone under the current authority, reserved for another firing (which adopted it), or already past reservation is not replaced, rebound, or waited for: the reservation settles and the firing refires under the current configuration. Past the deadline a job the sweep already closed still publishes, recording the expiry.
     let names_reserved_job = swept_expired
         || job.as_ref().is_some_and(|job| {
-            job.state == CuratorJobState::Reserved
+            job.state == MemoryReviewerJobState::Reserved
                 && handoff::firing_id_names(&job.producer, reservation.firing_seq)
         });
     if !names_reserved_job {
@@ -935,7 +941,7 @@ pub fn republish_reserved(
                             current,
                             failure_backoff_at_ms,
                             Some(
-                                "curator republish: the handoff did not reuse the reservation"
+                                "memory_reviewer republish: the handoff did not reuse the reservation"
                                     .to_string(),
                             ),
                         )
@@ -948,7 +954,9 @@ pub fn republish_reserved(
     let prepared = match plan {
         Ok(prepared) => prepared,
         // The reservation's own job is gone: nothing to publish against.
-        Err(HandoffError::Reserve(CuratorJobError::Refused(CuratorJobRefusal::Missing))) => {
+        Err(HandoffError::Reserve(MemoryReviewerJobError::Refused(
+            MemoryReviewerJobRefusal::Missing,
+        ))) => {
             return settle("the reservation no longer names a publishable job");
         }
         // Staging or reading back failed for a reason a later pass may not see again.
@@ -957,7 +965,7 @@ pub fn republish_reserved(
                 retain_with_detail(
                     current,
                     failure_backoff_at_ms,
-                    Some(format!("curator republish: {error}")),
+                    Some(format!("memory_reviewer republish: {error}")),
                 )
             });
         }
@@ -982,8 +990,8 @@ pub fn republish_reserved(
             now_ms,
             failure_backoff_at_ms,
             publication_fence,
-            curator_nonadmission: None,
-            curator_activation: Some(&prepared),
+            memory_reviewer_nonadmission: None,
+            memory_reviewer_activation: Some(&prepared),
         },
     ) {
         Ok(_) => Ok(RepublishOutcome::Published),
@@ -1003,17 +1011,17 @@ pub fn republish_reserved(
             retain_backoff(
                 current,
                 failure_backoff_at_ms,
-                Some(format!("curator republish: {error}")),
+                Some(format!("memory_reviewer republish: {error}")),
             )
         }),
         // The job itself refuses to activate: the reservation is settled with a terminal outcome.
         Err(HistorySummarizerStateError::Publish(
-            HistorySummarizerPublishError::CuratorActivation(
-                CuratorJobRefusal::Terminal
-                | CuratorJobRefusal::NotReserved
-                | CuratorJobRefusal::ProducerMismatch
-                | CuratorJobRefusal::InvalidRequest
-                | CuratorJobRefusal::Missing,
+            HistorySummarizerPublishError::MemoryReviewerActivation(
+                MemoryReviewerJobRefusal::Terminal
+                | MemoryReviewerJobRefusal::NotReserved
+                | MemoryReviewerJobRefusal::ProducerMismatch
+                | MemoryReviewerJobRefusal::InvalidRequest
+                | MemoryReviewerJobRefusal::Missing,
             ),
         )) => settle("the job refused activation"),
         Err(error) => Err(error.into()),
@@ -1048,7 +1056,7 @@ fn settle_republish(
     failure_backoff_at_ms: i64,
     detail: &str,
 ) -> Result<RepublishOutcome, HistorySummarizerDriveError> {
-    if let Some(held) = publishing.curator_reservation.as_ref()
+    if let Some(held) = publishing.memory_reviewer_reservation.as_ref()
         && !settle_reservation(store, session_id, project_path, held, now_ms)?
     {
         return Ok(RepublishOutcome::Retained);
@@ -1065,7 +1073,7 @@ fn settle_republish(
             abandon_with_detail(
                 current,
                 failure_backoff_at_ms,
-                Some(format!("curator reservation settled: {detail}")),
+                Some(format!("memory_reviewer reservation settled: {detail}")),
             ),
         )?;
     }
@@ -1107,8 +1115,8 @@ pub enum HistorySummarizerDriveError {
         backoff_error: Option<Box<MemoryStoreError>>,
     },
     Validation(HistorySummarizerValidationError),
-    /// The Curator reservation exists but staging or sealing failed; nothing was published and the reservation is retained.
-    CuratorHandoff(HandoffError),
+    /// The MemoryReviewer reservation exists but staging or sealing failed; nothing was published and the reservation is retained.
+    MemoryReviewerHandoff(HandoffError),
     /// The session was deleted while the firing ran; the producer was dropped mid-chain and
     /// nothing was published.
     Cancelled,
@@ -1121,7 +1129,9 @@ impl fmt::Display for HistorySummarizerDriveError {
                 write!(f, "history_summarizer model chain is empty")
             }
             HistorySummarizerDriveError::State(e) => write!(f, "state: {e}"),
-            HistorySummarizerDriveError::CuratorHandoff(e) => write!(f, "curator handoff: {e}"),
+            HistorySummarizerDriveError::MemoryReviewerHandoff(e) => {
+                write!(f, "memory_reviewer handoff: {e}")
+            }
             HistorySummarizerDriveError::Producer(e) => write!(f, "producer: {e}"),
             HistorySummarizerDriveError::ProducerConnect {
                 source,
@@ -1353,8 +1363,8 @@ pub struct HistorySummarizerFireRequest<'a> {
     pub failure_backoff_at_ms: i64,
     pub completion_now_ms: fn() -> i64,
     pub publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
-    /// The Curator handoff an accepted fact set is reserved and staged through; `None` records the candidates as not admitted for an unavailable Curator.
-    pub curator_handoff: Option<&'a HandoffTarget>,
+    /// The MemoryReviewer handoff an accepted fact set is reserved and staged through; `None` records the candidates as not admitted for an unavailable MemoryReviewer.
+    pub memory_reviewer_handoff: Option<&'a HandoffTarget>,
 }
 
 pub struct HistorySummarizerReattachRequest<'a> {
@@ -1373,7 +1383,7 @@ pub struct HistorySummarizerReattachRequest<'a> {
     pub failure_backoff_at_ms: i64,
     pub completion_now_ms: fn() -> i64,
     pub publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
-    pub curator_handoff: Option<&'a HandoffTarget>,
+    pub memory_reviewer_handoff: Option<&'a HandoffTarget>,
 }
 
 /// `HISTORY_SUMMARIZER_CHILD_SESSION_PREFIX` marks producer sessions as self-owned.
@@ -1826,7 +1836,7 @@ where
             failure_backoff_at_ms: request.failure_backoff_at_ms,
             completion_now_ms: request.completion_now_ms,
             publication_fence: request.publication_fence,
-            curator_handoff: request.curator_handoff,
+            memory_reviewer_handoff: request.memory_reviewer_handoff,
         });
         let row_version = match publish_result {
             Ok(row_version) => row_version,
@@ -1886,7 +1896,7 @@ where
                 store: request.store,
                 session_id: request.session_id,
                 project_path: request.project_path,
-                curator_handoff: request.curator_handoff,
+                memory_reviewer_handoff: request.memory_reviewer_handoff,
                 now_ms: request.now_ms,
                 failure_backoff_at_ms: request.failure_backoff_at_ms,
                 publication_fence: request.publication_fence,
@@ -2004,7 +2014,7 @@ where
         failure_backoff_at_ms: request.failure_backoff_at_ms,
         completion_now_ms: request.completion_now_ms,
         publication_fence: request.publication_fence,
-        curator_handoff: request.curator_handoff,
+        memory_reviewer_handoff: request.memory_reviewer_handoff,
     });
     close_and_log(producer, request.session_id).await;
     let row_version = publish_result?;
@@ -2036,7 +2046,7 @@ struct PublishOutputRequest<'a> {
     failure_backoff_at_ms: i64,
     completion_now_ms: fn() -> i64,
     publication_fence: Option<&'a dyn HistorySummarizerPublicationFence>,
-    curator_handoff: Option<&'a HandoffTarget>,
+    memory_reviewer_handoff: Option<&'a HandoffTarget>,
 }
 
 fn publish_output_from_awaiting(
@@ -2060,7 +2070,7 @@ fn publish_output_from_awaiting(
         failure_backoff_at_ms,
         completion_now_ms,
         publication_fence,
-        curator_handoff,
+        memory_reviewer_handoff,
     } = request;
     let validating = output_received(&awaiting, &output.text)?;
     persist_history_summarizer_state(store, session_id, validating.clone())?;
@@ -2109,7 +2119,7 @@ fn publish_output_from_awaiting(
     let publishing_row_version =
         persist_history_summarizer_state(store, session_id, publishing.clone())?;
     let predicate = publish_predicate(&publishing)?;
-    let decision = curator_decision_before_publish(CuratorDecisionRequest {
+    let decision = memory_reviewer_decision_before_publish(MemoryReviewerDecisionRequest {
         store,
         session_id,
         project_path,
@@ -2130,14 +2140,14 @@ fn publish_output_from_awaiting(
             collect_user_memory_candidates: validate_options.user_memory_collection_enabled,
             created_at_ms,
         },
-        curator_handoff,
+        memory_reviewer_handoff,
         failure_started_at_ms,
         failure_backoff_at_ms,
         completion_now_ms,
     })?;
-    let CuratorDecision {
-        curator_nonadmission,
-        curator_activation,
+    let MemoryReviewerDecision {
+        memory_reviewer_nonadmission,
+        memory_reviewer_activation,
         publishing_row_version,
     } = decision;
     let published = publish_validated_chunk(
@@ -2159,8 +2169,8 @@ fn publish_output_from_awaiting(
             now_ms: created_at_ms,
             failure_backoff_at_ms,
             publication_fence,
-            curator_nonadmission,
-            curator_activation: curator_activation.as_deref(),
+            memory_reviewer_nonadmission,
+            memory_reviewer_activation: memory_reviewer_activation.as_deref(),
         },
     )?;
     Ok(published.row_version)
@@ -2188,15 +2198,20 @@ fn persist_reservation(
     store: &MemoryStore,
     session_id: &str,
     publishing_row_version: u64,
-    reservation: &memory_store::CuratorReservation,
+    reservation: &memory_store::MemoryReviewerReservation,
     pending: &PendingPublication,
 ) -> Result<u64, HistorySummarizerStateError> {
     store
-        .record_curator_reservation(session_id, publishing_row_version, reservation, pending)
+        .record_memory_reviewer_reservation(
+            session_id,
+            publishing_row_version,
+            reservation,
+            pending,
+        )
         .map_err(HistorySummarizerStateError::Publish)
 }
 
-struct CuratorDecisionRequest<'a> {
+struct MemoryReviewerDecisionRequest<'a> {
     store: &'a MemoryStore,
     session_id: &'a str,
     project_path: &'a str,
@@ -2206,24 +2221,24 @@ struct CuratorDecisionRequest<'a> {
     aliases: &'a FrozenAliasTable,
     /// Retained with the reservation so a local retry republishes the same output.
     pending: PendingPublication,
-    curator_handoff: Option<&'a HandoffTarget>,
+    memory_reviewer_handoff: Option<&'a HandoffTarget>,
     failure_started_at_ms: i64,
     failure_backoff_at_ms: i64,
     completion_now_ms: fn() -> i64,
 }
 
-/// What the publication carries for the Curator, with the row version it must CAS against.
-struct CuratorDecision {
-    curator_nonadmission: Option<CuratorNonadmissionCode>,
-    curator_activation: Option<Box<PreparedActivation>>,
+/// What the publication carries for the MemoryReviewer, with the row version it must CAS against.
+struct MemoryReviewerDecision {
+    memory_reviewer_nonadmission: Option<MemoryReviewerNonadmissionCode>,
+    memory_reviewer_activation: Option<Box<PreparedActivation>>,
     publishing_row_version: u64,
 }
 
 /// KTD3/Q31: an accepted set is reserved and staged before publication, and the reservation is written into the Publishing state the moment it exists; every other outcome is decided without a reservation. A failure after the reservation abandons the run with the reservation retained and does not publish.
-fn curator_decision_before_publish(
-    request: CuratorDecisionRequest<'_>,
-) -> Result<CuratorDecision, HistorySummarizerDriveError> {
-    let CuratorDecisionRequest {
+fn memory_reviewer_decision_before_publish(
+    request: MemoryReviewerDecisionRequest<'_>,
+) -> Result<MemoryReviewerDecision, HistorySummarizerDriveError> {
+    let MemoryReviewerDecisionRequest {
         store,
         session_id,
         project_path,
@@ -2232,25 +2247,27 @@ fn curator_decision_before_publish(
         validated,
         aliases,
         pending,
-        curator_handoff,
+        memory_reviewer_handoff,
         failure_started_at_ms,
         failure_backoff_at_ms,
         completion_now_ms,
     } = request;
     let (ExtractionOutcome::Accepted { .. }, Some(target)) =
-        (&validated.extraction, curator_handoff)
+        (&validated.extraction, memory_reviewer_handoff)
     else {
-        return Ok(CuratorDecision {
-            curator_nonadmission: curator_nonadmission_before_reservation(&validated.extraction),
-            curator_activation: None,
+        return Ok(MemoryReviewerDecision {
+            memory_reviewer_nonadmission: memory_reviewer_nonadmission_before_reservation(
+                &validated.extraction,
+            ),
+            memory_reviewer_activation: None,
             publishing_row_version,
         });
     };
     // Q31: a publication the store refuses to retain (past its envelope, or content the durable scan rejects) could never be recovered after the reservation, so nothing is reserved for it and the refusal is recorded like the Kernel's.
     if !store.pending_publication_retainable(session_id, &pending)? {
-        return Ok(CuratorDecision {
-            curator_nonadmission: Some(CuratorNonadmissionCode::SubjectRefused),
-            curator_activation: None,
+        return Ok(MemoryReviewerDecision {
+            memory_reviewer_nonadmission: Some(MemoryReviewerNonadmissionCode::SubjectRefused),
+            memory_reviewer_activation: None,
             publishing_row_version,
         });
     }
@@ -2277,19 +2294,19 @@ fn curator_decision_before_publish(
         },
     );
     match handoff {
-        Ok(Handoff::Activate(prepared)) => Ok(CuratorDecision {
-            curator_nonadmission: None,
+        Ok(Handoff::Activate(prepared)) => Ok(MemoryReviewerDecision {
+            memory_reviewer_nonadmission: None,
             publishing_row_version: prepared.row_version,
-            curator_activation: Some(prepared),
+            memory_reviewer_activation: Some(prepared),
         }),
-        Ok(Handoff::Nonadmission(code)) => Ok(CuratorDecision {
-            curator_nonadmission: Some(code),
-            curator_activation: None,
+        Ok(Handoff::Nonadmission(code)) => Ok(MemoryReviewerDecision {
+            memory_reviewer_nonadmission: Some(code),
+            memory_reviewer_activation: None,
             publishing_row_version,
         }),
-        Ok(Handoff::Settled) => Ok(CuratorDecision {
-            curator_nonadmission: None,
-            curator_activation: None,
+        Ok(Handoff::Settled) => Ok(MemoryReviewerDecision {
+            memory_reviewer_nonadmission: None,
+            memory_reviewer_activation: None,
             publishing_row_version,
         }),
         Err(error) => {
@@ -2301,7 +2318,7 @@ fn curator_decision_before_publish(
             // After the reservation exists the firing stays in Publishing with the failure recorded, committed only over the row that was checked and only while that row is still this firing, so recovery reconciles it against the reservation instead of abandoning and refiring. Otherwise it is abandoned, fenced on this firing's predicate: a persist that lost its row-version race means another writer moved the session on, and that writer's state is not this firing's to mark or abandon.
             let loaded = store.load(session_id)?;
             let current = &loaded.meta.history_summarizer;
-            let detail = Some(format!("curator handoff failed: {error}"));
+            let detail = Some(format!("memory_reviewer handoff failed: {error}"));
             if current.firing_seq == publishing.firing_seq && current.holds_reservation() {
                 persist_history_summarizer_state_if_unmoved(
                     store,
@@ -2318,20 +2335,22 @@ fn curator_decision_before_publish(
                     detail,
                 )?;
             }
-            Err(HistorySummarizerDriveError::CuratorHandoff(error))
+            Err(HistorySummarizerDriveError::MemoryReviewerHandoff(error))
         }
     }
 }
 
-/// Q31, before any reservation: a rejected optional fact set is a nonadmission with the validator's code; an accepted set that reaches here had no Curator handoff to take it, so it is a nonadmission for an unavailable Curator; an intentional no-fact or extraction-free run is not a nonadmission.
-fn curator_nonadmission_before_reservation(
+/// Q31, before any reservation: a rejected optional fact set is a nonadmission with the validator's code; an accepted set that reaches here had no MemoryReviewer handoff to take it, so it is a nonadmission for an unavailable MemoryReviewer; an intentional no-fact or extraction-free run is not a nonadmission.
+fn memory_reviewer_nonadmission_before_reservation(
     extraction: &ExtractionOutcome,
-) -> Option<CuratorNonadmissionCode> {
+) -> Option<MemoryReviewerNonadmissionCode> {
     match extraction {
         ExtractionOutcome::NotRequested | ExtractionOutcome::NoFacts => None,
-        ExtractionOutcome::Accepted { .. } => Some(CuratorNonadmissionCode::CuratorUnavailable),
+        ExtractionOutcome::Accepted { .. } => {
+            Some(MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable)
+        }
         ExtractionOutcome::Rejected { failure } => {
-            Some(CuratorNonadmissionCode::FactSetRejected { failure: *failure })
+            Some(MemoryReviewerNonadmissionCode::FactSetRejected { failure: *failure })
         }
     }
 }
@@ -2906,7 +2925,7 @@ mod tests {
             failure_backoff_at_ms: 999,
             completion_now_ms: || 123,
             publication_fence: None,
-            curator_handoff: None,
+            memory_reviewer_handoff: None,
         }
     }
 
@@ -2931,7 +2950,7 @@ mod tests {
             failure_backoff_at_ms: 999,
             completion_now_ms: || 123,
             publication_fence: None,
-            curator_handoff: None,
+            memory_reviewer_handoff: None,
         }
     }
 
@@ -2955,8 +2974,8 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
-            curator_nonadmission: Default::default(),
-            curator_reservation: None,
+            memory_reviewer_nonadmission: Default::default(),
+            memory_reviewer_reservation: None,
         }
     }
 
@@ -3732,7 +3751,7 @@ mod tests {
             failure_backoff_at_ms: 999,
             completion_now_ms: || 123,
             publication_fence: None,
-            curator_handoff: None,
+            memory_reviewer_handoff: None,
         };
         let right_request = HistorySummarizerReattachRequest {
             store: &store,
@@ -3750,7 +3769,7 @@ mod tests {
             failure_backoff_at_ms: 999,
             completion_now_ms: || 123,
             publication_fence: None,
-            curator_handoff: None,
+            memory_reviewer_handoff: None,
         };
 
         let (left, right) = tokio::join!(
@@ -4364,7 +4383,7 @@ mod tests {
             failure_backoff_at_ms: 999,
             completion_now_ms: || 123,
             publication_fence: None,
-            curator_handoff: None,
+            memory_reviewer_handoff: None,
         };
         let err = reattach_history_summarizer_producer(&mut producer, request)
             .await
@@ -4734,8 +4753,8 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
-            curator_nonadmission: Default::default(),
-            curator_reservation: None,
+            memory_reviewer_nonadmission: Default::default(),
+            memory_reviewer_reservation: None,
         };
         let rv = store
             .commit(
@@ -4766,8 +4785,8 @@ mod tests {
                 now_ms: 123,
                 failure_backoff_at_ms: 0,
                 publication_fence: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             },
         )
         .expect("publish succeeds");
@@ -4790,14 +4809,14 @@ mod tests {
         assert_eq!(c2.created_at, 123);
     }
 
-    /// Q31 before reservation: a rejected fact set records one nonadmission with the firing's identity in the same publication that advances history; a later no-fact success, an extraction-free run, a restart with the producer in flight, a validation failure, and a store reopen all leave the count and latest reason in place; an accepted set with no Curator handoff is recorded as an unavailable Curator.
+    /// Q31 before reservation: a rejected fact set records one nonadmission with the firing's identity in the same publication that advances history; a later no-fact success, an extraction-free run, a restart with the producer in flight, a validation failure, and a store reopen all leave the count and latest reason in place; an accepted set with no MemoryReviewer handoff is recorded as an unavailable MemoryReviewer.
     #[test]
     fn nonadmission_facts_survive_later_firings_failures_and_reopen() {
         use crate::history_summarizer_citations::{FrozenAlias, FrozenAliasTable};
         use crate::history_summarizer_validate::{
             ChunkLine, HistorySummarizerChunk, StoredHistorySegmentRange, ValidateOptions,
         };
-        use memory_store::{CuratorNonadmission, ExtractionFailure, RecordedNonadmission};
+        use memory_store::{ExtractionFailure, MemoryReviewerNonadmission, RecordedNonadmission};
 
         fn chunk(start: u64, end: u64) -> HistorySummarizerChunk {
             let mut aliases = FrozenAliasTable::default();
@@ -4868,7 +4887,7 @@ mod tests {
                 .unwrap()
                 .meta
                 .history_summarizer
-                .curator_nonadmission
+                .memory_reviewer_nonadmission
         };
         let floor = || store.load("ses").unwrap().meta.publication_floor_ordinal;
         // Fires `from..=to` from the idle state and marks the producer started, as the live path does.
@@ -4929,7 +4948,7 @@ mod tests {
                 failure_backoff_at_ms: 0,
                 completion_now_ms: || 11,
                 publication_fence: None,
-                curator_handoff: None,
+                memory_reviewer_handoff: None,
             })
         };
         let publish = |awaiting: HistorySummarizerDurableState,
@@ -4952,11 +4971,11 @@ mod tests {
         .expect("history publishes beside the rejected set");
         assert_eq!(floor(), Some(4));
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
-        let recorded = CuratorNonadmission {
+        let recorded = MemoryReviewerNonadmission {
             count: 1,
             latest: Some(RecordedNonadmission {
                 firing_seq: 1,
-                code: CuratorNonadmissionCode::FactSetRejected {
+                code: MemoryReviewerNonadmissionCode::FactSetRejected {
                     failure: ExtractionFailure::UnknownAlias,
                 },
             }),
@@ -4965,7 +4984,7 @@ mod tests {
 
         // Firing 2 (4..=6): an intentional no-fact output is not a nonadmission.
         let awaiting = fire_next(4, 6);
-        assert_eq!(awaiting.curator_nonadmission, recorded);
+        assert_eq!(awaiting.memory_reviewer_nonadmission, recorded);
         publish(
             awaiting,
             output(4, 5, "<facts><PROJECT_RULES>\n</PROJECT_RULES></facts>"),
@@ -4988,7 +5007,7 @@ mod tests {
         ));
         let after_restart = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(after_restart.state, HistorySummarizerPhase::Idle);
-        assert_eq!(after_restart.curator_nonadmission, recorded);
+        assert_eq!(after_restart.memory_reviewer_nonadmission, recorded);
 
         // Firing 4 (6..=8): an extraction-free run (memory disabled) is not a nonadmission, whatever the model emitted.
         let awaiting = fire_next(6, 8);
@@ -5025,7 +5044,7 @@ mod tests {
         assert_eq!(floor(), Some(8));
         assert_eq!(nonadmission(), recorded);
 
-        // Firing 6 (8..=10): an accepted set has no Curator handoff yet, so it is recorded against this firing as an unavailable Curator.
+        // Firing 6 (8..=10): an accepted set has no MemoryReviewer handoff yet, so it is recorded against this firing as an unavailable MemoryReviewer.
         let awaiting = fire_next(8, 10);
         let firing_seq = awaiting.firing_seq;
         publish(awaiting, output(8, 9, CITED), &chunk(8, 10))
@@ -5036,12 +5055,12 @@ mod tests {
         let reopened = self::store(dir.path());
         let loaded = reopened.load("ses").unwrap();
         assert_eq!(
-            loaded.meta.history_summarizer.curator_nonadmission,
-            CuratorNonadmission {
+            loaded.meta.history_summarizer.memory_reviewer_nonadmission,
+            MemoryReviewerNonadmission {
                 count: 2,
                 latest: Some(RecordedNonadmission {
                     firing_seq,
-                    code: CuratorNonadmissionCode::CuratorUnavailable,
+                    code: MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable,
                 }),
             }
         );
@@ -5182,8 +5201,8 @@ mod tests {
                 now_ms: 0,
                 failure_backoff_at_ms: 999,
                 publication_fence: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             },
         )
         .unwrap_err();
@@ -5271,8 +5290,8 @@ mod tests {
                 now_ms: 0,
                 failure_backoff_at_ms: 999,
                 publication_fence: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             },
         )
         .unwrap_err();
@@ -5355,8 +5374,8 @@ mod tests {
                 now_ms: 0,
                 failure_backoff_at_ms: 999,
                 publication_fence: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             },
         )
         .unwrap_err();
@@ -5519,8 +5538,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 5,
                 chunk_transcript: Some("U: transcript"),
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap();
 

@@ -200,7 +200,7 @@ jobs:
         run: scripts/forbid-comment-markers.sh
 
       - name: Invented provenance
-        # Review-staging and Curator paths carry no caller provenance, so no
+        # Review-staging and MemoryReviewer paths carry no caller provenance, so no
         # source or fixture under them may construct `RepositoryProvenance`
         # or populate a `provenance` field by any means: a literal `Some`, a
         # forwarded value, a call, or field-init shorthand. The only permitted
@@ -214,9 +214,9 @@ jobs:
             --and --not -e 'provenanc[e]:[[:space:]]*None' \
             -- ':(glob)crates/kernel/src/review_staging.rs' \
                ':(glob)crates/kernel/tests/kernel_review_staging.rs' \
-               ':(glob)crates/**/curator*' ':(glob)crates/**/curator/**' || status=$?
+               ':(glob)crates/**/memory_reviewer*' ':(glob)crates/**/memory_reviewer/**' || status=$?
           if [ "$status" -eq 0 ]; then
-            echo "invented provenance in a Curator or review-staging path"
+            echo "invented provenance in a MemoryReviewer or review-staging path"
             exit 1
           fi
           if [ "$status" -ne 1 ]; then

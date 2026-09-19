@@ -60,7 +60,7 @@ impl SessionKey {
     }
 }
 
-/// The durable identity of one Curator attempt run under the supervisor. It binds the task kind, the project and job, the receipt generation and attempt, and both store incarnations, so a run from another generation, attempt, or incarnation is a different key even when every other field matches.
+/// The durable identity of one MemoryReviewer attempt run under the supervisor. It binds the task kind, the project and job, the receipt generation and attempt, and both store incarnations, so a run from another generation, attempt, or incarnation is a different key even when every other field matches.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct InternalRunKey {
     pub task_kind: String,
@@ -138,7 +138,7 @@ impl RunKey {
     }
 }
 
-/// The one-shot erased launch: given the run's event sink and cancellation token, it produces the backend future. The public path wraps the supervisor's backend and request in one; the Curator supplies its own with its real dependencies.
+/// The one-shot erased launch: given the run's event sink and cancellation token, it produces the backend future. The public path wraps the supervisor's backend and request in one; the MemoryReviewer supplies its own with its real dependencies.
 pub type Launch = Box<dyn FnOnce(EventSink, CancellationToken) -> BackendFuture + Send + 'static>;
 
 fn app(code: &'static str, message: &str) -> RequestError {
@@ -609,7 +609,7 @@ impl Supervisor {
             .contains_key(&RunKey::Internal(key.clone()))
     }
 
-    /// Admits one Curator attempt as an internal run and spawns its launch under the same run slots, backend permits, retained bytes, task tracker, and shutdown as public runs. `request_bytes` is the prepared request's retained size, charged like a public request; text the launch emits through its sink counts against the per-run replay cap but is not retained. The backend-permit wait ends at `cutoff`; a run that has not started by then terminates as cancelled without ever calling `launch`, and one that has started has its token cancelled at `cutoff`. An internal key admits exactly one run while that run is retained; a second launch under it is refused. No command permit is taken: internal admission must not consume the public callback budget, and the run slot is what bounds it.
+    /// Admits one MemoryReviewer attempt as an internal run and spawns its launch under the same run slots, backend permits, retained bytes, task tracker, and shutdown as public runs. `request_bytes` is the prepared request's retained size, charged like a public request; text the launch emits through its sink counts against the per-run replay cap but is not retained. The backend-permit wait ends at `cutoff`; a run that has not started by then terminates as cancelled without ever calling `launch`, and one that has started has its token cancelled at `cutoff`. An internal key admits exactly one run while that run is retained; a second launch under it is refused. No command permit is taken: internal admission must not consume the public callback budget, and the run slot is what bounds it.
     pub fn launch_internal(
         &self,
         key: InternalRunKey,
@@ -1407,7 +1407,7 @@ fn enforce_terminal_cap(
     // The scan is O(sessions) per eviction: the cap plus at most one uncounted internal terminal per backend permit does not justify an ordered structure.
     loop {
         let mut retained = 0usize;
-        // Internal terminals are evicted before any public entry, so Curator churn cannot revoke a public deletion guard early; within one class the oldest goes first.
+        // Internal terminals are evicted before any public entry, so MemoryReviewer churn cannot revoke a public deletion guard early; within one class the oldest goes first.
         let mut oldest: Option<(RunKey, (bool, Instant))> = None;
         for (key, entry) in &index.sessions {
             let (at, evictable) = match entry {
@@ -1507,7 +1507,7 @@ fn sweep_for(inner: &Arc<Inner>, index: &mut Index, released: &mut Released) {
     }
 }
 
-/// The Curator's handle on one internal run. It is the only way to address the run: public status, cancel, delete, and subscribe never see it.
+/// The MemoryReviewer's handle on one internal run. It is the only way to address the run: public status, cancel, delete, and subscribe never see it.
 pub struct InternalRun {
     inner: Arc<Inner>,
     run: Arc<Run>,

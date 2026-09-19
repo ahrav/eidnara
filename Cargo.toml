@@ -64,7 +64,7 @@ semver = "1"
 # `default-features = false` keeps credential helpers out of the dependency graph; `status` still pulls gix-filter and gix-command, and gix-protocol pulls gix-transport.
 gix = { version = "0.87", default-features = false, features = ["revision", "status", "sha1", "parallel"] }
 proptest = "1.11"
-# The Curator's model sender: connection-level HTTP/1 over rustls with the ring provider, pinned to the versions whose one-shot handoff contract the sender proof was run against.
+# The MemoryReviewer's model sender: connection-level HTTP/1 over rustls with the ring provider, pinned to the versions whose one-shot handoff contract the sender proof was run against.
 hyper = { version = "=1.11.1", features = ["client", "http1"] }
 hyper-util = { version = "=0.1.20", features = ["tokio"] }
 http-body-util = "=0.1.5"

@@ -1,4 +1,4 @@
-//! Review inputs: extraction subjects and Curator proposals staged through the stager shared with the public `StagingCandidateSpec` path.
+//! Review inputs: extraction subjects and MemoryReviewer proposals staged through the stager shared with the public `StagingCandidateSpec` path.
 //!
 //! `provenance_witness` carries `kind: "review"` plus a `binding` object naming the daemon-supplied project digest, domain, owner, subject source, and reference sources. `validate_provenance` rejects the `review` kind, `load_candidate_facts` filters the review `candidate_kind` literals, and the public staging path refuses those literals, so admission never resolves a review row. Review rows carry no caller provenance, so `run_sensitivity` classifies them `Sensitive`; a private read cannot upgrade that classification.
 //!
@@ -23,7 +23,7 @@ use crate::cas::is_artifact_digest;
 pub const REVIEW_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 /// `candidate_kind` literal of a staged extraction subject.
 pub const REVIEW_SUBJECT_KIND: &str = "review_subject";
-/// `candidate_kind` literal of a staged Curator proposal.
+/// `candidate_kind` literal of a staged MemoryReviewer proposal.
 pub const REVIEW_PROPOSAL_KIND: &str = "review_proposal";
 /// `provenance_witness.kind` literal of every review row; admission rejects it.
 pub const REVIEW_WITNESS_KIND: &str = "review";
@@ -208,7 +208,7 @@ pub struct PolicyDependencies {
     pub ancestry: Vec<String>,
 }
 
-/// A Curator proposal as staged; publication and acceptance happen elsewhere.
+/// A MemoryReviewer proposal as staged; publication and acceptance happen elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewProposal {

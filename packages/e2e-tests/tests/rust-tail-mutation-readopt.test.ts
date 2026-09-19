@@ -18,6 +18,8 @@ function mutateNewestUserTailInPlace(h: RustTestHarness, sessionId: string): str
     const ocPath = join(h.env.dataDir, "opencode", "opencode.db");
     const db = new Database(ocPath);
     try {
+        // OpenCode holds the writer; wait for it as appendSyntheticHistory does.
+        db.exec("PRAGMA busy_timeout = 30000");
         const newestUser = db
             .prepare(
                 "SELECT id FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user' ORDER BY id DESC LIMIT 1",

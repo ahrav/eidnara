@@ -596,11 +596,11 @@ fn sanitize_kernel_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(block))
 }
 
-pub(crate) const CURATOR_KEY: &str = "curator";
-const CURATOR_STATE_KEY: &str = "curator_state";
-const CURATOR_STATES: [&str; 3] = ["ready", STATE_STARTING, STATE_UNAVAILABLE];
+pub(crate) const MEMORY_REVIEWER_KEY: &str = "memory_reviewer";
+const MEMORY_REVIEWER_STATE_KEY: &str = "memory_reviewer_state";
+const MEMORY_REVIEWER_STATES: [&str; 3] = ["ready", STATE_STARTING, STATE_UNAVAILABLE];
 /// `activation_state` values: the gate is open, or closed for one of the record's closed reasons, or not yet evaluated.
-const CURATOR_ACTIVATION_STATES: [&str; 12] = [
+const MEMORY_REVIEWER_ACTIVATION_STATES: [&str; 12] = [
     "open",
     "unknown",
     "stale",
@@ -614,8 +614,8 @@ const CURATOR_ACTIVATION_STATES: [&str; 12] = [
     "unavailable",
     "store",
 ];
-/// Every Curator counter the wire contract names (`docs/host-wire-protocol.md`, `metrics.curator`); an unknown field is dropped.
-const CURATOR_COUNTERS: [&str; 36] = [
+/// Every MemoryReviewer counter the wire contract names (`docs/host-wire-protocol.md`, `metrics.memory_reviewer`); an unknown field is dropped.
+const MEMORY_REVIEWER_COUNTERS: [&str; 36] = [
     "swept_jobs",
     "swept_selections",
     "jobs_reserved",
@@ -647,32 +647,32 @@ const CURATOR_COUNTERS: [&str; 36] = [
     "metadata_headroom_bytes",
     "nonadmissions",
     "sessions_with_reservation",
-    "latest_nonadmission_curator_unavailable",
+    "latest_nonadmission_memory_reviewer_unavailable",
     "latest_nonadmission_capacity_full",
     "latest_nonadmission_evidence_unavailable",
     "latest_nonadmission_fact_set_rejected",
     "latest_nonadmission_subject_refused",
 ];
 
-/// Retains only Curator counters with declared types and ranges, field by field, the way the kernel block is kept. A block without a recognized `curator_state` is dropped whole; every counter is an unsigned integer no greater than 2^53 or it is dropped to absent; `sampled_at_ms` alone may be `null`.
-fn sanitize_curator_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
+/// Retains only MemoryReviewer counters with declared types and ranges, field by field, the way the kernel block is kept. A block without a recognized `memory_reviewer_state` is dropped whole; every counter is an unsigned integer no greater than 2^53 or it is dropped to absent; `sampled_at_ms` alone may be `null`.
+fn sanitize_memory_reviewer_block(raw: &serde_json::Value) -> Option<serde_json::Value> {
     const MAX_COUNTER: u64 = 1 << 53;
     let raw = raw.as_object()?;
     let state = raw
-        .get(CURATOR_STATE_KEY)
+        .get(MEMORY_REVIEWER_STATE_KEY)
         .and_then(serde_json::Value::as_str)?;
-    if !CURATOR_STATES.contains(&state) {
+    if !MEMORY_REVIEWER_STATES.contains(&state) {
         return None;
     }
     let mut block = serde_json::Map::new();
     block.insert(
-        CURATOR_STATE_KEY.to_owned(),
+        MEMORY_REVIEWER_STATE_KEY.to_owned(),
         serde_json::Value::String(state.to_owned()),
     );
     if let Some(activation) = raw
         .get("activation_state")
         .and_then(serde_json::Value::as_str)
-        .filter(|value| CURATOR_ACTIVATION_STATES.contains(value))
+        .filter(|value| MEMORY_REVIEWER_ACTIVATION_STATES.contains(value))
     {
         block.insert(
             "activation_state".to_owned(),
@@ -690,7 +690,7 @@ fn sanitize_curator_block(raw: &serde_json::Value) -> Option<serde_json::Value> 
         }
         None => {}
     }
-    for name in CURATOR_COUNTERS {
+    for name in MEMORY_REVIEWER_COUNTERS {
         if let Some(value) = raw
             .get(name)
             .and_then(serde_json::Value::as_u64)
@@ -744,11 +744,11 @@ fn sanitize_context_metrics(
     {
         sanitized_metrics.insert(KERNEL_KEY.to_owned(), kernel);
     }
-    if let Some(curator) = metrics
-        .and_then(|metrics| metrics.get(CURATOR_KEY))
-        .and_then(sanitize_curator_block)
+    if let Some(memory_reviewer) = metrics
+        .and_then(|metrics| metrics.get(MEMORY_REVIEWER_KEY))
+        .and_then(sanitize_memory_reviewer_block)
     {
-        sanitized_metrics.insert(CURATOR_KEY.to_owned(), curator);
+        sanitized_metrics.insert(MEMORY_REVIEWER_KEY.to_owned(), memory_reviewer);
     }
 }
 
@@ -1665,10 +1665,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod curator_block_tests {
+mod memory_reviewer_block_tests {
     use super::*;
 
-    fn report(curator: serde_json::Value) -> crate::handler::HealthReport {
+    fn report(memory_reviewer: serde_json::Value) -> crate::handler::HealthReport {
         crate::handler::HealthReport {
             status: crate::handler::HealthStatus::Ok,
             detail: None,
@@ -1676,14 +1676,14 @@ mod curator_block_tests {
                 "components": {
                     "context": {
                         "status": "ok",
-                        "metrics": { "storage_state": "ready", "curator": curator }
+                        "metrics": { "storage_state": "ready", "memory_reviewer": memory_reviewer }
                     }
                 }
             })),
         }
     }
 
-    fn curator_of(report: &crate::handler::HealthReport) -> Option<serde_json::Value> {
+    fn memory_reviewer_of(report: &crate::handler::HealthReport) -> Option<serde_json::Value> {
         let response: serde_json::Value = serde_json::from_slice(&host_status_response_json(
             report,
             serde_json::json!({"state": "healthy"}),
@@ -1692,32 +1692,33 @@ mod curator_block_tests {
         response["metrics"]["components"]["context"]["metrics"]
             .as_object()
             .expect("context metrics object")
-            .get("curator")
+            .get("memory_reviewer")
             .cloned()
     }
 
     /// Every declared counter passes; unknown, negative, oversized, string, and `null` counters are dropped to absent; `sampled_at_ms` alone may be `null`; a block without a valid state is dropped whole.
     #[test]
-    fn curator_block_is_sanitized_field_by_field() {
+    fn memory_reviewer_block_is_sanitized_field_by_field() {
         let mut full = serde_json::Map::new();
-        full.insert("curator_state".into(), "ready".into());
+        full.insert("memory_reviewer_state".into(), "ready".into());
         full.insert("activation_state".into(), "identity_mismatch".into());
         full.insert("sampled_at_ms".into(), 1_700_000_000_000_u64.into());
-        for (index, name) in CURATOR_COUNTERS.iter().enumerate() {
+        for (index, name) in MEMORY_REVIEWER_COUNTERS.iter().enumerate() {
             full.insert((*name).to_owned(), (index as u64).into());
         }
         full.insert("job_ids".into(), serde_json::json!(["a", "b"]));
-        let kept = curator_of(&report(serde_json::Value::Object(full.clone()))).expect("kept");
+        let kept =
+            memory_reviewer_of(&report(serde_json::Value::Object(full.clone()))).expect("kept");
         let kept = kept.as_object().unwrap();
-        assert_eq!(kept.len(), 3 + CURATOR_COUNTERS.len());
+        assert_eq!(kept.len(), 3 + MEMORY_REVIEWER_COUNTERS.len());
         assert_eq!(kept["activation_state"], "identity_mismatch");
         assert!(kept.get("job_ids").is_none(), "unknown fields are dropped");
-        for (index, name) in CURATOR_COUNTERS.iter().enumerate() {
+        for (index, name) in MEMORY_REVIEWER_COUNTERS.iter().enumerate() {
             assert_eq!(kept[*name], serde_json::Value::from(index as u64), "{name}");
         }
 
-        let partial = curator_of(&report(serde_json::json!({
-            "curator_state": "starting",
+        let partial = memory_reviewer_of(&report(serde_json::json!({
+            "memory_reviewer_state": "starting",
             "activation_state": "because I said so",
             "sampled_at_ms": null,
             "jobs_ready": -1,
@@ -1730,20 +1731,25 @@ mod curator_block_tests {
         assert_eq!(
             partial,
             serde_json::json!({
-                "curator_state": "starting",
+                "memory_reviewer_state": "starting",
                 "sampled_at_ms": null,
                 "metadata_headroom_bytes": 1_u64 << 53,
             })
         );
 
-        assert!(curator_of(&report(serde_json::json!({ "curator_state": "broken" }))).is_none());
-        assert!(curator_of(&report(serde_json::json!({ "jobs_ready": 1 }))).is_none());
-        assert!(curator_of(&report(serde_json::json!("ready"))).is_none());
+        assert!(
+            memory_reviewer_of(&report(
+                serde_json::json!({ "memory_reviewer_state": "broken" })
+            ))
+            .is_none()
+        );
+        assert!(memory_reviewer_of(&report(serde_json::json!({ "jobs_ready": 1 }))).is_none());
+        assert!(memory_reviewer_of(&report(serde_json::json!("ready"))).is_none());
         assert_eq!(
-            curator_of(&report(
-                serde_json::json!({ "curator_state": "unavailable" })
+            memory_reviewer_of(&report(
+                serde_json::json!({ "memory_reviewer_state": "unavailable" })
             )),
-            Some(serde_json::json!({ "curator_state": "unavailable" }))
+            Some(serde_json::json!({ "memory_reviewer_state": "unavailable" }))
         );
     }
 }

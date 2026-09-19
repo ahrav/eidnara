@@ -21,7 +21,7 @@ The publish path in `crates/daemon/src/history_summarizer.rs`:
   optionally user observations onto store row shapes.
 - `:487-500` builds `HistorySummarizerPublishRequest`, always with
   `chunk_transcript: Some(...)`, and carries the caller's
-  `curator_nonadmission` code.
+  `memory_reviewer_nonadmission` code.
 - `:501-504` calls the publication fence when present, otherwise
   `store.publish_history_summarizer_chunk` directly.
 

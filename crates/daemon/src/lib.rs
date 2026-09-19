@@ -13,7 +13,6 @@ pub(crate) mod conditional_note_evaluation;
 pub(crate) mod config;
 pub mod context_capabilities;
 pub mod coverage;
-pub mod curator;
 pub mod decay_render;
 pub mod dispatch;
 pub(crate) mod divergence;
@@ -40,6 +39,7 @@ pub mod m0_compose;
 pub(crate) mod m1_compose;
 pub(crate) mod memory_classifier_scheduler;
 pub(crate) mod memory_render;
+pub mod memory_reviewer;
 pub mod memory_tool;
 pub mod message_cleanup;
 pub mod metered_decode;
@@ -2261,7 +2261,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// The memory store's connection holds `memory_store::PAGE_CACHE_BUDGET_BYTES` of page cache and maps up to `memory_store::MMAP_BUDGET_BYTES` of its file; mapped pages are file-backed and reclaimable, and are counted so the ceiling stays conservative.
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
-/// The Curator host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`curator::worker::RETAINED_CREDENTIAL_BYTES`).
+/// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
 pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES
     as u64
     + TRANSFORM_SNAPSHOT_BUDGET_BYTES as u64
@@ -2283,7 +2283,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
     + kernel_routes::eligibility::CACHE_BUDGET_BYTES
-    + curator::worker::RETAINED_CREDENTIAL_BYTES;
+    + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES;
 
 #[derive(Debug, Clone)]
 struct NativeDeltaFrontier {
@@ -2914,8 +2914,8 @@ pub struct HandlerCore {
     /// The kernel store opens after the cache store under the same managed
     /// directory; routes read it through `kernel_store()`, never the slot.
     kernel: Arc<kernel_routes::KernelOpenCoordinator>,
-    /// The Curator sampler's published block; `health()` and status read it and never touch the ledger.
-    curator_status: Arc<curator::lifecycle::CuratorStatus>,
+    /// The MemoryReviewer sampler's published block; `health()` and status read it and never touch the ledger.
+    memory_reviewer_status: Arc<memory_reviewer::lifecycle::MemoryReviewerStatus>,
     /// `initialize` decodes the storage descriptor, and `activate` consumes it: malformed descriptors fail before publication, while storage opens after transport publication.
     pending_storage: Mutex<Option<StorageDescriptor>>,
     /// `spawn_gate` serializes the task-admission check against shutdown.
@@ -2981,9 +2981,9 @@ pub struct HandlerCore {
     search_lifecycle: Arc<Mutex<Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>>>>,
     /// The lane the projection's identity and embedding work come from; attached by the daemon binary before activation.
     local_embeddings: Mutex<Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>>,
-    /// The Model Execution supervisor and startup credentials Curator runs use; without them the worker never starts and accepted candidates stay recorded as not admitted.
-    curator_host: Mutex<Option<Arc<curator::worker::CuratorHost>>>,
-    curator_permits: Arc<curator::coordinator::InvestigationPermits>,
+    /// The Model Execution supervisor and startup credentials MemoryReviewer runs use; without them the worker never starts and accepted candidates stay recorded as not admitted.
+    memory_reviewer_host: Mutex<Option<Arc<memory_reviewer::worker::MemoryReviewerHost>>>,
+    memory_reviewer_permits: Arc<memory_reviewer::coordinator::InvestigationPermits>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
     /// Evaluator registrations exist only in memory and are keyed by notes-authority project.
@@ -3527,8 +3527,8 @@ struct HistorySummarizerFiringTask {
     connect_failure_commit_hook: ConnectFailureCommitHook,
     publication_fence: Option<Arc<dyn history_summarizer::HistorySummarizerPublicationFence>>,
     credential_fingerprints: std::collections::BTreeMap<String, String>,
-    /// The Curator handoff an accepted fact set is reserved and staged through; `None` when the Kernel is unavailable, which publication records as a nonadmission.
-    curator_handoff: Option<curator::handoff::HandoffTarget>,
+    /// The MemoryReviewer handoff an accepted fact set is reserved and staged through; `None` when the Kernel is unavailable, which publication records as a nonadmission.
+    memory_reviewer_handoff: Option<memory_reviewer::handoff::HandoffTarget>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3819,10 +3819,13 @@ impl Handler {
         self
     }
 
-    /// Attaches the supervisor and credentials the Curator worker runs review jobs under. The credentials are the startup envelope's, by name; the activation record names which one the sender dials with. Attach before `initialize`: `begin_store_open` reads the host once, and one attached later is never seen by the worker.
-    pub fn with_curator_host(self, host: Arc<curator::worker::CuratorHost>) -> Self {
+    /// Attaches the supervisor and credentials the MemoryReviewer worker runs review jobs under. The credentials are the startup envelope's, by name; the activation record names which one the sender dials with. Attach before `initialize`: `begin_store_open` reads the host once, and one attached later is never seen by the worker.
+    pub fn with_memory_reviewer_host(
+        self,
+        host: Arc<memory_reviewer::worker::MemoryReviewerHost>,
+    ) -> Self {
         *self
-            .curator_host
+            .memory_reviewer_host
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
         self
@@ -3844,9 +3847,9 @@ impl Handler {
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::clone(&kernel),
-            curator_status: Arc::default(),
-            curator_host: Mutex::new(None),
-            curator_permits: Arc::default(),
+            memory_reviewer_status: Arc::default(),
+            memory_reviewer_host: Mutex::new(None),
+            memory_reviewer_permits: Arc::default(),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
             cancel,
@@ -3987,13 +3990,13 @@ impl HandlerCore {
         let task_coordinator = Arc::clone(&coordinator);
         let cancel = self.cancel.clone();
         let store_slot = Arc::clone(&self.store);
-        let curator_status = Arc::clone(&self.curator_status);
-        let curator_host = self
-            .curator_host
+        let memory_reviewer_status = Arc::clone(&self.memory_reviewer_status);
+        let memory_reviewer_host = self
+            .memory_reviewer_host
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let curator_permits = Arc::clone(&self.curator_permits);
+        let memory_reviewer_permits = Arc::clone(&self.memory_reviewer_permits);
         let bindings = Arc::clone(&self.bindings);
         let memory_classifier = Arc::clone(&self.memory_classifier);
         let search_lifecycle = Arc::clone(&self.search_lifecycle);
@@ -4018,11 +4021,11 @@ impl HandlerCore {
                 let opened =
                     Self::run_store_open(store, task_coordinator, &descriptor, cancel.clone())
                         .await;
-                // The Curator sampler and cleanup start as soon as the store is installed; the Kernel joins its passes only while it is ready.
+                // The MemoryReviewer sampler and cleanup start as soon as the store is installed; the Kernel joins its passes only while it is ready.
                 if opened && let Some(store) = store_slot.lock().expect("store slot mutex").clone()
                 {
-                    task_admission.spawn(curator::lifecycle::run(
-                        Arc::clone(&curator_status),
+                    task_admission.spawn(memory_reviewer::lifecycle::run(
+                        Arc::clone(&memory_reviewer_status),
                         store,
                         Arc::clone(&kernel),
                         cancel.clone(),
@@ -4038,7 +4041,7 @@ impl HandlerCore {
                             store,
                             bindings: Arc::clone(&bindings),
                             memory_classifier,
-                            curator_status: Arc::clone(&curator_status),
+                            memory_reviewer_status: Arc::clone(&memory_reviewer_status),
                         });
                     let scheduler = memory_classifier_scheduler::MemoryClassifierScheduler::new(
                         Arc::new(memory_classifier_scheduler::WallClock),
@@ -4065,31 +4068,31 @@ impl HandlerCore {
                                 .spawn(search_lifecycle_owner::run_slices(owner, cancel.clone()));
                         }
                         if kernel.state() == kernel_routes::KernelState::Ready
-                            && let Some(host) = curator_host
-                            && let Some(home) = curator::worker::Worker::home_of(path)
+                            && let Some(host) = memory_reviewer_host
+                            && let Some(home) = memory_reviewer::worker::Worker::home_of(path)
                             && let Some(store) =
                                 store_slot.lock().expect("store slot mutex").clone()
                         {
                             let kernel_source = Arc::clone(&kernel);
                             let project_store = Arc::clone(&store);
                             let project_bindings = Arc::clone(&bindings);
-                            task_admission.spawn(curator::worker::run(
-                                Arc::new(curator::worker::Worker {
+                            task_admission.spawn(memory_reviewer::worker::run(
+                                Arc::new(memory_reviewer::worker::Worker {
                                     host,
                                     home,
                                     store,
                                     kernel: Arc::new(move || {
-                                        curator::worker::ready_kernel(&kernel_source)
+                                        memory_reviewer::worker::ready_kernel(&kernel_source)
                                     }),
                                     projects: Arc::new(move || {
-                                        curator::worker::module_projects(
+                                        memory_reviewer::worker::module_projects(
                                             &project_store,
                                             &project_bindings,
                                         )
                                     }),
-                                    status: Arc::clone(&curator_status),
-                                    permits: curator_permits,
-                                    endpoint: curator::model_request::Endpoint::anthropic(),
+                                    status: Arc::clone(&memory_reviewer_status),
+                                    permits: memory_reviewer_permits,
+                                    endpoint: memory_reviewer::model_request::Endpoint::anthropic(),
                                 }),
                                 cancel.clone(),
                             ));
@@ -4338,9 +4341,9 @@ impl Handler {
             store: Arc::new(Mutex::new(None)),
             store_open: Arc::new(StoreOpenCoordinator::new()),
             kernel: Arc::clone(&kernel),
-            curator_status: Arc::default(),
-            curator_host: Mutex::new(None),
-            curator_permits: Arc::default(),
+            memory_reviewer_status: Arc::default(),
+            memory_reviewer_host: Mutex::new(None),
+            memory_reviewer_permits: Arc::default(),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
             cancel: CancellationToken::new(),
@@ -5433,7 +5436,7 @@ impl HandlerCore {
                 let fingerprint_items: Vec<_> =
                     chunk.snapshot.iter().map(|item| item.as_item()).collect();
                 let observed = history_summarizer::compute_chunk_fingerprint(&fingerprint_items);
-                let curator_handoff = self.curator_handoff_target(&store, binding);
+                let memory_reviewer_handoff = self.memory_reviewer_handoff_target(&store, binding);
                 let spawned = self.spawn_module_task(async move {
                     let _guard = guard;
                     let result = async {
@@ -5457,7 +5460,7 @@ impl HandlerCore {
                                         store: &store,
                                         session_id: &session_id,
                                         project_path: &project_path,
-                                        curator_handoff: curator_handoff.as_ref(),
+                                        memory_reviewer_handoff: memory_reviewer_handoff.as_ref(),
                                         now_ms: now,
                                         failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                                         publication_fence: Some(publication_fence.as_ref()),
@@ -5506,7 +5509,7 @@ impl HandlerCore {
                                 failure_backoff_at_ms: now + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
                                 completion_now_ms: now_ms,
                                 publication_fence: Some(publication_fence.as_ref()),
-                                curator_handoff: curator_handoff.as_ref(),
+                                memory_reviewer_handoff: memory_reviewer_handoff.as_ref(),
                             },
                         );
                         tokio::select! {
@@ -5534,7 +5537,7 @@ impl HandlerCore {
                     #[cfg(test)]
                     after_store_publish: Arc::clone(&self.publication_fence_write_hook),
                 });
-                let curator_handoff = self.curator_handoff_target(&store, binding);
+                let memory_reviewer_handoff = self.memory_reviewer_handoff_target(&store, binding);
                 let spawned = self.spawn_module_task(async move {
                     let _guard = guard;
                     let result = match history_summarizer::handle_restart_load(
@@ -5549,7 +5552,7 @@ impl HandlerCore {
                                     store: &store,
                                     session_id: &session_id,
                                     project_path: &project_path,
-                                    curator_handoff: curator_handoff.as_ref(),
+                                    memory_reviewer_handoff: memory_reviewer_handoff.as_ref(),
                                     now_ms: now,
                                     failure_backoff_at_ms: now
                                         + HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS,
@@ -5913,7 +5916,7 @@ impl HandlerCore {
                 };
             }
         };
-        let curator_handoff = self.curator_handoff_target(&store, binding);
+        let memory_reviewer_handoff = self.memory_reviewer_handoff_target(&store, binding);
         PreparedHistorySummarizerAction::FireReady(Box::new(PreparedHistorySummarizerFiring {
             diagnostics,
             task: HistorySummarizerFiringTask {
@@ -5928,17 +5931,17 @@ impl HandlerCore {
                 connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
                 credential_fingerprints: binding.credential_fingerprints.clone(),
                 publication_fence: None,
-                curator_handoff,
+                memory_reviewer_handoff,
             },
         }))
     }
 
-    /// The Kernel-side scope a firing hands accepted facts to Curator review under. Only a route whose memories authority is MODULE has a project the Curator dispatches jobs for, so an unmanaged route gets no target and its candidates are recorded as not admitted; the job row then lives under the authority project the publication itself commits under.
-    fn curator_handoff_target(
+    /// The Kernel-side scope a firing hands accepted facts to MemoryReviewer review under. Only a route whose memories authority is MODULE has a project the MemoryReviewer dispatches jobs for, so an unmanaged route gets no target and its candidates are recorded as not admitted; the job row then lives under the authority project the publication itself commits under.
+    fn memory_reviewer_handoff_target(
         &self,
         store: &MemoryStore,
         binding: &SessionBinding,
-    ) -> Option<curator::handoff::HandoffTarget> {
+    ) -> Option<memory_reviewer::handoff::HandoffTarget> {
         let route_root = binding.project_root.to_string_lossy().to_string();
         match memories_authority_for_route(store, &route_root) {
             Ok(MemoriesAuthority::Module(_)) => {}
@@ -5950,7 +5953,7 @@ impl HandlerCore {
             Arc::default(),
         );
         let kernel_incarnation = kernel.database_incarnation_id_within_budget(&budget).ok()?;
-        Some(curator::handoff::HandoffTarget {
+        Some(memory_reviewer::handoff::HandoffTarget {
             kernel,
             project_digest: binding.kernel_project.digest().to_string(),
             domain_id: canonical_memory::MEMORY_DOMAIN_ID.to_string(),
@@ -6057,7 +6060,7 @@ impl HandlerCore {
                 return PreparedWrapupAction::Busy(completion);
             }
         };
-        let curator_handoff = self.curator_handoff_target(&store, binding);
+        let memory_reviewer_handoff = self.memory_reviewer_handoff_target(&store, binding);
         PreparedWrapupAction::FireReady(Box::new(HistorySummarizerFiringTask {
             store,
             session_id: parsed.session_id.clone(),
@@ -6070,7 +6073,7 @@ impl HandlerCore {
             connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
             credential_fingerprints: binding.credential_fingerprints.clone(),
             publication_fence: None,
-            curator_handoff,
+            memory_reviewer_handoff,
         }))
     }
 
@@ -6122,7 +6125,7 @@ impl HandlerCore {
             connect_failure_commit_hook,
             publication_fence,
             credential_fingerprints,
-            curator_handoff,
+            memory_reviewer_handoff,
         } = task;
         let cancel = live_guard.cancel.clone();
         let _guard = live_guard;
@@ -6144,7 +6147,7 @@ impl HandlerCore {
                     &harness,
                 );
                 request.publication_fence = publication_fence.as_deref();
-                request.curator_handoff = curator_handoff.as_ref();
+                request.memory_reviewer_handoff = memory_reviewer_handoff.as_ref();
                 tokio::select! {
                     () = cancel.cancelled() => Err(history_summarizer::HistorySummarizerDriveError::Cancelled),
                     outcome = run_history_summarizer_firing(&mut *producer, request) => outcome,
@@ -8495,7 +8498,7 @@ impl HandlerCore {
                     },
                     "memory_holders": self.memory_holder_metrics(),
                     "kernel": kernel,
-                    "curator": self.curator_status.reported().to_json(),
+                    "memory_reviewer": self.memory_reviewer_status.reported().to_json(),
                 })),
                 Err(e) => PreparedOutcome::Error {
                     code: "store_load_failed".to_string(),
@@ -12834,8 +12837,8 @@ impl CompositeComponent for Handler {
         }
         metrics.insert("kernel".to_owned(), kernel.to_json());
         metrics.insert(
-            "curator".to_owned(),
-            self.curator_status.reported().to_json(),
+            "memory_reviewer".to_owned(),
+            self.memory_reviewer_status.reported().to_json(),
         );
         metrics.insert(
             "epochs".to_owned(),
@@ -13674,8 +13677,8 @@ impl HandlerCore {
                 edit_receipts::PREPARE => self.handle_retrieval_prepare(channel, request),
                 edit_receipts::APPLY => self.handle_retrieval_apply(channel, request),
                 edit_receipts::CONFIRM => self.handle_retrieval_confirm(channel, request),
-                curator::wire::LIST => self.handle_review_list(channel, request).await,
-                curator::wire::READ => self.handle_review_read(channel, request).await,
+                memory_reviewer::wire::LIST => self.handle_review_list(channel, request).await,
+                memory_reviewer::wire::READ => self.handle_review_read(channel, request).await,
                 // The handler echoes only explicit wire-debugging requests.
                 // Unknown request bodies must fail so misrouted callers cannot mistake an echo for success.
                 // An unconditional echo lets a misrouted caller mistake an echo for success.
@@ -14970,8 +14973,8 @@ struct SchedulerBridge {
     store: Arc<MemoryStore>,
     bindings: Arc<Mutex<RouteBindings>>,
     memory_classifier: Arc<MemoryClassifierRuntime>,
-    /// The Curator worker's published activation state; Memory Classifier selection is scheduled only while the gate is open, so review capacity is not filled with jobs nothing may run.
-    curator_status: Arc<curator::lifecycle::CuratorStatus>,
+    /// The MemoryReviewer worker's published activation state; Memory Classifier selection is scheduled only while the gate is open, so review capacity is not filled with jobs nothing may run.
+    memory_reviewer_status: Arc<memory_reviewer::lifecycle::MemoryReviewerStatus>,
 }
 
 impl SchedulerBridge {
@@ -14996,7 +14999,7 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
         project: &memory_classifier_scheduler::ScheduledProject,
         cursor: Option<&str>,
     ) -> Result<
-        memory_store::curator_jobs::FrozenSelectionPage,
+        memory_store::memory_reviewer_jobs::FrozenSelectionPage,
         memory_classifier_scheduler::SelectionFailure,
     > {
         use memory_classifier_scheduler::SelectionFailure;
@@ -15038,12 +15041,12 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
             Some(std::time::Instant::now() + std::time::Duration::from_secs(30)),
             Arc::default(),
         );
-        let policy_versions = curator::handoff::review_policy_versions();
-        let classes = curator::selection::resolvable_classes();
-        curator::selection::select_review_targets(
+        let policy_versions = memory_reviewer::handoff::review_policy_versions();
+        let classes = memory_reviewer::selection::resolvable_classes();
+        memory_reviewer::selection::select_review_targets(
             &kernel,
             &self.store,
-            &curator::selection::SelectionScope {
+            &memory_reviewer::selection::SelectionScope {
                 project: binding.kernel_project.scope(),
                 ledger_project: &project.project,
                 classes: &classes,
@@ -15105,9 +15108,9 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
                 std::collections::btree_map::Entry::Occupied(_) => {}
             }
         }
-        let curator_open = self.curator_status.reported().activation_state.0
-            == curator::lifecycle::ActivationState::Open
-            && !curator::selection::resolvable_classes().is_empty();
+        let memory_reviewer_open = self.memory_reviewer_status.reported().activation_state.0
+            == memory_reviewer::lifecycle::ActivationState::Open
+            && !memory_reviewer::selection::resolvable_classes().is_empty();
         Ok(by_project
             .into_iter()
             .flat_map(
@@ -15123,9 +15126,9 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
                     let mut tasks = vec![scheduled(
                         memory_classifier_scheduler::ScheduledTask::ReviewUserMemories,
                     )];
-                    if curator_open {
+                    if memory_reviewer_open {
                         tasks.push(scheduled(
-                            memory_classifier_scheduler::ScheduledTask::CuratorReviewSelection,
+                            memory_classifier_scheduler::ScheduledTask::MemoryReviewerReviewSelection,
                         ));
                     }
                     Some(tasks)
@@ -15149,9 +15152,9 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
                 };
             }
             // Selection runs through its own slot path, never through the classify protocol.
-            memory_classifier_scheduler::ScheduledTask::CuratorReviewSelection => {
+            memory_classifier_scheduler::ScheduledTask::MemoryReviewerReviewSelection => {
                 return memory_classifier_scheduler::TaskRunOutcome::NotRunnable {
-                    reason: "curator selection is not a classify task".to_string(),
+                    reason: "memory_reviewer selection is not a classify task".to_string(),
                 };
             }
             memory_classifier_scheduler::ScheduledTask::ReviewUserMemories => {}
@@ -32835,7 +32838,7 @@ mod tests {
                 store: Arc::clone(&self.store),
                 bindings: Arc::clone(&self.handler.bindings),
                 memory_classifier: Arc::clone(&self.handler.memory_classifier),
-                curator_status: Arc::clone(&self.handler.curator_status),
+                memory_reviewer_status: Arc::clone(&self.handler.memory_reviewer_status),
             }
         }
 
@@ -33012,7 +33015,7 @@ mod tests {
 
     /// Selection requires an open gate and at least one resolvable class. No walked class resolves until the coordinator reads canonical and promoted descriptors through their originating decision (Q21), so an open gate alone schedules no selection; when `resolves_class` admits a memory class, this test must assert the selection task instead.
     #[tokio::test(flavor = "current_thread")]
-    async fn curator_review_selection_is_not_scheduled_while_no_walked_class_resolves() {
+    async fn memory_reviewer_review_selection_is_not_scheduled_while_no_walked_class_resolves() {
         use memory_classifier_scheduler::{ScheduledTask, SchedulerHost};
         let producer = Arc::new(ProducerState::default());
         let harness = MemoryClassifierHarness::start(&producer).await;
@@ -33030,11 +33033,11 @@ mod tests {
 
         harness
             .handler
-            .curator_status
-            .set_activation(curator::lifecycle::ActivationState::Open);
+            .memory_reviewer_status
+            .set_activation(memory_reviewer::lifecycle::ActivationState::Open);
         assert!(
-            curator::selection::resolvable_classes().is_empty(),
-            "a walked class now resolves: assert CuratorReviewSelection is scheduled under an open gate"
+            memory_reviewer::selection::resolvable_classes().is_empty(),
+            "a walked class now resolves: assert MemoryReviewerReviewSelection is scheduled under an open gate"
         );
         assert_eq!(
             tasks(&bridge),
@@ -33252,7 +33255,7 @@ mod tests {
         harness.schedule(Some("*/15 * * * *"));
         let bridge = harness.scheduler_bridge();
         let mut project = bridge.scheduled_projects().unwrap().remove(0);
-        project.task = ScheduledTask::CuratorReviewSelection;
+        project.task = ScheduledTask::MemoryReviewerReviewSelection;
         assert!(
             bridge.select_review_page(&project, None).is_ok(),
             "the bound project selects"
@@ -39221,8 +39224,8 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
-            curator_nonadmission: Default::default(),
-            curator_reservation: None,
+            memory_reviewer_nonadmission: Default::default(),
+            memory_reviewer_reservation: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -39256,8 +39259,8 @@ mod tests {
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
-            curator_nonadmission: Default::default(),
-            curator_reservation: None,
+            memory_reviewer_nonadmission: Default::default(),
+            memory_reviewer_reservation: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -39367,16 +39370,17 @@ mod tests {
     /// Records a reservation and a retained publication for the seeded firing, as the live path leaves them when publication fails after the handoff.
     fn seed_retained_reservation(store: &MemoryStore) {
         let loaded = store.load("ses").unwrap();
-        let reservation = memory_store::CuratorReservation {
+        let reservation = memory_store::MemoryReviewerReservation {
             firing_seq: loaded.meta.history_summarizer.firing_seq,
             causal_identity: "c".repeat(64),
             candidate_id: "hs-ses-candidate".to_string(),
             payload_digest: "d".repeat(64),
             kernel_incarnation: "k".repeat(64),
-            queue_deadline_ms: now_ms() + memory_store::curator_jobs::CURATOR_QUEUE_LIFETIME_MS,
+            queue_deadline_ms: now_ms()
+                + memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_QUEUE_LIFETIME_MS,
         };
         store
-            .record_curator_reservation(
+            .record_memory_reviewer_reservation(
                 "ses",
                 loaded.row_version.unwrap(),
                 &reservation,
@@ -39425,7 +39429,7 @@ mod tests {
         wait_for_reattach_to_finish(&handler).await;
         let retained = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(retained.state, HistorySummarizerPhase::Publishing);
-        assert!(retained.curator_reservation.is_some());
+        assert!(retained.memory_reviewer_reservation.is_some());
         assert!(
             retained.failure_backoff_at_ms.is_some(),
             "a retained pass arms the backoff"
@@ -39772,8 +39776,8 @@ mod tests {
                 user_memory_candidates: &[],
                 publication_floor_ordinal: 21,
                 chunk_transcript: None,
-                curator_nonadmission: None,
-                curator_activation: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
             })
             .unwrap();
 

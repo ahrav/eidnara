@@ -1,4 +1,4 @@
-//! Internal Curator runs under the ModelExecution supervisor: invisible to every public session operation, one launch per attempt identity, and sharing run slots, backend permits, retained bytes, cancellation, and joined shutdown with public runs. Paused Tokio time drives the cutoff cases.
+//! Internal MemoryReviewer runs under the ModelExecution supervisor: invisible to every public session operation, one launch per attempt identity, and sharing run slots, backend permits, retained bytes, cancellation, and joined shutdown with public runs. Paused Tokio time drives the cutoff cases.
 
 // The scripted-backend support module is Linux-only, like the rest of the ModelExecution conformance suite.
 #![cfg(target_os = "linux")]
@@ -25,7 +25,7 @@ use support::model_execution::{ScriptedBackend, send_params};
 
 fn internal_key(job: &str, attempt: u32) -> InternalRunKey {
     InternalRunKey {
-        task_kind: "curator_investigation".to_string(),
+        task_kind: "memory_reviewer_investigation".to_string(),
         project_digest: "a".repeat(64),
         job_id: job.to_string(),
         receipt_generation: 1,
