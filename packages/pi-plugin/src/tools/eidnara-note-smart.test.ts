@@ -100,17 +100,18 @@ describe("Pi eidnara_note", () => {
         expect(text).toContain("create a scheduled wake instead; stored as a plain note");
     });
 
-    it("keeps conditioned updates for Rust refusal when wake plane is active", async () => {
+    it("refuses conditioned updates before transport when wake plane is active", async () => {
         __wakePlaneTest.setCatalogProbe(async () => [
             { module_id: "scheduled-wakes", roles: [], control_ops: [WAKE_PLANE_CAPABILITY] },
         ]);
-        const { requests, note } = recordingNote("Error: no live note evaluator; note not updated");
-        const { isError } = await callNote({
+        const { requests, note } = recordingNote("Saved session note #3.");
+        const { isError, text } = await callNote({
             rustToolBackends: { note },
             params: { action: "update", note_id: 3, surface_condition: "when done" },
         });
         expect(isError).toBe(true);
-        expect(requests[0]?.surfaceCondition).toBe("when done");
+        expect(text).toContain("wake plane active");
+        expect(requests).toHaveLength(0);
     });
 
     it("requires stable command ids for mutations before transport", async () => {

@@ -174,9 +174,14 @@ export function createEidnaraNoteTool(
             }
             const commandId = callId ? boundedCommandId(callId) : undefined;
             const wakePlaneActive =
-                action === "write" &&
+                (action === "write" || action === "update") &&
                 Boolean(args.surface_condition?.trim()) &&
                 (await wakePlaneStatus()) === "present";
+            if (wakePlaneActive && action === "update") {
+                return err(
+                    "Error: wake plane active — scheduled wakes own condition evaluation; resend the update without surface_condition, or create a scheduled wake instead. Note not updated.",
+                );
+            }
             const surfaceCondition = wakePlaneActive ? undefined : args.surface_condition?.trim();
 
             const projectIdentity = deps.resolveProjectPath?.(projectRoot);

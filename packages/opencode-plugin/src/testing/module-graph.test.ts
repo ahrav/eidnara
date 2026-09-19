@@ -135,7 +135,7 @@ describe("module graph over the landed tree", () => {
 
         const forbiddenRuntimeImports = MODULES.flatMap((file) => {
             const source = readFileSync(file, "utf8");
-            return /(?:from\s+|import\s*\()["'](?:ai-tokenizer(?:\/[^"']*)?|[^"']*test-token-counter)["']/.test(
+            return /(?:from\s+|import\s*\(|require\s*\()["'](?:ai-tokenizer(?:\/[^"']*)?|[^"']*test-token-counter)["']/.test(
                 source,
             )
                 ? [relative(SRC, file)]
