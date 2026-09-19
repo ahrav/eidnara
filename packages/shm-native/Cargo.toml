@@ -21,6 +21,7 @@ rustix = { workspace = true, features = ["event", "fs", "net"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 subtle = { workspace = true }
+tokenizer = { workspace = true }
 
 [dev-dependencies]
 napi = { version = "=3.12.2", default-features = false, features = ["napi8", "dyn-symbols"] }

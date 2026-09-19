@@ -1,6 +1,16 @@
+import { mock } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as shmNative from "@eidnara/shm-native";
+import { deterministicTestTokenCount } from "../test-token-counter";
+
+if (process.env.EIDNARA_SHM_NATIVE_CLAIMED_TARGET !== "1") {
+    mock.module("@eidnara/shm-native", () => ({
+        ...shmNative,
+        estimateTokens: deterministicTestTokenCount,
+    }));
+}
 
 const isolatedDataHome = mkdtempSync(join(tmpdir(), "eidnara-pi-test-xdg-"));
 

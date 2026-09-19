@@ -15,8 +15,6 @@ export const INTERNAL_OPENCODE_AGENT_SIGNATURES: readonly string[] = [
  */
 export const EIDNARA_INTERNAL_AGENT_SIGNATURES: readonly string[] = [
     "You are HistorySummarizer — the hippocampus of a long-running coding agent.",
-    // NOTE_CONDITION_COMPILER_SYSTEM_PROMPT
-    "You are the Eidnara conditional-note compiler for the memory system.",
     // CONTEXT_RESEARCHER_SYSTEM_PROMPT
     "You are ContextResearcher, a focused memory-retrieval subagent for an AI coding assistant.",
 ];

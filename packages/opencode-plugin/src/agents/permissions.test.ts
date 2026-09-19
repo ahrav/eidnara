@@ -4,7 +4,6 @@ import {
     CONTEXT_RESEARCHER_ALLOWED_TOOLS,
     denyTaskRoutingToAgents,
     denyTaskRoutingToCallerAgents,
-    NOTE_CONDITION_COMPILER_ALLOWED_TOOLS,
 } from "./permissions";
 
 describe("buildAllowOnlyPermission", () => {
@@ -33,7 +32,7 @@ describe("denyTaskRoutingToAgents", () => {
     it("preserves user task patterns and appends internal denies last", () => {
         const result = denyTaskRoutingToAgents(
             { edit: "ask", task: { "*": "allow", explore: "allow" } },
-            ["context-researcher", "note-condition-compiler"],
+            ["context-researcher", "other-internal-agent"],
         );
         expect(result).toEqual({
             edit: "ask",
@@ -41,14 +40,14 @@ describe("denyTaskRoutingToAgents", () => {
                 "*": "allow",
                 explore: "allow",
                 "context-researcher": "deny",
-                "note-condition-compiler": "deny",
+                "other-internal-agent": "deny",
             },
         });
         expect(Object.keys((result as { task: Record<string, unknown> }).task)).toEqual([
             "*",
             "explore",
             "context-researcher",
-            "note-condition-compiler",
+            "other-internal-agent",
         ]);
     });
 
@@ -112,12 +111,6 @@ describe("denyTaskRoutingToCallerAgents", () => {
     });
 });
 
-describe("NOTE_CONDITION_COMPILER_ALLOWED_TOOLS", () => {
-    it("is empty so the compiler emits text without calling tools", () => {
-        expect([...NOTE_CONDITION_COMPILER_ALLOWED_TOOLS]).toEqual([]);
-    });
-});
-
 describe("CONTEXT_RESEARCHER_ALLOWED_TOOLS", () => {
     it("is exactly eidnara_search plus aft_outline/aft_zoom for navigation: no eidnara_memory, read, write, task, or web tools", () => {
         expect([...CONTEXT_RESEARCHER_ALLOWED_TOOLS]).toEqual([
@@ -129,12 +122,6 @@ describe("CONTEXT_RESEARCHER_ALLOWED_TOOLS", () => {
 });
 
 describe("integration: full hidden-agent permission shape", () => {
-    it("note-condition-compiler permission object: `*` denied with no allow entry at all", () => {
-        const perm = buildAllowOnlyPermission(NOTE_CONDITION_COMPILER_ALLOWED_TOOLS);
-        expect(perm).toEqual({ "*": "deny" });
-        expect(Object.keys(perm)).toEqual(["*"]);
-    });
-
     it("context_researcher permission object: `*` denied + read-only retrieval/navigation allowed", () => {
         const perm = buildAllowOnlyPermission(CONTEXT_RESEARCHER_ALLOWED_TOOLS);
         expect(perm).toEqual({

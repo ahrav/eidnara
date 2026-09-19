@@ -106,8 +106,6 @@ export function denyTaskRoutingToCallerAgents(
     return result;
 }
 
-export const NOTE_CONDITION_COMPILER_ALLOWED_TOOLS = [] as const;
-
 export const CONTEXT_RESEARCHER_ALLOWED_TOOLS = [
     "eidnara_search",
     "aft_outline",
