@@ -63,6 +63,14 @@ import {
 } from "./tools/todo-view-pi";
 
 const PREFIX = "[eidnara][pi]";
+/**
+ * The Pi plugin has no message transform: nothing folds history or serves `§N§` tags, so
+ * owning compaction would only cancel Pi's native compaction and leave the session to
+ * overflow. While this is false, every compaction-on path in this file is skipped, whatever
+ * the compaction setting says. The Pi transform that flips it is tracked in the issue tracker
+ * (`docs/agents/issue-tracker.md`).
+ */
+export const PI_TRANSFORM_AVAILABLE: boolean = false;
 const managedDemandStart = createLazyManagedDemandStart({
     declaringModuleUrl: import.meta.url,
     parentPackageName: "@eidnara/pi",
@@ -321,7 +329,13 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         resolveProjectIdentityForSession(projectDir, config.allow_home_project) ?? "";
     info(`loaded | harness=pi | project=${projectIdentity} | dir=${projectDir}`);
     // Pi registers tools once per process, so compaction registration does not follow later /cd config changes.
-    const compactionOff = !isCompactionEnabled(config);
+    const compactionRequested = isCompactionEnabled(config);
+    const compactionOff = !PI_TRANSFORM_AVAILABLE || !compactionRequested;
+    if (compactionRequested && !PI_TRANSFORM_AVAILABLE) {
+        info(
+            "the compaction setting is not honored on Pi: no Pi context transform exists yet, so native Pi compaction proceeds and eidnara_reduce is not registered",
+        );
+    }
     setEidnaraReduceRegisteredGlobally(!compactionOff);
     // Pi configures child-runner extensions once at boot because the allowlist is user-tier only.
     // The returned merged config strips project-level subagent extension settings.
@@ -507,7 +521,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
                     try {
                         const id = getId.call(sm);
                         if (typeof id === "string" && id.length > 0) sessionId = id;
-                    } catch {}
+                    } catch {
+                        // A session manager that cannot answer leaves the handler without a session id.
+                    }
                 }
             }
 
@@ -677,7 +693,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         try {
             const outgoingSessionId = sessionIdFromContext(ctx);
             if (outgoingSessionId) releaseSessionResources(outgoingSessionId);
-        } catch {}
+        } catch {
+            // Releasing the outgoing session is best effort; the switch itself must proceed.
+        }
     });
     return true;
 }

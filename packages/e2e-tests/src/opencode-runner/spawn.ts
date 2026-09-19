@@ -73,10 +73,7 @@ export interface SpawnOptions {
     modelContextLimit?: number;
     /** Reuse an isolated env so direct host starts before OpenCode and survives serve restarts. */
     existingEnv?: IsolatedEnv;
-    /**
-     * User-tier host connection file. When set, the user config carries `host.connection_file`
-     * and `transform_mode: "rust"`, and the project config selects `transform_mode: "rust"`.
-     */
+    /** User-tier host connection file. When set, the user config carries `host.connection_file`. */
     userHostConnectionFile?: string;
     /** `projectEidnaraConfig` is written to `<workdir>/.eidnara/eidnara.jsonc` when set. */
     projectEidnaraConfig?: Record<string, unknown>;
@@ -108,7 +105,9 @@ async function pickFreePort(): Promise<number> {
  * Reusing the environment preserves opencode.db and the module store across serve restarts.
  */
 export function createIsolatedEnv(): IsolatedEnv {
-    const unique = `opencode-e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // The prefix is what `reapRecordedRustProcesses` scans for; the rest stays short because
+    // the direct host binds a Unix socket under `dataDir` and the path is bounded by `SUN_LEN`.
+    const unique = `opencode-e2e-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     const base = join(tmpdir(), unique);
     const configDir = join(base, "config");
     const dataDir = join(base, "data");
@@ -207,13 +206,8 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
         ...(eidnaraConfig ?? {}),
     };
     if (opts.userHostConnectionFile) {
-        // The config loader activates rust only with user-tier consent: a user-tier
-        // `transform_mode: "rust"` or a user-tier `host.connection_file`. Both are written so
-        // the project selection below cannot be downgraded to ts by the consent check.
-        Object.assign(eidnara, {
-            transform_mode: "rust",
-            host: { connection_file: opts.userHostConnectionFile },
-        });
+        // The user tier names the daemon; only the user tier may set `host`.
+        Object.assign(eidnara, { host: { connection_file: opts.userHostConnectionFile } });
     }
 
     writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2));
@@ -223,9 +217,7 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
     mkdirSync(dirname(userConfigPath), { recursive: true });
     writeFileSync(userConfigPath, JSON.stringify(eidnara, null, 2));
 
-    const projectConfig: Record<string, unknown> | undefined = opts.userHostConnectionFile
-        ? { ...(projectEidnaraConfig ?? {}), transform_mode: "rust" }
-        : projectEidnaraConfig;
+    const projectConfig = projectEidnaraConfig;
     if (projectConfig) {
         const projectConfigDir = join(env.workdir, ".eidnara");
         mkdirSync(projectConfigDir, { recursive: true });

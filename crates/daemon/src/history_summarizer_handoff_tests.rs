@@ -181,6 +181,7 @@ impl Rig {
             failure_backoff_at_ms: now_ms + 60_000,
             publication_fence: None,
             collect_user_memory_candidates: false,
+            memory_enabled: true,
         })
         .unwrap()
     }
@@ -1637,6 +1638,7 @@ fn an_unreadable_retained_publication_settles_the_reservation_instead_of_strandi
         failure_backoff_at_ms: t0() + 60_000,
         publication_fence: None,
         collect_user_memory_candidates: false,
+        memory_enabled: true,
     });
     assert!(
         matches!(outcome, Ok(RepublishOutcome::Settled)),
@@ -1729,6 +1731,7 @@ fn every_retained_republish_arms_the_backoff() {
         failure_backoff_at_ms: t0() + 1 + 60_000,
         publication_fence: Some(&fence),
         collect_user_memory_candidates: false,
+        memory_enabled: true,
     })
     .unwrap();
     assert_eq!(outcome, RepublishOutcome::Retained);
@@ -1778,6 +1781,7 @@ fn a_settle_from_a_stale_snapshot_spares_a_later_firing_and_the_job_the_publicat
         failure_backoff_at_ms: t0() + 1 + 60_000,
         publication_fence: Some(&fence),
         collect_user_memory_candidates: false,
+        memory_enabled: true,
     })
     .unwrap();
     // The activated job, the later firing, and its retained publication are all someone else's now.
@@ -1903,7 +1907,7 @@ fn a_retain_that_loses_the_row_to_a_publication_writes_nothing_back() {
     let prepared = activation(rig.handoff(t0()).unwrap());
     let reservation = rig.reservation();
     // The retain checks a Publishing state that holds the reservation; before it writes, another pass publishes the firing, activates the job, and drops the retained publication.
-    let outcome = retain_republish(&rig.store, SESSION, |current| {
+    let outcome = retain_republish(&rig.store, SESSION, 3, |current| {
         rig.publish(Some(&prepared), None, t0() + 1).unwrap();
         retain_with_detail(current, t0() + 60_000, Some("stale pass".to_string()))
     })
@@ -2020,8 +2024,8 @@ fn a_retained_publication_the_scanner_would_rewrite_is_a_nonadmission_before_any
 }
 
 #[test]
-fn a_reservation_made_under_an_earlier_memories_authority_republishes_under_the_current_one() {
-    // The route was rebound between the reservation and recovery: the job was reserved under "git:other", recovery runs under PROJECT.
+fn a_reservation_made_under_an_earlier_memories_authority_settles_instead_of_migrating() {
+    // The route was rebound between the reservation and recovery: the job was reserved under "git:other", recovery runs under PROJECT. Recovery republishes only under the job the reservation names; a job it cannot find under the current authority is not replaced, the reservation settles, and the firing refires under the current authority.
     let rig = Rig::open();
     let handoff = reserve_and_stage(
         &rig.target(),
@@ -2038,18 +2042,19 @@ fn a_reservation_made_under_an_earlier_memories_authority_republishes_under_the_
     )
     .unwrap();
     let earlier = activation(handoff);
-    let reservation = rig.reservation();
+    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
     let target = rig.target();
     assert_eq!(
         rig.republish(Some(&target), t0() + 1),
-        RepublishOutcome::Published
+        RepublishOutcome::Settled
     );
-    // The retained output is published once, activating a job of the same identity under the current authority; the earlier project's job is left to its expiry sweep.
-    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
-    assert!(matches!(
-        rig.job(&reservation.causal_identity).state,
-        CuratorJobState::Ready(_)
-    ));
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+    assert_eq!(
+        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        headroom_before.pending_jobs,
+        "no replacement job is reserved under the current authority"
+    );
+    // The earlier project's job is left to its expiry sweep.
     assert_eq!(
         rig.store
             .lookup_curator_job("git:other", &earlier.causal_identity)
@@ -2058,8 +2063,39 @@ fn a_reservation_made_under_an_earlier_memories_authority_republishes_under_the_
             .state,
         CuratorJobState::Reserved
     );
-    assert_eq!(rig.state().state, HistorySummarizerPhase::Idle);
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
     assert_eq!(rig.pending(), None);
+}
+
+#[test]
+fn a_reservation_whose_job_is_no_longer_reserved_for_its_firing_settles() {
+    // The job the reservation names is already terminal under the current project (another firing's publication under the same identity closed it). Recovery cannot activate it and does not wait for the deadline: the reservation settles and the firing refires.
+    let rig = Rig::open();
+    let prepared = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    rig.store
+        .finish_curator_job(
+            PROJECT,
+            &prepared.causal_identity,
+            CuratorJobOutcome::Nonadmitted,
+            t0() + 1,
+        )
+        .unwrap();
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 2),
+        RepublishOutcome::Settled
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
 }
 
 #[test]
@@ -2414,4 +2450,338 @@ fn the_retained_boundary_dates_are_those_of_the_validated_segments() {
         retained,
         BTreeMap::from([("m2".to_string(), "2026-01-02".to_string())])
     );
+}
+
+/// A re-cut chunk that starts at another ordinal but yields the same facts adopts the orphaned reservation and reads the sealed subject under the binding it was staged with: the job's ordinal, not the adopting firing's.
+#[test]
+fn a_recut_firing_adopts_the_reservation_under_the_staged_binding() {
+    let rig = Rig::open();
+    let first = activation(rig.handoff(t0()).unwrap());
+    let orphaned = rig.reservation();
+    rig.persist(abandon_with_detail(
+        &rig.state(),
+        t0() + 1,
+        Some("crash".to_string()),
+    ));
+    // Firing 4 re-cuts the chunk to 3..=4 and extracts the same facts from the same messages.
+    rig.persist(next_publishing_firing(&rig, 3, 4));
+    let adopted = activation(rig.handoff(t0() + 10).unwrap());
+    assert_eq!(adopted.causal_identity, first.causal_identity);
+    assert_eq!(adopted.producer.firing_id, format!("{}#4", rig_key()));
+    assert_eq!(
+        adopted.producer.ordinal, 2,
+        "the job keeps the ordinal the subject was staged under"
+    );
+    assert!(rig.read_subject(&orphaned, t0() + 11).is_ok());
+    let result = rig
+        .publish_range(Some(&adopted), None, t0() + 12, 3, 4)
+        .unwrap();
+    assert_eq!(
+        result.curator_activation,
+        Some(CuratorActivationOutcome::Activated)
+    );
+}
+
+#[test]
+fn an_unpublishable_reservation_settled_past_its_deadline_records_expiry_and_frees_the_firing() {
+    // The retained payload cannot be read and the queue deadline has passed: the job closes as expired, the way the sweep would close it, and the firing returns to Idle in the same pass.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    rig.retain(
+        &reservation,
+        &memory_store::PendingPublication {
+            validated_json: r#"{"schema":"a shape this daemon does not read"}"#.to_string(),
+            ..pending_publication(&validated_range(2, 4))
+        },
+    );
+    let late = reservation.queue_deadline_ms + 1;
+    let outcome = republish_reserved(RepublishRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        curator_handoff: None,
+        now_ms: late,
+        failure_backoff_at_ms: late + 60_000,
+        publication_fence: None,
+        collect_user_memory_candidates: false,
+        memory_enabled: true,
+    });
+    assert!(
+        matches!(outcome, Ok(RepublishOutcome::Settled)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+}
+
+#[test]
+fn a_stale_retain_leaves_a_later_firing_untouched() {
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    // The pass snapshotted firing 3; before its refusal is handled, another path abandons firing 3, fires 4 over the same chunk, and firing 4 adopts the job under its own reservation.
+    struct MoveOnThenRetire<'a>(&'a Rig);
+    impl HistorySummarizerPublicationFence for MoveOnThenRetire<'_> {
+        fn publish(
+            &self,
+            _store: &MemoryStore,
+            _request: memory_store::HistorySummarizerPublishRequest<'_>,
+        ) -> Result<memory_store::HistorySummarizerPublishResult, HistorySummarizerPublishError>
+        {
+            let rig = self.0;
+            rig.persist(abandon_with_detail(&rig.state(), t0() + 1, None));
+            rig.persist(next_publishing_firing(rig, 2, 4));
+            let _ = activation(rig.handoff(t0() + 2).unwrap());
+            Err(HistorySummarizerPublishError::CallerFenceRejected {
+                reason: "snapshot retired".to_string(),
+            })
+        }
+    }
+    let target = rig.target();
+    let fence = MoveOnThenRetire(&rig);
+    let outcome = republish_reserved(RepublishRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        curator_handoff: Some(&target),
+        now_ms: t0() + 3,
+        failure_backoff_at_ms: t0() + 3 + 60_000,
+        publication_fence: Some(&fence),
+        collect_user_memory_candidates: false,
+        memory_enabled: true,
+    })
+    .unwrap();
+    assert_eq!(outcome, RepublishOutcome::Retained);
+    // Firing 4's state carries no failure or backoff the stale pass for firing 3 decided.
+    let later = rig.state();
+    assert_eq!(later.firing_seq, 4);
+    assert_eq!(later.state, HistorySummarizerPhase::Publishing);
+    assert_eq!(later.last_failure, None);
+    assert_eq!(later.failure_backoff_at_ms, None);
+}
+
+#[test]
+fn a_republication_under_other_policy_versions_settles_instead_of_reserving_a_second_job() {
+    use crate::curator::broker::QuestionTemplate;
+
+    // The firing reserved and retained under a previous step schema; the daemon that recovers it computes a different causal identity for the same subject. The retained output cannot publish under the recorded reservation, so it settles: no second job is reserved for the recovering daemon's policy.
+    let rig = Rig::open();
+    let reference = rig.staged_reference();
+    let previous_policy = CausalInputs {
+        target: ReviewTarget::StagedSubject {
+            kernel_incarnation: rig.kernel_incarnation.clone(),
+            candidate_id: reference.candidate_id.clone(),
+            payload_digest: reference.payload_digest.clone(),
+        },
+        question_template: QuestionTemplate::ExtractedFacts.id().to_string(),
+        signals: Vec::new(),
+        required_evidence: Vec::new(),
+        policy_versions: BTreeMap::from([("step_schema".to_string(), "previous".to_string())]),
+    };
+    let producer = ProducerBinding {
+        producer: PRODUCER.to_string(),
+        firing_id: format!("{}#3", rig_key()),
+        ordinal: 2,
+    };
+    let previous = match rig
+        .store
+        .reserve_curator_job(PROJECT, &producer, &previous_policy, t0())
+        .unwrap()
+    {
+        memory_store::curator_jobs::ReserveOutcome::Reserved(job) => job,
+        other => panic!("{other:?}"),
+    };
+    rig.retain(
+        &memory_store::CuratorReservation {
+            firing_seq: 3,
+            causal_identity: previous.causal_identity.clone(),
+            candidate_id: reference.candidate_id.clone(),
+            payload_digest: reference.payload_digest.clone(),
+            kernel_incarnation: rig.kernel_incarnation.clone(),
+            queue_deadline_ms: previous.queue_deadline_ms,
+        },
+        &pending_publication(&validated_range(2, 4)),
+    );
+    let headroom_before = rig.store.curator_headroom(PROJECT).unwrap();
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 1),
+        RepublishOutcome::Settled
+    );
+    assert_eq!(
+        rig.job(&previous.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
+    assert_eq!(
+        rig.store.curator_headroom(PROJECT).unwrap().pending_jobs,
+        headroom_before.pending_jobs - 1,
+        "the previous policy's job closed and no job was reserved for the current one"
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+}
+
+#[test]
+fn a_publication_without_an_activation_drops_a_retained_publication_no_reservation_names() {
+    // Firing 3 was abandoned with its reservation retained; firing 4 fires (dropping the reservation pointer) and publishes with nothing to hand off. The retained row of firing 3 has no consumer left and goes with that publication.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    rig.persist(abandon_with_detail(
+        &rig.state(),
+        t0() + 1,
+        Some("crash".to_string()),
+    ));
+    assert_eq!(rig.pending().map(|(firing_seq, _)| firing_seq), Some(3));
+    rig.persist(next_publishing_firing(&rig, 5, 6));
+    assert_eq!(rig.state().curator_reservation, None);
+    rig.publish_range(None, None, t0() + 10, 5, 6).unwrap();
+    assert_eq!(rig.state().state, HistorySummarizerPhase::Idle);
+    assert_eq!(rig.pending(), None);
+}
+
+#[test]
+fn a_handoff_failure_retains_only_the_firing_whose_handoff_failed() {
+    let rig = Rig::open();
+    let publishing = rig.state();
+    let publishing_row_version = rig.store.load(SESSION).unwrap().row_version.unwrap();
+    // Another path moved the session on: firing 3 was abandoned, firing 4 fired and holds its own reservation with its retained publication.
+    rig.persist(abandon_with_detail(&rig.state(), t0() + 1, None));
+    rig.persist(next_publishing_firing(&rig, 5, 6));
+    rig.retain(
+        &later_reservation(),
+        &pending_publication(&validated_range(5, 6)),
+    );
+    let before = rig.state();
+    assert_eq!(before.firing_seq, 4);
+    assert_eq!(before.last_failure, None);
+    // Firing 3's handoff fails at persistence: its row version is stale.
+    let target = rig.target();
+    let result = curator_decision_before_publish(CuratorDecisionRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        publishing: &publishing,
+        publishing_row_version,
+        validated: &accepted_range(2, 4),
+        aliases: &aliases(),
+        pending: pending_publication(&validated_range(2, 4)),
+        curator_handoff: Some(&target),
+        failure_started_at_ms: t0(),
+        failure_backoff_at_ms: t0() + 60_000,
+        completion_now_ms: t0,
+    });
+    assert!(
+        matches!(result, Err(HistorySummarizerDriveError::CuratorHandoff(_))),
+        "{:?}",
+        result.err()
+    );
+    // Firing 4 carries nothing of firing 3's failure.
+    let after = rig.state();
+    assert_eq!(after.firing_seq, 4);
+    assert_eq!(after.state, HistorySummarizerPhase::Publishing);
+    assert_eq!(after.curator_reservation, Some(later_reservation()));
+    assert_eq!(after.last_failure, None);
+    assert_eq!(after.failure_backoff_at_ms, None);
+    assert_eq!(
+        after.consecutive_publish_failures,
+        before.consecutive_publish_failures
+    );
+}
+
+#[test]
+fn a_republication_with_memory_disabled_settles_instead_of_activating() {
+    // Memory was disabled after the firing retained its accepted facts; recovery does not hand them to the Curator. The reservation settles and the firing refires under the current configuration.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    let target = rig.target();
+    let outcome = republish_reserved(RepublishRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        curator_handoff: Some(&target),
+        now_ms: t0() + 1,
+        failure_backoff_at_ms: t0() + 60_000,
+        publication_fence: None,
+        collect_user_memory_candidates: false,
+        memory_enabled: false,
+    })
+    .unwrap();
+    assert_eq!(outcome, RepublishOutcome::Settled);
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Nonadmitted)
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+}
+
+#[test]
+fn a_firing_holding_its_reservation_does_not_take_back_a_job_another_firing_adopted() {
+    // Firing 3 holds its reservation; before it republishes, firing 4 adopted the same job. The handoff for firing 3 reuses the job only while it is still bound to firing 3: it does not rebind it back, and answers Settled.
+    let rig = Rig::open();
+    let prepared = activation(rig.handoff(t0()).unwrap());
+    let holder = rig.state();
+    assert!(holder.holds_reservation());
+    let adopter = ProducerBinding {
+        firing_id: format!("{}#4", rig_key()),
+        ..prepared.producer.clone()
+    };
+    rig.store
+        .rebind_reserved_curator_job(PROJECT, &prepared.causal_identity, &adopter, t0() + 1)
+        .unwrap();
+    let handoff = reserve_and_stage(
+        &rig.target(),
+        &HandoffRequest {
+            store: &rig.store,
+            project: PROJECT,
+            session_id: SESSION,
+            firing: &holder,
+            facts: &facts(),
+            aliases: &aliases(),
+            now_ms: t0() + 2,
+        },
+        |_| Ok(0),
+    )
+    .unwrap();
+    assert!(matches!(handoff, Handoff::Settled), "{handoff:?}");
+    assert_eq!(rig.job(&prepared.causal_identity).producer, adopter);
+}
+
+#[test]
+fn a_recovery_clocked_before_the_deadline_still_publishes_a_job_the_sweep_expired() {
+    // The pass captured its clock just before the deadline; by the time it looks the job up, the sweep has closed it as expired. The terminal state proves the deadline passed: the retained history publishes through the expiry path instead of being discarded.
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    let (jobs, _) = rig
+        .store
+        .expire_curator_work(reservation.queue_deadline_ms + 1)
+        .unwrap();
+    assert_eq!(jobs, 1);
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), reservation.queue_deadline_ms - 1),
+        RepublishOutcome::Published
+    );
+    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        CuratorJobState::Terminal(CuratorJobOutcome::Expired)
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.curator_reservation, None);
+    assert_eq!(rig.pending(), None);
 }

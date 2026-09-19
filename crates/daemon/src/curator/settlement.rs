@@ -720,16 +720,15 @@ pub fn list_review_outcomes(
     Ok(ReviewOutcomePage { outcomes, next })
 }
 
-/// Reads the proposal the job's completed receipt selects. `binding` builds the job's staging binding from the Kernel project digest the selection records; its owner is replaced by the selected generation's proposal owner. A job with no defined binding is refused as the Kernel would refuse any binding invented for it: a scope mismatch.
+/// Reads the proposal the job's completed receipt selects. The proposal row carries the binding its settlement staged it under; the read requires that binding to name the selection's project digest and this job's generation as the proposal owner, and a row bound otherwise is a scope mismatch. Nothing is rebuilt from the job row: the subject's own row keeps its queue deadline, while the selected proposal's row moves with the review window.
 pub fn read_selected_proposal(
     store: &KernelStore,
     ledger: &MemoryStore,
     project: &str,
     causal_identity: &str,
-    binding: impl FnOnce(&str) -> Option<ReviewBinding>,
     now: i64,
 ) -> Result<SelectedProposal, ReadRefusal> {
-    read_selected_proposal_inner(store, ledger, project, causal_identity, binding, now, None)
+    read_selected_proposal_inner(store, ledger, project, causal_identity, now, None)
 }
 
 /// [`read_selected_proposal`] with `after_hold_lookup` run between the review-hold lookup and the evidence validation under it, so a test can end the hold inside that window.
@@ -739,7 +738,6 @@ pub fn read_selected_proposal_with_hook_for_test(
     ledger: &MemoryStore,
     project: &str,
     causal_identity: &str,
-    binding: impl FnOnce(&str) -> Option<ReviewBinding>,
     now: i64,
     after_hold_lookup: &dyn Fn(),
 ) -> Result<SelectedProposal, ReadRefusal> {
@@ -748,7 +746,6 @@ pub fn read_selected_proposal_with_hook_for_test(
         ledger,
         project,
         causal_identity,
-        binding,
         now,
         Some(after_hold_lookup),
     )
@@ -759,7 +756,6 @@ fn read_selected_proposal_inner(
     ledger: &MemoryStore,
     project: &str,
     causal_identity: &str,
-    binding: impl FnOnce(&str) -> Option<ReviewBinding>,
     now: i64,
     after_hold_lookup: Option<&dyn Fn()>,
 ) -> Result<SelectedProposal, ReadRefusal> {
@@ -796,20 +792,31 @@ fn read_selected_proposal_inner(
         subject: causal_identity.to_string(),
         generation: receipt.generation,
     };
-    let binding = binding(&selection.project_digest)
-        .ok_or(ReadRefusal::Kernel(ReviewReadRefusal::ScopeMismatch))?;
+    let refused = |error| match error {
+        ReviewReadError::Refused(ReviewReadRefusal::IncarnationMismatch) => {
+            ReadRefusal::IncarnationMismatch
+        }
+        // Selection moved the row's deadline to the review expiry, so a lapsed deadline on a selected row is the review window ending.
+        ReviewReadError::Refused(ReviewReadRefusal::Expired) => ReadRefusal::ReviewExpired,
+        ReviewReadError::Refused(refusal) => ReadRefusal::Kernel(refusal),
+        ReviewReadError::Invalid => ReadRefusal::SelectionMismatch,
+        ReviewReadError::Store(error) => ReadRefusal::Store(error.to_string()),
+    };
+    let binding = store
+        .staged_review_binding(&reference, now)
+        .map_err(refused)?;
+    if binding.project_digest != run.project_digest
+        || binding.owner
+            != (ReviewOwner::Proposal {
+                job_id: run.subject.clone(),
+                generation: run.generation,
+            })
+    {
+        return Err(ReadRefusal::Kernel(ReviewReadRefusal::ScopeMismatch));
+    }
     let row = store
-        .read_review_input(&reference, &proposal_binding(&binding, &run), now)
-        .map_err(|error| match error {
-            ReviewReadError::Refused(ReviewReadRefusal::IncarnationMismatch) => {
-                ReadRefusal::IncarnationMismatch
-            }
-            // Selection moved the row's deadline to the review expiry, so a lapsed deadline on a selected row is the review window ending.
-            ReviewReadError::Refused(ReviewReadRefusal::Expired) => ReadRefusal::ReviewExpired,
-            ReviewReadError::Refused(refusal) => ReadRefusal::Kernel(refusal),
-            ReviewReadError::Invalid => ReadRefusal::SelectionMismatch,
-            ReviewReadError::Store(error) => ReadRefusal::Store(error.to_string()),
-        })?;
+        .read_review_input(&reference, &binding, now)
+        .map_err(refused)?;
     // Review rows are classified `Sensitive` by construction; a row the Kernel classifies `Secret` (including a stored class this build does not recognize) is refused as a local read rather than returned on the strength of that construction.
     if row.sensitivity == kernel::Sensitivity::Secret {
         return Err(ReadRefusal::Dependency(RefusalCode::PolicyBlocked));

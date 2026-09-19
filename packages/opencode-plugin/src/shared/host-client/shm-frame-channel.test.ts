@@ -39,9 +39,8 @@ import {
  * The addon is a release build of the Rust cdylib, absent from checkouts that
  * only typecheck and lint. A claimed native target must at least load it, so a
  * missing build fails there instead of skipping. Full availability is a
- * separate question the capability probe answers: Bun 1.3.14 has no
- * `markAsUntransferable`, so the probe stops before the shared-memory
- * mechanism and these scenarios skip until a runtime implements it.
+ * separate question the capability probe answers; these scenarios skip on a
+ * runtime that fails one of its gated mechanisms.
  */
 function nativeAvailable(): boolean {
     const capability = probeCapabilities();
@@ -138,14 +137,20 @@ const shmContractFactory: FrameChannelContractFactory = async (overrides = {}) =
     };
     let reading = true;
     let cleaning = false;
+    let activeDeliveries = 0;
     const channel = new ShmFrameChannel({
         nativeChannel: pair.first,
         budget,
         maxBodyLen: overrides.maxBodyLen ?? MAX_FRAME_BODY_LEN,
         handlers: {
             onFrame: (frame) => {
-                if (hook.current?.(frame)) return;
-                received.push({ header: frame.header, body: frame.body.takeOwned() });
+                activeDeliveries += 1;
+                try {
+                    if (hook.current?.(frame)) return;
+                    received.push({ header: frame.header, body: frame.body.takeOwned() });
+                } finally {
+                    activeDeliveries -= 1;
+                }
             },
             onClosed: (reason, error) => closes.push({ reason, error }),
         },
@@ -153,20 +158,30 @@ const shmContractFactory: FrameChannelContractFactory = async (overrides = {}) =
     channel.beginFrames();
     const drain = (): void => {
         if (!reading || cleaning) return;
-        while (
-            pair.second.drainOne((lease) => {
-                const header = decodeHeader(lease.header);
-                const body = new Uint8Array(lease.byteLength);
-                let offset = 0;
-                for (let index = 0; index < lease.segmentCount; index++) {
-                    const segment = lease.segment(index);
-                    body.set(segment, offset);
-                    offset += segment.byteLength;
-                }
-                lease.release();
-                frames.push({ ...header, body });
-            })
-        ) {}
+        try {
+            while (
+                pair.second.drainOne((lease) => {
+                    const header = decodeHeader(lease.header);
+                    const body = new Uint8Array(lease.byteLength);
+                    let offset = 0;
+                    for (let index = 0; index < lease.segmentCount; index++) {
+                        const segment = lease.segment(index);
+                        body.set(segment, offset);
+                        offset += segment.byteLength;
+                    }
+                    lease.release();
+                    frames.push({ ...header, body });
+                })
+            ) {}
+        } catch (error) {
+            // The ring quarantines once its peer closes, and a scenario may close the channel
+            // before cleanup clears this timer; that receive failure is the fake host's EOF.
+            if (channel.isClosed() || pair.second.peerClosed()) {
+                reading = false;
+                return;
+            }
+            throw error;
+        }
     };
     const drainTimer = setInterval(drain, 0);
     const peer = {
@@ -232,6 +247,7 @@ const shmContractFactory: FrameChannelContractFactory = async (overrides = {}) =
         set frameHook(value) {
             hook.current = value;
         },
+        deliveryDepth: () => activeDeliveries,
         async cleanup() {
             cleaning = true;
             clearInterval(drainTimer);
@@ -333,7 +349,11 @@ describe("mandatory shared-memory channel", () => {
             expect(binaryBody).toBeInstanceOf(ReceiveLease);
             const lease = binaryBody as ReceiveLease;
             const alias = lease.segment(0);
-            expect(() => structuredClone(alias.buffer, { transfer: [alias.buffer] })).toThrow();
+            // Transfer prevention is reported, not gated; without it the attempt would detach
+            // the alias here, so it is made only where the runtime must refuse it.
+            if (probeCapabilities().transferPrevention) {
+                expect(() => structuredClone(alias.buffer, { transfer: [alias.buffer] })).toThrow();
+            }
             expect(channel.stats().activeReceiveLeases).toBe(1);
             expect(lease.release()).toBe(true);
             expect(lease.release()).toBe(false);

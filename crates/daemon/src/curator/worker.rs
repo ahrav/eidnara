@@ -5,12 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use host_runtime::model_execution::subprocess::CREDENTIAL_VALUE_CAP_BYTES;
+use host_runtime::model_execution::subprocess::{CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES};
 use host_runtime::model_execution::supervisor::Supervisor;
-use kernel::{
-    ReviewBinding, ReviewOwner, ReviewReadError, ReviewReadRefusal, ReviewStagedReference,
-    SourceDependency,
-};
+use kernel::{ReviewBinding, ReviewOwner, ReviewStagedReference, SourceDependency};
 use memory_store::curator_jobs::{
     CuratorJob, CuratorJobState, MAX_PENDING_CURATOR_JOBS_PER_PROJECT, ReviewTarget,
 };
@@ -27,7 +24,6 @@ use super::activation::{self, Activation, Closed, LiveIdentity};
 use super::broker::{MAX_ISSUED_INSPECTIONS, QuestionTemplate};
 use super::coordinator::{Coordinator, InvestigationError, InvestigationPermits, JobContext};
 use super::disclosure::ModelProfile;
-use super::handoff::{PRODUCER as HISTORY_SUMMARIZER, review_binding};
 use super::lifecycle::{ActivationState, CuratorStatus};
 use super::model_request::{Credential, Endpoint, Sender};
 use super::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
@@ -39,8 +35,8 @@ pub const IDLE_INTERVAL: Duration = Duration::from_secs(30);
 pub const JOBS_PER_PASS: usize = 8;
 /// Output budget and sampling every Curator request carries; the model id comes from the activation record.
 pub const MAX_TOKENS: u32 = 4096;
-/// Credential names the host may hand the daemon; `eidnara_host` asserts its name list against this.
-pub const MAX_CREDENTIALS: usize = 3;
+/// Credential variables the host may hand the daemon: every name the startup envelope admits.
+pub const MAX_CREDENTIALS: usize = CREDENTIAL_VARIABLES.len();
 /// Bytes [`CuratorHost`] retains for the process lifetime: one value under [`CREDENTIAL_VALUE_CAP_BYTES`] per credential, its name, and its keyed identity. Declared under the daemon's retained-resident bytes.
 pub const RETAINED_CREDENTIAL_BYTES: u64 =
     MAX_CREDENTIALS as u64 * (CREDENTIAL_VALUE_CAP_BYTES as u64 + 256);
@@ -359,6 +355,17 @@ impl Worker {
         };
         let store_error =
             |error: &dyn std::fmt::Display| InvestigationError::Store(error.to_string());
+        // The pass snapshotted routes once; the root's live mapping is read again here, before the claim, so a root rebound to another project since is not read or staged under the stale one. The lease fences the project's authority, not this mapping.
+        let live = memories_authority_for_route(&self.store, &root.project_root.to_string_lossy())
+            .map_err(|error| store_error(&error))?;
+        if !matches!(&live, MemoriesAuthority::Module(authority) if authority.project == route.project && authority.generation == route.authority_generation)
+        {
+            eprintln!(
+                "daemon: curator job {}/{} is staged under a root that no longer resolves to its project at the pass's authority generation; it is left for the next pass",
+                project, job.causal_identity
+            );
+            return Ok(None);
+        }
         let acquisition_id = format!("curator:{}:{now}", job.causal_identity);
         let claim = match self
             .store
@@ -447,45 +454,31 @@ struct PreparedJob {
     project_text: Option<ProjectText>,
 }
 
-/// Only `HISTORY_SUMMARIZER` has a defined staged-subject binding; other producers return `None`.
-pub fn job_binding(project_digest: &str, job: &CuratorJob) -> Option<ReviewBinding> {
-    match &job.target {
-        ReviewTarget::StagedSubject { .. } if job.producer.producer == HISTORY_SUMMARIZER => {
-            let (session_id, firing_seq) = job
-                .producer
-                .firing_id
-                .rsplit_once('#')
-                .and_then(|(session, seq)| Some((session, seq.parse::<u64>().ok()?)))
-                .unwrap_or((job.producer.firing_id.as_str(), 0));
-            Some(review_binding(
-                project_digest,
-                MEMORY_DOMAIN_ID,
-                session_id,
-                firing_seq,
-                &job.causal_identity,
-            ))
-        }
-        ReviewTarget::StagedSubject { .. } => None,
-        ReviewTarget::Memory {
-            object_id,
-            source_revision,
-        } => Some(ReviewBinding {
-            project_digest: project_digest.to_string(),
-            domain_id: MEMORY_DOMAIN_ID.to_string(),
-            owner: ReviewOwner::Job {
-                job_id: job.causal_identity.clone(),
-            },
-            subject_source: SourceDependency {
-                source_kind: "canonical_memory".to_string(),
-                source_id: object_id.clone(),
-                source_revision: *source_revision,
-            },
-            reference_sources: Vec::new(),
-        }),
-    }
+/// The binding a memory-target job is read under; a staged subject carries its own in the Kernel row.
+fn memory_binding(project_digest: &str, job: &CuratorJob) -> Option<ReviewBinding> {
+    let ReviewTarget::Memory {
+        object_id,
+        source_revision,
+    } = &job.target
+    else {
+        return None;
+    };
+    Some(ReviewBinding {
+        project_digest: project_digest.to_string(),
+        domain_id: MEMORY_DOMAIN_ID.to_string(),
+        owner: ReviewOwner::Job {
+            job_id: job.causal_identity.clone(),
+        },
+        subject_source: SourceDependency {
+            source_kind: "canonical_memory".to_string(),
+            source_id: object_id.clone(),
+            source_revision: *source_revision,
+        },
+        reference_sources: Vec::new(),
+    })
 }
 
-/// The root a job is read under, with its binding. A `ScopeMismatch` means the root does not own the staged subject, so the next root is tried; any other outcome is that root's to settle. Memory targets use the newest root. `None` when no root owns the staged subject.
+/// The root a job is read under, with its binding. A staged subject's binding is the one its stager wrote, read back from the Kernel row: the job row carries neither the session nor the scope it was staged under, so nothing is reconstructed. The root is the bound one whose digest the binding names, and the binding must belong to this job. Memory targets use the newest root. `None` when no bound root owns the subject.
 fn job_root<'a>(
     kernel: &kernel::KernelStore,
     route: &'a ProjectRoute,
@@ -504,17 +497,20 @@ fn job_root<'a>(
         },
         ReviewTarget::Memory { .. } => {
             let root = route.roots.first()?;
-            return Some((root, job_binding(&root.project_digest, job)?));
+            return Some((root, memory_binding(&root.project_digest, job)?));
         }
     };
-    for root in &route.roots {
-        let binding = job_binding(&root.project_digest, job)?;
-        match kernel.read_review_input(&reference, &binding, now) {
-            Err(ReviewReadError::Refused(ReviewReadRefusal::ScopeMismatch)) => continue,
-            Ok(_) | Err(_) => return Some((root, binding)),
-        }
+    let binding = kernel.staged_review_binding(&reference, now).ok()?;
+    if binding.domain_id != MEMORY_DOMAIN_ID
+        || !matches!(&binding.owner, ReviewOwner::Job { job_id } if *job_id == job.causal_identity)
+    {
+        return None;
     }
-    None
+    let root = route
+        .roots
+        .iter()
+        .find(|root| root.project_digest == binding.project_digest)?;
+    Some((root, binding))
 }
 
 /// Runs passes until cancelled: a pass that settled a run is followed at once, an idle one after [`IDLE_INTERVAL`].
@@ -537,47 +533,5 @@ pub async fn run(worker: Arc<Worker>, cancel: CancellationToken) {
 impl Worker {
     pub(crate) fn home_of(store_path: &str) -> Option<PathBuf> {
         crate::sqlite_store_data_home(store_path).map(|home| Path::new(home).to_path_buf())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use memory_store::curator_jobs::ProducerBinding;
-
-    use super::*;
-
-    fn staged_job(producer: &str) -> CuratorJob {
-        CuratorJob {
-            project: "git:proj".to_string(),
-            causal_identity: "job-1".to_string(),
-            producer: ProducerBinding {
-                producer: producer.to_string(),
-                firing_id: "ses#3".to_string(),
-                ordinal: 1,
-            },
-            target: ReviewTarget::StagedSubject {
-                kernel_incarnation: "k".repeat(64),
-                candidate_id: "cand-1".to_string(),
-                payload_digest: "0".repeat(64),
-            },
-            input_fingerprint: "1".repeat(64),
-            question_template: "extracted_facts".to_string(),
-            state: CuratorJobState::Reserved,
-            queue_deadline_ms: 10,
-            created_at_ms: 1,
-            updated_at_ms: 1,
-        }
-    }
-
-    /// A staged subject is read under the binding its stager wrote, and only the History Summarizer's is known; another producer's job yields no binding rather than one the Kernel would refuse.
-    #[test]
-    fn only_a_history_summarizer_staged_subject_has_a_binding() {
-        let digest = "a".repeat(64);
-        let history = job_binding(&digest, &staged_job(HISTORY_SUMMARIZER)).unwrap();
-        assert_eq!(
-            history,
-            review_binding(&digest, MEMORY_DOMAIN_ID, "ses", 3, "job-1")
-        );
-        assert_eq!(job_binding(&digest, &staged_job("other_producer")), None);
     }
 }

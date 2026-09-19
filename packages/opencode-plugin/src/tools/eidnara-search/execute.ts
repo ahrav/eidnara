@@ -98,6 +98,11 @@ export type EidnaraSearchExecution =
           reason: ExplicitDeliveryReason;
       };
 
+/** One memory read for the search: the rows it returned, or the state that refused it. */
+type MemoryRead =
+    | { rows: ReadRow[]; truncated: boolean; unresolvedObjectIds: string[]; state: null }
+    | { state: MemoryState };
+
 export async function executeEidnaraSearch(
     deps: EidnaraSearchToolDeps,
     rawArgs: EidnaraSearchArgs,
@@ -158,41 +163,46 @@ export async function executeEidnaraSearch(
     });
     // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits a list over the client's filter bound into filtered requests and splits on byte-budget truncation, so every named id resolves or is reported unresolved by name.
     const idQuery = parseObjectIdQuery(query);
-    let memoryRows: ReadRow[] = [];
-    let memoryState: MemoryState | null = null;
-    let memoryTruncated = false;
-    let unresolvedObjectIds: string[] = [];
-    if (idQuery) {
-        const read = await readObjectRowsChunked({
-            client,
-            surface: "explicit_search",
-            gated: true,
-            objectIds: idQuery,
-            ...(toolContext.abort ? { signal: toolContext.abort } : {}),
-        });
-        if (read.ok) {
-            memoryRows = read.rows;
-            unresolvedObjectIds = read.unresolvedObjectIds;
-        } else {
-            memoryState = read.state;
+    // The gate judges the lag of registered consumers. A deployment with no consumer at all
+    // (no admitted search projection) has no derived state that can lag behind the canonical
+    // rows this read returns, so the same read is repeated ungated and the result says that
+    // freshness was not judged, instead of the search failing for the deployment's lifetime.
+    const readMemory = async (gated: boolean): Promise<MemoryRead> => {
+        const signal = toolContext.abort ? { signal: toolContext.abort } : {};
+        if (idQuery) {
+            const read = await readObjectRowsChunked({
+                client,
+                surface: "explicit_search",
+                gated,
+                objectIds: idQuery,
+                ...signal,
+            });
+            return read.ok
+                ? {
+                      rows: read.rows,
+                      truncated: false,
+                      unresolvedObjectIds: read.unresolvedObjectIds,
+                      state: null,
+                  }
+                : { state: read.state };
         }
-    } else {
-        const read = await client.read({
-            surface: "explicit_search",
-            gated: true,
-            ...(toolContext.abort ? { signal: toolContext.abort } : {}),
-        });
-        if (isAvailable(read)) {
-            memoryRows = read.rows;
-            memoryTruncated = read.truncated;
-        } else {
-            memoryState = read.state;
-        }
+        const read = await client.read({ surface: "explicit_search", gated, ...signal });
+        return isAvailable(read)
+            ? { rows: read.rows, truncated: read.truncated, unresolvedObjectIds: [], state: null }
+            : { state: read.state };
+    };
+    let memory = await readMemory(true);
+    let freshnessNote: string | undefined;
+    if (memory.state?.kind === "unavailable" && memory.state.reason === "no_required_consumer") {
+        freshnessNote = `Memory: ${renderToolStateText(memory.state)} Results are read from the canonical tip.`;
+        memory = await readMemory(false);
     }
-    if (memoryState) {
-        return { status: "invalid", text: `Error: ${renderToolStateText(memoryState)}` };
+    if (memory.state) {
+        return { status: "invalid", text: `Error: ${renderToolStateText(memory.state)}` };
     }
+    const { rows: memoryRows, truncated: memoryTruncated, unresolvedObjectIds } = memory;
     const notes: string[] = [];
+    if (freshnessNote) notes.push(freshnessNote);
     if (unresolvedObjectIds.length > 0) {
         notes.push(
             `Memory: unresolved object id${unresolvedObjectIds.length === 1 ? "" : "s"} (the daemon read stayed truncated): ${unresolvedObjectIds.join(", ")}`,

@@ -1892,9 +1892,9 @@ Open questions:
 ### capability-probe-gates-every-advertised-mechanism
 
 Type: safety
-Reachability: default-production - `capableAddon` (`packages/shm-native/index.ts:276-281`)
-calls `probeCapabilities` (`:278`) once and throws
-`NativeStartupError("capability_unavailable")` when it reports
+Reachability: default-production - `capableAddon` (`packages/shm-native/index.ts:343-347`)
+calls `probeCapabilities` (`:345`) once and throws
+`NativeStartupError("capability_unavailable")` (`:346`) when it reports
 `available: false`, so every channel construction consults the probe. The
 source tree's `ShmFrameChannel` in `packages/plugin`, which bypassed it, is
 not in this tree.
@@ -1908,19 +1908,21 @@ Check: `always` — for each enumerated mechanism, a runtime lacking it yields
 Fault/timing angle: a runtime that is neither Bun nor reports as Node, or one
 without the cleanup-hook export.
 Required faults and enabling state: a runtime missing one enumerated mechanism.
-Confidence: high — [evidence](evidence/capability-probe-gates-every-advertised-mechanism.md).
-Verified by direct read of `packages/shm-native/index.ts` at HEAD: every
-enumerated mechanism, including the cleanup hook, gates with an
-`available: false` return carrying a closed reason; the cleanup-hook gate calls
-`native.probeCleanupHooks()` inside a try/catch and sets `cleanupHooks` from
-whether it threw (`:408-414`), returns `available: false` with
-`reason: "cleanup_hooks_unavailable"` when the flag is false (`:415-426`), and
-only then returns `available: true` with `cleanupHooks: true` (`:427-435`);
-`registerCleanupProbe` is a separate exported wrapper (`:912-915`) the probe
+Confidence: low - [evidence](evidence/capability-probe-gates-every-advertised-mechanism.md).
+At HEAD transfer prevention is reported, not gated, and the evidence file
+describes the earlier gating order; see the second open question.
+Superseded - the paragraph below describes an earlier tree, with its refs
+corrected to HEAD: every gated mechanism, including the cleanup hook, refuses
+with an `available: false` return carrying a closed reason; the cleanup-hook
+gate calls `native.probeCleanupHooks()` inside a try/catch and sets
+`cleanupHooks` from whether it threw (`:517-523`), returns `available: false`
+with `reason: "cleanup_hooks_unavailable"` when the flag is false (`:524-536`),
+and only then returns `available: true` with `cleanupHooks: true` (`:538-547`);
+`registerCleanupProbe` is a separate exported wrapper (`:1045`) the probe
 never inspects. The source tree reported the hook inside an `available: true`
 object instead of gating on it, which is the defect this record was written
 against.
-Existing check: `packages/shm-native/tests/mechanism.ts:29` calls
+Existing check: `packages/shm-native/tests/mechanism.ts:33` calls
 `probeCapabilities` and the capability suite asserts channel counts around it;
 no test removes a mechanism and asserts the corresponding reason. Status
 unaudited.
@@ -1935,16 +1937,24 @@ Open questions:
 - An earlier draft asserted that the code's step order differs from the
   document's numbering. That is **not supported**: steps one through eight appear
   in documented order. Two real divergences replace it. At HEAD
-  `probeCapabilities` (`packages/shm-native/index.ts:319-443`) refuses in the
-  order `addon_unavailable` (`:331-332`), `node_detachment_unavailable`
-  (`:333-334`), `napi_8_unavailable` (`:338-345`),
-  `external_exact_bounds_unavailable` (`:353-360`),
-  `transfer_prevention_unavailable` (`:373-382`), `detachment_unavailable`
-  (`:397-407`), `cleanup_hooks_unavailable` (`:415-426`), then the catch-all
-  `runtime_mechanism_unavailable` (`:436-442`); the addon-load gate precedes the
-  Node detachment gate so an unavailable addon is not reported as a detachment
-  failure (`:328-329`). Whether the enumeration is meant to be one gate per
-  documented step is the open question. (needs human input)
+  `probeCapabilities` (`packages/shm-native/index.ts:441-555`) refuses in the
+  order `addon_unavailable` (`:454`), `napi_8_unavailable` (`:462`),
+  `external_exact_bounds_unavailable` (`:478`), `detachment_unavailable`
+  (`:514`), `cleanup_hooks_unavailable` (`:534`), then the catch-all
+  `runtime_mechanism_unavailable` (`:552`); the addon-load gate precedes every
+  other gate so an unavailable addon is not reported as a detachment failure
+  (`:452-454`). Whether the enumeration is meant to be one gate per documented
+  step is the open question. (needs human input)
+- Since the commit that starts the channel on Node, the probe no longer refuses
+  on `node_detachment_unavailable` or `transfer_prevention_unavailable`.
+  Transfer prevention is measured (`transferPreventionMechanism` of
+  `intrinsic`, `marked`, or `none`, `:489-490`) and reported on the capability
+  object rather than gated, because no shipped runtime offers both marking and
+  detachment; the evidence file
+  `capability-probe-gates-every-advertised-mechanism.md` describes the earlier
+  gating order and is stale for those two reasons. Whether a reported rather
+  than gated mechanism still satisfies this record's guarantee is open.
+  (needs human input)
 
 ### clean-reclamation-is-reachable
 
@@ -5008,13 +5018,13 @@ Open questions:
 Type: safety
 Reachability: default-production - every channel close in the addon runs this drop order.
 Status: active
-Exercised: partial - one unit test drives the drop order for borrowing reservations; the N-API detachment half is covered by `packages/shm-native/tests/runtime.ts` under Bun only.
+Exercised: partial - one unit test drives the drop order for borrowing reservations; the N-API detachment half is covered by `packages/shm-native/tests/runtime.ts` under Bun and Node.
 Guarantee: Closing a channel drops every reservation that borrows ring memory before the ring itself is dropped, so no JavaScript alias outlives the mapping it points into.
 Check: `always` - at channel close, `reservations.is_empty()` before `ring` is dropped; externally, when `close` returns `Ok`, no `Uint8Array` handed to JavaScript remains attached. When a detachment fails, `close` returns an error and by design keeps the channel entry and its mapping registered until a later `close` retries the detachment (`packages/shm-native/src/lib.rs`, `close`), so that error path is the quarantine the guarantee relies on, not a violation of it.
 Fault/timing angle: A reservation dropped after the ring would touch unmapped memory from the finalizer.
 Required faults and enabling state: A channel with live borrowing reservations at close.
-Confidence: medium - [evidence](evidence/addon-reservations-drop-before-the-ring.md). `channel_drops_borrowing_reservations_before_the_ring` (`packages/shm-native/src/lib.rs`) and the detachment cases in `packages/shm-native/tests/runtime.ts`; the Node runtime reports detachment unavailable, so the Node half is a capability refusal, not a proof.
-Existing check: `channel_drops_borrowing_reservations_before_the_ring`; `packages/shm-native/tests/runtime.ts` detachment cases (Bun); unaudited.
+Confidence: medium - [evidence](evidence/addon-reservations-drop-before-the-ring.md). `channel_drops_borrowing_reservations_before_the_ring` (`packages/shm-native/src/lib.rs`) and the detachment cases in `packages/shm-native/tests/runtime.ts`; since the probe started the channel on Node, `packages/shm-native/tests/capability.ts:40-46` requires `available: true` on a claimed target, so the detachment cases run on both runtimes.
+Existing check: `channel_drops_borrowing_reservations_before_the_ring`; `packages/shm-native/tests/runtime.ts` detachment cases (Bun and Node); unaudited.
 Impact: Use-after-unmap in the JavaScript peer.
 Open questions: None.
 

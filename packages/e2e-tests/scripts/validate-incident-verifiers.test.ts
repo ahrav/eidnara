@@ -262,8 +262,15 @@ describe("catalog revision replay admission", () => {
         ).toThrow(/requires an appended fingerprint-bound baseline/);
     });
 
+    // History validation names the missing and reused cases before the replay gate would.
+    const EXPECTED_PROBE_MESSAGE = {
+        missing: /is not bound by a fingerprint-matching baseline adjudication/,
+        reused: /changed its semantic fingerprint while reusing revision id/,
+        fingerprint: /does not match the registered case/,
+    } as const;
+
     it("rejects a baseline missing for one affected variant, a reused revision, or an invented fingerprint", () => {
-        for (const failure of ["missing", "reused", "fingerprint"]) {
+        for (const failure of ["missing", "reused", "fingerprint"] as const) {
             const { accepted, current, acceptedDigests, currentDigests } = replayFixture();
             const before = parseIncidentCatalog(JSON.parse(accepted.catalogText));
             const after = parseIncidentCatalog(JSON.parse(current.catalogText));
@@ -290,9 +297,7 @@ describe("catalog revision replay admission", () => {
                     currentDigests,
                     replayPass,
                 ),
-            ).toThrow(
-                /requires an appended fingerprint-bound baseline|reusing semantic revision|does not match the registered case/,
-            );
+            ).toThrow(EXPECTED_PROBE_MESSAGE[failure]);
         }
     });
 

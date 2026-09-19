@@ -15,7 +15,6 @@ use memory_store::curator_ledger::MAX_RECEIPT_PAGE;
 use memory_store::{MemoryStore, MemoryStoreError};
 
 use super::settlement::{ReadRefusal, ReviewOutcome, list_review_outcomes, read_selected_proposal};
-use super::worker::job_binding;
 
 pub(crate) const LIST: &str = "review.list";
 pub(crate) const READ: &str = "review.read";
@@ -195,7 +194,7 @@ impl HandlerCore {
         }
         let read = blocking(move || {
             let scope = bound.review_scope()?;
-            let job = scope
+            scope
                 .ledger
                 .lookup_curator_job(&scope.project, &parsed.causal_identity)
                 .map_err(|_| "store_unavailable")?
@@ -205,7 +204,6 @@ impl HandlerCore {
                 &scope.ledger,
                 &scope.project,
                 &parsed.causal_identity,
-                |project_digest| job_binding(project_digest, &job),
                 crate::now_ms(),
             )
             .map(|selected| (parsed.causal_identity, selected))

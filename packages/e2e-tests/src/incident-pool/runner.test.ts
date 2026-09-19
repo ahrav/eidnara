@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -772,6 +772,8 @@ describe("case isolation", () => {
         expect(env.OPENAI_API_KEY).toBeUndefined();
         // A real `CARGO_HOME` can hold registry credentials, so the case relocates it instead of inheriting the parent's path.
         expect(env.CARGO_HOME).toBe(join(workspace.home, ".cargo"));
+        // A parent without `RUSTUP_HOME` gets one only when its default directory exists; `/real/home` has none.
+        expect(env.RUSTUP_HOME).toBeUndefined();
         const relocated = ["HOME", "TMPDIR", "TMP", "TEMP", "CARGO_HOME"];
         expect(
             Object.keys(env).every(
@@ -781,6 +783,21 @@ describe("case isolation", () => {
                     relocated.includes(key),
             ),
         ).toBe(true);
+        destroyCaseWorkspace(workspace);
+    });
+
+    it("forwards the parent's default rustup home so the relocated child still finds cargo", () => {
+        const workspace = createCaseWorkspace(testRoot, "var-rustup-check", snapshot.runNonce);
+        const parentHome = join(testRoot, "parent-home");
+        mkdirSync(join(parentHome, ".rustup"), { recursive: true });
+        const derived = buildCaseEnv(workspace, { PATH: "/usr/bin", HOME: parentHome });
+        expect(derived.RUSTUP_HOME).toBe(join(parentHome, ".rustup"));
+        const explicit = buildCaseEnv(workspace, {
+            PATH: "/usr/bin",
+            HOME: parentHome,
+            RUSTUP_HOME: "/opt/rustup",
+        });
+        expect(explicit.RUSTUP_HOME).toBe("/opt/rustup");
         destroyCaseWorkspace(workspace);
     });
 

@@ -173,6 +173,11 @@ pub struct ManifestFile {
 }
 
 /// `GenerationManifest` serializes fields in declaration order.
+/// The `inputs_lock_sha256` a debug launcher records for a payload staged without a manifest
+/// digest. Such a generation has no production inputs lock, so a lane whose inputs the lock
+/// pins may be absent by design rather than by packaging error.
+pub const UNQUALIFIED_INPUTS_LOCK_SHA256: &str = "unqualified-dev-inputs";
+
 /// `files` is sorted by path, making the encoding deterministic.
 /// `GenerationManifest`'s SHA-256 names the generation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

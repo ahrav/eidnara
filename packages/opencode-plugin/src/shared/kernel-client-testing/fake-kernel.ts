@@ -158,11 +158,14 @@ export function fakeProjectScopeId(projectRoot: string): string {
     return `project:${sha256Hex(projectRoot)}`;
 }
 
-function invalid(reason: string): unknown {
+/** One daemon reply body as the fake transport hands it to the client. */
+type WireReply = Record<string, unknown>;
+
+function invalid(reason: string): WireReply {
     return { state: { kind: "invalid", reason } };
 }
 
-function conflict(reason: string): unknown {
+function conflict(reason: string): WireReply {
     return { state: { kind: "conflict", reason } };
 }
 
@@ -215,7 +218,7 @@ const MODEL_INFERENCE_TAINTS: ReadonlySet<string> = new Set([
 /** An assertion above the derived class is refused rather than clamped so the caller learns its claim was not accepted. */
 function resolveClasses(
     body: Record<string, unknown>,
-): { sourceKind: string } | { reply: unknown } {
+): { sourceKind: string } | { reply: WireReply } {
     const sourceKind = body.source_kind;
     if (typeof sourceKind !== "string") throw invalidParams("kernel.commit requires source_kind");
     const derived = DERIVED_CLASSES[sourceKind];
@@ -266,6 +269,8 @@ export class FakeKernel {
     >();
     /** Forces every read on a surface to answer with this state instead of rows. */
     readonly surfaceStates = new Map<Surface, MemoryState>();
+    /** Forces only gated reads on a surface to answer with this state; an ungated read serves rows. */
+    readonly gatedSurfaceStates = new Map<Surface, MemoryState>();
     /** Forces the next commit to answer with this state. */
     nextCommitState: MemoryState | null = null;
     /** Every read reply carries this `truncated` flag, standing in for a daemon that dropped rows to fit its per-read bounds. */
@@ -422,10 +427,12 @@ export class FakeKernel {
         );
     }
 
-    private readReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
+    private readReply(body: Record<string, unknown>, projectRoot: string | null): WireReply {
         const surface = body.surface;
         if (!(SURFACES as readonly unknown[]).includes(surface)) return invalid("invalid_input");
-        const forced = this.surfaceStates.get(surface as Surface);
+        const forced =
+            this.surfaceStates.get(surface as Surface) ??
+            (body.gated === true ? this.gatedSurfaceStates.get(surface as Surface) : undefined);
         if (forced && forced.kind !== "available") return { state: forced };
         const asOf = typeof body.as_of === "number" ? body.as_of : this.tip;
         if (asOf > this.tip) return { state: { kind: "unavailable", reason: "snapshot_diverged" } };
@@ -493,7 +500,7 @@ export class FakeKernel {
     private conflictFor(
         tokens: { object_id: string; known_as_of: number }[],
         projectRoot: string | null,
-    ): unknown | null {
+    ): WireReply | null {
         for (const token of tokens) {
             const object = this.objects.get(token.object_id);
             if (!object || !FakeKernel.inProject(object, projectRoot)) return invalid("not_found");
@@ -516,7 +523,7 @@ export class FakeKernel {
      * lookup, so an over-declared class cannot replay a receipt.
      */
     private commitPreflight(body: Record<string, unknown>):
-        | { reply: unknown }
+        | { reply: WireReply }
         | {
               operations: Operation[];
               tokens: { object_id: string; known_as_of: number }[];
@@ -549,7 +556,7 @@ export class FakeKernel {
         return { operations, tokens, sourceKind: classes.sourceKind, intent, replayed };
     }
 
-    private commitReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
+    private commitReply(body: Record<string, unknown>, projectRoot: string | null): WireReply {
         const preflight = this.commitPreflight(body);
         if ("reply" in preflight) return preflight.reply;
         const { operations, tokens, sourceKind, intent, replayed } = preflight;
@@ -757,7 +764,7 @@ export class FakeKernel {
         operation: Operation,
         projectRoot: string | null,
         view: (objectId: string) => FakeObject | undefined,
-    ): { result: DispositionResult; approval: string | null } | { reply: unknown } {
+    ): { result: DispositionResult; approval: string | null } | { reply: WireReply } {
         const objectId = operation.object_id;
         const event = operation.event;
         if (
@@ -810,7 +817,7 @@ export class FakeKernel {
     }
 
     /** `kernel.commit` with `preview: true`: a recorded identity answers its receipt; otherwise operations are judged in order on an overlay of the tip, nothing is written, and no receipt is created. */
-    private previewReply(body: Record<string, unknown>, projectRoot: string | null): unknown {
+    private previewReply(body: Record<string, unknown>, projectRoot: string | null): WireReply {
         const tokens = (body.tokens as unknown[] | undefined) ?? [];
         if (tokens.length > 0)
             throw invalidParams("kernel.commit preview checks no tokens; send none");
@@ -857,7 +864,7 @@ export class FakeKernel {
         return { state: { kind: "available" }, known_as_of: this.tip, previews };
     }
 
-    reply(call: KernelTransportCall): unknown {
+    reply(call: KernelTransportCall): WireReply {
         const body = call.body as Record<string, unknown>;
         // The route is bound to the transport call's root; a body root that names another project is refused before any work. The daemon canonicalizes both roots first; the fake compares the strings.
         if (typeof body.project_root === "string" && body.project_root !== call.projectRoot) {

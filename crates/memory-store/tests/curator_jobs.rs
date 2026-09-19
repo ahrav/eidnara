@@ -527,11 +527,13 @@ fn rebinding_hands_a_reserved_row_to_another_firing_of_the_same_producer() {
         ),
         CuratorJobRefusal::Missing
     );
-    let mut rebound_producer = producer("f2");
-    rebound_producer.ordinal = 7;
+    // The ordinal names the source revision the subject was staged under, so it stays with the row.
+    let mut recut_producer = producer("f2");
+    recut_producer.ordinal = 7;
     let rebound = store
-        .rebind_reserved_curator_job("proj", &job.causal_identity, &rebound_producer, NOW + 1)
+        .rebind_reserved_curator_job("proj", &job.causal_identity, &recut_producer, NOW + 1)
         .unwrap();
+    let rebound_producer = producer("f2");
     assert_eq!(rebound.producer, rebound_producer);
     assert_eq!(rebound.state, CuratorJobState::Reserved);
     assert_eq!(rebound.queue_deadline_ms, job.queue_deadline_ms);

@@ -4,12 +4,11 @@ import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
+import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import {
-    type PromptSurfaceConfig,
-    promptSurfaceConfigIdentity,
-    resolvePromptSurface,
-} from "../../shared/prompt-surface";
-import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
+    type PromptSurfaceRuntime,
+    promptSurfaceWireFields,
+} from "../../shared/prompt-surface-runtime";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
 import {
     applyRecipe,
@@ -1206,13 +1205,6 @@ export function createRustModeTransform(
             );
             const midTurn = isMidTurn(deps, sessionId);
             const requestObservedAtMs = Date.now();
-            const promptSurfaceGuidance = deps.promptSurfaceRuntime?.resolveGuidance(
-                deps.promptSurface,
-                modelKey ?? undefined,
-            );
-            const promptSurface =
-                promptSurfaceGuidance ??
-                resolvePromptSurface(deps.promptSurface, modelKey ?? undefined);
             const passInputs: Record<string, unknown> = {
                 effective_execute_threshold: threshold,
                 auto_search_enabled: deps.autoSearch?.enabled ?? true,
@@ -1228,11 +1220,7 @@ export function createRustModeTransform(
                 is_subagent: isSubagent,
                 tool_present: toolPresent,
                 todo_tool_present: todoToolPresent,
-                prompt_surface_preset: promptSurface.preset,
-                prompt_surface_model_key: modelKey,
-                prompt_surface_config_identity: promptSurfaceConfigIdentity(deps.promptSurface),
-                prompt_surface_tool_descriptions: deps.promptSurface?.tool_descriptions ?? {},
-                prompt_surface_guidance_override: promptSurfaceGuidance?.primaryOverride,
+                ...promptSurfaceWireFields(deps.promptSurfaceRuntime, deps.promptSurface, modelKey),
                 protected_tags: deps.protectedTags ?? DEFAULT_PROTECTED_TAGS,
             };
             /**

@@ -583,14 +583,7 @@ impl Fixture {
     }
 
     fn read(&self, now: i64) -> Result<SelectedProposal, ReadRefusal> {
-        read_selected_proposal(
-            &self.store,
-            &self.ledger,
-            PROJECT,
-            &self.identity,
-            |_| Some(self.review_binding()),
-            now,
-        )
+        read_selected_proposal(&self.store, &self.ledger, PROJECT, &self.identity, now)
     }
 
     /// Commits one attempt marker under the fixture's claim and, when `terminal` is given, records it.
@@ -1933,22 +1926,14 @@ fn a_selected_result_is_readable_only_through_its_live_review_hold() {
         let store = Arc::clone(&fixture.store);
         let ledger = Arc::clone(&fixture.ledger);
         let identity = fixture.identity.clone();
-        let binding = fixture.review_binding();
         let barrier = Arc::clone(&barrier);
         let now = fixture.now + 7;
         std::thread::spawn(move || {
             barrier.wait();
             (0..200)
                 .map(|_| {
-                    read_selected_proposal(
-                        &store,
-                        &ledger,
-                        PROJECT,
-                        &identity,
-                        |_| Some(binding.clone()),
-                        now,
-                    )
-                    .map(|selected| selected.reference)
+                    read_selected_proposal(&store, &ledger, PROJECT, &identity, now)
+                        .map(|selected| selected.reference)
                 })
                 .collect::<Vec<_>>()
         })
@@ -1995,7 +1980,6 @@ fn a_hold_ended_between_lookup_and_validation_reads_as_the_review_expiring() {
     for ending in ["release", "purge"] {
         let fixture = Fixture::open();
         let broker = fixture.broker(1);
-        // Publication requires a completed attempt on the receipt.
         fixture.attempt(1, Some(CuratorAttemptTerminal::Complete));
         let evidence = fixture.evidence_id();
         let Settled::Published(reference) = fixture
@@ -2040,7 +2024,6 @@ fn a_hold_ended_between_lookup_and_validation_reads_as_the_review_expiring() {
             &fixture.ledger,
             PROJECT,
             &fixture.identity,
-            |_| Some(fixture.review_binding()),
             fixture.now + 7,
             &end_hold,
         );

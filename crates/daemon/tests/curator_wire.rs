@@ -6,9 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use daemon::curator::broker::{EvidenceBroker, QuestionTemplate, RunBinding};
-use daemon::curator::handoff::review_policy_versions;
+use daemon::curator::handoff::{review_binding, review_policy_versions};
 use daemon::curator::settlement::{RunResult, Settled, Settlement, TaskClaim};
-use daemon::curator::worker::job_binding;
 use daemon::dispatch::PreparedOutcome;
 use kernel::{
     CuratorHoldBinding, KernelStore, ManifestReference, PolicyDependencies, ProposalAction,
@@ -83,8 +82,16 @@ struct BegunJob {
     receipt: CuratorReceipt,
 }
 
+/// The staged subject binding for `firing`: the handoff stages under the real session id and the chunk ordinal, and the job row carries neither.
+fn subject_binding(digest: &str, firing: u64, causal_identity: &str) -> kernel::ReviewBinding {
+    review_binding(digest, "memory", "ses", firing, causal_identity)
+}
+
+/// Reserves, stages the subject in the Kernel as the handoff does, activates, claims, and begins the receipt of one History Summarizer job.
 fn begin_job(
+    kernel: &KernelStore,
     store: &MemoryStore,
+    digest: &str,
     kernel_incarnation: &str,
     generation: u64,
     firing: u64,
@@ -92,14 +99,34 @@ fn begin_job(
 ) -> BegunJob {
     let producer = ProducerBinding {
         producer: "history_summarizer".to_string(),
-        firing_id: format!("ses#{firing}"),
+        firing_id: format!("{}#{firing}", "5".repeat(32)),
         ordinal: firing,
     };
+    let payload = kernel::ReviewPayload::Subject(kernel::ReviewSubject {
+        facts: vec![kernel::ExtractedFact {
+            text: format!("bun builds the workspace {firing}"),
+            spans: vec![kernel::SourceSpan {
+                alias: "s1".to_string(),
+                start: 0,
+                end: 4,
+            }],
+        }],
+        origins: vec![kernel::SubjectOrigin {
+            alias: "s1".to_string(),
+            message_id: "m2".to_string(),
+            ordinal: 2,
+            block_ids: vec!["m2#0".to_string()],
+            block_hashes: vec!["0".repeat(64)],
+            ranges: vec![kernel::ByteRange { start: 0, end: 4 }],
+        }],
+    });
+    let payload_digest = payload.digest().unwrap();
+    let candidate_id = format!("hs-ses-{}", &payload_digest[..32]);
     let inputs = CausalInputs {
         target: ReviewTarget::StagedSubject {
             kernel_incarnation: kernel_incarnation.to_string(),
-            candidate_id: format!("hs-ses-candidate-{firing}"),
-            payload_digest: format!("{firing:064}"),
+            candidate_id: candidate_id.clone(),
+            payload_digest,
         },
         question_template: "extracted_facts".to_string(),
         signals: Vec::new(),
@@ -112,6 +139,21 @@ fn begin_job(
     else {
         panic!("fresh inputs reserve")
     };
+    let run_id = format!("hs-run-{firing}");
+    kernel
+        .stage_review_input(kernel::ReviewStagingSpec {
+            extraction_run_id: run_id.clone(),
+            candidate_id,
+            producer: "history_summarizer".to_string(),
+            binding: subject_binding(digest, firing, &job.causal_identity),
+            payload,
+            recorded_at: now,
+            queue_deadline_at: job.queue_deadline_ms,
+        })
+        .unwrap();
+    kernel
+        .finish_staging_run(&run_id, kernel::StagingTerminalState::Completed, now)
+        .unwrap();
     store
         .activate_curator_job(
             PROJECT,
@@ -272,7 +314,11 @@ fn publish(
             now,
         )
         .unwrap();
-    let binding = job_binding(digest, &begun.job).expect("a History Summarizer job has a binding");
+    let binding = subject_binding(
+        digest,
+        begun.job.producer.ordinal,
+        &begun.job.causal_identity,
+    );
     let settled = Settlement {
         store: kernel,
         ledger: store,
@@ -355,10 +401,34 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
         json!({ "kind": "page", "items": [], "next": null })
     );
     let now = now_ms();
-    let abstained = begin_job(&store, &kernel_incarnation, generation, 1, now);
+    let abstained = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        1,
+        now,
+    );
     abstain(&store, &kernel_incarnation, &abstained, now);
-    let in_progress = begin_job(&store, &kernel_incarnation, generation, 2, now);
-    let published = begin_job(&store, &kernel_incarnation, generation, 3, now);
+    let in_progress = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        2,
+        now,
+    );
+    let published = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        3,
+        now,
+    );
     let expected_proposal = publish(
         &kernel,
         &store,
@@ -552,11 +622,20 @@ async fn a_published_proposal_reads_from_every_root_after_a_newer_root_binds() {
     let generation = activate_module_authority(&store, &first_root);
     let kernel_incarnation = commit_memory_domain(&kernel);
     let now = now_ms();
-    let published = begin_job(&store, &kernel_incarnation, generation, 1, now);
+    let digest = daemon.project_digest();
+    let published = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        1,
+        now,
+    );
     publish(
         &kernel,
         &store,
-        &daemon.project_digest(),
+        &digest,
         &kernel_incarnation,
         &published,
         now,

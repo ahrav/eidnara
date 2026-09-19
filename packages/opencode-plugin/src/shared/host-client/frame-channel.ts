@@ -144,6 +144,7 @@ export interface InboundFrame {
     readonly body: ReceiveLease;
 }
 
+/** `header.len` must equal `body.byteLength`; `send` rejects a disagreeing frame as `not_sent`. */
 export interface OutboundFrame {
     readonly header: EnvelopeHeader;
     readonly body: Uint8Array;

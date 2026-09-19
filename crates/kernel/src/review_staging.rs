@@ -756,15 +756,54 @@ impl KernelStore {
         expected: &ReviewBinding,
         now: i64,
     ) -> Result<ReviewStagedRow, ReviewReadError> {
+        let expected = expected
+            .clone()
+            .normalized()
+            .map_err(|_| ReviewReadError::Invalid)?;
+        let (row, sealed_at, binding) = self.load_staged_review(reference, now)?;
+        if binding != expected {
+            return Err(ReviewReadRefusal::ScopeMismatch.into());
+        }
+        let payload =
+            ReviewPayload::decode(&row.payload).map_err(|_| ReviewReadRefusal::DecodeRefused)?;
+        if payload.kind() != row.candidate_kind {
+            return Err(ReviewReadRefusal::DecodeRefused.into());
+        }
+        Ok(ReviewStagedRow {
+            binding,
+            payload,
+            // A review row is never public; a stored class below that floor is not trusted.
+            sensitivity: Sensitivity::from_stored(&row.sensitivity)
+                .restrictive(Sensitivity::Sensitive),
+            lifecycle: ReviewLifecycle {
+                created_at: row.created_at,
+                queue_deadline_at: row.deadline_at,
+                sealed_at,
+            },
+        })
+    }
+
+    /// The binding a sealed, unexpired staged row was written under, without asserting one: the caller that holds only the job row learns which scope and owner the subject belongs to before it reads. No payload byte leaves.
+    pub fn staged_review_binding(
+        &self,
+        reference: &ReviewStagedReference,
+        now: i64,
+    ) -> Result<ReviewBinding, ReviewReadError> {
+        let (_, _, binding) = self.load_staged_review(reference, now)?;
+        Ok(binding)
+    }
+
+    /// The sealed, unexpired, byte-identical row `reference` names, its sealing time, and its stored binding.
+    fn load_staged_review(
+        &self,
+        reference: &ReviewStagedReference,
+        now: i64,
+    ) -> Result<(StoredReviewRow, i64, ReviewBinding), ReviewReadError> {
         if now < 0 {
             return Err(ReviewReadError::Invalid);
         }
         check_identity(&reference.candidate_id).map_err(|_| ReviewReadError::Invalid)?;
         check_digest(&reference.payload_digest).map_err(|_| ReviewReadError::Invalid)?;
-        let expected = expected
-            .clone()
-            .normalized()
-            .map_err(|_| ReviewReadError::Invalid)?;
         let reader = self.lock_reader().map_err(ReviewReadError::Store)?;
         let incarnation =
             super::open::database_incarnation_id_via(&reader).map_err(ReviewReadError::Store)?;
@@ -815,26 +854,7 @@ impl KernelStore {
         }
         let binding =
             ReviewBinding::from_witness(&row.witness).ok_or(ReviewReadRefusal::ScopeMismatch)?;
-        if binding != expected {
-            return Err(ReviewReadRefusal::ScopeMismatch.into());
-        }
-        let payload =
-            ReviewPayload::decode(&row.payload).map_err(|_| ReviewReadRefusal::DecodeRefused)?;
-        if payload.kind() != row.candidate_kind {
-            return Err(ReviewReadRefusal::DecodeRefused.into());
-        }
-        Ok(ReviewStagedRow {
-            binding,
-            payload,
-            // A review row is never public; a stored class below that floor is not trusted.
-            sensitivity: Sensitivity::from_stored(&row.sensitivity)
-                .restrictive(Sensitivity::Sensitive),
-            lifecycle: ReviewLifecycle {
-                created_at: row.created_at,
-                queue_deadline_at: row.deadline_at,
-                sealed_at,
-            },
-        })
+        Ok((row, sealed_at, binding))
     }
 }
 

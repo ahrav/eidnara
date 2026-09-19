@@ -17,7 +17,7 @@ use napi::bindgen_prelude::{AsyncTask, Buffer, FnArgs, Function, Object};
 use napi::{Env, Error, JsValue, Result, Status, Task, Unknown, ValueType, sys};
 use napi_derive::napi;
 use shm_transport::backend::ring::{HOST_TO_PEER_LANE, PEER_TO_HOST_LANE, PoolGrant};
-use shm_transport::backend::ring::{ProducerError, ProducerReservation, Ring};
+use shm_transport::backend::ring::{ProducerError, ProducerReservation, Ring, RingError};
 use shm_transport::descriptor::{WIRE_V3_HEADER_BYTES, check_wire_header};
 use shm_transport::lease::PayloadLease;
 use shm_transport::pool::{BlockClass, Inventory};
@@ -90,6 +90,9 @@ struct Channel {
     // then is not consuming, so visible data does not earn another redispatch.
     dispatched_lease: u32,
     closed: bool,
+    // Latched when a receive-side failure was the peer hanging up on a drained ring; later
+    // polls stay empty and `peer_closed` reports the hang-up.
+    hung_up: bool,
     setup: Option<UnixStream>,
     // Held for its Drop: releasing the process-wide claim exactly when the
     // channel entry is removed keeps quarantined and alias-holding entries
@@ -791,6 +794,7 @@ pub fn attach(env: &Env, descriptor: Unknown<'_>) -> Result<u32> {
                     next_lease: 0,
                     dispatched_lease: 0,
                     closed: false,
+                    hung_up: false,
                     setup: None,
                     _reservation: Some(reservation),
                 },
@@ -914,6 +918,7 @@ impl Task for FinishSetupTask {
                     next_lease: 0,
                     dispatched_lease: 0,
                     closed: false,
+                    hung_up: false,
                     setup: Some(stream),
                     _reservation: Some(pending.reservation),
                 },
@@ -993,6 +998,7 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                     next_lease: 0,
                     dispatched_lease: 0,
                     closed: false,
+                    hung_up: false,
                     setup: None,
                     // Test pairs attach freshly created local rings, never a
                     // host descriptor, so no process-wide grant is claimed.
@@ -1011,6 +1017,7 @@ pub fn create_test_pair(env: &Env) -> Result<NativeTestPair> {
                     next_lease: 0,
                     dispatched_lease: 0,
                     closed: false,
+                    hung_up: false,
                     setup: None,
                     _reservation: None,
                 },
@@ -1292,6 +1299,26 @@ pub fn abort_reservation(env: &Env, channel_id: u32, token: u32) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The observation costs a mutex and a socket peek, so it runs only for the one failure
+    /// class it can classify.
+    #[test]
+    fn peer_hang_up_consults_the_observation_only_for_a_quarantined_ring() {
+        let observed = std::cell::Cell::new(0);
+        let observe = |answer: bool| {
+            let observed = &observed;
+            move || {
+                observed.set(observed.get() + 1);
+                answer
+            }
+        };
+        assert!(peer_hung_up(&RingError::DoorbellFailed, observe(false)));
+        assert!(!peer_hung_up(&RingError::InvalidSharedState, observe(true)));
+        assert_eq!(observed.get(), 0);
+        assert!(peer_hung_up(&RingError::Quarantined, observe(true)));
+        assert!(!peer_hung_up(&RingError::Quarantined, observe(false)));
+        assert_eq!(observed.get(), 2);
+    }
+
     #[test]
     fn token_allocation_wraps_and_skips_outstanding_tokens() {
         let mut in_use: HashMap<u32, ()> = HashMap::new();
@@ -1385,6 +1412,7 @@ mod tests {
             next_lease: 1,
             dispatched_lease: 0,
             closed: false,
+            hung_up: false,
             setup: None,
             _reservation: None,
         };
@@ -1435,6 +1463,7 @@ mod tests {
             next_lease: 0,
             dispatched_lease: 0,
             closed: false,
+            hung_up: false,
             setup: None,
             _reservation: None,
         });
@@ -1567,6 +1596,27 @@ pub fn arm_capacity(channel_id: u32, header: Buffer, capacity: u32) -> Result<bo
     })
 }
 
+/// Whether a receive-side ring failure means the peer hung up rather than misbehaved: the
+/// doorbell reported the peer's end closed, or the ring was already quarantined after the
+/// reactor or the setup socket observed the peer leave.
+fn peer_hung_up(cause: &RingError, peer_observed_closed: impl FnOnce() -> bool) -> bool {
+    match cause {
+        RingError::DoorbellFailed => true,
+        RingError::Quarantined => peer_observed_closed(),
+        _ => false,
+    }
+}
+
+fn peer_observed_closed(
+    reactor: Option<&scheduling::Reactor>,
+    channel_id: u32,
+    channel: &Channel,
+) -> bool {
+    channel.hung_up
+        || reactor.is_some_and(|reactor| reactor.peer_closed(channel_id))
+        || channel.setup.as_ref().is_some_and(setup::peer_closed)
+}
+
 #[napi]
 pub fn poll(
     env: &Env,
@@ -1577,7 +1627,9 @@ pub fn poll(
         let mut registry = registry
             .try_borrow_mut()
             .map_err(|_| error("native channel is busy"))?;
-        if let Some(reactor) = registry.reactor.as_ref() {
+        let registry = &mut *registry;
+        let reactor = registry.reactor.as_ref();
+        if let Some(reactor) = reactor {
             reactor.ensure_healthy()?;
         }
         let channel = registry
@@ -1587,11 +1639,22 @@ pub fn poll(
         if channel.closed {
             return Err(error("native channel is closed"));
         }
-        let Some(lease) = channel
-            .from_host
-            .try_receive()
-            .map_err(|_| error("shared-memory receive failed"))?
-        else {
+        let lease = match channel.from_host.try_receive() {
+            Ok(lease) => lease,
+            // A drained ring whose peer hung up is empty for good: `poll` reports it empty and
+            // `peerClosed` reports the hang-up, so the caller retires with end-of-stream instead
+            // of a protocol violation.
+            Err(cause)
+                if peer_hung_up(&cause, || {
+                    peer_observed_closed(reactor, channel_id, channel)
+                }) =>
+            {
+                channel.hung_up = true;
+                None
+            }
+            Err(_) => return Err(error("shared-memory receive failed")),
+        };
+        let Some(lease) = lease else {
             return Ok::<Option<(u32, Buffer, Vec<Unknown<'_>>)>, Error>(None);
         };
         let token = allocate_token(&mut channel.next_lease, &channel.active)
@@ -1625,18 +1688,33 @@ pub fn poll(
     })?
     else {
         REGISTRY.with(|registry| {
-            let registry = registry
-                .try_borrow()
+            let mut registry = registry
+                .try_borrow_mut()
                 .map_err(|_| error("native channel is busy"))?;
+            let registry = &mut *registry;
+            let reactor = registry.reactor.as_ref();
             let channel = registry
                 .channels
-                .get(&channel_id)
+                .get_mut(&channel_id)
                 .ok_or_else(|| error("native channel is closed"))?;
-            let should_block = channel
-                .from_host
-                .arm_data_wait()
-                .map_err(|_| error("shared-memory receive failed"))?;
-            if !should_block && let Some(reactor) = registry.reactor.as_ref() {
+            let should_block = match channel.from_host.arm_data_wait() {
+                Ok(should_block) => Some(should_block),
+                // Arming reads the doorbell; a peer that closed its end leaves nothing to wait
+                // for and nothing to kick. The ring is quarantined by the failed arm, so
+                // `peerClosed` reports it.
+                Err(cause)
+                    if peer_hung_up(&cause, || {
+                        peer_observed_closed(reactor, channel_id, channel)
+                    }) =>
+                {
+                    channel.hung_up = true;
+                    None
+                }
+                Err(_) => return Err(error("shared-memory receive failed")),
+            };
+            if should_block == Some(false)
+                && let Some(reactor) = reactor
+            {
                 reactor.kick(channel_id);
             }
             Ok::<(), Error>(())
@@ -1705,7 +1783,8 @@ pub fn peer_closed(channel_id: u32) -> Result<bool> {
             .ok_or_else(|| error("native channel is closed"))?;
         // A quarantined consumer ring is also a dead peer: the doorbell drain saw the
         // peer's end close, or the peer rewrote a slot under a live lease.
-        Ok(channel.from_host.is_quarantined()
+        Ok(channel.hung_up
+            || channel.from_host.is_quarantined()
             || registry
                 .reactor
                 .as_ref()

@@ -32,6 +32,29 @@ import {
 const MAX_PARENT_WALK = 8;
 const READINESS_POLL_MS = 50;
 
+/**
+ * Sleeps one poll interval, or until `deadline`, or until `signal` aborts, whichever comes
+ * first. Both readiness loops call this so an abort ends the wait at once instead of after the
+ * next request.
+ */
+function sleepUntilPollOrAbort(deadline: number, signal: AbortSignal | undefined): Promise<void> {
+    return new Promise<void>((resolve) => {
+        const onAbort = (): void => {
+            clearTimeout(timer);
+            resolve();
+        };
+        const timer = setTimeout(
+            () => {
+                // `once` removes the listener only when abort fires; the timer path must remove it too or every poll iteration leaves one behind.
+                signal?.removeEventListener("abort", onAbort);
+                resolve();
+            },
+            Math.min(READINESS_POLL_MS, Math.max(1, deadline - monotonicNow())),
+        );
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
 export function buildManagedCredentialEnvelope(
     env: Record<string, string | undefined>,
 ): NativeStartupEnvelope {
@@ -168,21 +191,7 @@ async function probeManagedStorage(
             const state = storageState(snapshot.metrics);
             // An abort means no waiter remains; the observation is left indeterminate rather than polled to the deadline.
             if (state !== "starting" || monotonicNow() >= deadline || signal?.aborted) return state;
-            await new Promise<void>((resolve) => {
-                const onAbort = (): void => {
-                    clearTimeout(timer);
-                    resolve();
-                };
-                const timer = setTimeout(
-                    () => {
-                        // `once` removes the listener only when abort fires; the timer path must remove it too or every poll iteration leaves one behind.
-                        signal?.removeEventListener("abort", onAbort);
-                        resolve();
-                    },
-                    Math.min(READINESS_POLL_MS, Math.max(1, deadline - monotonicNow())),
-                );
-                signal?.addEventListener("abort", onAbort, { once: true });
-            });
+            await sleepUntilPollOrAbort(deadline, signal);
             if (signal?.aborted) return "starting";
         }
     } catch (error) {
@@ -266,15 +275,28 @@ async function readCompatibilityProbe(
             status: null,
         };
     }
-    const remainingMs = deadline - monotonicNow();
-    if (remainingMs <= 0) throw new Error("compatibility probe deadline expired");
-    const status = await client.hostStatus({
-        timeoutMs: remainingMs,
-    });
-    if (!samePeer(client.authenticated, authenticated)) {
-        throw new Error("authenticated peer changed during compatibility probe");
+    // The host publishes `{"components": {}}` until its first health probe completes, so a
+    // status read in that window carries no `context` component and no epochs. That is a
+    // daemon that has not reported yet, not one with a different epoch set; poll until the
+    // component appears or the budget ends, and let the evaluator judge what the last read says.
+    let status: HostStatusSnapshot;
+    for (;;) {
+        const remainingMs = deadline - monotonicNow();
+        if (remainingMs <= 0) throw new Error("compatibility probe deadline expired");
+        status = await client.hostStatus({
+            timeoutMs: remainingMs,
+        });
+        if (!samePeer(client.authenticated, authenticated)) {
+            throw new Error("authenticated peer changed during compatibility probe");
+        }
+        if (signal?.aborted) throw signal.reason ?? new Error("compatibility probe aborted");
+        if (componentRecord(status.metrics, "context") !== null) break;
+        if (deadline - monotonicNow() <= 0) break;
+        await sleepUntilPollOrAbort(deadline, signal);
+        if (signal?.aborted) throw signal.reason ?? new Error("compatibility probe aborted");
+        // The budget ran out while waiting: the last read stands as the observation.
+        if (monotonicNow() >= deadline) break;
     }
-    if (signal?.aborted) throw signal.reason ?? new Error("compatibility probe aborted");
     const contextMetrics = componentMetrics(status.metrics, "context");
     // The probe reports observations, not a compatibility verdict.
     const snapshot = {
@@ -552,7 +574,7 @@ function findDeclaringParentRoot(moduleUrl: string, packageName: string): string
             text = null;
         }
         if (text !== null) {
-            const parsed = asRecord(parseJsonOrNull(text));
+            const parsed = parseJsonRecordOrNull(text);
             if (parsed === null) {
                 throw new BootstrapError(
                     "unsupported_install_layout",
@@ -571,9 +593,10 @@ function findDeclaringParentRoot(moduleUrl: string, packageName: string): string
     );
 }
 
-function parseJsonOrNull(text: string): unknown {
+/** A JSON object body, or `null` for unparsable text or any non-object document. */
+function parseJsonRecordOrNull(text: string): Record<string, unknown> | null {
     try {
-        return JSON.parse(text) as unknown;
+        return asRecord(JSON.parse(text) as unknown);
     } catch {
         return null;
     }

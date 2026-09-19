@@ -2,7 +2,8 @@
  *
  */
 
-import { chmodSync, closeSync, mkdirSync, openSync, rmSync, writeSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, rmSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export interface CaseWorkspace {
@@ -23,7 +24,10 @@ export function createCaseWorkspace(
     runNonce: string,
 ): CaseWorkspace {
     const suffix = `${variantId}-${runNonce.slice(0, 8)}`;
-    const root = resolve(parentDir, `case-${suffix}`);
+    // The root name is a digest, not the variant id: the direct host binds a Unix socket
+    // under the case `TMPDIR`, and the whole path must stay under `SUN_LEN` (108 bytes).
+    const rootName = `case-${createHash("sha256").update(suffix).digest("hex").slice(0, 12)}`;
+    const root = resolve(parentDir, rootName);
     mkdirSync(root, { recursive: true, mode: 0o700 });
     chmodSync(root, 0o700); // mkdir mode is masked by umask; make 0o700 unconditional
     const sub = (name: string): string => {
@@ -84,6 +88,13 @@ export function buildCaseEnv(
     env.XDG_STATE_HOME = join(workspace.home, ".local", "state");
     env.XDG_CACHE_HOME = join(workspace.home, ".cache");
     env.CARGO_HOME = join(workspace.home, ".cargo");
+    // The rustup proxies resolve toolchains from `RUSTUP_HOME`, defaulting to `$HOME/.rustup`.
+    // The relocated HOME has no toolchains, so a parent that relies on the default (CI runners
+    // do) is forwarded the real path explicitly; the directory holds no credentials.
+    if (env.RUSTUP_HOME === undefined && typeof baseEnv.HOME === "string") {
+        const defaultRustupHome = join(baseEnv.HOME, ".rustup");
+        if (existsSync(defaultRustupHome)) env.RUSTUP_HOME = defaultRustupHome;
+    }
     return env;
 }
 

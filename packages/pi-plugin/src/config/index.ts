@@ -12,6 +12,7 @@ import {
 import { pruneNestedConfigLeaf } from "@eidnara/opencode/config/prune-config-leaf";
 import {
     assertKnownConfigKeys,
+    dropRemovedConfigKeys,
     type EidnaraConfig,
     EidnaraConfigSchema,
 } from "@eidnara/opencode/config/schema/eidnara";
@@ -188,6 +189,7 @@ function userTierFallbackFor(
     userRaw: Record<string, unknown> | undefined,
     trustedBaseConfig: EidnaraConfig,
 ): Map<string, unknown> {
+    // SAFETY: the parsed user-tier config is a plain data object; it is read by top-level key name only.
     const trusted = trustedBaseConfig as unknown as Record<string, unknown>;
     const fallback = new Map<string, unknown>();
     if (userRaw === undefined) return fallback;
@@ -210,7 +212,7 @@ function parsePiConfig(
     config: EidnaraConfig;
     warnings: string[];
 } {
-    const preMigrationWarnings: string[] = [];
+    const preMigrationWarnings: string[] = dropRemovedConfigKeys(rawConfig);
     assertKnownConfigKeys(rawConfig);
     const migrated = rawConfig;
     const parsed = EidnaraConfigSchema.safeParse(migrated);
@@ -309,6 +311,7 @@ function parsePiConfig(
         }
 
         delete patched[key];
+        // SAFETY: `defaults` is the parsed schema object; indexing by a top-level key reads own data properties only.
         const defaultValue = (defaults as unknown as Record<string, unknown>)[key];
         warnings.push(
             `"${key}": invalid value (${redactConfigValue(rawConfig[key])}), using default ${JSON.stringify(defaultValue)}.`,
@@ -347,6 +350,12 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
         return a.scope === "user" ? -1 : 1;
     });
     const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
+    // Removed keys are dropped once, here, so the trusted-base parse and the merge loop both see a clean file and the warning is recorded once.
+    if (userRaw) {
+        warnings.push(
+            ...dropRemovedConfigKeys(userRaw).map((warning) => `[user config] ${warning}`),
+        );
+    }
     // The threshold trust boundary uses the effective USER/default config as its baseline.
     const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
     let userTierFallback: Map<string, unknown> | undefined;
@@ -354,7 +363,10 @@ export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult
     for (const loaded of mergeFiles) {
         const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
         warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
-        warnings.push();
+        // Removed keys are dropped before the unknown-key gate so a stale file still loads.
+        warnings.push(
+            ...dropRemovedConfigKeys(loaded.config).map((warning) => `${prefix} ${warning}`),
+        );
 
         if (loaded.scope === "project") {
             // The loader sanitizes the untrusted project config before merging it.
@@ -464,6 +476,11 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
         return a.scope === "user" ? -1 : 1;
     });
     const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
+    if (userRaw) {
+        warnings.push(
+            ...dropRemovedConfigKeys(userRaw).map((warning) => `[user config] ${warning}`),
+        );
+    }
     // A cloned repository may delay compaction but must not lower thresholds enough to increase history_summarizer work for the user's account.
     const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
     let userTierFallback: Map<string, unknown> | undefined;
@@ -471,7 +488,10 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     for (const loaded of mergeFiles) {
         const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
         warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
-        warnings.push();
+        // Removed keys are dropped before the unknown-key gate so a stale file still loads.
+        warnings.push(
+            ...dropRemovedConfigKeys(loaded.config).map((warning) => `${prefix} ${warning}`),
+        );
 
         if (loaded.scope === "project") {
             assertKnownConfigKeys(loaded.config);

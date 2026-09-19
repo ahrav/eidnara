@@ -30,14 +30,12 @@ describe("buildEidnaraHookConfig", () => {
             smart_drops: true,
             language: "de",
             terse_text_compression: { enabled: true, min_chars: 800 },
-            transform_mode: "rust",
             temporal_awareness: true,
         } as never) as Record<string, unknown>;
 
         expect(config.smart_drops).toBe(true);
         expect(config.language).toBe("de");
         expect(config.terse_text_compression).toEqual({ enabled: true, min_chars: 800 });
-        expect(config.transform_mode).toBe("rust");
         expect(config.temporal_awareness).toBe(true);
     });
 
