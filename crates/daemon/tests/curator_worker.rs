@@ -271,7 +271,8 @@ impl Rig {
     ) -> String {
         let producer = ProducerBinding {
             producer: "history_summarizer".to_string(),
-            firing_id: "ses#3".to_string(),
+            // As the handoff records it: the hashed handoff key and the firing sequence, with the chunk ordinal the subject was staged under.
+            firing_id: format!("{}#3", "5".repeat(32)),
             ordinal: 2,
         };
         let payload = kernel::ReviewPayload::Subject(kernel::ReviewSubject {
@@ -317,7 +318,14 @@ impl Rig {
                 extraction_run_id: format!("hs-run-{tag}"),
                 candidate_id,
                 producer: "history_summarizer".to_string(),
-                binding: review_binding(project_digest, "memory", "ses", 3, &job.causal_identity),
+                // The handoff stages under the real session id and the chunk ordinal; neither appears in the job row.
+                binding: review_binding(
+                    project_digest,
+                    "memory",
+                    "session-1",
+                    2,
+                    &job.causal_identity,
+                ),
                 payload,
                 recorded_at: now,
                 queue_deadline_at: job.queue_deadline_ms,
