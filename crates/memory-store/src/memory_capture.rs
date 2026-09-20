@@ -356,9 +356,14 @@ impl MemoryStore {
         // storing output different from what the daemon validated.
         let output = write.identity("prepared_json", output)?;
         write.execute(&self.inner, |tx| {
-            tx.tx().execute("UPDATE memory_capture_jobs SET prepared_json=?3,last_error=NULL,retry_at_ms=0 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL",params![project,job,output])?;
+            let changed = tx.tx().execute("UPDATE memory_capture_jobs SET prepared_json=?3,last_error=NULL,retry_at_ms=0 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL",params![project,job,output])?;
             let stored = tx.tx().query_row("SELECT prepared_json FROM memory_capture_jobs WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL",params![project,job],|row| row.get(0)).optional()?.flatten();
-            Ok(WriteDisposition::Applied(stored))
+            // A write that lost the race stored nothing, so it owes no audit.
+            Ok(if changed == 1 {
+                WriteDisposition::Applied(stored)
+            } else {
+                WriteDisposition::Replay(stored)
+            })
         })
     }
 
