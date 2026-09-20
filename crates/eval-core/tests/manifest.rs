@@ -728,6 +728,7 @@ fn host_environment_and_incarnation_fields_are_never_kept() {
         "ppid",
         "project_root",
         "artifact_path",
+        "boot_id",
         "database_incarnation_id",
     ] {
         assert!(is_never_kept(field), "{field}");

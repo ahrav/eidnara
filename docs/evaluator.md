@@ -123,8 +123,12 @@ recorded trace always digests.
 names the only clock-named fields a schema may keep; any other clock-named
 field under `Keep` is refused at schema construction, as is any field named
 for a hostname (`hostname` or a `host` token), cwd, a filesystem location (a
-`root` or `path` token), pid (a `pid` or `ppid` token or `process_id`
-anywhere), or incarnation (`HostFieldKept`). The trace
+`root` or `path` token), a boot (`boot` token), pid (a `pid` or `ppid` token or
+`process_id` anywhere), or incarnation (`HostFieldKept`). These name gates are
+a heuristic that refuses obvious mistakes at schema construction; the
+guarantee that host values stay out of a digest is the two-process equality
+test in `tests/two_process.rs`, and a new host-specific spelling is added to
+the gate when it is found. The trace
 digest uses protocol `eval-trace/v1`. Rules apply to the top-level fields of an
 observation; nested values under `Keep` enter the digest whole.
 
