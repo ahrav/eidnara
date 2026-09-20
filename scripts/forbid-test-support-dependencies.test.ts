@@ -381,6 +381,34 @@ describe("eval-core fences", () => {
         ]);
     });
 
+    test("rejects unaliased extern crate and the stdio macros", () => {
+        expect(
+            forbiddenCoreSources(
+                {
+                    "a.rs": [
+                        "#[macro_use]",
+                        "extern crate kernel;",
+                        "extern crate tokio;",
+                        "extern crate serde;",
+                        "println!(\"{x}\");",
+                        "let d = dbg!(x);",
+                        "eprint!(\"e\");",
+                        "let s = format!(\"{x}\");",
+                        "write!(out, \"{x}\")?;",
+                        "",
+                    ].join("\n"),
+                },
+                crates,
+            ),
+        ).toEqual([
+            "a.rs:2: extern crate kernel;",
+            "a.rs:3: extern crate tokio;",
+            "a.rs:5: println!(\"{x}\");",
+            "a.rs:6: let d = dbg!(x);",
+            "a.rs:7: eprint!(\"e\");",
+        ]);
+    });
+
     test("refuses to pass on an empty source set", () => {
         expect(forbiddenCoreSources({}, crates)).toEqual([
             "crates/eval-core/src: no source files scanned",

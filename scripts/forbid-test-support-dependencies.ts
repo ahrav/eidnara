@@ -18,7 +18,8 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
  * renaming it (`std as s`, `std::{self as s}`, `extern crate kernel as k`) or
  * globbing std (`use std::*`, `use std::{.., *}`) would let `s::fs`, `k::X`, or
  * bare `fs` escape the textual scan. `#[path]` and the `include*!` macros are
- * refused too: they pull source from outside the scanned tree.
+ * refused too: they pull source from outside the scanned tree. The stdio
+ * macros (`print!`, `eprintln!`, `dbg!`, ...) write without naming `std::io`.
  */
 const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io|os";
 const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
@@ -43,12 +44,14 @@ function forbiddenCoreSource(crates: readonly string[]): RegExp {
             `\\b(${product})::`,
             `\\buse (${product})\\b`,
             `\\b(${product}) as\\b`,
+            `\\bextern crate (${product})\\b`,
             `\\bstd::(${STD_EFFECT_MODULES})\\b`,
             `\\bstd::\\{[^;]*(?:[{,]\\s*|::)(${STD_EFFECT_MODULES})\\b`,
             `\\bstd as\\b`,
             `\\bstd::\\{[^;]*\\bself as\\b`,
             `\\bstd::(?:\\{[^;]*[{,]\\s*)?\\*`,
             `#\\[path\\b|\\binclude(?:_str|_bytes)?!`,
+            `\\b(?:e?print(?:ln)?|dbg)!`,
         ].join("|"),
         "g",
     );

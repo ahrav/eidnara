@@ -348,8 +348,9 @@ crate, `rusqlite`, `tokio`, or a `std` effect module (`fs`, `path`, `process`,
 from `cargo metadata` and includes any Cargo rename eval-core gives a fenced
 crate, so a new workspace crate is fenced without editing the script. Paths are caught whether written as a full path or inside a brace-grouped
 `use std::{...}`; renaming a crate root or globbing `std` is refused so no
-alias or bare name can hide an effect path, and `#[path]` and `include*!` are
-refused so no source enters from outside the scanned tree). The source scan runs from the `cargo metadata` workspace
+alias or bare name can hide an effect path, `extern crate` of a fenced crate
+is refused, `#[path]` and `include*!` are refused so no source enters from
+outside the scanned tree, and the stdio macros are refused as effects). The source scan runs from the `cargo metadata` workspace
 root and fails when it matches no files, so it cannot pass vacuously.
 
 ## Bitemporal reducer
