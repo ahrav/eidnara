@@ -4,14 +4,13 @@ use sha2::{Digest, Sha256};
 /// The kernel's `OCCURRENCE_ENCODING_VERSION`; a kernel test pins the two equal.
 pub const OCCURRENCE_ENCODING_VERSION: u8 = 2;
 pub const IDENTITY_CONTRACT_VERSION: &str = "search-projection-identity-v3";
-const MAX_IDENTITY_VALUE_BYTES: usize = 512;
+pub const MAX_IDENTITY_VALUE_BYTES: usize = 512;
 const ROLE_OCCURRENCE: u8 = 0;
 const ROLE_LINEAGE: u8 = 1;
-const HARNESSES: [&str; 2] = ["opencode", "pi"];
-const OBJECT_FORMATS: [(&str, usize); 2] = [("sha1", 40), ("sha256", 64)];
+pub const HARNESSES: [&str; 2] = ["opencode", "pi"];
+pub const OBJECT_FORMATS: [(&str, usize); 2] = [("sha1", 40), ("sha256", 64)];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OccurrenceClass {
     Messages,
     CanonicalClaims,
@@ -96,8 +95,7 @@ pub struct Occurrence<'a> {
     pub span: Option<Span>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub occurrence_id: String,
     pub lineage_id: String,

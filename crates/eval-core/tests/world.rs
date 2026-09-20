@@ -89,6 +89,10 @@ fn generation_is_a_pure_function_of_seed_and_config() {
         LINEARIZATION_RULE_VERSION
     );
     assert_eq!(base.tape.identity, tape_identity(SEED, &config()));
+    assert_eq!(
+        GENERATOR_VERSION, "eval-generator/v2",
+        "a change to a draw domain or the schedule is a new generator"
+    );
 
     // The generator constants are run-identity components: each one, the seed,
     // and the config change `eval_run_id`.

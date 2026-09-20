@@ -46,6 +46,15 @@ fn the_core_encoder_reproduces_every_identity_golden_and_the_kernel_encoder() {
         OCCURRENCE_ENCODING_VERSION,
         kernel::source_identity::OCCURRENCE_ENCODING_VERSION
     );
+    assert_eq!(
+        eval_core::MAX_IDENTITY_VALUE_BYTES,
+        kernel::source_identity::MAX_IDENTITY_VALUE_BYTES
+    );
+    assert_eq!(eval_core::HARNESSES, HARNESSES);
+    assert_eq!(
+        eval_core::OBJECT_FORMATS,
+        kernel::source_identity::OBJECT_FORMATS
+    );
     for class in OccurrenceClass::ALL {
         let core = eval_core::OccurrenceClass::from_code(class.code()).unwrap();
         assert_eq!(core.identity_fields(), class.identity_fields());
@@ -145,7 +154,6 @@ fn the_core_encoder_reproduces_every_identity_golden_and_the_kernel_encoder() {
             .collect::<Vec<_>>()
     );
     assert!(names.len() >= 8, "{names:?}");
-    assert_eq!(HARNESSES, ["opencode", "pi"]);
 }
 
 /// Valid time is the revision of a message, so a later completion is a new

@@ -9,7 +9,9 @@ use crate::event::{
 };
 use crate::stream::{ChoiceKind, Chooser, RANDOM_SCHEMA_VERSION, ReplayRefusal, Tape};
 
-pub const GENERATOR_VERSION: &str = "eval-generator/v1";
+/// Version 2 removed the zero time gap; the same seed and config draw a
+/// different world under each version.
+pub const GENERATOR_VERSION: &str = "eval-generator/v2";
 pub const TAPE_IDENTITY_PROTOCOL: &str = "eval-tape/v1";
 const OID_PROTOCOL: &str = "eval-git-oid/v1";
 

@@ -147,7 +147,12 @@ is `WorldError::InvalidField(name)`. The bound is a config value rather than a
 manifest field; the manifest carries it inside `run_identity.config`.
 `GENERATOR_VERSION`, `RANDOM_SCHEMA_VERSION`, and `LINEARIZATION_RULE_VERSION`
 are constants the shell copies into the run identity's `generator_version`,
-`random_schema_version`, and `linearization_rule_version`.
+`random_schema_version`, and `linearization_rule_version`. `GENERATOR_VERSION`
+changes whenever a draw domain or the schedule changes, because the same seed
+and config then produce a different world: `eval-generator/v1` drew time gaps
+from `{0, 1, 2, 5}` ticks; `eval-generator/v2` draws from `{1, 2, 5}`, so a
+correction always advances its target's revision. A tape recorded under v1
+refuses under v2 as `TapeMismatch`.
 
 ### Keyed draws
 
@@ -358,7 +363,9 @@ revision, the representation, and the span, under `OCCURRENCE_ENCODING_VERSION`
 2 and `IDENTITY_CONTRACT_VERSION` `search-projection-identity-v3`. Payload
 bytes never enter. The refusal order (`EncodingRefusal`) is the kernel's. The
 kernel test `eval_identity.rs` reproduces all 23 identity goldens with both
-encoders, pins the two version constants equal, and shows the twin rule that
+encoders, pins the two version constants and the shared limits
+(`MAX_IDENTITY_VALUE_BYTES`, `HARNESSES`, `OBJECT_FORMATS`) equal, and shows
+the twin rule that
 makes valid time identity-bearing: a message with a later completion time is a
 new occurrence of the same lineage, while a commit's time is not an input at
 all.
@@ -379,9 +386,14 @@ times:
 - Every correction becomes a new message JSON for the same `message_id` at
   the correction's valid time with the corrected text: the same lineage, a
   later revision, so `publish` reports `replaced_object_id`. A rendered unit's
-  valid time is immutable; corrections are new events. The generator's time
-  gaps are strictly positive so a correction always advances its target's
-  revision.
+  valid time is immutable; corrections are new events. The renderer refuses a
+  correction that would break that promise: a target in another session
+  (`CorrectionTargetInOtherSession`; the session is an identity field, so the
+  result would be a fresh lineage) or a valid time at or before the target's
+  (`CorrectionDoesNotAdvance`; the result would reuse or precede the target's
+  occurrence). The generator's time gaps are strictly positive
+  (`eval-generator/v2`) and its correction targets stay in the correcting
+  entity, so generated worlds never meet either refusal.
 - Every commit becomes a `RenderedCommit { message, valid_time_ms,
   observation_time_ms }`. The oid exists only once the shell writes the commit
   into a real repository, so the shell keeps the evaluator-owned

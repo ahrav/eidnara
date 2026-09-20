@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::event::{Event, EventId, EventLog, Payload};
@@ -9,8 +8,7 @@ use crate::occurrence::{EncodingRefusal, Identity, Occurrence, OccurrenceClass, 
 const HARNESS: &str = "opencode";
 const TOOL: &str = "bash";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderConfig {
     pub project_id: String,
     pub repository_id: String,
@@ -58,6 +56,12 @@ pub struct Rendering {
 pub enum RenderError {
     CorrectionTargetMissing(EventId),
     CorrectionTargetIsNotAMessage(EventId),
+    /// The correction's session differs from its target's. The session is an
+    /// identity field, so rendering it would mint a fresh lineage.
+    CorrectionTargetInOtherSession(EventId),
+    /// The correction's valid time is at or before its target's. The revision
+    /// is the valid time, so rendering it would reuse or precede the target.
+    CorrectionDoesNotAdvance(EventId),
     UnknownRole {
         event_id: EventId,
         role: String,
@@ -294,6 +298,12 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                 else {
                     return Err(RenderError::CorrectionTargetIsNotAMessage(target.clone()));
                 };
+                if original.entity_id != event.entity_id {
+                    return Err(RenderError::CorrectionTargetInOtherSession(target.clone()));
+                }
+                if event.valid_time_ms <= original.valid_time_ms {
+                    return Err(RenderError::CorrectionDoesNotAdvance(target.clone()));
+                }
                 let m = Message {
                     event,
                     message_id,

@@ -313,6 +313,47 @@ fn render_refuses_bad_targets_roles_times_and_unencodable_identities_by_event() 
         RenderError::CorrectionTargetMissing(missing)
     );
 
+    // A correction stays in its target's session and advances its valid time;
+    // otherwise it would mint a fresh lineage or the target's own occurrence.
+    let target = message_event("session-0", 0, EPOCH_MS, "user", "original");
+    let mut foreign = message_event("session-1", 0, EPOCH_MS + 1, "user", "fix");
+    foreign.payload = Payload::Correction {
+        target: target.id.clone(),
+        text: "fix".to_string(),
+    };
+    assert_eq!(
+        render(&log(vec![target.clone(), foreign]), &config()).unwrap_err(),
+        RenderError::CorrectionTargetInOtherSession(target.id.clone())
+    );
+    let mut same_time = message_event("session-0", 1, EPOCH_MS, "user", "fix");
+    same_time.payload = Payload::Correction {
+        target: target.id.clone(),
+        text: "fix".to_string(),
+    };
+    assert_eq!(
+        render(&log(vec![target.clone(), same_time]), &config()).unwrap_err(),
+        RenderError::CorrectionDoesNotAdvance(target.id.clone())
+    );
+    let mut backdated = message_event("session-0", 1, EPOCH_MS - 1, "user", "fix");
+    backdated.payload = Payload::Correction {
+        target: target.id.clone(),
+        text: "fix".to_string(),
+    };
+    assert_eq!(
+        render(&log(vec![target.clone(), backdated]), &config()).unwrap_err(),
+        RenderError::CorrectionDoesNotAdvance(target.id.clone())
+    );
+    let mut advancing = message_event("session-0", 1, EPOCH_MS + 1, "user", "fix");
+    advancing.payload = Payload::Correction {
+        target: target.id.clone(),
+        text: "fix".to_string(),
+    };
+    let rendered = render(&log(vec![target.clone(), advancing]), &config()).unwrap();
+    assert_eq!(
+        rendered.messages[1].expected[0].identity.lineage_id,
+        rendered.messages[0].expected[0].identity.lineage_id
+    );
+
     let system = message_event("session-0", 0, EPOCH_MS, "system", "x");
     assert_eq!(
         render(&log(vec![system.clone()]), &config()).unwrap_err(),

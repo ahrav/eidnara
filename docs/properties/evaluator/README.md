@@ -322,9 +322,11 @@ Identity rule (`crates/kernel/tests/eval_identity.rs`):
   (`wm-occurrence-identity-recomputation`) encodes all 23 records of the
   independent identity goldens with the evaluator's copy and the kernel's
   `encode_preserving_span`, expects both to equal the expected occurrence and
-  lineage ids, pins `OCCURRENCE_ENCODING_VERSION` and the contract version to
-  the kernel's, and compares the refusal names and order on the tuple-level
-  invalid records.
+  lineage ids, pins `OCCURRENCE_ENCODING_VERSION`, the contract version,
+  `MAX_IDENTITY_VALUE_BYTES`, `HARNESSES`, and `OBJECT_FORMATS` to the
+  kernel's (the goldens hold no identity value between 65 and 512 bytes, so
+  the limit is pinned directly), and compares the refusal names and order on
+  the tuple-level invalid records.
 - `a_later_message_time_changes_the_occurrence_but_not_the_lineage` is the
   identity-mapping matrix: a message twin with a later completion time is a
   new occurrence of the same lineage; a commit's time is not an input.
@@ -348,7 +350,11 @@ Renderer, encoder, accounting, and registry, store-free
   revision.
 - `render_refuses_bad_targets_roles_times_and_unencodable_identities_by_event`:
   `CorrectionTargetIsNotAMessage` for a commit target,
-  `CorrectionTargetMissing` for an unknown one, `UnknownRole` for a role that
+  `CorrectionTargetMissing` for an unknown one,
+  `CorrectionTargetInOtherSession` for a target in another session (a
+  same-session correction one millisecond later shares the target's lineage),
+  `CorrectionDoesNotAdvance` for a correction at or before the target's valid
+  time, `UnknownRole` for a role that
   is neither `user` nor `assistant`, `NoEarlierCreated` for an assistant turn
   at valid time zero (valid time one renders `created: 0`), and an identity
   value with a tab refuses as `Encoding { event_id, .. }` naming the event,
