@@ -47,7 +47,9 @@ binding and the proposal's commit token names the retired row.
 Between `resolve_descriptor` at run preparation and `proposal_target` at
 binding, a `correct_decision` or `retire_decision` commit may land. The broker
 re-judges the owner on every read in that window, and `proposal_target`
-re-reads the registry row at binding.
+re-reads the registry row at binding. Bytes the broker disclosed before the
+commit landed stay disclosed; the change refuses the next read and the target
+binding, not the disclosure that preceded it.
 
 ## What a test must construct
 
@@ -59,6 +61,9 @@ an unregistered decision; assert `NotFound`. Construct an expectation whose
 bound decision revision disagrees with the live row; assert
 `ExpectationChanged`. Publish a descriptor whose owner is an evidence object;
 assert the broker refuses before disclosure with zero model-visible bytes.
+Insert a second scope whose project term names another project, a decision in
+that scope, and an in-scope descriptor naming it; assert resolution binds the
+decision and the broker refuses the read `Scope` with zero model-visible bytes.
 
 ## Investigation log
 

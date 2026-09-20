@@ -274,6 +274,11 @@ impl Fixture {
     }
 
     fn decision(&self, object: &str) {
+        self.decision_in(object, SCOPE);
+    }
+
+    /// A live, admitted decision at `object` inside `scope`.
+    fn decision_in(&self, object: &str, scope: &str) {
         self.store
             .commit(intent(&format!("decision-{object}")), |envelope| {
                 envelope.insert_decision(DecisionSpec {
@@ -281,7 +286,7 @@ impl Fixture {
                     object_id: object.to_string(),
                     domain_id: DOMAIN.to_string(),
                     proposition_id: None,
-                    scope_id: Some(SCOPE.to_string()),
+                    scope_id: Some(scope.to_string()),
                     anchor_id: None,
                     evidence_id: None,
                     decision_kind: "architecture".to_string(),
@@ -2249,6 +2254,46 @@ fn a_moved_missing_stale_or_wrong_kind_owner_refuses_the_subject_and_the_target(
         RefusalCode::ExpectationChanged
     );
     let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&wrong_evidence.0));
+    let alias = broker.aliases.issue(subject);
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Scope
+    );
+    assert_eq!(broker.accounting.model_visible_bytes(), 0);
+    // An owner scoped to another project: resolution binds it, and the broker refuses the read `Scope` on the decision candidate with zero bytes, even though the descriptor itself is in scope.
+    fixture
+        .store
+        .commit(intent("scope-b"), |envelope| {
+            envelope.insert_scope(ScopeSpec {
+                scope_id: "project:b".to_string(),
+                object_id: "project:b".to_string(),
+                source_id: "project:b".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "kernel_route".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                terms: vec![ScopeTermSpec {
+                    dimension: Dimension::Project.as_str().to_string(),
+                    operator: "exact".to_string(),
+                    exact_value: Some(OTHER_PROJECT.to_string()),
+                    ..ScopeTermSpec::default()
+                }],
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    fixture.decision_in("decision-elsewhere", "project:b");
+    let (foreign, foreign_evidence) = derived(
+        &fixture,
+        "foreign",
+        OccurrenceClass::CanonicalClaims,
+        "decision-elsewhere",
+    );
+    let subject = fixture.resolve(&foreign).unwrap();
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&foreign_evidence.0));
     let alias = broker.aliases.issue(subject);
     assert_eq!(
         broker

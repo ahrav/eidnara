@@ -1232,8 +1232,11 @@ async fn a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_re
             .is_some_and(|state| state.object.invalidated_commit_seq.is_none())),
         "the decision and its descriptor are untouched"
     );
-    // The abstention is a ledger write; the only Kernel commits are the hold this run took and released.
-    assert!(tip_after >= tip_before);
+    // The abstention is a ledger write, and the hold this run took and released lives in `capture_pins`: nothing here commits to the Kernel.
+    assert_eq!(
+        tip_after, tip_before,
+        "the abstained run must not create a Kernel commit"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
