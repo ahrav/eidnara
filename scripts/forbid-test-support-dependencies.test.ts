@@ -218,16 +218,28 @@ describe("eval-core fences", () => {
         ]);
     });
 
+    test("rejects a build script on eval-core", () => {
+        const metadata = core(closed);
+        metadata.packages[0]!.targets = [
+            { name: "eval-core", kind: ["lib"] },
+            { name: "build-script-build", kind: ["custom-build"] },
+        ];
+        expect(forbiddenDependencyEdges(metadata)).toEqual([
+            "eval-core [package] has a build script",
+        ]);
+    });
+
     test("rejects product-crate paths and std effect modules in core source", () => {
         expect(
             forbiddenCoreSources({
-                "a.rs": "use kernel::EligibilityVerdict;\nlet t = std::time::Instant::now();\n",
+                "a.rs": "use kernel::EligibilityVerdict;\nlet t = std::time::Instant::now();\nstd::os::unix::fs::symlink(a, b);\n",
                 "b.rs": "use std::collections::BTreeMap;\nlet p = std::path::Path::new(\"x\");\n",
                 "c.rs": "use serde::Serialize;\n",
             }, crates),
         ).toEqual([
             "a.rs:1: use kernel::EligibilityVerdict;",
             "a.rs:2: let t = std::time::Instant::now();",
+            "a.rs:3: std::os::unix::fs::symlink(a, b);",
             "b.rs:2: let p = std::path::Path::new(\"x\");",
         ]);
     });

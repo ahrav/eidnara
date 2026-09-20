@@ -20,7 +20,7 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
  * bare `fs` escape the textual scan. `#[path]` and the `include*!` macros are
  * refused too: they pull source from outside the scanned tree.
  */
-const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io";
+const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io|os";
 const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
 
 /** Crate names as Rust paths spell them: every local package except eval-core and its closed set. */
@@ -71,6 +71,7 @@ export interface MetadataPackage {
     source: string | null;
     dependencies: MetadataDependency[];
     features?: Record<string, string[]>;
+    targets?: { name: string; kind: string[] }[];
 }
 
 export interface CargoMetadata {
@@ -183,6 +184,11 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
             }
             for (const name of missing) {
                 findings.add(`eval-core [dependencies] lacks ${name} from its closed set`);
+            }
+            // A build script runs arbitrary code at compile time and can smuggle
+            // its results into the crate through `cargo:rustc-env`.
+            if ((pkg.targets ?? []).some((target) => target.kind.includes("custom-build"))) {
+                findings.add("eval-core [package] has a build script");
             }
         }
         for (const dep of pkg.dependencies) {
