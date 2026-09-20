@@ -286,6 +286,8 @@ function projectFor(
     return project;
 }
 
+export const __nativeCaptureTest = { isolateRoot };
+
 /** Busy projects remain available until their in-flight captures finish. */
 export async function disposeNativeCaptureProjects(client: EidnaraDeps["client"]): Promise<void> {
     const projects = [...state.byKey.values()];

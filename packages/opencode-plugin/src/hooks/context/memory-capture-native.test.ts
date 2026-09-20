@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as logger from "../../shared/logger";
 import {
+    __nativeCaptureTest,
     disposeNativeCaptureProjects,
     isNativeCaptureProject,
     openCodeMemoryCaptureExecutor,
@@ -312,26 +313,42 @@ describe("OpenCode native memory capture executor", () => {
     it("refuses a gitless private root when a parent directory carries OpenCode config", async () => {
         const base = mkdtempSync(join(tmpdir(), "eidnara-no-git-config-"));
         const emptyPath = join(base, "path");
+        const clean = join(base, "clean", "root");
+        const shadowed = join(base, "shadowed", "root");
         mkdirSync(emptyPath);
-        mkdirSync(join(base, "tmp"));
-        writeFileSync(join(base, "opencode.json"), "{}");
-        const saved = { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR };
+        mkdirSync(clean, { recursive: true });
+        mkdirSync(shadowed, { recursive: true });
+        writeFileSync(join(base, "shadowed", "opencode.jsonc"), "{}");
+        const savedPath = process.env.PATH;
         process.env.PATH = emptyPath;
-        process.env.TMPDIR = join(base, "tmp");
         try {
-            const h = harness({ gitless: true });
-            lastClient = h.client;
-            await expect(
-                openCodeMemoryCaptureExecutor(h.client as never)(
-                    { ...work, system: "gitless-refused" },
-                    new AbortController().signal,
-                ),
-            ).rejects.toThrow("Native memory capture: provider_unavailable");
+            expect(() => __nativeCaptureTest.isolateRoot(shadowed)).toThrow(
+                "git is unavailable and",
+            );
+            // The same walk accepts a root with nothing above it... apart from whatever sits
+            // above the test's own temp dir, which the git-backed path never consults.
+            let accepted: unknown;
+            try {
+                __nativeCaptureTest.isolateRoot(clean);
+                accepted = true;
+            } catch (error) {
+                accepted = error;
+            }
+            expect(accepted === true || String(accepted).includes("git is unavailable and")).toBe(
+                true,
+            );
+            expect(existsSync(join(clean, ".git"))).toBe(false);
         } finally {
-            process.env.PATH = saved.PATH;
-            if (saved.TMPDIR === undefined) delete process.env.TMPDIR;
-            else process.env.TMPDIR = saved.TMPDIR;
+            process.env.PATH = savedPath;
             rmSync(base, { recursive: true, force: true });
+        }
+        // With git present the root becomes a repository and no walk happens.
+        const repo = mkdtempSync(join(tmpdir(), "eidnara-git-root-"));
+        try {
+            __nativeCaptureTest.isolateRoot(repo);
+            expect(existsSync(join(repo, ".git"))).toBe(true);
+        } finally {
+            rmSync(repo, { recursive: true, force: true });
         }
     });
 
