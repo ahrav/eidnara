@@ -356,6 +356,8 @@ fn restart_start_failure_from_stopped_reports_false_false() {
     assert_eq!(effects(&value), (false, false));
 }
 
+/// A permanently held transaction lock is reported as `lifecycle_busy` once the lock wait expires.
+/// The `EIDNARA_HOST_TEST_LOCK_WAIT_MS` override keeps this expiry test short.
 #[cfg(target_os = "linux")]
 #[test]
 fn start_reports_lifecycle_busy_while_transaction_lock_is_held() {
@@ -378,12 +380,25 @@ fn start_reports_lifecycle_busy_while_transaction_lock_is_held() {
         "test holds the transaction lock"
     );
 
-    let out = run(&data, &["start"]);
+    let started = Instant::now();
+    let out = run_with_envelope_and_env(
+        &data,
+        &["start"],
+        None,
+        &[("EIDNARA_HOST_TEST_LOCK_WAIT_MS", "200")],
+    );
+    let elapsed = started.elapsed();
     assert_eq!(out.code, 1);
     let value = out.json();
     // A held transaction lock names no observed incarnation, so the state stays `stopped`.
     assert_result(&value, "start", false, "stopped", "lifecycle_busy");
     assert_eq!(value["remediation"], "wait_and_retry");
+    if cfg!(debug_assertions) {
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "a shortened lock wait must report expiry promptly, took {elapsed:?}"
+        );
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
