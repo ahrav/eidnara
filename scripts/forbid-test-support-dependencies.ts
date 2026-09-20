@@ -6,6 +6,8 @@ export interface MetadataDependency {
     name: string;
     /** The alias a `package = "name"` rename gives the dependency; feature entries use it. */
     rename?: string | null;
+    /** Null for a path dependency; a registry or git URL otherwise. */
+    source?: string | null;
     kind: "dev" | "build" | null;
     features?: string[];
     target?: string | null;
@@ -57,10 +59,19 @@ function forwardsTestSupport(entry: string): boolean {
     return forwarded(entry)?.[1].endsWith("test-support") ?? false;
 }
 
-/** The package `owner`'s feature entries call `alias`: its rename, else the name itself. */
-function dependencyPackage(local: Map<string, MetadataPackage>, owner: string, alias: string) {
+/**
+ * The local package `owner`'s feature entries call `alias`: its rename, else the
+ * name itself. Null when the alias names a registry or git dependency, whose
+ * table is not read even if a workspace package shares its name.
+ */
+function dependencyPackage(
+    local: Map<string, MetadataPackage>,
+    owner: string,
+    alias: string,
+): string | null {
     const dep = local.get(owner)?.dependencies.find((d) => (d.rename ?? d.name) === alias);
-    return dep?.name ?? alias;
+    if (dep === undefined) return alias;
+    return dep.source == null ? dep.name : null;
 }
 
 /**
@@ -89,7 +100,8 @@ function featureClosure(
             const other = forwarded(entry);
             if (other === null) pending.push([owner, entry, root]);
             else if (!forwardsTestSupport(entry)) {
-                pending.push([dependencyPackage(local, owner, other[0]), other[1], root]);
+                const target = dependencyPackage(local, owner, other[0]);
+                if (target !== null) pending.push([target, other[1], root]);
             }
         }
     }

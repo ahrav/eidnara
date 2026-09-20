@@ -197,6 +197,27 @@ describe("forbiddenDependencyEdges", () => {
         ]);
     });
 
+    test("does not follow a forward into a same-named registry dependency", () => {
+        const metadata = workspace([
+            dep({ name: "foo", rename: "ext", source: "registry+https://github.com/rust-lang/crates.io-index" }),
+        ]);
+        metadata.packages[0]!.features = { fixtures: ["ext/fixtures"] };
+        metadata.packages.push(
+            {
+                name: "foo",
+                source: null,
+                dependencies: [],
+                features: { fixtures: ["test-support"], "test-support": [] },
+            },
+            {
+                name: "cli",
+                source: null,
+                dependencies: [dep({ name: "daemon", features: ["fixtures"] })],
+            },
+        );
+        expect(forbiddenDependencyEdges(metadata)).toEqual([]);
+    });
+
     test("resolves edge features only against local packages", () => {
         const metadata = workspace([dep({ name: "serde", features: ["derive"] })]);
         metadata.packages[1]!.features = { derive: ["serde_derive/test-support"] };
