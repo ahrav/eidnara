@@ -10,12 +10,68 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
     "sha2",
 ]);
 
-/** Paths a sans-I/O core must not name: product crates and the std effect modules. */
-const FORBIDDEN_CORE_SOURCE =
-    /\b(kernel|daemon|retrieval|storage|memory_store|host_runtime|rusqlite|tokio)::|\buse (kernel|daemon|retrieval|storage|memory_store|host_runtime|rusqlite|tokio)\b|\bstd::(fs|path|process|time|net|env|io)\b/;
+/**
+ * Paths a sans-I/O core must not name: every crate outside its closed
+ * dependency set (see `productCrates`) and the std effect
+ * modules, whether written as a full path (`std::fs::read`) or as a member of a
+ * brace-grouped `use std::{...}` list. Rebinding a root is refused outright:
+ * renaming it (`std as s`, `std::{self as s}`, `extern crate kernel as k`) or
+ * globbing std (`use std::*`, `use std::{.., *}`) would let `s::fs`, `k::X`, or
+ * bare `fs` escape the textual scan. `#[path]` and the `include*!` macros are
+ * refused too: they pull source from outside the scanned tree. The stdio
+ * macros (`print!`, `eprintln!`, `dbg!`, ...) write without naming `std::io`,
+ * and `env!`/`option_env!` read the build environment without `std::env`.
+ * A macro metavariable rooting an effect path (`$root::fs`) is refused: the
+ * scan cannot know what the caller substitutes.
+ */
+const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io|os|thread";
+const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
+
+/**
+ * Crate names as Rust paths spell them: every local package, every dependency
+ * of eval-core outside its closed set (dev-dependencies included, under the
+ * rename Rust code uses), and the external effect crates.
+ */
+export function productCrates(metadata: CargoMetadata): string[] {
+    const local = metadata.packages.filter((pkg) => pkg.source === null).map((pkg) => pkg.name);
+    const deps = (metadata.packages.find((pkg) => pkg.name === "eval-core")?.dependencies ?? [])
+        .filter((dep) => !EVAL_CORE_DEPENDENCIES.has(dep.name))
+        .map((dep) => dep.rename ?? dep.name);
+    return [...new Set([...local, ...deps, ...EXTERNAL_EFFECT_CRATES])]
+        .filter((name) => name !== "eval-core" && !EVAL_CORE_DEPENDENCIES.has(name))
+        .map((name) => name.replaceAll("-", "_"));
+}
+
+function forbiddenCoreSource(crates: readonly string[]): RegExp {
+    const product = crates.join("|");
+    return new RegExp(
+        [
+            `\\b(${product})::`,
+            `\\buse (${product})\\b`,
+            `\\b(${product}) as\\b`,
+            `\\bextern crate (${product})\\b`,
+            `\\bstd::(${STD_EFFECT_MODULES})\\b`,
+            `\\bstd::\\{[^;]*(?:[{,]\\s*|::)(${STD_EFFECT_MODULES})\\b`,
+            `\\bstd as\\b`,
+            `\\bstd::\\{[^;]*\\bself as\\b`,
+            `\\bstd::(?:\\{[^;]*[{,]\\s*)?\\*`,
+            `#\\[path\\b|\\binclude(?:_str|_bytes)?!`,
+            `\\b(?:e?print(?:ln)?|dbg|(?:option_)?env)!`,
+            `\\$\\w+::(${STD_EFFECT_MODULES})\\b`,
+        ].join("|"),
+        "g",
+    );
+}
+
+/** The directory the source fence scans, relative to the workspace root. */
+export const EVAL_CORE_SOURCE_DIR = "crates/eval-core/src";
 
 export interface MetadataDependency {
     name: string;
+    /** The alias a `package = "name"` rename gives the dependency; feature entries use it. */
+    rename?: string | null;
+    /** Null for a path dependency; a registry or git URL otherwise. */
+    source?: string | null;
     kind: "dev" | "build" | null;
     features?: string[];
     target?: string | null;
@@ -26,10 +82,23 @@ export interface MetadataPackage {
     source: string | null;
     dependencies: MetadataDependency[];
     features?: Record<string, string[]>;
+    manifest_path?: string;
+    targets?: { name: string; kind: string[]; src_path?: string }[];
 }
 
 export interface CargoMetadata {
     packages: MetadataPackage[];
+    workspace_root: string;
+}
+
+/** A feature or `pkg/feature` entry that turns on test-support, with the feature that holds it. */
+interface TestSupportHit {
+    /** The feature in whose table the hit sits (or the hit itself when `entry` is null). */
+    feature: string;
+    /** The requested feature whose closure reached `feature`. */
+    root: string;
+    /** A `pkg/test-support` entry, or null when `feature` is itself a test-support feature. */
+    entry: string | null;
 }
 
 function tableName(dep: MetadataDependency): string {
@@ -37,25 +106,100 @@ function tableName(dep: MetadataDependency): string {
     return dep.target ? `target.${dep.target}.${table}` : table;
 }
 
-/** Feature names reachable from `default` through the package's own feature table. */
-function defaultFeatureClosure(features: Record<string, string[]>): Set<string> {
-    const reached = new Set<string>();
-    const pending = ["default"];
+/** A reached feature: bare for the scanned package, `pkg/feature` for another local package. */
+interface Reached {
+    name: string;
+    /** The requested feature whose closure reached it. */
+    root: string;
+    entries: string[];
+}
+
+/** Splits `pkg/feature` and `pkg?/feature`; null for a same-package entry. */
+function forwarded(entry: string): [string, string] | null {
+    const slash = entry.indexOf("/");
+    if (slash < 0) return null;
+    return [entry.slice(0, slash).replace(/\?$/, ""), entry.slice(slash + 1)];
+}
+
+/** A `pkg/feature` entry whose feature is test-support under any prefix. */
+function forwardsTestSupport(entry: string): boolean {
+    return forwarded(entry)?.[1].endsWith("test-support") ?? false;
+}
+
+/**
+ * The local package `owner`'s feature entries call `alias`: its rename, else the
+ * name itself. Null when the alias names a registry or git dependency, whose
+ * table is not read even if a workspace package shares its name.
+ */
+function dependencyPackage(
+    local: Map<string, MetadataPackage>,
+    owner: string,
+    alias: string,
+): string | null {
+    const dep = local.get(owner)?.dependencies.find((d) => (d.rename ?? d.name) === alias);
+    if (dep === undefined) return alias;
+    return dep.source == null ? dep.name : null;
+}
+
+/**
+ * Features reachable from `roots` through `pkg`'s feature table and, via
+ * `other/feature` entries, through other local packages' tables. `dep:x`
+ * enables the optional dependency `x` and suppresses its implicit feature, so it
+ * is not a feature node; the dependency's own requested features are scanned on
+ * its edge. A `pkg/*test-support` entry is a hit on its own and is not followed.
+ */
+function featureClosure(
+    local: Map<string, MetadataPackage>,
+    pkg: string,
+    roots: string[],
+): Reached[] {
+    const reached = new Map<string, Reached>();
+    const pending: [string, string, string][] = roots.map((root) => [pkg, root, root]);
     while (pending.length > 0) {
-        const feature = pending.pop() as string;
-        if (reached.has(feature) || !(feature in features)) continue;
-        reached.add(feature);
-        for (const entry of features[feature] ?? []) {
-            if (!entry.includes("/")) pending.push(entry.replace(/^dep:/, ""));
+        const [owner, feature, root] = pending.pop() as [string, string, string];
+        const table = local.get(owner)?.features ?? {};
+        const key = `${owner}/${feature}`;
+        if (reached.has(key) || !(feature in table)) continue;
+        const entries = table[feature] ?? [];
+        reached.set(key, { name: owner === pkg ? feature : key, root, entries });
+        for (const entry of entries) {
+            if (entry.startsWith("dep:")) continue;
+            const other = forwarded(entry);
+            if (other === null) pending.push([owner, entry, root]);
+            else if (!forwardsTestSupport(entry)) {
+                const target = dependencyPackage(local, owner, other[0]);
+                if (target !== null) pending.push([target, other[1], root]);
+            }
         }
     }
-    return reached;
+    return [...reached.values()];
+}
+
+/**
+ * Every way the closure of `roots` turns on test-support: a reached feature named
+ * `*test-support`, or a reached feature whose table forwards `pkg/*test-support`.
+ */
+function testSupportReach(
+    local: Map<string, MetadataPackage>,
+    pkg: string,
+    roots: string[],
+): TestSupportHit[] {
+    const hits: TestSupportHit[] = [];
+    for (const { name, root, entries } of featureClosure(local, pkg, roots)) {
+        if (name.endsWith("test-support")) hits.push({ feature: name, root, entry: null });
+        for (const entry of entries) {
+            if (forwardsTestSupport(entry)) hits.push({ feature: name, root, entry });
+        }
+    }
+    return hits;
 }
 
 export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
-    const findings: string[] = [];
-    for (const pkg of metadata.packages) {
-        if (pkg.source !== null) continue;
+    const findings = new Set<string>();
+    const local = new Map(
+        metadata.packages.filter((pkg) => pkg.source === null).map((pkg) => [pkg.name, pkg]),
+    );
+    for (const pkg of local.values()) {
         if (pkg.name === "eval-core") {
             const normal = new Set(
                 pkg.dependencies.filter((dep) => dep.kind !== "dev").map((dep) => dep.name),
@@ -63,51 +207,91 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
             const unexpected = [...normal].filter((name) => !EVAL_CORE_DEPENDENCIES.has(name));
             const missing = [...EVAL_CORE_DEPENDENCIES].filter((name) => !normal.has(name));
             for (const name of unexpected) {
-                findings.push(`eval-core [dependencies] names ${name} outside its closed set`);
+                findings.add(`eval-core [dependencies] names ${name} outside its closed set`);
             }
             for (const name of missing) {
-                findings.push(`eval-core [dependencies] lacks ${name} from its closed set`);
+                findings.add(`eval-core [dependencies] lacks ${name} from its closed set`);
             }
-        }
-        for (const dep of pkg.dependencies) {
-            if (dep.kind === "dev") continue;
-            const testSupport = (dep.features ?? []).filter((feature) =>
-                feature.endsWith("test-support"),
-            );
-            if (testSupport.length > 0) {
-                findings.push(
-                    `${pkg.name} [${tableName(dep)}] ${dep.name} enables ${testSupport.join(", ")}`,
-                );
+            // A build script runs arbitrary code at compile time and can smuggle
+            // its results into the crate through `cargo:rustc-env`.
+            if ((pkg.targets ?? []).some((target) => target.kind.includes("custom-build"))) {
+                findings.add("eval-core [package] has a build script");
             }
-            if (DEV_ONLY_PACKAGES.has(dep.name)) {
-                findings.push(
-                    `${pkg.name} [${tableName(dep)}] depends on dev-only package ${dep.name}`,
-                );
-            }
-        }
-        const features = pkg.features ?? {};
-        for (const feature of defaultFeatureClosure(features)) {
-            for (const entry of features[feature] ?? []) {
-                if (entry.endsWith("/test-support")) {
-                    findings.push(
-                        `${pkg.name} [features] default reaches ${entry} through ${feature}`,
+            // `[lib] path = "..."` moves the real crate root out of the scanned tree.
+            const crateDir = (pkg.manifest_path ?? "").replace(/\/Cargo\.toml$/, "");
+            for (const target of pkg.targets ?? []) {
+                if (!target.kind.includes("lib") || target.src_path === undefined) continue;
+                if (!target.src_path.startsWith(`${crateDir}/src/`)) {
+                    const shown = target.src_path.replace(`${metadata.workspace_root}/`, "");
+                    findings.add(
+                        `eval-core [lib] ${target.name} lives at ${shown}, outside ${EVAL_CORE_SOURCE_DIR}`,
                     );
                 }
             }
         }
+        for (const dep of pkg.dependencies) {
+            if (dep.kind === "dev") continue;
+            const table = `${pkg.name} [${tableName(dep)}]`;
+            const edge = `${table} ${dep.name}`;
+            const requested = dep.features ?? [];
+            const testSupport = requested.filter((feature) => feature.endsWith("test-support"));
+            if (testSupport.length > 0) {
+                findings.add(`${edge} enables ${testSupport.join(", ")}`);
+            }
+            // A registry or git target is only checked for the features it is
+            // asked for above: it is not the workspace's dev-only package, and its
+            // table is not read, even if a local package shares its name.
+            if (dep.source != null) continue;
+            if (DEV_ONLY_PACKAGES.has(dep.name)) {
+                findings.add(`${table} depends on dev-only package ${dep.name}`);
+            }
+            // A requested feature can forward to test-support under another name,
+            // in the target or in a local package it forwards to; the target's
+            // own `default` is reported once below, on the target.
+            for (const hit of testSupportReach(local, dep.name, requested)) {
+                if (hit.entry !== null) {
+                    findings.add(`${edge} reaches ${hit.entry} through ${hit.feature}`);
+                } else if (hit.feature !== hit.root) {
+                    findings.add(`${edge} enables ${hit.feature} through ${hit.root}`);
+                }
+            }
+        }
+        for (const hit of testSupportReach(local, pkg.name, ["default"])) {
+            findings.add(
+                hit.entry === null
+                    ? `${pkg.name} [features] default enables ${hit.feature}`
+                    : `${pkg.name} [features] default reaches ${hit.entry} through ${hit.feature}`,
+            );
+        }
     }
-    return findings.sort();
+    return [...findings].sort();
 }
 
-/** Lines of evaluator-core source that reach a product crate or a std effect module. */
-export function forbiddenCoreSources(sources: Record<string, string>): string[] {
+/**
+ * An empty source set is itself a finding: a scan that matched no files
+ * proves nothing about the crate, so the gate must not pass on it.
+ */
+export function forbiddenCoreSources(
+    sources: Record<string, string>,
+    crates: readonly string[],
+): string[] {
+    const entries = Object.entries(sources);
+    if (entries.length === 0) {
+        return [`${EVAL_CORE_SOURCE_DIR}: no source files scanned`];
+    }
+    const pattern = forbiddenCoreSource(crates);
     const findings: string[] = [];
-    for (const [path, text] of Object.entries(sources)) {
-        text.split("\n").forEach((line, index) => {
-            if (FORBIDDEN_CORE_SOURCE.test(line)) {
-                findings.push(`${path}:${index + 1}: ${line.trim()}`);
-            }
-        });
+    // Match the whole file, not each line: a rustfmt-wrapped `use std::{`
+    // group names its effect module several lines below the `std::` prefix.
+    for (const [path, text] of entries) {
+        const lines = text.split("\n");
+        const reported = new Set<number>();
+        for (const match of text.matchAll(pattern)) {
+            const line = text.slice(0, match.index).split("\n").length;
+            if (reported.has(line)) continue;
+            reported.add(line);
+            findings.push(`${path}:${line}: ${lines[line - 1]!.trim()}`);
+        }
     }
     return findings.sort();
 }
@@ -121,19 +305,27 @@ if (import.meta.main) {
         console.error(`cargo metadata exited ${proc.exitCode}`);
         process.exit(2);
     }
-    const metadata = JSON.parse(proc.stdout.toString()) as CargoMetadata;
+    let metadata: CargoMetadata;
+    try {
+        metadata = JSON.parse(proc.stdout.toString()) as CargoMetadata;
+    } catch (error) {
+        console.error(`cargo metadata produced invalid JSON: ${String(error)}`);
+        process.exit(2);
+    }
     const findings = forbiddenDependencyEdges(metadata);
     if (findings.length > 0) {
         console.error("test-only code reachable from a production dependency table:");
         for (const finding of findings) console.error(`  ${finding}`);
         process.exit(1);
     }
+    // `cargo metadata` names the workspace root, so the scan does not depend
+    // on the directory the script was launched from.
     const sources: Record<string, string> = {};
-    const glob = new Bun.Glob("crates/eval-core/src/**/*.rs");
-    for (const path of glob.scanSync(".")) {
-        sources[path] = await Bun.file(path).text();
+    const glob = new Bun.Glob(`${EVAL_CORE_SOURCE_DIR}/**/*.rs`);
+    for (const path of glob.scanSync(metadata.workspace_root)) {
+        sources[path] = await Bun.file(`${metadata.workspace_root}/${path}`).text();
     }
-    const leaks = forbiddenCoreSources(sources);
+    const leaks = forbiddenCoreSources(sources, productCrates(metadata));
     if (leaks.length > 0) {
         console.error("eval-core source names a product crate or a std effect module:");
         for (const leak of leaks) console.error(`  ${leak}`);

@@ -13,7 +13,7 @@ use kernel::{ArtifactDestination, KernelStore, MemoryReviewerHoldKind};
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_ledger::{
     AttemptMarker, DispatchOutcome, MemoryReviewerAttemptTerminal, MemoryReviewerLedgerError,
-    MemoryReviewerLedgerRefusal,
+    MemoryReviewerLedgerRefusal, ResponseUsage,
 };
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -24,7 +24,8 @@ use super::broker::{
     check_render, hold_refusal,
 };
 use super::model_request::{
-    AssistantText, Message, MessagesRequest, RequestBody, Role, SendError, Sender,
+    AssistantText, Message, MessagesRequest, RequestBody, ResponseAccounting, Role, SendError,
+    Sender,
 };
 
 /// The complete API and model profile of one request: the requested canonical model id and the exact sampling values or their omission. It is serialized into the body before dispatch and bound to the marker through the body digest; nothing resolves an alias or asks the provider what it means.
@@ -311,7 +312,7 @@ impl Disclosure<'_> {
                     DisclosureRefusal::Store(error.to_string())
                 }
             })?;
-        let (attempt_index, in_flight, attempt_deadline_ms) = match outcome {
+        let (attempt_index, in_flight, attempt_deadline_ms, allowance) = match outcome {
             DispatchOutcome::ChargedNotDispatched {
                 attempt_index,
                 reason,
@@ -333,14 +334,16 @@ impl Disclosure<'_> {
                 attempt_index,
                 handoff,
                 attempt_deadline_ms,
+                allowance,
                 release,
             } => {
-                // No request byte has been written yet. A ledger that could not restore its view after the handoff may refuse this attempt's terminal, so the unwritten request is dropped rather than sent under a store that cannot record its outcome.
+                // No request byte has been written yet, so no response byte was consumed. A ledger that could not restore its view after the handoff may refuse this attempt's terminal, so the unwritten request is dropped rather than sent under a store that cannot record its outcome.
                 if let Err(error) = release {
                     drop(handoff);
                     return Err(self.end(
                         attempt_index,
                         MemoryReviewerAttemptTerminal::Failed,
+                        ResponseUsage::NONE,
                         DisclosureRefusal::Store(error.to_string()),
                     ));
                 }
@@ -350,6 +353,7 @@ impl Disclosure<'_> {
                         return Err(self.end(
                             attempt_index,
                             MemoryReviewerAttemptTerminal::Failed,
+                            ResponseUsage::NONE,
                             DisclosureRefusal::Send {
                                 attempt_index: Some(attempt_index),
                                 error,
@@ -357,21 +361,24 @@ impl Disclosure<'_> {
                             },
                         ));
                     }
-                    Ok(in_flight) => (attempt_index, in_flight, attempt_deadline_ms),
+                    Ok(in_flight) => (attempt_index, in_flight, attempt_deadline_ms, allowance),
                 }
             }
         };
-        // The ledger bounded the attempt when it committed the marker; a response after that bound is not this attempt's.
+        // The ledger bounded the attempt when it committed the marker; a response after that bound is not this attempt's. The response may consume only what the job has left of its ceilings.
         let remaining = u64::try_from(attempt_deadline_ms - (self.now_ms)()).unwrap_or(0);
         let deadline = deadline.min(Instant::now() + Duration::from_millis(remaining));
+        // The caller owns the accounting so the bytes consumed before a cancellation or a refusal are still known when the terminal is written.
+        let mut accounting = ResponseAccounting::default();
         let completed = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                // The request may already be on the wire; the attempt is cancelled, never retried.
-                return Err(self.end(attempt_index, MemoryReviewerAttemptTerminal::Cancelled, DisclosureRefusal::Cancelled));
+                // The request may already be on the wire; the attempt is cancelled, never retried, and charged for what it read.
+                return Err(self.end(attempt_index, MemoryReviewerAttemptTerminal::Cancelled, consumed(&accounting), DisclosureRefusal::Cancelled));
             }
-            completed = in_flight.complete(deadline) => completed,
+            completed = in_flight.complete(deadline, allowance, &mut accounting) => completed,
         };
+        let usage = consumed(&accounting);
         let text = match completed {
             Ok(text) => text,
             // `NotReady` means the connection took the request back unwritten. The ledger still ends the attempt `Failed`, because no-disclosure proof is the dispatch path's alone; `sent: false` carries the sender's report.
@@ -379,6 +386,7 @@ impl Disclosure<'_> {
                 return Err(self.end(
                     attempt_index,
                     MemoryReviewerAttemptTerminal::Failed,
+                    usage,
                     DisclosureRefusal::Send {
                         attempt_index: Some(attempt_index),
                         error: SendError::NotReady,
@@ -390,6 +398,7 @@ impl Disclosure<'_> {
                 return Err(self.end(
                     attempt_index,
                     MemoryReviewerAttemptTerminal::Failed,
+                    usage,
                     DisclosureRefusal::Send {
                         attempt_index: Some(attempt_index),
                         error,
@@ -402,14 +411,19 @@ impl Disclosure<'_> {
             return Err(self.end(
                 attempt_index,
                 MemoryReviewerAttemptTerminal::Failed,
+                usage,
                 DisclosureRefusal::ModelMismatch { attempt_index },
             ));
         }
-        self.finish(attempt_index, MemoryReviewerAttemptTerminal::Complete)
-            .map_err(|error| DisclosureRefusal::TerminalNotRecorded {
-                attempt_index,
-                error,
-            })?;
+        self.finish(
+            attempt_index,
+            MemoryReviewerAttemptTerminal::Complete,
+            usage,
+        )
+        .map_err(|error| DisclosureRefusal::TerminalNotRecorded {
+            attempt_index,
+            error,
+        })?;
         Ok(Disclosed {
             attempt_index,
             text,
@@ -491,9 +505,10 @@ impl Disclosure<'_> {
         &self,
         attempt_index: u32,
         terminal: MemoryReviewerAttemptTerminal,
+        usage: ResponseUsage,
         refusal: DisclosureRefusal,
     ) -> DisclosureRefusal {
-        match self.finish(attempt_index, terminal) {
+        match self.finish(attempt_index, terminal, usage) {
             Ok(()) => refusal,
             Err(error) => {
                 let hold = &self.broker.binding().hold;
@@ -513,6 +528,7 @@ impl Disclosure<'_> {
         &self,
         attempt_index: u32,
         terminal: MemoryReviewerAttemptTerminal,
+        usage: ResponseUsage,
     ) -> Result<(), String> {
         let hold = &self.broker.binding().hold;
         self.ledger
@@ -523,9 +539,18 @@ impl Disclosure<'_> {
                 self.claim_id,
                 attempt_index,
                 terminal,
+                usage,
                 (self.now_ms)(),
             )
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+}
+
+/// The bytes a response consumed, as the ledger records them: exact counts of what the transport delivered and the decoder measured, whether the exchange completed or stopped.
+fn consumed(accounting: &ResponseAccounting) -> ResponseUsage {
+    ResponseUsage {
+        raw_response_bytes: Some(u64::try_from(accounting.transport_bytes).unwrap_or(u64::MAX)),
+        decoded_text_bytes: Some(u64::try_from(accounting.decoded_text_bytes).unwrap_or(u64::MAX)),
     }
 }

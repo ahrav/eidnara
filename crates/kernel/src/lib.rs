@@ -110,9 +110,10 @@ pub use local_file::{
     local_file_capture_id,
 };
 pub use memory_reviewer_hold::{
-    HeldEvidence, MAX_MEMORY_REVIEWER_HOLD_REFERENCES, MAX_RUN_BUFFER_BYTES,
-    MEMORY_REVIEWER_EXECUTION_HOLD_KIND, MEMORY_REVIEWER_REVIEW_HOLD_KIND, MemoryReviewerHold,
-    MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldKind,
+    ActiveReviewHold, HeldEvidence, MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST,
+    MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_PROJECT, MAX_MEMORY_REVIEWER_HOLD_REFERENCES,
+    MAX_RUN_BUFFER_BYTES, MEMORY_REVIEWER_EXECUTION_HOLD_KIND, MEMORY_REVIEWER_REVIEW_HOLD_KIND,
+    MemoryReviewerHold, MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldKind,
     MemoryReviewerHoldRefusal, REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
 };
 #[cfg(feature = "test-support")]
@@ -123,15 +124,17 @@ pub use retention::{
     STAGING_DELETE_BATCH_RUNS, STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState,
 };
 pub use review_staging::{
-    ByteRange, CanonicalTarget, EvidenceReference, ExtractedFact, MAX_FACT_SPANS, MAX_REVIEW_FACTS,
-    MAX_REVIEW_IDENTITY_BYTES, MAX_REVIEW_LIMITATIONS, MAX_REVIEW_PAYLOAD_BYTES,
-    MAX_REVIEW_REFERENCE_SOURCES, MAX_REVIEW_REFERENCES, MAX_REVIEW_TEXT_BYTES, ManifestReference,
-    PolicyDependencies, ProposalAction, ProposalTarget, ProvisionalResultIdentity,
+    ByteRange, CanonicalTarget, EvidenceReference, ExtractedFact, MAX_FACT_SPANS,
+    MAX_REVIEW_DEPENDENCIES_BYTES, MAX_REVIEW_FACTS, MAX_REVIEW_IDENTITY_BYTES,
+    MAX_REVIEW_LIMITATIONS, MAX_REVIEW_PAYLOAD_BYTES, MAX_REVIEW_REFERENCE_SOURCES,
+    MAX_REVIEW_REFERENCES, MAX_REVIEW_TEXT_BYTES, ManifestReference, PolicyDependencies,
+    ProposalAction, ProposalTarget, ProvisionalResultIdentity, REVIEW_DEPENDENCIES_VERSION,
     REVIEW_PAYLOAD_VERSION, REVIEW_PROPOSAL_KIND, REVIEW_QUEUE_LIFETIME_MS, REVIEW_SUBJECT_KIND,
-    REVIEW_WITNESS_KIND, ReviewBinding, ReviewLifecycle, ReviewOwner, ReviewPayload,
-    ReviewProposal, ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal, ReviewStageError,
-    ReviewStageRefusal, ReviewStagedReference, ReviewStagedRow, ReviewStagingSpec, ReviewSubject,
-    SourceDependency, SourceSpan, SubjectOrigin, Uncertainty, provisional_result_identity,
+    REVIEW_WITNESS_KIND, ReviewBinding, ReviewDependencies, ReviewLifecycle, ReviewOwner,
+    ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal,
+    ReviewStageError, ReviewStageRefusal, ReviewStagedReference, ReviewStagedRow,
+    ReviewStagingSpec, ReviewSubject, SourceDependency, SourceSpan, SubjectOrigin, Uncertainty,
+    provisional_result_identity,
 };
 pub use scope::{
     CanonicalScope, Dimension, GraphOracle, MatchOutcome, ScopeFormError, ScopeMatchContext,

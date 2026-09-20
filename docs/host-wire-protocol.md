@@ -795,7 +795,7 @@ For every valid `route.open`, host MUST:
 
 The channel namespace is process-global, and `Handler` keys bindings and cleanup by the complete `(channel, epoch)` handle. Two simultaneous connections, two roots for one session, and two sessions MUST never hold the same live channel. Channel reuse is permitted only after all prior work is settled or cancelled, route-gone completes exactly once, and the epoch advances strictly. Late frames and callbacks for an old epoch cannot observe, mutate, or remove new route state. At `u32::MAX`, that channel is permanently retired for the host incarnation. If all channels are live or retired, the host returns terminal `target_unavailable` without calling bind.
 
-A bind stores `project_root`, `harness`, and `session` as handler scope. Multiple routes for one session are valid. Host MUST NOT merge them by session alone.
+A bind stores `project_root`, `harness`, and `session` as handler scope. Multiple routes for one session are valid. Host MUST NOT merge them by session alone. A route bound with harness `cli` is observational: it authorizes and resolves its project like any route and answers every read it is otherwise entitled to, and the daemon excludes it from background participation (MemoryReviewer worker enrollment, scheduler root and schedule selection, and search maintenance rosters), so opening or closing it changes no other route's effective binding. `harness` remains a scoping claim (Section 2); the value grants nothing.
 
 ```mermaid
 sequenceDiagram

@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use context_core::canonical_json::{ContractError, is_lower_hex, protocol_digest};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -36,7 +38,7 @@ pub struct RunIdentity {
     pub config: Value,
     pub scenario: Value,
     /// Serialized as a canonical decimal string: canonical JSON rejects integers above 2^53 - 1.
-    #[serde(with = "decimal_u64")]
+    #[serde(with = "crate::decimal")]
     pub root_seed: u64,
     pub random_schema_version: String,
     pub generator_version: String,
@@ -54,6 +56,8 @@ pub enum IdentityError {
     },
     /// The SHA-256 of zero bytes names no build.
     ZeroBytesBinaryDigest,
+    /// Two dirty trees on one commit are told apart only by the binary.
+    DirtyBuildWithoutBinaryDigest,
     NotCanonical(ContractError),
 }
 
@@ -98,10 +102,18 @@ impl BuildRecord {
         require_hex("lockfile_digest", &self.lockfile_digest, 64)?;
         require_non_empty("rustc_version", &self.rustc_version)?;
         require_non_empty("target_triple", &self.target_triple)?;
-        if let BinaryDigest::Present { sha256 } = &self.binary_digest {
-            require_hex("binary_digest", sha256, 64)?;
-            if *sha256 == zero_bytes_sha256() {
-                return Err(IdentityError::ZeroBytesBinaryDigest);
+        match &self.binary_digest {
+            BinaryDigest::Present { sha256 } => {
+                require_hex("binary_digest", sha256, 64)?;
+                if *sha256 == zero_bytes_sha256() {
+                    return Err(IdentityError::ZeroBytesBinaryDigest);
+                }
+            }
+            BinaryDigest::Absent { reason } => {
+                require_non_empty("binary_digest.reason", reason)?;
+                if self.dirty {
+                    return Err(IdentityError::DirtyBuildWithoutBinaryDigest);
+                }
             }
         }
         Ok(())
@@ -126,7 +138,10 @@ impl RunIdentity {
         require_non_empty(
             "linearization_rule_version",
             &self.linearization_rule_version,
-        )
+        )?;
+        // `config` and `scenario` are free-form; the run ID needs them canonical.
+        canonical_json_encode(&serde_json::to_value(self).expect("run identity serializes"))?;
+        Ok(())
     }
 }
 
@@ -136,24 +151,4 @@ pub fn eval_run_id(identity: &RunIdentity) -> Result<String, IdentityError> {
     let mut tuple = serde_json::to_value(identity).expect("run identity serializes");
     tuple["build"] = Value::String(identity.build.digest()?);
     Ok(protocol_digest(RUN_ID_PROTOCOL, &tuple)?)
-}
-
-mod decimal_u64 {
-    use super::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&value.to_string())
-    }
-
-    /// Accepts only the string `u64::to_string` produces, so one value has one encoding.
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        let value: u64 = text.parse().map_err(serde::de::Error::custom)?;
-        if value.to_string() != text {
-            return Err(serde::de::Error::custom(format!(
-                "root_seed {text:?} is not the canonical decimal form"
-            )));
-        }
-        Ok(value)
-    }
 }

@@ -116,6 +116,7 @@ pub enum LogError {
     DanglingEdge { edge: CausalEdge },
     EdgeAgainstOrder { edge: CausalEdge },
     EdgeAgainstDepth { edge: CausalEdge },
+    EdgesNotSorted { position: usize },
 }
 
 debug_display!(LogError);
@@ -213,7 +214,10 @@ impl EventLog {
                 });
             }
         }
-        for edge in &self.causal_edges {
+        for (position, edge) in self.causal_edges.iter().enumerate() {
+            if position > 0 && self.causal_edges[position - 1] >= *edge {
+                return Err(LogError::EdgesNotSorted { position });
+            }
             let (Some(from), Some(to)) = (positions.get(&edge.from), positions.get(&edge.to))
             else {
                 return Err(LogError::DanglingEdge { edge: edge.clone() });

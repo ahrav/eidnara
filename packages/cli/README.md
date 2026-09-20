@@ -15,6 +15,7 @@ eidnara doctor               # check configuration
 eidnara doctor --force       # repair configuration conflicts
 eidnara doctor --issue       # write a redacted diagnostics bundle
 eidnara daemon <action>      # start | stop | restart | status | doctor
+eidnara review <action>      # list | show <causal-identity> | status
 eidnara --version
 eidnara --help
 ```
@@ -90,6 +91,62 @@ the daemon. `restart` is one serialized lifecycle transaction, not separate
 CLI stop and start calls. `stop` uses authenticated lifecycle control and does
 not signal a publication PID.
 
+`start` waits for another lifecycle transaction to finish within its existing
+60-second startup budget. Waiting does not reset that budget. The wait stops
+after 45 seconds so the remaining startup stages keep their 15 seconds of
+budget. If the lock is still busy at that point, startup reports
+`lifecycle_busy` with remediation `wait_and_retry` and sends no application
+operation. Filesystem and ownership validation failures are not retried.
+`stop`, `restart`, and read-only probes retain their shorter lock-contention
+policy.
+
 Exit code `0` means the v1 result has `ok: true`. Exit code `1` means an
 operational lifecycle failure. Exit code `2` means invalid CLI arguments and
 does not invoke lifecycle policy.
+
+## Review inspection
+
+```bash
+eidnara review list [--project PATH] [--limit 1..64] [--after CURSOR] [--json]
+eidnara review show <causal-identity> [--project PATH] [--json]
+eidnara review status [--json]
+```
+
+`list` and `show` read the completed MemoryReviewer outcomes of the project
+bound to `PATH` or the current directory, resolved to the Git worktree root that
+contains it, or to its real path outside a repository, as the OpenCode and Pi
+routes bind it. Each
+invocation opens one connection to the running daemon, binds one observational
+route under the `cli` harness with a fresh `eidnara-review:` session, sends one
+request, prints the validated answer, and closes. Nothing here changes
+canonical memory, accepts a proposal, starts review work, or enrolls the project
+in background work.
+
+`list` asks for one page of `--limit` outcomes (16 by default) in causal-identity
+order. A full page prints the next command, naming the bound root, any
+non-default `--limit`, and the `--after` cursor, so it reruns the same walk
+from any directory; the walk is live, so an outcome that completes behind the
+cursor appears on a fresh walk, and the command never walks pages on its own. `show` issues exactly one read and
+prints the proposal the completed receipt selects: action, exact target, text,
+support and contradiction spans, limitations, uncertainty, manifest reference,
+and the live review expiry. A `retain` or `no_change` proposal changes,
+extends, and corroborates nothing.
+
+`status` reads `host.status` only and names no project: the MemoryReviewer
+store state, the activation state, and every counter the wire document lists.
+A counter prints as `unavailable` when the store is not ready or the value is
+missing or outside its domain, never as zero; a store or activation state the
+host did not report prints as `unreported`, which is not a state the wire
+defines. Counters are overlapping
+populations over the whole data home; no total or ratio is derived. An `open`
+activation state means the deployment owner admits model disclosure; it is not
+compaction status, and it applies nothing.
+
+Integers print with their exact digits in text and as exact number tokens in
+JSON. Text output strips control and escape sequences; `--json` output is for
+programs and is not made terminal-safe. A refusal prints as the protocol's closed terminal, the Kernel's state, or
+a validation message; peer payloads, provider text, and error bodies are never
+echoed. Exit code `0` means an outcome, proposal, or status was rendered; `1`
+means a refusal, a transport failure, or a response that failed validation;
+`2` means invalid arguments. The daemon connection is a bearer key, not an OS
+sandbox.

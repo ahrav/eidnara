@@ -1,10 +1,14 @@
-//! Real-store proofs for the MemoryReviewer evidence broker: scope and staleness refusal, live-origin revocation, canonical and promoted deduplication, native identity sharing across spans, uncited-context lineage, unsupported bound questions (Q24), the render check over small and windowed artifacts, the verdict-before-hold and verdict-after-load order, hold growth, and the accounting bounds.
+//! Real-store proofs for the MemoryReviewer evidence broker: scope and staleness refusal, live-origin revocation, canonical and promoted deduplication, native identity sharing across spans, uncited-context lineage, unsupported bound questions (Q24), the render check over small and windowed artifacts, the verdict-before-hold and verdict-after-load order, hold growth, and the accounting bounds; and for the coordinator's canonical resolution over the same store: descriptors resolve through their originating decision, proposals target that decision, and a moved, missing, or wrong-kind owner refuses before disclosure.
 
 use daemon::memory_reviewer::broker::{
     EvidenceBroker, JudgedAt, MAX_ISSUED_INSPECTIONS, MAX_MODEL_VISIBLE_BYTES,
     MAX_OPERATIONS_PER_BATCH, OriginClass, QuestionTemplate, ReferenceExpectation, RefusalCode,
-    RunBinding,
+    RunBinding, decision_derived,
 };
+use daemon::memory_reviewer::coordinator::{
+    InvestigationError, proposal_target, resolve_descriptor,
+};
+use daemon::memory_reviewer::selection::{MEMORY_CLASSES, PRODUCTION_SELECTION_OPEN};
 use kernel::source_identity::{Occurrence, OccurrenceClass, Span};
 use kernel::{
     ArtifactIngestRequest, CommitIntent, DecisionPayload, DecisionSpec, Dimension, DomainSpec,
@@ -228,6 +232,7 @@ impl Fixture {
                 }),
                 recorded_at: self.now,
                 queue_deadline_at: self.now + 24 * HOUR_MS,
+                dependencies: None,
             })
             .unwrap();
         self.store
@@ -270,6 +275,11 @@ impl Fixture {
     }
 
     fn decision(&self, object: &str) {
+        self.decision_in(object, SCOPE);
+    }
+
+    /// A live, admitted decision at `object` inside `scope`.
+    fn decision_in(&self, object: &str, scope: &str) {
         self.store
             .commit(intent(&format!("decision-{object}")), |envelope| {
                 envelope.insert_decision(DecisionSpec {
@@ -277,7 +287,7 @@ impl Fixture {
                     object_id: object.to_string(),
                     domain_id: DOMAIN.to_string(),
                     proposition_id: None,
-                    scope_id: Some(SCOPE.to_string()),
+                    scope_id: Some(scope.to_string()),
                     anchor_id: None,
                     evidence_id: None,
                     decision_kind: "architecture".to_string(),
@@ -306,6 +316,53 @@ impl Fixture {
                 Ok(String::new())
             })
             .unwrap();
+    }
+
+    /// Supersedes the live decision at `old` with a successor at source revision 2, invalidating `old`.
+    fn revise_decision(&self, old: &str, successor: &str) {
+        self.store
+            .commit(intent(&format!("revise-{old}")), |envelope| {
+                envelope.correct_decision(
+                    old,
+                    DecisionSpec {
+                        decision_id: format!("decision-{successor}"),
+                        object_id: successor.to_string(),
+                        domain_id: DOMAIN.to_string(),
+                        proposition_id: None,
+                        scope_id: Some(SCOPE.to_string()),
+                        anchor_id: None,
+                        evidence_id: None,
+                        decision_kind: "architecture".to_string(),
+                        payload: DecisionPayload {
+                            summary: format!("summary {successor}"),
+                            rationale: format!("rationale {successor}"),
+                        },
+                        source_kind: "repo".to_string(),
+                        source_id: format!("src/{old}"),
+                        source_revision: 2,
+                        sensitivity: Sensitivity::Normal,
+                    },
+                )?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+
+    /// The coordinator's resolution of a published descriptor, asserting the hold protects exactly its evidence.
+    fn resolve(&self, object_id: &str) -> Result<ReferenceExpectation, InvestigationError> {
+        resolve_descriptor(&self.store, object_id, None).map(|(expectation, protected)| {
+            assert_eq!(
+                protected,
+                vec![expectation.evidence_id().unwrap().to_string()]
+            );
+            expectation
+        })
+    }
+
+    /// The registry tip and every live decision and descriptor object's state, for before/after equality.
+    fn canonical_state(&self, objects: &[&str]) -> (i64, Vec<Option<kernel::ObjectState>>) {
+        let ids: Vec<String> = objects.iter().map(|id| id.to_string()).collect();
+        self.store.object_states(&ids).unwrap()
     }
 
     /// Publishes one descriptor and returns its object id and the descriptor's identity tuple bytes.
@@ -1524,6 +1581,7 @@ fn a_staged_subject_owned_by_another_job_is_out_of_scope() {
             }),
             recorded_at: fixture.now,
             queue_deadline_at: fixture.now + 24 * HOUR_MS,
+            dependencies: None,
         })
         .unwrap();
     fixture
@@ -1983,4 +2041,303 @@ fn an_elapsed_retention_floor_does_not_expire_non_capture_evidence() {
         .read(&fixture.store, alias.as_str(), None, fixture.now)
         .unwrap();
     assert_eq!(read.buffer.bytes(), native_text.as_bytes());
+}
+
+fn resolution_refusal(error: InvestigationError) -> RefusalCode {
+    match error {
+        InvestigationError::Refused(code) => code,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// Publishes a canonical-claim or promoted-memory descriptor over fresh Normal evidence whose leading identity field names `owner`.
+fn derived(
+    fixture: &Fixture,
+    key: &str,
+    class: OccurrenceClass,
+    owner: &str,
+) -> (String, (String, String)) {
+    let text = format!("{key}: a form of {owner}");
+    let evidence = fixture.ingest(key, text.as_bytes(), false);
+    let (object, _) = fixture.descriptor(Publish {
+        key,
+        class: class.code(),
+        representation: class.representations()[0],
+        identity: &[(class.identity_fields()[0], owner)],
+        evidence: &evidence,
+        buffer: &text,
+        span: None,
+    });
+    (object, evidence)
+}
+
+// Opening the production gate must rewrite the witnesses below; a constant assertion makes that a compile error rather than a silent pass.
+const _: () = assert!(!PRODUCTION_SELECTION_OPEN);
+
+/// A class the selector walks but the resolver treats as native would be targeted at its own descriptor, so its owner's retraction would never be consulted; a class the resolver treats as decision-derived but the selector skips would never be reviewed. Every class must fall on the same side of both.
+#[test]
+fn the_selected_classes_are_exactly_the_decision_derived_classes() {
+    for class in OccurrenceClass::ALL {
+        assert_eq!(
+            decision_derived(class),
+            MEMORY_CLASSES.contains(&class),
+            "{class:?} is selected and decision-derived together or not at all"
+        );
+    }
+}
+
+#[test]
+fn canonical_and_promoted_descriptors_resolve_to_their_originating_decision_and_target_it() {
+    let fixture = Fixture::open();
+    fixture.decision("decision-a");
+    let (claim, claim_evidence) = derived(
+        &fixture,
+        "claim",
+        OccurrenceClass::CanonicalClaims,
+        "decision-a",
+    );
+    let (promoted, promoted_evidence) = derived(
+        &fixture,
+        "promoted",
+        OccurrenceClass::PromotedMemory,
+        "decision-a",
+    );
+    // A second commit appending an event to the decision separates its last change from its creation, so a target built from `created_commit_seq` alone would differ.
+    fixture
+        .store
+        .commit(intent("touch-decision-a"), |envelope| {
+            envelope.append_decision_event(
+                "decision-decision-a",
+                kernel::DecisionEventSpec {
+                    event_kind: "note".to_string(),
+                    payload: kernel::DecisionEventPayload {
+                        summary: "touched".to_string(),
+                    },
+                    evidence_id: None,
+                    recorded_at: 1,
+                },
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let (tip, before) = fixture.canonical_state(&["decision-a", &claim, &promoted]);
+    let decision = before[0].clone().unwrap();
+    let last_change = decision.latest_change_commit_seq.unwrap();
+    assert!(
+        last_change > decision.object.created_commit_seq,
+        "the touch commit is the decision's last change"
+    );
+    let expected = kernel::ProposalTarget::Memory(kernel::CanonicalTarget {
+        object_id: "decision-a".to_string(),
+        source_revision: 1,
+        known_as_of: tip,
+        commit_token: last_change,
+    });
+    for (object, evidence, class) in [
+        (&claim, &claim_evidence, OccurrenceClass::CanonicalClaims),
+        (
+            &promoted,
+            &promoted_evidence,
+            OccurrenceClass::PromotedMemory,
+        ),
+    ] {
+        assert!(decision_derived(class) && MEMORY_CLASSES.contains(&class));
+        let subject = fixture.resolve(object).unwrap();
+        assert_eq!(
+            subject,
+            ReferenceExpectation::CanonicalSource {
+                object_id: object.clone(),
+                class,
+                source_revision: 1,
+                artifact_digest: evidence.1.clone(),
+                evidence_id: evidence.0.clone(),
+                originating_decision_id: "decision-a".to_string(),
+                decision_source_revision: 1,
+            },
+            "{class:?} resolves to its decision, never to a native expectation"
+        );
+        // Two descriptors of one decision name one mutation target; neither descriptor's own id is the target.
+        let target = proposal_target(&fixture.store, &subject).unwrap();
+        assert_eq!(target, expected);
+    }
+    assert!(!MEMORY_CLASSES.contains(&OccurrenceClass::GitCommits));
+    // Resolution and binding are reads: nothing canonical moved.
+    assert_eq!(
+        fixture.canonical_state(&["decision-a", &claim, &promoted]),
+        (tip, before)
+    );
+}
+
+#[test]
+fn a_moved_missing_stale_or_wrong_kind_owner_refuses_the_subject_and_the_target() {
+    let fixture = Fixture::open();
+    fixture.decision("decision-a");
+    let (claim, claim_evidence) = derived(
+        &fixture,
+        "claim",
+        OccurrenceClass::CanonicalClaims,
+        "decision-a",
+    );
+    let bound = fixture.resolve(&claim).unwrap();
+    // Supersession after binding: the bound target refuses as a revoked origin rather than retargeting to the successor, and a fresh resolution refuses too because the descriptor's identity still names the superseded decision.
+    fixture.revise_decision("decision-a", "decision-a-r2");
+    let (_, after_revision) = fixture.canonical_state(&["decision-a", "decision-a-r2", &claim]);
+    assert_eq!(
+        proposal_target(&fixture.store, &bound).unwrap_err().code,
+        RefusalCode::OriginRevoked
+    );
+    assert_eq!(
+        resolution_refusal(fixture.resolve(&claim).unwrap_err()),
+        RefusalCode::OriginRevoked
+    );
+    // A stale descriptor revision under a live decision is refused by the broker before any byte is read.
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&claim_evidence.0));
+    let stale_descriptor = broker.aliases.issue(ReferenceExpectation::CanonicalSource {
+        object_id: claim.clone(),
+        class: OccurrenceClass::CanonicalClaims,
+        source_revision: 7,
+        artifact_digest: claim_evidence.1.clone(),
+        evidence_id: claim_evidence.0.clone(),
+        originating_decision_id: "decision-a-r2".to_string(),
+        decision_source_revision: 2,
+    });
+    assert_eq!(
+        broker
+            .read(&fixture.store, stale_descriptor.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::ExpectationChanged
+    );
+    assert_eq!(broker.accounting.model_visible_bytes(), 0);
+    // An owner the registry has never seen has nothing to resolve through.
+    let (orphan, _) = derived(
+        &fixture,
+        "orphan",
+        OccurrenceClass::PromotedMemory,
+        "decision-missing",
+    );
+    assert_eq!(
+        resolution_refusal(fixture.resolve(&orphan).unwrap_err()),
+        RefusalCode::NotFound
+    );
+    // A bound decision revision that disagrees with the live row refuses instead of retargeting.
+    fixture.decision("decision-b");
+    let (other, _) = derived(
+        &fixture,
+        "other",
+        OccurrenceClass::CanonicalClaims,
+        "decision-b",
+    );
+    let mut stale_decision = fixture.resolve(&other).unwrap();
+    let ReferenceExpectation::CanonicalSource {
+        decision_source_revision,
+        ..
+    } = &mut stale_decision
+    else {
+        panic!("canonical")
+    };
+    *decision_source_revision = 7;
+    assert_eq!(
+        proposal_target(&fixture.store, &stale_decision)
+            .unwrap_err()
+            .code,
+        RefusalCode::ExpectationChanged
+    );
+    // An owner that is a registered object but not a decision: resolution binds it, the target refuses it, and the broker refuses the read with zero bytes.
+    let (wrong_kind, wrong_evidence) = derived(
+        &fixture,
+        "wrong",
+        OccurrenceClass::CanonicalClaims,
+        "evidence-object-claim",
+    );
+    let subject = fixture.resolve(&wrong_kind).unwrap();
+    assert_eq!(
+        proposal_target(&fixture.store, &subject).unwrap_err().code,
+        RefusalCode::ExpectationChanged
+    );
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&wrong_evidence.0));
+    let alias = broker.aliases.issue(subject);
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Scope
+    );
+    assert_eq!(broker.accounting.model_visible_bytes(), 0);
+    // An owner scoped to another project: resolution binds it, and the broker refuses the read `Scope` on the decision candidate with zero bytes, even though the descriptor itself is in scope.
+    fixture
+        .store
+        .commit(intent("scope-b"), |envelope| {
+            envelope.insert_scope(ScopeSpec {
+                scope_id: "project:b".to_string(),
+                object_id: "project:b".to_string(),
+                source_id: "project:b".to_string(),
+                domain_id: DOMAIN.to_string(),
+                source_kind: "kernel_route".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                terms: vec![ScopeTermSpec {
+                    dimension: Dimension::Project.as_str().to_string(),
+                    operator: "exact".to_string(),
+                    exact_value: Some(OTHER_PROJECT.to_string()),
+                    ..ScopeTermSpec::default()
+                }],
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    fixture.decision_in("decision-elsewhere", "project:b");
+    let (foreign, foreign_evidence) = derived(
+        &fixture,
+        "foreign",
+        OccurrenceClass::CanonicalClaims,
+        "decision-elsewhere",
+    );
+    let subject = fixture.resolve(&foreign).unwrap();
+    let mut broker = fixture.broker(PROJECT, std::slice::from_ref(&foreign_evidence.0));
+    let alias = broker.aliases.issue(subject);
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::Scope
+    );
+    assert_eq!(broker.accounting.model_visible_bytes(), 0);
+    // Every refusal above was a read; the tracked objects moved only where the test moved them.
+    assert_eq!(
+        fixture
+            .canonical_state(&["decision-a", "decision-a-r2", &claim])
+            .1,
+        after_revision
+    );
+}
+
+#[test]
+fn a_resolved_canonical_subject_still_refuses_the_remote_destination() {
+    let fixture = Fixture::open();
+    fixture.decision("decision-a");
+    let (claim, claim_evidence) = derived(
+        &fixture,
+        "claim",
+        OccurrenceClass::CanonicalClaims,
+        "decision-a",
+    );
+    // The artifact asserts Normal and RemoteAllowed, and carries no repository provenance; the store's own rule keeps it Sensitive, so the destination the production coordinator binds refuses it with zero bytes. This is the abstention a scheduled production job settles on, and why the production gate stays closed.
+    let subject = fixture.resolve(&claim).unwrap();
+    let mut remote = fixture.broker_for(
+        PROJECT,
+        std::slice::from_ref(&claim_evidence.0),
+        kernel::ArtifactDestination::Remote,
+    );
+    let alias = remote.aliases.issue(subject);
+    assert_eq!(
+        remote
+            .read(&fixture.store, alias.as_str(), None, fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::PolicyBlocked
+    );
+    assert_eq!(remote.accounting.model_visible_bytes(), 0);
 }

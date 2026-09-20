@@ -94,6 +94,49 @@ impl PolicyUnion {
             members: self.members.len(),
         })
     }
+
+    /// Decodes persisted canonical bytes, accepting them only when they re-encode to themselves and to `digest`; a union that was edited, reordered, or produced under another version is not this union.
+    pub fn decode(canonical: &str, digest: &str) -> Result<Self, ContractError> {
+        let invalid = || ContractError::NotCanonical("policy union".to_string());
+        let value: Value = serde_json::from_str(canonical).map_err(|_| invalid())?;
+        let object = value.as_object().ok_or_else(invalid)?;
+        if object.get("v").and_then(Value::as_u64)
+            != Some(MEMORY_REVIEWER_POLICY_UNION_VERSION.into())
+        {
+            return Err(invalid());
+        }
+        let members = object
+            .get("members")
+            .and_then(Value::as_array)
+            .ok_or_else(invalid)?;
+        let mut union = Self::new();
+        for member in members {
+            let required = |name: &str| {
+                member
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(invalid)
+            };
+            let optional = |name: &str| match member.get(name) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(value)) => Ok(Some(value.clone())),
+                Some(_) => Err(invalid()),
+            };
+            union.insert(PolicyUnionMember {
+                kind: required("kind")?,
+                id: required("id")?,
+                revision: required("revision")?,
+                owner_id: optional("owner_id")?,
+                owner_revision: optional("owner_revision")?,
+            });
+        }
+        let encoded = union.encode()?;
+        if encoded.canonical != canonical || encoded.digest != digest {
+            return Err(invalid());
+        }
+        Ok(union)
+    }
 }
 
 #[cfg(test)]
@@ -150,6 +193,33 @@ mod tests {
         ));
         assert_ne!(third.encode().unwrap().digest, a.digest);
         assert_eq!(PolicyUnion::new().encode().unwrap().members, 0);
+    }
+
+    #[test]
+    fn decoding_accepts_only_bytes_that_re_encode_to_themselves_and_their_digest() {
+        let mut union = PolicyUnion::new();
+        union.insert(member("native_source", "obj-1", "4", None));
+        union.insert(member(
+            "canonical_source",
+            "desc-1",
+            "3",
+            Some(("decision-1", "2")),
+        ));
+        let encoded = union.encode().unwrap();
+        assert_eq!(
+            PolicyUnion::decode(&encoded.canonical, &encoded.digest).unwrap(),
+            union
+        );
+        assert!(PolicyUnion::decode(&encoded.canonical, &"0".repeat(64)).is_err());
+        let edited = encoded
+            .canonical
+            .replace("\"revision\":\"4\"", "\"revision\":\"5\"");
+        assert!(PolicyUnion::decode(&edited, &encoded.digest).is_err());
+        let reordered = encoded
+            .canonical
+            .replacen("{\"members\":[", "{\"members\":[ ", 1);
+        assert!(PolicyUnion::decode(&reordered, &encoded.digest).is_err());
+        assert!(PolicyUnion::decode("{\"members\":[],\"v\":2}", &encoded.digest).is_err());
     }
 
     const FIXTURE: &str = include_str!("../testdata/canonical-json-contract-v1.json");

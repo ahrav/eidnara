@@ -1,0 +1,394 @@
+# Evidence-backed memory review: catalog
+
+Method: `../METHOD.md`. Records were verified against the daemon and kernel
+crates at the change that introduced `resolve_descriptor` and `proposal_target`
+in `crates/daemon/src/memory_reviewer/coordinator.rs`. References name functions and
+tests rather than line numbers.
+
+## Scope
+
+The MemoryReviewer review path from production selection through the coordinator,
+broker, settlement, Memory Store ledger, Kernel holds, and the protocol 3
+review reads, plus the packaged review commands that consume them. This part
+holds records only for slugs whose ticket has landed; the index lists every
+slug the specification assigns.
+
+## Reachability classes
+
+- `default-production`: reached by the daemon's worker, scheduler, or routed
+  request with no configuration beyond an open activation gate.
+- `explicit-config-only`: reached only when an operator opens a gate or
+  constant that ships closed.
+- `test-only`: constructed only by a test.
+
+## Index
+
+Every slug the seven residual tickets own. Slugs the specification assigns to other owners are not indexed here.
+
+| Slug | Ticket | Record |
+| --- | --- | --- |
+| `production-classes-reach-policy-eligible-proposal` | #725 | yes |
+| `canonical-resolution-refuses-changed-owner-and-target` | #725 | yes |
+| `private-result-transfer-preserves-queue-expiry` | #726 | yes |
+| `receipt-selection-fences-private-generation-results` | #727 | yes |
+| `durable-private-result-recovers-without-model-refire` | #727 | yes |
+| `unknown-dispatch-does-not-authorize-resend` | #727 | yes |
+| `uncited-owner-lineage-remains-read-authority` | #727 | yes |
+| `observer-route-does-not-change-background-rosters` | #728 | yes |
+| `status-sanitizer-preserves-inclusive-integer-domain` | #729 | yes |
+| `completed-outcome-pages-have-live-keyset-semantics` | #730 | yes |
+| `shared-path-fixture-reaches-selected-readable-proposal` | #730 | yes |
+| `reference-only-cli-outcomes-preserve-meaning` | #730 | yes |
+| `review-cli-owns-one-replay-free-connection` | #730 | yes |
+| `review-cli-validates-byte-exact-inert-payloads` | #730 | yes |
+| `review-cli-preserves-shared-kernel-refusal-shapes` | #730 | yes |
+| `status-freshness-never-defaults-unknown-to-zero` | #730 | yes |
+| `status-counts-preserve-overlapping-ledger-populations` | #730 | yes |
+| `provider-response-budget-is-cumulative-per-job` | #731 | yes |
+| `attempt-ledger-preserves-cross-generation-ceilings` | #731 | yes |
+| `guarded-request-handoff-precedes-network-polling` | #731 | yes |
+
+## Records
+
+### production-classes-reach-policy-eligible-proposal
+
+Type: reachability
+Reachability: explicit-config-only
+Status: active
+Exercised: not yet - no Remote-eligible representation of a canonical or promoted artifact exists, so no run over a production class can reach a selected proposal; `PRODUCTION_SELECTION_OPEN` is `false`
+Guarantee: When production selection is open, a job over `canonical_claims` or `promoted_memory` reaches a receipt-selected, readable, non-abstaining proposal only through a genuinely eligible originating decision under existing policy, with the request ledger, disclosed bytes, and selected receipt inspectable.
+Check: `sometimes` - a campaign with production selection open must produce at least one completed receipt whose selected proposal targets a decision reached through `ReferenceExpectation::CanonicalSource`; the situation, not the branch, is what matters, and it cannot occur while the gate is closed
+Fault/timing angle: none
+Required faults and enabling state: `PRODUCTION_SELECTION_OPEN` set `true`; an owner-approved Remote-eligible decision representation; an open activation gate; a live scoped decision with a canonical descriptor whose artifact egress is `Allowed` for `ArtifactDestination::Remote`
+Confidence: high - [evidence](evidence/production-classes-reach-policy-eligible-proposal.md). Verified that `resolve_descriptor` returns `CanonicalSource` for both production classes instead of refusing them as `Unsupported`, that a canonical subject reaches the coordinator and settles `owner_sensitive` with zero requests, and that the Remote broker refuses the artifact with `PolicyBlocked` and zero disclosed bytes
+Existing check: `crates/daemon/tests/memory_reviewer_broker.rs::canonical_and_promoted_descriptors_resolve_to_their_originating_decision_and_target_it` covers resolution; `a_resolved_canonical_subject_still_refuses_the_remote_destination` covers the Remote refusal; `crates/daemon/tests/memory_reviewer_coordinator.rs::a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_remote_model` covers the coordinator path; `crates/daemon/tests/memory_reviewer_selection.rs::the_production_classes_are_walked_in_order_and_unproven_canonical_descriptors_are_not_selected` covers the empty production walk; `crates/daemon/src/lib.rs::memory_reviewer_review_selection_is_not_scheduled_while_production_selection_is_closed` covers the scheduler gate
+Impact: A positive result claimed without this witness would report scripted Git-only coverage as production eligibility
+Open questions:
+- Which decision bytes may reach the Remote destination, and which Kernel-owned proof binds them to the decision's id, revision, and scope (needs human input)
+
+### canonical-resolution-refuses-changed-owner-and-target
+
+Type: safety
+Reachability: explicit-config-only - the only production producer of a `ReviewTarget::Memory` job over `canonical_claims` or `promoted_memory` is the selection walk in `crates/daemon/src/memory_reviewer/selection.rs`, which `SchedulerBridge::scheduled_projects` schedules only while `PRODUCTION_SELECTION_OPEN` is `true`; the History Summarizer produces staged subjects
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_broker.rs` constructs a superseded owner, a retired owner, a never-registered owner, a stale descriptor revision, a stale bound decision revision, an owner that is not a decision, an owner scoped to another project, and the Remote destination
+Guarantee: A proposal over a canonical or promoted descriptor names the originating decision's exact object id, source revision, snapshot, and last-change commit token, never the descriptor; an owner that is missing, retired, superseded, re-revised, wrong-kind, or out-of-scope when the subject is read refuses before any byte is disclosed; an owner that moves after disclosure refuses at target binding, so no proposal is bound to it; and descriptor identity cannot redirect the target.
+Check: `always` - every `ProposalTarget::Memory` produced from a `CanonicalSource` subject has `object_id == originating_decision_id` and `source_revision == decision_source_revision`; `resolve_descriptor` refuses an absent (`NotFound`) or invalidated (`OriginRevoked`) decision and otherwise binds the live registry row, whatever its kind; `proposal_target` refuses an invalidated decision (`OriginRevoked`) and a row that is not a decision or is at another revision (`ExpectationChanged`); the broker's `judge_canonical_source` refuses a wrong-kind or out-of-scope owner (`Scope`) and a stale revision (`ExpectationChanged`) before any byte is read; asserted on every evaluation because the target is the mutation token a later application compares against
+Fault/timing angle: the decision changes between resolution and proposal binding; bytes disclosed before the change stay disclosed and the refusal lands at binding
+Required faults and enabling state: `correct_decision` superseding the bound decision after `resolve_descriptor`; a descriptor whose identity names an unregistered decision; a bound expectation whose `decision_source_revision` disagrees with the live row; a stale descriptor revision; a descriptor whose owner is an evidence object; a descriptor whose owner is a decision in another project's scope
+Confidence: high - [evidence](evidence/canonical-resolution-refuses-changed-owner-and-target.md). Verified each refusal code, that two descriptors of one decision produce one equal target whose commit token is the decision's last change rather than its creation, and that resolution and binding leave the tracked registry rows equal
+Existing check: `crates/daemon/tests/memory_reviewer_broker.rs::canonical_and_promoted_descriptors_resolve_to_their_originating_decision_and_target_it`, `a_moved_missing_stale_or_wrong_kind_owner_refuses_the_subject_and_the_target`, `canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_both`, `a_canonical_owner_must_be_a_live_decision`
+Impact: A proposal bound to the descriptor or to a moved decision would carry a mutation token that a later application could apply to the wrong object or revision
+Open questions: None.
+
+### private-result-transfer-preserves-queue-expiry
+
+Type: safety
+Reachability: default-production - the transfer runs inside `Settlement::settle` (`crates/daemon/src/memory_reviewer/settlement.rs::transfer_retention`), which the coordinator calls at the end of every run the production worker starts; `crates/daemon/src/lib.rs` spawns `memory_reviewer::worker::run` once the Kernel is ready and the worker claims Ready jobs from both producers whenever the activation gate is open, independent of `PRODUCTION_SELECTION_OPEN`. The sweep and the reconciler run in `memory_reviewer::lifecycle::run`, spawned by `crates/daemon/src/lib.rs` as soon as the Memory Store is installed, with no gate. The selected read is the routed `review.read` request (`crates/daemon/src/memory_reviewer/wire.rs::handle_review_read`), dispatched from `crates/daemon/src/lib.rs` for any bound route whose memories authority is MODULE
+Status: active
+Exercised: yes - `crates/kernel/tests/kernel_memory_reviewer_holds.rs` transfers a hold and reads the row live and as selected on either side of the queue deadline; `crates/daemon/tests/memory_reviewer_settlement.rs` closes an in-progress receipt by sweep after transfer, lists and reads it, reconciles the hold, fences a late completion, sweeps inside the settlement window, orphans a losing generation's hold through takeover, and refuses a selected row whose owner or class changed; `crates/memory-store/tests/memory_reviewer_ledger.rs` closes a receipt at a queue deadline earlier than its run deadline and scopes the selection question
+Guarantee: A private Kernel result not selected by a completed receipt remains subject to the job's original queue deadline after execution-to-review hold transfer: the candidate and run rows keep that deadline, a live read past it refuses `Expired`, the public read answers `not_selected`, and the sweep closes the receipt at the earlier of run and queue deadlines. A result selected before the queue deadline is read against its selection time and stays readable only while its review hold is live and its inputs pass policy. Selection, rejection, cancellation, expiry, and reconciliation never move a deadline or publish an unselected row.
+Check: `always` - after `transfer_execution_to_review`, `candidates.lease_expires_at` and `extraction_runs.lease_expires_at` equal the job's `queue_deadline_ms`; `read_selected_review_input` refuses when `selected_at >= deadline`; `read_selected_proposal` succeeds only for a `complete` receipt whose `completed_at_ms` precedes the deadline and whose hold is live; asserted on every evaluation because a moved deadline would let an unselected result outlive its queue
+Fault/timing angle: crash after the Kernel envelope committed and before the Memory Store completion; sweep and selection racing at the deadline; a run deadline later than the queue deadline
+Required faults and enabling state: a sealed proposal row and transferred hold with no completed receipt; the sweep at the run deadline or the queue deadline, whichever is earlier; a late completion under the original claim after the terminal
+Confidence: high - [evidence](evidence/private-result-transfer-preserves-queue-expiry.md). Verified the removed deadline promotion, the new selected-read predicate, the ledger's completion fence on the queue deadline, and the reconciler's release of an orphaned hold
+Existing check: `crates/kernel/tests/kernel_memory_reviewer_holds.rs::review_transfer_acquires_before_releasing_and_moves_only_live_memory_reviewer_references`; `crates/daemon/tests/memory_reviewer_settlement.rs::an_unselected_transferred_result_expires_with_its_queue_and_its_hold_is_reconciled`, `a_completed_receipt_selects_the_staged_proposal_and_reads_pass_the_kernel`, `kernel_results_stay_private_until_the_receipt_selects_them`, `the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners`, `a_sweep_inside_the_settlement_window_fences_the_selection_and_releases_the_hold`, `a_selected_row_whose_owner_or_class_changed_refuses_the_read`; `crates/memory-store/tests/memory_reviewer_ledger.rs::the_sweep_closes_an_in_progress_receipt_at_the_queue_deadline_before_its_run_deadline`, `an_attempt_never_outlives_the_job_queue_deadline`, `a_selected_result_answers_only_for_its_project_digest_and_generation`
+Impact: An unselected result would stay readable by identity, and its evidence held, for up to seven days past the queue that admitted it
+Open questions:
+- Whether the capture `retain_until` promotion at transfer should also stay at the queue deadline for an unselected result; the retention floor is a resource bound, not a visibility path, and is left in place (needs human input)
+
+### receipt-selection-fences-private-generation-results
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_settlement.rs` stages a generation-1 result, takes the receipt over at generation 2, and adopts and reads under generation 2
+Guarantee: A Kernel result stays private to its generation: only the completed receipt of the same generation selects it, a successor generation adopts only a result at its own provisional identity, and the losing generation's row stays sealed, unpublished, and unreadable through the receipt.
+Check: `always` - `adopt` and `read_selected_proposal` derive the candidate id from `(causal_identity, receipt.generation)` and refuse any other row; asserted on every evaluation because a row at another generation is another run's result
+Fault/timing angle: takeover between a run's Kernel envelope and its Memory Store completion
+Required faults and enabling state: a sealed row and transferred hold at generation 1; `take_over_memory_reviewer_receipt` to generation 2; an adopt at generation 2
+Confidence: high - [evidence](evidence/receipt-selection-fences-private-generation-results.md). Verified the provisional identity derivation on both the adopt and the read paths and the takeover test's outcomes
+Existing check: `crates/daemon/tests/memory_reviewer_settlement.rs::a_resumed_claim_adopts_the_durable_result_without_the_broker_or_a_new_request` (second half), `a_takeover_fences_the_losing_generation_and_selects_only_its_own_result`, `the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners`
+Impact: A successor could publish a result whose lineage and marker belong to a fenced generation
+Open questions: None.
+
+### durable-private-result-recovers-without-model-refire
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_settlement.rs` drops the run's broker and adopts under a fresh one with no aliases and no execution hold; `crates/daemon/tests/memory_reviewer_coordinator.rs` runs a resumed generation against a live peer that receives nothing
+Guarantee: A valid same-generation claim that finds a sealed result adopts it from the row's dependency record alone, publishing the byte-identical reference with zero model requests; a record that fails revalidation or is absent refuses without content, without a request, and without rewriting the row.
+Check: `always` - `Settlement::adopt` never reaches the disclosure path; the coordinator returns from `adopt` before `open`; asserted on every resumed run because a compensating request is the failure this record forbids
+Fault/timing angle: process loss after the Kernel envelope and before the Memory Store completion; process loss after the completed marker and before staging
+Required faults and enabling state: a completed marker at the generation; a sealed row with a record, or no row; a fresh broker under the transferred review hold or under an execution hold covering nothing; a retired member, an edited record, and a record removed from the witness
+Confidence: high - [evidence](evidence/durable-private-result-recovers-without-model-refire.md). Verified the record's contents after staging, the adopt outcomes for each fault, and the zero-connection assertion at the coordinator
+Existing check: `crates/daemon/tests/memory_reviewer_settlement.rs::a_resumed_claim_adopts_the_durable_result_without_the_broker_or_a_new_request`, `a_result_sealed_before_its_transfer_is_adopted_under_an_empty_execution_hold`, `a_durable_result_whose_lineage_moved_or_lacks_a_record_is_not_adopted`, `a_proposal_without_a_completed_marker_at_its_generation_is_not_staged`; `crates/daemon/tests/memory_reviewer_coordinator.rs::a_resumed_generation_adopts_the_result_a_lost_run_sealed_without_a_send`, `a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send`; `crates/kernel/tests/kernel_review_staging.rs::schema_illegal_proposals_are_refused_at_decode`; `crates/context-core/src/memory_reviewer_policy_union.rs::decoding_accepts_only_bytes_that_re_encode_to_themselves_and_their_digest`
+Impact: A restart would spend a second physical request and a second attempt for a result the store already holds, or publish a result nothing revalidated
+Open questions: None.
+
+### unknown-dispatch-does-not-authorize-resend
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_coordinator.rs` plants an unterminated marker, a cancelled marker, and a `not_dispatched` marker before a run against a live peer
+Guarantee: A marker at the run's generation other than a proven `not_dispatched`, or an unterminated or `unknown` marker at any generation, ends the resumed run without a request: the receipt completes `unknown` when no sealed row exists, and adopts or abstains on the row when one does. Only `not_dispatched` markers, or none, admit a newly charged attempt, under the original identity, deadlines, and remaining count.
+Check: `always` - `resumes_dispatched_work` is evaluated in `prepare` before subject resolution and hold growth; a `true` result skips both and routes to `adopt`; asserted on every run start
+Fault/timing angle: crash between marker commit and terminal write; cancellation mid-attempt; a lapsed recheck after commit
+Required faults and enabling state: `dispatch_memory_reviewer_attempt` with no terminal; a cancelled first run; a recheck clock past the attempt deadline
+Confidence: high - [evidence](evidence/unknown-dispatch-does-not-authorize-resend.md). Verified the three marker classes at the coordinator with connection counts and attempt counts
+Existing check: `crates/daemon/tests/memory_reviewer_coordinator.rs::an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt`, `a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send`, `a_not_dispatched_marker_alone_lets_the_run_proceed_with_a_new_attempt`, `a_takeover_past_an_unterminated_marker_completes_unknown_without_a_send`
+Impact: A lost answer would be retried with a fresh physical request, exceeding the attempt and byte ceilings the marker already charged
+Open questions:
+- Whether a `failed` or `cancelled` marker with no sealed row should complete the receipt as `unknown` or under its own terminal; the ledger's sweep maps a cancelled receipt to `cancelled`, while the resumed run maps every non-`not_dispatched` marker to `unknown` (needs human input)
+
+### uncited-owner-lineage-remains-read-authority
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_settlement.rs` retires an uncited source after selection and reads; a fabricated canonical member is refused on read
+Guarantee: The selected read revalidates every persisted union member, cited or not, including each canonical member's originating decision and owner revision, and refuses the proposal when any no longer stands, while the receipt continues to select it.
+Check: `always` - `read_selected_proposal` calls `dependencies::revalidate` under the review hold for a local reader and maps its verdict to `dependency_refused`; asserted on every read
+Fault/timing angle: a source retired or a decision re-revised between selection and read
+Required faults and enabling state: a selected proposal over two disclosed sources with one uncited; `retire_observation` on the uncited one
+Confidence: high - [evidence](evidence/uncited-owner-lineage-remains-read-authority.md). Verified the refusal after retiring an uncited member, the fabricated-member refusal, and that the receipt is unchanged by a refused read
+Existing check: `crates/daemon/tests/memory_reviewer_settlement.rs::a_selected_read_refuses_when_an_uncited_member_no_longer_stands`, `the_staged_dependencies_are_the_brokers_union_including_uncited_inputs_and_ancestry`, `revoked_or_uncited_dependencies_abstain_and_conflicting_content_is_refused`
+Impact: A proposal whose uncited context was retired or whose canonical owner moved would still be served as a supported proposal
+Open questions: None.
+
+### observer-route-does-not-change-background-rosters
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/src/lib.rs` tests bind an observer alone on a dormant MODULE project, beside a live scheduled harness, and on a second root, and read the worker, scheduler, and roster views after every open and close in both close orders; `crates/daemon/tests/memory_reviewer_worker.rs` runs a pass over a hand-built empty view against a Ready Sensitive job, so observer to `module_projects` to worker pass is composed from the two tests rather than driven end to end; `crates/daemon/tests/memory_reviewer_wire.rs` reads through a `cli` route
+Guarantee: A binding whose harness is `cli` is removed from the participating view before newest-per-root selection, so the MemoryReviewer worker's projects, the scheduler's roots, harnesses, and schedules, and the search maintenance roster are identical whether or not the observer is open; route-local authorization and project lookup for the observer's own route are unchanged.
+Check: `always` - `RouteBindings::participating` is the only path into `latest_per_root` and `latest_for_root`, and those are the only sources for `module_projects`, `scheduled_projects`, `binding_for_root`, and `bound_projects`; asserted by the view equality before and after each observer open and close
+Fault/timing angle: an observer opened after a live harness on the same root, an observer-only second root of the project, each route closing first
+Required faults and enabling state: MODULE authority on the root with the start-up binding closed; a live `pi` binding with a user-tier schedule; an observer binding on the same root and on a second bound root; a Ready job with the gate open and a worker pass over an empty view
+Confidence: high - [evidence](evidence/observer-route-does-not-change-background-rosters.md). Verified the four views by equality against the dormant and the scheduled snapshots, the Ready job's state after two passes over an empty view, and byte-equal wire answers through a `cli` route
+Existing check: `crates/daemon/src/lib.rs::tests::an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`, `crates/daemon/tests/memory_reviewer_worker.rs::a_pass_over_a_view_without_the_project_leaves_its_ready_job_unclaimed`, `crates/daemon/tests/memory_reviewer_wire.rs::an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`
+Impact: Opening the review command on a dormant project would enroll it in the worker and run its Ready jobs, or replace a live harness's schedule with the observer's configuration
+Open questions: None.
+
+### status-sanitizer-preserves-inclusive-integer-domain
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/opencode-plugin/src/shared/host-client/client.test.ts` sends raw wire tokens at the signed and unsigned extrema and around 2^53 through an exact-integer routed response and a `host.status` response over the fake daemon, and a default routed response carrying a `transform` recipe with a 2^53+1 token inside an inserted message value; `connection.test.ts` covers stream items under both modes; `exact-json.test.ts` covers the reviver, the withheld-lexeme refusal, and the domain validators
+Guarantee: An exactly decoded body never presents a rounded integer as exact: a safe integer arrives as a `number`, any other integer lexeme arrives as a `bigint` with its exact value or refuses the body, so adjacent unequal wire integers never compare equal after decoding. `host.status` and a routed `request` under `exactIntegers` decode exactly; every other body decodes as `JSON.parse` does, so a module payload forwarded to OpenCode never carries a `bigint`. The count domain admits `9007199254740992` and refuses `9007199254740993`, negative, fractional, null, and absent values, each without touching its siblings; `u64` and `i64` fields follow their own bounds and return a `bigint` for any in-range value outside the safe range.
+Check: `always` - `consumeJson` is the only JSON decode on the receive path; it calls `parseExactJson` when the pending request's response mode is `exact_json` and `JSON.parse` otherwise; the reviver splits on `Number.isSafeInteger` for every number and refuses an integer-valued unsafe double whose lexeme the runtime withholds; asserted on every decoded body of each mode
+Fault/timing angle: none; a pure decoding property
+Required faults and enabling state: response bodies written as raw text with chosen integer tokens; a `host.status` body carrying a counter of 2^53+1 beside a valid counter; a default routed recipe body carrying 2^53+1 inside an inserted value; a `JSON.parse` that hands the reviver no source text
+Confidence: high - [evidence](evidence/status-sanitizer-preserves-inclusive-integer-domain.md). Verified under Bun 1.3.14 through the test suite and under Node 24.18 by direct import; both report `bigint` for 2^53+1 and `number` for 2^53 on the exact path
+Existing check: `client.test.ts::integer lexemes a double cannot reproduce arrive exact through exact-integer routed and control responses`, `a default routed response decodes as JSON.parse does, so module payloads forwarded to OpenCode never carry a bigint`, `routeOpen omits the ambient consumer identity only when asked, for that bind alone`; `connection.test.ts::stream items decode exactly only under the exact_json response mode`; `exact-json.test.ts`
+Impact: A counter or generation past 2^53 would display a neighboring value as exact, and two different receipts or revisions could render identically; a `bigint` reaching a module payload would make the `transform` recipe refuse it as malformed, or, past that check, OpenCode's `JSON.stringify` throw
+Open questions: None.
+
+### completed-outcome-pages-have-live-keyset-semantics
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` sends an explicit `limit` and `after`, renders a full page's continuation and an empty page's end, and never issues a second request; the daemon's page semantics are exercised in `crates/daemon/tests/memory_reviewer_wire.rs`
+Guarantee: `review list` asks for exactly one page with an explicit limit and an optional causal-identity cursor, prints the cursor the daemon returns as the operator's next command carrying the bound root and any non-default limit so it reruns the same walk from any directory, and never walks pages, reads a Kernel payload, or presents the walk as a chronological or stable snapshot.
+Check: `always` - one `request` per invocation with `limit` and `after` in the envelope; asserted on every list
+Fault/timing angle: an outcome completing behind the cursor during a walk
+Required faults and enabling state: a page whose `next` is a cursor, then a follow-up whose `next` is null
+Confidence: high - [evidence](evidence/completed-outcome-pages-have-live-keyset-semantics.md). Verified the envelope and the single request at the fake connection and over the real transport
+Existing check: `packages/cli/src/commands/review.test.ts`::`review list`; `packages/cli/src/commands/review.wire.test.ts`
+Impact: An automatic walk would read every page on each invocation and hide that new identities behind the cursor need a fresh walk
+Open questions: None.
+
+### shared-path-fixture-reaches-selected-readable-proposal
+
+Type: reachability
+Reachability: test-only
+Status: active
+Exercised: partial - `crates/daemon/tests/memory_reviewer_wire.rs` reaches a selected proposal over the real handler with a completed receipt through the shared `publish` fixture; `packages/cli/src/commands/review.test.ts` decodes a proposal body with nonempty spans through the command's validator; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` drives status, list, and show against the direct-host fixture, where no MODULE authority is bound and the answers are refusals
+Guarantee: The command's decoder accepts exactly the fields the Kernel's staged `ReviewProposal` serializes, span for span, and the real host answers the command's flat envelopes over the installed transport.
+Check: `sometimes` - a real-store run must reach a selected proposal the command renders; the situation is the selected read, not a branch
+Fault/timing angle: none
+Required faults and enabling state: MODULE authority on a root, a completed receipt, a staged proposal with nonempty spans, the command reading it
+Confidence: medium - [evidence](evidence/shared-path-fixture-reaches-selected-readable-proposal.md). The positive read through the command against a real host is not constructed; the Rust wire test and the command's decoder are joined by the wire document's shape, not by one process
+Existing check: `crates/daemon/tests/memory_reviewer_wire.rs::a_published_proposal_reads_from_every_root_after_a_newer_root_binds`; `packages/cli/src/commands/review.test.ts`::`review show`; `packages/e2e-tests/src/rust-runner/review-cli.test.ts`
+Impact: A field the Kernel serializes differently from the decoder's expectation would refuse every real proposal as malformed
+Open questions:
+- A TypeScript path that activates MODULE authority on the hermetic host and publishes a proposal with nonempty spans is needed to drive `review show` to a rendered proposal in one process (needs human input)
+
+### reference-only-cli-outcomes-preserve-meaning
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` renders each of the six outcomes and each of the nine abstention reasons, maps every read terminal and the `disabled` sentence, and refuses an unknown outcome, an unknown reason, a reason on a non-abstained item, and a terminal outside the operation's vocabulary
+Guarantee: Every receipt terminal and abstention reason the protocol names renders as itself, the `disabled` terminal renders as the owner's sentence, `not_selected` never triggers a list walk or a guessed reason, and an unknown variant refuses without success output or a raw dump.
+Check: `always` - closed vocabularies at decode; asserted on every item and terminal
+Fault/timing angle: none
+Required faults and enabling state: bodies with each terminal, an unknown outcome, a reason on a complete item, a `not_selected` terminal on the list operation
+Confidence: high - [evidence](evidence/reference-only-cli-outcomes-preserve-meaning.md). Verified each mapping and each refusal
+Existing check: `packages/cli/src/commands/review.test.ts`::`review list`, `review list vocabulary`, `review show`
+Impact: A guessed reason or a walked list would present an inference as the daemon's outcome
+Open questions: None.
+
+### review-cli-owns-one-replay-free-connection
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` counts one `closeAsync` on success, terminal, malformed, thrown request, and incompatible catalog; `packages/cli/src/commands/review.wire.test.ts` asserts `isClosed` after success, after a route refusal, and after a `route.open` the daemon never answers, which fails within the command's one timeout; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` asserts it against the real host under the `native-addon` job's `test:fixture-contract` step
+Guarantee: One connection is opened per invocation and closed on every path; the catalog probe, the route open, and the request share it; routed requests use `request`, never a managed `call`, so nothing is replayed; and no model call, canonical write, cache, poll, or retry occurs.
+Check: `always` - `closeAsync` in `finally`; asserted on every path
+Fault/timing angle: a thrown request, an aborted request, a refused route
+Required faults and enabling state: a connection whose request throws each error kind
+Confidence: high - [evidence](evidence/review-cli-owns-one-replay-free-connection.md). Verified the close count on nine paths and the closed client over the real transport
+Existing check: `packages/cli/src/commands/review.test.ts`::`connection lifecycle`; `packages/cli/src/commands/review.wire.test.ts`; `packages/e2e-tests/src/rust-runner/review-cli.test.ts`
+Impact: A leaked connection would hold a payload block; a managed call would replay a read after an unknown outcome
+Open questions: None.
+
+### review-cli-validates-byte-exact-inert-payloads
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` refuses text past 32 KiB, an identifier past 512 bytes, a span whose end does not follow its start, a page past 64 items, and renders control sequences inert; `packages/cli/src/commands/review.wire.test.ts` decodes 2^53+1 exactly through the real transport
+Guarantee: Every field is validated against the Kernel's byte caps and its exact integer domain before rendering; text output strips control and escape sequences and JSON output keeps exact integer tokens; no peer, provider, or error body is echoed and nothing reaches a diagnostic, transcript, file, model context, or remote request.
+Check: `always` - the decoder runs before any output; asserted on every body
+Fault/timing angle: none
+Required faults and enabling state: oversize text, escape sequences in text, unsafe integers in every integer field
+Confidence: high - [evidence](evidence/review-cli-validates-byte-exact-inert-payloads.md). Verified the caps, the inert rendering, and the exact tokens
+Existing check: `packages/cli/src/commands/review.test.ts`::`review show`, `connection lifecycle`; `packages/cli/src/commands/review.wire.test.ts`
+Impact: A crafted proposal could move the cursor, forge output, or round an identifier's revision
+Open questions: None.
+
+### review-cli-preserves-shared-kernel-refusal-shapes
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` renders `invalid:project_mismatch`, `unavailable:store_starting`, and an unrecognized state, and the management codes `route_unbound`, `session_mismatch`, `bad_request`, `unrecognized_request_shape`, `invalid_params`, `invalid_response_body`; `packages/cli/src/commands/review.wire.test.ts` drives `session_mismatch` over the real transport; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` drives an unbound root against the real host
+Guarantee: A Kernel state answers as the kernel client's state key, a management code as its code, and a closed terminal as the owner's text; none of them prints the daemon's message or body.
+Check: `always` - `parseKernelState` and `isHostCallError` on the refusal paths; asserted on every refusal
+Fault/timing angle: none
+Required faults and enabling state: each state and code body
+Confidence: high - [evidence](evidence/review-cli-preserves-shared-kernel-refusal-shapes.md). Verified each rendering
+Existing check: `packages/cli/src/commands/review.test.ts`::`review list`, `connection lifecycle`; `packages/cli/src/commands/review.wire.test.ts`; `packages/e2e-tests/src/rust-runner/review-cli.test.ts`
+Impact: A wrong-root or unready refusal rendered as raw text would leak the daemon's message and hide the shared state
+Open questions: None.
+
+### status-freshness-never-defaults-unknown-to-zero
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` feeds the block under `metrics.components.context.metrics`, the path `host.status` publishes, and rejects the same block at the top of `metrics`; renders a `starting` block with present `swept_*` zeros as all unavailable, an absent block and an absent or unrecognized activation state as `unreported`, the wire's own `unknown` and `unavailable` as themselves, and a missing or invalid counter as unavailable beside a valid sibling; `packages/cli/src/commands/review-wire.contract.test.ts` pins the state and counter vocabularies to the wire document's `metrics.memory_reviewer` table in its order
+Guarantee: The block is read where `host.status` publishes it, under the `context` component's metrics. A store that is not `ready` reports every counter unavailable; a counter that is absent, negative, fractional, `null`, or past 2^53 is unavailable, never zero; a missing or unrecognized store or activation state renders as `unreported`, a word outside both vocabularies, so it never reads as the wire's `unknown` or `unavailable`; unknown fields are ignored.
+Check: `always` - `decodeReviewStatus` runs the wire document's rules field by field; asserted on every status
+Fault/timing angle: a stale or starting sampler
+Required faults and enabling state: a `starting` block with zeros, an absent block, out-of-domain counters
+Confidence: high - [evidence](evidence/status-freshness-never-defaults-unknown-to-zero.md). Verified each rule
+Existing check: `packages/cli/src/commands/review.test.ts`::`review status`; `packages/cli/src/commands/review.wire.test.ts`; `packages/cli/src/commands/review-wire.contract.test.ts`; `scripts/smoke-tarball-install.ts` and `packages/e2e-tests/src/rust-runner/review-cli.test.ts` require a reported store state from the running daemon
+Impact: A zero printed for an unsampled counter would read as an idle store
+Open questions: None.
+
+### status-counts-preserve-overlapping-ledger-populations
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` asserts every counter prints under its own name with no total, ratio, or success line and that the command binds no route and names no project
+Guarantee: Status prints the sampler's counters as the overlapping populations they are, over the whole data home, with no synthetic total, success ratio, or per-project attribution.
+Check: `always` - the renderer emits one line per counter and no derived value; asserted on every status
+Fault/timing angle: none
+Required faults and enabling state: a `ready` block with several populated counters
+Confidence: high - [evidence](evidence/status-counts-preserve-overlapping-ledger-populations.md). Verified the output has no derived line and no route open
+Existing check: `packages/cli/src/commands/review.test.ts`::`review status`
+Impact: A total or ratio over overlapping populations would misstate the store's work
+Open questions: None.
+
+### provider-response-budget-is-cumulative-per-job
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_coordinator.rs` runs two 600 KiB responses through the real coordinator, disclosure, collector, and ledger over local TLS; `crates/daemon/tests/memory_reviewer_disclosure.rs` runs two 40 KiB texts through the decoder the same way; `crates/daemon/tests/memory_reviewer_model_request.rs` drives the collector and decoder under explicit remainders
+Guarantee: Raw response bytes and decoded text bytes are charged against what the job has left of its 1 MiB and 64 KiB ceilings, chunk by chunk before retention and length by length before allocation; a response that crosses a remainder is refused there with the remainder recorded as consumed, and a job with nothing left is refused before a marker is charged or a request byte sent.
+Check: `always` - the ledger computes the remainder in the marker transaction and refuses at zero; the collector and decoder charge against the handed remainder; asserted on every dispatch and every response
+Fault/timing angle: a response legal alone arriving after earlier responses consumed most of the job
+Required faults and enabling state: padded bodies of 600 KiB; 40 KiB texts; explicit remainders at the collector
+Confidence: high - [evidence](evidence/provider-response-budget-is-cumulative-per-job.md). Verified the recorded usage on each row, the refusal at the crossing chunk and the crossing text, and that the exhausted round sent no request
+Existing check: `memory_reviewer_coordinator::responses_consume_the_jobs_raw_ceiling_across_attempts_and_exhaustion_sends_nothing_more`; `memory_reviewer_disclosure::responses_consume_the_jobs_text_ceiling_across_attempts_and_exhaustion_sends_nothing`; `memory_reviewer_model_request::responses_are_charged_against_the_jobs_remaining_allowance_and_refusals_record_known_consumption`
+Impact: Four individually bounded responses could deliver 4 MiB and 256 KiB to one job
+Open questions: None.
+
+### attempt-ledger-preserves-cross-generation-ceilings
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/memory-store/tests/memory_reviewer_ledger.rs` records usage on completed and failed attempts, takes the receipt over with an attempt left unterminated, and asserts the successor is refused; `crates/daemon/tests/memory_reviewer_disclosure.rs` records the usage of a provider error body and a cancelled read
+Guarantee: Every attempt row records its response usage in the same statement as its terminal, once; a `not_dispatched` attempt records zero; an unterminated, `unknown`, or byte-less attempt counts as the whole ceiling; the remainder is summed over every generation of the job, so takeover and reopen never reset it and a failed terminal write never grants headroom.
+Check: `always` - the schema forbids bytes on an in-flight row and rewrites of a recorded terminal; the allowance query treats missing evidence as full consumption; asserted on every commit
+Fault/timing angle: crash before the terminal write; takeover after a lost run; reopen
+Required faults and enabling state: an unterminated attempt at takeover; an `unknown` terminal with bytes; a `failed` terminal without bytes; direct SQL against the columns
+Confidence: high - [evidence](evidence/attempt-ledger-preserves-cross-generation-ceilings.md). Verified the recorded usage after reopen, the successor's refusal, the schema refusals, and the ceiling-exact boundary
+Existing check: `memory_reviewer_ledger::response_usage_accumulates_across_attempts_and_generations_and_exhaustion_refuses_before_a_marker_is_charged`, `response_usage_columns_are_bounded_and_written_once_at_the_schema`, `markers_commit_before_handoff_and_every_committed_attempt_stays_consumed`; `memory_reviewer_disclosure::cancelled_and_failed_responses_record_the_bytes_they_consumed`
+Impact: A restart or takeover would hand a successor fresh ceilings for a job that already spent them
+Open questions: None.
+
+### guarded-request-handoff-precedes-network-polling
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_disclosure.rs` asserts the network wait begins only after both store owners release and that a marker commit failure prevents the handoff; the usage is written once at terminalization with no store owner held across the read
+Guarantee: The remainder is read and the marker committed inside one ledger transaction before the request is handed to the connection; no store owner is held while the response is polled; the consumption is held in memory and written once with the terminal, so response accounting cannot fail before the send and a failed terminal write leaves the row unterminated and fully consumed.
+Check: `always` - `dispatch_memory_reviewer_attempt` returns the allowance with the handoff and releases the store before `complete` is polled; `finish` runs after the response; asserted by the existing ownership tests on every dispatch
+Fault/timing angle: a store lock held across a slow provider; a terminal write that fails after the response
+Required faults and enabling state: a peer that waits for the store release before answering; a ledger that refuses the terminal
+Confidence: high - [evidence](evidence/guarded-request-handoff-precedes-network-polling.md). Verified against the existing ownership and terminal-refusal tests, which the usage parameter did not change
+Existing check: `memory_reviewer_disclosure::the_network_wait_begins_only_after_both_owners_release`, `a_failed_attempt_whose_terminal_cannot_be_recorded_reports_it`, `nothing_is_sent_without_approval_under_cancellation_or_when_the_marker_cannot_commit`
+Impact: A slow provider would hold the Memory Store, or a per-chunk write would turn every response into a write storm
+Open questions: None.
+
+## Relationship map
+
+`canonical-resolution-refuses-changed-owner-and-target` is the safety half of
+`production-classes-reach-policy-eligible-proposal`: the same resolution path
+must reach a proposal when eligible and refuse when the owner or target moved.
+Both consume the broker's canonical judgement (`judge_canonical_source`) and the
+Kernel's egress fold, which `served-sensitivity-and-artifact-policy-govern-egress`
+in `../canonical-positive-claim-projection/` records.
+
+`private-result-transfer-preserves-queue-expiry` shares the settlement and
+selected-read path with the two records above: the proposal a canonical run
+publishes is the row whose deadline this record pins.
+
+The four recovery records share one mechanism, `dependencies::revalidate`:
+`durable-private-result-recovers-without-model-refire` and
+`unknown-dispatch-does-not-authorize-resend` are the two branches of the resumed
+run's decision, `receipt-selection-fences-private-generation-results` is the
+generation scope both derive their candidate id under, and
+`uncited-owner-lineage-remains-read-authority` is the same revalidation run by
+the reader instead of the resumer.
+
+The eight review-command records share one consumer: `review-cli-owns-one-replay-free-connection` is the
+connection every other record's request travels on, `review-cli-validates-byte-exact-inert-payloads` and
+`status-sanitizer-preserves-inclusive-integer-domain` are the same decoding discipline at two layers, and
+`observer-route-does-not-change-background-rosters` is what the command's `cli` harness relies on.
+
+The three response-budget records are one mechanism seen from three places:
+the ceilings (`provider-response-budget-is-cumulative-per-job`), the durable
+row they are summed from (`attempt-ledger-preserves-cross-generation-ceilings`),
+and the ordering that keeps the sum honest without holding a store across the
+network (`guarded-request-handoff-precedes-network-polling`).
+`unknown-dispatch-does-not-authorize-resend` is the same conservatism for
+attempts: missing evidence is consumption, never headroom.
+
+`observer-route-does-not-change-background-rosters` sits upstream of every
+worker record: the participating view decides which projects the worker sees
+at all, and the records above describe what happens to a job the worker did
+see.

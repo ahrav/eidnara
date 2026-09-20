@@ -1095,15 +1095,22 @@ impl EvidenceBroker {
         alias: &str,
         now_ms: i64,
     ) -> Result<Option<String>, Refusal> {
-        self.revalidate_under(store, alias, now_ms, HeldUnder::Execution(&self.binding))
+        self.revalidate_under(
+            store,
+            alias,
+            now_ms,
+            now_ms,
+            HeldUnder::Execution(&self.binding),
+        )
     }
 
-    /// [`Self::revalidate`] with the hold that protects the disclosed inputs named explicitly: the execution hold while the run investigates, or the review hold once settlement has moved retention there and the execution hold is released.
+    /// [`Self::revalidate`] with the hold that protects the disclosed inputs named explicitly: the execution hold while the run investigates, or the review hold once settlement has moved retention there and the execution hold is released. A staged subject's queue deadline is judged against `staged_at`, not the clock: the run's own time for a live run, the selection time for a selected read, so a subject whose queue deadline passed after selection stands as long as the review hold does, as the proposal row itself does.
     pub fn revalidate_under(
         &self,
         store: &KernelStore,
         alias: &str,
         now_ms: i64,
+        staged_at: i64,
         hold: HeldUnder<'_>,
     ) -> Result<Option<String>, Refusal> {
         let now_ms = now_ms.max(crate::now_ms());
@@ -1125,8 +1132,11 @@ impl EvidenceBroker {
                     )
                     .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
                 let row = store
-                    .read_review_input(reference, binding, now_ms)
+                    .read_selected_review_input(reference, staged_at)
                     .map_err(|error| refuse(Some(alias), staged_refusal(error)))?;
+                if row.binding != *binding {
+                    return Err(refuse(Some(alias), RefusalCode::Scope));
+                }
                 self.gate_destination(alias, row.sensitivity)?;
                 Ok(None)
             }
@@ -1579,6 +1589,8 @@ pub(crate) fn hold_refusal(error: MemoryReviewerHoldError) -> RefusalCode {
         | MemoryReviewerHoldError::Refused(
             kernel::MemoryReviewerHoldRefusal::HostBackingExhausted,
         )
+        | MemoryReviewerHoldError::Refused(kernel::MemoryReviewerHoldRefusal::ProjectHoldLimit)
+        | MemoryReviewerHoldError::Refused(kernel::MemoryReviewerHoldRefusal::HostHoldLimit)
         | MemoryReviewerHoldError::Refused(kernel::MemoryReviewerHoldRefusal::TooManyReferences) => {
             RefusalCode::HoldLimit
         }
@@ -1605,11 +1617,24 @@ fn span_range(
 }
 
 /// The classes whose descriptors are forms of one decision, and so carry an originating decision.
-const fn decision_derived(class: OccurrenceClass) -> bool {
+pub const fn decision_derived(class: OccurrenceClass) -> bool {
     matches!(
         class,
         OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory
     )
+}
+
+/// Returns the originating decision object id of a decision-derived descriptor identity, read from the class's leading identity field so the lookup follows the Kernel identity layout; `None` for a native class or an absent or empty field.
+pub fn originating_decision(class: OccurrenceClass, identity: &[(String, String)]) -> Option<&str> {
+    if !decision_derived(class) {
+        return None;
+    }
+    let field = *class.identity_fields().first()?;
+    identity
+        .iter()
+        .find(|(name, _)| name == field)
+        .map(|(_, value)| value.as_str())
+        .filter(|value| !value.is_empty())
 }
 
 /// Two excerpts or revisions of one native source are one origin: the key is the class and identity fields, without revision, representation, or span. Identity values are control-character free, so the unit separator cannot occur inside one.

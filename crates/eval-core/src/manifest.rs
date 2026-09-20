@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use context_core::canonical_json::{ContractError, is_lower_hex, protocol_digest};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -219,9 +221,12 @@ pub enum ManifestError {
     ClaimBoundaryMismatch,
     DirectDatabaseAged,
     ResidueIncomplete { field: String },
+    ResidueContradiction { type_name: String, field: String },
     SampleOrderNotAPermutation,
     MalformedDigest { field: String },
     MalformedDecimal { field: String, value: String },
+    RateOutOfRange { field: String, value: String },
+    EmptyComponent { field: String },
     Identity(IdentityError),
     Residue(ResidueError),
     NotCanonical(ContractError),
@@ -293,6 +298,13 @@ pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
 
 impl Manifest {
     pub fn validate(&self) -> Result<(), ManifestError> {
+        if self.schema != MANIFEST_SCHEMA {
+            return Err(ManifestError::SchemaMismatch {
+                found: self.schema.clone(),
+            });
+        }
+        // Digestible on both runtimes: no integer may leave the canonical safe range.
+        canonical_json_encode(&self.to_value())?;
         let derived = eval_run_id(&self.run_identity)?;
         if derived != self.eval_run_id {
             return Err(ManifestError::RunIdMismatch {
@@ -316,6 +328,18 @@ impl Manifest {
                 return Err(ManifestError::ResidueIncomplete { field: entry.field });
             }
         }
+        // Residue lists only non-`Keep` rules, one per `(type_name, field)`.
+        let mut classified = BTreeSet::new();
+        for entry in &self.residue {
+            if entry.rule == Rule::Keep
+                || !classified.insert((entry.type_name.as_str(), entry.field.as_str()))
+            {
+                return Err(ManifestError::ResidueContradiction {
+                    type_name: entry.type_name.clone(),
+                    field: entry.field.clone(),
+                });
+            }
+        }
         let ids: BTreeSet<&str> = self.sample_ids.iter().map(String::as_str).collect();
         let ordered: BTreeSet<&str> = self.sample_order.iter().map(String::as_str).collect();
         if ids.len() != self.sample_ids.len()
@@ -325,21 +349,25 @@ impl Manifest {
             return Err(ManifestError::SampleOrderNotAPermutation);
         }
         let mut digests = vec![
-            ("result_digest", &self.result_digest),
-            ("witness_digest", &self.witness_digest),
-            ("tokenizer_profile.digest", &self.tokenizer_profile.digest),
+            ("result_digest".to_string(), &self.result_digest),
+            ("witness_digest".to_string(), &self.witness_digest),
+            (
+                "tokenizer_profile.digest".to_string(),
+                &self.tokenizer_profile.digest,
+            ),
         ];
         if let Attestation::Signed {
             signature_digest, ..
         } = &self.attestation
         {
-            digests.push(("attestation.signature_digest", signature_digest));
+            digests.push(("attestation.signature_digest".to_string(), signature_digest));
+        }
+        for (index, prior) in self.retry_lineage.iter().enumerate() {
+            digests.push((format!("retry_lineage[{index}]"), prior));
         }
         for (field, digest) in digests {
             if !is_lower_hex(digest, 64) {
-                return Err(ManifestError::MalformedDigest {
-                    field: field.to_string(),
-                });
+                return Err(ManifestError::MalformedDigest { field });
             }
         }
         for (arm, rates) in &self.arm_rates {
@@ -347,12 +375,51 @@ impl Manifest {
                 ("miss_rate", &rates.miss_rate),
                 ("refusal_rate", &rates.refusal_rate),
             ] {
+                let field = format!("arm_rates[{arm}].{field}");
                 if !is_canonical_decimal(rate) {
                     return Err(ManifestError::MalformedDecimal {
-                        field: format!("arm_rates[{arm}].{field}"),
+                        field,
                         value: rate.clone(),
                     });
                 }
+                // Canonical, so within [0, 1] means exactly `0`, `1`, or `0.<digits>`.
+                if rate != "1" && !rate.starts_with('0') {
+                    return Err(ManifestError::RateOutOfRange {
+                        field,
+                        value: rate.clone(),
+                    });
+                }
+            }
+        }
+        let versions = &self.component_versions;
+        let signer = match &self.attestation {
+            Attestation::Signed { signer, .. } => signer,
+            Attestation::None => "-",
+        };
+        for (field, text) in [
+            (
+                "component_versions.event_schema",
+                versions.event_schema.as_str(),
+            ),
+            ("component_versions.reducer", &versions.reducer),
+            ("component_versions.oracles", &versions.oracles),
+            (
+                "component_versions.execution_image",
+                &versions.execution_image,
+            ),
+            ("component_versions.task_corpus", &versions.task_corpus),
+            ("component_versions.judge", &versions.judge),
+            ("tokenizer_profile.name", &self.tokenizer_profile.name),
+            (
+                "tokenizer_profile.revision",
+                &self.tokenizer_profile.revision,
+            ),
+            ("attestation.signer", signer),
+        ] {
+            if text.is_empty() {
+                return Err(ManifestError::EmptyComponent {
+                    field: field.to_string(),
+                });
             }
         }
         Ok(())

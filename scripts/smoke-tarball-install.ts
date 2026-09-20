@@ -148,18 +148,27 @@ const PREDECESSOR_TOKENS = new RegExp(
 // Exits non-zero unless each package exposes the entry point its host loads.
 // OpenCode reads `{ id, server }` from the root export and `{ id, tui }` from `./tui`.
 // Pi calls the default export with its extension API.
+// The installed payload must expose a tokenizer that returns a positive safe integer.
 const IMPORT_PROBE = [
     'const a = await import("@eidnara/opencode");',
     'const t = await import("@eidnara/opencode/tui");',
     'const p = await import("@eidnara/pi");',
+    'const n = await import("@eidnara/shm-native");',
     "const problems = [];",
     'if (typeof a.default?.id !== "string" || typeof a.default?.server !== "function")',
     '    problems.push("@eidnara/opencode default lacks { id, server }");',
     'if (typeof t.default?.id !== "string" || typeof t.default?.tui !== "function")',
     '    problems.push("@eidnara/opencode/tui default lacks { id, tui }");',
     'if (typeof p.default !== "function") problems.push("@eidnara/pi default is not callable");',
+    "try {",
+    '    const count = n.estimateTokens("hello world");',
+    "    if (!Number.isSafeInteger(count) || count < 1)",
+    '        problems.push(`@eidnara/shm-native estimateTokens returned ${String(count)}`);',
+    "} catch (error) {",
+    '    problems.push(`@eidnara/shm-native estimateTokens threw: ${error instanceof Error ? error.message : String(error)}`);',
+    "}",
     'if (problems.length > 0) { console.error(problems.join("\\n")); process.exit(1); }',
-    'console.log("opencode, opencode/tui, pi");',
+    'console.log("opencode, opencode/tui, pi, shm-native tokenizer");',
 ].join("\n");
 const START_TIMEOUT_MS = 180_000;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -407,13 +416,18 @@ function daemon(
         cwd: project,
         timeoutMs,
     });
-    let parsed: Record<string, unknown> = {};
+    return { result, parsed: parseJson(result.stdout) };
+}
+
+function parseJson(text: string): Record<string, unknown> {
     try {
-        parsed = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(text.trim());
+        return typeof parsed === "object" && parsed !== null
+            ? (parsed as Record<string, unknown>)
+            : {};
     } catch {
-        parsed = {};
+        return {};
     }
-    return { result, parsed };
 }
 
 function assertDaemon(
@@ -672,6 +686,48 @@ function main(): void {
             state: "running",
             command: "status",
         });
+        // The shipped review commands reach the running daemon through the
+        // installed transport.
+        const reviewStatus = run([cli, "review", "status", "--json"], {
+            cwd: project,
+        });
+        const reviewStatusJson = parseJson(reviewStatus.stdout);
+        const reviewCounters = reviewStatusJson.counters;
+        const reviewState = reviewStatusJson.memory_reviewer_state;
+        assert(
+            reviewStatus.code === 0 &&
+                reviewStatusJson.kind === "status" &&
+                typeof reviewState === "string" &&
+                ["ready", "starting", "unavailable"].includes(reviewState) &&
+                typeof reviewCounters === "object" &&
+                reviewCounters !== null,
+            "eidnara review status --json exits 0 with kind=status and a reported store state",
+            describe(reviewStatus),
+        );
+        assert(
+            reviewState !== "ready" ||
+                Object.values(reviewCounters as Record<string, unknown>).some(
+                    (value) => typeof value === "number",
+                ),
+            "eidnara review status --json reports at least one counter for a ready store",
+            describe(reviewStatus),
+        );
+        for (const [action, argv] of [
+            ["list", ["review", "list", "--project", project, "--json"]],
+            [
+                "show",
+                ["review", "show", "e".repeat(64), "--project", project, "--json"],
+            ],
+        ] as const) {
+            const result = run([cli, ...argv], { cwd: project });
+            const parsed = parseJson(result.stdout);
+            assert(
+                result.code === 1 &&
+                    (parsed.kind === "terminal" || parsed.kind === "state"),
+                `eidnara review ${action} --json on an unbound project exits 1 with a decoded refusal`,
+                describe(result),
+            );
+        }
         const stop = daemon(cli, project, "stop");
         stopped = stop.result.code === 0;
         assertDaemon("stop", stop, 0, {

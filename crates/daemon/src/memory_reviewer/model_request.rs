@@ -24,7 +24,11 @@ use tokio_rustls::client::TlsStream;
 use zeroize::Zeroizing;
 
 use super::broker::check_render;
-use super::model_response::{DecodeError, StopReason, decode_message};
+pub use memory_store::memory_reviewer_ledger::ResponseAllowance;
+
+use super::model_response::{
+    DecodeError, MAX_ASSISTANT_TEXT_BYTES, StopReason, decode_message_within,
+};
 
 pub const ANTHROPIC_HOST: &str = "api.anthropic.com";
 pub const ANTHROPIC_PORT: u16 = 443;
@@ -304,13 +308,24 @@ pub struct AssistantText {
     pub accounting: ResponseAccounting,
 }
 
-/// Bytes a response cost, kept apart: the parsed head (header names and values plus any non-canonical reason phrase, not delimiters), the body the transport delivered, and what the parser allocated for itself.
+/// Bytes a response cost, kept apart: the parsed head (header names and values plus any non-canonical reason phrase, not delimiters), the body the transport delivered, the assistant text the decoder measured, and what the parser allocated for itself. `transport_bytes` and `decoded_text_bytes` are the two the job's cumulative ceilings charge: exact on success, and the whole remaining bound on an overflow refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResponseAccounting {
     pub head_bytes: usize,
     pub transport_bytes: usize,
+    pub decoded_text_bytes: usize,
     pub parser_scratch_bytes: usize,
 }
+
+// The per-response constants are the per-job ceilings the ledger enforces across attempts; a response may never consume more than the job has left.
+const _: () = assert!(
+    MAX_RAW_RESPONSE_BYTES as u64
+        == memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES
+);
+const _: () = assert!(
+    MAX_ASSISTANT_TEXT_BYTES as u64
+        == memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES
+);
 
 #[derive(Debug, Clone)]
 pub struct Sender {
@@ -447,15 +462,23 @@ impl std::fmt::Debug for InFlight {
 }
 
 impl InFlight {
-    /// Polls the connection, so the request is written, and reads the one response by `deadline`, clamped to [`Timing::completion_budget`] for the request's `max_tokens`, with at most [`Timing::frame_idle`] between body frames. The connection is dropped afterwards whatever the outcome; there is no second attempt.
-    pub async fn complete(self, deadline: Instant) -> Result<AssistantText, SendError> {
+    /// Polls the connection, so the request is written, and reads the one response by `deadline`, clamped to [`Timing::completion_budget`] for the request's `max_tokens`, with at most [`Timing::frame_idle`] between body frames. The connection is dropped afterwards whatever the outcome; there is no second attempt. The body is charged against `allowance` chunk by chunk before it is kept and the text against it before it is allocated; `accounting` is the caller's and holds what was consumed whether the exchange completes, refuses, times out, or is dropped.
+    pub async fn complete(
+        self,
+        deadline: Instant,
+        allowance: ResponseAllowance,
+        accounting: &mut ResponseAccounting,
+    ) -> Result<AssistantText, SendError> {
         let InFlight {
             mut connection,
             mut response,
             timing,
             max_tokens,
         } = self;
-        let mut accounting = ResponseAccounting::default();
+        let raw_bound = usize::try_from(allowance.raw_response_bytes)
+            .unwrap_or(usize::MAX)
+            .min(MAX_RAW_RESPONSE_BYTES);
+        let text_bound = usize::try_from(allowance.decoded_text_bytes).unwrap_or(usize::MAX);
         let exchange = async {
             // The connection may finish in the same poll that delivers the response; a finished connection is never polled again, and the response it already delivered is taken from the future.
             let mut connection_done = false;
@@ -499,13 +522,15 @@ impl InFlight {
             {
                 return Err(SendError::Compressed);
             }
+            // A declared length past the bound refuses without reading the body; the bound counts as consumed, since nothing durable can say less was.
             if let Some(length) = head
                 .headers
                 .get(header::CONTENT_LENGTH)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse::<usize>().ok())
-                && length > MAX_RAW_RESPONSE_BYTES
+                && length > raw_bound
             {
+                accounting.transport_bytes = raw_bound;
                 return Err(SendError::ResponseTooLarge);
             }
             let bytes = collect_body(
@@ -513,7 +538,8 @@ impl InFlight {
                 &mut connection,
                 connection_done,
                 timing.frame_idle,
-                &mut accounting,
+                raw_bound,
+                &mut *accounting,
             )
             .await?;
             if head.status != StatusCode::OK {
@@ -531,14 +557,16 @@ impl InFlight {
             if !json {
                 return Err(SendError::ContentType);
             }
-            let decoded = decode_message(&bytes).map_err(SendError::Decode)?;
+            let (decoded, text_bytes) = decode_message_within(&bytes, text_bound);
+            accounting.decoded_text_bytes = text_bytes;
+            let decoded = decoded.map_err(SendError::Decode)?;
             accounting.parser_scratch_bytes = decoded.scratch_bytes;
             check_render(decoded.text.as_bytes(), None).map_err(|_| SendError::EgressCheck)?;
             Ok(AssistantText {
                 text: decoded.text,
                 stop_reason: decoded.stop_reason,
                 model: decoded.model,
-                accounting,
+                accounting: *accounting,
             })
         };
         tokio::time::timeout_at(
@@ -550,12 +578,13 @@ impl InFlight {
     }
 }
 
-/// Reads every body frame while keeping the connection polled, charging each chunk against [`MAX_RAW_RESPONSE_BYTES`] before it is kept. The bytes of a body that overflows are not retained. Once the connection has finished, cleanly or not, it is never polled again; frames it already delivered are still drained, and a body cut short reports itself through its own frame error.
+/// Reads every body frame while keeping the connection polled, charging each chunk against `raw_bound` before it is kept. The bytes of a body that overflows are not retained, and the overflow is recorded as the whole bound consumed. Once the connection has finished, cleanly or not, it is never polled again; frames it already delivered are still drained, and a body cut short reports itself through its own frame error.
 async fn collect_body(
     mut body: Incoming,
     connection: &mut Connection<Transport, Body>,
     mut connection_done: bool,
     frame_idle: Duration,
+    raw_bound: usize,
     accounting: &mut ResponseAccounting,
 ) -> Result<Vec<u8>, SendError> {
     let mut bytes = Vec::new();
@@ -581,13 +610,15 @@ async fn collect_body(
         };
         let frame = frame.map_err(|_| SendError::Transport)?;
         frames += 1;
+        // A body in more frames than admitted is refused like one over the byte bound, and charged the same way: nothing durable says it was shorter.
         if frames > MAX_RESPONSE_FRAMES {
+            accounting.transport_bytes = raw_bound;
             return Err(SendError::ResponseTooLarge);
         }
         if let Some(chunk) = frame.data_ref() {
             let charged = accounting.transport_bytes.saturating_add(chunk.len());
-            if charged > MAX_RAW_RESPONSE_BYTES {
-                accounting.transport_bytes = MAX_RAW_RESPONSE_BYTES;
+            if charged > raw_bound {
+                accounting.transport_bytes = raw_bound;
                 return Err(SendError::ResponseTooLarge);
             }
             accounting.transport_bytes = charged;

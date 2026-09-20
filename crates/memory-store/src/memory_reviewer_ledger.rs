@@ -33,6 +33,10 @@ pub const MEMORY_REVIEWER_ATTEMPT_MAX_MS: i64 = 30_000;
 /// Committed attempts per job across every generation.
 pub const MEMORY_REVIEWER_MAX_ATTEMPTS: i64 = 4;
 pub const MEMORY_REVIEWER_MAX_REQUEST_BYTES: u64 = 256 * 1024;
+/// Raw provider response bytes one job may consume across every round, attempt, and generation.
+pub const MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES: u64 = 1024 * 1024;
+/// Decoded assistant text bytes one job may consume across every round, attempt, and generation.
+pub const MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES: u64 = 64 * 1024;
 /// Byte bounds of the marker's caller text. The schema bounds the same columns in characters; these keep every permanent marker inside the receipt charge whatever the encoding.
 pub const MAX_PROVIDER_BYTES: usize = 128;
 pub const MAX_MODEL_BYTES: usize = 256;
@@ -258,6 +262,8 @@ pub struct MemoryReviewerReceipt {
     pub abstained_reason: Option<AbstainReason>,
     pub selected: Option<(u64, ResultSelection)>,
     pub created_at_ms: i64,
+    /// The instant the receipt completed, `None` while in progress. A completed receipt is never rewritten, so this is the selection time a selected result is judged against.
+    pub completed_at_ms: Option<i64>,
 }
 
 /// The KTD7 marker tuple a caller binds before disclosure.
@@ -271,6 +277,34 @@ pub struct AttemptMarker {
     pub policy_union_digest: String,
 }
 
+/// Provider response bytes one attempt consumed, recorded once with its terminal. `None` in either field means the consumption is unknown, and the attempt counts as having spent the whole per-job ceiling for that field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResponseUsage {
+    pub raw_response_bytes: Option<u64>,
+    pub decoded_text_bytes: Option<u64>,
+}
+
+impl ResponseUsage {
+    pub const NONE: Self = Self {
+        raw_response_bytes: Some(0),
+        decoded_text_bytes: Some(0),
+    };
+}
+
+/// What a job may still consume of its response ceilings when an attempt is committed: the ceilings minus every earlier attempt's usage, with an unterminated, `unknown`, or unrecorded attempt counted as the whole ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseAllowance {
+    pub raw_response_bytes: u64,
+    pub decoded_text_bytes: u64,
+}
+
+impl ResponseAllowance {
+    pub const FULL: Self = Self {
+        raw_response_bytes: MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES,
+        decoded_text_bytes: MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES,
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryReviewerAttempt {
     pub generation: u64,
@@ -279,6 +313,7 @@ pub struct MemoryReviewerAttempt {
     pub attempt_deadline_ms: i64,
     pub committed_at_ms: i64,
     pub terminal: Option<(MemoryReviewerAttemptTerminal, i64)>,
+    pub response: ResponseUsage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +371,8 @@ pub enum DispatchOutcome<H> {
     Handed {
         attempt_index: u32,
         attempt_deadline_ms: i64,
+        /// What the response may still consume; the collector and decoder charge against it.
+        allowance: ResponseAllowance,
         handoff: H,
         release: Result<(), MemoryStoreError>,
     },
@@ -372,7 +409,7 @@ const RECEIPT_COLUMNS: &str =
      authority_generation, state, generation, claim_id, run_deadline_ms, execution_cutoff_ms,
      cancelled_at_ms, terminal_kind, selected_generation, selected_candidate_id,
      selected_payload_digest, created_at_ms, authority_context_store, abstained_reason,
-     selected_project_digest";
+     selected_project_digest, updated_at_ms";
 
 fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryReviewerReceipt> {
     let invalid = |column: usize, value: String| {
@@ -428,6 +465,7 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryReviewerR
         abstained_reason,
         selected,
         created_at_ms: row.get(15)?,
+        completed_at_ms: terminal.is_some().then(|| row.get(19)).transpose()?,
     })
 }
 
@@ -682,7 +720,7 @@ pub fn commit_memory_reviewer_attempt_in_tx(
     kernel_incarnation_id: &str,
     marker: &AttemptMarker,
     now_ms: i64,
-) -> rusqlite::Result<MemoryReviewerAttempt> {
+) -> rusqlite::Result<CommittedAttempt> {
     let generation = generation_param(generation).map_err(refuse)?;
     if !is_lower_hex(&marker.body_digest, 64)
         || !is_lower_hex(&marker.policy_union_digest, 64)
@@ -734,7 +772,12 @@ pub fn commit_memory_reviewer_attempt_in_tx(
     if now_ms < ledger_clock_floor(conn, project, causal_identity)? {
         return Err(refuse(MemoryReviewerLedgerRefusal::ClockBehind));
     }
-    // The allowance and the clock floor are evaluated inside the statement: at most four markers across every generation, and no marker dated before an earlier commit or terminal.
+    // A job whose earlier attempts consumed either response ceiling sends nothing more: the refusal is read as exhaustion before any marker is charged.
+    let allowance = response_allowance(conn, project, causal_identity)?;
+    if allowance.raw_response_bytes == 0 || allowance.decoded_text_bytes == 0 {
+        return Err(refuse(MemoryReviewerLedgerRefusal::AttemptsExhausted));
+    }
+    // The attempt count and the clock floor are evaluated inside the statement: at most four markers across every generation, and no marker dated before an earlier commit or terminal.
     let attempt_index: Option<i64> = conn
         .query_row(
             "INSERT INTO memory_reviewer_attempts (
@@ -768,13 +811,52 @@ pub fn commit_memory_reviewer_attempt_in_tx(
         .optional()?;
     let attempt_index =
         attempt_index.ok_or_else(|| refuse(MemoryReviewerLedgerRefusal::AttemptsExhausted))?;
-    Ok(MemoryReviewerAttempt {
-        generation: receipt.generation,
-        attempt_index: u32::try_from(attempt_index).unwrap_or(u32::MAX),
-        marker: marker.clone(),
-        attempt_deadline_ms,
-        committed_at_ms: now_ms,
-        terminal: None,
+    Ok(CommittedAttempt {
+        attempt: MemoryReviewerAttempt {
+            generation: receipt.generation,
+            attempt_index: u32::try_from(attempt_index).unwrap_or(u32::MAX),
+            marker: marker.clone(),
+            attempt_deadline_ms,
+            committed_at_ms: now_ms,
+            terminal: None,
+            response: ResponseUsage::default(),
+        },
+        allowance,
+    })
+}
+
+/// A committed marker with the allowance its response travels under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedAttempt {
+    pub attempt: MemoryReviewerAttempt,
+    pub allowance: ResponseAllowance,
+}
+
+/// The ceilings minus every recorded consumption under the job, across every generation. A row that is unterminated or `unknown`, or whose byte column is NULL, consumed the whole ceiling: nothing durable says it did not.
+fn response_allowance(
+    conn: &GuardedConn<'_>,
+    project: &str,
+    causal_identity: &str,
+) -> rusqlite::Result<ResponseAllowance> {
+    let (raw, text): (i64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN terminal_kind IS NULL OR terminal_kind = 'unknown' OR raw_response_bytes IS NULL
+                                  THEN ?3 ELSE MIN(raw_response_bytes, ?3) END), 0),
+                COALESCE(SUM(CASE WHEN terminal_kind IS NULL OR terminal_kind = 'unknown' OR decoded_text_bytes IS NULL
+                                  THEN ?4 ELSE MIN(decoded_text_bytes, ?4) END), 0)
+           FROM memory_reviewer_attempts WHERE project = ?1 AND causal_identity = ?2",
+        params![
+            project,
+            causal_identity,
+            i64::try_from(MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES).unwrap_or(i64::MAX),
+            i64::try_from(MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES).unwrap_or(i64::MAX),
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(ResponseAllowance {
+        raw_response_bytes: MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES
+            .saturating_sub(u64::try_from(raw).unwrap_or(u64::MAX)),
+        decoded_text_bytes: MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES
+            .saturating_sub(u64::try_from(text).unwrap_or(u64::MAX)),
     })
 }
 
@@ -788,6 +870,7 @@ pub fn finish_memory_reviewer_attempt_in_tx(
     claim_id: &str,
     attempt_index: u32,
     terminal: MemoryReviewerAttemptTerminal,
+    usage: ResponseUsage,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
     if terminal == MemoryReviewerAttemptTerminal::NotDispatched {
@@ -824,10 +907,12 @@ pub fn finish_memory_reviewer_attempt_in_tx(
         claim_id,
         attempt_index,
         terminal,
+        usage,
         now_ms,
     )
 }
 
+/// Writes the terminal and the response usage in one statement, so a crash leaves either both or neither, and an unterminated row is read as fully consumed.
 #[allow(clippy::too_many_arguments)]
 fn record_attempt_terminal_in_tx(
     conn: &GuardedConn<'_>,
@@ -837,10 +922,23 @@ fn record_attempt_terminal_in_tx(
     claim_id: &str,
     attempt_index: u32,
     terminal: MemoryReviewerAttemptTerminal,
+    usage: ResponseUsage,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
+    let column = |bytes: Option<u64>, ceiling: u64| -> rusqlite::Result<Option<i64>> {
+        bytes
+            .map(|bytes| {
+                if bytes > ceiling {
+                    return Err(refuse(MemoryReviewerLedgerRefusal::InvalidRequest));
+                }
+                i64::try_from(bytes)
+                    .map_err(|_| refuse(MemoryReviewerLedgerRefusal::InvalidRequest))
+            })
+            .transpose()
+    };
     let changed = conn.execute(
-        "UPDATE memory_reviewer_attempts SET terminal_kind = ?6, terminal_at_ms = ?7
+        "UPDATE memory_reviewer_attempts
+            SET terminal_kind = ?6, terminal_at_ms = ?7, raw_response_bytes = ?8, decoded_text_bytes = ?9
           WHERE project = ?1 AND causal_identity = ?2 AND generation = ?3 AND attempt_index = ?5
             AND terminal_kind IS NULL
             AND EXISTS(SELECT 1 FROM memory_reviewer_receipts r
@@ -853,7 +951,9 @@ fn record_attempt_terminal_in_tx(
             claim_id,
             i64::from(attempt_index),
             terminal.as_str(),
-            now_ms
+            now_ms,
+            column(usage.raw_response_bytes, MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES)?,
+            column(usage.decoded_text_bytes, MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES)?,
         ],
     )?;
     if changed == 0 {
@@ -871,7 +971,7 @@ pub fn list_memory_reviewer_attempts_in_tx(
     let mut statement = conn.prepare_cached(
         "SELECT generation, attempt_index, body_digest, request_bytes, provider, model,
                 credential_id, policy_union_digest, attempt_deadline_ms, committed_at_ms,
-                terminal_kind, terminal_at_ms
+                terminal_kind, terminal_at_ms, raw_response_bytes, decoded_text_bytes
            FROM memory_reviewer_attempts WHERE project = ?1 AND causal_identity = ?2
           ORDER BY generation, attempt_index",
     )?;
@@ -885,6 +985,15 @@ pub fn list_memory_reviewer_attempts_in_tx(
             })
             .transpose()?;
         let terminal_at: Option<i64> = row.get(11)?;
+        let bytes = |index: usize| -> rusqlite::Result<Option<u64>> {
+            Ok(row
+                .get::<_, Option<i64>>(index)?
+                .and_then(|bytes| u64::try_from(bytes).ok()))
+        };
+        let response = ResponseUsage {
+            raw_response_bytes: bytes(12)?,
+            decoded_text_bytes: bytes(13)?,
+        };
         Ok(MemoryReviewerAttempt {
             generation: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
             attempt_index: u32::try_from(row.get::<_, i64>(1)?).unwrap_or(u32::MAX),
@@ -899,6 +1008,7 @@ pub fn list_memory_reviewer_attempts_in_tx(
             attempt_deadline_ms: row.get(8)?,
             committed_at_ms: row.get(9)?,
             terminal: terminal_kind.zip(terminal_at),
+            response,
         })
     })?;
     rows.collect()
@@ -1143,7 +1253,8 @@ impl MemoryStore {
                 .map(WriteDisposition::Applied)
                 .inspect_err(|error| refusal.set(refusal_of(error)))
             },
-            |conn, attempt| {
+            |conn, committed| {
+                let attempt = &committed.attempt;
                 // The recheck never fails the operation: an unreadable ledger after commit is a withheld handoff, not a lost marker.
                 let live = now();
                 let recheck = (|| -> rusqlite::Result<Option<MemoryReviewerLedgerRefusal>> {
@@ -1198,7 +1309,7 @@ impl MemoryStore {
             (Err(error), None) => return Err(MemoryReviewerLedgerError::Store(error)),
             (
                 Ok((
-                    attempt,
+                    committed,
                     HandoffOutcome::Handed {
                         handed: Ok(handoff),
                         release,
@@ -1207,25 +1318,27 @@ impl MemoryStore {
                 _,
             ) => {
                 return Ok(DispatchOutcome::Handed {
-                    attempt_index: attempt.attempt_index,
-                    attempt_deadline_ms: attempt.attempt_deadline_ms,
+                    attempt_index: committed.attempt.attempt_index,
+                    attempt_deadline_ms: committed.attempt.attempt_deadline_ms,
+                    allowance: committed.allowance,
                     handoff,
                     release: release.map_err(MemoryStoreError::from),
                 });
             }
             (
                 Ok((
-                    attempt,
+                    committed,
                     HandoffOutcome::Handed {
                         handed: Err(reason),
                         ..
                     },
                 )),
                 _,
-            ) => (attempt, reason),
-            (Ok((attempt, HandoffOutcome::NotRun(_))), _) => {
-                (attempt, MemoryReviewerLedgerRefusal::RecheckUnavailable)
-            }
+            ) => (committed.attempt, reason),
+            (Ok((committed, HandoffOutcome::NotRun(_))), _) => (
+                committed.attempt,
+                MemoryReviewerLedgerRefusal::RecheckUnavailable,
+            ),
         };
         let finished = self
             .ledger_transaction(project, "finish-attempt", causal_identity, |conn| {
@@ -1239,6 +1352,7 @@ impl MemoryStore {
                     claim_id,
                     attempt.attempt_index,
                     MemoryReviewerAttemptTerminal::NotDispatched,
+                    ResponseUsage::NONE,
                     now().max(floor),
                 )
                 .map(WriteDisposition::Applied)
@@ -1261,6 +1375,7 @@ impl MemoryStore {
         claim_id: &str,
         attempt_index: u32,
         terminal: MemoryReviewerAttemptTerminal,
+        usage: ResponseUsage,
         now_ms: i64,
     ) -> Result<(), MemoryReviewerLedgerError> {
         self.ledger_transaction(project, "finish-attempt", causal_identity, |conn| {
@@ -1272,6 +1387,7 @@ impl MemoryStore {
                 claim_id,
                 attempt_index,
                 terminal,
+                usage,
                 now_ms,
             )
             .map(WriteDisposition::Applied)
@@ -1507,6 +1623,66 @@ impl MemoryStore {
         check_project(project)?;
         self.inner
             .with_conn(|conn| list_memory_reviewer_attempts_in_tx(conn, project, causal_identity))
+            .map_err(Into::into)
+    }
+
+    /// Every `(project_digest, candidate_id, generation)` a completed receipt of the live store incarnation selects among `candidate_ids`, ordered by project and causal identity. The caller's list bounds the answer, so a reconciliation pass carries at most one triple per live hold rather than every selection the ledger has recorded. Receipts of a prior incarnation are excluded.
+    pub fn selected_memory_reviewer_results<'a>(
+        &self,
+        candidate_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<(String, String, u64)>, MemoryStoreError> {
+        let candidate_ids = candidate_ids.into_iter().collect::<Vec<_>>();
+        self.inner
+            .with_conn(|conn| {
+                let candidate_ids = crate::json_id_array(candidate_ids.iter().copied())?;
+                let mut statement = conn.prepare_cached(
+                    "SELECT selected_project_digest, selected_candidate_id, selected_generation
+                       FROM memory_reviewer_receipts
+                      WHERE state = 'complete' AND terminal_kind = 'complete'
+                        AND selected_candidate_id IN (SELECT value FROM json_each(?1))
+                        AND database_incarnation_id = (SELECT database_incarnation_id
+                                                       FROM memory_reviewer_store_identity WHERE id = 0)
+                      ORDER BY project, causal_identity",
+                )?;
+                let rows = statement.query_map([candidate_ids], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                    ))
+                })?;
+                rows.collect()
+            })
+            .map_err(Into::into)
+    }
+
+    /// Every in-progress receipt as `(causal_identity, generation)`. These are the receipts that may still select a private result, so their derived candidate ids keep review holds alive; the list is unbounded because omitting one would release a hold a live settlement still needs, and every in-progress receipt holds a pending job under the store's own job bounds.
+    pub fn in_progress_memory_reviewer_receipts(
+        &self,
+    ) -> Result<Vec<(String, u64)>, MemoryStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .in_progress_receipts_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(storage::StoreError::Backend(
+                "injected in-progress receipt listing failure".to_string(),
+            )));
+        }
+        self.inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare_cached(
+                    "SELECT causal_identity, generation FROM memory_reviewer_receipts
+                      WHERE state = 'in_progress'",
+                )?;
+                let rows = statement.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    ))
+                })?;
+                rows.collect()
+            })
             .map_err(Into::into)
     }
 }

@@ -139,6 +139,7 @@ fn subject_spec(run: &str, candidate: &str, recorded_at: i64) -> ReviewStagingSp
         payload: subject("the build uses bun"),
         recorded_at,
         queue_deadline_at: recorded_at + DAY_MS,
+        dependencies: None,
     }
 }
 
@@ -204,6 +205,23 @@ fn proposal_spec(job_id: &str, generation: u64, proposal: ReviewProposal) -> Rev
         payload: ReviewPayload::Proposal(Box::new(proposal)),
         recorded_at,
         queue_deadline_at: recorded_at + DAY_MS,
+        dependencies: Some(dependencies(generation)),
+    }
+}
+
+/// A well-formed dependency record for `generation`; its union is the empty union, which is enough for the staging rules these tests exercise.
+fn dependencies(generation: u64) -> kernel::ReviewDependencies {
+    let union = context_core::memory_reviewer_policy_union::PolicyUnion::new()
+        .encode()
+        .unwrap();
+    kernel::ReviewDependencies {
+        version: kernel::REVIEW_DEPENDENCIES_VERSION,
+        union_canonical: union.canonical,
+        union_digest: union.digest,
+        generation,
+        attempt_index: 0,
+        body_digest: "b".repeat(64),
+        marker_union_digest: "e".repeat(64),
     }
 }
 
@@ -835,6 +853,62 @@ fn schema_illegal_proposals_are_refused_at_decode() {
 
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
+    // The dependency record is required on a proposal row, refused on a subject row, and must be well formed and of the owner's generation.
+    let retain = || proposal(ProposalAction::Retain, memory_target(), None);
+    let without_record = ReviewStagingSpec {
+        dependencies: None,
+        ..proposal_spec("job-0", 1, retain())
+    };
+    let subject_with_record = ReviewStagingSpec {
+        dependencies: Some(dependencies(1)),
+        ..subject_spec("run-0", "subject-0", now_ms())
+    };
+    let other_generation = ReviewStagingSpec {
+        dependencies: Some(dependencies(2)),
+        ..proposal_spec("job-0", 1, retain())
+    };
+    let other_version = ReviewStagingSpec {
+        dependencies: Some(kernel::ReviewDependencies {
+            version: kernel::REVIEW_DEPENDENCIES_VERSION + 1,
+            ..dependencies(1)
+        }),
+        ..proposal_spec("job-0", 1, retain())
+    };
+    let empty_union = ReviewStagingSpec {
+        dependencies: Some(kernel::ReviewDependencies {
+            union_canonical: String::new(),
+            ..dependencies(1)
+        }),
+        ..proposal_spec("job-0", 1, retain())
+    };
+    let oversized_union = ReviewStagingSpec {
+        dependencies: Some(kernel::ReviewDependencies {
+            union_canonical: "x".repeat(kernel::MAX_REVIEW_DEPENDENCIES_BYTES + 1),
+            ..dependencies(1)
+        }),
+        ..proposal_spec("job-0", 1, retain())
+    };
+    let short_digest = ReviewStagingSpec {
+        dependencies: Some(kernel::ReviewDependencies {
+            union_digest: "zz".to_string(),
+            ..dependencies(1)
+        }),
+        ..proposal_spec("job-0", 1, retain())
+    };
+    for spec in [
+        without_record,
+        subject_with_record,
+        other_generation,
+        other_version,
+        empty_union,
+        oversized_union,
+        short_digest,
+    ] {
+        assert_eq!(
+            stage_refusal(store.stage_review_input(spec).unwrap_err()),
+            ReviewStageRefusal::Invalid
+        );
+    }
     let legal = [
         proposal(ProposalAction::Create, staged_target(), Some("text")),
         proposal(ProposalAction::Revise, memory_target(), Some("text")),

@@ -470,7 +470,9 @@ export function verifyPayloadDir(dir: string, manifest: PayloadManifest): void {
     walk("payload");
 }
 
-/** `packages/shm-native/index.ts` performs the same two probes at runtime and refuses `"debug"` and any target other than `PAYLOAD_TARGET.nativeTarget`. Callers pass an absolute path: `require` resolves a relative one against this module's directory, not the working directory. */
+const TOKENIZER_PROBE_TEXT = "hello world";
+
+/** The probe invokes `estimateTokens` while loading the addon so an unavailable or invalid tokenizer fails here rather than at the plugins' first token count. `addonPath` must be absolute because `require` resolves relative paths from this module's directory. */
 export function probeAddon(addonPath: string): {
     profile: string;
     target: string;
@@ -483,6 +485,24 @@ export function probeAddon(addonPath: string): {
     ) {
         fail(
             `addon ${addonPath} exports no buildProfile and buildTarget functions`,
+        );
+    }
+    if (typeof module.estimateTokens !== "function") {
+        fail(`addon ${addonPath} exports no estimateTokens function`);
+    }
+    let count: unknown;
+    try {
+        count = (module.estimateTokens as (text: string) => unknown)(
+            TOKENIZER_PROBE_TEXT,
+        );
+    } catch (error) {
+        fail(
+            `addon ${addonPath} estimateTokens threw for ${JSON.stringify(TOKENIZER_PROBE_TEXT)}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    }
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
+        fail(
+            `addon ${addonPath} estimateTokens returned ${String(count)} for ${JSON.stringify(TOKENIZER_PROBE_TEXT)}; expected a positive integer`,
         );
     }
     return {

@@ -255,6 +255,88 @@ async fn review_operations_are_disabled_without_module_authority_and_list_and_re
     }
 }
 
+/// An observational route (harness `cli`) reads exactly what an ordinary route on the same project reads, byte for byte, and its malformed bodies keep the shared refusal shapes.
+#[tokio::test]
+async fn an_observational_route_reads_the_same_outcomes_as_an_ordinary_route() {
+    let daemon = KernelDaemon::start().await;
+    let root = daemon.project().to_path_buf();
+    let store = daemon
+        .memory_store()
+        .expect("the daemon installed its store");
+    let kernel = daemon.store();
+    let generation = activate_module_authority(&store, &root);
+    commit_memory_domain(&kernel);
+    let kernel_incarnation = kernel_incarnation(&kernel);
+    let now = now_ms();
+    let digest = daemon.project_digest();
+    let published = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        1,
+        now,
+    );
+    publish(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        &published,
+        now,
+    );
+    let observer = daemon.bind_another(9, daemon::OBSERVATIONAL_HARNESS).await;
+    let requests = [
+        envelope("review.list", &root, json!({ "limit": 1 })),
+        envelope(
+            "review.read",
+            &root,
+            json!({ "causal_identity": published.job.causal_identity }),
+        ),
+    ];
+    for request in requests {
+        let ordinary = daemon.call(request.clone()).await;
+        let observed = daemon.call_on(observer, request.clone()).await;
+        assert_eq!(observed, ordinary, "{request}");
+    }
+    let read = daemon
+        .call_on(
+            observer,
+            envelope(
+                "review.read",
+                &root,
+                json!({ "causal_identity": published.job.causal_identity }),
+            ),
+        )
+        .await;
+    assert_eq!(read["kind"], json!("proposal"), "{read}");
+    // Malformed bodies keep the shared transport refusal through the observational route.
+    for request in [
+        envelope(
+            "review.read",
+            &root,
+            json!({ "causal_identity": "not-a-digest" }),
+        ),
+        envelope("review.list", &root, json!({ "limit": 1, "page": 2 })),
+    ] {
+        let ordinary = daemon.outcome(request.clone()).await;
+        let observed = daemon.outcome_on(observer, request.clone()).await;
+        let (
+            daemon::dispatch::PreparedOutcome::Error { code, message },
+            daemon::dispatch::PreparedOutcome::Error {
+                code: observed_code,
+                message: observed_message,
+            },
+        ) = (&ordinary, &observed)
+        else {
+            panic!("{request}: {ordinary:?} / {observed:?}");
+        };
+        assert_eq!(code, "invalid_params");
+        assert_eq!((code, message), (observed_code, observed_message));
+    }
+}
+
 /// Proposal reads use the digest recorded when the proposal was staged, not the newest bound root's.
 #[tokio::test]
 async fn a_published_proposal_reads_from_every_root_after_a_newer_root_binds() {

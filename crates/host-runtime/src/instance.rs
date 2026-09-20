@@ -6,7 +6,7 @@
 use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use rustix::fd::OwnedFd;
 use rustix::fs::{
@@ -737,11 +737,28 @@ pub(crate) fn write_atomic_owner_only(
 /// Renaming `.eidnara-coordination` externally splits the lifetime fence.
 /// `.eidnara-coordination` must not be renamed externally.
 fn lock_instance(dir: &OwnedFd, dir_path: &Path) -> Result<(), InstanceError> {
-    match flock(dir, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(()),
-        // WOULDBLOCK and AGAIN are one errno on Linux.
-        Err(rustix::io::Errno::WOULDBLOCK) => Err(InstanceError::AlreadyRunning),
-        Err(e) => Err(io_err("flock", dir_path, e)),
+    if flock_nonblocking(
+        dir,
+        dir_path,
+        "flock",
+        FlockOperation::NonBlockingLockExclusive,
+    )? {
+        Ok(())
+    } else {
+        Err(InstanceError::AlreadyRunning)
+    }
+}
+
+fn flock_nonblocking(
+    dir: &OwnedFd,
+    dir_path: &Path,
+    op: &'static str,
+    operation: FlockOperation,
+) -> Result<bool, InstanceError> {
+    match flock(dir, operation) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
+        Err(error) => Err(io_err(op, dir_path, error)),
     }
 }
 
@@ -767,15 +784,11 @@ pub(crate) fn flock_bounded(
     operation: FlockOperation,
 ) -> Result<bool, InstanceError> {
     for attempt in 0..LOCK_RETRY_ATTEMPTS {
-        match flock(dir, operation) {
-            Ok(()) => return Ok(true),
-            // WOULDBLOCK and AGAIN are one errno on Linux.
-            Err(rustix::io::Errno::WOULDBLOCK) => {
-                if attempt + 1 < LOCK_RETRY_ATTEMPTS {
-                    std::thread::sleep(LOCK_RETRY_DELAY);
-                }
-            }
-            Err(e) => return Err(io_err(op, dir_path, e)),
+        if flock_nonblocking(dir, dir_path, op, operation)? {
+            return Ok(true);
+        }
+        if attempt + 1 < LOCK_RETRY_ATTEMPTS {
+            std::thread::sleep(LOCK_RETRY_DELAY);
         }
     }
     Ok(false)
@@ -791,6 +804,23 @@ pub(crate) fn flock_exclusive_bounded(
     } else {
         Err(InstanceError::AlreadyRunning)
     }
+}
+
+pub(crate) fn flock_exclusive_until(
+    dir: &OwnedFd,
+    dir_path: &Path,
+    op: &'static str,
+    deadline: Instant,
+) -> Result<(), InstanceError> {
+    while Instant::now() < deadline {
+        if flock_nonblocking(dir, dir_path, op, FlockOperation::NonBlockingLockExclusive)? {
+            return Ok(());
+        }
+        std::thread::sleep(
+            LOCK_RETRY_DELAY.min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    Err(InstanceError::AlreadyRunning)
 }
 
 pub(crate) const S_IFMT: u32 = 0o170000;

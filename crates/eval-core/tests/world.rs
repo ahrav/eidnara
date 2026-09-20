@@ -324,6 +324,14 @@ fn replay_refuses_a_missing_changed_or_out_of_range_choice_and_emits_no_log() {
         );
     }
 
+    // Entries past the generator's last choice are ignored, not refused: the
+    // replay succeeds and the returned tape holds only the consumed entries.
+    let mut trailing = base.tape.clone();
+    trailing.entries.push(base.tape.entries[0].clone());
+    let replayed = generate_all(SEED, &config(), Mode::ReplayTape(trailing)).unwrap();
+    assert_eq!(replayed, base);
+    assert_eq!(replayed.tape.entries.len(), entries);
+
     // A refusal mid-drive poisons the generator: no partial log, no finish.
     let mut short = base.tape.clone();
     short.entries.truncate(entries / 2);
@@ -741,6 +749,21 @@ fn the_log_is_linearized_by_the_versioned_key_and_equality_checks_the_edges() {
         Err(LogError::EdgeAgainstOrder { .. })
     ));
 
+    let mut unsorted = base.clone();
+    unsorted.causal_edges.swap(0, 1);
+    assert_eq!(
+        unsorted.validate(max()),
+        Err(LogError::EdgesNotSorted { position: 1 })
+    );
+    let mut duplicated = base.clone();
+    duplicated
+        .causal_edges
+        .insert(0, base.causal_edges[0].clone());
+    assert_eq!(
+        duplicated.validate(max()),
+        Err(LogError::EdgesNotSorted { position: 1 })
+    );
+
     let mut shallow = base.clone();
     let deep = shallow
         .events
@@ -873,13 +896,21 @@ fn the_event_bound_is_refused_before_generation_and_by_the_validator() {
         Err(WorldError::EventBound { .. })
     ));
 
-    // The slot-count gate refuses in O(entities) before the exact count runs.
+    // The declared count is arithmetic, so refusal is O(entities) whatever the counts.
     let mut huge = config();
     huge.sessions[0].messages = u32::MAX;
     let started = std::time::Instant::now();
     assert!(matches!(
         huge.validate(),
         Err(WorldError::EventBound { events, max: 64 }) if events >= u64::from(u32::MAX)
+    ));
+    huge.max_events_per_log = u32::MAX;
+    huge.sessions.truncate(1);
+    huge.sessions[0].tool_span_every = 1;
+    huge.repositories.clear();
+    assert!(matches!(
+        huge.validate(),
+        Err(WorldError::EventBound { events, max: u32::MAX }) if events > u64::from(u32::MAX)
     ));
     assert!(started.elapsed().as_secs() < 5);
 

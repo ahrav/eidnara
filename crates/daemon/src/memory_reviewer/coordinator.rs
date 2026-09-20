@@ -20,7 +20,8 @@ use kernel::{
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{MemoryReviewerJob, MemoryReviewerJobInput, ReviewTarget};
 use memory_store::memory_reviewer_ledger::{
-    MEMORY_REVIEWER_ATTEMPT_MAX_MS, MemoryReviewerLedgerRefusal, MemoryReviewerReceipt,
+    MEMORY_REVIEWER_ATTEMPT_MAX_MS, MemoryReviewerAttemptTerminal, MemoryReviewerLedgerRefusal,
+    MemoryReviewerReceipt,
 };
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -28,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::broker::{
     Alias, EvidenceBroker, QuestionTemplate, ReferenceExpectation, Refusal, RefusalCode,
-    RenderedBuffer, RunBinding, refuse,
+    RenderedBuffer, RunBinding, decision_derived, originating_decision, refuse,
 };
 use super::disclosure::{
     Disclosed, Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile, prepare_body,
@@ -192,6 +193,7 @@ impl Coordinator {
             coordinator: self,
             context,
             hold_binding: prepared.hold_binding,
+            resuming: prepared.resuming,
             broker: Arc::new(tokio::sync::Mutex::new(broker)),
             transcript: Vec::new(),
             sent: 0,
@@ -225,6 +227,38 @@ impl Coordinator {
             subject: context.job.causal_identity.clone(),
             generation: context.receipt.generation,
         };
+        // Markers at this generation other than a proven `not_dispatched` mean a run already dispatched under this claim and its transcript is gone: the resumed run adopts that run's durable result or completes without content, so it resolves nothing and holds only what the lost run still holds.
+        let resuming = resumes_dispatched_work(
+            &self.ledger,
+            &context.job.project,
+            &context.job.causal_identity,
+            context.receipt.generation,
+        )?;
+        if resuming {
+            let hold_id = match self.store.acquire_execution_hold(
+                &hold_binding,
+                &[],
+                context.receipt.execution_cutoff_ms,
+            ) {
+                Ok(hold) => hold.hold_id,
+                // An invalid request means adoption proceeds without an execution hold; any other refusal is transient and aborts the run instead.
+                Err(kernel::MemoryReviewerHoldError::Refused(
+                    kernel::MemoryReviewerHoldRefusal::InvalidRequest,
+                )) => String::new(),
+                Err(error) => {
+                    return Err(InvestigationError::Kernel(super::broker::hold_refusal(
+                        error,
+                    )));
+                }
+            };
+            return Ok(Prepared {
+                hold_binding,
+                subject: Err(RefusalCode::Unsupported),
+                starting: Vec::new(),
+                hold_id,
+                resuming,
+            });
+        }
         // A subject or linked reference the run cannot resolve for a remote model settles the run on that refusal; nothing is sent.
         let mut protected = Vec::new();
         let mut starting = Vec::with_capacity(context.input.starting_references.len());
@@ -269,6 +303,7 @@ impl Coordinator {
             subject,
             starting,
             hold_id,
+            resuming,
         })
     }
 }
@@ -277,8 +312,33 @@ struct Prepared {
     hold_binding: MemoryReviewerHoldBinding,
     subject: Result<ReferenceExpectation, RefusalCode>,
     starting: Vec<ReferenceExpectation>,
-    /// `hold_id` is empty when the run took no hold: past the cutoff or with a refused subject.
+    /// `hold_id` is empty when the run took no hold: past the cutoff, with a refused subject, or resuming a generation whose retention already moved to review.
     hold_id: String,
+    /// Whether markers at this generation prove dispatched work this process never saw the end of.
+    resuming: bool,
+}
+
+/// Whether the ledger holds a marker at `generation` other than a proven `not_dispatched`: a completed, failed, cancelled, unknown, or unterminated attempt whose response, if any, this process never saw. An unterminated or `unknown` marker at any generation counts too: the job's outcome is unknown from that marker on (Q20), and the settlement would record it so whatever a new request answered, so the run sends nothing.
+fn resumes_dispatched_work(
+    ledger: &MemoryStore,
+    project: &str,
+    causal_identity: &str,
+    generation: u64,
+) -> Result<bool, InvestigationError> {
+    let attempts = ledger
+        .list_memory_reviewer_attempts(project, causal_identity)
+        .map_err(|error| InvestigationError::Store(error.to_string()))?;
+    Ok(attempts.iter().any(|attempt| {
+        (attempt.generation == generation
+            && !matches!(
+                attempt.terminal,
+                Some((MemoryReviewerAttemptTerminal::NotDispatched, _))
+            ))
+            || matches!(
+                attempt.terminal,
+                None | Some((MemoryReviewerAttemptTerminal::Unknown, _))
+            )
+    }))
 }
 
 /// One investigation's state: the broker every disclosure goes through, the transcript resent each round, the related-memory cursors, and the cutoff every wait is bounded by.
@@ -286,6 +346,7 @@ struct Run<'a> {
     coordinator: &'a Coordinator,
     context: JobContext<'a>,
     hold_binding: MemoryReviewerHoldBinding,
+    resuming: bool,
     /// The broker is shared with the launch future, which must be `'static`; the coordinator is idle while an attempt runs, so the lock is never contended.
     broker: Arc<tokio::sync::Mutex<EvidenceBroker>>,
     transcript: Vec<RenderedBuffer>,
@@ -338,9 +399,13 @@ impl Run<'_> {
         }
         let now = (self.coordinator.now_ms)();
         // The subject is the first disclosure; a subject the policy refuses is the abstention AE1 names, settled without any request. At the cutoff not even that read is admitted.
-        {
+        let subject = {
             let broker = Arc::clone(&self.broker);
             let mut broker = broker.lock().await;
+            // A lost run's durable result is adopted, or the receipt completes without content; a new request is never the answer to a lost one.
+            if self.resuming {
+                return self.adopt(&broker);
+            }
             if now >= self.context.receipt.execution_cutoff_ms {
                 return self.settle(&broker, RunResult::Exhausted);
             }
@@ -349,11 +414,12 @@ impl Run<'_> {
                 Err(code) => return self.settle(&broker, RunResult::Refused(code)),
             };
             if let Err(result) =
-                tokio::task::block_in_place(|| self.open(&mut broker, subject, starting, now))?
+                tokio::task::block_in_place(|| self.open(&mut broker, &subject, starting, now))?
             {
                 return self.settle(&broker, result);
             }
-        }
+            subject
+        };
         for round in 0..MAX_ROUNDS {
             if cancel.is_cancelled() {
                 return Err(InvestigationError::Cancelled);
@@ -411,6 +477,7 @@ impl Run<'_> {
                             &self.coordinator.store,
                             &mut broker,
                             &self.context,
+                            &subject,
                             *outcome,
                         )
                     });
@@ -430,11 +497,11 @@ impl Run<'_> {
     fn open(
         &mut self,
         broker: &mut EvidenceBroker,
-        subject: ReferenceExpectation,
+        subject: &ReferenceExpectation,
         starting: Vec<ReferenceExpectation>,
         now: i64,
     ) -> Result<Result<(), RunResult>, InvestigationError> {
-        let alias = broker.aliases.issue(subject);
+        let alias = broker.aliases.issue(subject.clone());
         match broker.read(&self.coordinator.store, alias.as_str(), None, now) {
             Ok(read) => {
                 self.discovery = RelatedMemoryDiscovery::new(
@@ -470,6 +537,11 @@ impl Run<'_> {
         Ok(Ok(()))
     }
 
+    fn adopt(&self, broker: &EvidenceBroker) -> Result<Settled, InvestigationError> {
+        tokio::task::block_in_place(|| self.settlement().adopt(broker))
+            .map_err(InvestigationError::from)
+    }
+
     async fn settle_now(&self, result: RunResult) -> Result<Settled, InvestigationError> {
         let broker = Arc::clone(&self.broker);
         let broker = broker.lock().await;
@@ -481,21 +553,21 @@ impl Run<'_> {
         broker: &EvidenceBroker,
         result: RunResult,
     ) -> Result<Settled, InvestigationError> {
-        let now_ms = Arc::clone(&self.coordinator.now_ms);
-        tokio::task::block_in_place(|| {
-            Settlement {
-                store: &self.coordinator.store,
-                ledger: &self.coordinator.ledger,
-                project: &self.context.job.project,
-                binding: self.context.binding,
-                claim: self.context.claim,
-                now_ms: &move || now_ms(),
-                #[cfg(any(test, feature = "test-support"))]
-                before_completion_for_test: None,
-            }
-            .settle(broker, result)
-        })
-        .map_err(InvestigationError::from)
+        tokio::task::block_in_place(|| self.settlement().settle(broker, result))
+            .map_err(InvestigationError::from)
+    }
+
+    fn settlement(&self) -> Settlement<'_> {
+        Settlement {
+            store: &self.coordinator.store,
+            ledger: &self.coordinator.ledger,
+            project: &self.context.job.project,
+            binding: self.context.binding,
+            claim: self.context.claim,
+            now_ms: &*self.coordinator.now_ms,
+            #[cfg(any(test, feature = "test-support"))]
+            before_completion_for_test: None,
+        }
     }
 
     /// One supervised physical request: the prepared body is disclosed inside the supervisor's internal launch, so the backend permit, cutoff, cancellation, and physical completion are the supervisor's, and the text comes back only after the disclosure accepted it.
@@ -920,8 +992,8 @@ fn resolve_subject(
     }
 }
 
-/// The expectation for one native source descriptor at its live revision, or at `expected_revision` when the job bound one. A store failure is the caller's error; a descriptor that is missing, undecodable, or of an unsupported class is a refusal the run settles on, since another generation would meet it identically.
-fn resolve_descriptor(
+/// Resolves a descriptor at `expected_revision` when the job bound one, otherwise at its live revision, and returns the evidence id the execution hold must protect. A decision-derived descriptor resolves to `CanonicalSource` carrying its originating decision's live source revision; a native descriptor resolves to `NativeSource`. `Refused` settles the run: `NotFound` for a missing row or an unregistered decision, `Unsupported` for a row whose detail, class, revision, or identity field cannot be decoded, `OriginRevoked` for an invalidated decision. `Kernel(Store)` leaves the run unsettled.
+pub fn resolve_descriptor(
     store: &KernelStore,
     object_id: &str,
     expected_revision: Option<i64>,
@@ -944,35 +1016,105 @@ fn resolve_descriptor(
         Some(revision) => revision,
         None => detail.revision.parse().map_err(|_| unsupported())?,
     };
-    if !resolves_class(class) {
-        return Err(InvestigationError::Refused(RefusalCode::Unsupported));
-    }
-    let expectation = ReferenceExpectation::NativeSource {
-        object_id: object_id.to_string(),
-        class,
-        source_revision,
-        artifact_digest: detail.artifact_digest.clone(),
-        evidence_id: detail.evidence_id.clone(),
-        occurrence_tuple: detail.occurrence_tuple.clone(),
+    let expectation = if decision_derived(class) {
+        let decision = originating_decision(class, &detail.identity)
+            .ok_or_else(unsupported)?
+            .to_string();
+        let (_, state) = registry_state(store, &decision)
+            .map_err(store_error)?
+            .ok_or(InvestigationError::Refused(RefusalCode::NotFound))?;
+        if state.object.invalidated_commit_seq.is_some() {
+            return Err(InvestigationError::Refused(RefusalCode::OriginRevoked));
+        }
+        let decision_source_revision = state.object.source_revision;
+        ReferenceExpectation::CanonicalSource {
+            object_id: object_id.to_string(),
+            class,
+            source_revision,
+            artifact_digest: detail.artifact_digest.clone(),
+            evidence_id: detail.evidence_id.clone(),
+            originating_decision_id: decision,
+            decision_source_revision,
+        }
+    } else {
+        ReferenceExpectation::NativeSource {
+            object_id: object_id.to_string(),
+            class,
+            source_revision,
+            artifact_digest: detail.artifact_digest.clone(),
+            evidence_id: detail.evidence_id.clone(),
+            occurrence_tuple: detail.occurrence_tuple.clone(),
+        }
     };
     Ok((expectation, vec![detail.evidence_id]))
 }
 
-/// Whether a descriptor of `class` resolves to a subject the run can read. Canonical and promoted descriptors resolve through their originating decision, a path this run does not implement, so they are refused; the selector walks only classes this admits.
-pub fn resolves_class(class: OccurrenceClass) -> bool {
-    match class {
-        OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory => false,
-        OccurrenceClass::Messages | OccurrenceClass::GitCommits | OccurrenceClass::RawToolSpans => {
-            true
-        }
-    }
+/// Returns the registry snapshot and `object_id`'s registry state, or `None` if the registry has never seen that id; a retired or superseded object is returned with `invalidated_commit_seq` set.
+fn registry_state(
+    store: &KernelStore,
+    object_id: &str,
+) -> Result<Option<(i64, kernel::ObjectState)>, kernel::KernelError> {
+    let (tip, mut states) = store.object_states(std::slice::from_ref(&object_id.to_string()))?;
+    Ok(states.pop().flatten().map(|state| (tip, state)))
 }
 
-/// Binds the model's outcome into a proposal: every citation resolves to disclosed evidence through the broker, names only bytes the model was shown, and is recorded as a citation; the target is the job's subject; the manifest reference digests the disclosed spans; policy dependencies are left for settlement to fill from the broker.
+/// Canonical and promoted descriptors target their originating decision so descriptors remain causal inputs; native descriptors target themselves. `commit_token` records the target object's last change at the snapshot read here. An invalidated target refuses (`OriginRevoked` for a decision, `ExpectationChanged` for a native descriptor), a target whose live revision differs from the bound one refuses `ExpectationChanged` instead of retargeting, and a decision target whose registry row is not a decision refuses `ExpectationChanged`.
+pub fn proposal_target(
+    store: &KernelStore,
+    subject: &ReferenceExpectation,
+) -> Result<ProposalTarget, Refusal> {
+    let (object_id, source_revision, revoked) = match subject {
+        ReferenceExpectation::StagedSubject { reference, .. } => {
+            return Ok(ProposalTarget::StagedCandidate {
+                candidate_id: reference.candidate_id.clone(),
+            });
+        }
+        ReferenceExpectation::NativeSource {
+            object_id,
+            source_revision,
+            ..
+        } => (object_id, *source_revision, RefusalCode::ExpectationChanged),
+        ReferenceExpectation::CanonicalSource {
+            originating_decision_id,
+            decision_source_revision,
+            ..
+        } => (
+            originating_decision_id,
+            *decision_source_revision,
+            RefusalCode::OriginRevoked,
+        ),
+        ReferenceExpectation::TemporaryCapture { .. } => {
+            return Err(refuse(None, RefusalCode::Unsupported));
+        }
+    };
+    let (known_as_of, state) = registry_state(store, object_id)
+        .map_err(|_| refuse(None, RefusalCode::Store))?
+        .ok_or_else(|| refuse(None, RefusalCode::NotFound))?;
+    if state.object.invalidated_commit_seq.is_some() {
+        return Err(refuse(None, revoked));
+    }
+    let decision_target = matches!(subject, ReferenceExpectation::CanonicalSource { .. });
+    if state.object.source_revision != source_revision
+        || (decision_target && state.object.object_kind != "decision")
+    {
+        return Err(refuse(None, RefusalCode::ExpectationChanged));
+    }
+    Ok(ProposalTarget::Memory(kernel::CanonicalTarget {
+        object_id: object_id.clone(),
+        source_revision,
+        known_as_of,
+        commit_token: state
+            .latest_change_commit_seq
+            .unwrap_or(state.object.created_commit_seq),
+    }))
+}
+
+/// Every citation resolves through the broker to an alias it rendered, is clipped to the rendered ranges, and is recorded as a citation; the target is [`proposal_target`] of the subject; the manifest reference digests the disclosed aliases and rendered spans in order; policy dependencies are left empty for settlement to fill from the broker.
 fn bind_proposal(
     store: &KernelStore,
     broker: &mut EvidenceBroker,
     context: &JobContext<'_>,
+    subject: &ReferenceExpectation,
     outcome: ProposedOutcome,
 ) -> Result<ReviewProposal, Refusal> {
     let mut cite =
@@ -1022,32 +1164,7 @@ fn bind_proposal(
     if support.len() + contradictions.len() > kernel::MAX_REVIEW_REFERENCES {
         return Err(refuse(None, RefusalCode::TooLarge));
     }
-    let target = match &context.input.subject {
-        ReviewTarget::StagedSubject { candidate_id, .. } => ProposalTarget::StagedCandidate {
-            candidate_id: candidate_id.clone(),
-        },
-        ReviewTarget::Memory {
-            object_id,
-            source_revision,
-        } => {
-            // The target is named by Kernel commit sequences: the snapshot this binding read and the last change the subject had seen by then, which is what a later mutation token check compares against.
-            let (tip, mut states) = store
-                .object_states(std::slice::from_ref(object_id))
-                .map_err(|_| refuse(None, RefusalCode::Store))?;
-            let state = states
-                .pop()
-                .flatten()
-                .ok_or_else(|| refuse(None, RefusalCode::NotFound))?;
-            ProposalTarget::Memory(kernel::CanonicalTarget {
-                object_id: object_id.clone(),
-                source_revision: *source_revision,
-                known_as_of: tip,
-                commit_token: state
-                    .latest_change_commit_seq
-                    .unwrap_or(state.object.created_commit_seq),
-            })
-        }
-    };
+    let target = proposal_target(store, subject)?;
     // The manifest is the inspection record this run can attest to: every disclosed alias and the byte ranges rendered under it, in order.
     let mut manifest = Sha256::new();
     for alias in broker.ledger.disclosed() {

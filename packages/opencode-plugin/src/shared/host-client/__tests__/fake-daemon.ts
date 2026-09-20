@@ -144,6 +144,11 @@ export class FakeDaemon {
     }
 
     respond(request: EnvelopeHeader, value: unknown): void {
+        this.respondText(request, JSON.stringify(value));
+    }
+
+    /** Sends `text` as the response body verbatim, so a test controls the exact wire tokens. */
+    respondText(request: EnvelopeHeader, text: string): void {
         this.send(
             {
                 ty: FrameType.Response,
@@ -151,7 +156,7 @@ export class FakeDaemon {
                 epoch: request.epoch,
                 corr: request.corr,
             },
-            new Uint8Array(Buffer.from(JSON.stringify(value))),
+            new Uint8Array(Buffer.from(text)),
         );
     }
 

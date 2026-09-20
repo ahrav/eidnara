@@ -17,7 +17,7 @@ use memory_store::memory_reviewer_jobs::{
 };
 use memory_store::memory_reviewer_ledger::{
     AbstainReason, AttemptMarker, DispatchOutcome, MemoryReviewerAttemptTerminal,
-    MemoryReviewerBeginOutcome, MemoryReviewerReceipt, ReceiptCompletion,
+    MemoryReviewerBeginOutcome, MemoryReviewerReceipt, ReceiptCompletion, ResponseUsage,
 };
 
 pub const PROJECT: &str = "git:proj";
@@ -131,6 +131,7 @@ pub fn begin_job(
             payload,
             recorded_at: now,
             queue_deadline_at: job.queue_deadline_ms,
+            dependencies: None,
         })
         .unwrap();
     kernel
@@ -275,7 +276,7 @@ pub fn publish(
                 provider: "localhost/v1/messages@2023-06-01".to_string(),
                 model: "claude-canonical-1".to_string(),
                 credential_id: "cred-1".to_string(),
-                policy_union_digest: "e".repeat(64),
+                policy_union_digest: broker.ledger.union().encode().unwrap().digest,
             },
             (),
             || now,
@@ -293,6 +294,7 @@ pub fn publish(
             &claim.claim_id,
             attempt_index,
             MemoryReviewerAttemptTerminal::Complete,
+            ResponseUsage::NONE,
             now,
         )
         .unwrap();

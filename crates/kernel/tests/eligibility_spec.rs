@@ -378,18 +378,21 @@ fn table(sensitive_artifact: &str, secret_artifact: &str) -> Vec<Row> {
     ]
 }
 
-fn destination(destination: Destination) -> ArtifactDestination {
+// A variant added to a kernel enum fails to compile here, so the mirrored
+// eval-core enum cannot go stale silently.
+
+fn destination(destination: ArtifactDestination) -> Destination {
     match destination {
-        Destination::Local => ArtifactDestination::Local,
-        Destination::Remote => ArtifactDestination::Remote,
+        ArtifactDestination::Local => Destination::Local,
+        ArtifactDestination::Remote => Destination::Remote,
     }
 }
 
-fn surface(surface: Surface) -> kernel::Surface {
+fn surface(surface: kernel::Surface) -> Surface {
     match surface {
-        Surface::AutoInject => kernel::Surface::AutoInject,
-        Surface::AutoSearch => kernel::Surface::AutoSearch,
-        Surface::ExplicitSearch => kernel::Surface::ExplicitSearch,
+        kernel::Surface::AutoInject => Surface::AutoInject,
+        kernel::Surface::AutoSearch => Surface::AutoSearch,
+        kernel::Surface::ExplicitSearch => Surface::ExplicitSearch,
     }
 }
 
@@ -468,8 +471,9 @@ fn the_reducer_agrees_with_the_kernel_on_the_hand_authored_fact_tuple_table() {
         .map(|c| (c.object_id.clone(), c.artifact_digest.clone()))
         .collect();
     let mut seen = BTreeSet::new();
-    for dest in [Destination::Local, Destination::Remote] {
-        let (_, egress) = store.egress_candidates(&named, destination(dest)).unwrap();
+    for &kernel_dest in ArtifactDestination::ALL {
+        let dest = destination(kernel_dest);
+        let (_, egress) = store.egress_candidates(&named, kernel_dest).unwrap();
         assert_eq!(egress.len(), rows.len());
         for (row, egress) in rows.iter().zip(&egress) {
             // The scope decision is the row's own; whether the object has a
@@ -482,9 +486,10 @@ fn the_reducer_agrees_with_the_kernel_on_the_hand_authored_fact_tuple_table() {
                 row.candidate.object_id
             );
         }
-        for surf in Surface::ALL {
+        for &kernel_surf in kernel::Surface::ALL {
+            let surf = surface(kernel_surf);
             let batch = store
-                .judge_surface_eligibility(&project, destination(dest), surface(surf), &candidates)
+                .judge_surface_eligibility(&project, kernel_dest, kernel_surf, &candidates)
                 .unwrap();
             assert!(batch.snapshot.classification_generation.is_some());
             assert_eq!(batch.verdicts.len(), candidates.len());
@@ -519,6 +524,17 @@ fn the_reducer_agrees_with_the_kernel_on_the_hand_authored_fact_tuple_table() {
     }
     let verdicts: BTreeSet<Verdict> = seen.iter().map(|(v, _, _)| *v).collect();
     assert_eq!(verdicts.len(), 7, "every verdict is reached");
+    let surfaces: BTreeSet<Surface> = seen.iter().map(|(_, s, _)| *s).collect();
+    assert_eq!(
+        surfaces,
+        Surface::ALL.into_iter().collect(),
+        "the kernel's surface list and the mirror's agree"
+    );
+    assert_eq!(
+        ArtifactDestination::ALL.len(),
+        2,
+        "the kernel's destination list and the mirror's agree"
+    );
     assert!(
         seen.contains(&(Verdict::Ok, Surface::AutoInject, true)),
         "the fold permits automatic rows"

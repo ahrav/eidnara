@@ -16,10 +16,13 @@ sub-record.
   or tokio edge.
 - `eval-core` appears in the workspace only under `[dev-dependencies]`
   (`crates/daemon`). `scripts/forbid-test-support-dependencies.ts` rejects a
-  normal, build, or target-specific edge to it, rejects any such edge that
-  names a `*/test-support` feature, and rejects a `default` feature that
-  reaches a `*/test-support` entry through the package's own feature table.
-  The `gates` CI job runs the scan.
+  normal, build, or target-specific edge to it, and rejects any such edge whose
+  requested features turn on test-support in the target package, either by
+  naming a `*test-support` feature or by reaching one through the target's
+  feature table (a forwarding alias such as `bench = ["kernel/test-support"]`
+  counts). It also rejects a local package whose `default` feature enables its
+  own `test-support` or reaches a `*/test-support` entry. The `gates` CI job
+  runs the scan.
 - Digests come from `context_core::canonical_json::protocol_digest`, which is
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
@@ -30,11 +33,17 @@ sub-record.
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
 validates. Refusals are typed: `MissingField(name)`, `UnknownField(name)`,
 `SchemaMismatch`, `RunIdMismatch`, `GeneratorVersionMismatch`,
-`ClaimBoundaryMismatch`, `ResidueIncomplete`, `SampleOrderNotAPermutation`,
-`MalformedDigest`, `MalformedDecimal`. `Manifest::validate` is public so a
-manifest built in code can be checked before it is written. Adding a field to
-`Manifest` without bumping the schema fails the closure test, and the fixture
-digests in `tests/manifest.rs` are frozen so an encoding change is reviewed.
+`ClaimBoundaryMismatch`, `ResidueIncomplete`, `ResidueContradiction` (a `Keep`
+entry or two rules for one field), `SampleOrderNotAPermutation`,
+`MalformedDigest`, `MalformedDecimal`, `RateOutOfRange` (an arm rate outside
+`[0, 1]`), `EmptyComponent` (an empty component version, tokenizer name or
+revision, or attestation signer), `NotCanonical` (an integer outside the
+canonical safe range). `Manifest::validate` is public so a manifest built in
+code can be checked before it is written; it applies every check above except
+the key-set closure, so a manifest it accepts also parses and digests. Adding a
+field to `Manifest` without bumping the schema fails the closure test, and the
+fixture digests in `tests/manifest.rs` are frozen so an encoding change is
+reviewed.
 
 The 26 required fields, sorted:
 
@@ -56,7 +65,7 @@ The 26 required fields, sorted:
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `residue` | Every non-`Keep` field with its rule, including the manifest's own. |
 | `result_digest`, `witness_digest` | Lowercase hex SHA-256. |
-| `retry_lineage` | Prior `eval_run_id` values of retried attempts. |
+| `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
 | `schema` | `eval-manifest/v3`. |
@@ -68,8 +77,12 @@ rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
 is `Keep`), and hashes with protocol `eval-manifest-digest/v3`. Version 2
 added `execution_mode` (the reducer differential runs under `enumerate`);
 version 3 added `ingestion`, because no ingestion entry point has a production
-caller and every manifest must say so. Two processes
-with the same identity produce the same digest.
+caller and every manifest must say so. The digest is a function of every kept
+field, not of the run identity alone: two processes that record the same
+identity and the same kept contents produce the same digest
+(`two_process_same_identity_yields_equal_manifest_and_trace_digests`), and two
+runs that share an identity but differ in `status`, `sample_order`,
+`result_digest`, or any other kept field do not.
 
 Canonical JSON rejects fractional numbers, so every fraction is a canonical
 decimal string: `is_canonical_decimal` accepts `0`, `12`, `0.25` and rejects
@@ -87,8 +100,13 @@ dirty flag, lockfile digest, rustc version, feature set, target triple, and a
 binary digest that is either `{"kind": "present", "sha256"}` or
 `{"kind": "absent", "reason"}`. The feature set is a `BTreeSet`, so its order
 cannot change the identity. A present digest equal to the SHA-256 of zero bytes
-is refused; it names no build. Empty version strings and a malformed
-`eligibility_spec_digest` are refused. There is no seed-only constructor.
+is refused; it names no build, an absent digest needs a non-empty reason, and
+a dirty tree needs a present binary digest, since two dirty trees on one
+commit are told apart only by the binary.
+Empty version strings, a malformed
+`eligibility_spec_digest`, and a `config` or `scenario` value canonical JSON
+cannot encode are refused by `RunIdentity::validate`, so an identity it accepts
+also produces its run ID. There is no seed-only constructor.
 
 ## Residue rules
 
@@ -103,12 +121,26 @@ is refused; it names no build. Empty version strings and a malformed
 
 `SemanticTrace::record` refuses an observation whose field set differs from
 its schema (`UnclassifiedField`, `MissingField`), so classification is total;
-registering one type twice is refused (`DuplicateType`).
+registering one type twice is refused (`DuplicateType`), declaring one field
+twice in a schema is refused (`DuplicateField`), a field not spelled in
+snake_case (lowercase words and digits joined by single underscores) is refused
+(`FieldNotSnakeCase`) because the gates below match those tokens, as is a
+`Keep` or
+`Relative` value canonical JSON cannot encode (`NotCanonical`). A refused
+observation leaves the trace and its `Relative` numbering unchanged, so a
+recorded trace always digests.
 `CLOCK_FIELD_KEEP_ALLOWLIST` (`now_ms`, `observed_at_ms`, `valid_time_ms`)
 names the only clock-named fields a schema may keep; any other clock-named
 field under `Keep` is refused at schema construction, as is any field named
-for a hostname, cwd, pid, or incarnation (`HostFieldKept`). The trace digest
-uses protocol `eval-trace/v1`. Rules apply to the top-level fields of an
+for a hostname (`hostname` or a `host` token), cwd, a filesystem location (a
+`root` or `path` token), a boot (`boot` token), a Unix identity (`uid`, `euid`,
+`gid`, or `egid` token), pid (a `pid` or `ppid` token or `process_id`
+anywhere), or incarnation (`HostFieldKept`). These name gates are
+a heuristic that refuses obvious mistakes at schema construction; the
+guarantee that host values stay out of a digest is the two-process equality
+test in `tests/two_process.rs`, and a new host-specific spelling is added to
+the gate when it is found. The trace
+digest uses protocol `eval-trace/v1`. Rules apply to the top-level fields of an
 observation; nested values under `Keep` enter the digest whole.
 
 ## Surface census pins
@@ -138,12 +170,15 @@ repository (commit count and how often a rename fires), the valid-time epoch
 and tick, and `max_events_per_log`. Counts are exact, so
 `WorldConfig::declared_events` is the number of events generation emits, and
 `validate` refuses a config whose declared count exceeds the bound before any
-event exists (`WorldError::EventBound { events, max }`). The check gates on the
-slot count first, so a config declaring billions of messages is refused in
-time proportional to the entity count. There is no default for the bound: a
-missing field fails to parse, and a zero bound, a non-positive tick, an epoch
-outside the valid-time domain, an empty entity set, or an entity with no slots
-is `WorldError::InvalidField(name)`. The bound is a config value rather than a
+event exists (`WorldError::EventBound { events, max }`). The count is
+arithmetic, so a config declaring billions of messages is refused in time
+proportional to the entity count. Corrections and invalidations skip slot `0`,
+which has no earlier message to target, so `*_every = 1` fires on every slot
+for tool spans and renames but on every slot after the first for revisions.
+There is no default for the bound: a missing field fails to parse, and a zero
+bound, a non-positive tick, an epoch outside the valid-time domain, an empty
+entity set, or an entity with no slots is `WorldError::InvalidField(name)`. The
+bound is a config value rather than a
 manifest field; the manifest carries it inside `run_identity.config`.
 `GENERATOR_VERSION`, `RANDOM_SCHEMA_VERSION`, and `LINEARIZATION_RULE_VERSION`
 are constants the shell copies into the run identity's `generator_version`,
@@ -158,15 +193,15 @@ refuses under v2 as `TapeMismatch`.
 
 Every random decision is `keyed_draw(root_seed, &site)`: the first 64 bits of
 the protocol digest (`eval-random/v1`) over `(root_seed, axis, kind, actor,
-site, occurrence)`, reduced by `% candidates` (the small modulo bias is part
-of the random schema). `actor` is the entity (`session-0`, `repository-1`),
-`site` is the mutation slot (`slot:3`), and `occurrence` counts earlier choices
-of the same kind at that slot. A draw depends only on its key, so shortening
-one entity's history leaves every other entity's text, renames, revision
-targets, and times unchanged. The axis label (`text` for words, `topology` for
-rename targets, `evolution` for time gaps, observation lags, citations, and
-correction or invalidation targets) is fixed per `ChoiceKind` through
-`ChoiceKind::axis`.
+site, occurrence)`, which `Chooser::choose` reduces by `% candidates` (the
+small modulo bias is part of the random schema). `actor` is the entity
+(`session-0`, `repository-1`), `site` is the mutation slot (`slot:3`), and
+`occurrence` counts earlier choices of the same kind at that slot. A draw
+depends only on its key, so shortening one entity's history leaves every other
+entity's text, renames, revision targets, and times unchanged. The axis label
+(`text` for words, `topology` for rename targets, `evolution` for time gaps,
+observation lags, citations, and correction or invalidation targets) is fixed
+per `ChoiceKind` through `ChoiceKind::axis`.
 
 One choice is deliberately cross-entity: a message's `Cites` candidates are
 the commits of every repository emitted before it, so adding or removing a
@@ -226,17 +261,20 @@ derived ids (`IdNotDerived`), one event per id (`DuplicateId`), strict key
 order (`NotLinearized`), the valid-time domain `0..=MAX_VALID_TIME_MS` and a
 non-negative observation time (`TimeOutOfDomain`), `valid_time_ms <=
 observation_time_ms + MAX_REVISION_LEAD_MS` (`RevisionAhead`), that every edge
-names present events (`DanglingEdge`), and that each edge runs from an earlier
+names present events (`DanglingEdge`), that each edge runs from an earlier
 position (`EdgeAgainstOrder`) and a smaller depth (`EdgeAgainstDepth`) to a
-later one. It does not recompute depths, so a log with a deleted event keeps
-the depths it was generated with.
+later one, and that the edges are strictly sorted (`EdgesNotSorted`), so equal
+causal graphs have equal digests. It does not recompute depths, so a log with a
+deleted event keeps the depths it was generated with.
 
 `EventLog::without(id)` removes one event and its incident edges and touches
 no other payload: a correction whose target was removed keeps naming it, and
 the log still validates. This is the deletion rule the ticket asks for ("no
-repair of surviving semantic payloads"); the reducer treats a target that
-names an absent event as a distinct case rather than promoting the correction
-to an original. Equality and `EventLog::digest` (`eval-event-log/v1`) cover
+repair of surviving semantic payloads"); the reducer does not promote such a
+correction to an original or repair it in any way. It stays a `correction`
+unit judged on its own facts, and the absent target contributes no state, so
+every other unit's truth is unchanged (see "Bitemporal reducer"). Equality and
+`EventLog::digest` (`eval-event-log/v1`) cover
 events and edges, so two logs with the same events and different edges differ.
 
 ### Step drive
@@ -304,7 +342,10 @@ by hand. Because the digest is over the parsed value, whitespace is never
 drift; a reordered predicate, an added verdict, or a changed fact cell is.
 `check_spec(&fixture)` returns the parsed `EligibilitySpec` only when the
 digest matches, and otherwise `SpecError::SpecDrift { expected, found }` (or
-`NotCanonical` for a value canonical JSON cannot encode); the reducer refuses
+`NotCanonical` for a value canonical JSON cannot encode). Those are the only
+two refusals: the spec carries no numbers, the one JSON type canonical
+encoding can merge, so a matching digest is value equality with
+`serialize_spec()` and the parse cannot fail. The reducer refuses
 before producing any truth and judges with the predicates it parsed.
 
 The kernel differential
@@ -316,12 +357,27 @@ surfaces against `KernelStore::judge_surface_eligibility` and against
 `judge_surface`, with the hand-authored facts also compared to the tuple
 projected from the store's `egress_candidates`. A second test shows every
 adjacent transposition of the predicate order disagrees with that table
-except the first pair, which no store object can separate. The kernel test
+except the first pair, which no store object can separate. The differential
+iterates the kernel's own `ArtifactDestination::ALL` and `Surface::ALL` and
+maps every kernel enum onto its `eval-core` mirror with an exhaustive match,
+so a variant added on the kernel side fails to compile there. The kernel test
 carries `eval-core` as a dev dependency only; `eval-core` keeps its four
 dependencies and never names a kernel type, and
 `scripts/forbid-test-support-dependencies.ts` now asserts both facts (the
-closed dependency set, and no product-crate or `std` effect-module path in the
-core's source).
+closed dependency set with no build script and the library root under `src/`,
+and no path into another workspace
+crate, any eval-core dependency outside the closed set (dev-dependencies
+included), `rusqlite`, `tokio`, or a `std` effect module (`fs`, `path`, `process`,
+`time`, `net`, `env`, `io`, `os`, `thread`) in the core's source; the crate list comes
+from `cargo metadata` under the names Rust code uses (Cargo renames
+included), so a new workspace crate or dev-dependency is fenced without editing
+the script. Paths are caught whether written as a full path or inside a brace-grouped
+`use std::{...}`; renaming a crate root or globbing `std` is refused so no
+alias or bare name can hide an effect path, `extern crate` of a fenced crate
+is refused, `#[path]` and `include*!` are refused so no source enters from
+outside the scanned tree, and the stdio and `env!` macros are refused as
+effects). The source scan runs from the `cargo metadata` workspace
+root and fails when it matches no files, so it cannot pass vacuously.
 
 ## Bitemporal reducer
 
@@ -345,11 +401,15 @@ outside the cut has no state, which the rules judge `retracted`, the same
 verdict the kernel gives an object it has never seen. Each unit is judged at
 its own revision, so `stale` is out of reach here; the shell produces it by
 asking about an older revision. A correction whose target the log does not
-contain changes nothing, because deletion leaves such targets behind by
-design.
+contain changes nothing: it is still a unit judged on its own facts, no other
+unit gains or loses state, and nothing is repaired, because deletion leaves
+such targets behind by design.
 
 `Truth::required` is the set of units judged `ok`, which is exactly when a
-historical question about the unit must stay answerable. The reducer never
+historical question about the unit must stay answerable. `Truth` also carries
+`reducer_version`, the constant `REDUCER_VERSION` (`eval-reducer/v1`), which
+the shell copies into the manifest's `component_versions.reducer` the same way
+the generator constants reach the run identity. The reducer never
 reads a kernel result and never adjusts truth toward one: a typed kernel
 refusal at run time is recorded as a refusal by the shell, not repaired into
 an expectation here.

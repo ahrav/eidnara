@@ -22,9 +22,12 @@ Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
   `unknown_field_wrong_schema_and_non_object_are_refused`,
-  `manifest_consistency_refusals_name_their_cause`, and
-  `attestation_is_a_tagged_value` cover the typed refusals and the tagged
-  attestation.
+  `manifest_consistency_refusals_name_their_cause`,
+  `residue_declarations_are_non_keep_and_one_rule_per_field`,
+  `validate_refuses_what_parse_and_digest_refuse`,
+  `arm_rates_stay_within_the_unit_interval`,
+  `provenance_strings_are_non_empty`, and `attestation_is_a_tagged_value`
+  cover the typed refusals and the tagged attestation.
 - `every_kept_field_enters_the_digest_and_every_dropped_field_leaves_it`
   mutates each kept field through a valid manifest and expects a new digest,
   and restamps the dropped fields expecting the same digest.
@@ -32,12 +35,16 @@ Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
   with an independent SHA-256 over the nine-component tuple;
   `changing_any_identity_or_build_component_changes_the_run_id` mutates every
   component and every build sub-record field;
-  `malformed_or_empty_identity_components_are_refused` covers the zero-bytes
+  `identity_validate_refuses_what_the_run_id_refuses` and
+  `malformed_or_empty_identity_components_are_refused` cover the zero-bytes
   digest, malformed digests, and empty version strings.
 - `residue_classification_is_total_over_observation_fields`,
   `clock_named_keep_fields_equal_the_pinned_allowlist`,
   `host_environment_and_incarnation_fields_are_never_kept`,
+  `a_field_declared_twice_is_refused_at_schema_construction`,
   `presence_and_relative_rules_hide_incarnation_values_but_not_their_structure`,
+  `a_refused_observation_leaves_relative_numbering_unchanged`,
+  `a_kept_value_the_digest_cannot_encode_is_refused_at_record_time`,
   and `dropped_fields_never_reach_the_trace_digest` cover the residue rules.
 - `fractions_travel_as_canonical_decimal_strings` covers the decimal-string
   rule for rates and for `root_seed`.
@@ -70,14 +77,18 @@ Surface census (`crates/daemon/src/transform/surface_census.rs` and
   symbol path that implements it and checks the row order against
   `SURFACE1_STAGES`.
 - Order facts witnessed by behavior:
-  `suppression_and_the_length_gate_return_before_any_query`,
+  `suppression_and_the_length_gate_return_before_any_query` and
   `the_token_gate_returns_before_the_candidate_window_reads_the_store` (through
-  the store's statement probe), and
-  `the_threshold_empties_a_result_set_the_cap_would_otherwise_trim`. Decision
+  the store's statement probe). Decision
   freeze is witnessed by `empty_user_hint_decision_skips_future_queries` in
   `crates/daemon/src/transform.rs`; overlay apply by the aged golden below.
-  Deferral and native attachment have no per-hint seam until the Phase 2 taps
-  land and are pinned by symbol only.
+  The threshold reads only the top-ranked score and the cap keeps the
+  top-ranked result, so threshold-before-cap has no observable effect and is
+  pinned by symbol only, like deferral and native attachment, which have no
+  per-hint seam until the Phase 2 taps land.
+  `the_threshold_empties_a_result_set_the_cap_would_otherwise_trim` witnesses
+  that the threshold is all-or-nothing: five below-threshold candidates yield
+  no results, not three.
 - Bounds witnessed by behavior: `hint_bound_constants_equal_the_evaluator_pins`,
   `the_candidate_window_holds_exactly_one_hundred_segments`,
   `the_query_keeps_twenty_four_tokens`, `three_results_survive_the_cap`,
@@ -97,11 +108,14 @@ Fresh versus aged transform goldens
 (`crates/daemon/src/transform/aged_goldens.rs`,
 `crates/daemon/testdata/aged-transform-golden.json`):
 
-- `aged_history_changes_the_tail_only_when_it_matches_the_prompt` runs the
+- `aged_history_attaches_a_hint_only_when_it_matches_the_prompt` runs the
   same prompt through the transform path in a fresh world and in a hand-built
   aged world, and compares the tail text and wire digest of each against the
   golden. One case's aged history matches the prompt and attaches a hint; the
-  other's is irrelevant and attaches none.
+  other's is irrelevant and attaches none, asserted directly on the hint
+  marker and through the golden equality. The aged tail still differs from
+  the fresh tail in its `§n§` ordinal, because the prompt is the seventh wire
+  item rather than the first; that ordinal is not the attachment.
 - `a_dropped_attachment_fails_the_aged_golden` drops the attachment through the
   production switch (`auto_search_enabled: false`) and expects the golden
   comparison to fail while the fresh arm still matches.
@@ -111,10 +125,12 @@ Fresh versus aged transform goldens
 Placement fences (`scripts/forbid-test-support-dependencies.ts`, run in the
 `gates` CI job):
 
-- No normal, build, or target-specific dependency table names a
-  `*/test-support` feature or the dev-only `eval-core` package, and no
-  `default` feature reaches a `*/test-support` entry through a package's own
-  feature table.
+- No normal, build, or target-specific dependency table names the dev-only
+  `eval-core` package or requests a feature that turns on test-support in the
+  target package, directly or through a forwarding alias in the target's
+  feature table or in a local package that table forwards to, and no local
+  package's `default` feature enables its own
+  `test-support` or reaches a `*/*test-support` entry.
 
 ## Phase 1 executed checks: generated worlds
 
@@ -146,8 +162,10 @@ World generation, choice replay, and the event log
   each at the first, a middle, and the last entry, and expects the typed
   refusal naming that entry; probes the exact index boundary on a choice with
   one candidate; expects a tape replayed under another seed or config to
-  refuse with `TapeMismatch`; and after a mid-drive refusal expects `step`,
-  `log`, and `finish` to return the same error.
+  refuse with `TapeMismatch`; expects a tape with an entry past the last
+  choice to replay the same world and return a tape holding only the consumed
+  entries; and after a mid-drive refusal expects `step`, `log`, and `finish`
+  to return the same error.
 - `removing_an_unrelated_event_changes_no_later_text_or_rename_digest`
   (`wm-independent-rng-streams-per-axis-entity`) shortens one session and,
   separately, the repository, and expects every event on the other streams
@@ -174,7 +192,8 @@ World generation, choice replay, and the event log
   order, checks key uniqueness, checks every edge runs forward, requires
   same-millisecond events on two streams and a cross-stream edge, and expects
   two logs with equal events and different edges to compare unequal; swapped
-  events, a reversed edge, and a flattened depth are refused by name.
+  events, a reversed edge, swapped or duplicated edges, and a flattened depth
+  are refused by name.
 - `logs_tapes_and_times_round_trip_through_serde_in_canonical_form`
   (`wm-typed-choice-tape-and-replay-refusal`) round-trips the log and the tape
   through JSON, refuses unknown fields on both, and accepts only the
@@ -188,8 +207,10 @@ World generation, choice replay, and the event log
 - `the_event_bound_is_refused_before_generation_and_by_the_validator`
   (`wm-log-and-observation-bounds`) expects a bound one below the declared
   count to refuse from `Generator::new` and `generate_all` with `EventBound`,
-  a `u32::MAX` message count to refuse in well under a second through the
-  slot-count gate, a bound equal to the declared count to pass, the validator
+  a `u32::MAX` message count to refuse in well under a second, including with
+  the bound at `u32::MAX` and a tool span on every slot (the count is
+  arithmetic, not a per-slot sweep), a bound equal to the declared count to
+  pass, the validator
   to refuse `EventBound` at one below, and each `InvalidField` refusal (bound,
   tick, epoch, an entity with no slots, no entities) plus a missing, unknown,
   or fractional field at parse time. The record asks for an exported
@@ -242,7 +263,9 @@ Spec pin and reduction (`crates/eval-core/tests/reducer.rs`):
   `ELIGIBILITY_SPEC_DIGEST`, compares the predicate order to a list written in
   the test by hand, requires every verdict to have a vector and the
   both-columns-set cell and a remote destination to appear, checks all 22
-  vectors against `judge`, and round-trips the spec through serde.
+  vectors against `judge`, requires the serialized spec to carry no numbers
+  (so a matching digest is value equality and `check_spec` has no shape
+  error), and round-trips the spec through serde.
 - `every_predicate_and_the_surface_fold_are_reachable_from_facts`
   (`wm-reducer-agrees-with-judge-fact-tuples`) flips one fact at a time from a
   live labeled tuple and expects each predicate's verdict, checks the served
@@ -270,7 +293,8 @@ Spec pin and reduction (`crates/eval-core/tests/reducer.rs`):
   checks out-of-scope, unadmitted, and sensitive-remote worlds, purity, and
   every refusal by name (`NotLinearized`, `SchemaMismatch`, `EventBound`, and
   each `InvalidQuery` field).
-- `truth_and_queries_round_trip_through_serde_in_canonical_form` pins the
+- `truth_and_queries_round_trip_through_serde_in_canonical_form` pins
+  `Truth::reducer_version` to `REDUCER_VERSION` (`eval-reducer/v1`), the
   decimal cut times, the state field names, the surface wire names, and
   unknown-field refusal on `Truth` and `Query`.
 - `an_enumerate_run_records_its_mode_and_the_pinned_spec_digest`
@@ -299,6 +323,11 @@ Kernel differential (`crates/kernel/tests/eligibility_spec.rs`, fixture in
   and visibility and agree on `permits`, and the row's hand-authored facts
   must equal the tuple projected from the store's `egress_candidates`. The
   kernel assertion precedes the reducer assertion, so the kernel breaks first.
+  The destinations and surfaces come from the kernel's own
+  `ArtifactDestination::ALL` and `Surface::ALL`, every kernel enum is mapped
+  onto its mirror by an exhaustive match, and the surfaces seen must equal
+  the mirror's `Surface::ALL`, so a kernel variant the mirror lacks fails to
+  compile or fails the test rather than going untested.
   The test records that the admission policy gives both automatic surfaces
   one visibility today.
 - `every_adjacent_transposition_of_the_order_disagrees_with_the_table` shows
@@ -310,9 +339,12 @@ Fences (`wm-eval-core-dependency-fence`, `xc-core-oracles-take-values-only`,
 `scripts/forbid-test-support-dependencies.ts` now asserts `eval-core`'s normal
 dependency set is exactly `context-core`, `serde`, `serde_json`, `sha2`, and
 that no line of `crates/eval-core/src` names a product crate or a `std`
-effect module (`fs`, `path`, `process`, `time`, `net`, `env`, `io`), with
-negative cases in its unit test; `eval-core` enters the kernel only under
-`[dev-dependencies]`; `cargo tree -p daemon -e normal` is unchanged.
+effect module (`fs`, `path`, `process`, `time`, `net`, `env`, `io`), as a full
+path or as a member of a brace-grouped `use std::{...}`, with negative cases
+in its unit test; an empty scan is itself a finding, so the fence cannot pass
+on a wrong working directory or a moved crate; `eval-core` enters the kernel
+only under `[dev-dependencies]`; `cargo tree -p daemon -e normal` is
+unchanged.
 
 ## Phase 1 executed checks: rendering and ingestion
 

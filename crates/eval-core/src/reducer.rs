@@ -63,6 +63,8 @@ pub struct UnitTruth {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Truth {
+    /// The shell copies this into the manifest's `component_versions.reducer`.
+    pub reducer_version: String,
     pub query: Query,
     pub units: BTreeMap<EventId, UnitTruth>,
     pub required: BTreeSet<EventId>,
@@ -129,6 +131,7 @@ pub fn reduce(log: &EventLog, fixture: &Value, query: &Query) -> Result<Truth, R
         units.insert(event.id.clone(), UnitTruth { facts, verdict });
     }
     Ok(Truth {
+        reducer_version: REDUCER_VERSION.to_string(),
         query: query.clone(),
         units,
         required,
