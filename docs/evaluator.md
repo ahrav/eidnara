@@ -32,13 +32,14 @@ validates. Refusals are typed: `MissingField(name)`, `UnknownField(name)`,
 `SchemaMismatch`, `RunIdMismatch`, `GeneratorVersionMismatch`,
 `ClaimBoundaryMismatch`, `ResidueIncomplete`, `ResidueContradiction` (a `Keep`
 entry or two rules for one field), `SampleOrderNotAPermutation`,
-`MalformedDigest`, `MalformedDecimal`, `NotCanonical` (an integer outside the
-canonical safe range). `Manifest::validate` is public so a manifest built in
-code can be checked before it is written; it applies every check above except
-the key-set closure, so a manifest it accepts also parses and digests. Adding a
-field to `Manifest` without bumping the schema fails the closure test, and the
-fixture digests in `tests/manifest.rs` are frozen so an encoding change is
-reviewed.
+`MalformedDigest`, `MalformedDecimal`, `RateOutOfRange` (an arm rate outside
+`[0, 1]`), `EmptyComponent` (an empty component version or tokenizer name or
+revision), `NotCanonical` (an integer outside the canonical safe range).
+`Manifest::validate` is public so a manifest built in code can be checked
+before it is written; it applies every check above except the key-set closure,
+so a manifest it accepts also parses and digests. Adding a field to `Manifest`
+without bumping the schema fails the closure test, and the fixture digests in
+`tests/manifest.rs` are frozen so an encoding change is reviewed.
 
 The 24 required fields, sorted:
 
@@ -104,7 +105,8 @@ also produces its run ID. There is no seed-only constructor.
 
 `SemanticTrace::record` refuses an observation whose field set differs from
 its schema (`UnclassifiedField`, `MissingField`), so classification is total;
-registering one type twice is refused (`DuplicateType`), as is a `Keep` or
+registering one type twice is refused (`DuplicateType`), declaring one field
+twice in a schema is refused (`DuplicateField`), as is a `Keep` or
 `Relative` value canonical JSON cannot encode (`NotCanonical`). A refused
 observation leaves the trace and its `Relative` numbering unchanged, so a
 recorded trace always digests.

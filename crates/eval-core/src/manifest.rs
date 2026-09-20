@@ -198,6 +198,8 @@ pub enum ManifestError {
     SampleOrderNotAPermutation,
     MalformedDigest { field: String },
     MalformedDecimal { field: String, value: String },
+    RateOutOfRange { field: String, value: String },
+    EmptyComponent { field: String },
     Identity(IdentityError),
     Residue(ResidueError),
     NotCanonical(ContractError),
@@ -341,12 +343,43 @@ impl Manifest {
                 ("miss_rate", &rates.miss_rate),
                 ("refusal_rate", &rates.refusal_rate),
             ] {
+                let field = format!("arm_rates[{arm}].{field}");
                 if !is_canonical_decimal(rate) {
                     return Err(ManifestError::MalformedDecimal {
-                        field: format!("arm_rates[{arm}].{field}"),
+                        field,
                         value: rate.clone(),
                     });
                 }
+                // Canonical, so within [0, 1] means exactly `0`, `1`, or `0.<digits>`.
+                if rate != "1" && !rate.starts_with('0') {
+                    return Err(ManifestError::RateOutOfRange {
+                        field,
+                        value: rate.clone(),
+                    });
+                }
+            }
+        }
+        let versions = &self.component_versions;
+        for (field, text) in [
+            ("component_versions.event_schema", &versions.event_schema),
+            ("component_versions.reducer", &versions.reducer),
+            ("component_versions.oracles", &versions.oracles),
+            (
+                "component_versions.execution_image",
+                &versions.execution_image,
+            ),
+            ("component_versions.task_corpus", &versions.task_corpus),
+            ("component_versions.judge", &versions.judge),
+            ("tokenizer_profile.name", &self.tokenizer_profile.name),
+            (
+                "tokenizer_profile.revision",
+                &self.tokenizer_profile.revision,
+            ),
+        ] {
+            if text.is_empty() {
+                return Err(ManifestError::EmptyComponent {
+                    field: field.to_string(),
+                });
             }
         }
         Ok(())

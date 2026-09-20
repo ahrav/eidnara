@@ -24,7 +24,8 @@ Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
   `unknown_field_wrong_schema_and_non_object_are_refused`,
   `manifest_consistency_refusals_name_their_cause`,
   `residue_declarations_are_non_keep_and_one_rule_per_field`,
-  `validate_refuses_what_parse_and_digest_refuse`, and
+  `validate_refuses_what_parse_and_digest_refuse`,
+  `arm_rates_stay_within_the_unit_interval`, `provenance_strings_are_non_empty`, and
   `attestation_is_a_tagged_value` cover the typed refusals and the tagged
   attestation.
 - `every_kept_field_enters_the_digest_and_every_dropped_field_leaves_it`
@@ -40,6 +41,7 @@ Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 - `residue_classification_is_total_over_observation_fields`,
   `clock_named_keep_fields_equal_the_pinned_allowlist`,
   `host_environment_and_incarnation_fields_are_never_kept`,
+  `a_field_declared_twice_is_refused_at_schema_construction`,
   `presence_and_relative_rules_hide_incarnation_values_but_not_their_structure`,
   `a_refused_observation_leaves_relative_numbering_unchanged`,
   `a_kept_value_the_digest_cannot_encode_is_refused_at_record_time`,

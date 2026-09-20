@@ -45,6 +45,7 @@ pub enum ResidueError {
     ClockFieldKept { type_name: String, field: String },
     HostFieldKept { type_name: String, field: String },
     DuplicateType { type_name: String },
+    DuplicateField { type_name: String, field: String },
     UnclassifiedField { type_name: String, field: String },
     MissingField { type_name: String, field: String },
     UnknownType { type_name: String },
@@ -74,16 +75,21 @@ pub struct ObservationSchema {
 }
 
 impl ObservationSchema {
-    /// Refuses `Keep` on a host or incarnation field, and on a clock-named
-    /// field unless [`CLOCK_FIELD_KEEP_ALLOWLIST`] names it.
+    /// Refuses a field declared twice, `Keep` on a host or incarnation field, and
+    /// `Keep` on a clock-named field unless [`CLOCK_FIELD_KEEP_ALLOWLIST`] names it.
     pub fn new<'a>(
         type_name: &str,
-        rules: impl IntoIterator<Item = (&'a str, Rule)>,
+        rules_iter: impl IntoIterator<Item = (&'a str, Rule)>,
     ) -> Result<Self, ResidueError> {
-        let rules: BTreeMap<String, Rule> = rules
-            .into_iter()
-            .map(|(field, rule)| (field.to_string(), rule))
-            .collect();
+        let mut rules = BTreeMap::new();
+        for (field, rule) in rules_iter {
+            if rules.insert(field.to_string(), rule).is_some() {
+                return Err(ResidueError::DuplicateField {
+                    type_name: type_name.to_string(),
+                    field: field.to_string(),
+                });
+            }
+        }
         for (field, _) in rules.iter().filter(|(_, rule)| **rule == Rule::Keep) {
             if is_never_kept(field) {
                 return Err(ResidueError::HostFieldKept {

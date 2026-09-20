@@ -256,6 +256,62 @@ fn fractions_travel_as_canonical_decimal_strings() {
 }
 
 #[test]
+fn arm_rates_stay_within_the_unit_interval() {
+    for (rate, ok) in [
+        ("0", true),
+        ("1", true),
+        ("0.25", true),
+        ("2", false),
+        ("1.5", false),
+    ] {
+        let mut manifest = manifest();
+        manifest.arm_rates.insert(
+            "aged".to_string(),
+            ArmRates {
+                miss_rate: rate.to_string(),
+                refusal_rate: "0".to_string(),
+            },
+        );
+        let expected = if ok {
+            Ok(())
+        } else {
+            Err(ManifestError::RateOutOfRange {
+                field: "arm_rates[aged].miss_rate".to_string(),
+                value: rate.to_string(),
+            })
+        };
+        assert_eq!(
+            parse_manifest(&manifest.to_value()).map(drop),
+            expected,
+            "{rate}"
+        );
+    }
+}
+
+#[test]
+fn provenance_strings_are_non_empty() {
+    for (group, field) in [
+        ("component_versions", "event_schema"),
+        ("component_versions", "reducer"),
+        ("component_versions", "oracles"),
+        ("component_versions", "execution_image"),
+        ("component_versions", "task_corpus"),
+        ("component_versions", "judge"),
+        ("tokenizer_profile", "name"),
+        ("tokenizer_profile", "revision"),
+    ] {
+        let mut value = manifest().to_value();
+        value[group][field] = json!("");
+        assert_eq!(
+            parse_manifest(&value).map(drop),
+            Err(ManifestError::EmptyComponent {
+                field: format!("{group}.{field}")
+            })
+        );
+    }
+}
+
+#[test]
 fn run_id_is_the_protocol_digest_of_the_full_tuple() {
     let identity = identity();
     let mut tuple = serde_json::to_value(&identity).unwrap();
@@ -657,6 +713,17 @@ fn host_environment_and_incarnation_fields_are_never_kept() {
     }
     assert!(!is_never_kept("occurrence_id"));
     assert!(!is_never_kept("rapid_response"));
+}
+
+#[test]
+fn a_field_declared_twice_is_refused_at_schema_construction() {
+    assert_eq!(
+        ObservationSchema::new("twice", [("pid", Rule::Keep), ("pid", Rule::Drop)]),
+        Err(ResidueError::DuplicateField {
+            type_name: "twice".to_string(),
+            field: "pid".to_string(),
+        })
+    );
 }
 
 #[test]
