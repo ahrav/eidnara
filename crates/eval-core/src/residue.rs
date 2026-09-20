@@ -145,12 +145,16 @@ impl ObservationSchema {
             });
         }
         // Every fallible step runs before the first mutation, so a refused
-        // observation leaves `relative` exactly as it found it.
+        // observation leaves `relative` exactly as it found it, and a recorded
+        // entry always digests.
         let mut reduced = Map::new();
         let mut renumber = Vec::new();
         for (field, value) in fields {
             match self.rules[field] {
-                Rule::Keep => reduced.insert(field.clone(), value.clone()),
+                Rule::Keep => {
+                    canonical_json_encode(value)?;
+                    reduced.insert(field.clone(), value.clone())
+                }
                 Rule::Drop => None,
                 Rule::Presence => reduced.insert(field.clone(), Value::Bool(!value.is_null())),
                 Rule::Relative => {

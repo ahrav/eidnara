@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use context_core::canonical_json::{ContractError, is_lower_hex, protocol_digest};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -126,7 +128,10 @@ impl RunIdentity {
         require_non_empty(
             "linearization_rule_version",
             &self.linearization_rule_version,
-        )
+        )?;
+        // `config` and `scenario` are free-form; the run ID needs them canonical.
+        canonical_json_encode(&serde_json::to_value(self).expect("run identity serializes"))?;
+        Ok(())
     }
 }
 

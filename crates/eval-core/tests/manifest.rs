@@ -343,6 +343,20 @@ fn changing_any_identity_or_build_component_changes_the_run_id() {
 }
 
 #[test]
+fn identity_validate_refuses_what_the_run_id_refuses() {
+    let mut fractional = identity();
+    fractional.config = json!({"threshold": 0.7});
+    assert!(matches!(
+        eval_run_id(&fractional),
+        Err(IdentityError::NotCanonical(_))
+    ));
+    assert!(matches!(
+        fractional.validate(),
+        Err(IdentityError::NotCanonical(_))
+    ));
+}
+
+#[test]
 fn malformed_or_empty_identity_components_are_refused() {
     let mut build = build();
     build.binary_digest = BinaryDigest::Present {
@@ -688,6 +702,26 @@ fn a_refused_observation_leaves_relative_numbering_unchanged() {
     let mut clean = SemanticTrace::new([schema()]).unwrap();
     clean.record("pair", &json!({"a": "y", "b": "ok"})).unwrap();
     assert_eq!(refused.digest().unwrap(), clean.digest().unwrap());
+}
+
+#[test]
+fn a_kept_value_the_digest_cannot_encode_is_refused_at_record_time() {
+    let schema = || {
+        ObservationSchema::new("scored", [("score", Rule::Keep), ("id", Rule::Relative)]).unwrap()
+    };
+    let mut trace = SemanticTrace::new([schema()]).unwrap();
+    assert!(matches!(
+        trace.record("scored", &json!({"score": 0.5, "id": "x"})),
+        Err(ResidueError::NotCanonical(_))
+    ));
+    trace
+        .record("scored", &json!({"score": 1, "id": "y"}))
+        .unwrap();
+    let mut clean = SemanticTrace::new([schema()]).unwrap();
+    clean
+        .record("scored", &json!({"score": 1, "id": "y"}))
+        .unwrap();
+    assert_eq!(trace.digest().unwrap(), clean.digest().unwrap());
 }
 
 #[test]

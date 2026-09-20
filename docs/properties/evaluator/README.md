@@ -34,13 +34,15 @@ Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
   with an independent SHA-256 over the nine-component tuple;
   `changing_any_identity_or_build_component_changes_the_run_id` mutates every
   component and every build sub-record field;
-  `malformed_or_empty_identity_components_are_refused` covers the zero-bytes
+  `identity_validate_refuses_what_the_run_id_refuses` and
+  `malformed_or_empty_identity_components_are_refused` cover the zero-bytes
   digest, malformed digests, and empty version strings.
 - `residue_classification_is_total_over_observation_fields`,
   `clock_named_keep_fields_equal_the_pinned_allowlist`,
   `host_environment_and_incarnation_fields_are_never_kept`,
   `presence_and_relative_rules_hide_incarnation_values_but_not_their_structure`,
   `a_refused_observation_leaves_relative_numbering_unchanged`,
+  `a_kept_value_the_digest_cannot_encode_is_refused_at_record_time`,
   and `dropped_fields_never_reach_the_trace_digest` cover the residue rules.
 - `fractions_travel_as_canonical_decimal_strings` covers the decimal-string
   rule for rates and for `root_seed`.

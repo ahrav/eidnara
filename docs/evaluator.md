@@ -86,8 +86,10 @@ dirty flag, lockfile digest, rustc version, feature set, target triple, and a
 binary digest that is either `{"kind": "present", "sha256"}` or
 `{"kind": "absent", "reason"}`. The feature set is a `BTreeSet`, so its order
 cannot change the identity. A present digest equal to the SHA-256 of zero bytes
-is refused; it names no build. Empty version strings and a malformed
-`eligibility_spec_digest` are refused. There is no seed-only constructor.
+is refused; it names no build. Empty version strings, a malformed
+`eligibility_spec_digest`, and a `config` or `scenario` value canonical JSON
+cannot encode are refused by `RunIdentity::validate`, so an identity it accepts
+also produces its run ID. There is no seed-only constructor.
 
 ## Residue rules
 
@@ -102,8 +104,10 @@ is refused; it names no build. Empty version strings and a malformed
 
 `SemanticTrace::record` refuses an observation whose field set differs from
 its schema (`UnclassifiedField`, `MissingField`), so classification is total;
-registering one type twice is refused (`DuplicateType`). A refused observation
-leaves the trace and its `Relative` numbering unchanged.
+registering one type twice is refused (`DuplicateType`), as is a `Keep` or
+`Relative` value canonical JSON cannot encode (`NotCanonical`). A refused
+observation leaves the trace and its `Relative` numbering unchanged, so a
+recorded trace always digests.
 `CLOCK_FIELD_KEEP_ALLOWLIST` (`now_ms`, `observed_at_ms`, `valid_time_ms`)
 names the only clock-named fields a schema may keep; any other clock-named
 field under `Keep` is refused at schema construction, as is any field named

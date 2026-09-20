@@ -61,8 +61,9 @@ function dependencyPackage(local: Map<string, MetadataPackage>, owner: string, a
 /**
  * Features reachable from `roots` through `pkg`'s feature table and, via
  * `other/feature` entries, through other local packages' tables. `dep:x`
- * entries name the optional dependency `x`, whose implicit feature shares its
- * name. A `pkg/test-support` entry is a hit on its own and is not followed.
+ * enables the optional dependency `x` and suppresses its implicit feature, so it
+ * is not a feature node; the dependency's own requested features are scanned on
+ * its edge. A `pkg/test-support` entry is a hit on its own and is not followed.
  */
 function featureClosure(
     local: Map<string, MetadataPackage>,
@@ -79,8 +80,9 @@ function featureClosure(
         const entries = table[feature] ?? [];
         reached.set(key, { name: owner === pkg ? feature : key, root, entries });
         for (const entry of entries) {
+            if (entry.startsWith("dep:")) continue;
             const other = forwarded(entry);
-            if (other === null) pending.push([owner, entry.replace(/^dep:/, ""), root]);
+            if (other === null) pending.push([owner, entry, root]);
             else if (!entry.endsWith("/test-support")) {
                 pending.push([dependencyPackage(local, owner, other[0]), other[1], root]);
             }

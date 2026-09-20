@@ -171,6 +171,17 @@ describe("forbiddenDependencyEdges", () => {
         ]);
     });
 
+    test("does not read a dep: entry as the same-named explicit feature", () => {
+        const metadata = workspace([dep({ name: "x" })]);
+        metadata.packages[0]!.features = {
+            default: ["activate"],
+            activate: ["dep:x"],
+            x: ["test-support"],
+            "test-support": [],
+        };
+        expect(forbiddenDependencyEdges(metadata)).toEqual([]);
+    });
+
     test("resolves edge features only against local packages", () => {
         const metadata = workspace([dep({ name: "serde", features: ["derive"] })]);
         metadata.packages[1]!.features = { derive: ["serde_derive/test-support"] };
