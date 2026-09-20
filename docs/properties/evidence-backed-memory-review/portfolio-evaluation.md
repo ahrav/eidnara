@@ -61,6 +61,19 @@ reviews found and how each finding was dispositioned.
 | No Kernel negative case for the staging rules; no negative control on the marker join; no test of a live settlement with no completed marker; no coordinator-level adoption to `Published` | gap | fixed: seven refused staging specs, a record joined to a marker index the ledger lacks, a `Failed`-only marker settlement, and a coordinator run that adopts the row a crashed settlement sealed |
 | No adopt case with a `temporary_capture` member under the empty execution hold | bias | kept: the member path is shared with the live read's `TemporaryCapture` expectation; queued in `existing-checks.md` |
 
+## Observational routes
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The observational-harness comment named a consumer that does not exist in the tree | refinement | fixed: the comment states the mechanism only |
+| `OBSERVATIONAL_HARNESS` was `pub` with no Rust consumer outside the crate | refinement | reverted: the wire test in `crates/daemon/tests/memory_reviewer_wire.rs` binds through `daemon::OBSERVATIONAL_HARNESS`, so a change to the value cannot leave that test binding an ordinary route; the constant is `pub` |
+| The operations document listed `host.status` among the reads an observer makes under project authorization | gap | fixed: `host.status` is a route-free channel-0 operation (wire document 7.6) and is stated as unaffected |
+| The wire document did not name the `cli` value whose behavior the daemon defines, so the TypeScript consumer had no contract to mirror | gap | fixed: one sentence in the bind section; the value stays a scoping claim, no operation or literal of the protocol changes |
+| The worker test's comment claimed observation while its view was hand-built | gap | fixed: the comment states the empty-view claim; the catalog record says the composition is two tests |
+| No protocol-3 read through a `cli` route | gap | fixed: `review.list`, `review.read`, and two malformed bodies answer byte-equal through the observer and the ordinary route |
+| The empty-view worker construction repeated `worker_for` | refinement | fixed: `worker_with_projects` serves both |
+| `values()` consumers in bind and unbind remain unfiltered | bias | kept: session-liveness and note-capability decisions are route-local and must see observers; the security check found no read an observer gains or any scheduling an ordinary route escapes |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner

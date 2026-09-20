@@ -160,6 +160,15 @@ impl Rig {
     }
 
     fn worker_with_roots(&self, roots: Vec<RootScope>) -> Arc<Worker> {
+        self.worker_for(self.identified_host(), roots)
+    }
+
+    /// A worker over exactly `projects`, with the credential identities derived.
+    fn worker_over(&self, projects: Vec<ProjectRoute>) -> Arc<Worker> {
+        self.worker_with_projects(self.identified_host(), projects)
+    }
+
+    fn identified_host(&self) -> Arc<MemoryReviewerHost> {
         let host = self.host();
         host.credential_identities
             .set(BTreeMap::from([(
@@ -167,7 +176,7 @@ impl Rig {
                 CREDENTIAL_IDENTITY.to_string(),
             )]))
             .unwrap();
-        self.worker_for(host, roots)
+        host
     }
 
     fn host(&self) -> Arc<MemoryReviewerHost> {
@@ -191,22 +200,28 @@ impl Rig {
         for root in &roots {
             self.bind_route(&root.project_root, PROJECT);
         }
+        self.worker_with_projects(
+            host,
+            vec![ProjectRoute {
+                project: PROJECT.to_string(),
+                authority_generation: self.generation,
+                roots,
+            }],
+        )
+    }
+
+    fn worker_with_projects(
+        &self,
+        host: Arc<MemoryReviewerHost>,
+        projects: Vec<ProjectRoute>,
+    ) -> Arc<Worker> {
         let kernel = Arc::clone(&self.kernel);
         Arc::new(Worker {
             host,
             home: self.home.clone(),
             store: Arc::clone(&self.store),
             kernel: Arc::new(move || Some(Arc::clone(&kernel))),
-            projects: {
-                let generation = self.generation;
-                Arc::new(move || {
-                    vec![ProjectRoute {
-                        project: PROJECT.to_string(),
-                        authority_generation: generation,
-                        roots: roots.clone(),
-                    }]
-                })
-            },
+            projects: Arc::new(move || projects.clone()),
             status: Arc::clone(&self.status),
             permits: Arc::new(InvestigationPermits::default()),
             endpoint: self.endpoint(),
@@ -462,6 +477,48 @@ async fn a_closed_gate_runs_nothing_and_an_open_gate_runs_the_job_to_policy_bloc
             .unwrap()
             .receipts_complete,
         1
+    );
+}
+
+/// A worker whose project view is empty, as it is when a project's only routes are observational, claims nothing with the gate open and a Ready Sensitive job waiting: no receipt begins and nothing is sent. Zero sends alone would not distinguish this from a policy-blocked run; the job stays Ready, and runs on the next pass over a view that names the project.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pass_over_a_view_without_the_project_leaves_its_ready_job_unclaimed() {
+    let rig = Rig::open().await;
+    let now = now_ms();
+    let identity = rig.ready_history_summarizer_job(now);
+    rig.write_activation();
+    let worker = rig.worker_over(Vec::new());
+    let cancel = CancellationToken::new();
+    for _ in 0..2 {
+        assert_eq!(worker.pass(&cancel).await, 0);
+    }
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Open,
+        "the gate is open; observation, not the gate, keeps the job waiting"
+    );
+    assert!(matches!(
+        rig.store
+            .lookup_memory_reviewer_job(PROJECT, &identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        MemoryReviewerJobState::Ready(_)
+    ));
+    assert!(
+        rig.store
+            .lookup_memory_reviewer_receipt(PROJECT, &identity)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
+    // The same job under a participating route runs on the next pass.
+    assert_eq!(rig.worker().pass(&cancel).await, 1);
+    assert!(
+        rig.store
+            .lookup_memory_reviewer_receipt(PROJECT, &identity)
+            .unwrap()
+            .is_some()
     );
 }
 

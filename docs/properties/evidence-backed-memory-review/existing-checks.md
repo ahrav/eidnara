@@ -52,6 +52,14 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_hold_cap_refusal_on_resume_leaves_the_receipt_open_instead_of_abstaining` | same | a project at its active-hold cap refuses the resumed run's replacement hold; the run returns the Kernel refusal with the receipt still open and zero connections, and adopts the sealed reference once the cap clears | unaudited |
 | `decoding_accepts_only_bytes_that_re_encode_to_themselves_and_their_digest` | `crates/context-core/src/memory_reviewer_policy_union.rs` | decode refuses a wrong digest, edited bytes, whitespace, and another version | unaudited |
 
+## Observational routes
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs` | observer alone on a dormant project: worker, scheduler, root binding, and roster views empty, own route resolves; beside a live scheduled harness and on a second root: views equal the live snapshot; both close orders keep the other session bound | unaudited |
+| `a_pass_over_a_view_without_the_project_leaves_its_ready_job_unclaimed` | `crates/daemon/tests/memory_reviewer_worker.rs` | gate open, Ready job, two passes over a hand-built empty view: no claim, no receipt, zero connections; a view naming the project runs it on the next pass | unaudited |
+| `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route` | `crates/daemon/tests/memory_reviewer_wire.rs` | `review.list`, `review.read`, a malformed identity, and an unknown field answer byte-equal through a `cli` route and the ordinary route | unaudited |
+
 ## Suspiciously quiet areas
 
 - No test exercises class tightening (a decision reclassified `Sensitive`
@@ -67,6 +75,8 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
   read from code.
 - No test reopens either store between the Kernel envelope and the sweep; the
   durable rows are read through the same handles that wrote them.
+- No test drives observer open, `module_projects`, and a worker pass in one
+  process; the view and the pass are exercised in two tests.
 - No test records a `temporary_capture` member and adopts it; the member
   reconstruction for captures is read from code.
 - No test constructs the window after the Kernel result and before the hold

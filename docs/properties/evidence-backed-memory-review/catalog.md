@@ -34,7 +34,7 @@ Every slug the seven residual tickets own. Slugs the specification assigns to ot
 | `durable-private-result-recovers-without-model-refire` | #727 | yes |
 | `unknown-dispatch-does-not-authorize-resend` | #727 | yes |
 | `uncited-owner-lineage-remains-read-authority` | #727 | yes |
-| `observer-route-does-not-change-background-rosters` | #728 | not yet |
+| `observer-route-does-not-change-background-rosters` | #728 | yes |
 | `status-sanitizer-preserves-inclusive-integer-domain` | #729 | not yet |
 | `completed-outcome-pages-have-live-keyset-semantics` | #730 | not yet |
 | `shared-path-fixture-reaches-selected-readable-proposal` | #730 | not yet |
@@ -158,6 +158,21 @@ Existing check: `crates/daemon/tests/memory_reviewer_settlement.rs::a_selected_r
 Impact: A proposal whose uncited context was retired or whose canonical owner moved would still be served as a supported proposal
 Open questions: None.
 
+### observer-route-does-not-change-background-rosters
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/src/lib.rs` tests bind an observer alone on a dormant MODULE project, beside a live scheduled harness, and on a second root, and read the worker, scheduler, and roster views after every open and close in both close orders; `crates/daemon/tests/memory_reviewer_worker.rs` runs a pass over a hand-built empty view against a Ready Sensitive job, so observer to `module_projects` to worker pass is composed from the two tests rather than driven end to end; `crates/daemon/tests/memory_reviewer_wire.rs` reads through a `cli` route
+Guarantee: A binding whose harness is `cli` is removed from the participating view before newest-per-root selection, so the MemoryReviewer worker's projects, the scheduler's roots, harnesses, and schedules, and the search maintenance roster are identical whether or not the observer is open; route-local authorization and project lookup for the observer's own route are unchanged.
+Check: `always` - `RouteBindings::participating` is the only path into `latest_per_root` and `latest_for_root`, and those are the only sources for `module_projects`, `scheduled_projects`, `binding_for_root`, and `bound_projects`; asserted by the view equality before and after each observer open and close
+Fault/timing angle: an observer opened after a live harness on the same root, an observer-only second root of the project, each route closing first
+Required faults and enabling state: MODULE authority on the root with the start-up binding closed; a live `pi` binding with a user-tier schedule; an observer binding on the same root and on a second bound root; a Ready job with the gate open and a worker pass over an empty view
+Confidence: high - [evidence](evidence/observer-route-does-not-change-background-rosters.md). Verified the four views by equality against the dormant and the scheduled snapshots, the Ready job's state after two passes over an empty view, and byte-equal wire answers through a `cli` route
+Existing check: `crates/daemon/src/lib.rs::tests::an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`, `crates/daemon/tests/memory_reviewer_worker.rs::a_pass_over_a_view_without_the_project_leaves_its_ready_job_unclaimed`, `crates/daemon/tests/memory_reviewer_wire.rs::an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`
+Impact: Opening the review command on a dormant project would enroll it in the worker and run its Ready jobs, or replace a live harness's schedule with the observer's configuration
+Open questions: None.
+
 ## Relationship map
 
 `canonical-resolution-refuses-changed-owner-and-target` is the safety half of
@@ -178,3 +193,8 @@ run's decision, `receipt-selection-fences-private-generation-results` is the
 generation scope both derive their candidate id under, and
 `uncited-owner-lineage-remains-read-authority` is the same revalidation run by
 the reader instead of the resumer.
+
+`observer-route-does-not-change-background-rosters` sits upstream of every
+worker record: the participating view decides which projects the worker sees
+at all, and the records above describe what happens to a job the worker did
+see.

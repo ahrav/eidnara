@@ -25,6 +25,7 @@
 | Dependency record edited or removed | yes | direct SQLite `replace` or `json_remove` on the witness |
 | Unterminated, cancelled, or `not_dispatched` marker before a run | yes | `dispatch_memory_reviewer_attempt` without a terminal, a cancelled first run, or a recheck clock past the attempt deadline |
 | Uncited member retired after selection | yes | `retire_observation` on a disclosed but uncited source |
+| Observer bound on a dormant root, beside a live harness, and on a second root; each route closing first | yes | `bind_route` and `unbind_route` with harness `cli` |
 | Selection dated at or after the queue deadline | yes | `read_selected_review_input` with `selected_at >= deadline`; the ledger cannot record one |
 
 ## Required faults per property
@@ -38,6 +39,7 @@
 | `durable-private-result-recovers-without-model-refire` | broker lost; record edited; record removed; member retired; completed marker without a row | yes |
 | `unknown-dispatch-does-not-authorize-resend` | unterminated marker; cancelled marker; `not_dispatched` marker | yes |
 | `uncited-owner-lineage-remains-read-authority` | uncited member retired after selection; fabricated canonical member | yes |
+| `observer-route-does-not-change-background-rosters` | observer alone; observer newer than a live harness; observer-only second root; both close orders; worker pass over an empty view | yes |
 
 ## Coverage checks to add
 
