@@ -19,11 +19,16 @@ afterAll(() => {
 
 function dependencies() {
     const daemonArgs: string[][] = [];
+    const reviewArgs: string[][] = [];
     const stdout: string[] = [];
     const stderr: string[] = [];
     const deps: CliDispatchDependencies = {
         runDaemon: async (args) => {
             daemonArgs.push(args);
+            return 0;
+        },
+        runReview: async (args) => {
+            reviewArgs.push(args);
             return 0;
         },
         stdout: (line) => stdout.push(line),
@@ -32,12 +37,25 @@ function dependencies() {
     return {
         deps,
         daemonArgs,
+        reviewArgs,
         stdout,
         stderr,
     };
 }
 
 describe("import-safe CLI dispatch", () => {
+    test("review dispatches its subcommand and arguments without importing the command eagerly", async () => {
+        const h = dependencies();
+        const exit = await dispatchCli(["review", "list", "--limit", "3", "--json"], h.deps);
+        expect(exit).toBe(0);
+        expect(h.reviewArgs).toEqual([["list", "--limit", "3", "--json"]]);
+        expect(h.daemonArgs).toEqual([]);
+        const help = dependencies();
+        await dispatchCli(["--help"], help.deps);
+        expect(help.stdout.join("\n")).toContain("review list");
+        expect(help.stdout.join("\n")).toContain("review status");
+    });
+
     test("help lists all daemon actions and --json", async () => {
         const h = dependencies();
 

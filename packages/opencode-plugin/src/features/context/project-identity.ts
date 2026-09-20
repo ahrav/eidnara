@@ -13,6 +13,7 @@ import { accessSync, existsSync, constants as fsConstants, realpathSync, statSyn
 import { homedir } from "node:os";
 import path from "node:path";
 import { log } from "../../shared/logger";
+import { shellQuote } from "../../shared/shell-quote";
 
 // The resolver caches successful Git identities to avoid repeated synchronous probes.
 // The cooldown prevents repeated failed Git probes.
@@ -411,10 +412,6 @@ function reuseLastKnownGitIdentity(canonical: string, gitRoot: string): string |
         );
     }
     return cached.identity;
-}
-
-function shellQuote(value: string): string {
-    return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function formatDubiousOwnershipWarning(canonical: string): string {

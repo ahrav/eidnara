@@ -91,6 +91,22 @@ reviews found and how each finding was dispositioned.
 | A decimal or exponent spelling that evaluates to an unsafe integer (`9007199254740993e0`, `9007199254740993.0`) decoded as the rounded double 2^53, which `exactCount` then accepted as the exact boundary; `-0` passed every domain although serde reads it, like those spellings, as `f64` | gap | fixed: the same safe-integer rule refuses the rounded double, and `-0` is excluded by `Object.is`; pinned in `exact-json.test.ts` and the routed body in `client.test.ts` |
 | The reviver returned the rounded double when `JSON.parse` handed it no source text, so a runtime below the engine floor would pass 2^53+1 through `exactCount` as 2^53 | gap | fixed: an integer-valued unsafe double with no lexeme refuses the body; pinned by wrapping `JSON.parse` |
 
+## Review command
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The absent-connection-file diagnostic keyed on `ENOENT`, which the host client never throws; it wraps the miss as `ConnectionFileError` `not_found` | gap | fixed: keyed on the error's name and code; a `stat_failed` still reports only the error name |
+| `--project` was resolved after the connection opened, so a missing path printed the connection-file message | gap | fixed: resolved before connecting, exit 2, tested with the real `realpathSync.native` on relative, symlinked, and subdirectory paths |
+| `HostCallError.code` is peer-controlled and reached stderr raw | gap | fixed: `printableLine` on the code; tested with an escape sequence |
+| No real-host positive read: a completed receipt with a nonempty-span proposal rendered by `review show` against the hermetic host | gap | kept open: the direct-host fixture has no path that publishes a proposal from TypeScript; the selected read is reached in `memory_reviewer_wire.rs` and decoded from the same wire shape in the unit tests; recorded on `shared-path-fixture-reaches-selected-readable-proposal` for the owner |
+| Missing cases: UTF-8 byte caps versus character counts, staged-candidate target, empty limitations, exact-full page then empty follow-up, absent activation state, a stdout that throws, every outcome and reason, timeout and generation change | gap | fixed: added |
+| Per-field `jsonInteger` mapping through three shapes | refinement | fixed: one `JSON.stringify` replacer turns every `bigint` into a raw token |
+| A hand-written connection interface and a per-request timeout beside the connect-time one | refinement | fixed: `Pick<HostClient, ...>`; the connect-time timeout alone |
+| An unreachable `default` terminal text and five exported vocabularies with no importer | refinement | fixed |
+| Support and contradictions were bounded on their sum; the Kernel's `check_references` bounds each list at 256 and only the daemon's producer (`steps.rs`, `coordinator.rs`) keeps the sum under 256 before staging | gap | fixed: each list is bounded at 256 as the Kernel admits it; the sum check refused a proposal the Kernel can stage |
+| `--json` output passes C1 and bidi characters through `JSON.stringify`'s escaping | bias | kept: JSON output is machine output; the README says so and text output strips them |
+| Production size is about 770 lines against a 500 target | bias | kept: the closed vocabularies and the field-by-field decoder are the substance; the ticket's hard maximum is 1,000 and the status command shares the connection and decoding with list and show |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner
@@ -98,3 +114,6 @@ reviews found and how each finding was dispositioned.
   the policy-validating broker.
 - Class tightening and wrong-scope decisions at the coordinator seam remain
   unconstructed; see `existing-checks.md`.
+- A TypeScript-driven positive `review show` against the hermetic host needs
+  a fixture control that publishes a proposal with nonempty spans; queued
+  under the direct-host fixture owner.

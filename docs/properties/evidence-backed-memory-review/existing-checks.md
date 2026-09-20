@@ -70,6 +70,19 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `stream items decode exactly only under the exact_json response mode` | `packages/opencode-plugin/src/shared/host-client/connection.test.ts` | the same stream item is a rounded `number` under the default mode and a `bigint` under `exact_json` | unaudited |
 | `exact-json.test.ts` | `packages/opencode-plugin/src/shared/host-client/` | the reviver on every value shape, the width bound, refusal when `JSON.parse` withholds the lexeme, the three domains including an unsafe integer-valued double, human and raw JSON output | unaudited |
 
+## Review command
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `parseReviewArgs` | `packages/cli/src/commands/review.test.ts` | defaults, bounds, and every rejected argument shape | unaudited |
+| `review list` | same | route identity, envelope, single request, text and JSON rendering, terminals, states, malformed pages | unaudited |
+| `review show` | same | one read, every field, inert text, exact integers, every read terminal, malformed proposals | unaudited |
+| `review status` | same | `host.status` only, overlapping counters, unavailable over zero, not-ready block, absent block | unaudited |
+| `connection lifecycle` | same | close on every path, codes without messages, absent connection file, no data directory, no context module | unaudited |
+| `review over the host transport` | `packages/cli/src/commands/review.wire.test.ts` | real `HostClient` against the fake daemon: catalog probe, route identity without the ambient pair, envelope, exact decode, closed client, route refusal, status | unaudited |
+| `review command against the direct host` | `packages/e2e-tests/src/rust-runner/review-cli.test.ts` | real handshake and flat envelopes against the hermetic host; refusals decoded; backend counters unchanged | unaudited |
+| tarball smoke | `scripts/smoke-tarball-install.ts` | installed `eidnara review status`, `list`, and `show` reach a running daemon | unaudited |
+
 ## Suspiciously quiet areas
 
 - No test exercises class tightening (a decision reclassified `Sensitive`
@@ -94,6 +107,11 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 - No test drives a real `transform` pass end to end with a message value past
   2^53; the default-mode decode is asserted at the host client, and the recipe
   consumer's rejection of a `bigint` is read from `validateJsonValue`.
+- No test drives `review show` to a rendered proposal against a real host; the
+  selected read is reached in Rust and decoded in TypeScript from the same
+  wire shape.
+- No test exercises a request timeout or an aborted signal through the real
+  transport in the command; the error path is exercised with thrown errors.
 - No test drives observer open, `module_projects`, and a worker pass in one
   process; the view and the pass are exercised in two tests.
 - No test records a `temporary_capture` member and adopts it; the member

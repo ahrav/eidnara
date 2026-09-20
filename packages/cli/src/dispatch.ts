@@ -3,6 +3,7 @@ import { isPromptCancelledError } from "./lib/prompts";
 
 export interface CliDispatchDependencies {
     runDaemon: (args: string[]) => Promise<number>;
+    runReview: (args: string[]) => Promise<number>;
     stdout: (line: string) => void;
     stderr: (line: string) => void;
 }
@@ -11,6 +12,10 @@ const defaultDependencies: CliDispatchDependencies = {
     runDaemon: async (args) => {
         const { runDaemonCommand } = await import("./commands/daemon");
         return runDaemonCommand(args);
+    },
+    runReview: async (args) => {
+        const { runReviewCommand } = await import("./commands/review");
+        return runReviewCommand(args);
     },
     stdout: (line) => console.log(line),
     stderr: (line) => console.error(line),
@@ -43,6 +48,9 @@ export function usageText(): string {
         "    daemon restart   Restart the managed eidnara-host as one transaction",
         "    daemon status    Show lifecycle and readiness state without mutation",
         "    daemon doctor    Run read-only lifecycle diagnostics",
+        "    review list      List completed MemoryReviewer outcomes for a project",
+        "    review show      Show the proposal a completed outcome selected",
+        "    review status    Show host-wide MemoryReviewer counters",
         "",
         "  Daemon output:",
         "    --json            Emit one eidnara.daemon/v1 JSON object",
@@ -63,6 +71,8 @@ export function usageText(): string {
         "    eidnara doctor",
         "    eidnara doctor --issue",
         "    eidnara daemon status --json",
+        "    eidnara review list --project /path/to/project",
+        "    eidnara review show <causal-identity> --json",
         "",
     ].join("\n");
 }
@@ -121,6 +131,10 @@ export async function dispatchCli(
     try {
         if (command === "daemon") {
             return await dependencies.runDaemon(rest);
+        }
+
+        if (command === "review") {
+            return await dependencies.runReview(rest);
         }
 
         if (command === "setup") {
