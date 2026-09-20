@@ -288,7 +288,7 @@ describe("collectDiagnostics Eidnara config tiers", () => {
     });
 
     it("captures a project parse error and renders it sanitized", async () => {
-        const { configHome, cwd } = isolatedRoot();
+        const { cwd } = isolatedRoot();
         writeFileSync(join(cwd, ".eidnara", "eidnara.jsonc"), "{ not valid jsonc");
 
         const report = await collectDiagnostics(cwd);
@@ -297,6 +297,10 @@ describe("collectDiagnostics Eidnara config tiers", () => {
 
         const markdown = renderDiagnosticsMarkdown({
             ...report,
+            eidnaraConfig: {
+                ...report.eidnaraConfig,
+                path: "/home/alice/.config/eidnara/eidnara.jsonc",
+            },
             projectConfig: {
                 ...report.projectConfig,
                 parseError: `EACCES: permission denied, open '/home/alice/project/.eidnara/eidnara.jsonc' token=abc123`,
@@ -308,7 +312,7 @@ describe("collectDiagnostics Eidnara config tiers", () => {
         expect(markdown).not.toContain("alice");
         expect(markdown).not.toContain("abc123");
         expect(markdown).toContain(
-            `- User config: \`${join(configHome, "eidnara", "eidnara.jsonc")}\` (missing)`,
+            "- User config: `/home/<USER>/.config/eidnara/eidnara.jsonc` (missing)",
         );
     });
 });

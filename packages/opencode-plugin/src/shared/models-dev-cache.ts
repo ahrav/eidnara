@@ -336,7 +336,9 @@ const MAX_AUTH_REWARM_TIMEOUTS = 2;
  *
  * `authRewarmDone` is set before the await to suppress concurrent refreshes.
  * A failed refresh clears `authRewarmDone` so a later call can retry.
- * Timed-out reads are aborted and permit one retry before the latch stays closed.
+ * Timed-out waiters detach and permit one retry before the latch stays closed.
+ * Do not abort the underlying read: OpenCode can share its provider-initialization
+ * fiber with the user's first getModel call. Cancelling it interrupts that call.
  * A startup refresh still in flight when this runs cannot overwrite the
  * authenticated result: `refreshModelLimitsOnce` applies results in request order.
  */
@@ -362,10 +364,9 @@ export function resetAuthRewarmLatchForTest(readTimeoutMs = HOST_SDK_READ_TIMEOU
 /* */
 async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<RefreshOutcome> {
     const generation = ++refreshGeneration;
-    const controller = new AbortController();
     try {
         const result = await withTimeout(
-            client.config.providers({ signal: controller.signal }),
+            client.config.providers(),
             providerReadTimeoutMs,
             "provider metadata read timed out",
         );
@@ -431,7 +432,6 @@ async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<Refre
         }
         return "ok";
     } catch (error) {
-        if (error instanceof TimeoutError) controller.abort(error);
         sessionLog(
             "global",
             "models-dev-cache: API refresh failed:",

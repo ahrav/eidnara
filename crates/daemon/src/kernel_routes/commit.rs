@@ -448,7 +448,7 @@ impl CommitResult {
     }
 }
 
-fn admit(
+pub(crate) fn admit(
     envelope: &mut Envelope<'_>,
     object_id: &str,
     (source_class, taint_class): (SourceClass, TaintClass),

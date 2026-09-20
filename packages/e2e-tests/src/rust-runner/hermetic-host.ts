@@ -830,7 +830,11 @@ export class HermeticHostStack {
         chmodSync(fixtureConfigRoot, 0o700);
         writeFileSync(
             fixtureConfigPath,
-            JSON.stringify({ history_summarizer: { module_model: "fixture/deterministic" } }),
+            JSON.stringify({
+                history_summarizer: { module_model: "fixture/deterministic" },
+                // Unrelated background extraction must not consume a drill's next-call fault.
+                memory: { auto_capture: false },
+            }),
             { mode: 0o600 },
         );
         chmodSync(fixtureConfigPath, 0o600);

@@ -102,17 +102,21 @@ export function getLiveNotificationParams(
 }
 
 export function createChatMessageHook(args: {
+    checkpointUser?: (sessionId: string, output: unknown) => void;
     liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;
     upgradeReminder?: (sessionId: string) => Promise<void>;
 }) {
-    return async (input: {
-        sessionID?: string;
-        variant?: string;
-        agent?: string;
-        model?: { providerID?: string; modelID?: string };
-    }) => {
+    return async (
+        input: {
+            sessionID?: string;
+            variant?: string;
+            agent?: string;
+            model?: { providerID?: string; modelID?: string };
+        },
+        output?: unknown,
+    ) => {
         const sessionId = input.sessionID;
         if (!sessionId) return;
 
@@ -131,10 +135,12 @@ export function createChatMessageHook(args: {
         if (input.agent) {
             args.agentBySession.set(sessionId, input.agent);
         }
+        args.checkpointUser?.(sessionId, output);
     };
 }
 
 export function createEventHook(args: {
+    checkpointMemory?: (sessionId: string) => Promise<void>;
     eventHandler: (input: { event: { type: string; properties?: unknown } }) => Promise<void>;
     contextUsageMap: BoundedSessionMap<ContextUsageEntry>;
     liveModelBySession: LiveModelBySession;
@@ -183,6 +189,9 @@ export function createEventHook(args: {
         const properties = getSessionProperties(input.event.properties);
         const sessionId = resolveEventSessionId(properties);
         if (!sessionId) return;
+        if (input.event.type === "session.idle" || input.event.type === "session.compacted") {
+            await args.checkpointMemory?.(sessionId);
+        }
 
         if (input.event.type === "session.deleted") {
             args.liveModelBySession.delete(sessionId);

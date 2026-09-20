@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostModuleTransport } from "@eidnara/opencode/hooks/context/module-transport";
@@ -12,6 +12,7 @@ import {
 } from "./kernel-client-pi";
 import { EIDNARA_PI_SUBAGENT_ENV } from "./subagent-runner";
 
+const tempRoots: string[] = [];
 const originalEnv = {
     EIDNARA_PI_SUBAGENT: process.env.EIDNARA_PI_SUBAGENT,
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
@@ -27,6 +28,7 @@ function restoreEnv() {
 
 function isolateXdgEnv() {
     const root = mkdtempSync(join(tmpdir(), "eidnara-pi-release-test-"));
+    tempRoots.push(root);
     process.env.XDG_CONFIG_HOME = join(root, "config");
     process.env.XDG_DATA_HOME = join(root, "data");
 }
@@ -48,13 +50,14 @@ async function registeredHandlers() {
         | SessionHandler
         | undefined;
     if (!shutdown || !beforeSwitch) throw new Error("session handlers not registered");
-    return { shutdown, beforeSwitch };
+    return { shutdown, beforeSwitch, registrations };
 }
 
 afterEach(() => {
     restoreEnv();
     __test.clearPiEidnaraActive();
     resetPiKernelClientsForTest();
+    for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe("Pi fork token caches across session lifecycle events", () => {
@@ -87,6 +90,65 @@ describe("Pi fork token caches across session lifecycle events", () => {
 });
 
 describe("Pi daemon transport across runtime teardown", () => {
+    it.each([
+        true,
+        false,
+    ])("keeps capture unconfirmed until flushed, initial model present: %s", async (hasModel) => {
+        let ready = false;
+        const methods: string[] = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                methods.push(input.method);
+                return {
+                    state:
+                        input.method === "memory.capture"
+                            ? "accepted"
+                            : ready
+                              ? "ready"
+                              : "pending",
+                };
+            },
+        );
+        try {
+            const { registrations } = await registeredHandlers();
+            const agentEnd = registrations.handlers.get("agent_end");
+            if (typeof agentEnd !== "function") throw new Error("agent_end not registered");
+            const setStatus = mock(() => undefined);
+            const ctx = {
+                cwd: process.cwd(),
+                model: hasModel ? { provider: "openai", id: "test" } : undefined,
+                sessionManager: {
+                    getSessionId: () => "capture-status",
+                    getBranch: () => [
+                        {
+                            type: "message",
+                            id: "source-1",
+                            message: { role: "user", content: "Production uses port 4567." },
+                        },
+                    ],
+                },
+                hasUI: true,
+                ui: { setStatus },
+            };
+            await agentEnd({}, ctx);
+            expect(setStatus).toHaveBeenLastCalledWith(
+                "eidnara-capture",
+                "Memory capture: unconfirmed",
+            );
+            ready = true;
+            ctx.model = { provider: "openai", id: "test" };
+            await agentEnd({}, ctx);
+            expect(setStatus).toHaveBeenLastCalledWith("eidnara-capture", undefined);
+            expect(methods).toEqual([
+                "memory.capture",
+                "memory.capture.next",
+                "memory.capture.next",
+            ]);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("disconnects the runtime's transport on session_shutdown, for a reload and for a quit", async () => {
         for (const reason of ["reload", "quit"]) {
             const disconnect = spyOn(

@@ -1,12 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { renderToolStateText } from "@eidnara/opencode/shared/kernel-client";
 import { FakeKernel } from "@eidnara/opencode/shared/kernel-client-testing/fake-kernel";
 import {
     MEMORY_STATE_TABLE,
     stubKernelClient,
 } from "@eidnara/opencode/shared/kernel-client-testing/state-table";
+import { WRITABLE_MEMORY_CATEGORIES } from "@eidnara/opencode/tools/eidnara-memory/constants";
 import { createEidnaraMemoryTools } from "@eidnara/opencode/tools/eidnara-memory/tools";
 import { fakeKernelResolver } from "../__tests__/test-utils";
 import { createEidnaraMemoryTool } from "./eidnara-memory";
@@ -67,6 +69,45 @@ function createArgs(content: string) {
 function reduced(inner: Record<string, unknown>) {
     return { reduced: true, summary: JSON.stringify(inner) };
 }
+
+describe("Pi eidnara_memory provider schema", () => {
+    it("advertises flat string enums and explains every category", () => {
+        const { tool } = harness();
+        expect(tool.parameters.properties.category).toMatchObject({
+            type: "string",
+            enum: [...WRITABLE_MEMORY_CATEGORIES],
+        });
+        expect(tool.parameters.properties.category).not.toHaveProperty("anyOf");
+        expect(tool.parameters.properties.action).not.toHaveProperty("anyOf");
+        for (const category of WRITABLE_MEMORY_CATEGORIES) {
+            expect(tool.description).toContain(category);
+        }
+    });
+
+    it("rejects an invented category before SDK validation, then accepts a corrected call", async () => {
+        const { tool, kernel } = harness();
+        const prepare = (args: unknown) => tool.prepareArguments?.(args);
+        const bad = { action: "create", category: "project_fact", content: "Use port 4321." };
+        expect(() => prepare(bad)).toThrow(
+            `expected one of ${WRITABLE_MEMORY_CATEGORIES.join(", ")}`,
+        );
+        expect(kernel.liveRows()).toHaveLength(0);
+        const args = prepare({ ...bad, category: "CONFIG_VALUES" });
+        const validated = validateToolArguments(tool, {
+            type: "toolCall",
+            id: "corrected",
+            name: tool.name,
+            arguments: args,
+        });
+        const result = await tool.execute("corrected", validated, undefined, undefined, {
+            cwd: CWD,
+            sessionManager: { getSessionId: () => SESSION },
+        } as never);
+        expect(parseResult<CommitJson>(result).outcome).toBe("applied");
+        expect(kernel.liveRows()).toHaveLength(1);
+        expect(kernel.liveRows()[0]?.decision?.payload.summary).toBe("Use port 4321.");
+    });
+});
 
 describe("Pi eidnara_memory create", () => {
     it("returns a commit receipt and stores the decision in the kernel", async () => {

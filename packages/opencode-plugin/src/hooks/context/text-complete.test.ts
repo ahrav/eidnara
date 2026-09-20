@@ -18,6 +18,57 @@ async function expectEach(cases: ReadonlyArray<readonly [string, string]>): Prom
 }
 
 describe("text-complete handler", () => {
+    it("awaits the durable checkpoint of stripped final text", async () => {
+        let release = () => {};
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        let completed = false;
+        const texts: string[] = [];
+        const handler = createTextCompleteHandler(async (_input, text) => {
+            texts.push(text);
+            await gate;
+            completed = true;
+        });
+        const output = { text: `${SECTION}7${SECTION} A durable decision.` };
+        const pending = handler({ sessionID: "s", messageID: "m", partID: "p" }, output);
+        await Promise.resolve();
+        expect(texts).toEqual(["A durable decision."]);
+        expect(completed).toBe(false);
+        release();
+        await pending;
+        expect(completed).toBe(true);
+    });
+
+    it("does not lose the user's response when capture fails", async () => {
+        const handler = createTextCompleteHandler(async () => {
+            throw new Error("capture unavailable");
+        });
+        const output = { text: "A durable decision." };
+        await handler({ sessionID: "s", messageID: "m", partID: "p" }, output);
+        expect(output.text).toBe("A durable decision.");
+    });
+
+    it.each([
+        false,
+        true,
+    ])("reports pending capture without losing text if notification fails: %s", async (failNotification) => {
+        let notifications = 0;
+        const handler = createTextCompleteHandler(
+            async () => {
+                throw new Error("capture unavailable");
+            },
+            async () => {
+                notifications++;
+                if (failNotification) throw new Error("UI unavailable");
+            },
+        );
+        const output = { text: "A durable decision." };
+        await handler({ sessionID: "s", messageID: "m", partID: "p" }, output);
+        expect(notifications).toBe(1);
+        expect(output.text).toBe("A durable decision.");
+    });
+
     describe("leading tag prefix (canonical Eidnara tagger output)", () => {
         it("#given leading §N§ prefixes of any count, digit width, or spacing #when handler runs #then strips them all", async () => {
             await expectEach([

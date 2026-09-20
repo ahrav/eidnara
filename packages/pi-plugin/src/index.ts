@@ -9,7 +9,7 @@
  */
 
 import { resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import type {
     ContextResearcherConfig,
@@ -32,6 +32,11 @@ import { setHarness } from "@eidnara/opencode/shared/harness";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
 import { log } from "@eidnara/opencode/shared/logger";
 import {
+    createMemoryCaptureCheckpoint,
+    flushMemoryCapture,
+    piCaptureMessages,
+} from "@eidnara/opencode/shared/memory-capture";
+import {
     createPromptSurfaceGuidanceEpochCache,
     createPromptSurfaceRuntime,
 } from "@eidnara/opencode/shared/prompt-surface-runtime";
@@ -48,6 +53,7 @@ import { registerCtxWrapupCommand } from "./commands/eidnara-wrapup";
 import { registerCtxStatusEntryRenderer } from "./commands/pi-command-utils";
 import { loadPiConfig } from "./config";
 import { createPiKernelClientResolver, forgetPiSessionKernelTokens } from "./kernel-client-pi";
+import { piMemoryCaptureExecutor } from "./memory-capture-native";
 import { createPiRustToolBackends } from "./rust-tool-backends";
 import { registerStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
@@ -507,6 +513,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     const systemPromptRefreshSessions = new Set<string>();
 
     pi.on("before_agent_start", async (event, ctx) => {
+        await flushPendingMemory(ctx);
         try {
             const effectiveProjectDeps = resolveCurrentProjectDeps(ctx);
             const effectiveConfig = effectiveProjectDeps.config;
@@ -582,8 +589,51 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     });
     info("registered before_agent_start system prompt handler");
 
-    pi.on("agent_end", () => {
-        log("agent_end: returning synchronously (background work continues)");
+    const captureCheckpoint = createMemoryCaptureCheckpoint(moduleClient);
+    function captureScope(ctx: ExtensionContext) {
+        const sessionId = ctx.sessionManager.getSessionId();
+        if (!sessionId) return undefined;
+        const deps = resolveCurrentProjectDeps(ctx);
+        if (
+            deps.config.memory?.enabled === false ||
+            deps.config.memory?.auto_promote === false ||
+            deps.config.memory?.auto_capture === false
+        )
+            return undefined;
+        return {
+            sessionId,
+            projectRoot: resolveProjectRootDirectory(ctx.cwd),
+            model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+        };
+    }
+    async function flushPendingMemory(ctx: ExtensionContext): Promise<void> {
+        try {
+            const scope = captureScope(ctx);
+            if (scope) await flushMemoryCapture(moduleClient, scope, piMemoryCaptureExecutor(ctx));
+            if (ctx.hasUI) ctx.ui.setStatus("eidnara-capture", undefined);
+        } catch (error) {
+            warn("memory capture remains pending:", error);
+            if (ctx.hasUI) ctx.ui.setStatus("eidnara-capture", "Memory capture: unconfirmed");
+        }
+    }
+    async function checkpointMemory(ctx: ExtensionContext): Promise<void> {
+        try {
+            const scope = captureScope(ctx);
+            if (!scope) return;
+            await captureCheckpoint({
+                ...scope,
+                messages: piCaptureMessages(ctx.sessionManager.getBranch()),
+            });
+            await flushMemoryCapture(moduleClient, scope, piMemoryCaptureExecutor(ctx));
+            if (ctx.hasUI) ctx.ui.setStatus("eidnara-capture", undefined);
+        } catch (error) {
+            warn("memory capture checkpoint pending:", error);
+            if (ctx.hasUI) ctx.ui.setStatus("eidnara-capture", "Memory capture: unconfirmed");
+        }
+    }
+
+    pi.on("agent_end", async (_event, ctx) => {
+        await checkpointMemory(ctx);
     });
 
     // `tool_execution_start` exposes `event.args` before tool output.
@@ -612,9 +662,10 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         }
     });
 
-    pi.on("session_before_compact", async (_event, ctx) =>
-        handlePiSessionBeforeCompact({ compactionOff, ctx }),
-    );
+    pi.on("session_before_compact", async (_event, ctx) => {
+        await checkpointMemory(ctx);
+        return handlePiSessionBeforeCompact({ compactionOff, ctx });
+    });
 
     // Mutating `event.message` changes the message persisted by `sessionManager.appendMessage`.
     // Unstripped prefixes appear in assistant responses in Pi's UI.
@@ -671,6 +722,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
 
     // `/reload` tears down extensions and re-runs the default export.
     pi.on("session_shutdown", async (event, ctx) => {
+        await checkpointMemory(ctx);
         // Long-lived Pi processes can reinitialize the extension after `session_shutdown`, so the handler clears per-session state.
         try {
             const sessionId = sessionIdFromContext(ctx);

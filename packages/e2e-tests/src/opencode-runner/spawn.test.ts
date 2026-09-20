@@ -220,6 +220,19 @@ describe("opencode child lifecycle", () => {
                 }),
             ).toThrow(/eidnaraConfig must serialize to a JSON object/);
 
+            // A hook exception is also untrusted text and must not escape into diagnostics.
+            const throwing = {
+                toJSON() {
+                    throw new Error("password=fixture-secret");
+                },
+            };
+            expect(() =>
+                __spawnOpencodeTest.writeConfigs(env, "http://127.0.0.1:4321", {
+                    mockProviderURL: "http://127.0.0.1:4321",
+                    eidnaraConfig: throwing,
+                }),
+            ).toThrow(new Error("eidnaraConfig must serialize to a JSON object"));
+
             // The user config loader expands `{env:NAME}`, so a placeholder naming a sensitive
             // variable is the token that reaches disk under a credential-shaped key.
             expect(() =>
@@ -507,7 +520,7 @@ describe("opencode child lifecycle", () => {
                 )
                 .catch((failure: unknown) => failure);
 
-            expect(String(error)).toContain("cyclic structures");
+            expect(String(error)).toContain("openCodeConfigExtra must serialize to a JSON object");
             // The config is canonicalized before provisioning, so there is no fixture to
             // stop: a rejected spawn does not create resources it then has to tear down.
             expect(provisionCalls).toBe(0);

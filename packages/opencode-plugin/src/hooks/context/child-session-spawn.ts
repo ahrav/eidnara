@@ -30,6 +30,7 @@ interface ChildSessionSpawnArgs {
     title: string;
     directory?: string;
     signal?: AbortSignal;
+    denyTools?: boolean;
 }
 
 export async function createChildSession(args: ChildSessionSpawnArgs): Promise<unknown> {
@@ -38,6 +39,9 @@ export async function createChildSession(args: ChildSessionSpawnArgs): Promise<u
             body: {
                 ...(args.parentSessionId ? { parentID: args.parentSessionId } : {}),
                 title: args.title,
+                ...(args.denyTools
+                    ? { permission: [{ permission: "*", pattern: "*", action: "deny" }] }
+                    : {}),
             },
             query: { directory: args.directory },
             ...(args.signal ? { signal: args.signal } : {}),
@@ -58,7 +62,12 @@ export async function createChildSession(args: ChildSessionSpawnArgs): Promise<u
                         preferResponseOnMissingData: true,
                     });
                     if (typeof created?.id === "string" && created.id.length > 0) {
-                        return deleteChildSession(args.client, created.id);
+                        return deleteChildSession(
+                            args.client,
+                            created.id,
+                            undefined,
+                            args.directory,
+                        );
                     }
                     return undefined;
                 })
@@ -73,11 +82,13 @@ export async function deleteChildSession(
     client: ChildSessionDeleteClient,
     sessionId: string,
     signal?: AbortSignal,
+    directory?: string,
 ): Promise<void> {
     await withTimeout(
         Promise.resolve(
             client.session.delete({
                 path: { id: sessionId },
+                ...(directory ? { query: { directory } } : {}),
                 ...(signal ? { signal } : {}),
             } as never),
         ),

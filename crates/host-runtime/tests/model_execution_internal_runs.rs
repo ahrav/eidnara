@@ -59,7 +59,7 @@ fn try_public_send(supervisor: &Supervisor, session: &str) -> Result<String, Req
         provider: "prov".to_owned(),
         model: "model-a".to_owned(),
         max_output_tokens: 1_000,
-        temperature: 0.1,
+        temperature: Some(0.1),
     };
     let body = serde_json::to_vec(&serde_json::json!({
         "method": "session.send",
@@ -186,7 +186,7 @@ async fn internal_runs_are_invisible_to_every_public_operation() {
         provider: "prov".to_owned(),
         model: "model-a".to_owned(),
         max_output_tokens: 10,
-        temperature: 0.0,
+        temperature: Some(0.0),
     };
     supervisor.send(&public, request, b"body").unwrap();
     assert_eq!(supervisor.metrics().live_runs, 2);

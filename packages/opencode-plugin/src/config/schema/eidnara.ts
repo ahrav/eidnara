@@ -266,6 +266,7 @@ export interface EidnaraConfig {
         enabled: boolean;
         injection_budget_tokens: number;
         auto_promote: boolean;
+        auto_capture?: boolean;
         retrieval_count_promotion_threshold: number;
         /** `auto_search` appends a compact hint to new user messages when `eidnara_search` finds related results.
          * `auto_search` injects fragments rather than full content.
@@ -634,6 +635,12 @@ export const EidnaraConfigSchema = z
                     .describe(
                         "Automatically promote eligible session facts into memory (default: true)",
                     ),
+                auto_capture: z
+                    .boolean()
+                    .default(true)
+                    .describe(
+                        "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; captured facts remain labeled model inference. Set false to disable unattended capture.",
+                    ),
                 retrieval_count_promotion_threshold: z
                     .number()
                     .min(1)
@@ -704,6 +711,7 @@ export const EidnaraConfigSchema = z
                 enabled: true,
                 injection_budget_tokens: 4000,
                 auto_promote: true,
+                auto_capture: true,
                 retrieval_count_promotion_threshold: 3,
                 auto_search: { enabled: true, score_threshold: 0.6, min_prompt_chars: 20 },
                 git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },

@@ -188,6 +188,49 @@ async function expectSentinel(promise: Promise<unknown>, sentinel: string): Prom
 }
 
 describe("eidnara hook", () => {
+    it("queues user capture without blocking chat and awaits it before final-text capture", async () => {
+        useTempDataHome("capture-user-");
+        let release = (_value: { data: { directory: string } }) => {};
+        const directory = new Promise<{ data: { directory: string } }>((resolve) => {
+            release = resolve;
+        });
+        const client = createClientMock();
+        client.session.get = mock(() => directory) as never;
+        const fake = createFakeModuleClient(({ method }) => ({
+            state: method === "memory.capture.next" ? "ready" : "accepted",
+        }));
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+        );
+        await hook["chat.message"](
+            { sessionID: "capture-user", model: { providerID: "provider", modelID: "model" } },
+            {
+                message: { id: "native-user", role: "user", sessionID: "capture-user" },
+                parts: [{ type: "text", text: "A durable project fact." }],
+            },
+        );
+        expect(fake.calls).toHaveLength(0);
+        let finished = false;
+        const final = hook["experimental.text.complete"](
+            { sessionID: "capture-user", messageID: "native-answer", partID: "part" },
+            { text: "Completed." },
+        ).then(() => {
+            finished = true;
+        });
+        await Promise.resolve();
+        expect(finished).toBe(false);
+        release({ data: { directory: "/project" } });
+        await final;
+        expect(fake.calls.map((call) => call.method)).toEqual([
+            "memory.capture",
+            "memory.capture",
+            "memory.capture.next",
+        ]);
+        expect(fake.calls[0]?.body).toMatchObject({
+            messages: [{ id: "native-user", role: "user", text: "A durable project fact." }],
+        });
+    });
+
     for (const entry of ["hook", "wrapper"] as const) {
         it.each([
             "info",

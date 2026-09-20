@@ -6,6 +6,7 @@ import { createCountingPi } from "./__tests__/test-utils";
 import eidnaraPiExtension, { __test } from "./index";
 import { EIDNARA_PI_SUBAGENT_ENV } from "./subagent-runner";
 
+const tempRoots: string[] = [];
 const originalEnv = {
     EIDNARA_PI_SUBAGENT: process.env.EIDNARA_PI_SUBAGENT,
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
@@ -21,6 +22,7 @@ function restoreEnv() {
 
 function isolateXdgEnv() {
     const root = mkdtempSync(join(tmpdir(), "eidnara-pi-latch-test-"));
+    tempRoots.push(root);
     process.env.XDG_CONFIG_HOME = join(root, "config");
     process.env.XDG_DATA_HOME = join(root, "data");
     return root;
@@ -34,6 +36,7 @@ afterEach(() => {
     restoreEnv();
     // Clear the process-global latch between tests; otherwise one test's initialization suppresses the next.
     __test.clearPiEidnaraActive();
+    for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe("Pi in-process re-init latch (#247)", () => {

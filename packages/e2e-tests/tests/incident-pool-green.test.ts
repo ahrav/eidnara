@@ -1,7 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { detectRustPrerequisites } from "../scripts/check-rust-prerequisites";
 import { E2E_ROOT, INCIDENTS_DIR, loadHistorySnapshot } from "../scripts/validate-incident-history";
 import { validateIncidentHistory } from "../src/incident-pool/history";
@@ -51,12 +50,9 @@ describe.skipIf(!rustPrereqs.ok)("incident pool baseline-green wrappers (rust)",
                 process.env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN = prereqs.fixtureBin;
             }
         }
-        // Short on purpose: the case workspace hosts a Unix socket path bounded by `SUN_LEN`.
-        workspaceParentDir = mkdtempSync(join(tmpdir(), "ig-"));
-    });
-
-    afterAll(() => {
-        rmSync(workspaceParentDir, { recursive: true, force: true });
+        // Each case already owns and removes its nonce-named directory. An extra
+        // parent pushes the fixture's Unix socket past SUN_LEN with disk-backed TMPDIR.
+        workspaceParentDir = tmpdir();
     });
 
     async function runGreenVariant(variantId: string): Promise<IncidentCaseResult> {

@@ -36,7 +36,7 @@ fn send_pair(prompt: &str) -> (SendRequest, Vec<u8>) {
         provider: "prov".to_owned(),
         model: "model-a".to_owned(),
         max_output_tokens: 1_000,
-        temperature: 0.1,
+        temperature: Some(0.1),
     };
     let body = serde_json::to_vec(&serde_json::json!({
         "method": "session.send",

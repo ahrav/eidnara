@@ -14,7 +14,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "bun run clean && tsc -p ../fs-observer/tsconfig.build.json && bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui --external node:sqlite --external jsonc-parser",
+    "build": "bun run clean && tsc -p ../fs-observer/tsconfig.build.json && bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --splitting --external @eidnara/shm-native --external @earendil-works/pi-coding-agent --external @earendil-works/pi-ai --external @earendil-works/pi-tui --external node:sqlite --external jsonc-parser",
     "typecheck": "tsc -p ../fs-observer/tsconfig.build.json && tsc --noEmit",
     "test": "bun test",
     "lint": "biome check .",

@@ -37,6 +37,7 @@ pub mod injection;
 pub mod kernel_routes;
 pub mod m0_compose;
 pub(crate) mod m1_compose;
+pub mod memory_capture;
 pub(crate) mod memory_classifier_scheduler;
 pub(crate) mod memory_render;
 pub mod memory_reviewer;
@@ -2299,7 +2300,8 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
     + kernel_routes::eligibility::CACHE_BUDGET_BYTES
-    + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES;
+    + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES
+    + memory_capture::RETAINED_BYTES_BOUND;
 
 #[derive(Debug, Clone)]
 struct NativeDeltaFrontier {
@@ -2943,6 +2945,8 @@ pub struct HandlerCore {
     cancel: CancellationToken,
     tasks: TaskTracker,
     producer_factory: Arc<dyn HistorySummarizerProducerFactory>,
+    native_capture: Arc<Mutex<memory_capture::NativeCaptureState>>,
+    capture_commit_gate: Arc<Mutex<()>>,
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
     #[cfg(test)]
@@ -3875,6 +3879,8 @@ impl Handler {
                 Arc::clone(&kernel),
             )),
             producer_factory,
+            native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
+            capture_commit_gate: Arc::new(Mutex::new(())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
             #[cfg(test)]
@@ -4369,6 +4375,8 @@ impl Handler {
                 Arc::clone(&kernel),
             )),
             producer_factory: factory,
+            native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
+            capture_commit_gate: Arc::new(Mutex::new(())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             fixed_config: Some(config),
@@ -6542,10 +6550,20 @@ impl HandlerCore {
         request: &Value,
         operation: &str,
     ) -> Result<(String, SessionBinding), PreparedOutcome> {
-        if request.get("v").and_then(Value::as_u64) != Some(1) {
+        self.management_binding_version(channel, request, operation, 1)
+    }
+
+    fn management_binding_version(
+        &self,
+        channel: RouteHandle,
+        request: &Value,
+        operation: &str,
+        version: u64,
+    ) -> Result<(String, SessionBinding), PreparedOutcome> {
+        if request.get("v").and_then(Value::as_u64) != Some(version) {
             return Err(PreparedOutcome::Error {
                 code: "bad_request".to_string(),
-                message: format!("{operation} requires v=1"),
+                message: format!("{operation} requires v={version}"),
             });
         }
         let Some(session_id) = request.get("session_id").and_then(Value::as_str) else {
@@ -6789,6 +6807,10 @@ impl HandlerCore {
             Ok(project) => project,
             Err(outcome) => return outcome,
         };
+        let _capture_gate = self
+            .capture_commit_gate
+            .lock()
+            .expect("capture publication mutex");
         match store.delete_session(&session_id, &note_project_path) {
             Ok(deleted_rows) => {
                 self.cancel_history_summarizer_work(&session_id);
@@ -8817,6 +8839,7 @@ impl HandlerCore {
             Err(outcome) => return outcome,
         };
         ticket.accept();
+        self.capture_transform_sources(Arc::clone(&store), &binding, &parsed);
         let intake = PassIntake {
             store,
             parsed,
@@ -13631,6 +13654,12 @@ impl HandlerCore {
                 "mirror.pull" => self.handle_mirror_pull_value(&request),
                 "guidance.get" => self.handle_guidance_value(channel, &request),
                 "manifest.get" => self.handle_prompt_surface_manifest_value(channel, &request),
+                "memory.capture.next" => self.handle_native_capture_next(channel, &request).await,
+                "memory.capture.submit" => {
+                    self.handle_native_capture_submit(channel, &request).await
+                }
+                "memory.capture" => self.handle_memory_capture(channel, &request),
+                "memory.capture.status" => self.handle_memory_capture_status(channel, &request),
                 "memory_classifier.run_task" => {
                     self.handle_memory_classifier_run_task(channel, &request)
                         .await
@@ -22211,6 +22240,17 @@ mod tests {
             })
         }
 
+        async fn start_with_model_defaults(
+            &mut self,
+            session_id: &str,
+            system: &str,
+            prompt: &str,
+            model: &str,
+            _max_output_tokens: u32,
+        ) -> Result<RunHandle, HistorySummarizerProducerError> {
+            self.start(session_id, system, prompt, model).await
+        }
+
         async fn await_output(
             &mut self,
             _run_id: &str,
@@ -22385,6 +22425,320 @@ mod tests {
         (handler, store, dir, project)
     }
 
+    #[tokio::test]
+    async fn automatic_capture_routes_reject_foreign_or_malformed_scope_before_work() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        for method in [
+            "memory.capture",
+            "memory.capture.next",
+            "memory.capture.submit",
+            "memory.capture.status",
+        ] {
+            for (field, value) in [
+                ("project_root", json!("/another-project")),
+                ("project_root", Value::Null),
+                ("project_root", json!(17)),
+                ("project_root", json!(".")),
+                ("unexpected", json!(true)),
+            ] {
+                let mut request = json!({"method":method,"v":2,"session_id":"ses"});
+                request[field] = value;
+                let outcome = match method {
+                    "memory.capture" => handler.handle_memory_capture(test_route(7), &request),
+                    "memory.capture.next" => {
+                        handler
+                            .handle_native_capture_next(test_route(7), &request)
+                            .await
+                    }
+                    "memory.capture.submit" => {
+                        handler
+                            .handle_native_capture_submit(test_route(7), &request)
+                            .await
+                    }
+                    _ => handler.handle_memory_capture_status(test_route(7), &request),
+                };
+                assert!(
+                    matches!(outcome, PreparedOutcome::Error { ref code, .. } if code == "invalid_params"),
+                    "{method}: {outcome:?}"
+                );
+            }
+        }
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store
+                .memory_capture_status(project.to_str().unwrap())
+                .unwrap()
+                .pending,
+            0
+        );
+        let status = handler.handle_memory_capture_status(
+            test_route(7),
+            &json!({
+                "method":"memory.capture.status","v":2,"session_id":"ses","project_root":project,
+            }),
+        );
+        assert_eq!(tool_body(status)["state"], "available");
+    }
+
+    #[tokio::test]
+    async fn automatic_capture_commits_once_and_is_explicitly_retrievable() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    memory_auto_capture: true,
+                    ..default_test_config()
+                },
+                ..binding_with_harness(project.to_str().unwrap(), "pi", "ses")
+            },
+        );
+
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","model":"test/model","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging. Now fix the test."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            "accepted"
+        );
+        assert_eq!(
+            state.starts.load(Ordering::SeqCst),
+            0,
+            "checkpoint must not run a daemon model"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        let output = json!({"version":1,"decisions":prompt["messages"].as_array().unwrap().iter().map(|message| json!({
+            "message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":"Production uses port 4321.","quote":"Use port 4321 for staging."}]
+        })).collect::<Vec<_>>()});
+        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "stale"
+        );
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "ready"
+        );
+        let status = store
+            .memory_capture_status(project.to_str().unwrap())
+            .unwrap();
+        assert_eq!(status.completed, 1);
+        assert_eq!(status.pending, 0);
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(
+            memories.rows.len(),
+            1,
+            "captured facts must be retrievable, not merely stored"
+        );
+        assert_eq!(
+            memories.rows[0].visibility,
+            kernel::SurfaceVisibility::Labeled
+        );
+        assert_eq!(
+            memories.decisions.values().next().unwrap().payload.summary,
+            "User stated: Use port 4321 for staging.",
+            "store the attributed source quotation, not the extractor's broadened environment"
+        );
+        let injected = canonical_memory::read_project_memory(
+            &handler.kernel,
+            &kernel_routes::ProjectBinding::new(&project),
+            now_ms(),
+            4000.0,
+        );
+        assert!(
+            injected.rows().is_empty(),
+            "extraction must not promote model inference into trusted automatic context"
+        );
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            "accepted"
+        );
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store
+                .memory_capture_status(project.to_str().unwrap())
+                .unwrap()
+                .completed,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn native_capture_leases_expire_and_never_publish_stale_or_deleted_sources() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    memory_auto_capture: true,
+                    ..default_test_config()
+                },
+                ..binding_with_harness(project.to_str().unwrap(), "pi", "ses")
+            },
+        );
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source))["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let first = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(first["state"], "work");
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "pending"
+        );
+        handler
+            .native_capture
+            .lock()
+            .unwrap()
+            .expire_ready_for_test();
+        let second = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(second["state"], "work");
+        assert_ne!(first["lease"], second["lease"]);
+        let text = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[{"category":"CONFIG_VALUES","content":"Port 4321.","quote":"Use port 4321 for staging."}]}]}).to_string();
+        let mut submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":first["lease"],"model":first["model"],"output":text});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submit)
+                    .await
+            )["state"],
+            "stale"
+        );
+        submit["lease"] = second["lease"].clone();
+        submit["model"] = json!("different/model");
+        assert!(
+            matches!(handler.handle_native_capture_submit(test_route(7), &submit).await, PreparedOutcome::Error { ref code, .. } if code == "invalid_params")
+        );
+        submit["model"] = second["model"].clone();
+        let deleted = handler.handle_session_delete_value(
+            test_route(7),
+            &json!({"method":"session.delete","v":1,"session_id":"ses"}),
+        );
+        assert!(!matches!(deleted, PreparedOutcome::Error { .. }));
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submit)
+                    .await
+            )["state"],
+            "processed"
+        );
+        assert_eq!(
+            store
+                .memory_capture_status(project.to_str().unwrap())
+                .unwrap()
+                .completed,
+            0
+        );
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert!(memories.rows.is_empty());
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn automatic_capture_rejection_stays_pending_not_successful_empty_memory() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(state, default_test_config()).await;
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    memory_auto_capture: true,
+                    ..default_test_config()
+                },
+                ..binding_with_harness(project.to_str().unwrap(), "pi", "ses")
+            },
+        );
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","model":"test/model","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            "accepted"
+        );
+        let next =
+            json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"test/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        let submitted = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":"invalid response"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submitted)
+                    .await
+            )["state"],
+            "processed"
+        );
+        assert_eq!(
+            store
+                .memory_capture_status(project.to_str().unwrap())
+                .unwrap(),
+            memory_store::memory_capture::CaptureQueueStatus {
+                pending: 1,
+                prepared: 0,
+                completed: 0,
+                failed: 1
+            }
+        );
+    }
+
     #[test]
     fn claude_code_config_controls_fill_request_without_changing_default_request_bytes() {
         let value = json!({
@@ -22509,6 +22863,7 @@ mod tests {
             execute_threshold_percentage: 65.0,
             compaction_enabled: true,
             memory_enabled: true,
+            memory_auto_capture: false,
             auto_search: crate::config::AutoSearchConfig::default(),
             terse_text_compression: crate::config::TerseTextCompressionConfig::default(),
             auto_promote: true,
@@ -40218,7 +40573,7 @@ mod release_contract_tests {
         );
         assert_eq!(
             production_inputs::production_inputs_lock_sha256(),
-            "a6b2bf18777d9fba2ba7ac2b2782f248dc8a6448c20951804b65b266aff2122d"
+            "86fb7bed51069d776e53ab869a9e09aa772427a300941fdb6ad0ffb58778fe21"
         );
         let contract = contract();
         assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));

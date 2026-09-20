@@ -801,7 +801,101 @@ fn production_closures_from_environment_materialize() {
             .closure_path()
             .is_file()
     );
-    assert_eq!(pi.manifest().nodes.len(), 3_081);
+    assert_eq!(pi.manifest().nodes.len(), 5_906);
+    assert_eq!(
+        pi.digest(),
+        "c9cfb8a0371f04dddc73f6becdb96629a9fefc226e5b88dd9778658da9cca3ca"
+    );
+    // File presence does not prove Node's runtime graph. Nested package.json
+    // files select CJS/ESM semantics even when every JavaScript file is present.
+    let interpreter = pi
+        .resolve_node_descriptor("bin/node")
+        .expect("Pi interpreter");
+    let entrypoint = pi
+        .resolve_node_descriptor("node_modules/@earendil-works/pi-coding-agent/dist/cli.js")
+        .expect("Pi entrypoint");
+    let output = std::process::Command::new(interpreter.closure_path())
+        .arg(entrypoint.closure_path())
+        .arg("--version")
+        .env_clear()
+        .env("HOME", store_root.path())
+        .env("PI_SKIP_VERSION_CHECK", "1")
+        .current_dir(store_root.path())
+        .output()
+        .expect("launch copied Pi runtime");
+    assert!(
+        output.status.success(),
+        "copied Pi runtime failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "0.80.2");
+    // --version exits before theme/resource initialization. Enter print mode
+    // without credentials to prove startup data loads, without authenticated inference.
+    let print = std::process::Command::new(interpreter.closure_path())
+        .arg(entrypoint.closure_path())
+        .args([
+            "--print",
+            "--mode",
+            "json",
+            "--no-session",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-context-files",
+            "--no-tools",
+            "--no-approve",
+            "--no-extensions",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-haiku-4-5",
+            "hello",
+        ])
+        .env_clear()
+        .env("HOME", store_root.path())
+        .env("PI_OFFLINE", "1")
+        .env("PI_SKIP_VERSION_CHECK", "1")
+        .current_dir(store_root.path())
+        .output()
+        .expect("enter copied Pi print mode");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&print.stdout),
+        String::from_utf8_lossy(&print.stderr)
+    );
+    assert!(
+        text.contains("No API key"),
+        "startup must reach credential resolution, not fail loading assets: {text}"
+    );
+    assert!(!text.contains("ENOENT"), "runtime data missing: {text}");
+    // Startup can succeed without loading a provider's variable-specifier API.
+    // Import the pinned API modules themselves to verify their dependency trees.
+    let api_paths: Vec<_> = pi
+        .manifest()
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.kind == NodeKind::Module
+                && node.path.contains("/@earendil-works/pi-ai/dist/api/")
+                && node.path.ends_with(".js")
+        })
+        .map(|node| {
+            pi.resolve_node_descriptor(&node.path)
+                .unwrap()
+                .closure_path()
+                .to_path_buf()
+        })
+        .collect();
+    assert!(!api_paths.is_empty());
+    let imports = std::process::Command::new(interpreter.closure_path())
+        .args(["--input-type=module", "-e", "import {pathToFileURL} from 'node:url'; for (const path of process.argv.slice(1)) await import(pathToFileURL(path).href); console.log('loaded');"])
+        .args(&api_paths).env_clear().env("HOME", store_root.path())
+        .current_dir(store_root.path()).output().expect("load provider APIs from copied runtime");
+    assert!(
+        imports.status.success(),
+        "copied provider API import failed: {}",
+        String::from_utf8_lossy(&imports.stderr)
+    );
+    assert_eq!(String::from_utf8(imports.stdout).unwrap().trim(), "loaded");
 }
 
 #[test]

@@ -703,6 +703,7 @@
         "enabled": true,
         "injection_budget_tokens": 4000,
         "auto_promote": true,
+        "auto_capture": true,
         "retrieval_count_promotion_threshold": 3,
         "auto_search": {
           "enabled": true,
@@ -733,6 +734,11 @@
         "auto_promote": {
           "default": true,
           "description": "Automatically promote eligible session facts into memory (default: true)",
+          "type": "boolean"
+        },
+        "auto_capture": {
+          "default": true,
+          "description": "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; captured facts remain labeled model inference. Set false to disable unattended capture.",
           "type": "boolean"
         },
         "retrieval_count_promotion_threshold": {

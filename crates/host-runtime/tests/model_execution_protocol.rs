@@ -41,6 +41,33 @@ fn mutate(text: &str, needle: &str, replacement: &str) -> Vec<u8> {
 }
 
 #[test]
+fn generation_revision_two_supports_native_temperature_without_relaxing_revision_one() {
+    let mut params = send_params("hello", None, "amazon-bedrock/profile-model");
+    params["generation"] = serde_json::json!({"revision":2,"max_output_tokens":8192});
+    let request = body(serde_json::json!({"method":"session.send","params":params}));
+    let Request::Send(send) = protocol::parse_request(&request, false).unwrap() else {
+        panic!("send");
+    };
+    assert_eq!(send.temperature, None);
+    assert_eq!(send.max_output_tokens, 8192);
+    for generation in [
+        serde_json::json!({"max_output_tokens":8192}),
+        serde_json::json!({"revision":1,"max_output_tokens":8192}),
+        serde_json::json!({"revision":2,"max_output_tokens":8192,"temperature":null}),
+        serde_json::json!({"revision":3,"max_output_tokens":8192}),
+    ] {
+        params["generation"] = generation;
+        assert!(
+            protocol::parse_request(
+                &body(serde_json::json!({"method":"session.send","params":params})),
+                false
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn each_valid_operation_decodes_its_exact_schema() {
     let request = protocol::parse_request(&send_body("hello", Some("guidance")), false)
         .expect("valid send decodes");
@@ -52,7 +79,7 @@ fn each_valid_operation_decodes_its_exact_schema() {
     assert_eq!(send.provider, "prov");
     assert_eq!(send.model, "model-a");
     assert_eq!(send.max_output_tokens, 32_000);
-    assert_eq!(send.temperature, 0.1);
+    assert_eq!(send.temperature, Some(0.1));
 
     // Canonical model strings split at the first slash; remaining slashes belong to the model segment.
     let request = protocol::parse_request(

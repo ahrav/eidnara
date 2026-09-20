@@ -1476,7 +1476,8 @@ fn a_capacity_refusal_before_the_first_disclosure_still_truncates_the_evidence_s
 #[test]
 fn a_capture_past_its_retention_on_the_wall_clock_is_refused_whatever_now_the_caller_passes() {
     let fixture = Fixture::open();
-    let retain_until = now_ms() + 50;
+    // Admission and durable ingestion must finish before this test exercises expiry.
+    let retain_until = now_ms() + 2_000;
     let handle = fixture
         .store
         .ingest_artifact(ArtifactIngestRequest {

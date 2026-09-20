@@ -41,7 +41,8 @@ pub struct SendRequest {
     pub provider: String,
     pub model: String,
     pub max_output_tokens: u64,
-    pub temperature: f64,
+    /// None is generation revision 2's model-native decoding policy.
+    pub temperature: Option<f64>,
 }
 
 impl SendRequest {
@@ -103,8 +104,21 @@ struct ModelParams {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GenerationParams {
+    #[serde(default = "legacy_generation_revision")]
+    revision: u8,
     max_output_tokens: u64,
-    temperature: f64,
+    #[serde(default, deserialize_with = "present_temperature")]
+    temperature: Option<f64>,
+}
+
+fn legacy_generation_revision() -> u8 {
+    1
+}
+
+fn present_temperature<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    f64::deserialize(deserializer).map(Some)
 }
 
 #[derive(serde::Deserialize)]
@@ -248,12 +262,18 @@ fn parse_send(params: SendParams) -> Result<Request, RequestError> {
     if generation.max_output_tokens == 0 || generation.max_output_tokens > MAX_OUTPUT_TOKENS_BOUND {
         return Err(schema("max_output_tokens out of bounds"));
     }
-    // `-0.0` satisfies `contains` under IEEE 754 (`-0.0 >= 0.0`) but serializes as `"-0"`,
-    // which downstream provider schemas reject as a negative temperature.
-    if !generation.temperature.is_finite()
-        || !TEMPERATURE_RANGE.contains(&generation.temperature)
-        || generation.temperature.is_sign_negative()
-    {
+    if !matches!(generation.revision, 1 | 2) {
+        return Err(schema("unsupported generation revision"));
+    }
+    if generation.revision == 1 && generation.temperature.is_none() {
+        return Err(schema("generation revision 1 requires temperature"));
+    }
+    // `-0.0` satisfies `contains` under IEEE 754 but some providers reject it.
+    if generation.temperature.is_some_and(|temperature| {
+        !temperature.is_finite()
+            || !TEMPERATURE_RANGE.contains(&temperature)
+            || temperature.is_sign_negative()
+    }) {
         return Err(schema("temperature out of bounds"));
     }
     Ok(Request::Send(SendRequest {

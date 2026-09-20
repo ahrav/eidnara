@@ -424,10 +424,12 @@ async fn run_pi(
         OsString::from(MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV),
         OsString::from(request.max_output_tokens.to_string()),
     ));
-    child_env.push((
-        OsString::from(MODEL_EXECUTION_TEMPERATURE_ENV),
-        OsString::from(request.temperature.to_string()),
-    ));
+    if let Some(temperature) = request.temperature {
+        child_env.push((
+            OsString::from(MODEL_EXECUTION_TEMPERATURE_ENV),
+            OsString::from(temperature.to_string()),
+        ));
+    }
     child_env.push((OsString::from("HOME"), dir.path().as_os_str().to_owned()));
 
     let spec = SubprocessSpec {

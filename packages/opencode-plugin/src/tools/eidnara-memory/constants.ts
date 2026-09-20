@@ -26,7 +26,10 @@ Actions:
 - archive: objectId.
 - merge: objectIds into one survivor + content/category or antiMemory.
 
-Memories created here surface in the project's automatic memory context and in explicit search. Agent calls to approve/enforce are rejected.`;
+Positive categories (exact names): PROJECT_RULES (project conventions), ARCHITECTURE (design decisions), CONSTRAINTS (requirements and limits), CONFIG_VALUES (settings and operational values), NAMING (names and terminology).
+REJECTED_APPROACH requires antiMemory, not content. Do not invent category names.
+
+Memories created here are available through explicit search as labeled model inference. Automatic context injection follows the kernel's admission policy. Agent calls to approve/enforce are rejected.`;
 export const GET_MAX_CLAIMS = 20;
 /** Byte budget for the memories a get response serializes, matching the ~16 KiB scale of eidnara_search's 4096-token render budget; entries past the budget are elided and reported. */
 export const EIDNARA_MEMORY_RESPONSE_BUDGET_BYTES = 16 * 1024;
