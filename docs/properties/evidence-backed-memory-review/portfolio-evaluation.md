@@ -103,7 +103,7 @@ reviews found and how each finding was dispositioned.
 | Per-field `jsonInteger` mapping through three shapes | refinement | fixed: one `JSON.stringify` replacer turns every `bigint` into a raw token |
 | A hand-written connection interface and a per-request timeout beside the connect-time one | refinement | fixed: `Pick<HostClient, ...>`; the connect-time timeout alone |
 | An unreachable `default` terminal text and five exported vocabularies with no importer | refinement | fixed |
-| Support and contradictions were bounded separately at 256 each; the Kernel bounds their sum | gap | fixed: the sum is checked |
+| Support and contradictions were bounded on their sum; the Kernel's `check_references` bounds each list at 256 and only the daemon's producer (`steps.rs`, `coordinator.rs`) keeps the sum under 256 before staging | gap | fixed: each list is bounded at 256 as the Kernel admits it; the sum check refused a proposal the Kernel can stage |
 | `--json` output passes C1 and bidi characters through `JSON.stringify`'s escaping | bias | kept: JSON output is machine output; the README says so and text output strips them |
 | Production size is about 770 lines against a 500 target | bias | kept: the closed vocabularies and the field-by-field decoder are the substance; the ticket's hard maximum is 1,000 and the status command shares the connection and decoding with list and show |
 
