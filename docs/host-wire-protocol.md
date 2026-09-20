@@ -795,11 +795,13 @@ A `work` response contains:
   `max_duration_ms: 90000`.
 
 The lease lasts 180 seconds from the `work` response and belongs to the
-claiming route's project,
-harness, and session. A ready lease can expire and be replaced. Preparing or
-submitting work remains reserved until its handler finishes or is cancelled.
+claiming route's project, harness, and session. A ready lease can expire and
+be replaced. Preparing or submitting work remains reserved until its store
+work finishes, even when the request itself is cancelled first.
 A stale reply cannot remove or publish against a successor reservation.
-Leases are process-local; source jobs and frozen plans are durable.
+Leases are process-local; source jobs and frozen plans are durable. Capture
+queues and leases key on the canonical project root, so a symlinked spelling
+of one root is the same project.
 
 Other `next` states are `ready`, `pending`, `stale`, `disabled`,
 `store_failed`, and `unavailable`. `ready` means the project has no pending

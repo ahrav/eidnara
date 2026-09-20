@@ -13690,7 +13690,7 @@ impl HandlerCore {
                 "memory.capture.submit" => {
                     self.handle_native_capture_submit(channel, &request).await
                 }
-                "memory.capture" => self.handle_memory_capture(channel, &request),
+                "memory.capture" => self.handle_memory_capture(channel, &request).await,
                 "memory.capture.status" => self.handle_memory_capture_status(channel, &request),
                 "memory_classifier.run_task" => {
                     self.handle_memory_classifier_run_task(channel, &request)
@@ -22467,7 +22467,9 @@ mod tests {
                 let mut request = json!({"method":method,"v":2,"session_id":"ses"});
                 request[field] = value;
                 let outcome = match method {
-                    "memory.capture" => handler.handle_memory_capture(test_route(7), &request),
+                    "memory.capture" => {
+                        handler.handle_memory_capture(test_route(7), &request).await
+                    }
                     "memory.capture.next" => {
                         handler
                             .handle_native_capture_next(test_route(7), &request)
@@ -22521,7 +22523,7 @@ mod tests {
 
         let request = json!({"method":"memory.capture","v":2,"session_id":"ses","model":"test/model","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging. Now fix the test."}]});
         assert_eq!(
-            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
         assert_eq!(
@@ -22603,7 +22605,7 @@ mod tests {
             "extraction must not promote model inference into trusted automatic context"
         );
         assert_eq!(
-            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
         assert_eq!(state.starts.load(Ordering::SeqCst), 0);
@@ -22633,7 +22635,7 @@ mod tests {
         );
         let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
-            tool_body(handler.handle_memory_capture(test_route(7), &source))["state"],
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
             "accepted"
         );
         let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
@@ -22730,7 +22732,7 @@ mod tests {
         );
         let request = json!({"method":"memory.capture","v":2,"session_id":"ses","model":"test/model","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
-            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
         let next =
@@ -22898,6 +22900,231 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_capture_checkpoints_serialize_with_session_delete_off_the_worker() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        // Warm the store's first-write costs so the timing below measures the gate.
+        let warmup = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[
+            {"id":"u0","role":"user","text":"Warm up the capture store."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &warmup).await)["state"],
+            "accepted"
+        );
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let hold = Duration::from_millis(300);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(hold);
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[
+            {"id":"u1","role":"user","text":"Use port 4321 for staging."},
+            {"id":"u2","role":"user","text":"Production listens on 8080."}]});
+        let (accepted, ticked_at) = tokio::join!(
+            handler.handle_memory_capture(test_route(7), &request),
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                started.elapsed()
+            }
+        );
+        let accepted_at = started.elapsed();
+        holder.join().unwrap();
+        assert_eq!(tool_body(accepted)["state"], "accepted");
+        assert!(
+            accepted_at >= hold - Duration::from_millis(30),
+            "an explicit checkpoint must take the deletion gate: {accepted_at:?}"
+        );
+        assert!(
+            ticked_at < accepted_at,
+            "the runtime worker must keep running while the checkpoint waits: {ticked_at:?} vs {accepted_at:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_submission_keeps_its_reservation_until_its_work_finishes() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = project.to_str().unwrap();
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let text =
+            json!({"version":1,"decisions":[{"message_id":"source_1","memories":[]}]}).to_string();
+        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":text});
+        // Publication waits on the gate, so the blocking settle outlives a
+        // request future dropped while it runs.
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(100),
+            handler.handle_native_capture_submit(test_route(7), &submit),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the submission is dropped mid-settle");
+        assert_eq!(
+            handler.native_capture.lock().unwrap().reserved_for_test(),
+            1,
+            "a cancelled submission stays reserved while its blocking work can still publish"
+        );
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "pending",
+            "a successor cannot claim the same sources underneath the running settle"
+        );
+        holder.join().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            handler.native_capture.lock().unwrap().reserved_for_test(),
+            0
+        );
+        assert_eq!(
+            store.memory_capture_status(project_key).unwrap().completed,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_failure_during_preparation_is_reported_not_queued() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        store
+            .execute_tag_sql_for_test(
+                "CREATE TRIGGER capture_attempt_fault BEFORE UPDATE ON memory_capture_jobs
+                 BEGIN SELECT RAISE(ABORT, 'injected capture attempt fault'); END;",
+            )
+            .unwrap();
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "store_failed",
+            "a durable-store failure is not ordinary queued work"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_keys_follow_the_canonical_project_root() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let link = dir.path().join("project-link");
+        std::os::unix::fs::symlink(&project, &link).unwrap();
+        let canonical = canonical_root(&project);
+        handler.bind_route(test_route(7), capture_binding(&link, "pi"));
+        handler.bind_route(test_route(8), capture_binding(&canonical, "pi"));
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        let replay = tool_body(handler.handle_memory_capture(test_route(8), &source).await);
+        assert_eq!(
+            replay["state"], "accepted",
+            "a symlinked spelling of the bound root is the same project: {replay}"
+        );
+        let status = json!({"method":"memory.capture.status","v":2,"session_id":"ses"});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture_status(test_route(8), &status))["pending"],
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batch_failure_backs_off_each_source_by_its_own_dispatch_count() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = project.to_str().unwrap();
+        for (id, text) in [
+            ("native-user-1", "Use port 4321 for staging."),
+            ("native-user-2", "Production listens on 8080."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+        }
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let veteran = jobs
+            .iter()
+            .find(|job| job.message_id == "native-user-1")
+            .unwrap();
+        // Six interrupted dispatches and no model failures: still batchable.
+        for _ in 0..6 {
+            assert!(
+                store
+                    .begin_memory_capture_attempt(project_key, &veteran.job_id, now_ms())
+                    .unwrap()
+            );
+        }
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work", "{work}");
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        assert_eq!(prompt["messages"].as_array().unwrap().len(), 2);
+        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"error":"model_failed"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submit)
+                    .await
+            )["state"],
+            "pending"
+        );
+        // The fresh source is on its second dispatch (2 s); the veteran on its seventh (128 s).
+        let soon = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 10_000)
+            .unwrap();
+        assert_eq!(
+            soon.iter()
+                .map(|job| job.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["native-user-2"],
+            "each source backs off by its own dispatch count"
+        );
+    }
+
+    #[tokio::test]
     async fn transform_checkpoints_only_pi_delta_messages_and_never_twice() {
         let state = Arc::new(ProducerState::default());
         let (handler, store, _dir, project) =
@@ -22983,7 +23210,7 @@ mod tests {
         assert_eq!(text.len(), memory_capture::MAX_CAPTURE_INPUT_BYTES);
         let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":text}]});
         assert_eq!(
-            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
         let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
@@ -23056,7 +23283,7 @@ mod tests {
         let project_key = project.to_str().unwrap();
         let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
-            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
         let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses"});
@@ -23119,7 +23346,7 @@ mod tests {
         ] {
             let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
             assert_eq!(
-                tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
                 "accepted"
             );
         }
@@ -23174,7 +23401,7 @@ mod tests {
         ] {
             let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
             assert_eq!(
-                tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
                 "accepted"
             );
         }
@@ -23273,7 +23500,7 @@ mod tests {
         ] {
             let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
             assert_eq!(
-                tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
                 "accepted"
             );
         }
@@ -23322,7 +23549,7 @@ mod tests {
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
         let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
-            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
             "accepted"
         );
         let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});

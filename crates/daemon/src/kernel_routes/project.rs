@@ -50,6 +50,11 @@ impl ProjectBinding {
         &self.scope
     }
 
+    /// The canonical bound root.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// `sha256(root)` as lower hex: the project identity Kernel review inputs and MemoryReviewer holds are scoped under.
     pub(crate) fn digest(&self) -> &str {
         &self.digest

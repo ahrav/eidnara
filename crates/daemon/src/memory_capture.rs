@@ -334,8 +334,13 @@ fn native_capture_fragments(
         .harness_id
         .as_deref()
         .unwrap_or(&message.mid);
-    let source_hash = (bytes > CAPTURE_FRAGMENT_BYTES || source_id.len() > 256)
-        .then(|| format!("{:x}", Sha256::digest(source_id.as_bytes())));
+    // Ids outside the store's grammar are hashed rather than refused, so one
+    // odd native id cannot stall every later fragment of the checkpoint.
+    let source_hash = (bytes > CAPTURE_FRAGMENT_BYTES
+        || source_id.is_empty()
+        || source_id.len() > 256
+        || source_id.chars().any(char::is_control))
+    .then(|| format!("{:x}", Sha256::digest(source_id.as_bytes())));
     let mut offset = 0;
     let mut chunk = String::with_capacity(bytes.min(CAPTURE_FRAGMENT_BYTES));
     let mut send = |chunk: &str| {
@@ -491,6 +496,12 @@ pub(crate) fn capture_enabled(binding: &SessionBinding) -> bool {
     binding.config.memory_enabled
         && binding.config.auto_promote
         && binding.config.memory_auto_capture
+}
+
+/// Capture storage and leases key on the canonical root the kernel binding
+/// uses, so a symlinked spelling of one project is one capture queue.
+fn capture_project(binding: &SessionBinding) -> String {
+    binding.kernel_project.root().to_string_lossy().into_owned()
 }
 
 /// Fragments a transform admitted but has not yet handed to the store.
@@ -654,7 +665,7 @@ impl HandlerCore {
             store,
             memo: Arc::clone(&self.capture_memo),
             commit_gate: Arc::clone(&self.capture_commit_gate),
-            project: binding.project_root.to_string_lossy().into_owned(),
+            project: capture_project(binding),
             harness: binding.harness.clone(),
             session: binding.session.clone(),
             epoch,
@@ -664,7 +675,7 @@ impl HandlerCore {
 
     /// The route owns project/session identity. The payload supplies completed
     /// text and the current model only, never provider credentials or prompts.
-    pub(crate) fn handle_memory_capture(
+    pub(crate) async fn handle_memory_capture(
         &self,
         channel: RouteHandle,
         request: &Value,
@@ -703,34 +714,45 @@ impl HandlerCore {
         let Some(store) = self.store() else {
             return store_unavailable_error();
         };
-        let project = binding.project_root.to_string_lossy().into_owned();
-        let mut accepted = Vec::new();
-        for message in messages {
-            match store.enqueue_memory_capture(
-                CaptureSource {
-                    project: &project,
-                    harness: &binding.harness,
-                    session_id: &session,
-                    message_id: &message.id,
-                    role: match message.role {
-                        CaptureRole::User => "user",
-                        CaptureRole::Assistant => "assistant",
+        let project = capture_project(&binding);
+        let harness = binding.harness.clone();
+        let gate = Arc::clone(&self.capture_commit_gate);
+        // Session deletion sweeps under the same gate, so a batch lands whole
+        // before the sweep or whole after it, never half-swept.
+        kernel_routes::blocking(move || {
+            let _gate = gate.lock().expect("capture publication mutex");
+            let mut accepted = Vec::new();
+            for message in messages {
+                match store.enqueue_memory_capture(
+                    CaptureSource {
+                        project: &project,
+                        harness: &harness,
+                        session_id: &session,
+                        message_id: &message.id,
+                        role: match message.role {
+                            CaptureRole::User => "user",
+                            CaptureRole::Assistant => "assistant",
+                        },
+                        text: &message.text,
                     },
-                    text: &message.text,
-                },
-                now_ms(),
-            ) {
-                Ok(CaptureEnqueue::Accepted { job_id, .. }) => accepted.push(job_id),
-                Ok(CaptureEnqueue::Full) => {
-                    return respond(json!({"state":"queue_full","accepted":accepted}));
+                    now_ms(),
+                ) {
+                    Ok(CaptureEnqueue::Accepted { job_id, .. }) => accepted.push(job_id),
+                    Ok(CaptureEnqueue::Full) => {
+                        return respond(json!({"state":"queue_full","accepted":accepted}));
+                    }
+                    Ok(CaptureEnqueue::ProjectMismatch) => {
+                        return respond(json!({"state":"project_mismatch","accepted":accepted}));
+                    }
+                    Err(_) => {
+                        return respond(json!({"state":"store_failed","accepted":accepted}));
+                    }
                 }
-                Ok(CaptureEnqueue::ProjectMismatch) => {
-                    return respond(json!({"state":"project_mismatch","accepted":accepted}));
-                }
-                Err(_) => return respond(json!({"state":"store_failed","accepted":accepted})),
             }
-        }
-        respond(json!({"state":"accepted","jobs":accepted}))
+            respond(json!({"state":"accepted","jobs":accepted}))
+        })
+        .await
+        .unwrap_or_else(|_| respond(json!({"state":"store_failed","accepted":[]})))
     }
 
     pub(crate) fn handle_memory_capture_status(
@@ -746,7 +768,7 @@ impl HandlerCore {
         let Some(store) = self.store() else {
             return store_unavailable_error();
         };
-        match store.memory_capture_status(&binding.project_root.to_string_lossy()) {
+        match store.memory_capture_status(&capture_project(&binding)) {
             Ok(status) => respond(
                 json!({"state":"available","pending":status.pending,"prepared":status.prepared,"completed":status.completed,"failed":status.failed}),
             ),
@@ -833,7 +855,8 @@ impl CaptureWork {
 
     /// Transport, provider, store, and kernel outcomes say nothing about the
     /// model's answer, so they leave the model-failure allowance untouched.
-    fn failed(&self, jobs: &[CaptureJob], code: &str, retry_at: i64) -> Result<(), &'static str> {
+    /// Each source backs off by its own dispatch count.
+    fn failed(&self, jobs: &[CaptureJob], code: &str, now: i64) -> Result<(), &'static str> {
         if self.cancel.is_cancelled() {
             return Ok(());
         }
@@ -847,9 +870,9 @@ impl CaptureWork {
                     &job.project,
                     &job.job_id,
                     code,
-                    retry_at,
+                    now.saturating_add(capture_retry_delay_ms(job.attempts)),
                     model_failure,
-                    now_ms(),
+                    now,
                 )
                 .map_err(|_| "store_failed")?;
         }
@@ -1343,6 +1366,36 @@ mod tests {
         assert!(fragments[0].0.ends_with(":0"));
         assert!(fragments[1].0.ends_with(":16383"));
         assert_eq!(message, original);
+    }
+
+    #[test]
+    fn a_source_id_outside_the_capture_grammar_is_hashed_not_poisonous() {
+        use memory_store::{BlockKind, WireBlock, WireMessage};
+        let message = crate::wire::IngressMessage {
+            mid: "line\nbreak".into(),
+            ordinal: 1,
+            ck: WireMessage::from_parts(
+                "user",
+                vec![WireBlock::bare(BlockKind::Text {
+                    text: "Use port 4321 for staging.".into(),
+                })],
+                None,
+                Default::default(),
+                Default::default(),
+            ),
+        };
+        let mut ids = Vec::new();
+        native_capture_fragments(&message, |id, _| {
+            ids.push(id.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(ids.len(), 1);
+        assert!(
+            !ids[0].is_empty() && ids[0].len() <= 256 && !ids[0].chars().any(char::is_control),
+            "a fragment id must satisfy the store's id grammar: {:?}",
+            ids[0]
+        );
     }
 
     fn job(key: &str) -> CaptureJob {
