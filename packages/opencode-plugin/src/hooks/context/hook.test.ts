@@ -606,6 +606,30 @@ describe("eidnara hook", () => {
             expect(client.tui.showToast).not.toHaveBeenCalled();
         });
 
+        it("neither checkpoints nor drains a session deleted during the transcript read", async () => {
+            useTempDataHome("capture-deleted-mid-read-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "ready" : "accepted",
+            }));
+            const transcript = Promise.withResolvers<{ data: unknown[] }>();
+            const { hook, client } = createCaptureHook(fake, []);
+            client.session.messages = mock(() => transcript.promise) as never;
+            const idle = hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            await hook.event({
+                event: { type: "session.deleted", properties: { info: { id: SESSION } } },
+            });
+            transcript.resolve({
+                data: [assistantMessage("native-answer", [{ type: "text", text: "A decision." }])],
+            });
+            await idle;
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls.map((call) => call.method)).toEqual([]);
+            expect(client.tui.showToast).not.toHaveBeenCalled();
+        });
+
         it("skips a child session that the idle checkpoint's directory read classifies", async () => {
             useTempDataHome("capture-restored-child-");
             const fake = createFakeModuleClient(({ method }) => ({

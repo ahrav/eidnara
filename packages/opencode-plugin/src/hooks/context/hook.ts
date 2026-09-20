@@ -359,6 +359,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                           since,
                           CAPTURE_TAIL_MESSAGES,
                       ) ?? (await readTranscript()));
+            // A deletion observed during the read fences this session; nothing may re-enqueue it.
+            if (excludedFromCapture(sessionId)) return;
             const accepted = await captureCheckpoint({
                 ...scope,
                 messages: openCodeCaptureMessages(sourceMessages, {
@@ -375,8 +377,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             );
             warnCaptureIncomplete(scope?.projectRoot ?? deps.directory);
         } finally {
-            // Draining is what frees a full queue, so a refused checkpoint must not skip it.
-            if (scope) memoryCaptureDrain.schedule(scope);
+            // Draining is what frees a full queue, so a refused checkpoint must not skip it; a
+            // session deleted meanwhile must not be drained under.
+            if (scope && !excludedFromCapture(sessionId)) memoryCaptureDrain.schedule(scope);
         }
     };
 
