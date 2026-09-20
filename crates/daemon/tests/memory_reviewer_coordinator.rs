@@ -2107,6 +2107,26 @@ async fn a_resumed_generation_adopts_the_result_a_lost_run_sealed_without_a_send
     use daemon::memory_reviewer::settlement::{RunResult, Settlement};
     let fixture = Fixture::open(CASES[0].sources);
     let now = fixture.now + 3;
+    let hold_binding = kernel::MemoryReviewerHoldBinding {
+        project_digest: PROJECT.to_string(),
+        kernel_incarnation: fixture.kernel_incarnation(),
+        memstore_incarnation: fixture.ledger.memory_reviewer_store_incarnation().unwrap(),
+        subject: fixture.identity.clone(),
+        generation: 1,
+    };
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&hold_binding, &[], fixture.receipt.execution_cutoff_ms)
+        .unwrap();
+    let lost = EvidenceBroker::new(
+        RunBinding {
+            hold: hold_binding,
+            hold_id: hold.hold_id,
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        QuestionTemplate::ExtractedFacts,
+    )
+    .unwrap();
     let outcome = fixture
         .ledger
         .dispatch_memory_reviewer_attempt(
@@ -2121,7 +2141,7 @@ async fn a_resumed_generation_adopts_the_result_a_lost_run_sealed_without_a_send
                 provider: "localhost/v1/messages@2023-06-01".to_string(),
                 model: MODEL.to_string(),
                 credential_id: CREDENTIAL_ID.to_string(),
-                policy_union_digest: "e".repeat(64),
+                policy_union_digest: lost.ledger.union().encode().unwrap().digest,
             },
             (),
             || now,
@@ -2145,26 +2165,6 @@ async fn a_resumed_generation_adopts_the_result_a_lost_run_sealed_without_a_send
             now,
         )
         .unwrap();
-    let hold_binding = kernel::MemoryReviewerHoldBinding {
-        project_digest: PROJECT.to_string(),
-        kernel_incarnation: fixture.kernel_incarnation(),
-        memstore_incarnation: fixture.ledger.memory_reviewer_store_incarnation().unwrap(),
-        subject: fixture.identity.clone(),
-        generation: 1,
-    };
-    let hold = fixture
-        .store
-        .acquire_execution_hold(&hold_binding, &[], fixture.receipt.execution_cutoff_ms)
-        .unwrap();
-    let lost = EvidenceBroker::new(
-        RunBinding {
-            hold: hold_binding,
-            hold_id: hold.hold_id,
-            destination: kernel::ArtifactDestination::Remote,
-        },
-        QuestionTemplate::ExtractedFacts,
-    )
-    .unwrap();
     let binding = fixture.binding();
     // The lost run dies after the Kernel envelope committed and before the ledger completion.
     let crash = || panic!("lost between the stores");
@@ -2226,6 +2226,26 @@ async fn a_hold_cap_refusal_on_resume_leaves_the_receipt_open_instead_of_abstain
     use daemon::memory_reviewer::settlement::SETTLEMENT_PRODUCER;
     let fixture = Fixture::open(CASES[0].sources);
     let now = fixture.now + 3;
+    let hold_binding = kernel::MemoryReviewerHoldBinding {
+        project_digest: PROJECT.to_string(),
+        kernel_incarnation: fixture.kernel_incarnation(),
+        memstore_incarnation: fixture.ledger.memory_reviewer_store_incarnation().unwrap(),
+        subject: fixture.identity.clone(),
+        generation: 1,
+    };
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&hold_binding, &[], fixture.receipt.execution_cutoff_ms)
+        .unwrap();
+    let lost = EvidenceBroker::new(
+        RunBinding {
+            hold: hold_binding.clone(),
+            hold_id: hold.hold_id.clone(),
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        QuestionTemplate::ExtractedFacts,
+    )
+    .unwrap();
     let outcome = fixture
         .ledger
         .dispatch_memory_reviewer_attempt(
@@ -2240,7 +2260,7 @@ async fn a_hold_cap_refusal_on_resume_leaves_the_receipt_open_instead_of_abstain
                 provider: "localhost/v1/messages@2023-06-01".to_string(),
                 model: MODEL.to_string(),
                 credential_id: CREDENTIAL_ID.to_string(),
-                policy_union_digest: "e".repeat(64),
+                policy_union_digest: lost.ledger.union().encode().unwrap().digest,
             },
             (),
             || now,
@@ -2264,26 +2284,6 @@ async fn a_hold_cap_refusal_on_resume_leaves_the_receipt_open_instead_of_abstain
             now,
         )
         .unwrap();
-    let hold_binding = kernel::MemoryReviewerHoldBinding {
-        project_digest: PROJECT.to_string(),
-        kernel_incarnation: fixture.kernel_incarnation(),
-        memstore_incarnation: fixture.ledger.memory_reviewer_store_incarnation().unwrap(),
-        subject: fixture.identity.clone(),
-        generation: 1,
-    };
-    let hold = fixture
-        .store
-        .acquire_execution_hold(&hold_binding, &[], fixture.receipt.execution_cutoff_ms)
-        .unwrap();
-    let lost = EvidenceBroker::new(
-        RunBinding {
-            hold: hold_binding.clone(),
-            hold_id: hold.hold_id.clone(),
-            destination: kernel::ArtifactDestination::Remote,
-        },
-        QuestionTemplate::ExtractedFacts,
-    )
-    .unwrap();
     // The lost run sealed its row with the record, then exited unsettled before the transfer and released its execution hold.
     let identity = kernel::provisional_result_identity(&fixture.identity, 1);
     let record = dependencies::record(&lost, &fixture.attempts(), 1)

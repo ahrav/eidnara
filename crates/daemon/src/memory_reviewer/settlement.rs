@@ -916,27 +916,6 @@ fn read_selected_proposal_inner(
     if let Some(hook) = after_hold_lookup {
         hook();
     }
-    // The hold ended between the lookup above and this validation: the same review expiry the lookup would have reported a moment later, since the lookup excludes released, purge-degraded, and expired holds alike.
-    store
-        .validate_held_evidence(
-            &hold.hold_id,
-            MemoryReviewerHoldKind::Review,
-            &review,
-            &[],
-            now,
-        )
-        .map_err(|error| match error {
-            MemoryReviewerHoldError::Store(error) => ReadRefusal::Store(error.to_string()),
-            MemoryReviewerHoldError::Refused(
-                MemoryReviewerHoldRefusal::Missing
-                | MemoryReviewerHoldRefusal::Released
-                | MemoryReviewerHoldRefusal::PurgeDegraded
-                | MemoryReviewerHoldRefusal::Expired,
-            ) => ReadRefusal::ReviewExpired,
-            MemoryReviewerHoldError::Refused(_) => {
-                ReadRefusal::Dependency(RefusalCode::HoldInvalid)
-            }
-        })?;
     // Every persisted member, cited or not, is revalidated for a local reader from the row's own record: kind, revision, owner, owner revision, scope, and current egress, with the run's broker long gone.
     let job_binding = ReviewBinding {
         owner: ReviewOwner::Job {
@@ -955,8 +934,29 @@ fn read_selected_proposal_inner(
         destination: ArtifactDestination::Local,
         now,
     };
-    dependencies::revalidate(&revalidation, &reference, &row, &attempts).map_err(|verdict| {
-        match verdict {
+    if let Err(verdict) = dependencies::revalidate(&revalidation, &reference, &row, &attempts) {
+        // Every member is judged under the hold, so a hold that ended after the lookup above refuses through the members. That is the same review expiry the lookup would have reported a moment later (it excludes released, purge-degraded, and expired holds alike), and it is reported as such rather than as the member refusal it surfaced through.
+        if let Verdict::Abstain(_) = &verdict {
+            match store.validate_held_evidence(
+                &hold.hold_id,
+                MemoryReviewerHoldKind::Review,
+                &review,
+                &[],
+                now,
+            ) {
+                Err(MemoryReviewerHoldError::Refused(
+                    MemoryReviewerHoldRefusal::Missing
+                    | MemoryReviewerHoldRefusal::Released
+                    | MemoryReviewerHoldRefusal::PurgeDegraded
+                    | MemoryReviewerHoldRefusal::Expired,
+                )) => return Err(ReadRefusal::ReviewExpired),
+                Err(MemoryReviewerHoldError::Store(error)) => {
+                    return Err(ReadRefusal::Store(error.to_string()));
+                }
+                Ok(_) | Err(MemoryReviewerHoldError::Refused(_)) => {}
+            }
+        }
+        return Err(match verdict {
             Verdict::Abstain(AbstainReason::OwnerSensitive) => {
                 ReadRefusal::Dependency(RefusalCode::PolicyBlocked)
             }
@@ -965,8 +965,8 @@ fn read_selected_proposal_inner(
             }
             Verdict::Abstain(_) => ReadRefusal::Dependency(RefusalCode::ExpectationChanged),
             Verdict::Store(error) => ReadRefusal::Store(error),
-        }
-    })?;
+        });
+    }
     Ok(SelectedProposal {
         reference,
         proposal: *proposal,

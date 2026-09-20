@@ -125,7 +125,10 @@ pub fn revalidate(
         return Err(Verdict::changed());
     };
     let dependencies = row.dependencies.as_ref().ok_or_else(Verdict::changed)?;
-    if dependencies.generation != revalidation.run.generation {
+    // The version fences a durable shape this build does not read; the union digest must be the one the marker recorded, or the union is not the one the recorded request disclosed.
+    if dependencies.version != REVIEW_DEPENDENCIES_VERSION
+        || dependencies.generation != revalidation.run.generation
+    {
         return Err(Verdict::changed());
     }
     let union = PolicyUnion::decode(&dependencies.union_canonical, &dependencies.union_digest)
@@ -139,6 +142,7 @@ pub fn revalidate(
             )
             && attempt.marker.body_digest == dependencies.body_digest
             && attempt.marker.policy_union_digest == dependencies.marker_union_digest
+            && attempt.marker.policy_union_digest == dependencies.union_digest
     });
     if !marker_matches {
         return Err(Verdict::changed());
