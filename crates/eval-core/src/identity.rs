@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use context_core::canonical_json::{ContractError, is_lower_hex, protocol_digest};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -98,11 +100,14 @@ impl BuildRecord {
         require_hex("lockfile_digest", &self.lockfile_digest, 64)?;
         require_non_empty("rustc_version", &self.rustc_version)?;
         require_non_empty("target_triple", &self.target_triple)?;
-        if let BinaryDigest::Present { sha256 } = &self.binary_digest {
-            require_hex("binary_digest", sha256, 64)?;
-            if *sha256 == zero_bytes_sha256() {
-                return Err(IdentityError::ZeroBytesBinaryDigest);
+        match &self.binary_digest {
+            BinaryDigest::Present { sha256 } => {
+                require_hex("binary_digest", sha256, 64)?;
+                if *sha256 == zero_bytes_sha256() {
+                    return Err(IdentityError::ZeroBytesBinaryDigest);
+                }
             }
+            BinaryDigest::Absent { reason } => require_non_empty("binary_digest.reason", reason)?,
         }
         Ok(())
     }
@@ -126,7 +131,10 @@ impl RunIdentity {
         require_non_empty(
             "linearization_rule_version",
             &self.linearization_rule_version,
-        )
+        )?;
+        // `config` and `scenario` are free-form; the run ID needs them canonical.
+        canonical_json_encode(&serde_json::to_value(self).expect("run identity serializes"))?;
+        Ok(())
     }
 }
 

@@ -256,6 +256,62 @@ fn fractions_travel_as_canonical_decimal_strings() {
 }
 
 #[test]
+fn arm_rates_stay_within_the_unit_interval() {
+    for (rate, ok) in [
+        ("0", true),
+        ("1", true),
+        ("0.25", true),
+        ("2", false),
+        ("1.5", false),
+    ] {
+        let mut manifest = manifest();
+        manifest.arm_rates.insert(
+            "aged".to_string(),
+            ArmRates {
+                miss_rate: rate.to_string(),
+                refusal_rate: "0".to_string(),
+            },
+        );
+        let expected = if ok {
+            Ok(())
+        } else {
+            Err(ManifestError::RateOutOfRange {
+                field: "arm_rates[aged].miss_rate".to_string(),
+                value: rate.to_string(),
+            })
+        };
+        assert_eq!(
+            parse_manifest(&manifest.to_value()).map(drop),
+            expected,
+            "{rate}"
+        );
+    }
+}
+
+#[test]
+fn provenance_strings_are_non_empty() {
+    for (group, field) in [
+        ("component_versions", "event_schema"),
+        ("component_versions", "reducer"),
+        ("component_versions", "oracles"),
+        ("component_versions", "execution_image"),
+        ("component_versions", "task_corpus"),
+        ("component_versions", "judge"),
+        ("tokenizer_profile", "name"),
+        ("tokenizer_profile", "revision"),
+    ] {
+        let mut value = manifest().to_value();
+        value[group][field] = json!("");
+        assert_eq!(
+            parse_manifest(&value).map(drop),
+            Err(ManifestError::EmptyComponent {
+                field: format!("{group}.{field}")
+            })
+        );
+    }
+}
+
+#[test]
 fn run_id_is_the_protocol_digest_of_the_full_tuple() {
     let identity = identity();
     let mut tuple = serde_json::to_value(&identity).unwrap();
@@ -340,6 +396,30 @@ fn changing_any_identity_or_build_component_changes_the_run_id() {
         let id = eval_run_id(&mutated).unwrap();
         assert!(seen.insert(id), "{name} did not change the run id");
     }
+}
+
+#[test]
+fn identity_validate_refuses_what_the_run_id_refuses() {
+    let mut fractional = identity();
+    fractional.config = json!({"threshold": 0.7});
+    assert!(matches!(
+        eval_run_id(&fractional),
+        Err(IdentityError::NotCanonical(_))
+    ));
+    assert!(matches!(
+        fractional.validate(),
+        Err(IdentityError::NotCanonical(_))
+    ));
+    let mut unexplained = build();
+    unexplained.binary_digest = BinaryDigest::Absent {
+        reason: String::new(),
+    };
+    assert_eq!(
+        unexplained.validate(),
+        Err(IdentityError::EmptyComponent {
+            field: "binary_digest.reason"
+        })
+    );
 }
 
 #[test]
@@ -434,10 +514,79 @@ fn manifest_consistency_refusals_name_their_cause() {
             field: "result_digest".to_string()
         })
     );
+    let mut lineage = manifest();
+    lineage.retry_lineage = vec!["77".repeat(32), "not-a-run-id".to_string()];
+    assert_eq!(
+        parse_manifest(&lineage.to_value()),
+        Err(ManifestError::MalformedDigest {
+            field: "retry_lineage[1]".to_string()
+        })
+    );
+    lineage.retry_lineage.pop();
+    assert!(parse_manifest(&lineage.to_value()).is_ok());
     assert!(
         manifest().digest().is_ok() && wrong_id.digest().is_err(),
         "digest re-parses before hashing"
     );
+}
+
+#[test]
+fn residue_declarations_are_non_keep_and_one_rule_per_field() {
+    let kept = ResidueEntry {
+        type_name: "attempt".to_string(),
+        field: "pid".to_string(),
+        rule: Rule::Keep,
+    };
+    let mut keep = manifest();
+    keep.residue.insert(kept.clone());
+    assert_eq!(
+        parse_manifest(&keep.to_value()),
+        Err(ManifestError::ResidueContradiction {
+            type_name: "attempt".to_string(),
+            field: "pid".to_string(),
+        })
+    );
+    let mut twice = manifest();
+    twice.residue.insert(ResidueEntry {
+        type_name: OBSERVATION_TYPE.to_string(),
+        field: "run_id".to_string(),
+        rule: Rule::Presence,
+    });
+    assert_eq!(
+        parse_manifest(&twice.to_value()),
+        Err(ManifestError::ResidueContradiction {
+            type_name: OBSERVATION_TYPE.to_string(),
+            field: "run_id".to_string(),
+        })
+    );
+}
+
+#[test]
+fn validate_refuses_what_parse_and_digest_refuse() {
+    let mut schema = manifest();
+    schema.schema = "eval-manifest/v2".to_string();
+    assert_eq!(
+        schema.validate(),
+        Err(ManifestError::SchemaMismatch {
+            found: "eval-manifest/v2".to_string()
+        })
+    );
+    let mut epoch = manifest();
+    epoch.sample_epoch = 1 << 53;
+    assert!(matches!(
+        parse_manifest(&epoch.to_value()),
+        Err(ManifestError::NotCanonical(_))
+    ));
+    assert!(matches!(
+        epoch.validate(),
+        Err(ManifestError::NotCanonical(_))
+    ));
+    let mut stamp = manifest();
+    stamp.start_ms = i64::MAX;
+    assert!(matches!(
+        parse_manifest(&stamp.to_value()),
+        Err(ManifestError::NotCanonical(_))
+    ));
 }
 
 #[test]
@@ -460,6 +609,16 @@ fn attestation_is_a_tagged_value() {
         parse_manifest(&signed.to_value()),
         Err(ManifestError::MalformedDigest {
             field: "attestation.signature_digest".to_string()
+        })
+    );
+    signed.attestation = Attestation::Signed {
+        signer: String::new(),
+        signature_digest: "9a".repeat(32),
+    };
+    assert_eq!(
+        parse_manifest(&signed.to_value()),
+        Err(ManifestError::EmptyComponent {
+            field: "attestation.signer".to_string()
         })
     );
 }
@@ -556,6 +715,7 @@ fn clock_named_keep_fields_equal_the_pinned_allowlist() {
 fn host_environment_and_incarnation_fields_are_never_kept() {
     for field in [
         "hostname",
+        "host_name",
         "host_hostname",
         "cwd",
         "pid",
@@ -574,6 +734,35 @@ fn host_environment_and_incarnation_fields_are_never_kept() {
     }
     assert!(!is_never_kept("occurrence_id"));
     assert!(!is_never_kept("rapid_response"));
+    // The gates match snake_case spellings, so any other spelling is refused
+    // before the gates run.
+    for field in [
+        "hostName",
+        "writerPid",
+        "database-incarnation",
+        "",
+        "Now_ms",
+    ] {
+        assert_eq!(
+            ObservationSchema::new("spelled", [(field, Rule::Drop)]),
+            Err(ResidueError::FieldNotSnakeCase {
+                type_name: "spelled".to_string(),
+                field: field.to_string(),
+            }),
+            "{field:?}"
+        );
+    }
+}
+
+#[test]
+fn a_field_declared_twice_is_refused_at_schema_construction() {
+    assert_eq!(
+        ObservationSchema::new("twice", [("pid", Rule::Keep), ("pid", Rule::Drop)]),
+        Err(ResidueError::DuplicateField {
+            type_name: "twice".to_string(),
+            field: "pid".to_string(),
+        })
+    );
 }
 
 #[test]
@@ -602,6 +791,43 @@ fn presence_and_relative_rules_hide_incarnation_values_but_not_their_structure()
         run(["a", "a", "b"], [Some(1), None, None]),
         "presence differs"
     );
+}
+
+#[test]
+fn a_refused_observation_leaves_relative_numbering_unchanged() {
+    let schema =
+        || ObservationSchema::new("pair", [("a", Rule::Relative), ("b", Rule::Relative)]).unwrap();
+    let mut refused = SemanticTrace::new([schema()]).unwrap();
+    assert!(matches!(
+        refused.record("pair", &json!({"a": "x", "b": 0.5})),
+        Err(ResidueError::NotCanonical(_))
+    ));
+    refused
+        .record("pair", &json!({"a": "y", "b": "ok"}))
+        .unwrap();
+    let mut clean = SemanticTrace::new([schema()]).unwrap();
+    clean.record("pair", &json!({"a": "y", "b": "ok"})).unwrap();
+    assert_eq!(refused.digest().unwrap(), clean.digest().unwrap());
+}
+
+#[test]
+fn a_kept_value_the_digest_cannot_encode_is_refused_at_record_time() {
+    let schema = || {
+        ObservationSchema::new("scored", [("score", Rule::Keep), ("id", Rule::Relative)]).unwrap()
+    };
+    let mut trace = SemanticTrace::new([schema()]).unwrap();
+    assert!(matches!(
+        trace.record("scored", &json!({"score": 0.5, "id": "x"})),
+        Err(ResidueError::NotCanonical(_))
+    ));
+    trace
+        .record("scored", &json!({"score": 1, "id": "y"}))
+        .unwrap();
+    let mut clean = SemanticTrace::new([schema()]).unwrap();
+    clean
+        .record("scored", &json!({"score": 1, "id": "y"}))
+        .unwrap();
+    assert_eq!(trace.digest().unwrap(), clean.digest().unwrap());
 }
 
 #[test]

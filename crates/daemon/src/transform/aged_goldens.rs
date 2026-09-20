@@ -182,7 +182,7 @@ fn aged_golden_provenance_covers_every_case_input() {
 }
 
 #[test]
-fn aged_history_changes_the_tail_only_when_it_matches_the_prompt() {
+fn aged_history_attaches_a_hint_only_when_it_matches_the_prompt() {
     let golden = golden();
     let hinted = golden
         .cases
