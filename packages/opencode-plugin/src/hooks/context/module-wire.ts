@@ -299,7 +299,12 @@ export function serdeJsonCompact(value: unknown): string {
 /** The daemon's `stable_hash_prefix`: leading hex of the SHA-256 of `serde_json::to_vec`. */
 function stableHashPrefix(value: unknown, chars: number): string {
     // The daemon hashes the parsed wire JSON, so `toJSON`, dropped function-valued keys, and other serialization effects apply first.
-    const wire: unknown = JSON.parse(JSON.stringify(value) ?? "null");
+    let wire: unknown;
+    try {
+        wire = JSON.parse(JSON.stringify(value) ?? "null");
+    } catch (cause) {
+        throw new TypeError("Cannot encode transform identity as JSON", { cause });
+    }
     return crypto.createHash("sha256").update(serdeJsonCompact(wire)).digest("hex").slice(0, chars);
 }
 
@@ -670,8 +675,12 @@ const F64_JSON_MAX_BYTES = 24;
 
 function hasLoneJsonSurrogate(token: string): boolean {
     if (!/\\u[dD][89a-fA-F]/.test(token)) return false;
-    const decoded = JSON.parse(token) as string & { isWellFormed(): boolean };
-    return !decoded.isWellFormed();
+    try {
+        const decoded = JSON.parse(token) as string & { isWellFormed(): boolean };
+        return !decoded.isWellFormed();
+    } catch (cause) {
+        throw new TypeError("Invalid serialized JSON string token", { cause });
+    }
 }
 
 /** Invalid strings retain byte-only packing; valid f64 tokens use the formatter's maximum length. */
@@ -705,7 +714,11 @@ export function buildPagedModuleTransformPayloads(
         return [{ page: unpaged, bytes: unpagedBytes }];
     }
     // The per-item byte bound matches its in-page bytes only after every nested value is plain JSON.
-    body = JSON.parse(unpagedText) as Record<string, unknown>;
+    try {
+        body = JSON.parse(unpagedText) as Record<string, unknown>;
+    } catch (cause) {
+        throw new TypeError("Invalid serialized transform body", { cause });
+    }
 
     const arrayFields = [
         "input",
@@ -1127,6 +1140,10 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
 
 /** Every method name the module transport can carry on the wire. */
 export type ModuleMethod =
+    | "memory.capture"
+    | "memory.capture.next"
+    | "memory.capture.submit"
+    | "memory.capture.status"
     | "transform"
     | "session.status"
     | "session.delete"

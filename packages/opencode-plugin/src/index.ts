@@ -11,6 +11,7 @@ import { isCompactionEnabled } from "./config/agent-disable";
 import { getEidnaraBuiltinCommands } from "./features/builtin-commands/commands";
 import { CONTEXT_RESEARCHER_SYSTEM_PROMPT } from "./features/context/context-researcher/agent";
 import { createLiveSessionState } from "./hooks/context/live-session-state";
+import { isNativeCaptureProject } from "./hooks/context/memory-capture-native";
 import {
     configureManagedDemandStart,
     createHostModuleClient,
@@ -46,6 +47,7 @@ const managedDemandStart = createLazyManagedDemandStart({
 });
 
 const server: Plugin = async (ctx) => {
+    if (isNativeCaptureProject(ctx.directory)) return {};
     // ModelExecution child processes must not initialize Eidnara.
     // Do not use the buffered logger: it arms a flush timer and appends to the Eidnara log file.
     if (process.env.EIDNARA_MODEL_EXECUTION_CHILD === "1") {
@@ -225,12 +227,12 @@ const server: Plugin = async (ctx) => {
         "command.execute.before": async (input, output) => {
             await eidnara?.["command.execute.before"]?.(input, output);
         },
-        "chat.message": async (input, _output) => {
+        "chat.message": async (input, output) => {
             // Fire-and-forget: a pending delivery must not delay the user's prompt.
             if (configWarning?.pending && input.sessionID) {
                 void configWarning.deliverTo(input.sessionID);
             }
-            await eidnara?.["chat.message"]?.(input);
+            await eidnara?.["chat.message"]?.(input, output);
         },
         "tool.execute.after": async (input, _output) => {
             await eidnara?.["tool.execute.after"]?.(input);

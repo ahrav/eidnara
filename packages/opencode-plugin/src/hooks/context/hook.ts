@@ -11,9 +11,18 @@ import {
 } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
-import { log } from "../../shared/logger";
+import { log, sessionLog } from "../../shared/logger";
+import {
+    CAPTURE_MAX_AGE_MS,
+    createMemoryCaptureCheckpoint,
+    createMemoryCaptureDrain,
+    type MemoryCaptureDrain,
+    openCodeCaptureMessages,
+} from "../../shared/memory-capture";
+import { normalizeSDKResponse } from "../../shared/normalize-sdk-response";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
 import { createEidnaraCommandHandler } from "./command-handler";
 import { invalidateToolPermissionDenied } from "./eidnara-reduce-availability";
 import { type ContextUsageEntry, createEventHandler } from "./event-handler";
@@ -31,6 +40,7 @@ import {
     type LiveSessionState,
     MAX_LIVE_USAGE_SESSIONS,
 } from "./live-session-state";
+import { openCodeMemoryCaptureExecutor } from "./memory-capture-native";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -61,6 +71,8 @@ export interface EidnaraDeps {
         history_budget_percentage?: number;
         memory?: {
             enabled: boolean;
+            auto_promote?: boolean;
+            auto_capture?: boolean;
             injection_budget_tokens: number;
             auto_search?: {
                 enabled: boolean;
@@ -208,6 +220,133 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         ? deps.config.context_researcher
         : undefined;
     const moduleClient = deps.rustModeModuleClient;
+    const captureCheckpoint = createMemoryCaptureCheckpoint(moduleClient);
+    const executeCapture = openCodeMemoryCaptureExecutor(deps.client);
+    const notifyCaptureIncomplete = () =>
+        deps.client.tui.showToast({
+            body: {
+                title: "Eidnara memory capture",
+                message:
+                    "Capture incomplete. Some facts are not confirmed saved. See Eidnara logs.",
+                variant: "warning",
+            },
+        });
+    const warnCaptureIncomplete = (): void => {
+        void withTimeout(
+            Promise.resolve(notifyCaptureIncomplete()),
+            HOST_SDK_READ_TIMEOUT_MS,
+            "capture notification timed out",
+        ).catch(() => undefined);
+    };
+    // Model batches run detached from the lifecycle hooks that schedule them, so a completed
+    // response and an idle event return before any extraction work.
+    const memoryCaptureDrain = createMemoryCaptureDrain(moduleClient, executeCapture, {
+        // `"pending"` leaves work for a later drain and is not a failure to report.
+        onSettled: () => undefined,
+        onFailed: (scope, error) => {
+            sessionLog.warn(scope.sessionId, "memory capture drain failed:", error);
+            warnCaptureIncomplete();
+        },
+    });
+    const liveModelKey = (sessionId: string): string | undefined => {
+        const model = resolveLiveModel(sessionId);
+        return model ? `${model.providerID}/${model.modelID}` : undefined;
+    };
+    const pendingUserCaptures = new BoundedSessionMap<Promise<void>>(MAX_LIVE_USAGE_SESSIONS);
+    const checkpointUser = (sessionId: string, output: unknown): void => {
+        if (
+            deps.config.memory?.enabled === false ||
+            deps.config.memory?.auto_promote === false ||
+            deps.config.memory?.auto_capture === false
+        )
+            return;
+        try {
+            const messages = [
+                ...openCodeCaptureMessages([
+                    {
+                        info: readOwnDataProperty(output, "message"),
+                        parts: readOwnDataProperty(output, "parts"),
+                    },
+                ]),
+            ];
+            if (messages.length === 0) return;
+            const pending = (async () => {
+                const projectRoot = await sessionDirectoryFor(sessionId);
+                if (
+                    deletedSessions.has(sessionId) ||
+                    subagentSessions.has(sessionId) ||
+                    internalChildSessions.has(sessionId)
+                )
+                    return;
+                const model = liveModelBySession.get(sessionId);
+                await captureCheckpoint({
+                    sessionId,
+                    projectRoot,
+                    model: model ? `${model.providerID}/${model.modelID}` : undefined,
+                    messages,
+                });
+            })();
+            pendingUserCaptures.set(sessionId, pending);
+            void pending
+                .finally(() => {
+                    if (pendingUserCaptures.get(sessionId) === pending)
+                        pendingUserCaptures.delete(sessionId);
+                })
+                .catch((error) =>
+                    log(
+                        `memory capture user checkpoint pending: ${error instanceof Error ? error.message : "unknown error"}`,
+                    ),
+                );
+        } catch (error) {
+            log(
+                `memory capture user snapshot failed: ${error instanceof Error ? error.message : "unknown error"}`,
+            );
+        }
+    };
+    const checkpointMemory = async (sessionId: string): Promise<void> => {
+        if (
+            deps.config.memory?.enabled === false ||
+            deps.config.memory?.auto_promote === false ||
+            deps.config.memory?.auto_capture === false ||
+            deletedSessions.has(sessionId) ||
+            subagentSessions.has(sessionId) ||
+            internalChildSessions.has(sessionId)
+        )
+            return;
+        try {
+            const model = liveModelKey(sessionId);
+            if (!model) return;
+            const projectRoot = await sessionDirectoryFor(sessionId);
+            const scope = { sessionId, projectRoot, model };
+            const sourceMessages = normalizeSDKResponse(
+                await withTimeout(
+                    Promise.resolve(
+                        deps.client.session.messages({
+                            path: { id: sessionId },
+                            query: { directory: projectRoot },
+                        } as never),
+                    ),
+                    HOST_SDK_READ_TIMEOUT_MS,
+                    "memory capture transcript read timed out",
+                ),
+                [] as unknown[],
+                { preferResponseOnMissingData: true },
+            );
+            if (deletedSessions.has(sessionId)) return;
+            await captureCheckpoint({
+                ...scope,
+                messages: openCodeCaptureMessages(sourceMessages, {
+                    notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
+                }),
+            });
+            memoryCaptureDrain.schedule(scope);
+        } catch (error) {
+            log(
+                `memory capture checkpoint pending: ${error instanceof Error ? error.message : "unknown error"}`,
+            );
+            warnCaptureIncomplete();
+        }
+    };
 
     const rustToolBackends: RustToolBackends = {
         reduce: async ({ sessionId, drop, commandId }) => {
@@ -426,6 +565,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
 
     const eventHook = createEventHook({
         eventHandler,
+        checkpointMemory,
         contextUsageMap,
         liveModelBySession,
         variantBySession,
@@ -444,8 +584,32 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const hooks = {
         "experimental.chat.messages.transform": messagesTransform,
         "experimental.chat.system.transform": systemPromptHash.handler,
-        "experimental.text.complete": createTextCompleteHandler(),
+        "experimental.text.complete": createTextCompleteHandler(
+            // A completed part is not checkpointed: under the message id it would duplicate the
+            // joined message text with a different digest. The drain works on stored sources only.
+            async (input) => {
+                await pendingUserCaptures.get(input.sessionID)?.catch(() => undefined);
+                if (
+                    deps.config.memory?.enabled === false ||
+                    deps.config.memory?.auto_promote === false ||
+                    deps.config.memory?.auto_capture === false
+                )
+                    return;
+                const projectRoot = await sessionDirectoryFor(input.sessionID);
+                if (
+                    deletedSessions.has(input.sessionID) ||
+                    subagentSessions.has(input.sessionID) ||
+                    internalChildSessions.has(input.sessionID)
+                )
+                    return;
+                const model = liveModelKey(input.sessionID);
+                if (!model) return;
+                memoryCaptureDrain.schedule({ sessionId: input.sessionID, projectRoot, model });
+            },
+            notifyCaptureIncomplete,
+        ),
         "chat.message": createChatMessageHook({
+            checkpointUser,
             liveModelBySession,
             variantBySession,
             agentBySession,
@@ -486,6 +650,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const hooksWithBackends = hooks as typeof hooks & {
         rustToolBackends: RustToolBackends;
         resolveSessionDirectory: typeof sessionDirectoryFor;
+        memoryCaptureDrain: MemoryCaptureDrain;
     };
     Object.defineProperty(hooksWithBackends, "rustToolBackends", {
         value: rustToolBackends,
@@ -493,6 +658,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     });
     Object.defineProperty(hooksWithBackends, "resolveSessionDirectory", {
         value: projectRootForLiveSession,
+        enumerable: false,
+    });
+    Object.defineProperty(hooksWithBackends, "memoryCaptureDrain", {
+        value: memoryCaptureDrain,
         enumerable: false,
     });
     return hooksWithBackends;

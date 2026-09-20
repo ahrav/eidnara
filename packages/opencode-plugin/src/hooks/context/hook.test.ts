@@ -155,6 +155,7 @@ function createClientMock(promptMock = mock(() => undefined), sessionDirectory?:
             get: mock(async () => ({
                 data: sessionDirectory === undefined ? {} : { directory: sessionDirectory },
             })),
+            messages: mock(async () => ({ data: [] })),
         },
         app: { agents: mock(async () => ({ data: [] })) },
         tui: { showToast: mock(async () => undefined) },
@@ -188,6 +189,243 @@ async function expectSentinel(promise: Promise<unknown>, sentinel: string): Prom
 }
 
 describe("eidnara hook", () => {
+    it("queues user capture without blocking chat and awaits it before the final-text drain", async () => {
+        useTempDataHome("capture-user-");
+        let release = (_value: { data: { directory: string } }) => {};
+        const directory = new Promise<{ data: { directory: string } }>((resolve) => {
+            release = resolve;
+        });
+        const client = createClientMock();
+        client.session.get = mock(() => directory) as never;
+        const fake = createFakeModuleClient(({ method }) => ({
+            state: method === "memory.capture.next" ? "ready" : "accepted",
+        }));
+        const hook = requireHook(
+            createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+        );
+        await hook["chat.message"](
+            { sessionID: "capture-user", model: { providerID: "provider", modelID: "model" } },
+            {
+                message: { id: "native-user", role: "user", sessionID: "capture-user" },
+                parts: [{ type: "text", text: "A durable project fact." }],
+            },
+        );
+        expect(fake.calls).toHaveLength(0);
+        let finished = false;
+        const final = hook["experimental.text.complete"](
+            { sessionID: "capture-user", messageID: "native-answer", partID: "part" },
+            { text: "Completed." },
+        ).then(() => {
+            finished = true;
+        });
+        await Promise.resolve();
+        expect(finished).toBe(false);
+        release({ data: { directory: "/project" } });
+        await final;
+        await hook.memoryCaptureDrain.settle();
+        expect(fake.calls.map((call) => call.method)).toEqual([
+            "memory.capture",
+            "memory.capture.next",
+        ]);
+        expect(fake.calls[0]?.body).toMatchObject({
+            messages: [{ id: "native-user", role: "user", text: "A durable project fact." }],
+        });
+    });
+
+    describe("memory capture drain", () => {
+        const SESSION = "capture-drain";
+        const DAY_MS = 24 * 60 * 60 * 1000;
+
+        function assistantMessage(
+            id: string,
+            parts: unknown[],
+            created = Date.now(),
+        ): Record<string, unknown> {
+            return {
+                info: {
+                    id,
+                    role: "assistant",
+                    sessionID: SESSION,
+                    time: { created, completed: created + 1 },
+                },
+                parts,
+            };
+        }
+
+        function createCaptureHook(
+            fake: FakeModuleClient,
+            transcript: unknown[],
+        ): {
+            hook: NonNullable<ReturnType<typeof createEidnaraHook>>;
+            client: EidnaraDeps["client"];
+        } {
+            const client = createClientMock(undefined, "/project");
+            client.session.messages = mock(async () => ({ data: transcript })) as never;
+            const liveSessionState = createLiveSessionState();
+            liveSessionState.liveModelBySession.set(SESSION, {
+                providerID: "provider",
+                modelID: "model",
+            });
+            const hook = requireHook(
+                createEidnaraHook(
+                    createDeps({ client, liveSessionState, rustModeModuleClient: fake.client }),
+                ),
+            );
+            return { hook, client };
+        }
+
+        function capturedMessages(fake: FakeModuleClient): Array<{ id: string; text: string }> {
+            return fake.calls
+                .filter((call) => call.method === "memory.capture")
+                .flatMap(
+                    (call) =>
+                        (call.body as { messages: Array<{ id: string; text: string }> }).messages,
+                );
+        }
+
+        it("derives assistant capture text once from the whole message, never per text part", async () => {
+            useTempDataHome("capture-single-derivation-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "ready" : "accepted",
+            }));
+            const { hook } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [
+                    { type: "text", text: "First decision." },
+                    { type: "tool", tool: "bash" },
+                    { type: "text", text: "Second decision." },
+                ]),
+            ]);
+            for (const [partID, text] of [
+                ["part-1", "First decision."],
+                ["part-2", "Second decision."],
+            ] as const) {
+                await hook["experimental.text.complete"](
+                    { sessionID: SESSION, messageID: "native-answer", partID },
+                    { text },
+                );
+            }
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            const messages = capturedMessages(fake);
+            expect(messages).toEqual([
+                {
+                    id: "native-answer",
+                    role: "assistant",
+                    text: "First decision.\nSecond decision.",
+                },
+            ]);
+            const textsById = new Map<string, Set<string>>();
+            for (const message of messages) {
+                textsById.set(
+                    message.id,
+                    (textsById.get(message.id) ?? new Set()).add(message.text),
+                );
+            }
+            for (const texts of textsById.values()) expect(texts.size).toBe(1);
+        });
+
+        it("resolves the final-text hook before the drain finishes", async () => {
+            useTempDataHome("capture-final-text-detached-");
+            const next = Promise.withResolvers<unknown>();
+            const fake = createFakeModuleClient(({ method }) =>
+                method === "memory.capture.next" ? next.promise : { state: "accepted" },
+            );
+            const { hook } = createCaptureHook(fake, []);
+            await hook["experimental.text.complete"](
+                { sessionID: SESSION, messageID: "native-answer", partID: "part" },
+                { text: "Completed." },
+            );
+            expect(fake.calls.map((call) => call.method)).toEqual(["memory.capture.next"]);
+            expect(hook.memoryCaptureDrain.pending("/project")).toBeDefined();
+            next.resolve({ state: "ready" });
+            await hook.memoryCaptureDrain.settle();
+            expect(hook.memoryCaptureDrain.pending("/project")).toBeUndefined();
+        });
+
+        it("resolves the idle checkpoint before the drain finishes and coalesces reruns", async () => {
+            useTempDataHome("capture-idle-detached-");
+            const next = Promise.withResolvers<unknown>();
+            const fake = createFakeModuleClient(({ method }) =>
+                method === "memory.capture.next" ? next.promise : { state: "accepted" },
+            );
+            const { hook } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            const idle = { event: { type: "session.idle", properties: { sessionID: SESSION } } };
+            await hook.event(idle);
+            await hook.event(idle);
+            expect(fake.calls.map((call) => call.method)).toEqual([
+                "memory.capture",
+                "memory.capture.next",
+            ]);
+            next.resolve({ state: "ready" });
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls.map((call) => call.method)).toEqual([
+                "memory.capture",
+                "memory.capture.next",
+                "memory.capture.next",
+            ]);
+        });
+
+        it("stays quiet on a pending drain and warns on a failed one", async () => {
+            useTempDataHome("capture-toast-policy-");
+            for (const [state, toasts] of [
+                ["pending", 0],
+                ["store_failed", 1],
+            ] as const) {
+                const fake = createFakeModuleClient(({ method }) => ({
+                    state: method === "memory.capture.next" ? state : "accepted",
+                }));
+                const { hook, client } = createCaptureHook(fake, [
+                    assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+                ]);
+                await hook.event({
+                    event: { type: "session.idle", properties: { sessionID: SESSION } },
+                });
+                await hook.memoryCaptureDrain.settle();
+                expect(client.tui.showToast).toHaveBeenCalledTimes(toasts);
+            }
+        });
+
+        it("warns when the idle checkpoint itself fails", async () => {
+            useTempDataHome("capture-checkpoint-failure-");
+            const fake = createFakeModuleClient(() => ({ state: "store_failed" }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls.map((call) => call.method)).toEqual(["memory.capture"]);
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
+        it("offers only recent transcript messages for capture", async () => {
+            useTempDataHome("capture-age-bound-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "ready" : "accepted",
+            }));
+            const { hook } = createCaptureHook(fake, [
+                assistantMessage(
+                    "stale-answer",
+                    [{ type: "text", text: "An old decision." }],
+                    Date.now() - 3 * DAY_MS,
+                ),
+                assistantMessage("recent-answer", [{ type: "text", text: "A recent decision." }]),
+            ]);
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(capturedMessages(fake)).toEqual([
+                { id: "recent-answer", role: "assistant", text: "A recent decision." },
+            ]);
+        });
+    });
+
     for (const entry of ["hook", "wrapper"] as const) {
         it.each([
             "info",

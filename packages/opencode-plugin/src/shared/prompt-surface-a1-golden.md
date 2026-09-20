@@ -263,7 +263,7 @@ Example: eidnara_note(action="write", content="Revisit the retry logic after the
 }
 ```
 
-### eidnara_memory — description ~179 tokens, params ~417 tokens (total ~596)
+### eidnara_memory — description ~243 tokens, params ~417 tokens (total ~660)
 
 **Description:**
 
@@ -279,7 +279,10 @@ Actions:
 - archive: objectId.
 - merge: objectIds into one survivor + content/category or antiMemory.
 
-Memories created here surface in the project's automatic memory context and in explicit search. Agent calls to approve/enforce are rejected.
+Positive categories (exact names): PROJECT_RULES (project conventions), ARCHITECTURE (design decisions), CONSTRAINTS (requirements and limits), CONFIG_VALUES (settings and operational values), NAMING (names and terminology).
+REJECTED_APPROACH requires antiMemory, not content. Do not invent category names.
+
+Memories created here are available through explicit search as labeled model inference. Automatic context injection follows the kernel's admission policy. Agent calls to approve/enforce are rejected.
 ```
 
 **Parameters (JSON Schema per parameter, as serialized to the provider):**
