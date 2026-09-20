@@ -545,6 +545,10 @@ fn durable_write_registry_references_real_bindings_and_checked_tests() {
             "memory_reviewer_jobs",
             include_str!("memory_reviewer_jobs.rs"),
         ),
+        (
+            "memory_capture::tests",
+            include_str!("../src/memory_capture.rs"),
+        ),
         // Kernel oracles live in the extracted crate; the registry still names them.
         (
             "kernel_redaction",
