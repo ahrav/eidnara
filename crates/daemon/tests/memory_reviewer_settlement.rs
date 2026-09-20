@@ -1520,6 +1520,43 @@ fn the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners() {
     );
 }
 
+/// A restored Kernel beside a replaced Memory Store lists holds of the store incarnation that owns them; the live store has no receipt for any of them, and that absence is not orphaning. Reconciliation leaves holds of another store incarnation alone, so the correct store, once restored, still finds its selected results held.
+#[test]
+fn reconciliation_leaves_holds_of_another_store_incarnation_alone() {
+    use daemon::memory_reviewer::lifecycle::reconcile_review_holds;
+
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
+    let review = fixture.review_hold_binding(1, &reference.candidate_id);
+    let replaced_dir = tempfile::tempdir().unwrap();
+    let replaced = MemoryStore::open(&MemoryStore::test_descriptor(
+        replaced_dir.path(),
+        "eidnara-memory_reviewer-settlement-replaced-store",
+    ))
+    .unwrap();
+    assert_ne!(
+        replaced.memory_reviewer_store_incarnation().unwrap(),
+        fixture.ledger.memory_reviewer_store_incarnation().unwrap()
+    );
+    assert_eq!(
+        reconcile_review_holds(&replaced, &fixture.store, fixture.now + 6).unwrap(),
+        0,
+        "a hold of another store incarnation is not this store's to release"
+    );
+    assert!(
+        fixture
+            .store
+            .lookup_review_hold(&review, fixture.now + 6)
+            .unwrap()
+            .is_some()
+    );
+    // The owning store still sees its in-progress receipt and keeps the hold too.
+    assert_eq!(fixture.reconcile(fixture.now + 6), 0);
+}
+
 /// A reconciliation failure is a failed step like any other: the pass publishes `unavailable` with the last good sample time and retries early, while the Kernel's maintenance still ran. The next pass on a healthy store publishes `ready` again.
 #[test]
 fn a_failed_hold_reconciliation_publishes_unavailable_and_the_next_pass_recovers() {

@@ -230,16 +230,22 @@ pub struct Pass {
     pub healthy: bool,
 }
 
-/// Releases every live review hold whose result no completed receipt selects and no in-progress receipt can still select. A hold survives the transfer envelope on its own deadline, so a receipt the sweep closed, a losing generation, or a settlement that failed to release would otherwise keep evidence held until the review expiry; the queue deadline the row keeps already makes such a result unreadable, and this pass ends its retention. Returns the number released.
+/// Releases every live review hold of this Memory Store incarnation whose result no completed receipt selects and no in-progress receipt can still select. A hold survives the transfer envelope on its own deadline, so a receipt the sweep closed, a losing generation, or a settlement that failed to release would otherwise keep evidence held until the review expiry; the queue deadline the row keeps already makes such a result unreadable, and this pass ends its retention. A hold of another store incarnation is left alone: a Kernel restored beside a replaced store has no receipt for any of them, and that absence is not orphaning. Returns the number released.
 pub fn reconcile_review_holds(
     store: &MemoryStore,
     kernel: &kernel::KernelStore,
     now_ms: i64,
 ) -> Result<usize, String> {
-    // The Kernel admits at most this many active holds host-wide, so one listing covers every live review hold.
-    let holds = kernel
-        .list_active_review_holds(now_ms, kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST)
+    let incarnation = store
+        .memory_reviewer_store_incarnation()
         .map_err(|error| error.to_string())?;
+    // The Kernel admits at most this many active holds host-wide, so one listing covers every live review hold.
+    let holds: Vec<_> = kernel
+        .list_active_review_holds(now_ms, kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|hold| hold.binding.memstore_incarnation == incarnation)
+        .collect();
     if holds.is_empty() {
         return Ok(0);
     }
