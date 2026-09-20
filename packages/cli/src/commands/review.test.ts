@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { HostCallError } from "@eidnara/opencode/shared/host-client";
 import {
+    defaultResolveProjectRoot,
     parseReviewArgs,
     type ReviewCommandDependencies,
     type ReviewConnection,
@@ -10,12 +11,25 @@ import { decodeReviewStatus } from "./review-wire";
 
 const HEX = "a".repeat(64);
 const HEX_B = "b".repeat(64);
+
+/** A page exactly filling `limit`, whose `next` is its last identity as the wire contract requires. */
+function fullPage(limit: number): { page: Record<string, unknown>; next: string } {
+    const items = Array.from({ length: limit }, (_, i) => ({
+        causal_identity: `${"c".repeat(60)}${i.toString(16).padStart(4, "0")}`,
+        generation: i,
+        outcome: "complete",
+        selected: true,
+    }));
+    const next = items[items.length - 1].causal_identity;
+    return { page: { kind: "page", items, next }, next };
+}
 const ENV = { HOME: "/home/reviewer" };
 
 interface Recorded {
     connected: string[];
     routeOpens: unknown[][];
     requests: unknown[];
+    requestOptions: unknown[];
     closes: number;
     stdout: string[];
     stderr: string[];
@@ -33,6 +47,7 @@ function harness(
         connected: [],
         routeOpens: [],
         requests: [],
+        requestOptions: [],
         closes: 0,
         stdout: [],
         stderr: [],
@@ -47,8 +62,9 @@ function harness(
             recorded.routeOpens.push(args);
             return { channel: 7, epoch: 1 } as never;
         },
-        request: async (_handle, body) => {
+        request: async (_handle, body, options) => {
             recorded.requests.push(body);
+            recorded.requestOptions.push(options);
             const respond = answers.respond ?? (() => ({ kind: "page", items: [], next: null }));
             return respond(body as Record<string, unknown>);
         },
@@ -63,13 +79,27 @@ function harness(
                 recorded.connected.push(file);
                 return connection;
             }),
-        realpath: (path) => `${path}/real`,
+        resolveProjectRoot: (path) => `${path}/real`,
         cwd: () => "/work/project",
         env: ENV,
         stdout: (line) => recorded.stdout.push(line),
         stderr: (line) => recorded.stderr.push(line),
     };
     return { deps, recorded };
+}
+
+function statusMetrics(memoryReviewer?: Record<string, unknown>): Record<string, unknown> {
+    return {
+        components: {
+            context: {
+                status: "ok",
+                metrics: {
+                    storage_state: "ready",
+                    ...(memoryReviewer === undefined ? {} : { memory_reviewer: memoryReviewer }),
+                },
+            },
+        },
+    };
 }
 
 function selectedBody(): Record<string, unknown> {
@@ -165,7 +195,7 @@ describe("review list", () => {
                 next: HEX_B,
             }),
         });
-        expect(await runReviewCommand(["list", "--project", "/p"], deps)).toBe(0);
+        expect(await runReviewCommand(["list", "--project", "/p", "--limit", "2"], deps)).toBe(0);
         expect(recorded.connected).toEqual([
             "/home/reviewer/.local/share/eidnara/run/connection.json",
         ]);
@@ -185,16 +215,19 @@ describe("review list", () => {
                 session_id: identity.session,
                 project_root: "/p/real",
                 method: "review.list",
-                limit: 16,
+                limit: 2,
                 after: null,
             },
         ]);
+        expect(recorded.requestOptions).toEqual([{ exactIntegers: true }]);
         expect(recorded.closes).toBe(1);
         const text = recorded.stdout.join("\n");
         expect(text).toContain("Project: /p/real");
         expect(text).toContain(`${HEX} gen 1 complete selected`);
         expect(text).toContain(`${HEX_B} gen 9007199254740993 abstained (owner_sensitive)`);
-        expect(text).toContain(`--after ${HEX_B}`);
+        expect(text).toContain(
+            `Next page: eidnara review list --project /p/real --limit 2 --after ${HEX_B}`,
+        );
 
         const cwd = harness();
         expect(await runReviewCommand(["list"], cwd.deps)).toBe(0);
@@ -203,6 +236,42 @@ describe("review list", () => {
         ).toBe("/work/project/real");
         expect(cwd.recorded.stdout.join("\n")).toContain("No completed outcomes on this page.");
         expect(cwd.recorded.stdout.join("\n")).toContain("End of walk.");
+    });
+
+    test("the next-page command carries the bound root and a non-default limit so it reruns from any directory", async () => {
+        const five = fullPage(5);
+        const quoted = harness({ respond: () => five.page });
+        expect(
+            await runReviewCommand(
+                ["list", "--project", "/space d/it's", "--limit", "5"],
+                quoted.deps,
+            ),
+        ).toBe(0);
+        expect(quoted.recorded.stdout[0]).toContain(
+            `Next page: eidnara review list --project '/space d/it'\\''s/real' --limit 5 --after ${five.next}`,
+        );
+        const sixteen = fullPage(16);
+        const cwd = harness({ respond: () => sixteen.page });
+        expect(await runReviewCommand(["list"], cwd.deps)).toBe(0);
+        expect(cwd.recorded.stdout[0]).toContain(
+            `Next page: eidnara review list --project /work/project/real --after ${sixteen.next}`,
+        );
+        expect(cwd.recorded.stdout[0]).not.toContain("--limit");
+        const long = harness({ respond: () => sixteen.page });
+        const deep = `/${"segment/".repeat(40)}leaf`;
+        expect(await runReviewCommand(["list", "--project", deep], long.deps)).toBe(0);
+        expect(long.recorded.stdout[0]).toContain(`--project ${deep}/real --after`);
+    });
+
+    test("a root that printable rendering would alter is never offered as a runnable command", async () => {
+        const { page, next } = fullPage(16);
+        for (const root of ["/two  spaces", "/tab\tbed", "/new\nline", "/esc\u001b[2K"]) {
+            const { deps, recorded } = harness({ respond: () => page });
+            expect(await runReviewCommand(["list", "--project", root], deps)).toBe(0);
+            const text = recorded.stdout[0];
+            expect(text).toContain(`Next page: rerun this command with --after ${next}`);
+            expect(text).not.toContain("eidnara review list --project");
+        }
     });
 
     test("an exact-full page yields a cursor whose follow-up may be empty, and nothing walks it automatically", async () => {
@@ -234,7 +303,7 @@ describe("review list", () => {
         expect(await runReviewCommand(["list", "--limit", "2"], first.deps)).toBe(0);
         expect(first.recorded.requests).toHaveLength(1);
         expect(first.recorded.stdout[0]).toContain(
-            `Next page: eidnara review list --after ${HEX_B}`,
+            `Next page: eidnara review list --project /work/project/real --limit 2 --after ${HEX_B}`,
         );
         const second = harness({ respond: (body) => pages.get(body.after as string | null) });
         expect(
@@ -253,21 +322,21 @@ describe("review list", () => {
                 kind: "page",
                 items: [
                     {
-                        causal_identity: HEX,
+                        causal_identity: HEX_B,
                         generation: 18446744073709551615n,
                         outcome: "expired",
                         selected: false,
                     },
                 ],
-                next: body.after === HEX ? null : HEX,
+                next: body.after === HEX ? null : HEX_B,
             }),
         });
         expect(
-            await runReviewCommand(["list", "--json", "--limit", "1", "--after", HEX], deps),
+            await runReviewCommand(["list", "--json", "--limit", "2", "--after", HEX], deps),
         ).toBe(0);
-        expect(recorded.requests[0]).toMatchObject({ limit: 1, after: HEX });
+        expect(recorded.requests[0]).toMatchObject({ limit: 2, after: HEX });
         expect(recorded.stdout[0]).toBe(
-            `{"kind":"page","project_root":"/work/project/real","items":[{"causal_identity":"${HEX}","generation":18446744073709551615,"outcome":"expired","selected":false}],"next":null}`,
+            `{"kind":"page","project_root":"/work/project/real","items":[{"causal_identity":"${HEX_B}","generation":18446744073709551615,"outcome":"expired","selected":false}],"next":null}`,
         );
     });
 
@@ -347,8 +416,59 @@ describe("review list", () => {
                     })),
                     next: null,
                 },
-                "The response could not be validated: items is not a bounded array.",
-                '{"kind":"malformed","detail":"items is not a bounded array"}',
+                "The response could not be validated: items exceed the requested page.",
+                '{"kind":"malformed","detail":"items exceed the requested page"}',
+            ],
+            [
+                {
+                    kind: "page",
+                    items: [
+                        {
+                            causal_identity: HEX_B,
+                            generation: 1,
+                            outcome: "complete",
+                            selected: true,
+                        },
+                        { causal_identity: HEX, generation: 2, outcome: "failed", selected: false },
+                    ],
+                    next: null,
+                },
+                "The response could not be validated: items are not ordered after the cursor.",
+                '{"kind":"malformed","detail":"items are not ordered after the cursor"}',
+            ],
+            [
+                {
+                    kind: "page",
+                    items: [
+                        { causal_identity: HEX, generation: 1, outcome: "failed", selected: true },
+                    ],
+                    next: null,
+                },
+                "The response could not be validated: item selected disagrees with its outcome.",
+                '{"kind":"malformed","detail":"item selected disagrees with its outcome"}',
+            ],
+            [
+                // A cursor on a page short of the requested 16 would skip outcomes.
+                {
+                    kind: "page",
+                    items: [
+                        {
+                            causal_identity: HEX,
+                            generation: 1,
+                            outcome: "complete",
+                            selected: true,
+                        },
+                    ],
+                    next: HEX,
+                },
+                "The response could not be validated: next does not follow the page.",
+                '{"kind":"malformed","detail":"next does not follow the page"}',
+            ],
+            [
+                // A full page without its cursor would end the walk early.
+                { ...fullPage(16).page, next: null },
+                "The response could not be validated: next does not follow the page.",
+                '{"kind":"malformed","detail":"next does not follow the page"}',
             ],
             [
                 "nope",
@@ -386,13 +506,13 @@ describe("review list vocabulary", () => {
             ...outcomes
                 .filter((o) => o !== "abstained")
                 .map((outcome, i) => ({
-                    causal_identity: HEX,
+                    causal_identity: `${"a".repeat(62)}${i.toString(16).padStart(2, "0")}`,
                     generation: i,
                     outcome,
                     selected: outcome === "complete",
                 })),
             ...reasons.map((reason, i) => ({
-                causal_identity: HEX_B,
+                causal_identity: `${"b".repeat(62)}${i.toString(16).padStart(2, "0")}`,
                 generation: 100 + i,
                 outcome: "abstained",
                 reason,
@@ -443,17 +563,76 @@ describe("review list vocabulary", () => {
 });
 
 describe("review show", () => {
+    test("support and contradictions are each bounded at 256 references, not together", async () => {
+        const references = (prefix: string) =>
+            Array.from({ length: 256 }, (_, i) => ({ evidence_id: `${prefix}-${i}` }));
+        const { deps, recorded } = harness({
+            respond: () => {
+                const body = selectedBody();
+                const proposal = body.proposal as Record<string, unknown>;
+                proposal.support = references("s");
+                proposal.contradictions = references("c");
+                return body;
+            },
+        });
+        expect(await runReviewCommand(["show", HEX], deps)).toBe(0);
+        expect(recorded.stdout[0]).toContain("  s-255");
+        expect(recorded.stdout[0]).toContain("  c-255");
+    });
+
+    test("a bounded identifier longer than a display line is rendered whole", async () => {
+        const candidate = `c${"x".repeat(510)}`;
+        const evidence = `e${"y".repeat(510)}`;
+        const limitation = `only ${"z".repeat(300)} was read`;
+        const { deps, recorded } = harness({
+            respond: () => {
+                const body = selectedBody();
+                const proposal = body.proposal as Record<string, unknown>;
+                proposal.target = { kind: "staged_candidate", candidate_id: candidate };
+                proposal.support = [{ evidence_id: evidence }];
+                proposal.limitations = [limitation];
+                return body;
+            },
+        });
+        expect(await runReviewCommand(["show", HEX], deps)).toBe(0);
+        const text = recorded.stdout[0];
+        expect(text).toContain(`Target: staged candidate ${candidate}`);
+        expect(text).toContain(`  ${evidence}`);
+        expect(text).toContain(`  ${limitation}`);
+        expect(text).not.toContain("...");
+    });
+
+    test("a text line spelled like a field stays inside the indented text block", async () => {
+        const { deps, recorded } = harness({
+            respond: () => {
+                const body = selectedBody();
+                (body.proposal as Record<string, unknown>).new_text =
+                    "Uncertainty: low\nReference only: applied";
+                return body;
+            },
+        });
+        expect(await runReviewCommand(["show", HEX], deps)).toBe(0);
+        const lines = recorded.stdout[0].split("\n");
+        expect(lines).toContain("  Uncertainty: low");
+        expect(lines).toContain("  Reference only: applied");
+        expect(lines.filter((line) => line.startsWith("Uncertainty:"))).toEqual([
+            "Uncertainty: medium",
+        ]);
+        expect(lines.filter((line) => line.startsWith("Reference only:"))).toHaveLength(1);
+    });
+
     test("issues exactly one read and renders every field with inert text and exact integers", async () => {
         const { deps, recorded } = harness({ respond: selectedBody });
         expect(await runReviewCommand(["show", HEX], deps)).toBe(0);
         expect(recorded.requests).toHaveLength(1);
         expect(recorded.requests[0]).toMatchObject({ method: "review.read", causal_identity: HEX });
+        expect(recorded.requestOptions).toEqual([{ exactIntegers: true }]);
         const text = recorded.stdout[0];
         expect(text).toContain("Action: revise");
         expect(text).toContain(
             "Target: memory mem-1 revision 3 known as of 9007199254740993 commit token -5",
         );
-        expect(text).toContain("the workspace builds with bun \nsecond line");
+        expect(text).toContain("Text:\n  the workspace builds with bun \n  second line\nSupport:");
         expect(text).not.toContain("\u001b");
         expect(text).toContain("  ev-1 [s1 0..12]");
         expect(text).toContain("Contradictions: none");
@@ -532,19 +711,6 @@ describe("review show", () => {
             ],
             [
                 (b) => {
-                    (b.proposal as Record<string, unknown>).support = Array.from(
-                        { length: 129 },
-                        (_, i) => ({ evidence_id: `s-${i}` }),
-                    );
-                    (b.proposal as Record<string, unknown>).contradictions = Array.from(
-                        { length: 128 },
-                        (_, i) => ({ evidence_id: `c-${i}` }),
-                    );
-                },
-                "support and contradictions exceed the reference bound together",
-            ],
-            [
-                (b) => {
                     (b.proposal as Record<string, unknown>).action = "accept";
                 },
                 "action is not recognized",
@@ -581,6 +747,12 @@ describe("review show", () => {
                 },
                 "kind is not recognized",
             ],
+            [
+                (b) => {
+                    b.causal_identity = HEX_B;
+                },
+                "causal_identity is not the requested identity",
+            ],
         ];
         for (const [mutate, detail] of malformed) {
             const { deps, recorded } = harness({
@@ -601,22 +773,19 @@ describe("review status", () => {
         const { deps, recorded } = harness({
             status: {
                 health: "degraded",
-                metrics: {
-                    components: {},
-                    memory_reviewer: {
-                        memory_reviewer_state: "ready",
-                        activation_state: "open",
-                        sampled_at_ms: 1_700_000_000_000,
-                        jobs_ready: 9007199254740992,
-                        jobs_reserved: 9007199254740993n,
-                        jobs_abstained: -1,
-                        jobs_completed: 2.5,
-                        jobs_failed: null,
-                        receipts_complete: 4,
-                        swept_jobs: 0,
-                        future_counter: 7,
-                    },
-                },
+                metrics: statusMetrics({
+                    memory_reviewer_state: "ready",
+                    activation_state: "open",
+                    sampled_at_ms: 1_700_000_000_000,
+                    jobs_ready: 9007199254740992n,
+                    jobs_reserved: 9007199254740993n,
+                    jobs_abstained: -1,
+                    jobs_completed: 2.5,
+                    jobs_failed: null,
+                    receipts_complete: 4,
+                    swept_jobs: 0,
+                    future_counter: 7,
+                }),
             },
         });
         expect(await runReviewCommand(["status"], deps)).toBe(0);
@@ -639,21 +808,30 @@ describe("review status", () => {
         expect(text).not.toMatch(/^(total|ratio|success)/im);
     });
 
+    test("the block is read only under the context component, never from the top of metrics", () => {
+        const block = { memory_reviewer_state: "ready", jobs_ready: 1 };
+        expect(decodeReviewStatus(statusMetrics(block)).counters.jobs_ready).toBe(1);
+        const flat = decodeReviewStatus({ components: {}, memory_reviewer: block });
+        expect(flat.memory_reviewer_state).toBeNull();
+        expect(flat.counters.jobs_ready).toBeNull();
+        const otherComponent = decodeReviewStatus({
+            components: { local_embeddings: { status: "ok", metrics: { memory_reviewer: block } } },
+        });
+        expect(otherComponent.memory_reviewer_state).toBeNull();
+    });
+
     test("a store that is not ready reports every counter unavailable, even present zeros, and an absent block is unavailable", async () => {
         const starting = harness({
             status: {
                 health: "ok",
-                metrics: {
-                    components: {},
-                    memory_reviewer: {
-                        memory_reviewer_state: "starting",
-                        activation_state: "stale",
-                        sampled_at_ms: null,
-                        swept_jobs: 0,
-                        swept_selections: 0,
-                        jobs_ready: 3,
-                    },
-                },
+                metrics: statusMetrics({
+                    memory_reviewer_state: "starting",
+                    activation_state: "stale",
+                    sampled_at_ms: null,
+                    swept_jobs: 0,
+                    swept_selections: 0,
+                    jobs_ready: 3,
+                }),
             },
         });
         expect(await runReviewCommand(["status", "--json"], starting.deps)).toBe(0);
@@ -674,39 +852,51 @@ describe("review status", () => {
         const noActivation = harness({
             status: {
                 health: "ok",
-                metrics: {
-                    components: {},
-                    memory_reviewer: {
-                        memory_reviewer_state: "ready",
-                        sampled_at_ms: 42,
-                        jobs_ready: 1,
-                    },
-                },
+                metrics: statusMetrics({
+                    memory_reviewer_state: "ready",
+                    sampled_at_ms: 42,
+                    jobs_ready: 1,
+                }),
             },
         });
         expect(await runReviewCommand(["status"], noActivation.deps)).toBe(0);
         expect(noActivation.recorded.stdout[0]).toContain(
-            "Activation (disclosure admission, not application): unknown",
+            "Activation (disclosure admission, not application): unreported",
         );
         expect(noActivation.recorded.stdout[0]).toContain("Sampled at: 42 ms");
         expect(noActivation.recorded.stdout[0]).toContain("jobs_ready: 1");
 
-        const absent = harness({ status: { health: "ok", metrics: { components: {} } } });
+        const absent = harness({ status: { health: "ok", metrics: statusMetrics() } });
         expect(await runReviewCommand(["status"], absent.deps)).toBe(0);
-        expect(absent.recorded.stdout[0]).toContain("MemoryReviewer store: unavailable");
+        expect(absent.recorded.stdout[0]).toContain("MemoryReviewer store: unreported");
         expect(absent.recorded.stdout[0]).toContain(
+            "Activation (disclosure admission, not application): unreported",
+        );
+
+        // The wire's own `unknown` and `unavailable` render as themselves, distinct from an absent field.
+        const literal = harness({
+            status: {
+                health: "ok",
+                metrics: statusMetrics({
+                    memory_reviewer_state: "unavailable",
+                    activation_state: "unknown",
+                }),
+            },
+        });
+        expect(await runReviewCommand(["status"], literal.deps)).toBe(0);
+        expect(literal.recorded.stdout[0]).toContain("MemoryReviewer store: unavailable");
+        expect(literal.recorded.stdout[0]).toContain(
             "Activation (disclosure admission, not application): unknown",
         );
 
         expect(
-            decodeReviewStatus({
-                memory_reviewer: { memory_reviewer_state: "later", jobs_ready: 1 },
-            }).memory_reviewer_state,
+            decodeReviewStatus(statusMetrics({ memory_reviewer_state: "later", jobs_ready: 1 }))
+                .memory_reviewer_state,
         ).toBeNull();
         expect(
-            decodeReviewStatus({
-                memory_reviewer: { memory_reviewer_state: "ready", activation_state: "later" },
-            }).activation_state,
+            decodeReviewStatus(
+                statusMetrics({ memory_reviewer_state: "ready", activation_state: "later" }),
+            ).activation_state,
         ).toBeNull();
     });
 });
@@ -772,7 +962,7 @@ describe("connection lifecycle", () => {
         expect(unrenderable.recorded.closes).toBe(1);
     });
 
-    test("the default realpath resolves relative, subdirectory, and symlinked project paths to one real root", async () => {
+    test("the default resolver binds relative, subdirectory, and symlinked project paths to one real root, and a Git worktree to its root", async () => {
         const { mkdtempSync, mkdirSync, symlinkSync, realpathSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join, relative } = await import("node:path");
@@ -783,7 +973,7 @@ describe("connection lifecycle", () => {
         const real = realpathSync.native(project);
         const roots: string[] = [];
         const { deps } = harness();
-        deps.realpath = (path) => realpathSync.native(path);
+        deps.resolveProjectRoot = defaultResolveProjectRoot;
         deps.cwd = () => join(project, "src");
         const connection = await deps.connect("unused");
         const open = connection.routeOpen;
@@ -800,6 +990,14 @@ describe("connection lifecycle", () => {
         );
         expect(await runReviewCommand(["list"], deps)).toBe(0);
         expect(roots).toEqual([real, real, join(real, "src"), join(real, "src")]);
+        // Inside a repository the harness routes bind the worktree root, so the command must reach the same project digest from a subdirectory.
+        mkdirSync(join(project, ".git"));
+        roots.length = 0;
+        expect(await runReviewCommand(["list"], deps)).toBe(0);
+        expect(await runReviewCommand(["list", "--project", join(base, "link", "src")], deps)).toBe(
+            0,
+        );
+        expect(roots).toEqual([real, real]);
     });
 
     test("an absent connection file, a missing data directory, and a daemon without the context module refuse before any route opens", async () => {
@@ -827,7 +1025,7 @@ describe("connection lifecycle", () => {
         ]);
 
         const missingProject = harness();
-        missingProject.deps.realpath = () => {
+        missingProject.deps.resolveProjectRoot = () => {
             throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
         };
         expect(await runReviewCommand(["list", "--project", "/nope"], missingProject.deps)).toBe(2);

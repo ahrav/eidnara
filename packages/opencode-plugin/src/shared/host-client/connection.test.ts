@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { ConnectionGeneration, type ConnectionGenerationOptions } from "./connection";
+import {
+    ConnectionGeneration,
+    type ConnectionGenerationOptions,
+    type RequestTerminal,
+    type ResponseMode,
+} from "./connection";
 import { Deadline } from "./deadline";
 import { HostCallError, SocketTimeoutError } from "./errors";
 import {
@@ -263,7 +268,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
 
 function routedRequest(
     generation: ConnectionGeneration,
-    extra: { mode?: "unary" | "stream" } = {},
+    extra: { mode?: "unary" | "stream"; responseMode?: ResponseMode } = {},
 ) {
     return generation.request({
         channel: CHANNEL,
@@ -426,6 +431,35 @@ describe("connection generation stream retention", () => {
             }
             expect(generation.stats().pendingHeldBytes).toBe(0);
             expect(channel.budget.used).toBe(0);
+        } finally {
+            generation.retire("owner_close");
+        }
+    });
+
+    test("stream items decode exactly only under the exact_json response mode", async () => {
+        const { generation, channel } = await harness();
+        try {
+            const itemText = '{"n":9007199254740993}';
+            const streams = [
+                routedRequest(generation, { mode: "stream" }),
+                routedRequest(generation, { mode: "stream", responseMode: "exact_json" }),
+            ];
+            for (const stream of streams) {
+                const item = new TextEncoder().encode(itemText);
+                channel.deliver(
+                    header(FrameType.StreamData, stream.correlation, item.byteLength),
+                    channel.lease(item),
+                );
+                channel.deliver(
+                    header(FrameType.StreamEnd, stream.correlation, 0),
+                    channel.lease(new Uint8Array()),
+                );
+            }
+            const [plain, exact] = await Promise.all(streams.map((stream) => stream.result));
+            const first = (terminal: RequestTerminal | undefined): unknown =>
+                (terminal?.stream[0] as { value: { n: unknown } }).value.n;
+            expect(first(plain)).toBe(9007199254740992);
+            expect(first(exact)).toBe(9007199254740993n);
         } finally {
             generation.retire("owner_close");
         }

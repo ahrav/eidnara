@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import type { HostClient } from "@eidnara/opencode/shared/host-client";
+import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
+import type { HostClient, HostClientOptions } from "@eidnara/opencode/shared/host-client";
 import { isHostCallError, rawJsonInteger } from "@eidnara/opencode/shared/host-client";
 import {
     connectionFilePath,
     resolveLifecycleDataRoot,
 } from "@eidnara/opencode/shared/host-lifecycle";
 import { stateKey } from "@eidnara/opencode/shared/kernel-client/state";
+import { shellQuote } from "@eidnara/opencode/shared/shell-quote";
 import { printableBlock, printableLine } from "../lib/terminal-text";
 import {
     decodePage,
@@ -14,9 +16,11 @@ import {
     decodeSelected,
     integerText,
     isHex64,
+    MAX_IDENTITY_BYTES,
     MAX_PAGE_ITEMS,
+    MAX_TEXT_BYTES,
     type Proposal,
-    type READ_TERMINALS,
+    type ReadTerminal,
     type Reference,
     type ReviewAnswer,
     type ReviewStatus,
@@ -25,8 +29,14 @@ import {
 
 export const REVIEW_HARNESS = "cli";
 export const DEFAULT_LIMIT = 16;
-const MAX_LINE = 200;
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/** One bound covers every daemon wait: the control calls, `route.open`, and the routed request. */
+export function hostClientOptions(
+    timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Pick<HostClientOptions, "requestTimeoutMs" | "routeOpenDeadlineMs"> {
+    return { requestTimeoutMs: timeoutMs, routeOpenDeadlineMs: timeoutMs };
+}
 
 /** The connection-scoped operations the command uses. */
 export type ReviewConnection = Pick<
@@ -36,20 +46,25 @@ export type ReviewConnection = Pick<
 
 export interface ReviewCommandDependencies {
     connect: (connectionFile: string) => Promise<ReviewConnection>;
-    /** Canonicalizes a project path the way the daemon binds roots. */
-    realpath: (path: string) => string;
+    /** Resolves a project path to the root the harness routes bind; throws when the path does not exist. */
+    resolveProjectRoot: (path: string) => string;
     cwd: () => string;
     env: Record<string, string | undefined>;
     stdout: (line: string) => void;
     stderr: (line: string) => void;
 }
 
+/** The OpenCode and Pi routes bind the Git worktree root, so a subdirectory reaches the same project digest; `realpathSync.native` first so a missing path still throws. */
+export function defaultResolveProjectRoot(path: string): string {
+    return resolveProjectRootDirectory(realpathSync.native(path));
+}
+
 const defaultDependencies: ReviewCommandDependencies = {
     connect: async (connectionFile) => {
         const { HostClient } = await import("@eidnara/opencode/shared/host-client");
-        return HostClient.connect({ connectionFile, requestTimeoutMs: REQUEST_TIMEOUT_MS });
+        return HostClient.connect({ connectionFile, ...hostClientOptions() });
     },
-    realpath: (path) => realpathSync.native(path),
+    resolveProjectRoot: defaultResolveProjectRoot,
     cwd: () => process.cwd(),
     env: process.env,
     stdout: (line) => console.log(line),
@@ -141,7 +156,7 @@ export function parseReviewArgs(args: string[]): ReviewArgs | string {
     return command === "list" ? { command, project, limit, after, json } : { command, json };
 }
 
-function terminalText(terminal: (typeof READ_TERMINALS)[number]): string {
+function terminalText(terminal: ReadTerminal): string {
     switch (terminal) {
         case "disabled":
             return "Review access is disabled: no review store is installed, or this bound root has no active MODULE memories authority, including no authority-route binding. The daemon does not identify which cause applies.";
@@ -169,7 +184,7 @@ function toJson(value: unknown): string {
     );
 }
 
-function refusalLines<T extends (typeof READ_TERMINALS)[number], B>(
+function refusalLines<T extends ReadTerminal, B>(
     answer: Exclude<ReviewAnswer<T, B>, { kind: "body" }>,
     json: boolean,
 ): string {
@@ -185,9 +200,9 @@ function referenceLines(label: string, references: Reference[]): string[] {
         `${label}:`,
         ...references.map((reference) => {
             const span = reference.span
-                ? ` [${printableLine(reference.span.alias, 64)} ${integerText(reference.span.start)}..${integerText(reference.span.end)}]`
+                ? ` [${printableLine(reference.span.alias, MAX_IDENTITY_BYTES)} ${integerText(reference.span.start)}..${integerText(reference.span.end)}]`
                 : "";
-            return `  ${printableLine(reference.evidence_id, MAX_LINE)}${span}`;
+            return `  ${printableLine(reference.evidence_id, MAX_IDENTITY_BYTES)}${span}`;
         }),
     ];
 }
@@ -195,28 +210,54 @@ function referenceLines(label: string, references: Reference[]): string[] {
 function proposalLines(proposal: Proposal): string[] {
     const target =
         proposal.target.kind === "staged_candidate"
-            ? `staged candidate ${printableLine(proposal.target.candidate_id, MAX_LINE)}`
-            : `memory ${printableLine(proposal.target.object_id, MAX_LINE)} revision ${integerText(proposal.target.source_revision)} known as of ${integerText(proposal.target.known_as_of)} commit token ${integerText(proposal.target.commit_token)}`;
+            ? `staged candidate ${printableLine(proposal.target.candidate_id, MAX_IDENTITY_BYTES)}`
+            : `memory ${printableLine(proposal.target.object_id, MAX_IDENTITY_BYTES)} revision ${integerText(proposal.target.source_revision)} known as of ${integerText(proposal.target.known_as_of)} commit token ${integerText(proposal.target.commit_token)}`;
     const lines = [`Action: ${proposal.action}`, `Target: ${target}`];
-    if (proposal.new_text !== undefined) lines.push("Text:", printableBlock(proposal.new_text));
+    if (proposal.new_text !== undefined) {
+        // Every text line is indented so a model-authored line such as `Support:` never reads as the command's own field.
+        lines.push(
+            "Text:",
+            ...printableBlock(proposal.new_text)
+                .split("\n")
+                .map((line) => `  ${line}`),
+        );
+    }
     lines.push(...referenceLines("Support", proposal.support));
     lines.push(...referenceLines("Contradictions", proposal.contradictions));
     lines.push(
         proposal.limitations.length === 0
             ? "Limitations: none"
-            : `Limitations:\n${proposal.limitations.map((text) => `  ${printableLine(text, MAX_LINE)}`).join("\n")}`,
+            : `Limitations:\n${proposal.limitations.map((text) => `  ${printableLine(text, MAX_TEXT_BYTES)}`).join("\n")}`,
     );
     lines.push(`Uncertainty: ${proposal.uncertainty}`);
     lines.push(
-        `Manifest: ${printableLine(proposal.manifest.manifest_id, MAX_LINE)} ${proposal.manifest.digest}`,
+        `Manifest: ${printableLine(proposal.manifest.manifest_id, MAX_IDENTITY_BYTES)} ${proposal.manifest.digest}`,
     );
     return lines;
 }
 
+const UNREPORTED = "unreported";
+
+/** Characters a POSIX shell passes through unquoted. */
+const SHELL_PLAIN = /^[A-Za-z0-9_./-]+$/;
+/** Linux `PATH_MAX`. */
+const MAX_PATH_LINE = 4096;
+
+/** The command reruns the same walk from any directory: the root is explicit and a non-default page size is repeated. */
+function nextPageCommand(projectRoot: string, limit: number, next: string): string {
+    // A root that printable rendering would alter cannot be quoted back into a command that reaches the same directory.
+    if (printableLine(projectRoot, MAX_PATH_LINE) !== projectRoot) {
+        return `rerun this command with --after ${next}`;
+    }
+    const project = SHELL_PLAIN.test(projectRoot) ? projectRoot : shellQuote(projectRoot);
+    const size = limit === DEFAULT_LIMIT ? "" : ` --limit ${limit}`;
+    return `eidnara review list --project ${project}${size} --after ${next}`;
+}
+
 function statusLines(status: ReviewStatus): string[] {
     const lines = [
-        `MemoryReviewer store: ${status.memory_reviewer_state ?? "unavailable"}`,
-        `Activation (disclosure admission, not application): ${status.activation_state ?? "unknown"}`,
+        `MemoryReviewer store: ${status.memory_reviewer_state ?? UNREPORTED}`,
+        `Activation (disclosure admission, not application): ${status.activation_state ?? UNREPORTED}`,
         `Sampled at: ${status.sampled_at_ms === null ? "unavailable" : `${status.sampled_at_ms} ms`}`,
     ];
     for (const name of STATUS_COUNTERS) {
@@ -261,7 +302,7 @@ export async function runReviewCommand(
     let projectRoot: string | null = null;
     if (parsed.command !== "status") {
         try {
-            projectRoot = dependencies.realpath(parsed.project ?? dependencies.cwd());
+            projectRoot = dependencies.resolveProjectRoot(parsed.project ?? dependencies.cwd());
         } catch {
             dependencies.stderr(
                 `Review ${parsed.command} failed: the project path does not exist.`,
@@ -321,13 +362,17 @@ async function render(
     );
     const envelope = { v: 1, session_id: session, project_root: projectRoot };
     if (parsed.command === "list") {
-        const raw = await connection.request(handle, {
-            ...envelope,
-            method: "review.list",
-            limit: parsed.limit,
-            after: parsed.after,
-        });
-        const answer = decodePage(raw);
+        const raw = await connection.request(
+            handle,
+            {
+                ...envelope,
+                method: "review.list",
+                limit: parsed.limit,
+                after: parsed.after,
+            },
+            { exactIntegers: true },
+        );
+        const answer = decodePage(raw, parsed.limit, parsed.after);
         if (answer.kind !== "body") return { ok: false, text: refusalLines(answer, parsed.json) };
         const { items, next } = answer.body;
         if (parsed.json) {
@@ -336,7 +381,7 @@ async function render(
                 text: toJson({ kind: "page", project_root: projectRoot, items, next }),
             };
         }
-        const lines = [`Project: ${printableLine(projectRoot, MAX_LINE)}`];
+        const lines = [`Project: ${printableLine(projectRoot, MAX_PATH_LINE)}`];
         if (items.length === 0) lines.push("No completed outcomes on this page.");
         for (const item of items) {
             const reason = item.reason ? ` (${item.reason})` : "";
@@ -348,16 +393,20 @@ async function render(
         lines.push(
             next === null
                 ? "End of walk. Outcomes completing behind the cursor appear on a fresh walk."
-                : `Next page: eidnara review list --after ${next}`,
+                : `Next page: ${nextPageCommand(projectRoot, parsed.limit, next)}`,
         );
         return { ok: true, text: lines.join("\n") };
     }
-    const raw = await connection.request(handle, {
-        ...envelope,
-        method: "review.read",
-        causal_identity: parsed.causalIdentity,
-    });
-    const answer = decodeSelected(raw);
+    const raw = await connection.request(
+        handle,
+        {
+            ...envelope,
+            method: "review.read",
+            causal_identity: parsed.causalIdentity,
+        },
+        { exactIntegers: true },
+    );
+    const answer = decodeSelected(raw, parsed.causalIdentity);
     if (answer.kind !== "body") return { ok: false, text: refusalLines(answer, parsed.json) };
     const selected = answer.body;
     if (parsed.json) {
@@ -369,9 +418,9 @@ async function render(
     return {
         ok: true,
         text: [
-            `Project: ${printableLine(projectRoot, MAX_LINE)}`,
+            `Project: ${printableLine(projectRoot, MAX_PATH_LINE)}`,
             `Causal identity: ${selected.causal_identity}`,
-            `Reference: ${printableLine(selected.reference.database_incarnation_id, MAX_LINE)} ${printableLine(selected.reference.candidate_id, MAX_LINE)} ${selected.reference.payload_digest}`,
+            `Reference: ${printableLine(selected.reference.database_incarnation_id, MAX_IDENTITY_BYTES)} ${printableLine(selected.reference.candidate_id, MAX_IDENTITY_BYTES)} ${selected.reference.payload_digest}`,
             ...proposalLines(selected.proposal),
             `Review expires at: ${integerText(selected.review_expires_at)} ms`,
             "Reference only: this proposal is not applied, and viewing it changes nothing.",

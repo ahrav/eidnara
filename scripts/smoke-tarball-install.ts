@@ -687,17 +687,29 @@ function main(): void {
             command: "status",
         });
         // The shipped review commands reach the running daemon through the
-        // installed transport: status decodes, and the unbound project answers
-        // a decoded refusal rather than raw text.
+        // installed transport.
         const reviewStatus = run([cli, "review", "status", "--json"], {
             cwd: project,
         });
         const reviewStatusJson = parseJson(reviewStatus.stdout);
+        const reviewCounters = reviewStatusJson.counters;
+        const reviewState = reviewStatusJson.memory_reviewer_state;
         assert(
             reviewStatus.code === 0 &&
                 reviewStatusJson.kind === "status" &&
-                typeof reviewStatusJson.counters === "object",
-            "eidnara review status --json exits 0 with kind=status",
+                typeof reviewState === "string" &&
+                ["ready", "starting", "unavailable"].includes(reviewState) &&
+                typeof reviewCounters === "object" &&
+                reviewCounters !== null,
+            "eidnara review status --json exits 0 with kind=status and a reported store state",
+            describe(reviewStatus),
+        );
+        assert(
+            reviewState !== "ready" ||
+                Object.values(reviewCounters as Record<string, unknown>).some(
+                    (value) => typeof value === "number",
+                ),
+            "eidnara review status --json reports at least one counter for a ready store",
             describe(reviewStatus),
         );
         for (const [action, argv] of [

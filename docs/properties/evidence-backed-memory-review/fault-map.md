@@ -12,8 +12,9 @@
 | Remote destination on a Sensitive artifact | yes | `EvidenceBroker` with `ArtifactDestination::Remote` |
 | Production selection open | no | `PRODUCTION_SELECTION_OPEN` is a constant; no runtime switch exists, and no Remote-eligible representation exists to select |
 | Decision reclassified Sensitive after resolution | no | no test helper reclassifies a live decision; the broker folds `decision.sensitivity` on every read |
-| Decision scoped to another project | yes, unconstructed | `DecisionSpec.scope_id` naming a scope whose project term differs |
+| Decision scoped to another project | yes | `DecisionSpec.scope_id` naming a scope whose project term differs, read under a broker bound to the descriptor's project |
 | Descriptor republished at a new revision after binding | yes, unconstructed | `publish_source_descriptor` with `revision: "2"` for the same occurrence |
+| Selected class set drifts from the decision-derived set | yes | add a class to `MEMORY_CLASSES` alone (compile error from the `const` assertion in `selection.rs`) or to `decision_derived` alone (`the_selected_classes_are_exactly_the_decision_derived_classes` fails) |
 | Crash after transfer, before completion | yes | `Fixture::kernel_half` in `memory_reviewer_settlement.rs` commits the Kernel half and returns without completing |
 | Sweep at the earlier of run and queue deadlines | yes | `MemoryStore::expire_memory_reviewer_work` at the chosen instant |
 | Late completion after a sweep terminal | yes | `Settlement::settle` after `expire_memory_reviewer_work` |
@@ -24,11 +25,11 @@
 | Dependency record edited or removed | yes | direct SQLite `replace` or `json_remove` on the witness |
 | Unterminated, cancelled, or `not_dispatched` marker before a run | yes | `dispatch_memory_reviewer_attempt` without a terminal, a cancelled first run, or a recheck clock past the attempt deadline |
 | Uncited member retired after selection | yes | `retire_observation` on a disclosed but uncited source |
-| Raw integer tokens at the extrema and beyond 64 bits | yes | `FakeDaemon.respondText` |
-| Observer bound on a dormant root, beside a live harness, and on a second root; each route closing first | yes |
+| Raw integer tokens at the extrema and beyond 64 bits | yes | `FakeDaemon.respondText`; a `JSON.parse` wrapper that withholds the reviver's source text |
+| Observer bound on a dormant root, beside a live harness, and on a second root; each route closing first | yes | `bind_route` and `unbind_route` with harness `cli` |
 | A request that throws each `HostCallError` kind and code; an absent connection file; a catalog without the context module | yes | scripted `ReviewConnection` |
 | Response bodies outside the vocabulary or the byte caps | yes | mutated proposal and page bodies |
-| Responses legal alone that cross the job's raw or text ceiling; a declared length past the remainder; a provider error body; a cancelled read; an unterminated attempt at takeover; direct SQL on the usage columns | yes | padded bodies over local TLS, `Peer` scripts, `execute_tag_sql_for_test` | `bind_route` and `unbind_route` with harness `cli` |
+| Responses legal alone that cross the job's raw or text ceiling; a declared length past the remainder; a provider error body; a cancelled read; an unterminated attempt at takeover; direct SQL on the usage columns | yes | padded bodies over local TLS, `Peer` scripts, `execute_tag_sql_for_test` |
 | Selection dated at or after the queue deadline | yes | `read_selected_review_input` with `selected_at >= deadline`; the ledger cannot record one |
 
 ## Required faults per property
@@ -36,13 +37,13 @@
 | Property | Required faults and states | Constructed |
 | --- | --- | --- |
 | `production-classes-reach-policy-eligible-proposal` | production selection open; Remote-eligible decision representation; open activation gate | no |
-| `canonical-resolution-refuses-changed-owner-and-target` | supersession after resolution; unregistered owner; stale descriptor revision; stale bound decision revision; wrong-kind owner; Remote destination | yes |
+| `canonical-resolution-refuses-changed-owner-and-target` | supersession after resolution; unregistered owner; stale descriptor revision; stale bound decision revision; wrong-kind owner; owner in another project's scope; Remote destination | yes |
 | `private-result-transfer-preserves-queue-expiry` | crash after transfer; sweep at the earlier deadline; sweep inside the settlement window; late completion; takeover orphaning a hold; selection at the deadline; selected read past the queue deadline and at the hold's expiry; changed owner or class after selection | yes |
 | `receipt-selection-fences-private-generation-results` | takeover to generation 2 after a generation-1 Kernel envelope; adopt and read at generation 2 | yes |
 | `durable-private-result-recovers-without-model-refire` | broker lost; record edited; record removed; member retired; completed marker without a row | yes |
 | `unknown-dispatch-does-not-authorize-resend` | unterminated marker; cancelled marker; `not_dispatched` marker | yes |
 | `uncited-owner-lineage-remains-read-authority` | uncited member retired after selection; fabricated canonical member | yes |
-| `status-sanitizer-preserves-inclusive-integer-domain` | tokens at 2^53±1, the u64 and i64 extrema, `-0`, a width past 64 bits | yes |
+| `status-sanitizer-preserves-inclusive-integer-domain` | tokens at 2^53±1, the u64 and i64 extrema, `-0`, a width past 64 bits, a withheld lexeme, 2^53+1 inside a default-mode recipe value | yes |
 | `completed-outcome-pages-have-live-keyset-semantics` | a full page then an empty follow-up | yes |
 | `shared-path-fixture-reaches-selected-readable-proposal` | none; a positive read against the real host is not constructed | partially |
 | `reference-only-cli-outcomes-preserve-meaning` | every terminal and reason; a reason on a complete item | yes |
@@ -65,7 +66,7 @@
 - A reclassification fault: a live decision moved to `Sensitive` after the run
   bound it, asserted at the broker read as `PolicyBlocked` with zero bytes.
 
-## Leverage ranking
+## Priority ranking
 
 1. Supersession after resolution: one Kernel commit, exact refusal code, covers
    the target-binding invariant end to end.

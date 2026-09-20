@@ -25,8 +25,8 @@ the caller's and the store's clocks.
 `crates/memory-store/src/memory_reviewer_ledger.rs` - completion requires
 `queue_deadline_ms > now`; `MemoryReviewerReceipt::completed_at_ms` exposes the
 completion instant, which no later write changes;
-`memory_reviewer_result_is_selected` and `in_progress_memory_reviewer_receipts` answer the
-reconciler.
+`selected_memory_reviewer_results` and `in_progress_memory_reviewer_receipts` answer the
+reconciler, each as one listing per pass.
 
 `crates/memory-store/src/memory_reviewer_jobs.rs` - `expire_memory_reviewer_work` closes an
 in-progress receipt at the earlier of `run_deadline_ms` and the job's

@@ -7,7 +7,7 @@ import {
     FakeDaemon,
     writeConnectionFile,
 } from "@eidnara/opencode/shared/host-client/__tests__/fake-daemon";
-import { type ReviewCommandDependencies, runReviewCommand } from "./review";
+import { hostClientOptions, type ReviewCommandDependencies, runReviewCommand } from "./review";
 
 const HEX = "c".repeat(64);
 let tmpDir: string | null = null;
@@ -42,7 +42,7 @@ async function transport(): Promise<{
             clients.push(client);
             return client;
         },
-        realpath: (p) => p,
+        resolveProjectRoot: (p) => p,
         cwd: () => "/work/project",
         env: { HOME: tmpDir, EIDNARA_MODULE_ID: "context", EIDNARA_LAUNCH_NONCE: "nonce-1" },
         stdout: (line) => stdout.push(line),
@@ -180,11 +180,47 @@ describe("review over the host transport", () => {
         expect(control.json.op).toBe("host.status");
         status.daemon.respondText(
             control.header,
-            '{"op":"host.status","health":"ok","metrics":{"components":{},"memory_reviewer":{"memory_reviewer_state":"ready","activation_state":"open","sampled_at_ms":5,"jobs_ready":9007199254740992,"jobs_reserved":9007199254740993}}}',
+            '{"op":"host.status","health":"ok","metrics":{"components":{"context":{"status":"ok","metrics":{"storage_state":"ready","memory_reviewer":{"memory_reviewer_state":"ready","activation_state":"open","sampled_at_ms":5,"jobs_ready":9007199254740992,"jobs_reserved":9007199254740993}}}}}}',
         );
         expect(await statusRun).toBe(0);
+        expect(status.stdout[0]).toContain("MemoryReviewer store: ready");
         expect(status.stdout[0]).toContain("jobs_ready: 9007199254740992");
         expect(status.stdout[0]).toContain("jobs_reserved: unavailable");
         expect(status.clients[0].isClosed).toBe(true);
     });
+
+    test("a route.open the daemon never answers fails within the command's one request bound", async () => {
+        const stalled = await transport();
+        const run = runReviewCommand(["list", "--project", "/work/project"], {
+            ...stalled.deps,
+            connect: async () => {
+                const client = await HostClient.connect({
+                    connectionFile: path.join(tmpDir ?? "", "connection.json"),
+                    channelFactory: stalled.daemon.channelFactory,
+                    ...hostClientOptions(50),
+                });
+                stalled.clients.push(client);
+                return client;
+            },
+        });
+        const catalog = await stalled.daemon.nextRequest();
+        stalled.daemon.respond(catalog.header, {
+            op: "catalog.list",
+            generation: 1,
+            host_ops: ["route.open", "catalog.list", "host.shutdown", "host.status"],
+            modules: [
+                { module_id: "context", module_version: "1", roles: [], control_ops: [] },
+                { module_id: "local_embeddings", module_version: "1", roles: [], control_ops: [] },
+                { module_id: "model_execution", module_version: "1", roles: [], control_ops: [] },
+            ],
+        });
+        const open = await stalled.daemon.nextRequest();
+        expect(open.json.op).toBe("route.open");
+        const started = Date.now();
+        expect(await run).toBe(1);
+        expect(Date.now() - started).toBeLessThan(2_000);
+        expect(stalled.stdout).toEqual([]);
+        expect(stalled.stderr[0]).toMatch(/^Review list failed: /);
+        expect(stalled.clients[0].isClosed).toBe(true);
+    }, 5_000);
 });

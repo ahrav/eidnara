@@ -1517,7 +1517,7 @@ impl MemoryStore {
                                           AND j.queue_deadline_ms <= ?1))",
                     [now_ms],
                 )?;
-                // A job expires at its queue deadline, or as soon as its receipt is closed; an in-progress receipt inside its run deadline still shields the job.
+                // A job expires at its queue deadline, or as soon as its receipt is closed; an in-progress receipt inside both its run deadline and the job's queue deadline still shields the job.
                 let jobs = coordinated.tx().execute(
                     "UPDATE memory_reviewer_jobs
                         SET state = 'terminal', allowance_bytes = 0, input_json = NULL, updated_at_ms = ?1,

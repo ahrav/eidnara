@@ -9,16 +9,23 @@ import { parseKernelState } from "@eidnara/opencode/shared/kernel-client/wire";
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 
 /** Kernel `MAX_REVIEW_TEXT_BYTES`: the longest text a staged proposal carries. */
-const MAX_TEXT_BYTES = 32 * 1024;
+export const MAX_TEXT_BYTES = 32 * 1024;
 /** Kernel `MAX_REVIEW_IDENTITY_BYTES`: the longest identifier a staged proposal carries. */
-const MAX_IDENTITY_BYTES = 512;
-/** Kernel `MAX_REVIEW_REFERENCES`: the bound on support and contradictions together. */
+export const MAX_IDENTITY_BYTES = 512;
+/** Kernel `MAX_REVIEW_REFERENCES`: `check_references` bounds support and contradictions at this many each, not together; the daemon's own producer keeps their sum under it before staging, but the Kernel admits either list at the bound. */
 const MAX_REFERENCES = 256;
 const MAX_LIMITATIONS = 16;
 export const MAX_PAGE_ITEMS = 64;
 
-const OUTCOMES = ["complete", "abstained", "failed", "cancelled", "unknown", "expired"] as const;
-const ABSTAIN_REASONS = [
+export const OUTCOMES = [
+    "complete",
+    "abstained",
+    "failed",
+    "cancelled",
+    "unknown",
+    "expired",
+] as const;
+export const ABSTAIN_REASONS = [
     "owner_sensitive",
     "wrong_scope",
     "secret",
@@ -40,7 +47,10 @@ export const READ_TERMINALS = [
     "store_unavailable",
 ] as const;
 export type ReadTerminal = (typeof READ_TERMINALS)[number];
-const LIST_TERMINALS = ["disabled", "store_unavailable"] as const satisfies readonly ReadTerminal[];
+export const LIST_TERMINALS = [
+    "disabled",
+    "store_unavailable",
+] as const satisfies readonly ReadTerminal[];
 const ACTIONS = ["create", "revise", "retain", "retire", "no_change"] as const;
 const UNCERTAINTIES = ["low", "medium", "high"] as const;
 
@@ -149,6 +159,9 @@ function decodeItem(raw: unknown): ListItem | string {
     if (generation === null) return "item generation is not a u64";
     if (!oneOf(OUTCOMES, raw.outcome)) return "item outcome is not in the protocol vocabulary";
     if (typeof raw.selected !== "boolean") return "item selected is not a boolean";
+    // Only a `Complete` receipt carries a selection, so the two fields must agree.
+    if (raw.selected !== (raw.outcome === "complete"))
+        return "item selected disagrees with its outcome";
     const item: ListItem = {
         causal_identity: raw.causal_identity,
         generation,
@@ -164,18 +177,32 @@ function decodeItem(raw: unknown): ListItem | string {
     return item;
 }
 
-export function decodePage(raw: unknown): ReviewAnswer<(typeof LIST_TERMINALS)[number], Page> {
+/**
+ * `limit` and `after` are the request's page size and cursor: the wire contract bounds the page by
+ * `limit`, orders identities strictly after `after`, and sets `next` to the last identity exactly when the page is full.
+ */
+export function decodePage(
+    raw: unknown,
+    limit: number,
+    after: string | null,
+): ReviewAnswer<(typeof LIST_TERMINALS)[number], Page> {
     return classify(raw, LIST_TERMINALS, "page", (body) => {
-        if (!Array.isArray(body.items) || body.items.length > MAX_PAGE_ITEMS) {
-            return "items is not a bounded array";
+        if (!Array.isArray(body.items) || body.items.length > limit) {
+            return "items exceed the requested page";
         }
         const items: ListItem[] = [];
+        let previous = after ?? "";
         for (const raw of body.items) {
             const item = decodeItem(raw);
             if (typeof item === "string") return item;
+            if (item.causal_identity <= previous) return "items are not ordered after the cursor";
+            previous = item.causal_identity;
             items.push(item);
         }
         if (body.next !== null && !isHex64(body.next)) return "next is not null or a hex64";
+        const expectedNext =
+            items.length === limit ? (items.at(-1)?.causal_identity ?? null) : null;
+        if (body.next !== expectedNext) return "next does not follow the page";
         return { items, next: body.next };
     });
 }
@@ -237,9 +264,6 @@ function decodeProposal(raw: unknown): Proposal | string {
     if (typeof support === "string") return `support ${support}`;
     const contradictions = decodeReferences(raw.contradictions);
     if (typeof contradictions === "string") return `contradictions ${contradictions}`;
-    if (support.length + contradictions.length > MAX_REFERENCES) {
-        return "support and contradictions exceed the reference bound together";
-    }
     if (!Array.isArray(raw.limitations) || raw.limitations.length > MAX_LIMITATIONS) {
         return "limitations are not a bounded array";
     }
@@ -271,11 +295,15 @@ function decodeProposal(raw: unknown): Proposal | string {
     return proposal;
 }
 
+/** `requested` is the identity the read named; the answer echoes it, so another identity is a skewed or unrelated proposal. */
 export function decodeSelected(
     raw: unknown,
+    requested: string,
 ): ReviewAnswer<(typeof READ_TERMINALS)[number], Selected> {
     return classify(raw, READ_TERMINALS, "proposal", (body) => {
         if (!isHex64(body.causal_identity)) return "causal_identity is not a hex64";
+        if (body.causal_identity !== requested)
+            return "causal_identity is not the requested identity";
         if (!isRecord(body.reference)) return "reference is not an object";
         const database_incarnation_id = boundedText(
             body.reference.database_incarnation_id,
@@ -299,8 +327,8 @@ export function decodeSelected(
     });
 }
 
-const MEMORY_REVIEWER_STATES = ["ready", "starting", "unavailable"] as const;
-const ACTIVATION_STATES = [
+export const MEMORY_REVIEWER_STATES = ["ready", "starting", "unavailable"] as const;
+export const ACTIVATION_STATES = [
     "open",
     "unknown",
     "stale",
@@ -363,9 +391,15 @@ export interface ReviewStatus {
     counters: Record<(typeof STATUS_COUNTERS)[number], number | null>;
 }
 
-/** The `metrics.memory_reviewer` block as the wire document sanitizes it: a block whose state is not `ready` reports every counter unavailable, and a present counter outside its domain is unavailable, never zero. */
+function memoryReviewerBlock(metrics: Record<string, unknown>): Record<string, unknown> | null {
+    if (!isRecord(metrics.components) || !isRecord(metrics.components.context)) return null;
+    const context = metrics.components.context;
+    if (!isRecord(context.metrics) || !isRecord(context.metrics.memory_reviewer)) return null;
+    return context.metrics.memory_reviewer;
+}
+
 export function decodeReviewStatus(metrics: Record<string, unknown>): ReviewStatus {
-    const block = isRecord(metrics.memory_reviewer) ? metrics.memory_reviewer : null;
+    const block = memoryReviewerBlock(metrics);
     const state = oneOf(MEMORY_REVIEWER_STATES, block?.memory_reviewer_state)
         ? block?.memory_reviewer_state
         : null;

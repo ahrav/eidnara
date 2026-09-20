@@ -14,7 +14,7 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
 | `unknown-dispatch-does-not-authorize-resend` | Constraints (Q14, Q20); U1 acceptance | #727 | `crates/daemon/src/memory_reviewer/coordinator.rs` (`resumes_dispatched_work`, `prepare`) |
 | `uncited-owner-lineage-remains-read-authority` | R6; U1 acceptance | #727 | `crates/daemon/src/memory_reviewer/dependencies.rs` (`revalidate`), `crates/daemon/src/memory_reviewer/settlement.rs` (`read_selected_proposal`) |
 | `observer-route-does-not-change-background-rosters` | U3 acceptance; OQ8 | #728 | `crates/daemon/src/lib.rs` (`RouteBindings::participating`, `latest_per_root`, `latest_for_root`) |
-| `status-sanitizer-preserves-inclusive-integer-domain` | U3 acceptance; OQ9 | #729 | `packages/opencode-plugin/src/shared/host-client/exact-json.ts`, `connection.ts` (`consumeJson`), `client.ts` (`routeOpen`) |
+| `status-sanitizer-preserves-inclusive-integer-domain` | U3 acceptance; OQ9 | #729 | `packages/opencode-plugin/src/shared/host-client/exact-json.ts`, `connection.ts` (`consumeJson`), `client.ts` (`awaitRequest`, `routeOpen`, `hostStatus`) |
 | `completed-outcome-pages-have-live-keyset-semantics` | U3 acceptance; OQ5, OQ9 | #730 | `packages/cli/src/commands/review.ts`, `review-wire.ts` |
 | `shared-path-fixture-reaches-selected-readable-proposal` | U3 acceptance; OQ5, OQ9 | #730 | `packages/cli/src/commands/review.ts`, `review-wire.ts` |
 | `reference-only-cli-outcomes-preserve-meaning` | U3 acceptance; OQ5, OQ9 | #730 | `packages/cli/src/commands/review.ts`, `review-wire.ts` |

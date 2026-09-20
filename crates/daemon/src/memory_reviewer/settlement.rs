@@ -1,6 +1,6 @@
 //! Settlement of one MemoryReviewer run across the Kernel and Memory Store, and the read that follows it.
 //!
-//! Settlement copies the run's attempt terminals out of the Memory Store, releases that read, and derives the unknown-disclosure scalar before anything else; an unknown attempt or a truncated disclosure permits only a content-free terminal. It then revalidates the full disclosed union through the Kernel at the current clock, stages the proposal at the provisional identity the run reserved, moves retention from the execution hold to a review hold in one Kernel envelope, and only then completes the task lease and receipt in the Memory Store's fenced transaction. That completion is the store's to decide: a receipt cancelled before it, or completed at or after its run deadline, records `cancelled` or `expired` in place of whatever the run produced, and settlement reads the receipt back to report what was recorded. A receipt that another generation already owns writes nothing, so a late worker's staged result stays private: fenced before its hold transfer, the row expires under its original queue deadline; fenced after it, the row's deadline has already moved to the review expiry and only moves later, so the loser releases the review hold and the unselected row lapses there. Completed staging is not selection.
+//! Settlement copies the run's attempt terminals out of the Memory Store, releases that read, and derives the unknown-disclosure scalar before anything else; an unknown attempt or a truncated disclosure permits only a content-free terminal. It then revalidates the full disclosed union through the Kernel at the current clock, stages the proposal at the provisional identity the run reserved, moves retention from the execution hold to a review hold in one Kernel envelope, and only then completes the task lease and receipt in the Memory Store's fenced transaction. That completion is the store's to decide: a receipt cancelled before it, or completed at or after its run deadline, records `cancelled` or `expired` in place of whatever the run produced, and settlement reads the receipt back to report what was recorded. A receipt that another generation already owns writes nothing, so a late worker's staged result stays private: fenced before or after its hold transfer, the row keeps its original queue deadline and expires there, and the loser releases the review hold it transferred. Completed staging is not selection.
 //!
 //! Reads follow the same copy-then-enter order in reverse: the completed receipt is copied and the Memory Store released before the Kernel is entered; the Kernel row must match every selected field and both incarnations; the review hold must be live; and every disclosed input is revalidated before content is returned. Completion never freezes eligibility.
 
@@ -251,6 +251,7 @@ impl Settlement<'_> {
             hold,
             destination: broker.binding().destination,
             now,
+            staged_at: now,
         };
         match dependencies::revalidate(&revalidation, &reference, &row, &attempts) {
             Ok(_) => {}
@@ -491,7 +492,7 @@ impl Settlement<'_> {
     ) -> Result<Vec<String>, Verdict> {
         let mut evidence = Vec::new();
         for alias in broker.ledger.disclosed() {
-            match broker.revalidate_under(self.store, alias.as_str(), now, hold) {
+            match broker.revalidate_under(self.store, alias.as_str(), now, now, hold) {
                 Ok(Some(id)) => evidence.push(id),
                 Ok(None) => {}
                 Err(refusal) => return Err(Verdict::from_refusal(refusal.code)),
@@ -505,7 +506,7 @@ impl Settlement<'_> {
         Ok(evidence)
     }
 
-    /// Stages the proposal at the provisional identity and seals its run; returns the reference and the row's creation time. A byte-identical row already sealed by an earlier attempt of this settlement is adopted; different bytes at the identity conflict.
+    /// Stages the proposal at the provisional identity and seals its run; returns the reference and the row's creation time. A row already sealed by an earlier attempt of this settlement is adopted when its bytes and its dependency record are this settlement's; different bytes or another record at the identity conflict.
     fn stage(
         &self,
         run: &MemoryReviewerHoldBinding,
@@ -524,7 +525,7 @@ impl Settlement<'_> {
             payload: payload.clone(),
             recorded_at: now,
             queue_deadline_at,
-            dependencies: Some(dependencies),
+            dependencies: Some(dependencies.clone()),
         });
         let reference = match staged {
             Ok(reference) => reference,
@@ -539,6 +540,10 @@ impl Settlement<'_> {
                     payload_digest: payload.digest().map_err(kernel)?,
                 };
                 return match self.store.read_review_input(&reference, &binding, now) {
+                    // The record is part of what this settlement staged: a row carrying another, or none, is not its result, whatever its bytes.
+                    Ok(row) if row.dependencies.as_ref() != Some(&dependencies) => {
+                        Err(SettlementError::ConflictingContent)
+                    }
                     Ok(row) => Ok((reference, row.lifecycle.created_at)),
                     Err(ReviewReadError::Refused(ReviewReadRefusal::Changed)) => {
                         Err(SettlementError::ConflictingContent)
@@ -916,27 +921,6 @@ fn read_selected_proposal_inner(
     if let Some(hook) = after_hold_lookup {
         hook();
     }
-    // The hold ended between the lookup above and this validation: the same review expiry the lookup would have reported a moment later, since the lookup excludes released, purge-degraded, and expired holds alike.
-    store
-        .validate_held_evidence(
-            &hold.hold_id,
-            MemoryReviewerHoldKind::Review,
-            &review,
-            &[],
-            now,
-        )
-        .map_err(|error| match error {
-            MemoryReviewerHoldError::Store(error) => ReadRefusal::Store(error.to_string()),
-            MemoryReviewerHoldError::Refused(
-                MemoryReviewerHoldRefusal::Missing
-                | MemoryReviewerHoldRefusal::Released
-                | MemoryReviewerHoldRefusal::PurgeDegraded
-                | MemoryReviewerHoldRefusal::Expired,
-            ) => ReadRefusal::ReviewExpired,
-            MemoryReviewerHoldError::Refused(_) => {
-                ReadRefusal::Dependency(RefusalCode::HoldInvalid)
-            }
-        })?;
     // Every persisted member, cited or not, is revalidated for a local reader from the row's own record: kind, revision, owner, owner revision, scope, and current egress, with the run's broker long gone.
     let job_binding = ReviewBinding {
         owner: ReviewOwner::Job {
@@ -954,9 +938,31 @@ fn read_selected_proposal_inner(
         },
         destination: ArtifactDestination::Local,
         now,
+        staged_at: selected_at,
     };
-    dependencies::revalidate(&revalidation, &reference, &row, &attempts).map_err(|verdict| {
-        match verdict {
+    if let Err(verdict) = dependencies::revalidate(&revalidation, &reference, &row, &attempts) {
+        // Every member is judged under the hold, so a hold that ended after the lookup above refuses through the members. That is the same review expiry the lookup would have reported a moment later (it excludes released, purge-degraded, and expired holds alike), and it is reported as such rather than as the member refusal it surfaced through.
+        if let Verdict::Abstain(_) = &verdict {
+            match store.validate_held_evidence(
+                &hold.hold_id,
+                MemoryReviewerHoldKind::Review,
+                &review,
+                &[],
+                now,
+            ) {
+                Err(MemoryReviewerHoldError::Refused(
+                    MemoryReviewerHoldRefusal::Missing
+                    | MemoryReviewerHoldRefusal::Released
+                    | MemoryReviewerHoldRefusal::PurgeDegraded
+                    | MemoryReviewerHoldRefusal::Expired,
+                )) => return Err(ReadRefusal::ReviewExpired),
+                Err(MemoryReviewerHoldError::Store(error)) => {
+                    return Err(ReadRefusal::Store(error.to_string()));
+                }
+                Ok(_) | Err(MemoryReviewerHoldError::Refused(_)) => {}
+            }
+        }
+        return Err(match verdict {
             Verdict::Abstain(AbstainReason::OwnerSensitive) => {
                 ReadRefusal::Dependency(RefusalCode::PolicyBlocked)
             }
@@ -965,8 +971,8 @@ fn read_selected_proposal_inner(
             }
             Verdict::Abstain(_) => ReadRefusal::Dependency(RefusalCode::ExpectationChanged),
             Verdict::Store(error) => ReadRefusal::Store(error),
-        }
-    })?;
+        });
+    }
     Ok(SelectedProposal {
         reference,
         proposal: *proposal,

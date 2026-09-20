@@ -22,6 +22,7 @@ import {
     type JsonReceiveBody,
     type PendingRequest,
     type RequestTerminal,
+    type ResponseMode,
     type RetirementInfo,
     type RetirementReason,
 } from "./connection";
@@ -315,7 +316,7 @@ interface RequestParams {
     body: Uint8Array | DirectFrameBody;
     deadline: Deadline;
     options: RequestOptions;
-    responseMode?: "json" | "binary";
+    responseMode?: ResponseMode;
     mode?: "unary" | "stream";
     /** The ceiling limits retained items for each stream-mode request. */
     maxStreamItems?: number;
@@ -713,18 +714,18 @@ export class HostClient {
         await this.controlRequest(active, bodyText, "host.shutdown", deadline, options);
     }
 
-    /** The readiness operation reads host-owned component readiness without opening a routed module. */
+    /**
+     * The readiness operation reads host-owned component readiness without opening a routed module.
+     * Counters decode exactly, so a value past the safe range is a `bigint` that the count domain refuses rather than a neighbor it admits.
+     */
     async hostStatus(options: ControlCallOptions = {}): Promise<HostStatusSnapshot> {
         const deadline = Deadline.start(options.timeoutMs ?? this.requestTimeoutMs, this.clock);
         const active = await this.ensureConnection(deadline, options.expectedDaemonId);
         const bodyText = JSON.stringify({ op: "host.status" });
-        const parsed = await this.controlRequest(
-            active,
-            bodyText,
-            "host.status",
-            deadline,
-            options,
-        );
+        const parsed = await this.controlRequest(active, bodyText, "host.status", deadline, {
+            ...options,
+            exactIntegers: true,
+        });
         return parseHostStatusResponse(parsed);
     }
 
@@ -1045,7 +1046,8 @@ export class HostClient {
             ...(params.maxStreamItems === undefined
                 ? {}
                 : { maxStreamItems: params.maxStreamItems }),
-            responseMode: params.responseMode,
+            responseMode:
+                params.responseMode ?? (params.options.exactIntegers ? "exact_json" : "json"),
             binary: params.binary,
             priority: params.options.priority,
             admissionClass: params.options.admissionClass,
@@ -1082,7 +1084,7 @@ export class HostClient {
         bodyText: string,
         expectedOp: string,
         deadline: Deadline,
-        options: Pick<RequestOptions, "expectedDaemonId"> = {},
+        options: Pick<RequestOptions, "expectedDaemonId" | "exactIntegers"> = {},
     ): Promise<Record<string, unknown>> {
         const body = Buffer.from(bodyText, "utf8");
         if (body.length > MAX_CONTROL_BODY_LEN) {
