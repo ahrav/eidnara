@@ -135,14 +135,6 @@ impl<S: Stage> Observation<S> {
         self.stage
     }
 
-    pub fn sequence(&self) -> u32 {
-        self.sequence
-    }
-
-    pub fn incarnation(&self) -> Option<u64> {
-        self.incarnation
-    }
-
     pub fn evidence(&self) -> &Evidence {
         &self.evidence
     }
