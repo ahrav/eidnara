@@ -12,7 +12,7 @@
 | Remote destination on a Sensitive artifact | yes | `EvidenceBroker` with `ArtifactDestination::Remote` |
 | Production selection open | no | `PRODUCTION_SELECTION_OPEN` is a constant; no runtime switch exists, and no Remote-eligible representation exists to select |
 | Decision reclassified Sensitive after resolution | no | no test helper reclassifies a live decision; the broker folds `decision.sensitivity` on every read |
-| Decision scoped to another project | yes, unconstructed | `DecisionSpec.scope_id` naming a scope whose project term differs |
+| Decision scoped to another project | yes | `DecisionSpec.scope_id` naming a scope whose project term differs, read under a broker bound to the descriptor's project |
 | Descriptor republished at a new revision after binding | yes, unconstructed | `publish_source_descriptor` with `revision: "2"` for the same occurrence |
 | Selected class set drifts from the decision-derived set | yes | add a class to `MEMORY_CLASSES` alone (compile error from the `const` assertion in `selection.rs`) or to `decision_derived` alone (`the_selected_classes_are_exactly_the_decision_derived_classes` fails) |
 
@@ -21,7 +21,7 @@
 | Property | Required faults and states | Constructed |
 | --- | --- | --- |
 | `production-classes-reach-policy-eligible-proposal` | production selection open; Remote-eligible decision representation; open activation gate | no |
-| `canonical-resolution-refuses-changed-owner-and-target` | supersession after resolution; unregistered owner; stale descriptor revision; stale bound decision revision; wrong-kind owner; Remote destination | yes |
+| `canonical-resolution-refuses-changed-owner-and-target` | supersession after resolution; unregistered owner; stale descriptor revision; stale bound decision revision; wrong-kind owner; owner in another project's scope; Remote destination | yes |
 
 ## Coverage checks to add
 
