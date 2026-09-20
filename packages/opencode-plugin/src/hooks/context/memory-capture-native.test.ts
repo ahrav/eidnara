@@ -64,9 +64,14 @@ function harness(overrides: {
                 overrides.onCreate?.(directory);
                 return { data: { id: `native-child-${directories.length}` } };
             },
-            prompt: async (input: { query: { directory: string }; body: { model: unknown } }) => {
+            prompt: async (input: {
+                query: { directory: string };
+                body: { model: unknown; system?: unknown; parts: unknown };
+            }) => {
                 expect(directories).toContain(input.query.directory);
                 expect(input.body.model).toEqual({ providerID: "custom", modelID: "m" });
+                expect(input.body.system).toBeUndefined();
+                expect(input.body.parts).toEqual([{ type: "text", text: work.prompt }]);
                 return {
                     data: {
                         info: { modelID: "m", providerID: "custom", finish: "stop" },

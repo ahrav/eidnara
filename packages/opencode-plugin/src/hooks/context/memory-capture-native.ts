@@ -311,9 +311,10 @@ export function openCodeMemoryCaptureExecutor(
                         query: { directory },
                         signal,
                         body: {
+                            // The agent's configured prompt already carries `work.system`; a body
+                            // `system` would append the same instructions a second time.
                             agent: AGENT,
                             model: { providerID, modelID },
-                            system: work.system,
                             parts: [{ type: "text", text: work.prompt }],
                         },
                     } as never),
