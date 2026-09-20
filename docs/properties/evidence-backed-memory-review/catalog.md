@@ -208,7 +208,7 @@ Open questions: None.
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: partially - `crates/daemon/tests/memory_reviewer_wire.rs` reaches a selected proposal over the real handler with a completed receipt through the shared `publish` fixture; `packages/cli/src/commands/review.test.ts` decodes a proposal body with nonempty spans through the command's validator; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` drives status, list, and show against the direct-host fixture, where no MODULE authority is bound and the answers are refusals
+Exercised: partial - `crates/daemon/tests/memory_reviewer_wire.rs` reaches a selected proposal over the real handler with a completed receipt through the shared `publish` fixture; `packages/cli/src/commands/review.test.ts` decodes a proposal body with nonempty spans through the command's validator; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` drives status, list, and show against the direct-host fixture, where no MODULE authority is bound and the answers are refusals
 Guarantee: The command's decoder accepts exactly the fields the Kernel's staged `ReviewProposal` serializes, span for span, and the real host answers the command's flat envelopes over the installed transport.
 Check: `sometimes` - a real-store run must reach a selected proposal the command renders; the situation is the selected read, not a branch
 Fault/timing angle: none

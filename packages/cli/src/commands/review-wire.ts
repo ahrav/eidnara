@@ -174,7 +174,11 @@ function decodeItem(raw: unknown): ListItem | string {
     return item;
 }
 
-export function decodePage(raw: unknown): ReviewAnswer<(typeof LIST_TERMINALS)[number], Page> {
+/** `limit` is the requested page size: the wire contract sets `next` to the last identity exactly when the page is full. */
+export function decodePage(
+    raw: unknown,
+    limit: number,
+): ReviewAnswer<(typeof LIST_TERMINALS)[number], Page> {
     return classify(raw, LIST_TERMINALS, "page", (body) => {
         if (!Array.isArray(body.items) || body.items.length > MAX_PAGE_ITEMS) {
             return "items is not a bounded array";
@@ -186,6 +190,9 @@ export function decodePage(raw: unknown): ReviewAnswer<(typeof LIST_TERMINALS)[n
             items.push(item);
         }
         if (body.next !== null && !isHex64(body.next)) return "next is not null or a hex64";
+        const expectedNext =
+            items.length === limit ? (items.at(-1)?.causal_identity ?? null) : null;
+        if (body.next !== expectedNext) return "next does not follow the page";
         return { items, next: body.next };
     });
 }

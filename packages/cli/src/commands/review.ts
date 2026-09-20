@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
 import type { HostClient, HostClientOptions } from "@eidnara/opencode/shared/host-client";
 import { isHostCallError, rawJsonInteger } from "@eidnara/opencode/shared/host-client";
 import {
@@ -18,7 +19,7 @@ import {
     MAX_IDENTITY_BYTES,
     MAX_PAGE_ITEMS,
     type Proposal,
-    type READ_TERMINALS,
+    type ReadTerminal,
     type Reference,
     type ReviewAnswer,
     type ReviewStatus,
@@ -45,12 +46,17 @@ export type ReviewConnection = Pick<
 
 export interface ReviewCommandDependencies {
     connect: (connectionFile: string) => Promise<ReviewConnection>;
-    /** Canonicalizes a project path the way the daemon binds roots. */
-    realpath: (path: string) => string;
+    /** Resolves a project path to the root the harness routes bind; throws when the path does not exist. */
+    resolveProjectRoot: (path: string) => string;
     cwd: () => string;
     env: Record<string, string | undefined>;
     stdout: (line: string) => void;
     stderr: (line: string) => void;
+}
+
+/** The OpenCode and Pi routes bind the Git worktree root, so a subdirectory reaches the same project digest; `realpathSync.native` first so a missing path still throws. */
+export function defaultResolveProjectRoot(path: string): string {
+    return resolveProjectRootDirectory(realpathSync.native(path));
 }
 
 const defaultDependencies: ReviewCommandDependencies = {
@@ -58,7 +64,7 @@ const defaultDependencies: ReviewCommandDependencies = {
         const { HostClient } = await import("@eidnara/opencode/shared/host-client");
         return HostClient.connect({ connectionFile, ...hostClientOptions() });
     },
-    realpath: (path) => realpathSync.native(path),
+    resolveProjectRoot: defaultResolveProjectRoot,
     cwd: () => process.cwd(),
     env: process.env,
     stdout: (line) => console.log(line),
@@ -150,7 +156,7 @@ export function parseReviewArgs(args: string[]): ReviewArgs | string {
     return command === "list" ? { command, project, limit, after, json } : { command, json };
 }
 
-function terminalText(terminal: (typeof READ_TERMINALS)[number]): string {
+function terminalText(terminal: ReadTerminal): string {
     switch (terminal) {
         case "disabled":
             return "Review access is disabled: no review store is installed, or this bound root has no active MODULE memories authority, including no authority-route binding. The daemon does not identify which cause applies.";
@@ -178,7 +184,7 @@ function toJson(value: unknown): string {
     );
 }
 
-function refusalLines<T extends (typeof READ_TERMINALS)[number], B>(
+function refusalLines<T extends ReadTerminal, B>(
     answer: Exclude<ReviewAnswer<T, B>, { kind: "body" }>,
     json: boolean,
 ): string {
@@ -207,7 +213,15 @@ function proposalLines(proposal: Proposal): string[] {
             ? `staged candidate ${printableLine(proposal.target.candidate_id, MAX_IDENTITY_BYTES)}`
             : `memory ${printableLine(proposal.target.object_id, MAX_IDENTITY_BYTES)} revision ${integerText(proposal.target.source_revision)} known as of ${integerText(proposal.target.known_as_of)} commit token ${integerText(proposal.target.commit_token)}`;
     const lines = [`Action: ${proposal.action}`, `Target: ${target}`];
-    if (proposal.new_text !== undefined) lines.push("Text:", printableBlock(proposal.new_text));
+    if (proposal.new_text !== undefined) {
+        // Every text line is indented so a model-authored line such as `Support:` never reads as the command's own field.
+        lines.push(
+            "Text:",
+            ...printableBlock(proposal.new_text)
+                .split("\n")
+                .map((line) => `  ${line}`),
+        );
+    }
     lines.push(...referenceLines("Support", proposal.support));
     lines.push(...referenceLines("Contradictions", proposal.contradictions));
     lines.push(
@@ -288,7 +302,7 @@ export async function runReviewCommand(
     let projectRoot: string | null = null;
     if (parsed.command !== "status") {
         try {
-            projectRoot = dependencies.realpath(parsed.project ?? dependencies.cwd());
+            projectRoot = dependencies.resolveProjectRoot(parsed.project ?? dependencies.cwd());
         } catch {
             dependencies.stderr(
                 `Review ${parsed.command} failed: the project path does not exist.`,
@@ -358,7 +372,7 @@ async function render(
             },
             { exactIntegers: true },
         );
-        const answer = decodePage(raw);
+        const answer = decodePage(raw, parsed.limit);
         if (answer.kind !== "body") return { ok: false, text: refusalLines(answer, parsed.json) };
         const { items, next } = answer.body;
         if (parsed.json) {

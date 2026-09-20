@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { HostCallError } from "@eidnara/opencode/shared/host-client";
 import {
+    defaultResolveProjectRoot,
     parseReviewArgs,
     type ReviewCommandDependencies,
     type ReviewConnection,
@@ -10,6 +11,18 @@ import { decodeReviewStatus } from "./review-wire";
 
 const HEX = "a".repeat(64);
 const HEX_B = "b".repeat(64);
+
+/** A page exactly filling `limit`, whose `next` is its last identity as the wire contract requires. */
+function fullPage(limit: number): { page: Record<string, unknown>; next: string } {
+    const items = Array.from({ length: limit }, (_, i) => ({
+        causal_identity: `${"c".repeat(60)}${i.toString(16).padStart(4, "0")}`,
+        generation: i,
+        outcome: "complete",
+        selected: false,
+    }));
+    const next = items[items.length - 1].causal_identity;
+    return { page: { kind: "page", items, next }, next };
+}
 const ENV = { HOME: "/home/reviewer" };
 
 interface Recorded {
@@ -66,7 +79,7 @@ function harness(
                 recorded.connected.push(file);
                 return connection;
             }),
-        realpath: (path) => `${path}/real`,
+        resolveProjectRoot: (path) => `${path}/real`,
         cwd: () => "/work/project",
         env: ENV,
         stdout: (line) => recorded.stdout.push(line),
@@ -182,7 +195,7 @@ describe("review list", () => {
                 next: HEX_B,
             }),
         });
-        expect(await runReviewCommand(["list", "--project", "/p"], deps)).toBe(0);
+        expect(await runReviewCommand(["list", "--project", "/p", "--limit", "2"], deps)).toBe(0);
         expect(recorded.connected).toEqual([
             "/home/reviewer/.local/share/eidnara/run/connection.json",
         ]);
@@ -202,7 +215,7 @@ describe("review list", () => {
                 session_id: identity.session,
                 project_root: "/p/real",
                 method: "review.list",
-                limit: 16,
+                limit: 2,
                 after: null,
             },
         ]);
@@ -212,7 +225,9 @@ describe("review list", () => {
         expect(text).toContain("Project: /p/real");
         expect(text).toContain(`${HEX} gen 1 complete selected`);
         expect(text).toContain(`${HEX_B} gen 9007199254740993 abstained (owner_sensitive)`);
-        expect(text).toContain(`Next page: eidnara review list --project /p/real --after ${HEX_B}`);
+        expect(text).toContain(
+            `Next page: eidnara review list --project /p/real --limit 2 --after ${HEX_B}`,
+        );
 
         const cwd = harness();
         expect(await runReviewCommand(["list"], cwd.deps)).toBe(0);
@@ -224,8 +239,8 @@ describe("review list", () => {
     });
 
     test("the next-page command carries the bound root and a non-default limit so it reruns from any directory", async () => {
-        const page = { kind: "page", items: [], next: HEX_B };
-        const quoted = harness({ respond: () => page });
+        const five = fullPage(5);
+        const quoted = harness({ respond: () => five.page });
         expect(
             await runReviewCommand(
                 ["list", "--project", "/space d/it's", "--limit", "5"],
@@ -233,27 +248,28 @@ describe("review list", () => {
             ),
         ).toBe(0);
         expect(quoted.recorded.stdout[0]).toContain(
-            `Next page: eidnara review list --project '/space d/it'\\''s/real' --limit 5 --after ${HEX_B}`,
+            `Next page: eidnara review list --project '/space d/it'\\''s/real' --limit 5 --after ${five.next}`,
         );
-        const cwd = harness({ respond: () => page });
+        const sixteen = fullPage(16);
+        const cwd = harness({ respond: () => sixteen.page });
         expect(await runReviewCommand(["list"], cwd.deps)).toBe(0);
         expect(cwd.recorded.stdout[0]).toContain(
-            `Next page: eidnara review list --project /work/project/real --after ${HEX_B}`,
+            `Next page: eidnara review list --project /work/project/real --after ${sixteen.next}`,
         );
         expect(cwd.recorded.stdout[0]).not.toContain("--limit");
-        const long = harness({ respond: () => page });
+        const long = harness({ respond: () => sixteen.page });
         const deep = `/${"segment/".repeat(40)}leaf`;
         expect(await runReviewCommand(["list", "--project", deep], long.deps)).toBe(0);
         expect(long.recorded.stdout[0]).toContain(`--project ${deep}/real --after`);
     });
 
     test("a root that printable rendering would alter is never offered as a runnable command", async () => {
-        const page = { kind: "page", items: [], next: HEX_B };
+        const { page, next } = fullPage(16);
         for (const root of ["/two  spaces", "/tab\tbed", "/new\nline", "/esc\u001b[2K"]) {
             const { deps, recorded } = harness({ respond: () => page });
             expect(await runReviewCommand(["list", "--project", root], deps)).toBe(0);
             const text = recorded.stdout[0];
-            expect(text).toContain(`Next page: rerun this command with --after ${HEX_B}`);
+            expect(text).toContain(`Next page: rerun this command with --after ${next}`);
             expect(text).not.toContain("eidnara review list --project");
         }
     });
@@ -316,9 +332,9 @@ describe("review list", () => {
             }),
         });
         expect(
-            await runReviewCommand(["list", "--json", "--limit", "1", "--after", HEX], deps),
+            await runReviewCommand(["list", "--json", "--limit", "2", "--after", HEX], deps),
         ).toBe(0);
-        expect(recorded.requests[0]).toMatchObject({ limit: 1, after: HEX });
+        expect(recorded.requests[0]).toMatchObject({ limit: 2, after: HEX });
         expect(recorded.stdout[0]).toBe(
             `{"kind":"page","project_root":"/work/project/real","items":[{"causal_identity":"${HEX}","generation":18446744073709551615,"outcome":"expired","selected":false}],"next":null}`,
         );
@@ -402,6 +418,29 @@ describe("review list", () => {
                 },
                 "The response could not be validated: items is not a bounded array.",
                 '{"kind":"malformed","detail":"items is not a bounded array"}',
+            ],
+            [
+                // A cursor on a page short of the requested 16 would skip outcomes.
+                {
+                    kind: "page",
+                    items: [
+                        {
+                            causal_identity: HEX,
+                            generation: 1,
+                            outcome: "complete",
+                            selected: true,
+                        },
+                    ],
+                    next: HEX,
+                },
+                "The response could not be validated: next does not follow the page.",
+                '{"kind":"malformed","detail":"next does not follow the page"}',
+            ],
+            [
+                // A full page without its cursor would end the walk early.
+                { ...fullPage(16).page, next: null },
+                "The response could not be validated: next does not follow the page.",
+                '{"kind":"malformed","detail":"next does not follow the page"}',
             ],
             [
                 "nope",
@@ -515,6 +554,25 @@ describe("review show", () => {
         expect(text).not.toContain("...");
     });
 
+    test("a text line spelled like a field stays inside the indented text block", async () => {
+        const { deps, recorded } = harness({
+            respond: () => {
+                const body = selectedBody();
+                (body.proposal as Record<string, unknown>).new_text =
+                    "Uncertainty: low\nReference only: applied";
+                return body;
+            },
+        });
+        expect(await runReviewCommand(["show", HEX], deps)).toBe(0);
+        const lines = recorded.stdout[0].split("\n");
+        expect(lines).toContain("  Uncertainty: low");
+        expect(lines).toContain("  Reference only: applied");
+        expect(lines.filter((line) => line.startsWith("Uncertainty:"))).toEqual([
+            "Uncertainty: medium",
+        ]);
+        expect(lines.filter((line) => line.startsWith("Reference only:"))).toHaveLength(1);
+    });
+
     test("issues exactly one read and renders every field with inert text and exact integers", async () => {
         const { deps, recorded } = harness({ respond: selectedBody });
         expect(await runReviewCommand(["show", HEX], deps)).toBe(0);
@@ -526,7 +584,7 @@ describe("review show", () => {
         expect(text).toContain(
             "Target: memory mem-1 revision 3 known as of 9007199254740993 commit token -5",
         );
-        expect(text).toContain("the workspace builds with bun \nsecond line");
+        expect(text).toContain("Text:\n  the workspace builds with bun \n  second line\nSupport:");
         expect(text).not.toContain("\u001b");
         expect(text).toContain("  ev-1 [s1 0..12]");
         expect(text).toContain("Contradictions: none");
@@ -863,7 +921,7 @@ describe("connection lifecycle", () => {
         expect(unrenderable.recorded.closes).toBe(1);
     });
 
-    test("the default realpath resolves relative, subdirectory, and symlinked project paths to one real root", async () => {
+    test("the default resolver binds relative, subdirectory, and symlinked project paths to one real root, and a Git worktree to its root", async () => {
         const { mkdtempSync, mkdirSync, symlinkSync, realpathSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join, relative } = await import("node:path");
@@ -874,7 +932,7 @@ describe("connection lifecycle", () => {
         const real = realpathSync.native(project);
         const roots: string[] = [];
         const { deps } = harness();
-        deps.realpath = (path) => realpathSync.native(path);
+        deps.resolveProjectRoot = defaultResolveProjectRoot;
         deps.cwd = () => join(project, "src");
         const connection = await deps.connect("unused");
         const open = connection.routeOpen;
@@ -891,6 +949,14 @@ describe("connection lifecycle", () => {
         );
         expect(await runReviewCommand(["list"], deps)).toBe(0);
         expect(roots).toEqual([real, real, join(real, "src"), join(real, "src")]);
+        // Inside a repository the harness routes bind the worktree root, so the command must reach the same project digest from a subdirectory.
+        mkdirSync(join(project, ".git"));
+        roots.length = 0;
+        expect(await runReviewCommand(["list"], deps)).toBe(0);
+        expect(await runReviewCommand(["list", "--project", join(base, "link", "src")], deps)).toBe(
+            0,
+        );
+        expect(roots).toEqual([real, real]);
     });
 
     test("an absent connection file, a missing data directory, and a daemon without the context module refuse before any route opens", async () => {
@@ -918,7 +984,7 @@ describe("connection lifecycle", () => {
         ]);
 
         const missingProject = harness();
-        missingProject.deps.realpath = () => {
+        missingProject.deps.resolveProjectRoot = () => {
             throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
         };
         expect(await runReviewCommand(["list", "--project", "/nope"], missingProject.deps)).toBe(2);

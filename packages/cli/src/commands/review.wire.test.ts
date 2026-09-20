@@ -42,7 +42,7 @@ async function transport(): Promise<{
             clients.push(client);
             return client;
         },
-        realpath: (p) => p,
+        resolveProjectRoot: (p) => p,
         cwd: () => "/work/project",
         env: { HOME: tmpDir, EIDNARA_MODULE_ID: "context", EIDNARA_LAUNCH_NONCE: "nonce-1" },
         stdout: (line) => stdout.push(line),

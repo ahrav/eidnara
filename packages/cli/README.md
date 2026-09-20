@@ -113,7 +113,9 @@ eidnara review status [--json]
 ```
 
 `list` and `show` read the completed MemoryReviewer outcomes of the project
-bound to `PATH` or the current directory, resolved through its real path. Each
+bound to `PATH` or the current directory, resolved to the Git worktree root that
+contains it, or to its real path outside a repository, as the OpenCode and Pi
+routes bind it. Each
 invocation opens one connection to the running daemon, binds one observational
 route under the `cli` harness with a fresh `eidnara-review:` session, sends one
 request, prints the validated answer, and closes. Nothing here changes

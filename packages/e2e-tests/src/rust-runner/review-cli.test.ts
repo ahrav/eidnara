@@ -29,7 +29,7 @@ function commandDependencies(dataDir: string): {
             clients.push(client);
             return client;
         },
-        realpath: (path) => path,
+        resolveProjectRoot: (path) => path,
         cwd: () => dataDir,
         env: { XDG_DATA_HOME: dataDir },
         stdout: (line) => out.push(line),
