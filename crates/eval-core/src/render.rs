@@ -62,9 +62,10 @@ pub enum RenderError {
     /// The correction's valid time is at or before its target's. The revision
     /// is the valid time, so rendering it would reuse or precede the target.
     CorrectionDoesNotAdvance(EventId),
-    /// Two rendered messages share session, `message_id`, and valid time, so
-    /// they would share one occurrence: two events, one identity.
-    RevisionReused(EventId),
+    /// The event's unit encodes to an occurrence an earlier event already
+    /// produced (a second correction at one valid time, or a second tool span
+    /// with one `call_id` and valid time): two events, one identity.
+    OccurrenceReused(EventId),
     /// No message in the span's session carries its `message_id`; nothing
     /// renders it and no rule excludes it, so it would vanish from accounting.
     ToolSpanParentMissing(EventId),
@@ -227,16 +228,14 @@ impl Message<'_> {
         &self,
         parts: Vec<Value>,
         expected: Vec<ExpectedUnit>,
-        revisions: &mut BTreeSet<(String, String, i64)>,
+        occurrences: &mut BTreeSet<String>,
     ) -> Result<RenderedMessage, RenderError> {
-        let valid = self.event.valid_time_ms;
-        if !revisions.insert((
-            self.event.entity_id.clone(),
-            self.message_id.to_string(),
-            valid,
-        )) {
-            return Err(RenderError::RevisionReused(self.event.id.clone()));
+        for unit in &expected {
+            if !occurrences.insert(unit.identity.occurrence_id.clone()) {
+                return Err(RenderError::OccurrenceReused(unit.event_id.clone()));
+            }
         }
+        let valid = self.event.valid_time_ms;
         let time = match self.role {
             "user" => json!({"created": valid}),
             "assistant" => {
@@ -274,7 +273,7 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
         commits: Vec::new(),
         excluded_by_rule: BTreeMap::new(),
     };
-    let mut revisions = BTreeSet::new();
+    let mut occurrences = BTreeSet::new();
     let mut repository: Option<&str> = None;
     let has_message = |entity_id: &str, id: &str| {
         log.events.iter().any(|e| {
@@ -317,7 +316,7 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                 }
                 rendering
                     .messages
-                    .push(m.rendered(parts, expected, &mut revisions)?);
+                    .push(m.rendered(parts, expected, &mut occurrences)?);
             }
             Payload::Correction { target, text } => {
                 let original = log
@@ -346,7 +345,7 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                 let parts = vec![json!({"type": "text", "text": text})];
                 rendering
                     .messages
-                    .push(m.rendered(parts, expected, &mut revisions)?);
+                    .push(m.rendered(parts, expected, &mut occurrences)?);
             }
             Payload::Commit { message, .. } => {
                 if *repository.get_or_insert(&event.entity_id) != event.entity_id {

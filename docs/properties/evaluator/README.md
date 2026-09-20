@@ -17,7 +17,7 @@ provides, so a reader can find them by test name.
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v2` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v3` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -389,8 +389,9 @@ Renderer, encoder, accounting, and registry, store-free
   `CorrectionTargetInOtherSession` for a target in another session (a
   same-session correction one millisecond later shares the target's lineage),
   `CorrectionDoesNotAdvance` for a correction at or before the target's valid
-  time, `RevisionReused` for a second correction of one target at one valid
-  time, `SecondRepository` for commits from two repository entities under one
+  time, `OccurrenceReused` for a second correction of one target at one valid
+  time and for a second tool span with one `call_id` at one valid time,
+  `SecondRepository` for commits from two repository entities under one
   `repository_id`, `UnknownRole` for a role that
   is neither `user` nor `assistant`, `NoEarlierCreated` for an assistant turn
   at valid time zero (valid time one renders `created: 0`), and an identity
@@ -399,7 +400,10 @@ Renderer, encoder, accounting, and registry, store-free
 - `the_identity_flip_matrix_names_what_enters_each_id` is the tuple-level
   matrix: each identity field moves both ids, revision moves the occurrence
   only, representation and span move both, the same tuple is one identity,
-  and each refusal variant fires for its malformed input.
+  and `UnknownClass`, `MissingIdentityField`, `MalformedRevision`,
+  `MissingRevision`, and `UnknownRepresentation` fire for their malformed
+  input (the identity goldens in `eval_identity.rs` fire all nine variants
+  in kernel order).
 - `accounting_names_every_way_a_unit_can_go_missing` and
   `the_marker_registry_is_unique_and_incomplete_until_every_marker_fires`
   cover `check_accounting` and `Coverage` off the store.

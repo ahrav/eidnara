@@ -456,11 +456,12 @@ times:
   result would be a fresh lineage) or a valid time at or before the target's
   (`CorrectionDoesNotAdvance`; the result would reuse or precede the target's
   occurrence), or a second rendered message with the same session,
-  `message_id`, and valid time (`RevisionReused`; two events would share one
-  occurrence). The generator's time gaps are strictly positive
-  (`eval-generator/v2`), each slot emits at most one correction, and its
-  correction targets stay in the correcting entity, so generated worlds never
-  meet these refusals.
+  `message_id`, and valid time, or a second tool span with one `call_id` at
+  one valid time (`OccurrenceReused`; two events would share one occurrence).
+  The generator's time gaps are strictly positive (`eval-generator/v2`), each
+  slot emits at most one correction and one tool span, and its correction
+  targets stay in the correcting entity, so generated worlds never meet these
+  refusals.
 - Every commit becomes a `RenderedCommit { message, valid_time_ms,
   observation_time_ms }`. The oid exists only once the shell writes the commit
   into a real repository, so the shell keeps the evaluator-owned

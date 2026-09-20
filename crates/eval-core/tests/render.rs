@@ -387,7 +387,8 @@ fn render_refuses_bad_targets_roles_times_and_unencodable_identities_by_event() 
         rendered.messages[0].expected[0].identity.lineage_id
     );
     // Two corrections of one target at one valid time would share an
-    // occurrence: two events, one identity, so the second refuses.
+    // occurrence: two events, one identity, so the second refuses; so do two
+    // tool spans of one message with one `call_id` at one valid time.
     let mut twin = advancing.clone();
     twin.local_seq = 2;
     twin.id = EventId::derive(StreamLabel::Session, "session-0", 2);
@@ -401,7 +402,22 @@ fn render_refuses_bad_targets_roles_times_and_unencodable_identities_by_event() 
             &config()
         )
         .unwrap_err(),
-        RenderError::RevisionReused(twin.id)
+        RenderError::OccurrenceReused(twin.id)
+    );
+    let parent = message_event("session-0", 0, EPOCH_MS, "user", "parent");
+    let span = |seq: u32, output: &str| {
+        let mut span = message_event("session-0", seq, EPOCH_MS, "user", "x");
+        span.payload = Payload::ToolSpan {
+            message_id: "session-0-m0".to_string(),
+            call_id: "call".to_string(),
+            output: output.to_string(),
+        };
+        span
+    };
+    let (first, second) = (span(1, "one"), span(2, "two"));
+    assert_eq!(
+        render(&log(vec![parent, first, second.clone()]), &config()).unwrap_err(),
+        RenderError::OccurrenceReused(second.id)
     );
     // One `repository_id` binds one repository entity.
     let mut second_repo = commit.clone();
