@@ -85,10 +85,6 @@ pub enum ReplayRefusal {
         selected_index: u32,
         candidates: usize,
     },
-    UnconsumedChoices {
-        consumed: usize,
-        recorded: usize,
-    },
 }
 
 debug_display!(ReplayRefusal);

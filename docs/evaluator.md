@@ -15,10 +15,13 @@ sub-record.
   or tokio edge.
 - `eval-core` appears in the workspace only under `[dev-dependencies]`
   (`crates/daemon`). `scripts/forbid-test-support-dependencies.ts` rejects a
-  normal, build, or target-specific edge to it, rejects any such edge that
-  names a `*/test-support` feature, and rejects a `default` feature that
-  reaches a `*/test-support` entry through the package's own feature table.
-  The `gates` CI job runs the scan.
+  normal, build, or target-specific edge to it, and rejects any such edge whose
+  requested features turn on test-support in the target package, either by
+  naming a `*test-support` feature or by reaching one through the target's
+  feature table (a forwarding alias such as `bench = ["kernel/test-support"]`
+  counts). It also rejects a local package whose `default` feature enables its
+  own `test-support` or reaches a `*/test-support` entry. The `gates` CI job
+  runs the scan.
 - Digests come from `context_core::canonical_json::protocol_digest`, which is
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
@@ -29,11 +32,17 @@ sub-record.
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
 validates. Refusals are typed: `MissingField(name)`, `UnknownField(name)`,
 `SchemaMismatch`, `RunIdMismatch`, `GeneratorVersionMismatch`,
-`ClaimBoundaryMismatch`, `ResidueIncomplete`, `SampleOrderNotAPermutation`,
-`MalformedDigest`, `MalformedDecimal`. `Manifest::validate` is public so a
-manifest built in code can be checked before it is written. Adding a field to
-`Manifest` without bumping the schema fails the closure test, and the fixture
-digests in `tests/manifest.rs` are frozen so an encoding change is reviewed.
+`ClaimBoundaryMismatch`, `ResidueIncomplete`, `ResidueContradiction` (a `Keep`
+entry or two rules for one field), `SampleOrderNotAPermutation`,
+`MalformedDigest`, `MalformedDecimal`, `RateOutOfRange` (an arm rate outside
+`[0, 1]`), `EmptyComponent` (an empty component version, tokenizer name or
+revision, or attestation signer), `NotCanonical` (an integer outside the
+canonical safe range). `Manifest::validate` is public so a manifest built in
+code can be checked before it is written; it applies every check above except
+the key-set closure, so a manifest it accepts also parses and digests. Adding a
+field to `Manifest` without bumping the schema fails the closure test, and the
+fixture digests in `tests/manifest.rs` are frozen so an encoding change is
+reviewed.
 
 The 25 required fields, sorted:
 
@@ -54,7 +63,7 @@ The 25 required fields, sorted:
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `residue` | Every non-`Keep` field with its rule, including the manifest's own. |
 | `result_digest`, `witness_digest` | Lowercase hex SHA-256. |
-| `retry_lineage` | Prior `eval_run_id` values of retried attempts. |
+| `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
 | `schema` | `eval-manifest/v2`. |
@@ -64,8 +73,12 @@ The 25 required fields, sorted:
 `Manifest::digest` re-parses the manifest, applies the manifest's own residue
 rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
 is `Keep`), and hashes with protocol `eval-manifest-digest/v2`. Version 2
-added `execution_mode`; the reducer differential runs under `enumerate`. Two processes
-with the same identity produce the same digest.
+added `execution_mode`; the reducer differential runs under `enumerate`. The
+digest is a function of every kept field, not of the run identity alone: two
+processes that record the same identity and the same kept contents produce the
+same digest (`two_process_same_identity_yields_equal_manifest_and_trace_digests`),
+and two runs that share an identity but differ in `status`, `sample_order`,
+`result_digest`, or any other kept field do not.
 
 Canonical JSON rejects fractional numbers, so every fraction is a canonical
 decimal string: `is_canonical_decimal` accepts `0`, `12`, `0.25` and rejects
@@ -83,8 +96,11 @@ dirty flag, lockfile digest, rustc version, feature set, target triple, and a
 binary digest that is either `{"kind": "present", "sha256"}` or
 `{"kind": "absent", "reason"}`. The feature set is a `BTreeSet`, so its order
 cannot change the identity. A present digest equal to the SHA-256 of zero bytes
-is refused; it names no build. Empty version strings and a malformed
-`eligibility_spec_digest` are refused. There is no seed-only constructor.
+is refused; it names no build, and an absent digest needs a non-empty reason.
+Empty version strings, a malformed
+`eligibility_spec_digest`, and a `config` or `scenario` value canonical JSON
+cannot encode are refused by `RunIdentity::validate`, so an identity it accepts
+also produces its run ID. There is no seed-only constructor.
 
 ## Residue rules
 
@@ -99,11 +115,18 @@ is refused; it names no build. Empty version strings and a malformed
 
 `SemanticTrace::record` refuses an observation whose field set differs from
 its schema (`UnclassifiedField`, `MissingField`), so classification is total;
-registering one type twice is refused (`DuplicateType`).
+registering one type twice is refused (`DuplicateType`), declaring one field
+twice in a schema is refused (`DuplicateField`), a field not spelled in
+snake_case is refused (`FieldNotSnakeCase`) because the gates below match that
+spelling, as is a `Keep` or
+`Relative` value canonical JSON cannot encode (`NotCanonical`). A refused
+observation leaves the trace and its `Relative` numbering unchanged, so a
+recorded trace always digests.
 `CLOCK_FIELD_KEEP_ALLOWLIST` (`now_ms`, `observed_at_ms`, `valid_time_ms`)
 names the only clock-named fields a schema may keep; any other clock-named
 field under `Keep` is refused at schema construction, as is any field named
-for a hostname, cwd, pid, or incarnation (`HostFieldKept`). The trace digest
+for a hostname (`hostname` or a `host` token), cwd, pid, or incarnation
+(`HostFieldKept`). The trace digest
 uses protocol `eval-trace/v1`. Rules apply to the top-level fields of an
 observation; nested values under `Keep` enter the digest whole.
 

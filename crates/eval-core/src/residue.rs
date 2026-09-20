@@ -31,9 +31,11 @@ pub fn is_clock_named(field: &str) -> bool {
 }
 
 /// Host environment and store incarnation values never enter a digest, so a
-/// field named for one may not be `Keep`.
+/// field named for one may not be `Keep`. Field names are snake_case, so
+/// `host` is matched as a token (`host_name`) as well as inside `hostname`.
 pub fn is_never_kept(field: &str) -> bool {
     field.contains("hostname")
+        || field.split('_').any(|token| token == "host")
         || field.contains("cwd")
         || field == "pid"
         || field.ends_with("_pid")
@@ -45,6 +47,8 @@ pub enum ResidueError {
     ClockFieldKept { type_name: String, field: String },
     HostFieldKept { type_name: String, field: String },
     DuplicateType { type_name: String },
+    DuplicateField { type_name: String, field: String },
+    FieldNotSnakeCase { type_name: String, field: String },
     UnclassifiedField { type_name: String, field: String },
     MissingField { type_name: String, field: String },
     UnknownType { type_name: String },
@@ -74,16 +78,33 @@ pub struct ObservationSchema {
 }
 
 impl ObservationSchema {
-    /// Refuses `Keep` on a host or incarnation field, and on a clock-named
-    /// field unless [`CLOCK_FIELD_KEEP_ALLOWLIST`] names it.
+    /// Refuses a field not spelled in snake_case, a field declared twice, `Keep`
+    /// on a host or incarnation field, and `Keep` on a clock-named field unless
+    /// [`CLOCK_FIELD_KEEP_ALLOWLIST`] names it.
     pub fn new<'a>(
         type_name: &str,
-        rules: impl IntoIterator<Item = (&'a str, Rule)>,
+        rules_iter: impl IntoIterator<Item = (&'a str, Rule)>,
     ) -> Result<Self, ResidueError> {
-        let rules: BTreeMap<String, Rule> = rules
-            .into_iter()
-            .map(|(field, rule)| (field.to_string(), rule))
-            .collect();
+        let mut rules = BTreeMap::new();
+        for (field, rule) in rules_iter {
+            // The gates below match snake_case spellings, so nothing else is admitted.
+            if field.is_empty()
+                || !field
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            {
+                return Err(ResidueError::FieldNotSnakeCase {
+                    type_name: type_name.to_string(),
+                    field: field.to_string(),
+                });
+            }
+            if rules.insert(field.to_string(), rule).is_some() {
+                return Err(ResidueError::DuplicateField {
+                    type_name: type_name.to_string(),
+                    field: field.to_string(),
+                });
+            }
+        }
         for (field, _) in rules.iter().filter(|(_, rule)| **rule == Rule::Keep) {
             if is_never_kept(field) {
                 return Err(ResidueError::HostFieldKept {
@@ -144,15 +165,28 @@ impl ObservationSchema {
                 field: field.to_string(),
             });
         }
+        // Every fallible step runs before the first mutation, so a refused
+        // observation leaves `relative` exactly as it found it, and a recorded
+        // entry always digests.
         let mut reduced = Map::new();
+        let mut renumber = Vec::new();
         for (field, value) in fields {
-            let kept = match self.rules[field] {
-                Rule::Keep => value.clone(),
-                Rule::Drop => continue,
-                Rule::Presence => Value::Bool(!value.is_null()),
-                Rule::Relative => relative.renumber(&self.type_name, field, value)?,
+            match self.rules[field] {
+                Rule::Keep => {
+                    canonical_json_encode(value)?;
+                    reduced.insert(field.clone(), value.clone())
+                }
+                Rule::Drop => None,
+                Rule::Presence => reduced.insert(field.clone(), Value::Bool(!value.is_null())),
+                Rule::Relative => {
+                    renumber.push((field, canonical_json_encode(value)?));
+                    None
+                }
             };
-            reduced.insert(field.clone(), kept);
+        }
+        for (field, key) in renumber {
+            let index = relative.renumber(&self.type_name, field, key);
+            reduced.insert(field.clone(), Value::from(index));
         }
         Ok(Value::Object(reduced))
     }
@@ -173,19 +207,14 @@ pub(crate) struct RelativeDomains {
 }
 
 impl RelativeDomains {
-    fn renumber(
-        &mut self,
-        type_name: &str,
-        field: &str,
-        value: &Value,
-    ) -> Result<Value, ResidueError> {
+    /// `key` is the canonical encoding of the observed value.
+    fn renumber(&mut self, type_name: &str, field: &str, key: String) -> u64 {
         let domain = self
             .seen
             .entry((type_name.to_string(), field.to_string()))
             .or_default();
         let next = domain.len() as u64 + 1;
-        let index = *domain.entry(canonical_json_encode(value)?).or_insert(next);
-        Ok(Value::from(index))
+        *domain.entry(key).or_insert(next)
     }
 }
 
