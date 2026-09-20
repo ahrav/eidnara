@@ -807,26 +807,6 @@ impl HistorySummarizerProducer {
         max_output_tokens: u32,
         temperature: f64,
     ) -> Result<RunHandle, HistorySummarizerProducerError> {
-        self.start_with_options(
-            session_id,
-            system,
-            prompt,
-            model,
-            max_output_tokens,
-            temperature,
-        )
-        .await
-    }
-
-    async fn start_with_options(
-        &mut self,
-        session_id: &str,
-        system: &str,
-        prompt: &str,
-        model: &str,
-        max_output_tokens: u32,
-        temperature: f64,
-    ) -> Result<RunHandle, HistorySummarizerProducerError> {
         // Route admission does not observe cancellation, so check before opening a route.
         // `NotSent` is valid here because no frame has been queued.
         if self.stop_requested() {
@@ -855,7 +835,10 @@ impl HistorySummarizerProducer {
         params.insert("tools".into(), json!([]));
         params.insert(
             "generation".into(),
-            json!({"max_output_tokens":max_output_tokens,"temperature":temperature}),
+            json!({
+                "max_output_tokens": max_output_tokens,
+                "temperature": temperature,
+            }),
         );
         if !system.is_empty() {
             params.insert("system".into(), json!(system));

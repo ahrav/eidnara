@@ -2947,7 +2947,7 @@ pub struct HandlerCore {
     producer_factory: Arc<dyn HistorySummarizerProducerFactory>,
     native_capture: Arc<Mutex<memory_capture::NativeCaptureState>>,
     capture_commit_gate: Arc<Mutex<()>>,
-    capture_memo: Mutex<memory_capture::CaptureCheckpointMemo>,
+    capture_memo: Arc<Mutex<memory_capture::CaptureCheckpointMemo>>,
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
     #[cfg(test)]
@@ -3882,7 +3882,7 @@ impl Handler {
             producer_factory,
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
-            capture_memo: Mutex::new(memory_capture::CaptureCheckpointMemo::default()),
+            capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
             #[cfg(test)]
@@ -4379,7 +4379,7 @@ impl Handler {
             producer_factory: factory,
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
-            capture_memo: Mutex::new(memory_capture::CaptureCheckpointMemo::default()),
+            capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             fixed_config: Some(config),
@@ -8853,8 +8853,14 @@ impl HandlerCore {
             Err(outcome) => return outcome,
         };
         ticket.accept();
-        self.capture_transform_sources(Arc::clone(&store), &binding, &parsed, request_messages)
-            .await;
+        // The reply does not wait on the checkpoint's store writes; the memo
+        // learns a fragment only once the store accepted it, so a checkpoint
+        // that never runs replays on the next sync.
+        if let Some(checkpoint) =
+            self.capture_checkpoint(Arc::clone(&store), &binding, &parsed, request_messages)
+        {
+            self.spawn_tracked_task(checkpoint.run());
+        }
         let intake = PassIntake {
             store,
             parsed,
@@ -22785,6 +22791,21 @@ mod tests {
         .unwrap()
     }
 
+    impl HandlerCore {
+        async fn checkpoint_transform_sources(
+            &self,
+            store: Arc<MemoryStore>,
+            binding: &SessionBinding,
+            request: &TransformRequest,
+            delta_messages: usize,
+        ) -> usize {
+            match self.capture_checkpoint(store, binding, request, delta_messages) {
+                Some(checkpoint) => checkpoint.run().await,
+                None => 0,
+            }
+        }
+    }
+
     #[tokio::test]
     async fn transform_checkpoints_only_pi_delta_messages_and_never_twice() {
         let state = Arc::new(ProducerState::default());
@@ -22800,7 +22821,7 @@ mod tests {
         let opencode = capture_binding(&project, "opencode");
         assert_eq!(
             handler
-                .capture_transform_sources(Arc::clone(&store), &opencode, &request, 2)
+                .checkpoint_transform_sources(Arc::clone(&store), &opencode, &request, 2)
                 .await,
             0,
             "OpenCode text is checkpointed by its plugin, whose per-part synthetic markers the wire does not carry"
@@ -22810,7 +22831,7 @@ mod tests {
         let pi = capture_binding(&project, "pi");
         assert_eq!(
             handler
-                .capture_transform_sources(Arc::clone(&store), &pi, &request, 1)
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 1)
                 .await,
             1,
             "a tail delta checkpoints only the request's own messages"
@@ -22823,14 +22844,14 @@ mod tests {
 
         assert_eq!(
             handler
-                .capture_transform_sources(Arc::clone(&store), &pi, &request, 2)
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 2)
                 .await,
             1,
             "a full sync reaches the store only for the fragment the memo has not seen"
         );
         assert_eq!(
             handler
-                .capture_transform_sources(Arc::clone(&store), &pi, &request, 2)
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 2)
                 .await,
             0,
             "a repeated conversation performs no store work"
@@ -22842,7 +22863,7 @@ mod tests {
         assert_eq!(handler.capture_memo.lock().unwrap().session_len("ses"), 0);
         assert_eq!(
             handler
-                .capture_transform_sources(Arc::clone(&store), &pi, &request, 2)
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 2)
                 .await,
             2,
             "a purged memo replays through the store, which dedups by identity"
@@ -23024,6 +23045,121 @@ mod tests {
         assert!(
             ticked_at < deleted_at,
             "the runtime worker must keep running other tasks while the delete waits: {ticked_at:?} vs {deleted_at:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_that_can_never_fit_a_prompt_fails_instead_of_stalling_the_drain() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = project.to_str().unwrap();
+        // Each control character escapes to six JSON bytes, so this source alone
+        // renders past the native prompt ceiling however much else is dropped.
+        let oversized = "\u{1}".repeat(memory_capture::MAX_CAPTURE_INPUT_BYTES);
+        for (id, text) in [
+            ("native-user-1", oversized.as_str()),
+            ("native-user-2", "Use port 4321 for staging."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+                "accepted"
+            );
+        }
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "pending",
+            "an unfittable head source is a recorded failure, not work"
+        );
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap();
+        let head = jobs
+            .iter()
+            .find(|job| job.message_id == "native-user-1")
+            .expect("the unfittable source keeps its identity");
+        assert_eq!(head.attempts, 1, "the refused dispatch is recorded");
+        assert_eq!(
+            head.failures, 1,
+            "a source that can never be prepared consumes its failure allowance"
+        );
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(
+            work["state"], "work",
+            "the queue must advance past it: {work}"
+        );
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        assert_eq!(prompt["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(prompt["messages"][0]["text"], "Use port 4321 for staging.");
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn two_facts_citing_one_clause_publish_one_attributed_memory() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[
+            {"category":"CONFIG_VALUES","content":"Staging uses port 4321.","quote":"Use port 4321 for staging."},
+            {"category":"CONFIG_VALUES","content":"The staging port is 4321.","quote":"Use port 4321 for staging."}
+        ]}]})
+        .to_string();
+        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        assert_eq!(
+            store
+                .memory_capture_status(project.to_str().unwrap())
+                .unwrap()
+                .completed,
+            1
+        );
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(
+            memories.rows.len(),
+            1,
+            "identical attributed quotations must not publish as separate memories"
+        );
+        assert_eq!(
+            memories.decisions.values().next().unwrap().payload.summary,
+            "User stated: Use port 4321 for staging."
         );
     }
 
@@ -40877,7 +41013,7 @@ mod release_contract_tests {
         );
         assert_eq!(
             production_inputs::production_inputs_lock_sha256(),
-            "86fb7bed51069d776e53ab869a9e09aa772427a300941fdb6ad0ffb58778fe21"
+            "a6b2bf18777d9fba2ba7ac2b2782f248dc8a6448c20951804b65b266aff2122d"
         );
         let contract = contract();
         assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));

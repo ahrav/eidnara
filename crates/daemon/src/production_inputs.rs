@@ -38,7 +38,7 @@ pub const QUALIFIED_HARNESS_CLOSURES: &[(&str, &str, &str)] = &[
     ),
     (
         "pi",
-        "c9cfb8a0371f04dddc73f6becdb96629a9fefc226e5b88dd9778658da9cca3ca",
+        "23b6a41046463ca1d046e281585b4815814a4490b512c176d93de2c897c4c45c",
         include_str!("../../../release/harness-closures/pi-linux-x64-node-24.18.0.json"),
     ),
 ];

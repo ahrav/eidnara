@@ -751,10 +751,10 @@ Receipt state is in memory and cleared by a daemon restart or by uninstalling th
 
 `memory.capture`, `memory.capture.next`, `memory.capture.submit`, and
 `memory.capture.status` use the Context route and `v: 2`. Revision 1 capture
-requests are refused; `memory.capture.flush` is no longer served. These are
-harness lifecycle calls, not model tools. The route supplies project, harness,
-and session identity. Unknown fields are refused. Optional `project_root` must
-be an absolute path matching the route, never null or another type.
+requests are refused. These are harness lifecycle calls, not model tools. The
+route supplies project, harness, and session identity. Unknown fields are
+refused. Optional `project_root` must be an absolute path matching the route,
+never null or another type.
 
 A checkpoint is:
 
@@ -838,10 +838,13 @@ and `store_failed`; mismatched models and malformed envelopes are errors.
 
 Before freezing, each memory's text becomes its exact supporting quotation,
 prefixed with `User stated:` or `Assistant reported:` from the native role.
-The model's paraphrase is not published. Relevant and sufficiently complete
-quote selection still depends on model quality. Only user-source proposals
-may replace capture-owned memories; parsing and kernel publication both
-enforce this rule. User intent and observed implementation remain distinct.
+The model's paraphrase is not published. Memories of one source that share a
+category and quotation freeze as one memory, keeping any replacement target
+among them. Relevant and sufficiently complete quote selection still depends
+on model quality. Only user-source proposals may replace capture-owned
+memories; parsing and kernel publication both enforce this rule, and one
+target may be replaced once per batch whichever source claims it. User intent
+and observed implementation remain distinct.
 The canonical plan freezes before publication, and replay uses its exact
 intent. A kernel receipt completes the source and clears source/plan payloads
 while retaining replay identity.
@@ -852,15 +855,17 @@ allowance. Dispatch counts survive restart and drive exponential retry delay
 from one second to 128 seconds. A new store owner resets failures only for
 unfinished, unprepared sources while preserving dispatch counts and deadlines.
 A store refusal of a frozen plan is a recorded model/output failure of that
-source alone; other sources in the batch still commit. Dispatches are capped
-at nine per source across owners: a model/output failure on or after the ninth
-dispatch abandons the source. An abandoned source keeps its replay identity
-and its last error, releases its text, no longer counts toward the pending
-quota or the `pending` status count, is never returned as work, and is not
-revived by a new store owner. The native drain processes at most 32 batches
-per invocation. No model work runs in the daemon after a harness exits;
-unfinished sources await a later connected harness, and an abandoned lease may
-first need to expire.
+source alone; other sources in the batch still commit. A source whose prompt
+exceeds the prompt ceiling even alone is likewise a recorded dispatch and
+model/output failure of that source, so later sources are not held behind it.
+Dispatches are capped at nine per source across owners: a model/output failure
+on or after the ninth dispatch abandons the source. An abandoned source keeps
+its replay identity and its last error, releases its text, no longer counts
+toward the pending quota or the `pending` status count, is never returned as
+work, and is not revived by a new store owner. The native drain processes at
+most 32 batches per invocation. No model work runs in the daemon after a
+harness exits; unfinished sources await a later connected harness, and an
+abandoned lease may first need to expire.
 
 `memory.capture.status` returns `available` with project-level `pending`,
 `prepared`, `completed`, and `failed` source counts, or `store_failed`.
