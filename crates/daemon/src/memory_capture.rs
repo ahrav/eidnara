@@ -425,16 +425,20 @@ impl CaptureCheckpointMemo {
     /// epoch, creating the memo when absent. A purge removes the memo, so a
     /// checkpoint holding an older epoch knows its session was deleted.
     /// Capacity eviction skips pinned memos; with every memo pinned the map
-    /// briefly exceeds its cap, bounded by the outstanding checkpoints.
+    /// exceeds its cap, bounded by the outstanding checkpoints, and shrinks
+    /// back as later insertions evict the released surplus.
     fn epoch(&mut self, session: &str) -> u64 {
         if !self.sessions.contains_key(session) {
-            if self.sessions.len() >= CAPTURE_MEMO_SESSIONS {
+            while self.sessions.len() >= CAPTURE_MEMO_SESSIONS {
                 let victim = self
                     .order
                     .iter()
                     .position(|kept| self.sessions.get(kept).is_none_or(|memo| memo.pinned == 0));
-                if let Some(victim) = victim.and_then(|index| self.order.remove(index)) {
-                    self.sessions.remove(&victim);
+                match victim.and_then(|index| self.order.remove(index)) {
+                    Some(victim) => {
+                        self.sessions.remove(&victim);
+                    }
+                    None => break,
                 }
             }
             self.order.push_back(session.to_owned());
@@ -1459,6 +1463,30 @@ mod tests {
         assert!(
             !memo.matches("ses", epoch),
             "once released, the oldest session is ordinary eviction fodder again"
+        );
+    }
+
+    #[test]
+    fn releasing_a_pin_burst_lets_the_memo_shrink_back_to_its_cap() {
+        let mut memo = CaptureCheckpointMemo::default();
+        let burst = CAPTURE_MEMO_SESSIONS + 44;
+        let pins: Vec<(String, u64)> = (0..burst)
+            .map(|index| {
+                let session = format!("burst-{index}");
+                let epoch = memo.epoch(&session);
+                (session, epoch)
+            })
+            .collect();
+        assert_eq!(memo.sessions.len(), burst, "every pinned memo survives");
+        for (session, epoch) in &pins {
+            memo.release(session, *epoch);
+        }
+        let epoch = memo.epoch("after");
+        memo.release("after", epoch);
+        assert!(
+            memo.sessions.len() <= CAPTURE_MEMO_SESSIONS,
+            "surplus unpinned memos are evicted, not kept at the high-water mark: {}",
+            memo.sessions.len()
         );
     }
 

@@ -401,11 +401,9 @@ impl CaptureWork {
                         &job.project,
                         &job.job_id,
                         error,
-                        if error == "cancelled" {
-                            now
-                        } else {
-                            now.saturating_add(capture_retry_delay_ms(job.attempts))
-                        },
+                        // Every dispatch backs off, cancellation included, so a
+                        // claim/cancel loop cannot spin the store.
+                        now.saturating_add(capture_retry_delay_ms(job.attempts)),
                         matches!(error, "model_failed" | "output_limit"),
                         now,
                     )

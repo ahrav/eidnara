@@ -806,7 +806,8 @@ queues and leases key on the same canonical project identity the kernel scope
 uses, so a symlinked spelling of one root is the same project and two roots
 that differ only in raw path bytes stay distinct. A dispatch is recorded only
 when work is issued; a `next` request cancelled during preparation records
-none.
+none, except that a source whose prompt exceeds the ceiling even alone is
+failed as soon as it is discovered, whatever becomes of the request.
 
 Other `next` states are `ready`, `pending`, `stale`, `disabled`,
 `store_failed`, and `unavailable`. `ready` means the project has no pending
