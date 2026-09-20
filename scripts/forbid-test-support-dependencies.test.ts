@@ -4,6 +4,7 @@ import {
     type CargoMetadata,
     forbiddenCoreSources,
     forbiddenDependencyEdges,
+    productCrates,
     type MetadataDependency,
 } from "./forbid-test-support-dependencies";
 
@@ -318,6 +319,30 @@ describe("eval-core fences", () => {
                 crates,
             ),
         ).toEqual(["a.rs:2: extern crate kernel as k;", "a.rs:3: use {serde::Serialize, storage as st};"]);
+    });
+
+    test("fences every local package and eval-core's Cargo renames of them", () => {
+        const metadata: CargoMetadata = {
+            workspace_root: "/workspace",
+            packages: [
+                {
+                    name: "eval-core",
+                    source: null,
+                    dependencies: [
+                        ...closed,
+                        dep({ name: "storage", rename: "engine", kind: "dev" }),
+                        dep({ name: "tokio", rename: "rt", kind: "dev" }),
+                        dep({ name: "serde_json", rename: "sj", kind: "dev" }),
+                        dep({ name: "proptest", rename: "pt", kind: "dev" }),
+                    ],
+                },
+                { name: "context-core", source: null, dependencies: [] },
+                { name: "shm-transport", source: null, dependencies: [] },
+                { name: "storage", source: null, dependencies: [] },
+                { name: "serde", source: "registry+x", dependencies: [] },
+            ],
+        };
+        expect(productCrates(metadata).sort()).toEqual(["engine", "rt", "shm_transport", "storage"]);
     });
 
     test("refuses to pass on an empty source set", () => {

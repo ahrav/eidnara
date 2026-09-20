@@ -24,9 +24,13 @@ const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
 
 /** Crate names as Rust paths spell them: every local package except eval-core and its closed set. */
 export function productCrates(metadata: CargoMetadata): string[] {
-    return metadata.packages
-        .filter((pkg) => pkg.source === null)
-        .map((pkg) => pkg.name)
+    const local = metadata.packages.filter((pkg) => pkg.source === null).map((pkg) => pkg.name);
+    const fenced = new Set([...local, ...EXTERNAL_EFFECT_CRATES]);
+    // A Cargo rename (`engine = { package = "storage" }`) is the name source uses.
+    const renames = (metadata.packages.find((pkg) => pkg.name === "eval-core")?.dependencies ?? [])
+        .filter((dep) => dep.rename && fenced.has(dep.name))
+        .map((dep) => dep.rename as string);
+    return [...local, ...renames]
         .filter((name) => name !== "eval-core" && !EVAL_CORE_DEPENDENCIES.has(name))
         .map((name) => name.replaceAll("-", "_"));
 }
