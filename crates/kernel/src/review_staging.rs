@@ -2,7 +2,7 @@
 //!
 //! `provenance_witness` carries `kind: "review"` plus a `binding` object naming the daemon-supplied project digest, domain, owner, subject source, and reference sources. `validate_provenance` rejects the `review` kind, `load_candidate_facts` filters the review `candidate_kind` literals, and the public staging path refuses those literals, so admission never resolves a review row. Review rows carry no caller provenance, so `run_sensitivity` classifies them `Sensitive`; a private read cannot upgrade that classification.
 //!
-//! `lease_expires_at` is an absolute queue deadline no later than [`REVIEW_QUEUE_LIFETIME_MS`] after `recorded_at`; the public one-hour lease cap and renewal path are unchanged, and `renew_staging_run` refuses review runs. Reads require completed run and candidate states, a matching stored digest and binding, and a deadline strictly after both the caller's clock and the store clock. Restaging, reads, expiry, and abandonment never extend a deadline. The existing staging sweep abandons unsealed rows at the deadline; the existing thirty-day terminal cleanup deletes sealed rows. Moving a still-live deadline to a review expiry belongs to the hold owner, not to this module.
+//! `lease_expires_at` is an absolute queue deadline no later than [`REVIEW_QUEUE_LIFETIME_MS`] after `recorded_at`; the public one-hour lease cap and renewal path are unchanged, and `renew_staging_run` refuses review runs. Reads require completed run and candidate states and a matching stored digest; a live read also requires the caller's binding and a deadline strictly after both the caller's clock and the store clock, while a selected read judges the deadline against the selection time and returns the stored binding for the caller to compare. Restaging, reads, expiry, abandonment, and hold transfer never move a deadline. The existing staging sweep abandons unsealed rows at the deadline; the existing thirty-day terminal cleanup deletes sealed rows.
 
 use std::collections::BTreeSet;
 
@@ -820,7 +820,7 @@ impl KernelStore {
             .normalized()
             .map_err(|_| ReviewReadError::Invalid)?;
         let (row, sealed_at, binding, dependencies) =
-            self.load_staged_review(reference, now.max(current_time_ms()))?;
+            self.load_staged_review(reference, now, true)?;
         if binding != expected {
             return Err(ReviewReadRefusal::ScopeMismatch.into());
         }
@@ -834,7 +834,7 @@ impl KernelStore {
         selected_at: i64,
     ) -> Result<ReviewStagedRow, ReviewReadError> {
         let (row, sealed_at, binding, dependencies) =
-            self.load_staged_review(reference, selected_at)?;
+            self.load_staged_review(reference, selected_at, false)?;
         Self::decode_staged_row(row, sealed_at, binding, dependencies)
     }
 
@@ -896,15 +896,16 @@ impl KernelStore {
         reference: &ReviewStagedReference,
         now: i64,
     ) -> Result<ReviewBinding, ReviewReadError> {
-        let (_, _, binding, _) = self.load_staged_review(reference, now.max(current_time_ms()))?;
+        let (_, _, binding, _) = self.load_staged_review(reference, now, true)?;
         Ok(binding)
     }
 
-    /// The sealed, byte-identical row `reference` names, its sealing time, and its stored binding. The row's deadline must be strictly after `live_at`: the later of the caller's and the store's clocks for a live read, the selection time for a selected read.
+    /// The sealed, byte-identical row `reference` names, its sealing time, and its stored binding. The row's deadline must be strictly after `live_at`: the selection time for a selected read, or, when `live` is set, the later of the caller's clock and the store clock sampled after the reader is acquired, so a wait for a reader cannot carry a live read past the deadline.
     fn load_staged_review(
         &self,
         reference: &ReviewStagedReference,
         live_at: i64,
+        live: bool,
     ) -> Result<
         (
             StoredReviewRow,
@@ -951,6 +952,11 @@ impl KernelStore {
             .map_err(|error| ReviewReadError::Store(map_sqlite(error)))?
             .ok_or(ReviewReadRefusal::Missing)?;
         drop(reader);
+        let live_at = if live {
+            live_at.max(current_time_ms())
+        } else {
+            live_at
+        };
         // The schema pairs `terminal_state` with `terminal_at`, so a completed row always carries its timestamp.
         let sealed_at = match (
             row.run_terminal.as_deref(),

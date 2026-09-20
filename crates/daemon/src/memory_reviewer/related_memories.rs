@@ -16,6 +16,7 @@ use super::broker::{
     Alias, EvidenceBroker, Probed, ReferenceExpectation, Refusal, RefusalCode, RenderedBuffer,
     originating_decision,
 };
+use super::selection::MEMORY_CLASSES;
 use super::{Completeness, EXCERPT_LEAD_BYTES, MAX_EXCERPT_BYTES, excerpt_window};
 
 /// Hits per page; one page fills at most one model batch.
@@ -35,10 +36,8 @@ const MIN_TERM_BYTES: usize = 4;
 /// Longest subject token used as a matcher: the excerpt after its lead must hold the whole term.
 const MAX_TERM_BYTES: usize = MAX_EXCERPT_BYTES - EXCERPT_LEAD_BYTES;
 const CURSOR_PREFIX: &str = "cur-";
-const CLASSES: [OccurrenceClass; 2] = [
-    OccurrenceClass::CanonicalClaims,
-    OccurrenceClass::PromotedMemory,
-];
+/// Discovery walks the classes the production selector walks, so a related memory is always a form of a decision.
+const CLASSES: &[OccurrenceClass] = MEMORY_CLASSES;
 
 /// One related memory, disclosed through the broker.
 #[derive(Debug)]

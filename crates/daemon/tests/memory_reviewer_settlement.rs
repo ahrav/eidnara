@@ -604,8 +604,14 @@ impl Fixture {
     }
 
     fn reconcile(&self, now: i64) -> usize {
-        daemon::memory_reviewer::lifecycle::reconcile_review_holds(&self.ledger, &self.store, now)
-            .unwrap()
+        daemon::memory_reviewer::lifecycle::reconcile_review_holds(
+            &self.ledger,
+            &self.store,
+            now,
+            &|| false,
+        )
+        .unwrap()
+        .expect("not cancelled")
     }
 
     fn read(&self, now: i64) -> Result<SelectedProposal, ReadRefusal> {
@@ -1592,6 +1598,148 @@ fn the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners() {
             .is_ok(),
         "the losing row is sealed and private, unreadable through the receipt"
     );
+}
+
+/// Cancellation is read before every Kernel release: a probe that fires after the first orphan is released ends the pass with `None`, the release already made stands, and the remaining orphan waits for the next pass instead of extending the shutdown join by one writer acquisition per hold.
+#[test]
+fn reconciliation_stops_releasing_once_cancelled() {
+    use daemon::memory_reviewer::lifecycle::reconcile_review_holds;
+
+    let fixture = Fixture::open();
+    let evidence = fixture.evidence_id();
+    // Two crashed generations, each with a transferred hold; the sweep then closes the receipt, so both holds are orphans.
+    let first = fixture.broker(1);
+    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    let first_reference = fixture.kernel_half(&first, &fixture.bound_proposal(&[&evidence]));
+    let second = fixture.broker(2);
+    let second_reference = fixture.kernel_half(&second, &fixture.bound_proposal(&[&evidence]));
+    let run_deadline = fixture.receipt().run_deadline_ms;
+    fixture
+        .ledger
+        .expire_memory_reviewer_work(run_deadline)
+        .unwrap();
+    let live_holds = |now: i64| {
+        [
+            fixture.review_hold_binding(1, &first_reference.candidate_id),
+            fixture.review_hold_binding(2, &second_reference.candidate_id),
+        ]
+        .iter()
+        .filter(|review| {
+            fixture
+                .store
+                .lookup_review_hold(review, now)
+                .unwrap()
+                .is_some()
+        })
+        .count()
+    };
+    assert_eq!(live_holds(run_deadline + 1), 2);
+    let probes = std::cell::Cell::new(0);
+    let after_first = || {
+        probes.set(probes.get() + 1);
+        probes.get() > 1
+    };
+    assert_eq!(
+        reconcile_review_holds(
+            &fixture.ledger,
+            &fixture.store,
+            run_deadline + 1,
+            &after_first
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        live_holds(run_deadline + 1),
+        1,
+        "one release landed before the probe fired"
+    );
+    assert_eq!(
+        fixture.reconcile(run_deadline + 2),
+        1,
+        "the next pass releases the other"
+    );
+    assert_eq!(live_holds(run_deadline + 2), 0);
+}
+
+/// A restored Kernel beside a replaced Memory Store lists holds of the store incarnation that owns them; the live store has no receipt for any of them, and that absence is not orphaning. Reconciliation leaves holds of another store incarnation alone, so the correct store, once restored, still finds its selected results held.
+#[test]
+fn reconciliation_leaves_holds_of_another_store_incarnation_alone() {
+    use daemon::memory_reviewer::lifecycle::reconcile_review_holds;
+
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
+    let review = fixture.review_hold_binding(1, &reference.candidate_id);
+    let replaced_dir = tempfile::tempdir().unwrap();
+    let replaced = MemoryStore::open(&MemoryStore::test_descriptor(
+        replaced_dir.path(),
+        "eidnara-memory_reviewer-settlement-replaced-store",
+    ))
+    .unwrap();
+    assert_ne!(
+        replaced.memory_reviewer_store_incarnation().unwrap(),
+        fixture.ledger.memory_reviewer_store_incarnation().unwrap()
+    );
+    assert_eq!(
+        reconcile_review_holds(&replaced, &fixture.store, fixture.now + 6, &|| false).unwrap(),
+        Some(0),
+        "a hold of another store incarnation is not this store's to release"
+    );
+    assert!(
+        fixture
+            .store
+            .lookup_review_hold(&review, fixture.now + 6)
+            .unwrap()
+            .is_some()
+    );
+    // The owning store still sees its in-progress receipt and keeps the hold too.
+    assert_eq!(fixture.reconcile(fixture.now + 6), 0);
+}
+
+/// A reconciliation failure is a failed step like any other: the pass publishes `unavailable` with the last good sample time and retries early, while the Kernel's maintenance still ran. The next pass on a healthy store publishes `ready` again.
+#[test]
+fn a_failed_hold_reconciliation_publishes_unavailable_and_the_next_pass_recovers() {
+    use daemon::memory_reviewer::lifecycle::{MemoryReviewerState, sweep_and_sample};
+
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    // A live review hold, so the reconciler reads the receipt sets instead of returning on an empty listing.
+    fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
+    fixture
+        .ledger
+        .fail_next_in_progress_memory_reviewer_receipts_for_test();
+    let pass = sweep_and_sample(
+        &fixture.ledger,
+        Some(&fixture.store),
+        fixture.now + 6,
+        Some(41),
+        &|| false,
+    )
+    .expect("not cancelled");
+    assert!(!pass.healthy);
+    assert_eq!(
+        pass.block.memory_reviewer_state,
+        MemoryReviewerState::Unavailable
+    );
+    assert_eq!(pass.block.sampled_at_ms, Some(41));
+    assert!(pass.block.facts.is_none());
+
+    let pass = sweep_and_sample(
+        &fixture.ledger,
+        Some(&fixture.store),
+        fixture.now + 7,
+        Some(41),
+        &|| false,
+    )
+    .expect("not cancelled");
+    assert!(pass.healthy);
+    assert_eq!(pass.block.memory_reviewer_state, MemoryReviewerState::Ready);
+    assert_eq!(pass.block.sampled_at_ms, Some(fixture.now + 7));
 }
 
 /// The sweep beats the selection inside the settlement window: the receipt closes `expired` at its run deadline before the completion write, the completion is fenced, and the settlement itself releases the hold it had transferred.
