@@ -235,14 +235,16 @@ impl Coordinator {
             context.receipt.generation,
         )?;
         if resuming {
-            // The lost run's execution hold is returned when it is still live, and a released one is replaced by an empty hold that adoption extends over the record's inputs. Once retention moved to a review hold the Kernel refuses another execution hold for this generation, and adoption runs under that review hold instead.
             let hold_id = match self.store.acquire_execution_hold(
                 &hold_binding,
                 &[],
                 context.receipt.execution_cutoff_ms,
             ) {
                 Ok(hold) => hold.hold_id,
-                Err(kernel::MemoryReviewerHoldError::Refused(_)) => String::new(),
+                // An invalid request means adoption proceeds without an execution hold; any other refusal is transient and aborts the run instead.
+                Err(kernel::MemoryReviewerHoldError::Refused(
+                    kernel::MemoryReviewerHoldRefusal::InvalidRequest,
+                )) => String::new(),
                 Err(error) => {
                     return Err(InvestigationError::Kernel(super::broker::hold_refusal(
                         error,

@@ -2215,6 +2215,173 @@ async fn a_resumed_generation_adopts_the_result_a_lost_run_sealed_without_a_send
     );
 }
 
+/// A project at its active-hold cap refuses the resumed run's replacement execution hold. That refusal is transient: the run surfaces it and leaves the receipt open, so a retry adopts the sealed reference once capacity frees, instead of recording `budget_exhausted` against a result that still stands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hold_cap_refusal_on_resume_leaves_the_receipt_open_instead_of_abstaining() {
+    use daemon::memory_reviewer::broker::{EvidenceBroker, RefusalCode, RunBinding};
+    use daemon::memory_reviewer::dependencies;
+    use daemon::memory_reviewer::settlement::SETTLEMENT_PRODUCER;
+    let fixture = Fixture::open(CASES[0].sources);
+    let now = fixture.now + 3;
+    let outcome = fixture
+        .ledger
+        .dispatch_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &fixture.claim.claim_id,
+            &fixture.kernel_incarnation(),
+            &memory_store::memory_reviewer_ledger::AttemptMarker {
+                body_digest: "b".repeat(64),
+                request_bytes: 100,
+                provider: "localhost/v1/messages@2023-06-01".to_string(),
+                model: MODEL.to_string(),
+                credential_id: CREDENTIAL_ID.to_string(),
+                policy_union_digest: "e".repeat(64),
+            },
+            (),
+            || now,
+            |()| (),
+        )
+        .unwrap();
+    let memory_store::memory_reviewer_ledger::DispatchOutcome::Handed { attempt_index, .. } =
+        outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    fixture
+        .ledger
+        .finish_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &fixture.claim.claim_id,
+            attempt_index,
+            MemoryReviewerAttemptTerminal::Complete,
+            now,
+        )
+        .unwrap();
+    let hold_binding = kernel::MemoryReviewerHoldBinding {
+        project_digest: PROJECT.to_string(),
+        kernel_incarnation: fixture.kernel_incarnation(),
+        memstore_incarnation: fixture.ledger.memory_reviewer_store_incarnation().unwrap(),
+        subject: fixture.identity.clone(),
+        generation: 1,
+    };
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&hold_binding, &[], fixture.receipt.execution_cutoff_ms)
+        .unwrap();
+    let lost = EvidenceBroker::new(
+        RunBinding {
+            hold: hold_binding.clone(),
+            hold_id: hold.hold_id.clone(),
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        QuestionTemplate::ExtractedFacts,
+    )
+    .unwrap();
+    // The lost run sealed its row with the record, then exited unsettled before the transfer and released its execution hold.
+    let identity = kernel::provisional_result_identity(&fixture.identity, 1);
+    let record = dependencies::record(&lost, &fixture.attempts(), 1)
+        .unwrap()
+        .expect("a completed marker at this generation");
+    let sealed = fixture
+        .store
+        .stage_review_input(kernel::ReviewStagingSpec {
+            extraction_run_id: identity.extraction_run_id.clone(),
+            candidate_id: identity.candidate_id.clone(),
+            producer: SETTLEMENT_PRODUCER.to_string(),
+            binding: ReviewBinding {
+                owner: ReviewOwner::Proposal {
+                    job_id: fixture.identity.clone(),
+                    generation: 1,
+                },
+                ..fixture.binding()
+            },
+            payload: kernel::ReviewPayload::Proposal(Box::new(
+                support::memory_reviewer_publish::proposal(),
+            )),
+            recorded_at: now,
+            queue_deadline_at: fixture.job().queue_deadline_ms,
+            dependencies: Some(record),
+        })
+        .unwrap();
+    fixture
+        .store
+        .finish_staging_run(
+            &identity.extraction_run_id,
+            kernel::StagingTerminalState::Completed,
+            now,
+        )
+        .unwrap();
+    fixture
+        .store
+        .release_execution_hold(&hold.hold_id, &hold_binding)
+        .unwrap();
+    drop(lost);
+    assert_eq!(fixture.receipt().terminal, None);
+    // Other jobs in the project hold every active-hold slot when the claim resumes.
+    let others: Vec<_> = (0..kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_PROJECT)
+        .map(|index| {
+            let binding = kernel::MemoryReviewerHoldBinding {
+                subject: format!("other-job-{index}"),
+                ..hold_binding.clone()
+            };
+            let hold = fixture
+                .store
+                .acquire_execution_hold(&binding, &[], fixture.receipt.execution_cutoff_ms)
+                .unwrap();
+            (binding, hold.hold_id)
+        })
+        .collect();
+    let peer = Peer::start().await;
+    let outcome = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await;
+    assert_eq!(
+        outcome,
+        Err(InvestigationError::Kernel(RefusalCode::HoldInvalid)),
+        "a cap refusal is the Kernel's to report, not a budget the run spent"
+    );
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.receipt().terminal,
+        None,
+        "a transient cap refusal must not complete the receipt"
+    );
+    assert_eq!(fixture.attempts().len(), 1);
+    // Capacity frees; the same claim and generation adopt the sealed result under a replacement hold.
+    for (binding, hold_id) in &others {
+        fixture
+            .store
+            .release_execution_hold(hold_id, binding)
+            .unwrap();
+    }
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Published(sealed.clone()));
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Complete)
+    );
+    assert_eq!(
+        read_selected_proposal(
+            &fixture.store,
+            &fixture.ledger,
+            PROJECT,
+            &fixture.identity,
+            now + 5
+        )
+        .unwrap()
+        .reference,
+        sealed
+    );
+}
+
 /// A launch that failed before the ledger recorded an attempt (no approval) is still retained by the supervisor under its key; the retried generation must launch past it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retry_after_a_pre_ledger_failure_launches_under_a_fresh_supervisor_key() {

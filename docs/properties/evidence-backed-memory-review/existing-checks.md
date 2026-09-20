@@ -47,6 +47,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt` | `crates/daemon/tests/memory_reviewer_coordinator.rs` | an unterminated marker completes the receipt `unknown` with zero connections and no added attempt | unaudited |
 | `a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send` | same | a cancelled marker on a resumed run completes `unknown` with zero connections | unaudited |
 | `a_not_dispatched_marker_alone_lets_the_run_proceed_with_a_new_attempt` | same | a recheck-lapsed `not_dispatched` marker admits one request and a second, completed attempt | unaudited |
+| `a_hold_cap_refusal_on_resume_leaves_the_receipt_open_instead_of_abstaining` | same | a project at its active-hold cap refuses the resumed run's replacement hold; the run returns the Kernel refusal with the receipt still open and zero connections, and adopts the sealed reference once the cap clears | unaudited |
 | `decoding_accepts_only_bytes_that_re_encode_to_themselves_and_their_digest` | `crates/context-core/src/memory_reviewer_policy_union.rs` | decode refuses a wrong digest, edited bytes, whitespace, and another version | unaudited |
 
 ## Suspiciously quiet areas
