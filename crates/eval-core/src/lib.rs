@@ -22,7 +22,10 @@ mod event;
 mod generator;
 mod identity;
 mod manifest;
+mod markers;
+mod occurrence;
 mod reducer;
+mod render;
 mod residue;
 mod stream;
 
@@ -38,11 +41,14 @@ pub use identity::{
 };
 pub use manifest::{
     ArmRates, Attestation, CLAIM_BOUNDARY_EXCLUSIONS, CLAIM_BOUNDARY_SCHEMA, ClaimBoundary,
-    ComponentVersions, Cut, CutOutcome, CutReceipt, DROPPED_FIELDS, ExecutionMode,
+    ComponentVersions, Cut, CutOutcome, CutReceipt, DROPPED_FIELDS, ExecutionMode, Ingestion,
     MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError, REQUIRED_FIELDS,
     ResourceLimits, RunStatus, TokenizerProfile, is_canonical_decimal, parse_manifest,
 };
+pub use markers::*;
+pub use occurrence::*;
 pub use reducer::*;
+pub use render::*;
 pub use residue::{
     CLOCK_FIELD_KEEP_ALLOWLIST, ObservationSchema, ResidueEntry, ResidueError, Rule, SemanticTrace,
     TRACE_DIGEST_PROTOCOL, is_clock_named, is_never_kept,

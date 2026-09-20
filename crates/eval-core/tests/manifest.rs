@@ -16,7 +16,7 @@ use support::{OBSERVATION_TYPE, build, identity, manifest, observation, observat
 /// Frozen so a field-set or encoding change forces a reviewed schema bump.
 const FIXTURE_RUN_ID: &str = "e9f412ed2ad627c5801959c2c459bbb764bf45443a7774d02ac74a97f41832c9";
 const FIXTURE_MANIFEST_DIGEST: &str =
-    "a70c439f83a0b694911e6e411a30010726db72da54d8d1c2778e983e9c419ca3";
+    "8e6787eccba4c2dac03d4d1df4ad9d80064b936c83426718e3fa10cfab3c6e81";
 
 #[test]
 fn required_fields_are_sorted_and_equal_the_struct_field_set() {
@@ -86,15 +86,15 @@ fn unknown_field_wrong_schema_and_non_object_are_refused() {
         Err(ManifestError::UnknownField("extra".to_string()))
     );
     let mut v2 = valid.clone();
-    v2["schema"] = json!("eval-manifest/v3");
+    v2["schema"] = json!("eval-manifest/v4");
     assert_eq!(
         parse_manifest(&v2),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v3".to_string()
+            found: "eval-manifest/v4".to_string()
         })
     );
     assert_eq!(parse_manifest(&json!([])), Err(ManifestError::NotAnObject));
-    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v2");
+    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v3");
 }
 
 #[test]
@@ -148,6 +148,10 @@ fn every_kept_field_enters_the_digest_and_every_dropped_field_leaves_it() {
         (
             "execution_mode",
             Box::new(|m| m.execution_mode = eval_core::ExecutionMode::Enumerate),
+        ),
+        (
+            "ingestion",
+            Box::new(|m| m.ingestion = eval_core::Ingestion::DirectDatabaseNonAged),
         ),
         (
             "reachability",
@@ -486,6 +490,17 @@ fn malformed_or_empty_identity_components_are_refused() {
 
 #[test]
 fn manifest_consistency_refusals_name_their_cause() {
+    let mut aged_direct = manifest();
+    aged_direct.ingestion = eval_core::Ingestion::DirectDatabaseNonAged;
+    aged_direct.construction = eval_core::Construction::Replay;
+    assert_eq!(
+        aged_direct.validate(),
+        Err(ManifestError::DirectDatabaseAged)
+    );
+    assert_eq!(
+        manifest().to_value()["ingestion"],
+        json!("adapter-ingested, production caller: none")
+    );
     let mut wrong_id = manifest();
     wrong_id.eval_run_id = "00".repeat(32);
     assert!(matches!(
@@ -579,11 +594,11 @@ fn residue_declarations_are_non_keep_and_one_rule_per_field() {
 #[test]
 fn validate_refuses_what_parse_and_digest_refuse() {
     let mut schema = manifest();
-    schema.schema = "eval-manifest/v3".to_string();
+    schema.schema = "eval-manifest/v4".to_string();
     assert_eq!(
         schema.validate(),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v3".to_string()
+            found: "eval-manifest/v4".to_string()
         })
     );
     let mut epoch = manifest();
