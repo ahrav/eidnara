@@ -794,7 +794,8 @@ A `work` response contains:
 - `max_output_tokens: 8192`, `max_output_bytes: 131072`, and
   `max_duration_ms: 90000`.
 
-The lease lasts 180 seconds and belongs to the claiming route's project,
+The lease lasts 180 seconds from the `work` response and belongs to the
+claiming route's project,
 harness, and session. A ready lease can expire and be replaced. Preparing or
 submitting work remains reserved until its handler finishes or is cancelled.
 A stale reply cannot remove or publish against a successor reservation.

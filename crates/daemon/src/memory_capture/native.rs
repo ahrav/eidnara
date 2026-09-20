@@ -4,7 +4,7 @@
 use super::*;
 use std::collections::HashMap;
 
-const LEASE_DURATION: Duration = Duration::from_secs(180);
+pub(crate) const LEASE_DURATION: Duration = Duration::from_secs(180);
 const MAX_NATIVE_PROMPT_BYTES: usize = 240 * 1024;
 
 type LeaseKey = (String, String);
@@ -22,6 +22,15 @@ impl NativeCaptureState {
                 lease.expires = Instant::now();
             }
         }
+    }
+
+    /// The shortest time a lease holding issued work has left.
+    pub(crate) fn shortest_ready_lease_for_test(&self) -> Option<Duration> {
+        self.leases
+            .values()
+            .filter(|lease| lease.plan.is_some())
+            .map(|lease| lease.expires.saturating_duration_since(Instant::now()))
+            .min()
     }
 }
 
@@ -182,6 +191,9 @@ impl HandlerCore {
         else {
             return respond(json!({"state":"stale"}));
         };
+        // The lease clock starts when work is issued, so the advertised
+        // execution window fits however long preparation waited.
+        lease.expires = Instant::now() + LEASE_DURATION;
         lease.plan = Some(plan);
         guard.retained = true;
         respond(response)
@@ -285,6 +297,34 @@ impl HandlerCore {
     }
 }
 
+/// Memories of one source sharing a category and quotation freeze as one.
+/// A replacement target survives the collapse so the correction it carries
+/// is not lost.
+pub(super) fn collapse_quotations(
+    attribution: &str,
+    proposed: Vec<CapturedMemory>,
+) -> Vec<CapturedMemory> {
+    let mut memories: Vec<CapturedMemory> = Vec::new();
+    for mut memory in proposed {
+        memory.content = format!("{attribution}: {}", memory.quote);
+        match memories
+            .iter_mut()
+            .find(|kept| kept.category == memory.category && kept.content == memory.content)
+        {
+            Some(kept) => {
+                if kept.replaces.is_none()
+                    && (kept.duplicate_of.is_none() || memory.replaces.is_some())
+                {
+                    kept.replaces = memory.replaces;
+                    kept.duplicate_of = memory.duplicate_of;
+                }
+            }
+            None => memories.push(memory),
+        }
+    }
+    memories
+}
+
 impl CaptureWork {
     fn claim(&self, primary: Option<&str>) -> NextStep {
         match self.next_native_plan(primary) {
@@ -381,7 +421,11 @@ impl CaptureWork {
         if models.is_empty() {
             return Ok(None);
         }
-        let failures = unprepared.iter().map(|job| job.failures).max().unwrap_or(0);
+        // Fallback stage follows failures; a batch shares one model, so it
+        // holds only sources at the head's stage. The rest wait for the next
+        // drain call rather than skipping their own primary attempt.
+        let failures = unprepared[0].failures;
+        unprepared.retain(|job| job.failures == failures);
         let model = models[failures as usize % models.len()].clone();
         if !valid_capture_model(&model) {
             return Err("invalid_model_configuration");
@@ -461,24 +505,8 @@ impl CaptureWork {
             };
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
-            // paraphrases, which can differ. A reconciliation target survives
-            // the collapse so the correction it carries is not lost.
-            let mut memories: Vec<CapturedMemory> = Vec::new();
-            for mut memory in decision.memories {
-                memory.content = format!("{attribution}: {}", memory.quote);
-                match memories
-                    .iter_mut()
-                    .find(|kept| kept.category == memory.category && kept.content == memory.content)
-                {
-                    Some(kept) => {
-                        if kept.replaces.is_none() && kept.duplicate_of.is_none() {
-                            kept.replaces = memory.replaces;
-                            kept.duplicate_of = memory.duplicate_of;
-                        }
-                    }
-                    None => memories.push(memory),
-                }
-            }
+            // paraphrases, which can differ.
+            let memories = collapse_quotations(attribution, decision.memories);
             let existing = plan
                 .existing
                 .iter()

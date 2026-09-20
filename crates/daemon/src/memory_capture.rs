@@ -6,6 +6,8 @@
 //! the model found every fact. Exact quotations prove provenance, not entailment.
 
 mod native;
+#[cfg(test)]
+pub(crate) use native::LEASE_DURATION;
 pub(crate) use native::NativeCaptureState;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -13,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use host_runtime::RouteHandle;
+use host_runtime::wire::ByteCharge;
 use memory_store::memory_capture::{CaptureEnqueue, CaptureJob, CaptureSource};
 use memory_store::{MemoryStore, MemoryStoreError};
 use serde_json::{Value, json};
@@ -20,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::PreparedOutcome;
 use crate::kernel_routes::{self, KernelOpenCoordinator, ProjectBinding};
+use crate::metered_decode::ResidentReserve;
 use crate::{
     HandlerCore, SessionBinding, invalid_params_error, now_ms, respond, store_unavailable_error,
 };
@@ -233,6 +237,7 @@ fn parse_capture_batch(
         }
     }
     // One target may be superseded once per batch, whichever source claims it.
+    // A refused source commits nothing, so its claims are staged until it validates.
     let mut replaced = BTreeSet::new();
     Ok(messages
         .iter()
@@ -245,7 +250,9 @@ fn parse_capture_batch(
                 .ok_or("capture output omits a source message")?;
             let decision = MessageDecision::deserialize(row)
                 .map_err(|_| "capture output does not match the JSON schema")?;
-            validate_capture_memories(&decision.memories, message, existing, &mut replaced)?;
+            let mut staged = replaced.clone();
+            validate_capture_memories(&decision.memories, message, existing, &mut staged)?;
+            replaced = staged;
             Ok(CapturedMessage {
                 source_id: message.id.clone(),
                 memories: decision.memories,
@@ -384,6 +391,8 @@ fn fragment_digest(id: &str, role: &str, text: &str) -> FragmentDigest {
 
 #[derive(Default)]
 struct SessionCaptureMemo {
+    /// Distinguishes this session's memo from one recreated after a purge.
+    epoch: u64,
     seen: HashSet<FragmentDigest>,
     order: VecDeque<FragmentDigest>,
 }
@@ -394,6 +403,7 @@ struct SessionCaptureMemo {
 pub(crate) struct CaptureCheckpointMemo {
     sessions: HashMap<String, SessionCaptureMemo>,
     order: VecDeque<String>,
+    next_epoch: u64,
 }
 
 impl CaptureCheckpointMemo {
@@ -403,7 +413,10 @@ impl CaptureCheckpointMemo {
             .is_some_and(|memo| memo.seen.contains(digest))
     }
 
-    fn insert(&mut self, session: &str, digest: FragmentDigest) {
+    /// The current epoch of a session's memo, creating it when absent. A
+    /// purge removes the memo, so a checkpoint holding an older epoch knows
+    /// its session was deleted or evicted underneath it.
+    fn epoch(&mut self, session: &str) -> u64 {
         if !self.sessions.contains_key(session) {
             while self.sessions.len() >= CAPTURE_MEMO_SESSIONS {
                 match self.order.pop_front() {
@@ -414,8 +427,32 @@ impl CaptureCheckpointMemo {
                 }
             }
             self.order.push_back(session.to_owned());
+            self.next_epoch += 1;
+            self.sessions.insert(
+                session.to_owned(),
+                SessionCaptureMemo {
+                    epoch: self.next_epoch,
+                    ..Default::default()
+                },
+            );
         }
-        let memo = self.sessions.entry(session.to_owned()).or_default();
+        self.sessions[session].epoch
+    }
+
+    fn matches(&self, session: &str, epoch: u64) -> bool {
+        self.sessions
+            .get(session)
+            .is_some_and(|memo| memo.epoch == epoch)
+    }
+
+    fn insert(&mut self, session: &str, epoch: u64, digest: FragmentDigest) {
+        let Some(memo) = self
+            .sessions
+            .get_mut(session)
+            .filter(|memo| memo.epoch == epoch)
+        else {
+            return;
+        };
         if !memo.seen.insert(digest) {
             return;
         }
@@ -444,6 +481,8 @@ struct PendingFragment {
     role: String,
     text: String,
     digest: FragmentDigest,
+    // Dropped with the fragment, after the store owns its bytes.
+    _charge: ByteCharge,
 }
 
 /// The user-only consent gate shared by checkpointing and draining. Both sides
@@ -459,12 +498,18 @@ pub(crate) fn capture_enabled(binding: &SessionBinding) -> bool {
 /// The memo learns a fragment only after the store accepted it, so a checkpoint
 /// that never runs, or stops at a refusal, replays those fragments on the next
 /// sync and the store dedups them by identity.
+///
+/// Session deletion sweeps queued sources and the memo under the capture
+/// commit gate; the checkpoint enqueues under the same gate only while its
+/// memo epoch is current, so pre-delete work cannot land after the sweep.
 pub(crate) struct CaptureCheckpoint {
     store: Arc<MemoryStore>,
     memo: Arc<Mutex<CaptureCheckpointMemo>>,
+    commit_gate: Arc<Mutex<()>>,
     project: String,
     harness: String,
     session: String,
+    epoch: u64,
     fragments: Vec<PendingFragment>,
 }
 
@@ -475,13 +520,22 @@ impl CaptureCheckpoint {
         let Self {
             store,
             memo,
+            commit_gate,
             project,
             harness,
             session,
+            epoch,
             fragments,
         } = self;
-        let store_session = session.clone();
-        let outcome = kernel_routes::blocking(move || {
+        kernel_routes::blocking(move || {
+            let _gate = commit_gate.lock().expect("capture publication mutex");
+            if !memo
+                .lock()
+                .expect("capture memo mutex")
+                .matches(&session, epoch)
+            {
+                return 0;
+            }
             let mut accepted = Vec::with_capacity(fragments.len());
             let mut enqueued = 0;
             for fragment in fragments {
@@ -490,7 +544,7 @@ impl CaptureCheckpoint {
                     CaptureSource {
                         project: &project,
                         harness: &harness,
-                        session_id: &store_session,
+                        session_id: &session,
                         message_id: &fragment.id,
                         role: &fragment.role,
                         text: &fragment.text,
@@ -505,17 +559,14 @@ impl CaptureCheckpoint {
                     }
                 }
             }
-            (enqueued, accepted)
+            let mut memo = memo.lock().expect("capture memo mutex");
+            for digest in accepted {
+                memo.insert(&session, epoch, digest);
+            }
+            enqueued
         })
-        .await;
-        let Ok((enqueued, accepted)) = outcome else {
-            return 0;
-        };
-        let mut memo = memo.lock().expect("capture memo mutex");
-        for digest in accepted {
-            memo.insert(&session, digest);
-        }
-        enqueued
+        .await
+        .unwrap_or(0)
     }
 }
 
@@ -534,6 +585,11 @@ impl HandlerCore {
     /// enqueue different text for the same message id and store scaffolding as
     /// user statements.
     ///
+    /// Each retained fragment is charged to `reserve` before it is copied, so
+    /// detached checkpoints stay inside the scratch pool. A refused charge skips
+    /// the whole checkpoint; the memo has not learned it, so it replays on the
+    /// next sync.
+    ///
     /// Returns `None` when nothing needs the store, so the caller spawns no task.
     pub(super) fn capture_checkpoint(
         &self,
@@ -541,14 +597,16 @@ impl HandlerCore {
         binding: &SessionBinding,
         request: &crate::transform::TransformRequest,
         delta_messages: usize,
+        reserve: &dyn ResidentReserve,
     ) -> Option<CaptureCheckpoint> {
         if request.is_subagent || !capture_enabled(binding) || binding.harness != "pi" {
             return None;
         }
         let start = request.messages.len().saturating_sub(delta_messages);
         let mut fragments = Vec::new();
-        {
-            let memo = self.capture_memo.lock().expect("capture memo mutex");
+        let mut refused = false;
+        let epoch = {
+            let mut memo = self.capture_memo.lock().expect("capture memo mutex");
             for message in &request.messages[start..] {
                 if !matches!(message.ck.role.as_str(), "user" | "assistant")
                     || message.ck.meta.synthetic
@@ -558,32 +616,48 @@ impl HandlerCore {
                     continue;
                 }
                 let role = message.ck.role.as_str();
-                let _ = native_capture_fragments(message, |id, text| {
+                refused |= native_capture_fragments(message, |id, text| {
                     if text.trim().is_empty() {
                         return Ok(());
                     }
                     let digest = fragment_digest(id, role, text);
-                    if !memo.contains(&binding.session, &digest) {
-                        fragments.push(PendingFragment {
-                            id: id.to_owned(),
-                            role: role.to_owned(),
-                            text: text.to_owned(),
-                            digest,
-                        });
+                    if memo.contains(&binding.session, &digest) {
+                        return Ok(());
                     }
+                    let charge = reserve
+                        .try_reserve(id.len() + text.len())
+                        .ok_or("resident_pool_short")?;
+                    fragments.push(PendingFragment {
+                        id: id.to_owned(),
+                        role: role.to_owned(),
+                        text: text.to_owned(),
+                        digest,
+                        _charge: charge,
+                    });
                     Ok(())
-                });
+                })
+                .is_err();
+                if refused {
+                    break;
+                }
             }
-        }
-        if fragments.is_empty() {
-            return None;
-        }
+            if refused {
+                eprintln!("daemon: memory capture checkpoint deferred: resident_pool_short");
+                return None;
+            }
+            if fragments.is_empty() {
+                return None;
+            }
+            memo.epoch(&binding.session)
+        };
         Some(CaptureCheckpoint {
             store,
             memo: Arc::clone(&self.capture_memo),
+            commit_gate: Arc::clone(&self.capture_commit_gate),
             project: binding.project_root.to_string_lossy().into_owned(),
             harness: binding.harness.clone(),
             session: binding.session.clone(),
+            epoch,
             fragments,
         })
     }
@@ -1156,6 +1230,47 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_source_does_not_consume_a_replacement_target_for_a_later_source() {
+        let messages = vec![
+            CaptureMessage {
+                id: "u1".into(),
+                role: CaptureRole::User,
+                text: "Use port 4321 for staging.".into(),
+            },
+            CaptureMessage {
+                id: "u2".into(),
+                role: CaptureRole::User,
+                text: "Staging moved to port 5555.".into(),
+            },
+        ];
+        let existing = vec![ExistingCaptureMemory {
+            id: "mem_old".into(),
+            category: "CONFIG_VALUES".into(),
+            content: "Staging uses port 1234.".into(),
+            can_replace: true,
+            source_revision: 1,
+            created_commit_seq: 1,
+        }];
+        let text = json!({"version":1,"decisions":[
+            {"message_id":"u1","memories":[
+                {"category":"CONFIG_VALUES","content":"Staging uses port 4321.","quote":"Use port 4321 for staging.","replaces":"mem_old"},
+                {"category":"CONFIG_VALUES","content":"Invented.","quote":"not in the source"}]},
+            {"message_id":"u2","memories":[
+                {"category":"CONFIG_VALUES","content":"Staging uses port 5555.","quote":"Staging moved to port 5555.","replaces":"mem_old"}]}
+        ]})
+        .to_string();
+        let batch = parse_capture_batch(&text, &messages, &existing).unwrap();
+        assert!(
+            batch[0].is_err(),
+            "the source with a bad quotation is refused"
+        );
+        let second = batch[1]
+            .as_ref()
+            .expect("a refused source must not hold the replacement target it never committed");
+        assert_eq!(second.memories[0].replaces.as_deref(), Some("mem_old"));
+    }
+
+    #[test]
     fn quotation_from_another_message_is_not_evidence() {
         let mut value = output();
         value["decisions"][1]["memories"][0]["quote"] = json!("I will investigate.");
@@ -1252,6 +1367,28 @@ mod tests {
             quote: content.into(),
             replaces: None,
             duplicate_of: None,
+        }
+    }
+
+    #[test]
+    fn a_replacement_target_survives_quotation_collapse_whatever_the_output_order() {
+        let mut duplicate = memory("Use port 4321 for staging.");
+        duplicate.duplicate_of = Some("mem_same".into());
+        let mut replacement = memory("Staging listens on 4321.");
+        replacement.quote = duplicate.quote.clone();
+        replacement.replaces = Some("mem_old".into());
+        for order in [
+            vec![duplicate.clone(), replacement.clone()],
+            vec![replacement.clone(), duplicate.clone()],
+        ] {
+            let collapsed = native::collapse_quotations("User stated", order);
+            assert_eq!(collapsed.len(), 1);
+            assert_eq!(collapsed[0].replaces.as_deref(), Some("mem_old"));
+            assert_eq!(collapsed[0].duplicate_of, None);
+            assert_eq!(
+                collapsed[0].content,
+                "User stated: Use port 4321 for staging."
+            );
         }
     }
 

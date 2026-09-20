@@ -199,6 +199,12 @@ impl<'r> ResidentMeter<'r> {
         self.reserve.capacity()
     }
 
+    /// The pool behind this meter, for bytes a request retains past its own
+    /// decode and charges separately.
+    pub fn reserve(&self) -> &'r dyn ResidentReserve {
+        self.reserve
+    }
+
     pub fn refusal(&self) -> Option<Refusal> {
         match self.refusal.load(Ordering::Relaxed) {
             PERMANENT | TAKEN => Some(Refusal::Permanent),

@@ -6806,6 +6806,7 @@ impl HandlerCore {
             None => return store_unavailable_error(),
         };
         let gate = Arc::clone(&self.capture_commit_gate);
+        let memo = Arc::clone(&self.capture_memo);
         let project_root = binding.project_root.to_string_lossy().into_owned();
         let deleted = {
             let session_id = session_id.clone();
@@ -6813,15 +6814,21 @@ impl HandlerCore {
                 // Session notes live under the notes authority project, where `eidnara_note` wrote them.
                 let note_project_path =
                     Self::authority_project_path(&store, &project_root, "notes")?;
-                // Session deletion must not overlap capture publication; kernel
-                // commits hold `capture_commit_gate` on a blocking thread.
+                // Session deletion must not overlap capture publication or
+                // checkpointing; both hold `capture_commit_gate` on a blocking
+                // thread. Purging the memo here retires any checkpoint admitted
+                // before this delete but not yet run.
                 let _capture_gate = gate.lock().expect("capture publication mutex");
-                store
+                let deleted = store
                     .delete_session(&session_id, &note_project_path)
                     .map_err(|error| PreparedOutcome::Error {
                         code: "store_write_failed".to_string(),
                         message: error.to_string(),
-                    })
+                    })?;
+                memo.lock()
+                    .expect("capture memo mutex")
+                    .remove_session(&session_id);
+                Ok(deleted)
             })
             .await
         };
@@ -8856,9 +8863,13 @@ impl HandlerCore {
         // The reply does not wait on the checkpoint's store writes; the memo
         // learns a fragment only once the store accepted it, so a checkpoint
         // that never runs replays on the next sync.
-        if let Some(checkpoint) =
-            self.capture_checkpoint(Arc::clone(&store), &binding, &parsed, request_messages)
-        {
+        if let Some(checkpoint) = self.capture_checkpoint(
+            Arc::clone(&store),
+            &binding,
+            &parsed,
+            request_messages,
+            entry.meter.reserve(),
+        ) {
             self.spawn_tracked_task(checkpoint.run());
         }
         let intake = PassIntake {
@@ -22799,11 +22810,91 @@ mod tests {
             request: &TransformRequest,
             delta_messages: usize,
         ) -> usize {
-            match self.capture_checkpoint(store, binding, request, delta_messages) {
+            let reserve = metered_decode::unbounded_reserve();
+            match self.capture_checkpoint(store, binding, request, delta_messages, &reserve) {
                 Some(checkpoint) => checkpoint.run().await,
                 None => 0,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_the_scratch_pool_cannot_hold_is_deferred_not_copied() {
+        struct Short;
+        impl metered_decode::ResidentReserve for Short {
+            fn try_reserve(&self, _bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+                None
+            }
+            fn capacity(&self) -> usize {
+                0
+            }
+        }
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let project_key = project.to_str().unwrap();
+        let pi = capture_binding(&project, "pi");
+        let messages = [capture_ingress(
+            "m1",
+            "user",
+            "Use port 4321 for staging.",
+            1,
+        )];
+        let request = capture_transform_request(&messages);
+        assert!(
+            handler
+                .capture_checkpoint(Arc::clone(&store), &pi, &request, 1, &Short)
+                .is_none(),
+            "fragments are charged before they are copied"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 0);
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 1)
+                .await,
+            1,
+            "the deferred fragment replays once the pool admits it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_that_loses_the_race_to_session_delete_requeues_nothing() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let project_key = project.to_str().unwrap();
+        let pi = capture_binding(&project, "pi");
+        handler.bind_route(test_route(7), pi.clone());
+        let messages = [capture_ingress(
+            "m1",
+            "user",
+            "Use port 4321 for staging.",
+            1,
+        )];
+        let request = capture_transform_request(&messages);
+        let checkpoint = handler
+            .capture_checkpoint(
+                Arc::clone(&store),
+                &pi,
+                &request,
+                1,
+                &metered_decode::unbounded_reserve(),
+            )
+            .expect("an unseen fragment needs the store");
+        let deleted = handler
+            .handle_session_delete_value(
+                test_route(7),
+                &json!({"method":"session.delete","v":1,"session_id":"ses"}),
+            )
+            .await;
+        assert_eq!(tool_body(deleted)["ok"], json!(true));
+        assert_eq!(
+            checkpoint.run().await,
+            0,
+            "a checkpoint admitted before the delete must not recreate a swept source"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 0);
+        assert_eq!(handler.capture_memo.lock().unwrap().session_len("ses"), 0);
     }
 
     #[tokio::test]
@@ -23010,6 +23101,124 @@ mod tests {
         assert_eq!(
             later[0].failures, 1,
             "a deterministic refusal consumes the model-failure allowance"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_source_keeps_its_own_fallback_sequence_beside_a_failed_one() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        let mut pi = capture_binding(&project, "pi");
+        pi.config.model_chain = vec!["chain/a".into(), "chain/b".into(), "chain/c".into()];
+        handler.bind_route(test_route(7), pi);
+        let project_key = project.to_str().unwrap();
+        for (id, text) in [
+            ("native-user-1", "Use port 4321 for staging."),
+            ("native-user-2", "Production listens on 8080."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+                "accepted"
+            );
+        }
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let failed = jobs
+            .iter()
+            .find(|job| job.message_id == "native-user-2")
+            .unwrap();
+        for _ in 0..2 {
+            store
+                .fail_memory_capture(
+                    project_key,
+                    &failed.job_id,
+                    "model_failed",
+                    now_ms(),
+                    true,
+                    now_ms(),
+                )
+                .unwrap();
+        }
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work", "{work}");
+        assert_eq!(
+            work["model"], "chain/a",
+            "a source with no failures starts on the primary model, whatever shares its queue"
+        );
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            prompt["messages"].as_array().unwrap().len(),
+            1,
+            "the twice-failed source waits for its own fallback batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn issued_work_keeps_its_full_lease_however_long_preparation_waited() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = project.to_str().unwrap();
+        for (id, text) in [
+            ("native-user-1", "Use port 4321 for staging."),
+            ("native-user-2", "Production listens on 8080."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+                "accepted"
+            );
+        }
+        // A frozen plan at the queue head publishes during preparation, and
+        // publication waits on the commit gate.
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let frozen = jobs
+            .iter()
+            .find(|job| job.message_id == "native-user-1")
+            .unwrap();
+        store
+            .prepare_memory_capture(
+                project_key,
+                &frozen.job_id,
+                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                    .to_string(),
+            )
+            .unwrap();
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let hold = Duration::from_millis(500);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(hold);
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        holder.join().unwrap();
+        assert_eq!(work["state"], "work", "{work}");
+        let remaining = handler
+            .native_capture
+            .lock()
+            .unwrap()
+            .shortest_ready_lease_for_test()
+            .unwrap();
+        assert!(
+            remaining >= memory_capture::LEASE_DURATION - Duration::from_millis(200),
+            "the advertised execution window must fit inside the lease: {remaining:?}"
         );
     }
 
