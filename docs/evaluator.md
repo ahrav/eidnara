@@ -437,9 +437,11 @@ turns an event log into the fixtures the real adapters read, with explicit
 times:
 
 - Every message becomes an OpenCode message JSON (`info.id`, `sessionID`,
-  `role`, `time.created`, and for an assistant turn `time.completed`, all the
-  event's valid time) with its text part first and one completed tool part per
-  tool span. The expected units are the text unit (class `messages`, revision
+  `role`, and `time`: a user turn's `created` is the event's valid time; an
+  assistant turn's `completed` is the valid time and its `created` sits one
+  millisecond earlier, so the adapter's completed-over-created precedence is
+  exercised rather than assumed) with its text part first and one completed
+  tool part per tool span. The expected units are the text unit (class `messages`, revision
   the valid time) and one `raw_tool_spans` unit per tool part (revision and
   `result_revision` the span's valid time), each with the identity the encoder
   assigns. A message and its tool parts are one fixture observed once, so a
@@ -455,9 +457,11 @@ times:
   (`CorrectionTargetInOtherSession`; the session is an identity field, so the
   result would be a fresh lineage) or a valid time at or before the target's
   (`CorrectionDoesNotAdvance`; the result would reuse or precede the target's
-  occurrence), or a second rendered message with the same session,
-  `message_id`, and valid time, or a second tool span with one `call_id` at
-  one valid time (`OccurrenceReused`; two events would share one occurrence).
+  occurrence), a second base message with the same session and `message_id`
+  (`MessageIdReused`; only a correction may reuse a lineage, and it says so),
+  or a second rendered message with the same session, `message_id`, and valid
+  time, or a second tool span with one `call_id` at one valid time
+  (`OccurrenceReused`; two events would share one occurrence).
   The generator's time gaps are strictly positive (`eval-generator/v2`), each
   slot emits at most one correction and one tool span, and its correction
   targets stay in the correcting entity, so generated worlds never meet these

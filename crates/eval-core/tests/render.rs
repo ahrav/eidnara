@@ -419,6 +419,19 @@ fn render_refuses_bad_targets_roles_times_and_unencodable_identities_by_event() 
         render(&log(vec![parent, first, second.clone()]), &config()).unwrap_err(),
         RenderError::OccurrenceReused(second.id)
     );
+    // Two base messages with one `message_id` would share a lineage without a
+    // `Correction` saying so; the renderer names the first it meets.
+    let mut same_id = message_event("session-0", 1, EPOCH_MS + 1, "user", "again");
+    same_id.payload = Payload::Message {
+        message_id: "session-0-m0".to_string(),
+        role: "user".to_string(),
+        text: "again".to_string(),
+        cites: None,
+    };
+    assert_eq!(
+        render(&log(vec![target.clone(), same_id]), &config()).unwrap_err(),
+        RenderError::MessageIdReused(target.id.clone())
+    );
     // One `repository_id` binds one repository entity.
     let mut second_repo = commit.clone();
     second_repo.entity_id = "repo-1".to_string();

@@ -62,6 +62,9 @@ pub enum RenderError {
     /// The correction's valid time is at or before its target's. The revision
     /// is the valid time, so rendering it would reuse or precede the target.
     CorrectionDoesNotAdvance(EventId),
+    /// Two base messages in one session share a `message_id`; only a
+    /// `Correction` may reuse a lineage, and it says so.
+    MessageIdReused(EventId),
     /// The event's unit encodes to an occurrence an earlier event already
     /// produced (a second correction at one valid time, or a second tool span
     /// with one `call_id` and valid time): two events, one identity.
@@ -275,11 +278,14 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
     };
     let mut occurrences = BTreeSet::new();
     let mut repository: Option<&str> = None;
-    let has_message = |entity_id: &str, id: &str| {
-        log.events.iter().any(|e| {
-            e.entity_id == entity_id
-                && matches!(&e.payload, Payload::Message { message_id, .. } if message_id == id)
-        })
+    let messages_named = |entity_id: &str, id: &str| {
+        log.events
+            .iter()
+            .filter(|e| {
+                e.entity_id == entity_id
+                    && matches!(&e.payload, Payload::Message { message_id, .. } if message_id == id)
+            })
+            .count()
     };
     for event in &log.events {
         match &event.payload {
@@ -289,6 +295,9 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                 text,
                 ..
             } => {
+                if messages_named(&event.entity_id, message_id) > 1 {
+                    return Err(RenderError::MessageIdReused(event.id.clone()));
+                }
                 let m = Message {
                     event,
                     message_id,
@@ -359,7 +368,7 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                 })
             }
             Payload::ToolSpan { message_id, .. } => {
-                if !has_message(&event.entity_id, message_id) {
+                if messages_named(&event.entity_id, message_id) == 0 {
                     return Err(RenderError::ToolSpanParentMissing(event.id.clone()));
                 }
             }

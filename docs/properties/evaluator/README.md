@@ -389,7 +389,8 @@ Renderer, encoder, accounting, and registry, store-free
   `CorrectionTargetInOtherSession` for a target in another session (a
   same-session correction one millisecond later shares the target's lineage),
   `CorrectionDoesNotAdvance` for a correction at or before the target's valid
-  time, `OccurrenceReused` for a second correction of one target at one valid
+  time, `MessageIdReused` for two base messages with one `message_id` in one
+  session, `OccurrenceReused` for a second correction of one target at one valid
   time and for a second tool span with one `call_id` at one valid time,
   `SecondRepository` for commits from two repository entities under one
   `repository_id`, `UnknownRole` for a role that

@@ -176,7 +176,7 @@ fn seeded(root: &Path) -> Corpus {
     corpus
 }
 
-fn rendered_worlds_round_trip_through_the_opencode_adapter_with_exact_accounting(
+fn rendered_worlds_round_trip_through_the_opencode_adapter_with_exact_accounting_scenario(
     coverage: &mut Coverage,
 ) {
     let world = world();
@@ -315,7 +315,9 @@ fn rendered_worlds_round_trip_through_the_opencode_adapter_with_exact_accounting
     ));
 }
 
-fn generated_observations_never_lead_and_a_boundary_fixture_refuses(coverage: &mut Coverage) {
+fn generated_observations_never_lead_and_a_boundary_fixture_refuses_scenario(
+    coverage: &mut Coverage,
+) {
     let world = world();
     let rendering = rendering(&world);
     for message in &rendering.messages {
@@ -371,7 +373,9 @@ fn git_bounds() -> GitReadBounds {
     }
 }
 
-fn git_units_keep_revision_one_and_take_valid_time_from_the_projection(coverage: &mut Coverage) {
+fn git_units_keep_revision_one_and_take_valid_time_from_the_projection_scenario(
+    coverage: &mut Coverage,
+) {
     let world = world();
     let rendering = rendering(&world);
     let dir = tempfile::tempdir().unwrap();
@@ -382,7 +386,14 @@ fn git_units_keep_revision_one_and_take_valid_time_from_the_projection(coverage:
     let mut oids = Vec::new();
     for commit in &rendering.commits {
         let oid = repo.commit(&commit.message, commit.valid_time_ms / 1_000);
-        projection.insert(oid.clone(), commit.valid_time_ms);
+        // Fixture commits share an empty tree and no parent, so one message
+        // in one second is one object; two events must not collapse into it.
+        assert!(
+            projection
+                .insert(oid.clone(), commit.valid_time_ms)
+                .is_none(),
+            "{oid} materialized twice"
+        );
         observations.insert(oid.clone(), commit.observation_time_ms);
         oids.push(oid);
     }
@@ -486,7 +497,7 @@ fn eligibility_of(
         .collect()
 }
 
-fn observation_time_is_inert_for_identity_and_eligibility(coverage: &mut Coverage) {
+fn observation_time_is_inert_for_identity_and_eligibility_scenario(coverage: &mut Coverage) {
     let world = world();
     let rendering = rendering(&world);
     let ten_years_ms = 10 * 365 * DAY_MS;
@@ -646,7 +657,7 @@ fn query_ids(
 /// The four seams composed: the predecessor's embedding is held (pending,
 /// unpublished), the correction commits through the adapter, the hold releases
 /// into a stale publication, and the route serves the successor only.
-fn hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete(
+fn hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete_scenario(
     coverage: &mut Coverage,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -773,29 +784,31 @@ fn hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete
 
 const SUITE: &str = "crates/daemon/tests/eval_ingestion.rs::";
 
+/// Each scenario runs as the `#[test]` of the same name, so a marker's `test`
+/// names a runnable test, and as one leg of the completeness proof.
 type Scenario = fn(&mut Coverage);
 
 fn scenarios() -> [(&'static str, Scenario); 5] {
     [
         (
             "rendered_worlds_round_trip_through_the_opencode_adapter_with_exact_accounting",
-            rendered_worlds_round_trip_through_the_opencode_adapter_with_exact_accounting,
+            rendered_worlds_round_trip_through_the_opencode_adapter_with_exact_accounting_scenario,
         ),
         (
             "generated_observations_never_lead_and_a_boundary_fixture_refuses",
-            generated_observations_never_lead_and_a_boundary_fixture_refuses,
+            generated_observations_never_lead_and_a_boundary_fixture_refuses_scenario,
         ),
         (
             "git_units_keep_revision_one_and_take_valid_time_from_the_projection",
-            git_units_keep_revision_one_and_take_valid_time_from_the_projection,
+            git_units_keep_revision_one_and_take_valid_time_from_the_projection_scenario,
         ),
         (
             "observation_time_is_inert_for_identity_and_eligibility",
-            observation_time_is_inert_for_identity_and_eligibility,
+            observation_time_is_inert_for_identity_and_eligibility_scenario,
         ),
         (
             "hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
-            hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete,
+            hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete_scenario,
         ),
     ]
 }
@@ -815,27 +828,27 @@ fn run(name: &str) {
 }
 
 #[test]
-fn adapter_round_trip() {
+fn rendered_worlds_round_trip_through_the_opencode_adapter_with_exact_accounting() {
     run("rendered_worlds_round_trip_through_the_opencode_adapter_with_exact_accounting");
 }
 
 #[test]
-fn observation_lead() {
+fn generated_observations_never_lead_and_a_boundary_fixture_refuses() {
     run("generated_observations_never_lead_and_a_boundary_fixture_refuses");
 }
 
 #[test]
-fn git_units() {
+fn git_units_keep_revision_one_and_take_valid_time_from_the_projection() {
     run("git_units_keep_revision_one_and_take_valid_time_from_the_projection");
 }
 
 #[test]
-fn observation_time_inert() {
+fn observation_time_is_inert_for_identity_and_eligibility() {
     run("observation_time_is_inert_for_identity_and_eligibility");
 }
 
 #[test]
-fn four_seam_lifecycle() {
+fn hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete() {
     run("hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete");
 }
 
