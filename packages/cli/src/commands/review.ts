@@ -18,6 +18,7 @@ import {
     isHex64,
     MAX_IDENTITY_BYTES,
     MAX_PAGE_ITEMS,
+    MAX_TEXT_BYTES,
     type Proposal,
     type ReadTerminal,
     type Reference,
@@ -227,7 +228,7 @@ function proposalLines(proposal: Proposal): string[] {
     lines.push(
         proposal.limitations.length === 0
             ? "Limitations: none"
-            : `Limitations:\n${proposal.limitations.map((text) => `  ${printableLine(text, MAX_LINE)}`).join("\n")}`,
+            : `Limitations:\n${proposal.limitations.map((text) => `  ${printableLine(text, MAX_TEXT_BYTES)}`).join("\n")}`,
     );
     lines.push(`Uncertainty: ${proposal.uncertainty}`);
     lines.push(
@@ -381,7 +382,7 @@ async function render(
                 text: toJson({ kind: "page", project_root: projectRoot, items, next }),
             };
         }
-        const lines = [`Project: ${printableLine(projectRoot, MAX_LINE)}`];
+        const lines = [`Project: ${printableLine(projectRoot, MAX_PATH_LINE)}`];
         if (items.length === 0) lines.push("No completed outcomes on this page.");
         for (const item of items) {
             const reason = item.reason ? ` (${item.reason})` : "";
@@ -406,7 +407,7 @@ async function render(
         },
         { exactIntegers: true },
     );
-    const answer = decodeSelected(raw);
+    const answer = decodeSelected(raw, parsed.causalIdentity);
     if (answer.kind !== "body") return { ok: false, text: refusalLines(answer, parsed.json) };
     const selected = answer.body;
     if (parsed.json) {
@@ -418,7 +419,7 @@ async function render(
     return {
         ok: true,
         text: [
-            `Project: ${printableLine(projectRoot, MAX_LINE)}`,
+            `Project: ${printableLine(projectRoot, MAX_PATH_LINE)}`,
             `Causal identity: ${selected.causal_identity}`,
             `Reference: ${printableLine(selected.reference.database_incarnation_id, MAX_IDENTITY_BYTES)} ${printableLine(selected.reference.candidate_id, MAX_IDENTITY_BYTES)} ${selected.reference.payload_digest}`,
             ...proposalLines(selected.proposal),

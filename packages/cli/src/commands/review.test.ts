@@ -18,7 +18,7 @@ function fullPage(limit: number): { page: Record<string, unknown>; next: string 
         causal_identity: `${"c".repeat(60)}${i.toString(16).padStart(4, "0")}`,
         generation: i,
         outcome: "complete",
-        selected: false,
+        selected: true,
     }));
     const next = items[items.length - 1].causal_identity;
     return { page: { kind: "page", items, next }, next };
@@ -420,6 +420,17 @@ describe("review list", () => {
                 '{"kind":"malformed","detail":"items is not a bounded array"}',
             ],
             [
+                {
+                    kind: "page",
+                    items: [
+                        { causal_identity: HEX, generation: 1, outcome: "failed", selected: true },
+                    ],
+                    next: null,
+                },
+                "The response could not be validated: item selected disagrees with its outcome.",
+                '{"kind":"malformed","detail":"item selected disagrees with its outcome"}',
+            ],
+            [
                 // A cursor on a page short of the requested 16 would skip outcomes.
                 {
                     kind: "page",
@@ -538,12 +549,14 @@ describe("review show", () => {
     test("a bounded identifier longer than a display line is rendered whole", async () => {
         const candidate = `c${"x".repeat(510)}`;
         const evidence = `e${"y".repeat(510)}`;
+        const limitation = `only ${"z".repeat(300)} was read`;
         const { deps, recorded } = harness({
             respond: () => {
                 const body = selectedBody();
                 const proposal = body.proposal as Record<string, unknown>;
                 proposal.target = { kind: "staged_candidate", candidate_id: candidate };
                 proposal.support = [{ evidence_id: evidence }];
+                proposal.limitations = [limitation];
                 return body;
             },
         });
@@ -551,6 +564,7 @@ describe("review show", () => {
         const text = recorded.stdout[0];
         expect(text).toContain(`Target: staged candidate ${candidate}`);
         expect(text).toContain(`  ${evidence}`);
+        expect(text).toContain(`  ${limitation}`);
         expect(text).not.toContain("...");
     });
 
@@ -711,6 +725,12 @@ describe("review show", () => {
                     b.kind = "page";
                 },
                 "kind is not recognized",
+            ],
+            [
+                (b) => {
+                    b.causal_identity = HEX_B;
+                },
+                "causal_identity is not the requested identity",
             ],
         ];
         for (const [mutate, detail] of malformed) {

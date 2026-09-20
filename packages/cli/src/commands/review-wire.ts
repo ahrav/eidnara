@@ -9,7 +9,7 @@ import { parseKernelState } from "@eidnara/opencode/shared/kernel-client/wire";
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 
 /** Kernel `MAX_REVIEW_TEXT_BYTES`: the longest text a staged proposal carries. */
-const MAX_TEXT_BYTES = 32 * 1024;
+export const MAX_TEXT_BYTES = 32 * 1024;
 /** Kernel `MAX_REVIEW_IDENTITY_BYTES`: the longest identifier a staged proposal carries. */
 export const MAX_IDENTITY_BYTES = 512;
 /** Kernel `MAX_REVIEW_REFERENCES`: the bound on support and contradictions together. */
@@ -159,6 +159,9 @@ function decodeItem(raw: unknown): ListItem | string {
     if (generation === null) return "item generation is not a u64";
     if (!oneOf(OUTCOMES, raw.outcome)) return "item outcome is not in the protocol vocabulary";
     if (typeof raw.selected !== "boolean") return "item selected is not a boolean";
+    // Only a `Complete` receipt carries a selection, so the two fields must agree.
+    if (raw.selected !== (raw.outcome === "complete"))
+        return "item selected disagrees with its outcome";
     const item: ListItem = {
         causal_identity: raw.causal_identity,
         generation,
@@ -288,11 +291,15 @@ function decodeProposal(raw: unknown): Proposal | string {
     return proposal;
 }
 
+/** `requested` is the identity the read named; the answer echoes it, so another identity is a skewed or unrelated proposal. */
 export function decodeSelected(
     raw: unknown,
+    requested: string,
 ): ReviewAnswer<(typeof READ_TERMINALS)[number], Selected> {
     return classify(raw, READ_TERMINALS, "proposal", (body) => {
         if (!isHex64(body.causal_identity)) return "causal_identity is not a hex64";
+        if (body.causal_identity !== requested)
+            return "causal_identity is not the requested identity";
         if (!isRecord(body.reference)) return "reference is not an object";
         const database_incarnation_id = boundedText(
             body.reference.database_incarnation_id,
