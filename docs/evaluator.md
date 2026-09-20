@@ -33,8 +33,8 @@ validates. Refusals are typed: `MissingField(name)`, `UnknownField(name)`,
 `ClaimBoundaryMismatch`, `ResidueIncomplete`, `ResidueContradiction` (a `Keep`
 entry or two rules for one field), `SampleOrderNotAPermutation`,
 `MalformedDigest`, `MalformedDecimal`, `RateOutOfRange` (an arm rate outside
-`[0, 1]`), `EmptyComponent` (an empty component version or tokenizer name or
-revision), `NotCanonical` (an integer outside the canonical safe range).
+`[0, 1]`), `EmptyComponent` (an empty component version, tokenizer name or
+revision, or attestation signer), `NotCanonical` (an integer outside the canonical safe range).
 `Manifest::validate` is public so a manifest built in code can be checked
 before it is written; it applies every check above except the key-set closure,
 so a manifest it accepts also parses and digests. Adding a field to `Manifest`
@@ -87,7 +87,8 @@ dirty flag, lockfile digest, rustc version, feature set, target triple, and a
 binary digest that is either `{"kind": "present", "sha256"}` or
 `{"kind": "absent", "reason"}`. The feature set is a `BTreeSet`, so its order
 cannot change the identity. A present digest equal to the SHA-256 of zero bytes
-is refused; it names no build. Empty version strings, a malformed
+is refused; it names no build, and an absent digest needs a non-empty reason.
+Empty version strings, a malformed
 `eligibility_spec_digest`, and a `config` or `scenario` value canonical JSON
 cannot encode are refused by `RunIdentity::validate`, so an identity it accepts
 also produces its run ID. There is no seed-only constructor.
@@ -106,7 +107,9 @@ also produces its run ID. There is no seed-only constructor.
 `SemanticTrace::record` refuses an observation whose field set differs from
 its schema (`UnclassifiedField`, `MissingField`), so classification is total;
 registering one type twice is refused (`DuplicateType`), declaring one field
-twice in a schema is refused (`DuplicateField`), as is a `Keep` or
+twice in a schema is refused (`DuplicateField`), a field not spelled in
+snake_case is refused (`FieldNotSnakeCase`) because the gates below match that
+spelling, as is a `Keep` or
 `Relative` value canonical JSON cannot encode (`NotCanonical`). A refused
 observation leaves the trace and its `Relative` numbering unchanged, so a
 recorded trace always digests.

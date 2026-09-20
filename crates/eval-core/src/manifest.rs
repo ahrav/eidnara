@@ -360,8 +360,15 @@ impl Manifest {
             }
         }
         let versions = &self.component_versions;
+        let signer = match &self.attestation {
+            Attestation::Signed { signer, .. } => signer,
+            Attestation::None => "-",
+        };
         for (field, text) in [
-            ("component_versions.event_schema", &versions.event_schema),
+            (
+                "component_versions.event_schema",
+                versions.event_schema.as_str(),
+            ),
             ("component_versions.reducer", &versions.reducer),
             ("component_versions.oracles", &versions.oracles),
             (
@@ -375,6 +382,7 @@ impl Manifest {
                 "tokenizer_profile.revision",
                 &self.tokenizer_profile.revision,
             ),
+            ("attestation.signer", signer),
         ] {
             if text.is_empty() {
                 return Err(ManifestError::EmptyComponent {

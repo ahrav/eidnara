@@ -410,6 +410,16 @@ fn identity_validate_refuses_what_the_run_id_refuses() {
         fractional.validate(),
         Err(IdentityError::NotCanonical(_))
     ));
+    let mut unexplained = build();
+    unexplained.binary_digest = BinaryDigest::Absent {
+        reason: String::new(),
+    };
+    assert_eq!(
+        unexplained.validate(),
+        Err(IdentityError::EmptyComponent {
+            field: "binary_digest.reason"
+        })
+    );
 }
 
 #[test]
@@ -601,6 +611,16 @@ fn attestation_is_a_tagged_value() {
             field: "attestation.signature_digest".to_string()
         })
     );
+    signed.attestation = Attestation::Signed {
+        signer: String::new(),
+        signature_digest: "9a".repeat(32),
+    };
+    assert_eq!(
+        parse_manifest(&signed.to_value()),
+        Err(ManifestError::EmptyComponent {
+            field: "attestation.signer".to_string()
+        })
+    );
 }
 
 #[test]
@@ -713,6 +733,24 @@ fn host_environment_and_incarnation_fields_are_never_kept() {
     }
     assert!(!is_never_kept("occurrence_id"));
     assert!(!is_never_kept("rapid_response"));
+    // The gates match snake_case spellings, so any other spelling is refused
+    // before the gates run.
+    for field in [
+        "hostName",
+        "writerPid",
+        "database-incarnation",
+        "",
+        "Now_ms",
+    ] {
+        assert_eq!(
+            ObservationSchema::new("spelled", [(field, Rule::Drop)]),
+            Err(ResidueError::FieldNotSnakeCase {
+                type_name: "spelled".to_string(),
+                field: field.to_string(),
+            }),
+            "{field:?}"
+        );
+    }
 }
 
 #[test]

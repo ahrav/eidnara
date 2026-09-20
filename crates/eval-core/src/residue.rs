@@ -46,6 +46,7 @@ pub enum ResidueError {
     HostFieldKept { type_name: String, field: String },
     DuplicateType { type_name: String },
     DuplicateField { type_name: String, field: String },
+    FieldNotSnakeCase { type_name: String, field: String },
     UnclassifiedField { type_name: String, field: String },
     MissingField { type_name: String, field: String },
     UnknownType { type_name: String },
@@ -75,14 +76,26 @@ pub struct ObservationSchema {
 }
 
 impl ObservationSchema {
-    /// Refuses a field declared twice, `Keep` on a host or incarnation field, and
-    /// `Keep` on a clock-named field unless [`CLOCK_FIELD_KEEP_ALLOWLIST`] names it.
+    /// Refuses a field not spelled in snake_case, a field declared twice, `Keep`
+    /// on a host or incarnation field, and `Keep` on a clock-named field unless
+    /// [`CLOCK_FIELD_KEEP_ALLOWLIST`] names it.
     pub fn new<'a>(
         type_name: &str,
         rules_iter: impl IntoIterator<Item = (&'a str, Rule)>,
     ) -> Result<Self, ResidueError> {
         let mut rules = BTreeMap::new();
         for (field, rule) in rules_iter {
+            // The gates below match snake_case spellings, so nothing else is admitted.
+            if field.is_empty()
+                || !field
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            {
+                return Err(ResidueError::FieldNotSnakeCase {
+                    type_name: type_name.to_string(),
+                    field: field.to_string(),
+                });
+            }
             if rules.insert(field.to_string(), rule).is_some() {
                 return Err(ResidueError::DuplicateField {
                     type_name: type_name.to_string(),

@@ -100,11 +100,14 @@ impl BuildRecord {
         require_hex("lockfile_digest", &self.lockfile_digest, 64)?;
         require_non_empty("rustc_version", &self.rustc_version)?;
         require_non_empty("target_triple", &self.target_triple)?;
-        if let BinaryDigest::Present { sha256 } = &self.binary_digest {
-            require_hex("binary_digest", sha256, 64)?;
-            if *sha256 == zero_bytes_sha256() {
-                return Err(IdentityError::ZeroBytesBinaryDigest);
+        match &self.binary_digest {
+            BinaryDigest::Present { sha256 } => {
+                require_hex("binary_digest", sha256, 64)?;
+                if *sha256 == zero_bytes_sha256() {
+                    return Err(IdentityError::ZeroBytesBinaryDigest);
+                }
             }
+            BinaryDigest::Absent { reason } => require_non_empty("binary_digest.reason", reason)?,
         }
         Ok(())
     }

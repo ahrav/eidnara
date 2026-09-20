@@ -108,11 +108,14 @@ Fresh versus aged transform goldens
 (`crates/daemon/src/transform/aged_goldens.rs`,
 `crates/daemon/testdata/aged-transform-golden.json`):
 
-- `aged_history_changes_the_tail_only_when_it_matches_the_prompt` runs the
+- `aged_history_attaches_a_hint_only_when_it_matches_the_prompt` runs the
   same prompt through the transform path in a fresh world and in a hand-built
   aged world, and compares the tail text and wire digest of each against the
   golden. One case's aged history matches the prompt and attaches a hint; the
-  other's is irrelevant and attaches none.
+  other's is irrelevant and attaches none, asserted directly on the hint
+  marker and through the golden equality. The aged tail still differs from
+  the fresh tail in its `§n§` ordinal, because the prompt is the seventh wire
+  item rather than the first; that ordinal is not the attachment.
 - `a_dropped_attachment_fails_the_aged_golden` drops the attachment through the
   production switch (`auto_search_enabled: false`) and expects the golden
   comparison to fail while the fresh arm still matches.
