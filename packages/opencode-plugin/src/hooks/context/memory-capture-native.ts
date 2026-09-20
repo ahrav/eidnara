@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { log } from "../../shared/logger";
@@ -13,11 +13,19 @@ import type { EidnaraDeps } from "./hook";
 const AGENT = "eidnara-memory-capture";
 const CLEANUP_MS = 10_000;
 const MAX_IN_FLIGHT = 16;
+/** `other` and `unknown` indicate an omitted `finish_reason`; the part checks determine
+ * whether the response text is usable. */
+const FAILED_FINISH_REASONS: ReadonlySet<string> = new Set([
+    "tool-calls",
+    "content-filter",
+    "error",
+]);
 /** Distinct (model, system prompt, output cap) projects kept warm; the least recently used is disposed beyond this. */
 const MAX_PROJECTS = 4;
 
 /** One private OpenCode project serves every capture with the same model, system prompt, and output cap. */
 interface PrivateProject {
+    key: string;
     directory: string;
     /** Settles once the directory is a real root with its authored config; rejects when setup failed. */
     ready: Promise<void>;
@@ -25,6 +33,8 @@ interface PrivateProject {
     started: boolean;
     inFlight: number;
     lastUsed: number;
+    /** Set when disposal found the project busy; the last capture to finish evicts it. */
+    retired: boolean;
 }
 
 interface CaptureState {
@@ -150,7 +160,8 @@ async function prepareProject(
         },
         stdio: "ignore",
     });
-    mkdirSync(join(directory, ".opencode"), { mode: 0o700 });
+    // The authored config lives at the root; a `.opencode` directory would make OpenCode's
+    // config loader install `@opencode-ai/plugin` into it from the npm registry.
     writeFileSync(
         join(directory, "opencode.json"),
         JSON.stringify({
@@ -180,12 +191,8 @@ async function prepareProject(
 }
 
 /** Disposes the project's instance before its directory goes away; failures are reported, not fatal. */
-async function evictProject(
-    client: EidnaraDeps["client"],
-    key: string,
-    project: PrivateProject,
-): Promise<void> {
-    state.byKey.delete(key);
+async function evictProject(client: EidnaraDeps["client"], project: PrivateProject): Promise<void> {
+    if (state.byKey.get(project.key) === project) state.byKey.delete(project.key);
     const failures: string[] = [];
     if (project.started)
         await withTimeout(
@@ -204,12 +211,12 @@ async function evictProject(
 
 function evictIdleProjects(client: EidnaraDeps["client"]): void {
     while (state.byKey.size > MAX_PROJECTS) {
-        let victim: [string, PrivateProject] | undefined;
-        for (const entry of state.byKey)
-            if (entry[1].inFlight === 0 && (!victim || entry[1].lastUsed < victim[1].lastUsed))
-                victim = entry;
+        let victim: PrivateProject | undefined;
+        for (const project of state.byKey.values())
+            if (project.inFlight === 0 && (!victim || project.lastUsed < victim.lastUsed))
+                victim = project;
         if (!victim) return;
-        void evictProject(client, victim[0], victim[1]);
+        void evictProject(client, victim);
     }
 }
 
@@ -223,14 +230,16 @@ function projectFor(
     const directory = realpathSync(mkdtempSync(join(tmpdir(), "eidnara-capture-")));
     state.projects.add(directory);
     const project: PrivateProject = {
+        key,
         directory,
         ready: Promise.resolve(),
         started: false,
         inFlight: 0,
         lastUsed: Date.now(),
+        retired: false,
     };
     project.ready = prepareProject(client, directory, work).catch((error) => {
-        state.byKey.delete(key);
+        if (state.byKey.get(key) === project) state.byKey.delete(key);
         removeDirectory(directory, []);
         throw error;
     });
@@ -238,9 +247,16 @@ function projectFor(
     return project;
 }
 
-/** Every project this process still owns is disposed and removed. */
+/** Busy projects remain available until their in-flight captures finish. */
 export async function disposeNativeCaptureProjects(client: EidnaraDeps["client"]): Promise<void> {
-    await Promise.all([...state.byKey].map(([key, project]) => evictProject(client, key, project)));
+    const projects = [...state.byKey.values()];
+    state.byKey.clear();
+    await Promise.all(
+        projects.map((project) => {
+            project.retired = true;
+            return project.inFlight === 0 ? evictProject(client, project) : Promise.resolve();
+        }),
+    );
 }
 
 /** Captures run in a warm private project; only the session is per capture. */
@@ -346,7 +362,7 @@ export function openCodeMemoryCaptureExecutor(
                 throw new NativeCaptureError("model_failed");
             }
             if (result.info.finish === "length") throw new NativeCaptureError("output_limit");
-            if (result.info.finish !== "stop" && result.info.finish !== "end_turn")
+            if (FAILED_FINISH_REASONS.has(result.info.finish ?? ""))
                 throw new NativeCaptureError("model_failed");
             const text = result.parts
                 .filter((part) => part.type === "text")
@@ -374,6 +390,7 @@ export function openCodeMemoryCaptureExecutor(
             // Cleanup failures never change the capture outcome; the answer is already final.
             if (cleanupFailures.length > 0)
                 log.warn("[eidnara] native memory capture cleanup incomplete", cleanupFailures);
+            if (project.retired && project.inFlight === 0) await evictProject(client, project);
         }
         if (failure) throw failure;
         if (!answer) throw new NativeCaptureError("model_failed");

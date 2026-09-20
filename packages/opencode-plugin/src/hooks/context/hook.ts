@@ -233,19 +233,26 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 variant: "warning",
             },
         });
+    /** One warning per outage: the toast repeats only after a checkpoint or drain succeeds again. */
+    let captureWarningShown = false;
     const warnCaptureIncomplete = (): void => {
+        if (captureWarningShown) return;
+        captureWarningShown = true;
         void withTimeout(
             Promise.resolve(notifyCaptureIncomplete()),
             HOST_SDK_READ_TIMEOUT_MS,
             "capture notification timed out",
         ).catch(() => undefined);
     };
+    const captureRecovered = (): void => {
+        captureWarningShown = false;
+    };
     // Model batches run detached from the idle checkpoint that schedules them, so the idle event
     // returns before any extraction work. One drain per completed turn sees the user's message
     // and the answer together.
     const memoryCaptureDrain = createMemoryCaptureDrain(moduleClient, executeCapture, {
         // `"pending"` leaves work for a later drain and is not a failure to report.
-        onSettled: () => undefined,
+        onSettled: captureRecovered,
         onFailed: (scope, error) => {
             sessionLog.warn(scope.sessionId, "memory capture drain failed:", error);
             warnCaptureIncomplete();
@@ -260,13 +267,18 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const captureWatermark = new BoundedSessionMap<string>(MAX_LIVE_USAGE_SESSIONS);
     /** Messages read back per later checkpoint before falling back to the whole transcript. */
     const CAPTURE_TAIL_MESSAGES = 32;
+    const captureDisabled = (): boolean =>
+        deps.config.memory?.enabled === false ||
+        deps.config.memory?.auto_promote === false ||
+        deps.config.memory?.auto_capture === false;
+    /** Capture excludes deleted and child sessions. Callers re-check after `sessionDirectoryFor`
+     * because that read can add `sessionId` to the child-session sets. */
+    const excludedFromCapture = (sessionId: string): boolean =>
+        deletedSessions.has(sessionId) ||
+        subagentSessions.has(sessionId) ||
+        internalChildSessions.has(sessionId);
     const checkpointUser = (sessionId: string, output: unknown): void => {
-        if (
-            deps.config.memory?.enabled === false ||
-            deps.config.memory?.auto_promote === false ||
-            deps.config.memory?.auto_capture === false
-        )
-            return;
+        if (captureDisabled()) return;
         try {
             const messages = [
                 ...openCodeCaptureMessages([
@@ -279,12 +291,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             if (messages.length === 0) return;
             const pending = (async () => {
                 const projectRoot = await sessionDirectoryFor(sessionId);
-                if (
-                    deletedSessions.has(sessionId) ||
-                    subagentSessions.has(sessionId) ||
-                    internalChildSessions.has(sessionId)
-                )
-                    return;
+                if (excludedFromCapture(sessionId)) return;
                 const model = liveModelBySession.get(sessionId);
                 await captureCheckpoint({
                     sessionId,
@@ -311,15 +318,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         }
     };
     const checkpointMemory = async (sessionId: string): Promise<void> => {
-        if (
-            deps.config.memory?.enabled === false ||
-            deps.config.memory?.auto_promote === false ||
-            deps.config.memory?.auto_capture === false ||
-            deletedSessions.has(sessionId) ||
-            subagentSessions.has(sessionId) ||
-            internalChildSessions.has(sessionId)
-        )
-            return;
+        if (captureDisabled() || excludedFromCapture(sessionId)) return;
         try {
             const model = liveModelKey(sessionId);
             if (!model) return;
@@ -353,7 +352,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                           since,
                           CAPTURE_TAIL_MESSAGES,
                       ) ?? (await readTranscript()));
-            if (deletedSessions.has(sessionId)) return;
+            if (excludedFromCapture(sessionId)) return;
             await captureCheckpoint({
                 ...scope,
                 messages: openCodeCaptureMessages(sourceMessages, {
@@ -362,6 +361,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             });
             const final = openCodeLastFinalMessageId(sourceMessages);
             if (final !== undefined) captureWatermark.set(sessionId, final);
+            captureRecovered();
             memoryCaptureDrain.schedule(scope);
         } catch (error) {
             log(

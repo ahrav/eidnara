@@ -390,6 +390,53 @@ describe("eidnara hook", () => {
             expect(client.tui.showToast).toHaveBeenCalledTimes(1);
         });
 
+        it("warns once per outage, not once per turn, and warns again after a recovery", async () => {
+            useTempDataHome("capture-warning-latch-");
+            let daemonUp = false;
+            const fake = createFakeModuleClient(({ method }) => {
+                if (!daemonUp) throw new Error("managed daemon demand failed: storage_unavailable");
+                return { state: method === "memory.capture.next" ? "ready" : "accepted" };
+            });
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            const idle = { event: { type: "session.idle", properties: { sessionID: SESSION } } };
+            for (let turn = 0; turn < 3; turn++) await hook.event(idle);
+            await hook.memoryCaptureDrain.settle();
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+            daemonUp = true;
+            await hook.event(idle);
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls.map((call) => call.method).slice(-2)).toEqual([
+                "memory.capture",
+                "memory.capture.next",
+            ]);
+            daemonUp = false;
+            await hook.event(idle);
+            await hook.memoryCaptureDrain.settle();
+            expect(client.tui.showToast).toHaveBeenCalledTimes(2);
+        });
+
+        it("skips a child session that the idle checkpoint's directory read classifies", async () => {
+            useTempDataHome("capture-restored-child-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "ready" : "accepted",
+            }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("child-answer", [{ type: "text", text: "A subagent decision." }]),
+            ]);
+            // After a plugin restart the child sets are empty; only the session read reveals the parent.
+            client.session.get = mock(async () => ({
+                data: { directory: "/project", parentID: "parent-session" },
+            })) as never;
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls).toHaveLength(0);
+            expect(client.tui.showToast).not.toHaveBeenCalled();
+        });
+
         it("offers only recent transcript messages for capture", async () => {
             useTempDataHome("capture-age-bound-");
             const fake = createFakeModuleClient(({ method }) => ({
