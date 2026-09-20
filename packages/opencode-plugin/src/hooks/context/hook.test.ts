@@ -189,7 +189,7 @@ async function expectSentinel(promise: Promise<unknown>, sentinel: string): Prom
 }
 
 describe("eidnara hook", () => {
-    it("queues user capture without blocking chat and awaits it before the final-text drain", async () => {
+    it("queues user capture without blocking chat and acknowledges it before the idle checkpoint", async () => {
         useTempDataHome("capture-user-");
         let release = (_value: { data: { directory: string } }) => {};
         const directory = new Promise<{ data: { directory: string } }>((resolve) => {
@@ -211,17 +211,22 @@ describe("eidnara hook", () => {
             },
         );
         expect(fake.calls).toHaveLength(0);
-        let finished = false;
-        const final = hook["experimental.text.complete"](
+        // The completed part neither checkpoints nor drains; the turn's idle event does both.
+        await hook["experimental.text.complete"](
             { sessionID: "capture-user", messageID: "native-answer", partID: "part" },
             { text: "Completed." },
-        ).then(() => {
-            finished = true;
-        });
+        );
+        expect(fake.calls).toHaveLength(0);
+        let finished = false;
+        const idle = hook
+            .event({ event: { type: "session.idle", properties: { sessionID: "capture-user" } } })
+            .then(() => {
+                finished = true;
+            });
         await Promise.resolve();
         expect(finished).toBe(false);
         release({ data: { directory: "/project" } });
-        await final;
+        await idle;
         await hook.memoryCaptureDrain.settle();
         expect(fake.calls.map((call) => call.method)).toEqual([
             "memory.capture",
@@ -326,24 +331,6 @@ describe("eidnara hook", () => {
             for (const texts of textsById.values()) expect(texts.size).toBe(1);
         });
 
-        it("resolves the final-text hook before the drain finishes", async () => {
-            useTempDataHome("capture-final-text-detached-");
-            const next = Promise.withResolvers<unknown>();
-            const fake = createFakeModuleClient(({ method }) =>
-                method === "memory.capture.next" ? next.promise : { state: "accepted" },
-            );
-            const { hook } = createCaptureHook(fake, []);
-            await hook["experimental.text.complete"](
-                { sessionID: SESSION, messageID: "native-answer", partID: "part" },
-                { text: "Completed." },
-            );
-            expect(fake.calls.map((call) => call.method)).toEqual(["memory.capture.next"]);
-            expect(hook.memoryCaptureDrain.pending("/project")).toBeDefined();
-            next.resolve({ state: "ready" });
-            await hook.memoryCaptureDrain.settle();
-            expect(hook.memoryCaptureDrain.pending("/project")).toBeUndefined();
-        });
-
         it("resolves the idle checkpoint before the drain finishes and coalesces reruns", async () => {
             useTempDataHome("capture-idle-detached-");
             const next = Promise.withResolvers<unknown>();
@@ -423,6 +410,46 @@ describe("eidnara hook", () => {
             expect(capturedMessages(fake)).toEqual([
                 { id: "recent-answer", role: "assistant", text: "A recent decision." },
             ]);
+        });
+
+        it("reads only the transcript tail after the first checkpoint and revisits unfinished answers", async () => {
+            useTempDataHome("capture-tail-read-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "ready" : "accepted",
+            }));
+            const transcript: Record<string, unknown>[] = [];
+            for (let turn = 0; turn < 40; turn++)
+                transcript.push(
+                    assistantMessage(`answer-${turn}`, [{ type: "text", text: `Fact ${turn}.` }]),
+                );
+            const { hook, client } = createCaptureHook(fake, transcript);
+            const limits: Array<number | undefined> = [];
+            client.session.messages = mock(async (input: { query?: { limit?: number } }) => {
+                limits.push(input.query?.limit);
+                const limit = input.query?.limit;
+                return { data: limit ? transcript.slice(-limit) : [...transcript] };
+            }) as never;
+            const idle = { event: { type: "session.idle", properties: { sessionID: SESSION } } };
+            await hook.event(idle);
+            expect(capturedMessages(fake)).toHaveLength(40);
+            // An answer still streaming when the idle read lands is not final; it must be offered later.
+            const running = assistantMessage("answer-40", [{ type: "text", text: "Fact 40." }]);
+            delete (running.info as Record<string, unknown>).time;
+            transcript.push(running);
+            await hook.event(idle);
+            expect(capturedMessages(fake)).toHaveLength(40);
+            (running.info as Record<string, unknown>).time = {
+                created: Date.now(),
+                completed: Date.now(),
+            };
+            transcript.push(assistantMessage("answer-41", [{ type: "text", text: "Fact 41." }]));
+            await hook.event(idle);
+            await hook.memoryCaptureDrain.settle();
+            expect(capturedMessages(fake).slice(40)).toEqual([
+                { id: "answer-40", role: "assistant", text: "Fact 40." },
+                { id: "answer-41", role: "assistant", text: "Fact 41." },
+            ]);
+            expect(limits).toEqual([undefined, 32, 32]);
         });
     });
 

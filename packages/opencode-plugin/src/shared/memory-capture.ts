@@ -148,6 +148,36 @@ export function* openCodeCaptureMessages(
     }
 }
 
+/** The id of the last message whose text can no longer change: a user message, or an
+ * assistant message that completed or failed. An in-progress message never advances it. */
+export function openCodeLastFinalMessageId(messages: Iterable<unknown>): string | undefined {
+    let last: string | undefined;
+    for (const value of messages) {
+        const info = record(record(value)?.info);
+        if (!info || typeof info.id !== "string") continue;
+        if (
+            info.role === "user" ||
+            info.error !== undefined ||
+            typeof record(info.time)?.completed === "number"
+        )
+            last = info.id;
+    }
+    return last;
+}
+
+/** The messages of `tail` after the one with id `since`. A tail that is not exactly
+ * `limit` long is the whole transcript. `undefined` means `since` fell off a full tail,
+ * so the caller must read the whole transcript. */
+export function openCodeMessagesSince(
+    tail: unknown[],
+    since: string,
+    limit: number,
+): unknown[] | undefined {
+    const index = tail.findIndex((value) => record(record(value)?.info)?.id === since);
+    if (index >= 0) return tail.slice(index + 1);
+    return tail.length === limit ? undefined : tail;
+}
+
 function stateOf(response: unknown): string | undefined {
     return response !== null &&
         typeof response === "object" &&

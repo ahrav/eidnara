@@ -6,6 +6,8 @@ import {
     createMemoryCaptureCheckpoint,
     memoryAutoCaptureEnabled,
     openCodeCaptureMessages,
+    openCodeLastFinalMessageId,
+    openCodeMessagesSince,
     piCaptureMessages,
 } from "./memory-capture";
 
@@ -241,5 +243,23 @@ describe("capture native source adapters", () => {
             "undated",
         ]);
         expect(CAPTURE_MAX_AGE_MS).toBe(48 * 60 * 60 * 1000);
+    });
+
+    it("advances the transcript watermark only past final messages and slices tails after it", () => {
+        const user = { info: { id: "u1", role: "user" }, parts: [] };
+        const done = { info: { id: "a1", role: "assistant", time: { completed: 5 } }, parts: [] };
+        const failed = { info: { id: "a2", role: "assistant", error: { name: "x" } }, parts: [] };
+        const running = { info: { id: "a3", role: "assistant", time: { created: 6 } }, parts: [] };
+        expect(openCodeLastFinalMessageId([user, done, running])).toBe("a1");
+        expect(openCodeLastFinalMessageId([user, failed])).toBe("a2");
+        expect(openCodeLastFinalMessageId([running])).toBeUndefined();
+        expect(openCodeLastFinalMessageId(["garbled", null])).toBeUndefined();
+        const tail = [user, done, failed, running];
+        expect(openCodeMessagesSince(tail, "a1", 4)).toEqual([failed, running]);
+        expect(openCodeMessagesSince(tail, "a3", 4)).toEqual([]);
+        // A full-length tail without the watermark means it fell off; a shorter one is the whole transcript.
+        expect(openCodeMessagesSince(tail, "gone", 4)).toBeUndefined();
+        expect(openCodeMessagesSince(tail, "gone", 8)).toEqual(tail);
+        expect(openCodeMessagesSince(tail, "gone", 2)).toEqual(tail);
     });
 });
