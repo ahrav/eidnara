@@ -1095,15 +1095,22 @@ impl EvidenceBroker {
         alias: &str,
         now_ms: i64,
     ) -> Result<Option<String>, Refusal> {
-        self.revalidate_under(store, alias, now_ms, HeldUnder::Execution(&self.binding))
+        self.revalidate_under(
+            store,
+            alias,
+            now_ms,
+            now_ms,
+            HeldUnder::Execution(&self.binding),
+        )
     }
 
-    /// [`Self::revalidate`] with the hold that protects the disclosed inputs named explicitly: the execution hold while the run investigates, or the review hold once settlement has moved retention there and the execution hold is released.
+    /// [`Self::revalidate`] with the hold that protects the disclosed inputs named explicitly: the execution hold while the run investigates, or the review hold once settlement has moved retention there and the execution hold is released. A staged subject's queue deadline is judged against `staged_at`, not the clock: the run's own time for a live run, the selection time for a selected read, so a subject whose queue deadline passed after selection stands as long as the review hold does, as the proposal row itself does.
     pub fn revalidate_under(
         &self,
         store: &KernelStore,
         alias: &str,
         now_ms: i64,
+        staged_at: i64,
         hold: HeldUnder<'_>,
     ) -> Result<Option<String>, Refusal> {
         let now_ms = now_ms.max(crate::now_ms());
@@ -1125,8 +1132,11 @@ impl EvidenceBroker {
                     )
                     .map_err(|error| refuse(Some(alias), hold_refusal(error)))?;
                 let row = store
-                    .read_review_input(reference, binding, now_ms)
+                    .read_selected_review_input(reference, staged_at)
                     .map_err(|error| refuse(Some(alias), staged_refusal(error)))?;
+                if row.binding != *binding {
+                    return Err(refuse(Some(alias), RefusalCode::Scope));
+                }
                 self.gate_destination(alias, row.sensitivity)?;
                 Ok(None)
             }

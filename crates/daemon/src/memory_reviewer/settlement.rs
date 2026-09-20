@@ -251,6 +251,7 @@ impl Settlement<'_> {
             hold,
             destination: broker.binding().destination,
             now,
+            staged_at: now,
         };
         match dependencies::revalidate(&revalidation, &reference, &row, &attempts) {
             Ok(_) => {}
@@ -491,7 +492,7 @@ impl Settlement<'_> {
     ) -> Result<Vec<String>, Verdict> {
         let mut evidence = Vec::new();
         for alias in broker.ledger.disclosed() {
-            match broker.revalidate_under(self.store, alias.as_str(), now, hold) {
+            match broker.revalidate_under(self.store, alias.as_str(), now, now, hold) {
                 Ok(Some(id)) => evidence.push(id),
                 Ok(None) => {}
                 Err(refusal) => return Err(Verdict::from_refusal(refusal.code)),
@@ -937,6 +938,7 @@ fn read_selected_proposal_inner(
         },
         destination: ArtifactDestination::Local,
         now,
+        staged_at: selected_at,
     };
     if let Err(verdict) = dependencies::revalidate(&revalidation, &reference, &row, &attempts) {
         // Every member is judged under the hold, so a hold that ended after the lookup above refuses through the members. That is the same review expiry the lookup would have reported a moment later (it excludes released, purge-degraded, and expired holds alike), and it is reported as such rather than as the member refusal it surfaced through.

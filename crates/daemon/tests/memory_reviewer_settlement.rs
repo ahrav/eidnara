@@ -2163,6 +2163,7 @@ fn recovery_after_the_acquisition_reference_lapsed_reads_the_moved_reference() {
             &fixture.store,
             &alias,
             after_reference,
+            after_reference,
             HeldUnder::Review {
                 hold: &hold,
                 binding: &review,
@@ -2176,6 +2177,7 @@ fn recovery_after_the_acquisition_reference_lapsed_reads_the_moved_reference() {
             .revalidate_under(
                 &fixture.store,
                 &alias,
+                after_reference,
                 after_reference,
                 HeldUnder::Execution(broker.binding()),
             )
@@ -2279,6 +2281,14 @@ fn recovery_revalidates_a_staged_subject_under_the_review_hold() {
         Settled::Published(reference.clone())
     );
     assert_eq!(fixture.read(fixture.now + 6).unwrap().reference, reference);
+    // The subject row shares the job's queue deadline. A selected result outlives that deadline for as long as its review hold does, and so must the subject it was judged on: it is read against the selection time, as the proposal row is, not live.
+    assert_eq!(
+        fixture
+            .read(fixture.now + 24 * HOUR_MS + 1)
+            .map(|selected| selected.reference),
+        Ok(reference),
+        "a staged subject past its queue deadline still stands for a selected read"
+    );
 }
 
 #[test]

@@ -112,6 +112,8 @@ pub struct Revalidation<'a> {
     pub hold: HeldUnder<'a>,
     pub destination: kernel::ArtifactDestination,
     pub now: i64,
+    /// The instant a staged subject's queue deadline is judged at: `now` for an adoption, the selection time for a selected read.
+    pub staged_at: i64,
 }
 
 /// Revalidates a sealed proposal row from its dependency record alone. Refuses a row without a record, a record whose canonical bytes do not re-encode to their digest, a record whose marker is not a completed attempt at the row's generation with the recorded digests, any member whose live kind, revision, owner, owner revision, scope, or egress no longer matches, and a record whose members do not produce exactly the payload's disclosed inputs and ancestry. Returns the disclosed evidence ids the hold validated.
@@ -178,6 +180,7 @@ pub fn revalidate(
                 revalidation.store,
                 alias.as_str(),
                 revalidation.now,
+                revalidation.staged_at,
                 revalidation.hold,
             )
             .map_err(|refusal| Verdict::from_refusal(refusal.code))?
