@@ -1550,6 +1550,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn distinct_replacement_targets_survive_quotation_collapse_as_separate_memories() {
+        let mut first = memory("Staging listens on 4321.");
+        first.quote = "Use port 4321 for staging.".into();
+        first.replaces = Some("mem_port".into());
+        let mut second = memory("The staging port changed.");
+        second.quote = first.quote.clone();
+        second.replaces = Some("mem_staging".into());
+        let collapsed = native::collapse_quotations("User stated", vec![first, second]);
+        let mut targets: Vec<&str> = collapsed
+            .iter()
+            .filter_map(|memory| memory.replaces.as_deref())
+            .collect();
+        targets.sort_unstable();
+        assert_eq!(
+            targets,
+            vec!["mem_port", "mem_staging"],
+            "one quotation superseding two memories keeps both targets"
+        );
+        assert!(
+            collapsed
+                .iter()
+                .all(|memory| memory.content == "User stated: Use port 4321 for staging.")
+        );
+    }
+
     fn current(kernel: &kernel::KernelStore, project: &ProjectBinding) -> ExistingCaptureMemory {
         let read = kernel_routes::read::read_visible(
             kernel,

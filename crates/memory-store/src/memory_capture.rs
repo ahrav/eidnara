@@ -333,11 +333,11 @@ impl MemoryStore {
 
     /// Records one dispatch for a whole batch, or none: a source swept or
     /// prepared since the queue was read leaves every other member untouched.
+    /// Each `(job_id, retry_at_ms)` pair sets that job's own retry deadline.
     pub fn begin_memory_capture_attempts(
         &self,
         project: &str,
-        jobs: &[&str],
-        retry_at_ms: i64,
+        jobs: &[(&str, i64)],
     ) -> Result<bool, MemoryStoreError> {
         if jobs.is_empty() || jobs.len() > MAX_CAPTURE_BATCH_JOBS {
             return Err(MemoryStoreError::Serde(
@@ -345,23 +345,23 @@ impl MemoryStore {
             ));
         }
         let mut write = PreparedWrite::new(DurableWriteFamily::MemoryCapture);
-        for job in jobs {
+        for (job, _) in jobs {
             write.domain_owner("project", project, *job);
         }
         write.existing_identity("project", project)?;
-        for job in jobs {
+        for (job, _) in jobs {
             write.existing_identity("job_id", job)?;
         }
         write.skip_audit_when_only_clean_identities();
         write.execute(&self.inner, |tx| {
             let tx = tx.tx();
-            for job in jobs {
+            for (job, _) in jobs {
                 let eligible: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM memory_capture_jobs WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL)", params![project,job], |row| row.get(0))?;
                 if !eligible {
                     return Ok(WriteDisposition::Replay(false));
                 }
             }
-            for job in jobs {
+            for (job, retry_at_ms) in jobs {
                 tx.execute("UPDATE memory_capture_jobs SET attempts=attempts+1,retry_at_ms=?3 WHERE project=?1 AND job_id=?2", params![project,job,retry_at_ms])?;
             }
             Ok(WriteDisposition::Applied(true))

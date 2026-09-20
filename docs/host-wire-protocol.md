@@ -849,7 +849,8 @@ Before freezing, each memory's text becomes its exact supporting quotation,
 prefixed with `User stated:` or `Assistant reported:` from the native role.
 The model's paraphrase is not published. Memories of one source that share a
 category and quotation freeze as one memory, keeping any replacement target
-among them. Relevant and sufficiently complete quote selection still depends
+among them; distinct replacement targets keep one memory each, since a
+memory supersedes exactly one predecessor. Relevant and sufficiently complete quote selection still depends
 on model quality. Only user-source proposals may replace capture-owned
 memories; parsing and kernel publication both enforce this rule, and one
 target may be replaced once per batch whichever source claims it. User intent
@@ -862,7 +863,8 @@ Each source permits three recorded model/output failures before it pauses
 for six hours; the pause ends with a fresh failure allowance. Cancellation
 and unavailable native auth do not consume that allowance. Dispatch counts
 survive restart and drive exponential retry delay from one second to 128
-seconds. A new store owner clears pauses and resets failures only for
+seconds; issued work carries its deadline, so a lease lost to a restart is
+retried after that delay, not at once. A new store owner clears pauses and resets failures only for
 unfinished, unprepared sources while preserving dispatch counts and deadlines.
 A store refusal of a frozen plan is a recorded model/output failure of that
 source alone; other sources in the batch still commit. A source whose prompt

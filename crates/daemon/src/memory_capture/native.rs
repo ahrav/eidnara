@@ -214,10 +214,22 @@ impl HandlerCore {
             }
             // One dispatch for the whole batch or none: a source swept since
             // the queue was read leaves the others' counts untouched.
-            let job_ids: Vec<&str> = plan.jobs.iter().map(|job| job.job_id.as_str()).collect();
+            // Issued work carries its own retry deadline, so a lease lost to a
+            // restart is retried after the dispatch backoff, not at once.
+            let now = now_ms();
+            let jobs: Vec<(&str, i64)> = plan
+                .jobs
+                .iter()
+                .map(|job| {
+                    (
+                        job.job_id.as_str(),
+                        now.saturating_add(capture_retry_delay_ms(job.attempts + 1)),
+                    )
+                })
+                .collect();
             match work
                 .store
-                .begin_memory_capture_attempts(&work.project(), &job_ids, now_ms())
+                .begin_memory_capture_attempts(&work.project(), &jobs)
             {
                 Ok(true) => {}
                 Ok(false) => return respond(json!({"state":"pending"})),
@@ -351,7 +363,8 @@ impl HandlerCore {
 
 /// Memories of one source sharing a category and quotation freeze as one.
 /// A replacement target survives the collapse so the correction it carries
-/// is not lost.
+/// is not lost; one quotation superseding two memories keeps one entry per
+/// target, since a decision supersedes exactly one predecessor.
 pub(super) fn collapse_quotations(
     attribution: &str,
     proposed: Vec<CapturedMemory>,
@@ -359,10 +372,13 @@ pub(super) fn collapse_quotations(
     let mut memories: Vec<CapturedMemory> = Vec::new();
     for mut memory in proposed {
         memory.content = format!("{attribution}: {}", memory.quote);
-        match memories
-            .iter_mut()
-            .find(|kept| kept.category == memory.category && kept.content == memory.content)
-        {
+        match memories.iter_mut().find(|kept| {
+            kept.category == memory.category
+                && kept.content == memory.content
+                && (kept.replaces.is_none()
+                    || memory.replaces.is_none()
+                    || kept.replaces == memory.replaces)
+        }) {
             Some(kept) => {
                 if kept.replaces.is_none()
                     && (kept.duplicate_of.is_none() || memory.replaces.is_some())

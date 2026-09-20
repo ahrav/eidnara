@@ -22661,6 +22661,11 @@ mod tests {
             .lock()
             .unwrap()
             .expire_ready_for_test();
+        // By the time a 180 s lease has lapsed, the issued dispatch's retry
+        // deadline (at most 128 s) has passed too; the clock does not run here.
+        store
+            .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+            .unwrap();
         let second = tool_body(
             handler
                 .handle_native_capture_next(test_route(7), &next)
@@ -23163,6 +23168,43 @@ mod tests {
             unprepared.attempts, 0,
             "a lapsed reservation issues no work and records no dispatch"
         );
+    }
+
+    #[tokio::test]
+    async fn issued_work_carries_its_retry_deadline_across_a_lost_lease() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "work"
+        );
+        // A restart forgets the lease; the durable row alone must carry the backoff.
+        assert!(
+            store
+                .pending_memory_captures(project_key, "pi", now_ms())
+                .unwrap()
+                .is_empty(),
+            "an issued dispatch is not immediately reclaimable once its lease is lost"
+        );
+        let job = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(job.attempts, 1);
     }
 
     #[tokio::test]
