@@ -1,6 +1,6 @@
 //! Settlement of one MemoryReviewer run across the Kernel and Memory Store, and the read that follows it.
 //!
-//! Settlement copies the run's attempt terminals out of the Memory Store, releases that read, and derives the unknown-disclosure scalar before anything else; an unknown attempt or a truncated disclosure permits only a content-free terminal. It then revalidates the full disclosed union through the Kernel at the current clock, stages the proposal at the provisional identity the run reserved, moves retention from the execution hold to a review hold in one Kernel envelope, and only then completes the task lease and receipt in the Memory Store's fenced transaction. That completion is the store's to decide: a receipt cancelled before it, or completed at or after its run deadline, records `cancelled` or `expired` in place of whatever the run produced, and settlement reads the receipt back to report what was recorded. A receipt that another generation already owns writes nothing, so a late worker's staged result stays private: fenced before its hold transfer, the row expires under its original queue deadline; fenced after it, the row's deadline has already moved to the review expiry and only moves later, so the loser releases the review hold and the unselected row lapses there. Completed staging is not selection.
+//! Settlement copies the run's attempt terminals out of the Memory Store, releases that read, and derives the unknown-disclosure scalar before anything else; an unknown attempt or a truncated disclosure permits only a content-free terminal. It then revalidates the full disclosed union through the Kernel at the current clock, stages the proposal at the provisional identity the run reserved, moves retention from the execution hold to a review hold in one Kernel envelope, and only then completes the task lease and receipt in the Memory Store's fenced transaction. That completion is the store's to decide: a receipt cancelled before it, or completed at or after its run deadline, records `cancelled` or `expired` in place of whatever the run produced, and settlement reads the receipt back to report what was recorded. A receipt that another generation already owns writes nothing, so a late worker's staged result stays private: fenced before or after its hold transfer, the row keeps its original queue deadline and expires there, and the loser releases the review hold it transferred. Completed staging is not selection.
 //!
 //! Reads follow the same copy-then-enter order in reverse: the completed receipt is copied and the Memory Store released before the Kernel is entered; the Kernel row must match every selected field and both incarnations; the review hold must be live; and every disclosed input is revalidated before content is returned. Completion never freezes eligibility.
 
@@ -104,7 +104,7 @@ impl Settlement<'_> {
         {
             return Err(SettlementError::BindingMismatch);
         }
-        // Q8: the staged proposal keeps the job's immutable queue deadline until selection moves it to the review expiry.
+        // Q8 and Q27: the staged proposal carries the job's immutable queue deadline. Selection never moves it; a selected result is read against its selection time and its live review hold.
         let queue_deadline_at = self
             .ledger
             .lookup_memory_reviewer_job(self.project, &run.subject)
@@ -726,7 +726,7 @@ pub fn list_review_outcomes(
     Ok(ReviewOutcomePage { outcomes, next })
 }
 
-/// Reads the proposal the job's completed receipt selects. The proposal row carries the binding its settlement staged it under; the read requires that binding to name the selection's project digest and this job's generation as the proposal owner, and a row bound otherwise is a scope mismatch. Nothing is rebuilt from the job row: the subject's own row keeps its queue deadline, while the selected proposal's row moves with the review window.
+/// Reads the proposal the job's completed receipt selects. The proposal row carries the binding its settlement staged it under; the read requires that binding to name the selection's project digest and this job's generation as the proposal owner, and a row bound otherwise is a scope mismatch. The row's queue deadline is judged against the receipt's completion time, which the Memory Store fenced against that same deadline, so a result selected while its queue was live stays readable afterward exactly as long as its review hold is live and every disclosed input still passes local policy.
 pub fn read_selected_proposal(
     store: &KernelStore,
     ledger: &MemoryStore,
@@ -773,10 +773,15 @@ fn read_selected_proposal_inner(
         .memory_reviewer_store_incarnation()
         .map_err(|error| ReadRefusal::Store(error.to_string()))?;
     // The Memory Store is released; everything below is the Kernel's.
-    let (selected_generation, selection) = match (receipt.terminal, receipt.selected) {
-        (Some(MemoryReviewerReceiptTerminal::Complete), Some(selected)) => selected,
-        _ => return Err(ReadRefusal::NotSelected),
-    };
+    let (selected_generation, selection, selected_at) =
+        match (receipt.terminal, receipt.selected, receipt.completed_at_ms) {
+            (
+                Some(MemoryReviewerReceiptTerminal::Complete),
+                Some((generation, selection)),
+                Some(at),
+            ) => (generation, selection, at),
+            _ => return Err(ReadRefusal::NotSelected),
+        };
     if receipt.database_incarnation_id != live_memstore {
         return Err(ReadRefusal::IncarnationMismatch);
     }
@@ -802,17 +807,17 @@ fn read_selected_proposal_inner(
         ReviewReadError::Refused(ReviewReadRefusal::IncarnationMismatch) => {
             ReadRefusal::IncarnationMismatch
         }
-        // Selection moved the row's deadline to the review expiry, so a lapsed deadline on a selected row is the review window ending.
-        ReviewReadError::Refused(ReviewReadRefusal::Expired) => ReadRefusal::ReviewExpired,
+        // The row's deadline is judged against the selection time: a selection dated at or after the queue deadline is one the Memory Store could not have recorded, so it is a selection the read cannot trust.
+        ReviewReadError::Refused(ReviewReadRefusal::Expired) => ReadRefusal::SelectionMismatch,
         ReviewReadError::Refused(refusal) => ReadRefusal::Kernel(refusal),
         ReviewReadError::Invalid => ReadRefusal::SelectionMismatch,
         ReviewReadError::Store(error) => ReadRefusal::Store(error.to_string()),
     };
-    let binding = store
-        .staged_review_binding(&reference, now)
+    let row = store
+        .read_selected_review_input(&reference, selected_at)
         .map_err(refused)?;
-    if binding.project_digest != run.project_digest
-        || binding.owner
+    if row.binding.project_digest != run.project_digest
+        || row.binding.owner
             != (ReviewOwner::Proposal {
                 job_id: run.subject.clone(),
                 generation: run.generation,
@@ -820,9 +825,6 @@ fn read_selected_proposal_inner(
     {
         return Err(ReadRefusal::Kernel(ReviewReadRefusal::ScopeMismatch));
     }
-    let row = store
-        .read_review_input(&reference, &binding, now)
-        .map_err(refused)?;
     // Review rows are classified `Sensitive` by construction; a row the Kernel classifies `Secret` (including a stored class this build does not recognize) is refused as a local read rather than returned on the strength of that construction.
     if row.sensitivity == kernel::Sensitivity::Secret {
         return Err(ReadRefusal::Dependency(RefusalCode::PolicyBlocked));

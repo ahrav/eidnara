@@ -1,5 +1,6 @@
 //! The MemoryReviewer's operator surface and expiry maintenance: one task per data home samples content-free ledger facts from the Memory Store into the `metrics.memory_reviewer` block and runs the kind-specific cleanup between samples. The Memory Store closes jobs and frozen selections past their queue deadlines with recorded terminal outcomes. The Kernel retires expired MemoryReviewer-only captures, then abandons expired staging runs and review inputs, releases capture pins, and reclaims unreferenced artifacts through its own staging maintenance. Neither sweep touches a live reservation, an accepted dependency, or an independent original: the Memory Store spares receipts in progress, and the Kernel abandons only runs past their deadline and deletes only terminal rows past retention.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -229,6 +230,73 @@ pub struct Pass {
     pub healthy: bool,
 }
 
+/// Releases every live review hold of this Memory Store incarnation whose result no completed receipt selects and no in-progress receipt can still select. A hold survives the transfer envelope on its own deadline, so a receipt the sweep closed, a losing generation, or a settlement that failed to release would otherwise keep evidence held until the review expiry; the queue deadline the row keeps already makes such a result unreadable, and this pass ends its retention. A hold of another store incarnation is left alone: a Kernel restored beside a replaced store has no receipt for any of them, and that absence is not orphaning. `cancelled` is read before every Kernel release; `None` means it fired, and the releases already made keep their effects. Otherwise returns the number released.
+pub fn reconcile_review_holds(
+    store: &MemoryStore,
+    kernel: &kernel::KernelStore,
+    now_ms: i64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<usize>, String> {
+    let incarnation = store
+        .memory_reviewer_store_incarnation()
+        .map_err(|error| error.to_string())?;
+    // The Kernel admits at most this many active holds host-wide, so one listing covers every live review hold.
+    let holds: Vec<_> = kernel
+        .list_active_review_holds(now_ms, kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|hold| hold.binding.memstore_incarnation == incarnation)
+        .collect();
+    if holds.is_empty() {
+        return Ok(Some(0));
+    }
+    // Both Memory Store sets are read once, ahead of any Kernel release, so filtering the holds performs no store probes; the selected set is asked for the listed holds' candidates only, so its size is bounded by the hold cap, not by the receipt ledger. The pending key carries no project: a receipt row names the Memory Store project, not the Kernel project digest of the root it ran under, so a same-identity receipt in another project keeps this project's hold until that receipt completes or the hold expires. Retention is the safe side; a release a live settlement still needs is the one this pass must never make.
+    let pending: HashSet<(String, u64)> = store
+        .in_progress_memory_reviewer_receipts()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(causal_identity, generation)| {
+            (
+                kernel::provisional_result_identity(&causal_identity, generation).candidate_id,
+                generation,
+            )
+        })
+        .collect();
+    let selected: HashSet<(String, String, u64)> = store
+        .selected_memory_reviewer_results(holds.iter().map(|hold| hold.binding.subject.as_str()))
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect();
+    let orphaned: Vec<_> = holds
+        .into_iter()
+        .filter(|hold| {
+            let binding = &hold.binding;
+            !pending.contains(&(binding.subject.clone(), binding.generation))
+                && !selected.contains(&(
+                    binding.project_digest.clone(),
+                    binding.subject.clone(),
+                    binding.generation,
+                ))
+        })
+        .collect();
+    let mut released = 0;
+    for hold in orphaned {
+        if cancelled() {
+            return Ok(None);
+        }
+        match kernel.release_review_hold(&hold.hold_id, &hold.binding) {
+            Ok(()) => released += 1,
+            // Released or expired between the listing and this call: nothing left to end.
+            Err(kernel::MemoryReviewerHoldError::Refused(
+                kernel::MemoryReviewerHoldRefusal::Released
+                | kernel::MemoryReviewerHoldRefusal::Expired,
+            )) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(Some(released))
+}
+
 /// Returns whether capture expiry or staging maintenance advanced, or `None` when `cancelled` fired before a step.
 fn kernel_slice(
     kernel: &kernel::KernelStore,
@@ -292,6 +360,21 @@ pub fn sweep_and_sample(
     };
     let mut advanced = swept_jobs + swept_selections > 0;
     if let Some(kernel) = kernel {
+        if cancelled() {
+            return None;
+        }
+        // A reconciliation failure is a failed step, but the Kernel's capture expiry, staging maintenance, and artifact reclamation below still run before the pass reports it.
+        let reconciled = match reconcile_review_holds(store, kernel, now_ms, cancelled) {
+            Ok(Some(released)) => {
+                advanced |= released > 0;
+                true
+            }
+            Ok(None) => return None,
+            Err(error) => {
+                eprintln!("daemon: memory reviewer hold reconciliation failed: {error}");
+                false
+            }
+        };
         match kernel_slice(kernel, now_ms, cancelled) {
             Ok(Some(slice_advanced)) => advanced |= slice_advanced,
             Ok(None) => return None,
@@ -299,6 +382,9 @@ pub fn sweep_and_sample(
                 eprintln!("daemon: kernel staging maintenance failed: {error:?}");
                 return Some(unavailable(advanced));
             }
+        }
+        if !reconciled {
+            return Some(unavailable(advanced));
         }
     }
     if cancelled() {

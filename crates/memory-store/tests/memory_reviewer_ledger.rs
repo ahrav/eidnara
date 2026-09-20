@@ -2255,6 +2255,136 @@ fn a_receipt_binds_only_a_well_formed_kernel_incarnation_that_matches_its_staged
     ));
 }
 
+/// A receipt begun in the last two minutes of its queue has a run deadline past the queue deadline. Completion is fenced on the queue, so nothing can select the result after it; the sweep closes the receipt at the queue deadline instead of shielding the job until the run deadline.
+#[test]
+fn the_sweep_closes_an_in_progress_receipt_at_the_queue_deadline_before_its_run_deadline() {
+    let fixture = Fixture::open();
+    let queue_deadline = T0 + MEMORY_REVIEWER_QUEUE_LIFETIME_MS;
+    let late = queue_deadline - 60_000;
+    let claim = fixture.claim("acq-1", "worker-a", late).unwrap();
+    let MemoryReviewerBeginOutcome::Begun(begun) = fixture.begin(&claim, late) else {
+        panic!("first claim begins")
+    };
+    assert!(
+        begun.run_deadline_ms > queue_deadline,
+        "the run deadline outlives the queue deadline"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .expire_memory_reviewer_work(queue_deadline - 1)
+            .unwrap(),
+        (0, 0),
+        "inside both deadlines the receipt shields its job"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .expire_memory_reviewer_work(queue_deadline)
+            .unwrap(),
+        (1, 0),
+        "the queue deadline closes the receipt and the job together"
+    );
+    let closed = receipt(&fixture);
+    assert_eq!(
+        closed.terminal,
+        Some(MemoryReviewerReceiptTerminal::Expired)
+    );
+    assert_eq!(closed.completed_at_ms, Some(queue_deadline));
+    assert!(closed.selected.is_none());
+    assert_eq!(
+        fixture
+            .store
+            .lookup_memory_reviewer_job(PROJECT, &fixture.identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Expired)
+    );
+    // An expired terminal result is neither selected nor pending.
+    assert!(
+        fixture
+            .store
+            .selected_memory_reviewer_results(["review-result:any"])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .store
+            .in_progress_memory_reviewer_receipts()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A completed selection is listed as one exact triple; a hold matches only its project digest, candidate, and generation.
+#[test]
+fn a_selected_result_answers_only_for_its_project_digest_and_generation() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    fixture.completed_attempt(1, &claim, T0);
+    let digest = "d".repeat(64);
+    let selection = ResultSelection {
+        candidate_id: "review-result:selected".to_string(),
+        payload_digest: "e".repeat(64),
+        project_digest: digest.clone(),
+    };
+    assert!(matches!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            MemoryReviewerReceiptTerminal::Complete,
+            Some(&selection),
+            T0 + 5,
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Applied { .. }
+    ));
+    let selected = fixture
+        .store
+        .selected_memory_reviewer_results(["review-result:selected", "review-result:other"])
+        .unwrap();
+    assert_eq!(
+        selected,
+        vec![(digest.clone(), "review-result:selected".to_string(), 1)]
+    );
+    // The answer is bounded by the asked-for candidates: a listing that names other candidates carries nothing about this one.
+    assert!(
+        fixture
+            .store
+            .selected_memory_reviewer_results(["review-result:other"])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .store
+            .selected_memory_reviewer_results([])
+            .unwrap()
+            .is_empty()
+    );
+    let contains = |digest: &str, candidate: &str, generation: u64| {
+        selected.contains(&(digest.to_string(), candidate.to_string(), generation))
+    };
+    assert!(contains(&digest, "review-result:selected", 1));
+    assert!(!contains(&"f".repeat(64), "review-result:selected", 1));
+    assert!(!contains(&digest, "review-result:selected", 2));
+    assert!(!contains(&digest, "review-result:other", 1));
+    assert!(
+        fixture
+            .store
+            .in_progress_memory_reviewer_receipts()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[test]
 fn an_attempt_never_outlives_the_job_queue_deadline() {
     let fixture = Fixture::open();

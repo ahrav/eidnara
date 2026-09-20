@@ -258,6 +258,8 @@ pub struct MemoryReviewerReceipt {
     pub abstained_reason: Option<AbstainReason>,
     pub selected: Option<(u64, ResultSelection)>,
     pub created_at_ms: i64,
+    /// The instant the receipt completed, `None` while in progress. A completed receipt is never rewritten, so this is the selection time a selected result is judged against.
+    pub completed_at_ms: Option<i64>,
 }
 
 /// The KTD7 marker tuple a caller binds before disclosure.
@@ -372,7 +374,7 @@ const RECEIPT_COLUMNS: &str =
      authority_generation, state, generation, claim_id, run_deadline_ms, execution_cutoff_ms,
      cancelled_at_ms, terminal_kind, selected_generation, selected_candidate_id,
      selected_payload_digest, created_at_ms, authority_context_store, abstained_reason,
-     selected_project_digest";
+     selected_project_digest, updated_at_ms";
 
 fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryReviewerReceipt> {
     let invalid = |column: usize, value: String| {
@@ -428,6 +430,7 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryReviewerR
         abstained_reason,
         selected,
         created_at_ms: row.get(15)?,
+        completed_at_ms: terminal.is_some().then(|| row.get(19)).transpose()?,
     })
 }
 
@@ -1507,6 +1510,66 @@ impl MemoryStore {
         check_project(project)?;
         self.inner
             .with_conn(|conn| list_memory_reviewer_attempts_in_tx(conn, project, causal_identity))
+            .map_err(Into::into)
+    }
+
+    /// Every `(project_digest, candidate_id, generation)` a completed receipt of the live store incarnation selects among `candidate_ids`, ordered by project and causal identity. The caller's list bounds the answer, so a reconciliation pass carries at most one triple per live hold rather than every selection the ledger has recorded. Receipts of a prior incarnation are excluded.
+    pub fn selected_memory_reviewer_results<'a>(
+        &self,
+        candidate_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<(String, String, u64)>, MemoryStoreError> {
+        let candidate_ids = candidate_ids.into_iter().collect::<Vec<_>>();
+        self.inner
+            .with_conn(|conn| {
+                let candidate_ids = crate::json_id_array(candidate_ids.iter().copied())?;
+                let mut statement = conn.prepare_cached(
+                    "SELECT selected_project_digest, selected_candidate_id, selected_generation
+                       FROM memory_reviewer_receipts
+                      WHERE state = 'complete' AND terminal_kind = 'complete'
+                        AND selected_candidate_id IN (SELECT value FROM json_each(?1))
+                        AND database_incarnation_id = (SELECT database_incarnation_id
+                                                       FROM memory_reviewer_store_identity WHERE id = 0)
+                      ORDER BY project, causal_identity",
+                )?;
+                let rows = statement.query_map([candidate_ids], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                    ))
+                })?;
+                rows.collect()
+            })
+            .map_err(Into::into)
+    }
+
+    /// Every in-progress receipt as `(causal_identity, generation)`. These are the receipts that may still select a private result, so their derived candidate ids keep review holds alive; the list is unbounded because omitting one would release a hold a live settlement still needs, and every in-progress receipt holds a pending job under the store's own job bounds.
+    pub fn in_progress_memory_reviewer_receipts(
+        &self,
+    ) -> Result<Vec<(String, u64)>, MemoryStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .in_progress_receipts_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(storage::StoreError::Backend(
+                "injected in-progress receipt listing failure".to_string(),
+            )));
+        }
+        self.inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare_cached(
+                    "SELECT causal_identity, generation FROM memory_reviewer_receipts
+                      WHERE state = 'in_progress'",
+                )?;
+                let rows = statement.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    ))
+                })?;
+                rows.collect()
+            })
             .map_err(Into::into)
     }
 }
