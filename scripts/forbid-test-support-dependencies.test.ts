@@ -218,6 +218,23 @@ describe("forbiddenDependencyEdges", () => {
         expect(forbiddenDependencyEdges(metadata)).toEqual([]);
     });
 
+    test("does not read a same-named local table for a registry dependency edge", () => {
+        const metadata = workspace([
+            dep({
+                name: "foo",
+                source: "registry+https://github.com/rust-lang/crates.io-index",
+                features: ["fixtures"],
+            }),
+        ]);
+        metadata.packages.push({
+            name: "foo",
+            source: null,
+            dependencies: [],
+            features: { fixtures: ["test-support"], "test-support": [] },
+        });
+        expect(forbiddenDependencyEdges(metadata)).toEqual([]);
+    });
+
     test("resolves edge features only against local packages", () => {
         const metadata = workspace([dep({ name: "serde", features: ["derive"] })]);
         metadata.packages[1]!.features = { derive: ["serde_derive/test-support"] };

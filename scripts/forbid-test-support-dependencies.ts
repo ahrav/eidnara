@@ -147,7 +147,9 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
             }
             // A requested feature can forward to test-support under another name,
             // in the target or in a local package it forwards to; the target's
-            // own `default` is reported once below, on the target.
+            // own `default` is reported once below, on the target. A registry or
+            // git target's table is not read, even if a local package shares its name.
+            if (dep.source != null) continue;
             for (const hit of testSupportReach(local, dep.name, requested)) {
                 if (hit.entry !== null) {
                     findings.add(`${edge} reaches ${hit.entry} through ${hit.feature}`);
