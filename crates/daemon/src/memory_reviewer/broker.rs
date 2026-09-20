@@ -1579,6 +1579,8 @@ pub(crate) fn hold_refusal(error: MemoryReviewerHoldError) -> RefusalCode {
         | MemoryReviewerHoldError::Refused(
             kernel::MemoryReviewerHoldRefusal::HostBackingExhausted,
         )
+        | MemoryReviewerHoldError::Refused(kernel::MemoryReviewerHoldRefusal::ProjectHoldLimit)
+        | MemoryReviewerHoldError::Refused(kernel::MemoryReviewerHoldRefusal::HostHoldLimit)
         | MemoryReviewerHoldError::Refused(kernel::MemoryReviewerHoldRefusal::TooManyReferences) => {
             RefusalCode::HoldLimit
         }

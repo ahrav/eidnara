@@ -2344,7 +2344,7 @@ async fn a_hold_cap_refusal_on_resume_leaves_the_receipt_open_instead_of_abstain
         .await;
     assert_eq!(
         outcome,
-        Err(InvestigationError::Kernel(RefusalCode::HoldInvalid)),
+        Err(InvestigationError::Kernel(RefusalCode::HoldLimit)),
         "a cap refusal is the Kernel's to report, not a budget the run spent"
     );
     assert_eq!(peer.connections.load(Ordering::SeqCst), 0);

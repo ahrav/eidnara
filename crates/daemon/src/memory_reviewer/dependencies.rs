@@ -324,5 +324,15 @@ mod tests {
             Verdict::from_refusal(RefusalCode::Store),
             Verdict::Store(_)
         ));
+        // A hold cap is capacity, not a changed input: transient here as on a live read.
+        for cap in [
+            kernel::MemoryReviewerHoldRefusal::ProjectHoldLimit,
+            kernel::MemoryReviewerHoldRefusal::HostHoldLimit,
+        ] {
+            assert!(matches!(
+                Verdict::from_hold(kernel::MemoryReviewerHoldError::Refused(cap)),
+                Verdict::Store(_)
+            ));
+        }
     }
 }
