@@ -17,7 +17,8 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
  * brace-grouped `use std::{...}` list. Rebinding a root is refused outright:
  * renaming it (`std as s`, `std::{self as s}`, `extern crate kernel as k`) or
  * globbing std (`use std::*`, `use std::{.., *}`) would let `s::fs`, `k::X`, or
- * bare `fs` escape the textual scan.
+ * bare `fs` escape the textual scan. `#[path]` and the `include*!` macros are
+ * refused too: they pull source from outside the scanned tree.
  */
 const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io";
 const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
@@ -47,6 +48,7 @@ function forbiddenCoreSource(crates: readonly string[]): RegExp {
             `\\bstd as\\b`,
             `\\bstd::\\{[^;]*\\bself as\\b`,
             `\\bstd::(?:\\{[^;]*[{,]\\s*)?\\*`,
+            `#\\[path\\b|\\binclude(?:_str|_bytes)?!`,
         ].join("|"),
         "g",
     );

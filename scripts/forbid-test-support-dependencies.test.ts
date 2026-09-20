@@ -345,6 +345,30 @@ describe("eval-core fences", () => {
         expect(productCrates(metadata).sort()).toEqual(["engine", "rt", "shm_transport", "storage"]);
     });
 
+    test("rejects pulling source from outside the scanned tree", () => {
+        expect(
+            forbiddenCoreSources(
+                {
+                    "a.rs": [
+                        "#[path = \"../effects.rs\"]",
+                        "mod effects;",
+                        "include!(\"../effects.rs\");",
+                        "const SPEC: &str = include_str!(\"spec.json\");",
+                        "const BLOB: &[u8] = include_bytes!(\"blob.bin\");",
+                        "let included = true;",
+                        "",
+                    ].join("\n"),
+                },
+                crates,
+            ),
+        ).toEqual([
+            "a.rs:1: #[path = \"../effects.rs\"]",
+            "a.rs:3: include!(\"../effects.rs\");",
+            "a.rs:4: const SPEC: &str = include_str!(\"spec.json\");",
+            "a.rs:5: const BLOB: &[u8] = include_bytes!(\"blob.bin\");",
+        ]);
+    });
+
     test("refuses to pass on an empty source set", () => {
         expect(forbiddenCoreSources({}, crates)).toEqual([
             "crates/eval-core/src: no source files scanned",
