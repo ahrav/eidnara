@@ -6797,7 +6797,7 @@ impl HandlerCore {
     }
 
     async fn handle_session_delete_value(
-        &self,
+        self: &Arc<Self>,
         channel: RouteHandle,
         request: &Value,
     ) -> PreparedOutcome {
@@ -6810,49 +6810,53 @@ impl HandlerCore {
             Some(store) => store,
             None => return store_unavailable_error(),
         };
-        let gate = Arc::clone(&self.capture_commit_gate);
-        let memo = Arc::clone(&self.capture_memo);
+        let core = Arc::clone(self);
         let project_root = binding.project_root.to_string_lossy().into_owned();
-        let deleted = {
-            let session_id = session_id.clone();
-            kernel_routes::blocking(move || {
-                // Session notes live under the notes authority project, where `eidnara_note` wrote them.
-                let note_project_path =
-                    Self::authority_project_path(&store, &project_root, "notes")?;
+        // The whole deletion, durable rows and in-memory state, is one piece of
+        // blocking work: a request future dropped mid-delete must not leave
+        // caches serving the deleted conversation.
+        let deleted = kernel_routes::blocking(move || {
+            // Session notes live under the notes authority project, where `eidnara_note` wrote them.
+            let note_project_path = Self::authority_project_path(&store, &project_root, "notes")?;
+            let deleted = {
                 // Session deletion must not overlap capture publication or
                 // checkpointing; both hold `capture_commit_gate` on a blocking
                 // thread. Purging the memo here retires any checkpoint admitted
                 // before this delete but not yet run.
-                let _capture_gate = gate.lock().expect("capture publication mutex");
+                let _capture_gate = core
+                    .capture_commit_gate
+                    .lock()
+                    .expect("capture publication mutex");
                 let deleted = store
                     .delete_session(&session_id, &note_project_path)
                     .map_err(|error| PreparedOutcome::Error {
                         code: "store_write_failed".to_string(),
                         message: error.to_string(),
                     })?;
-                memo.lock()
+                core.capture_memo
+                    .lock()
                     .expect("capture memo mutex")
                     .remove_session(&session_id);
-                Ok(deleted)
-            })
-            .await
-        };
-        let deleted_rows = match deleted {
-            Ok(Ok(deleted_rows)) => deleted_rows,
-            Ok(Err(outcome)) => return outcome,
-            Err(_) => return store_unavailable_error(),
-        };
-        self.cancel_history_summarizer_work(&session_id);
-        self.wrapup_sessions
-            .lock()
-            .expect("wrapup sessions mutex")
-            .remove(&session_id);
-        self.recomp_sessions
-            .lock()
-            .expect("recomp sessions mutex")
-            .remove(&session_id);
-        self.purge_session_state(&session_id, "session_delete");
-        respond(json!({ "ok": true, "deleted_rows": deleted_rows }))
+                deleted
+            };
+            core.cancel_history_summarizer_work(&session_id);
+            core.wrapup_sessions
+                .lock()
+                .expect("wrapup sessions mutex")
+                .remove(&session_id);
+            core.recomp_sessions
+                .lock()
+                .expect("recomp sessions mutex")
+                .remove(&session_id);
+            core.purge_session_state(&session_id, "session_delete");
+            Ok(deleted)
+        })
+        .await;
+        match deleted {
+            Ok(Ok(deleted_rows)) => respond(json!({ "ok": true, "deleted_rows": deleted_rows })),
+            Ok(Err(outcome)) => outcome,
+            Err(_) => store_unavailable_error(),
+        }
     }
 
     fn handle_session_status_value(
@@ -8867,7 +8871,8 @@ impl HandlerCore {
         ticket.accept();
         // The reply does not wait on the checkpoint's store writes; the memo
         // learns a fragment only once the store accepted it, so a checkpoint
-        // that never runs replays on the next sync.
+        // that never runs replays on the next sync. A drain answers `pending`
+        // for this project until the checkpoint has run.
         if let Some(checkpoint) = self.capture_checkpoint(
             Arc::clone(&store),
             &binding,
@@ -13735,7 +13740,12 @@ impl HandlerCore {
                 "session.flush" => self.handle_session_flush_value(channel, &request),
                 "session.recomp" => self.handle_session_recomp_value(channel, &request),
                 "session.status" => self.handle_session_status_value(channel, &request),
-                "session.delete" => self.handle_session_delete_value(channel, &request).await,
+                "session.delete" => {
+                    entry
+                        .core
+                        .handle_session_delete_value(channel, &request)
+                        .await
+                }
                 "session.wrapup" => self.handle_session_wrapup_value(channel, &request).await,
                 "kernel.read" => self.handle_kernel_read(channel, request).await,
                 "kernel.commit" => self.handle_kernel_commit(channel, request).await,
@@ -22690,6 +22700,7 @@ mod tests {
         );
         submit["model"] = second["model"].clone();
         let deleted = handler
+            .core
             .handle_session_delete_value(
                 test_route(7),
                 &json!({"method":"session.delete","v":1,"session_id":"ses"}),
@@ -22897,6 +22908,7 @@ mod tests {
             )
             .expect("an unseen fragment needs the store");
         let deleted = handler
+            .core
             .handle_session_delete_value(
                 test_route(7),
                 &json!({"method":"session.delete","v":1,"session_id":"ses"}),
@@ -23199,12 +23211,96 @@ mod tests {
                 .is_empty(),
             "an issued dispatch is not immediately reclaimable once its lease is lost"
         );
+        // The first dispatch backs off by the protocol's initial one second,
+        // the same deadline a submission for it would record.
         let job = store
-            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_500)
             .unwrap()
             .pop()
-            .unwrap();
+            .expect("the first dispatch is eligible again after one second");
         assert_eq!(job.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_session_delete_still_purges_in_memory_state() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        // Session work state that only the post-delete cleanup clears.
+        handler
+            .recomp_sessions
+            .lock()
+            .unwrap()
+            .insert("ses".to_string());
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let delete = json!({"method":"session.delete","v":1,"session_id":"ses"});
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(100),
+            handler
+                .core
+                .handle_session_delete_value(test_route(7), &delete),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the request is dropped while the sweep waits on the gate"
+        );
+        holder.join().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !handler.recomp_sessions.lock().unwrap().contains("ses"),
+            "the in-memory purge belongs to the durable deletion, not to the request future"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_drain_reports_pending_while_an_admitted_checkpoint_has_not_enqueued() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        let pi = capture_binding(&project, "pi");
+        handler.bind_route(test_route(7), pi.clone());
+        let messages = [capture_ingress(
+            "m1",
+            "user",
+            "Use port 4321 for staging.",
+            1,
+        )];
+        let request = capture_transform_request(&messages);
+        let checkpoint = handler
+            .capture_checkpoint(
+                Arc::clone(&store),
+                &pi,
+                &request,
+                1,
+                &metered_decode::unbounded_reserve(),
+            )
+            .expect("an unseen fragment needs the store");
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "pending",
+            "admitted checkpoint text is not yet durable, so the drain is not done"
+        );
+        assert_eq!(checkpoint.run().await, 1);
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "work"
+        );
     }
 
     #[tokio::test]
@@ -23889,7 +23985,9 @@ mod tests {
         let started = Instant::now();
         let delete = json!({ "method": "session.delete", "v": 1, "session_id": "ses" });
         let (deleted, ticked_at) = tokio::join!(
-            handler.handle_session_delete_value(test_route(7), &delete),
+            handler
+                .core
+                .handle_session_delete_value(test_route(7), &delete),
             async {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 started.elapsed()
@@ -31600,6 +31698,7 @@ mod tests {
 
         let deleted = tool_body(
             handler
+                .core
                 .handle_session_delete_value(
                     test_route(7),
                     &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
@@ -31801,6 +31900,7 @@ mod tests {
 
         let deleted = tool_body(
             handler
+                .core
                 .handle_session_delete_value(
                     test_route(7),
                     &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
@@ -38571,6 +38671,7 @@ mod tests {
 
         let deleted = tool_body(
             handler
+                .core
                 .handle_session_delete_value(
                     test_route(7),
                     &json!({ "method": "session.delete", "v": 1, "session_id": session_id }),
@@ -40480,6 +40581,7 @@ mod tests {
 
         let deleted = tool_body(
             handler
+                .core
                 .handle_session_delete_value(
                     test_route(7),
                     &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),

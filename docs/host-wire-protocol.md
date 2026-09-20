@@ -811,7 +811,8 @@ failed as soon as it is discovered, whatever becomes of the request.
 
 Other `next` states are `ready`, `pending`, `stale`, `disabled`,
 `store_failed`, and `unavailable`. `ready` means the project has no pending
-sources. It does not count saved memories. Retry backoff, exhausted failures,
+sources and no checkpoint admitted by a transform still waiting to reach the
+store. It does not count saved memories. Retry backoff, exhausted failures,
 another claimant, missing model selection, or unavailable preparation can
 produce `pending`. A lease that expired or was replaced while its work was
 being prepared produces `stale`. Clients treat `pending` and `stale` as work

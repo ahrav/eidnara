@@ -144,6 +144,17 @@ impl HandlerCore {
         if !capture_enabled(&binding) {
             return respond(json!({"state":"disabled"}));
         }
+        // Text a transform admitted but has not yet stored is not drained
+        // work yet, and the drain is not done either.
+        if self
+            .capture_memo
+            .lock()
+            .expect("capture memo mutex")
+            .outstanding(&capture_project(&binding))
+            > 0
+        {
+            return respond(json!({"state":"pending"}));
+        }
         let primary = match request.get("model") {
             None => None,
             Some(Value::String(model)) if valid_capture_model(model) => Some(model.clone()),
@@ -223,7 +234,7 @@ impl HandlerCore {
                 .map(|job| {
                     (
                         job.job_id.as_str(),
-                        now.saturating_add(capture_retry_delay_ms(job.attempts + 1)),
+                        now.saturating_add(capture_retry_delay_ms(job.attempts)),
                     )
                 })
                 .collect();

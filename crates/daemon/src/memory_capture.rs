@@ -412,6 +412,10 @@ pub(crate) struct CaptureCheckpointMemo {
     sessions: HashMap<String, SessionCaptureMemo>,
     order: VecDeque<String>,
     next_epoch: u64,
+    /// Checkpoints admitted but not yet run, per capture project. A drain
+    /// answers `pending` while any is outstanding, so a harness cannot see
+    /// `ready` between a transform's reply and its text reaching the store.
+    outstanding: HashMap<String, usize>,
 }
 
 impl CaptureCheckpointMemo {
@@ -469,6 +473,23 @@ impl CaptureCheckpointMemo {
         }
     }
 
+    fn admit(&mut self, project: &str) {
+        *self.outstanding.entry(project.to_owned()).or_insert(0) += 1;
+    }
+
+    fn settle(&mut self, project: &str) {
+        if let Some(count) = self.outstanding.get_mut(project) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.outstanding.remove(project);
+            }
+        }
+    }
+
+    pub(crate) fn outstanding(&self, project: &str) -> usize {
+        self.outstanding.get(project).copied().unwrap_or(0)
+    }
+
     fn matches(&self, session: &str, epoch: u64) -> bool {
         self.sessions
             .get(session)
@@ -507,19 +528,19 @@ impl CaptureCheckpointMemo {
 }
 
 /// Holds a memo pin for one outstanding checkpoint; dropping it, on any path,
-/// makes the session evictable again.
+/// makes the session evictable again and lets the project's drain proceed.
 struct MemoPin {
     memo: Arc<Mutex<CaptureCheckpointMemo>>,
+    project: String,
     session: String,
     epoch: u64,
 }
 
 impl Drop for MemoPin {
     fn drop(&mut self) {
-        self.memo
-            .lock()
-            .expect("capture memo mutex")
-            .release(&self.session, self.epoch);
+        let mut memo = self.memo.lock().expect("capture memo mutex");
+        memo.release(&self.session, self.epoch);
+        memo.settle(&self.project);
     }
 }
 
@@ -594,6 +615,7 @@ impl CaptureCheckpoint {
                 memo,
                 session,
                 epoch,
+                ..
             } = &pin;
             let (memo, session, epoch) = (Arc::clone(memo), session.clone(), *epoch);
             let _gate = commit_gate.lock().expect("capture publication mutex");
@@ -672,6 +694,7 @@ impl HandlerCore {
             return None;
         }
         let start = request.messages.len().saturating_sub(delta_messages);
+        let project = capture_project(binding);
         let mut fragments = Vec::new();
         let mut refused = false;
         let epoch = {
@@ -717,15 +740,17 @@ impl HandlerCore {
             if fragments.is_empty() {
                 return None;
             }
+            memo.admit(&project);
             memo.epoch(&binding.session)
         };
         Some(CaptureCheckpoint {
             store,
             commit_gate: Arc::clone(&self.capture_commit_gate),
-            project: capture_project(binding),
+            project: project.clone(),
             harness: binding.harness.clone(),
             pin: MemoPin {
                 memo: Arc::clone(&self.capture_memo),
+                project,
                 session: binding.session.clone(),
                 epoch,
             },
