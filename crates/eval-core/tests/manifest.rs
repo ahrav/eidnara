@@ -420,6 +420,17 @@ fn identity_validate_refuses_what_the_run_id_refuses() {
             field: "binary_digest.reason"
         })
     );
+    let mut dirty_unidentified = build();
+    dirty_unidentified.dirty = true;
+    dirty_unidentified.binary_digest = BinaryDigest::Absent {
+        reason: "composed in cargo test".to_string(),
+    };
+    assert_eq!(
+        dirty_unidentified.validate(),
+        Err(IdentityError::DirtyBuildWithoutBinaryDigest)
+    );
+    dirty_unidentified.binary_digest = build().binary_digest;
+    assert!(dirty_unidentified.validate().is_ok());
 }
 
 #[test]
@@ -729,6 +740,10 @@ fn host_environment_and_incarnation_fields_are_never_kept() {
         "project_root",
         "artifact_path",
         "boot_id",
+        "uid",
+        "owner_uid",
+        "euid",
+        "gid",
         "database_incarnation_id",
     ] {
         assert!(is_never_kept(field), "{field}");

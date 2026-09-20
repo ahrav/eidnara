@@ -56,6 +56,8 @@ pub enum IdentityError {
     },
     /// The SHA-256 of zero bytes names no build.
     ZeroBytesBinaryDigest,
+    /// Two dirty trees on one commit are told apart only by the binary.
+    DirtyBuildWithoutBinaryDigest,
     NotCanonical(ContractError),
 }
 
@@ -107,7 +109,12 @@ impl BuildRecord {
                     return Err(IdentityError::ZeroBytesBinaryDigest);
                 }
             }
-            BinaryDigest::Absent { reason } => require_non_empty("binary_digest.reason", reason)?,
+            BinaryDigest::Absent { reason } => {
+                require_non_empty("binary_digest.reason", reason)?;
+                if self.dirty {
+                    return Err(IdentityError::DirtyBuildWithoutBinaryDigest);
+                }
+            }
         }
         Ok(())
     }

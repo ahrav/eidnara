@@ -33,11 +33,12 @@ pub fn is_clock_named(field: &str) -> bool {
         || field.contains("deadline")
 }
 
-/// Host environment, filesystem location, boot, and store incarnation values
-/// never enter a digest, so a field named for one may not be `Keep`. Field names
-/// are snake_case, so `host`, `pid`, `ppid`, `root`, `path`, and `boot` are
-/// matched as tokens (`host_name`, `writer_pid`, `project_root`, `boot_id`) as
-/// well as `hostname` and `process_id` anywhere. This is a name heuristic that
+/// Host environment, filesystem location, boot, Unix identity, and store
+/// incarnation values never enter a digest, so a field named for one may not be
+/// `Keep`. Field names are snake_case, so `host`, `pid`, `ppid`, `root`, `path`,
+/// `boot`, `uid`, `euid`, `gid`, and `egid` are matched as tokens (`host_name`,
+/// `writer_pid`, `project_root`, `boot_id`, `owner_uid`) as well as `hostname`
+/// and `process_id` anywhere. This is a name heuristic that
 /// catches schema mistakes early; host neutrality itself is established by the
 /// two-process digest equality test, not by this list.
 pub fn is_never_kept(field: &str) -> bool {
@@ -51,6 +52,10 @@ pub fn is_never_kept(field: &str) -> bool {
         || token("root")
         || token("path")
         || token("boot")
+        || token("uid")
+        || token("euid")
+        || token("gid")
+        || token("egid")
         || field.contains("incarnation")
 }
 

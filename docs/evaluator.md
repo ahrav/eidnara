@@ -92,7 +92,9 @@ dirty flag, lockfile digest, rustc version, feature set, target triple, and a
 binary digest that is either `{"kind": "present", "sha256"}` or
 `{"kind": "absent", "reason"}`. The feature set is a `BTreeSet`, so its order
 cannot change the identity. A present digest equal to the SHA-256 of zero bytes
-is refused; it names no build, and an absent digest needs a non-empty reason.
+is refused; it names no build, an absent digest needs a non-empty reason, and
+a dirty tree needs a present binary digest, since two dirty trees on one
+commit are told apart only by the binary.
 Empty version strings, a malformed
 `eligibility_spec_digest`, and a `config` or `scenario` value canonical JSON
 cannot encode are refused by `RunIdentity::validate`, so an identity it accepts
@@ -123,8 +125,9 @@ recorded trace always digests.
 names the only clock-named fields a schema may keep; any other clock-named
 field under `Keep` is refused at schema construction, as is any field named
 for a hostname (`hostname` or a `host` token), cwd, a filesystem location (a
-`root` or `path` token), a boot (`boot` token), pid (a `pid` or `ppid` token or
-`process_id` anywhere), or incarnation (`HostFieldKept`). These name gates are
+`root` or `path` token), a boot (`boot` token), a Unix identity (`uid`, `euid`,
+`gid`, or `egid` token), pid (a `pid` or `ppid` token or `process_id`
+anywhere), or incarnation (`HostFieldKept`). These name gates are
 a heuristic that refuses obvious mistakes at schema construction; the
 guarantee that host values stay out of a digest is the two-process equality
 test in `tests/two_process.rs`, and a new host-specific spelling is added to
