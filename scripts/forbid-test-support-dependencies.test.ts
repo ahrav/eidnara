@@ -192,6 +192,7 @@ describe("forbiddenDependencyEdges", () => {
 });
 
 describe("eval-core fences", () => {
+    const crates = ["kernel", "daemon", "storage"];
     const core = (dependencies: MetadataDependency[]): CargoMetadata => ({
         workspace_root: "/workspace",
         packages: [{ name: "eval-core", source: null, dependencies }],
@@ -222,7 +223,7 @@ describe("eval-core fences", () => {
                 "a.rs": "use kernel::EligibilityVerdict;\nlet t = std::time::Instant::now();\n",
                 "b.rs": "use std::collections::BTreeMap;\nlet p = std::path::Path::new(\"x\");\n",
                 "c.rs": "use serde::Serialize;\n",
-            }),
+            }, crates),
         ).toEqual([
             "a.rs:1: use kernel::EligibilityVerdict;",
             "a.rs:2: let t = std::time::Instant::now();",
@@ -240,7 +241,7 @@ describe("eval-core fences", () => {
                     "use std::collections::{BTreeMap, BTreeSet};",
                     "",
                 ].join("\n"),
-            }),
+            }, crates),
         ).toEqual([
             "grouped.rs:1: use std::{fs, io};",
             "grouped.rs:2: use std::{collections::BTreeMap, time::Instant};",
@@ -261,7 +262,7 @@ describe("eval-core fences", () => {
                     "};",
                     "",
                 ].join("\n"),
-            }),
+            }, crates),
         ).toEqual(["wrapped.rs:1: use std::{"]);
     });
 
@@ -281,7 +282,7 @@ describe("eval-core fences", () => {
                     "use std::collections::*;",
                     "",
                 ].join("\n"),
-            }),
+            }, crates),
         ).toEqual([
             "alias.rs:1: use std as standard;",
             "alias.rs:2: use ::std as s;",
@@ -293,8 +294,17 @@ describe("eval-core fences", () => {
         ]);
     });
 
+    test("rejects every workspace crate outside the closed set, not a fixed list", () => {
+        expect(
+            forbiddenCoreSources(
+                { "a.rs": "#[cfg(test)]\nuse shm_transport::Frame;\nlet l = lease::Lease::new();\n" },
+                ["kernel", "shm_transport", "lease"],
+            ),
+        ).toEqual(["a.rs:2: use shm_transport::Frame;", "a.rs:3: let l = lease::Lease::new();"]);
+    });
+
     test("refuses to pass on an empty source set", () => {
-        expect(forbiddenCoreSources({})).toEqual([
+        expect(forbiddenCoreSources({}, crates)).toEqual([
             "crates/eval-core/src: no source files scanned",
         ]);
     });

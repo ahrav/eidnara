@@ -342,8 +342,10 @@ so a variant added on the kernel side fails to compile there. The kernel test
 carries `eval-core` as a dev dependency only; `eval-core` keeps its four
 dependencies and never names a kernel type, and
 `scripts/forbid-test-support-dependencies.ts` now asserts both facts (the
-closed dependency set, and no product-crate or `std` effect-module path in the
-core's source, whether written as a full path or inside a brace-grouped
+closed dependency set, and no path into another workspace crate, `rusqlite`,
+`tokio`, or a `std` effect module in the core's source; the crate list comes
+from `cargo metadata`, so a new workspace crate is fenced without editing the
+script. Paths are caught whether written as a full path or inside a brace-grouped
 `use std::{...}`; renaming or globbing the `std` root is refused so no alias
 or bare name can hide an effect path). The source scan runs from the `cargo metadata` workspace
 root and fails when it matches no files, so it cannot pass vacuously.

@@ -11,27 +11,41 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Paths a sans-I/O core must not name: product crates and the std effect
- * modules, whether written as a full path (`std::fs::read`) or as a member
- * of a brace-grouped `use std::{...}` list. Rebinding the `std` root is
- * refused outright: renaming it (`std as s`, `std::{self as s}`) or globbing
- * it (`use std::*`, `use std::{.., *}`) would let `s::fs` or bare `fs` escape
- * the textual scan.
+ * Paths a sans-I/O core must not name: every other workspace crate outside its
+ * closed dependency set, the external effect crates below, and the std effect
+ * modules, whether written as a full path (`std::fs::read`) or as a member of a
+ * brace-grouped `use std::{...}` list. Rebinding the `std` root is refused
+ * outright: renaming it (`std as s`, `std::{self as s}`) or globbing it
+ * (`use std::*`, `use std::{.., *}`) would let `s::fs` or bare `fs` escape the
+ * textual scan.
  */
 const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io";
-const PRODUCT_CRATES = "kernel|daemon|retrieval|storage|memory_store|host_runtime|rusqlite|tokio";
-const FORBIDDEN_CORE_SOURCE = new RegExp(
-    [
-        `\\b(${PRODUCT_CRATES})::`,
-        `\\buse (${PRODUCT_CRATES})\\b`,
-        `\\bstd::(${STD_EFFECT_MODULES})\\b`,
-        `\\bstd::\\{[^;]*(?:[{,]\\s*|::)(${STD_EFFECT_MODULES})\\b`,
-        `\\bstd as\\b`,
-        `\\bstd::\\{[^;]*\\bself as\\b`,
-        `\\bstd::(?:\\{[^;]*[{,]\\s*)?\\*`,
-    ].join("|"),
-    "g",
-);
+const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
+
+/** Crate names as Rust paths spell them: every local package except eval-core and its closed set. */
+export function productCrates(metadata: CargoMetadata): string[] {
+    return metadata.packages
+        .filter((pkg) => pkg.source === null)
+        .map((pkg) => pkg.name)
+        .filter((name) => name !== "eval-core" && !EVAL_CORE_DEPENDENCIES.has(name))
+        .map((name) => name.replaceAll("-", "_"));
+}
+
+function forbiddenCoreSource(crates: readonly string[]): RegExp {
+    const product = [...crates, ...EXTERNAL_EFFECT_CRATES].join("|");
+    return new RegExp(
+        [
+            `\\b(${product})::`,
+            `\\buse (${product})\\b`,
+            `\\bstd::(${STD_EFFECT_MODULES})\\b`,
+            `\\bstd::\\{[^;]*(?:[{,]\\s*|::)(${STD_EFFECT_MODULES})\\b`,
+            `\\bstd as\\b`,
+            `\\bstd::\\{[^;]*\\bself as\\b`,
+            `\\bstd::(?:\\{[^;]*[{,]\\s*)?\\*`,
+        ].join("|"),
+        "g",
+    );
+}
 
 /** The directory the source fence scans, relative to the workspace root. */
 export const EVAL_CORE_SOURCE_DIR = "crates/eval-core/src";
@@ -202,18 +216,22 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
  * An empty source set is itself a finding: a scan that matched no files
  * proves nothing about the crate, so the gate must not pass on it.
  */
-export function forbiddenCoreSources(sources: Record<string, string>): string[] {
+export function forbiddenCoreSources(
+    sources: Record<string, string>,
+    crates: readonly string[],
+): string[] {
     const entries = Object.entries(sources);
     if (entries.length === 0) {
         return [`${EVAL_CORE_SOURCE_DIR}: no source files scanned`];
     }
+    const pattern = forbiddenCoreSource(crates);
     const findings: string[] = [];
     // Match the whole file, not each line: a rustfmt-wrapped `use std::{`
     // group names its effect module several lines below the `std::` prefix.
     for (const [path, text] of entries) {
         const lines = text.split("\n");
         const reported = new Set<number>();
-        for (const match of text.matchAll(FORBIDDEN_CORE_SOURCE)) {
+        for (const match of text.matchAll(pattern)) {
             const line = text.slice(0, match.index).split("\n").length;
             if (reported.has(line)) continue;
             reported.add(line);
@@ -252,7 +270,7 @@ if (import.meta.main) {
     for (const path of glob.scanSync(metadata.workspace_root)) {
         sources[path] = await Bun.file(`${metadata.workspace_root}/${path}`).text();
     }
-    const leaks = forbiddenCoreSources(sources);
+    const leaks = forbiddenCoreSources(sources, productCrates(metadata));
     if (leaks.length > 0) {
         console.error("eval-core source names a product crate or a std effect module:");
         for (const leak of leaks) console.error(`  ${leak}`);
