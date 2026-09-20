@@ -117,7 +117,7 @@ reviews found and how each finding was dispositioned.
 | No test cancelled mid-body, no test asserted the bytes read before a timeout, no accounting on compressed and undecodable refusals, no exhaustion after an unterminated row, no nonzero usage across reopen | gap | fixed: added at the disclosure, sender, and ledger seams |
 | The ledger's usage bounds check repeats the schema `CHECK` as a typed refusal | bias | kept: the typed `InvalidRequest` is the contract the caller sees; production callers cannot exceed it |
 | Two const assertions pin the sender's constants to the ledger's | bias | kept: the sender's constants are the wire document's per-response bounds; the assertion states the coupling where it is relied on |
-| The text budget is clamped in the sender and in the decoder | bias | kept: each is a public entry point with its own contract |
+| The raw budget is clamped in the sender and the text budget only in the decoder | bias | kept: each bound is clamped where it is enforced; `decode_message_within` is the public entry point that owns the text contract |
 | The ledger tests that committed successive markers without terminals now close each attempt first | refinement | fixed: matches what a live run does; the unterminated case is exercised on purpose in the new tests |
 | No timing or memory measurement of the padded-response path | bias | kept: the byte counts the tests assert are the resource evidence; no latency or quality threshold is claimed, per the ticket |
 

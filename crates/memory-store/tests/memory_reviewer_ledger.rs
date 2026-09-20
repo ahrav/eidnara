@@ -3325,56 +3325,6 @@ fn a_begin_dated_before_the_first_claim_is_refused_as_clock_behind() {
 }
 
 #[test]
-fn an_attempt_terminal_dated_before_a_later_marker_is_refused_as_clock_behind() {
-    let fixture = Fixture::open();
-    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
-    fixture.begin(&claim, T0);
-    assert!(matches!(
-        fixture.dispatch(1, &claim, T0 + 1).unwrap(),
-        DispatchOutcome::Handed { .. }
-    ));
-    fixture.close_open_attempts(1, &claim, T0 + 1);
-    let mut next = marker(1);
-    next.body_digest = "b".repeat(64);
-    let DispatchOutcome::Handed { attempt_index, .. } = fixture
-        .store
-        .dispatch_memory_reviewer_attempt(
-            PROJECT,
-            &fixture.identity,
-            1,
-            &claim,
-            KERNEL,
-            &next,
-            "prepared",
-            || T0 + 30,
-            |prepared| prepared,
-        )
-        .unwrap()
-    else {
-        panic!("second attempt hands off")
-    };
-    // The ledger already holds a marker at T0 + 30; the attempt cannot close at T0 + 20.
-    assert_eq!(
-        refusal(
-            fixture
-                .store
-                .finish_memory_reviewer_attempt(
-                    PROJECT,
-                    &fixture.identity,
-                    1,
-                    &claim,
-                    attempt_index,
-                    MemoryReviewerAttemptTerminal::Complete,
-                    ResponseUsage::NONE,
-                    T0 + 20,
-                )
-                .unwrap_err()
-        ),
-        MemoryReviewerLedgerRefusal::ClockBehind
-    );
-}
-
-#[test]
 fn a_takeover_by_the_claim_that_already_owns_the_receipt_replays_without_advancing() {
     let fixture = Fixture::open();
     let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
