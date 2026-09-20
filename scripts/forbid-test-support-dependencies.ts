@@ -19,9 +19,10 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
  * globbing std (`use std::*`, `use std::{.., *}`) would let `s::fs`, `k::X`, or
  * bare `fs` escape the textual scan. `#[path]` and the `include*!` macros are
  * refused too: they pull source from outside the scanned tree. The stdio
- * macros (`print!`, `eprintln!`, `dbg!`, ...) write without naming `std::io`.
+ * macros (`print!`, `eprintln!`, `dbg!`, ...) write without naming `std::io`,
+ * and `env!`/`option_env!` read the build environment without `std::env`.
  */
-const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io|os";
+const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io|os|thread";
 const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
 
 /** Crate names as Rust paths spell them: every local package except eval-core and its closed set. */
@@ -51,7 +52,7 @@ function forbiddenCoreSource(crates: readonly string[]): RegExp {
             `\\bstd::\\{[^;]*\\bself as\\b`,
             `\\bstd::(?:\\{[^;]*[{,]\\s*)?\\*`,
             `#\\[path\\b|\\binclude(?:_str|_bytes)?!`,
-            `\\b(?:e?print(?:ln)?|dbg)!`,
+            `\\b(?:e?print(?:ln)?|dbg|(?:option_)?env)!`,
         ].join("|"),
         "g",
     );

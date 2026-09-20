@@ -381,7 +381,7 @@ describe("eval-core fences", () => {
         ]);
     });
 
-    test("rejects unaliased extern crate and the stdio macros", () => {
+    test("rejects unaliased extern crate, the stdio and env macros, and std::thread", () => {
         expect(
             forbiddenCoreSources(
                 {
@@ -395,6 +395,10 @@ describe("eval-core fences", () => {
                         "eprint!(\"e\");",
                         "let s = format!(\"{x}\");",
                         "write!(out, \"{x}\")?;",
+                        "const HOME: &str = env!(\"HOME\");",
+                        "let opt = option_env!(\"X\");",
+                        "std::thread::sleep(core::time::Duration::from_secs(1));",
+                        "let environment = 1;",
                         "",
                     ].join("\n"),
                 },
@@ -406,6 +410,9 @@ describe("eval-core fences", () => {
             "a.rs:5: println!(\"{x}\");",
             "a.rs:6: let d = dbg!(x);",
             "a.rs:7: eprint!(\"e\");",
+            "a.rs:10: const HOME: &str = env!(\"HOME\");",
+            "a.rs:11: let opt = option_env!(\"X\");",
+            "a.rs:12: std::thread::sleep(core::time::Duration::from_secs(1));",
         ]);
     });
 
