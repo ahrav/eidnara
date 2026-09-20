@@ -23074,6 +23074,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_checkpoint_charges_each_fragments_fixed_overhead_not_only_its_text() {
+        struct Counting(std::sync::atomic::AtomicUsize);
+        impl metered_decode::ResidentReserve for Counting {
+            fn try_reserve(&self, bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+                self.0.fetch_add(bytes, Ordering::Relaxed);
+                Some(host_runtime::wire::ByteCharge::none())
+            }
+            fn capacity(&self) -> usize {
+                usize::MAX
+            }
+        }
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let pi = capture_binding(&project, "pi");
+        let count = 512;
+        let messages: Vec<IngressMessage> = (0..count)
+            .map(|index| capture_ingress(&format!("m{index}"), "user", "x", index as u64 + 1))
+            .collect();
+        let request = capture_transform_request(&messages);
+        let reserve = Counting(std::sync::atomic::AtomicUsize::new(0));
+        let checkpoint = handler
+            .capture_checkpoint(Arc::clone(&store), &pi, &request, count, &reserve)
+            .expect("unseen fragments need the store");
+        let charged = reserve.0.load(Ordering::Relaxed);
+        let floor = count * (std::mem::size_of::<String>() * 3 + 32);
+        assert!(
+            charged >= floor,
+            "tiny fragments must still pay their headers and digest: charged {charged} < {floor}"
+        );
+        drop(checkpoint);
+    }
+
+    #[tokio::test]
+    async fn a_claim_that_outlives_its_reservation_records_no_dispatch() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        for (id, text) in [
+            ("frozen", "Frozen plan at the head."),
+            ("native-user-1", "Use port 4321 for staging."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+        }
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let frozen = jobs.iter().find(|job| job.message_id == "frozen").unwrap();
+        store
+            .prepare_memory_capture(
+                project_key,
+                &frozen.job_id,
+                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                    .to_string(),
+            )
+            .unwrap();
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        // The reservation lapses while preparation is still publishing the head.
+        let (outcome, ()) = tokio::join!(
+            handler.handle_native_capture_next(test_route(7), &next),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                handler.native_capture.lock().unwrap().expire_all_for_test();
+            }
+        );
+        holder.join().unwrap();
+        assert_eq!(tool_body(outcome)["state"], "stale");
+        let unprepared = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.message_id == "native-user-1")
+            .unwrap();
+        assert_eq!(
+            unprepared.attempts, 0,
+            "a lapsed reservation issues no work and records no dispatch"
+        );
+    }
+
+    #[tokio::test]
     async fn a_claim_whose_request_was_dropped_records_no_dispatch() {
         let state = Arc::new(ProducerState::default());
         let (handler, store, _dir, project) =

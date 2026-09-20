@@ -25,6 +25,12 @@ impl NativeCaptureState {
         }
     }
 
+    pub(crate) fn expire_all_for_test(&mut self) {
+        for lease in self.leases.values_mut() {
+            lease.expires = Instant::now();
+        }
+    }
+
     pub(crate) fn reserved_for_test(&self) -> usize {
         self.leases.len()
     }
@@ -194,6 +200,17 @@ impl HandlerCore {
             };
             if !wanted.load(Ordering::Acquire) {
                 return respond(json!({"state":"pending"}));
+            }
+            // A reservation that lapsed during preparation issues nothing, so
+            // it records nothing either.
+            if !state
+                .lock()
+                .expect("native capture leases mutex")
+                .leases
+                .get(&guard.key)
+                .is_some_and(|lease| lease.token == guard.token && lease.expires > Instant::now())
+            {
+                return respond(json!({"state":"stale"}));
             }
             // One dispatch for the whole batch or none: a source swept since
             // the queue was read leaves the others' counts untouched.

@@ -532,6 +532,18 @@ struct PendingFragment {
     _charge: ByteCharge,
 }
 
+impl PendingFragment {
+    /// Bytes one retained fragment costs: its own struct (headers, digest,
+    /// charge), the three heap buffers, and a second struct-sized share for
+    /// the `Vec` doubling and allocator rounding those buffers incur.
+    fn retained_bytes(id: &str, role: &str, text: &str) -> usize {
+        (std::mem::size_of::<PendingFragment>() * 2)
+            .saturating_add(id.len())
+            .saturating_add(role.len())
+            .saturating_add(text.len())
+    }
+}
+
 /// The user-only consent gate shared by checkpointing and draining. Both sides
 /// must agree, or sources accumulate with no drainer, or drain without consent.
 pub(crate) fn capture_enabled(binding: &SessionBinding) -> bool {
@@ -641,8 +653,9 @@ impl HandlerCore {
     /// enqueue different text for the same message id and store scaffolding as
     /// user statements.
     ///
-    /// Each retained fragment is charged to `reserve` before it is copied, so
-    /// detached checkpoints stay inside the scratch pool. A refused charge skips
+    /// Each retained fragment, headers and buffers included, is charged to
+    /// `reserve` before it is copied, so detached checkpoints stay inside the
+    /// scratch pool however small the fragments are. A refused charge skips
     /// the whole checkpoint; the memo has not learned it, so it replays on the
     /// next sync.
     ///
@@ -681,7 +694,7 @@ impl HandlerCore {
                         return Ok(());
                     }
                     let charge = reserve
-                        .try_reserve(id.len() + text.len())
+                        .try_reserve(PendingFragment::retained_bytes(id, role, text))
                         .ok_or("resident_pool_short")?;
                     fragments.push(PendingFragment {
                         id: id.to_owned(),
