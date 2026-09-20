@@ -212,6 +212,16 @@ pub struct SessionBinding {
     pub context_capabilities: context_capabilities::LatchedCapabilities,
 }
 
+impl SessionBinding {
+    /// An observational binding authorizes and resolves its project like any route and is excluded from every background view; see [`RouteBindings::participating`].
+    pub(crate) fn is_observational(&self) -> bool {
+        self.harness == OBSERVATIONAL_HARNESS
+    }
+}
+
+/// The harness whose bindings are observational. `harness` is scoping metadata the client claims on `route.open`, never authority: the value selects observation and grants nothing.
+pub(crate) const OBSERVATIONAL_HARNESS: &str = "cli";
+
 #[derive(Default)]
 pub(crate) struct RouteBindings {
     by_route: HashMap<RouteHandle, (u64, SessionBinding)>,
@@ -245,12 +255,18 @@ impl RouteBindings {
         self.by_route.clear();
     }
 
-    /// The returned sequence orders bindings by insertion time.
-    fn latest_for_root(&self, route_root: &Path) -> Option<(u64, &SessionBinding)> {
+    /// The bindings that take part in background work, with the sequence that orders them by insertion time. Observational bindings are excluded here, before any newest-per-root selection, so an observer never replaces an older participating binding, an observer-only root contributes nothing, and closing an observer reveals no binding that was not already selected. This is the only view background work reads: the MemoryReviewer worker's projects, the scheduler's roots and schedules, and the search maintenance roster.
+    fn participating(&self) -> impl Iterator<Item = (u64, &SessionBinding)> {
         self.by_route
             .values()
-            .filter(|(_, binding)| binding.project_root == route_root)
+            .filter(|(_, binding)| !binding.is_observational())
             .map(|(seq, binding)| (*seq, binding))
+    }
+
+    /// The newest participating binding on `route_root`.
+    fn latest_for_root(&self, route_root: &Path) -> Option<(u64, &SessionBinding)> {
+        self.participating()
+            .filter(|(_, binding)| binding.project_root == route_root)
             .max_by_key(|(seq, _)| *seq)
     }
 
@@ -265,15 +281,15 @@ impl RouteBindings {
         projects.into_iter().collect()
     }
 
-    /// The returned sequence orders bindings by insertion time.
+    /// The newest participating binding on every root that has one, with the sequence that orders bindings by insertion time.
     pub(crate) fn latest_per_root(&self) -> BTreeMap<&Path, (u64, &SessionBinding)> {
         let mut latest: BTreeMap<&Path, (u64, &SessionBinding)> = BTreeMap::new();
-        for (seq, binding) in self.by_route.values() {
+        for (seq, binding) in self.participating() {
             let entry = latest
                 .entry(binding.project_root.as_path())
-                .or_insert((*seq, binding));
-            if *seq > entry.0 {
-                *entry = (*seq, binding);
+                .or_insert((seq, binding));
+            if seq > entry.0 {
+                *entry = (seq, binding);
             }
         }
         latest
@@ -33177,6 +33193,131 @@ mod tests {
             bridge.binding_for_root(Path::new(&root)).unwrap().harness,
             "h13"
         );
+    }
+
+    /// An observational binding is a route like any other for authorization and project lookup, and nothing for background work: alone on a dormant MODULE project it enrolls the project in no worker, scheduler, or maintenance view; beside a live scheduled harness it neither replaces that harness's binding nor changes what the views report, whichever route closes first.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_observational_binding_reads_its_project_and_takes_no_part_in_background_work() {
+        use memory_classifier_scheduler::SchedulerHost;
+        let producer = Arc::new(ProducerState::default());
+        let harness = MemoryClassifierHarness::start(&producer).await;
+        let bridge = harness.scheduler_bridge();
+        let root = PathBuf::from(&harness.route_root);
+        let views = || {
+            let roster = harness.handler.bindings.lock().unwrap().bound_projects();
+            (
+                memory_reviewer::worker::module_projects(&harness.store, &harness.handler.bindings),
+                bridge.scheduled_projects().unwrap(),
+                bridge
+                    .binding_for_root(&root)
+                    .map(|binding| (binding.harness, binding.session)),
+                roster,
+            )
+        };
+        // The dormant project: the start-up binding is closed, leaving MODULE authority and no participating route.
+        harness.handler.unbind_route(test_route(7));
+        let dormant = views();
+        assert!(dormant.0.is_empty() && dormant.1.is_empty() && dormant.3.is_empty());
+        assert_eq!(dormant.2, None);
+
+        let observer = binding_with_harness(
+            &harness.route_root,
+            OBSERVATIONAL_HARNESS,
+            "eidnara-review:observer",
+        );
+        harness.handler.bind_route(test_route(21), observer.clone());
+        assert_eq!(views(), dormant, "an observer alone enrolls nothing");
+        // Route-local authorization and project lookup are unchanged for the observer's own route.
+        let resolved = harness
+            .handler
+            .resolve_binding(test_route(21), "eidnara-review:observer")
+            .unwrap();
+        assert_eq!(resolved.project_root, root);
+        assert!(resolved.is_observational());
+        assert!(matches!(
+            harness
+                .handler
+                .resolve_binding(test_route(21), "another-session"),
+            Err(BindingError::SessionMismatch)
+        ));
+        harness.handler.unbind_route(test_route(21));
+        assert_eq!(views(), dormant, "closing it reveals nothing");
+
+        // A live scheduled harness on the same root, then an observer opened beside it, in both close orders.
+        for observer_closes_first in [true, false] {
+            let mut live = binding_with_harness(&harness.route_root, "pi", "ses-live");
+            live.config.memory_classifier_review_user_memories_schedule =
+                Some("*/15 * * * *".to_string());
+            harness.handler.bind_route(test_route(7), live);
+            let scheduled = views();
+            assert_eq!(scheduled.0.len(), 1);
+            assert_eq!(scheduled.0[0].roots.len(), 1);
+            assert_eq!(scheduled.1.len(), 1);
+            assert_eq!(scheduled.1[0].schedule, "*/15 * * * *");
+            assert_eq!(
+                scheduled.2,
+                Some(("pi".to_string(), "ses-live".to_string()))
+            );
+            assert_eq!(scheduled.3.len(), 1);
+
+            harness.handler.bind_route(test_route(21), observer.clone());
+            assert_eq!(
+                views(),
+                scheduled,
+                "the newer observer does not replace the live binding"
+            );
+            // A second root of the same project bound only by an observer adds no root to the project.
+            let worktree = harness._dir.path().join("observed-worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            harness
+                .store
+                .bind_authority_route("context", "git:identity", worktree.to_str().unwrap())
+                .unwrap();
+            harness.handler.bind_route(
+                test_route(22),
+                binding_with_harness(
+                    worktree.to_str().unwrap(),
+                    OBSERVATIONAL_HARNESS,
+                    "eidnara-review:second",
+                ),
+            );
+            assert_eq!(
+                views(),
+                scheduled,
+                "an observer-only root contributes nothing"
+            );
+            assert_eq!(
+                bridge.binding_for_root(&worktree),
+                None,
+                "no participating binding on the observed root"
+            );
+            harness.handler.unbind_route(test_route(22));
+
+            if observer_closes_first {
+                harness.handler.unbind_route(test_route(21));
+                assert_eq!(views(), scheduled, "the live harness keeps its binding");
+                assert!(
+                    harness
+                        .handler
+                        .resolve_binding(test_route(7), "ses-live")
+                        .is_ok(),
+                    "the live session is not purged with the observer"
+                );
+                harness.handler.unbind_route(test_route(7));
+            } else {
+                harness.handler.unbind_route(test_route(7));
+                assert_eq!(views(), dormant, "the observer does not inherit the root");
+                assert!(
+                    harness
+                        .handler
+                        .resolve_binding(test_route(21), "eidnara-review:observer")
+                        .is_ok(),
+                    "the observer's own session is not purged with the live route"
+                );
+                harness.handler.unbind_route(test_route(21));
+            }
+            assert_eq!(views(), dormant);
+        }
     }
 
     /// Several route roots can bind to one authority project; the scheduler
