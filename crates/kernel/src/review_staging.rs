@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use context_core::redaction::redact_durable_text;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -251,6 +251,50 @@ struct VersionedPayload {
 struct ReviewWitness {
     kind: String,
     binding: ReviewBinding,
+    /// Present on proposal rows staged with their dependency record; absent on subject rows and on proposal rows whose witness carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dependencies: Option<ReviewDependencies>,
+}
+
+/// Schema version of [`ReviewDependencies`] this build writes and reads.
+pub const REVIEW_DEPENDENCIES_VERSION: u32 = 1;
+/// Bound on the persisted canonical policy-union bytes; a union over the hold's reference bound stays far below it.
+pub const MAX_REVIEW_DEPENDENCIES_BYTES: usize = 64 * 1024;
+
+/// The durable record a proposal row keeps of what its run disclosed and which attempt produced it, so a later reader can revalidate every member and join the marker without the run's process-local broker. It lives in the witness beside the payload; the payload bytes, their digest, and the wire proposal are unchanged by it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewDependencies {
+    pub version: u32,
+    /// Canonical policy-union bytes as `context_core::memory_reviewer_policy_union` encodes them.
+    pub union_canonical: String,
+    /// Lower-hex SHA-256 identity of `union_canonical` under the union protocol.
+    pub union_digest: String,
+    /// The receipt generation and attempt index of the marker whose response the proposal is.
+    pub generation: u64,
+    pub attempt_index: u32,
+    /// The marker's request body digest and policy-union digest, as the ledger recorded them.
+    pub body_digest: String,
+    pub marker_union_digest: String,
+}
+
+impl ReviewDependencies {
+    fn validate(&self) -> Result<(), ReviewStageRefusal> {
+        if self.version != REVIEW_DEPENDENCIES_VERSION
+            || self.union_canonical.is_empty()
+            || self.union_canonical.len() > MAX_REVIEW_DEPENDENCIES_BYTES
+        {
+            return Err(ReviewStageRefusal::Invalid);
+        }
+        for digest in [
+            &self.union_digest,
+            &self.body_digest,
+            &self.marker_union_digest,
+        ] {
+            check_digest(digest)?;
+        }
+        Ok(())
+    }
 }
 
 /// Lifecycle guards deserialize `WitnessKind` rather than `ReviewWitness` so rows with obsolete bindings remain non-renewable.
@@ -271,6 +315,8 @@ pub struct ReviewStagingSpec {
     pub recorded_at: i64,
     /// The job's absolute deadline, identical across retries; at most [`REVIEW_QUEUE_LIFETIME_MS`] after `recorded_at`.
     pub queue_deadline_at: i64,
+    /// Required with a proposal payload, refused with a subject payload.
+    pub dependencies: Option<ReviewDependencies>,
 }
 
 /// Immutable reference to a staged review input.
@@ -303,6 +349,8 @@ pub struct ReviewStagedRow {
     pub payload: ReviewPayload,
     pub sensitivity: Sensitivity,
     pub lifecycle: ReviewLifecycle,
+    /// `None` on subject rows and on proposal rows whose witness carries no record. A reader that needs the record refuses such a row for the rest of its review hold rather than inferring lineage from the payload; no migration rewrites it.
+    pub dependencies: Option<ReviewDependencies>,
 }
 
 /// Why a staging request stored nothing. No variant carries stored content.
@@ -632,18 +680,23 @@ impl ReviewBinding {
         Ok(self)
     }
 
-    fn witness_bytes(&self) -> Result<Vec<u8>, ReviewStageRefusal> {
+    fn witness_bytes(
+        &self,
+        dependencies: Option<&ReviewDependencies>,
+    ) -> Result<Vec<u8>, ReviewStageRefusal> {
         serde_json::to_vec(&ReviewWitness {
             kind: REVIEW_WITNESS_KIND.to_string(),
             binding: self.clone(),
+            dependencies: dependencies.cloned(),
         })
         .map_err(|_| ReviewStageRefusal::Invalid)
     }
+}
 
-    fn from_witness(bytes: &[u8]) -> Option<Self> {
-        let witness: ReviewWitness = serde_json::from_slice(bytes).ok()?;
-        (witness.kind == REVIEW_WITNESS_KIND).then_some(witness.binding)
-    }
+/// The binding and dependency record a review witness carries; `None` for bytes that are not a review witness.
+fn decode_witness(bytes: &[u8]) -> Option<(ReviewBinding, Option<ReviewDependencies>)> {
+    let witness: ReviewWitness = serde_json::from_slice(bytes).ok()?;
+    (witness.kind == REVIEW_WITNESS_KIND).then_some((witness.binding, witness.dependencies))
 }
 
 /// Only the two public witness kinds are renewable; decode failures and unknown kinds count as review so that a row the current build cannot classify never becomes renewable.
@@ -682,15 +735,21 @@ impl ReviewStagingSpec {
         check_identity(&self.candidate_id)?;
         check_identity(&self.producer)?;
         let binding = self.binding.normalized()?;
-        match (&binding.owner, &self.payload) {
-            (ReviewOwner::Job { .. }, ReviewPayload::Subject(_)) => {}
-            (ReviewOwner::Proposal { job_id, generation }, ReviewPayload::Proposal(_)) => {
+        match (&binding.owner, &self.payload, &self.dependencies) {
+            (ReviewOwner::Job { .. }, ReviewPayload::Subject(_), None) => {}
+            (
+                ReviewOwner::Proposal { job_id, generation },
+                ReviewPayload::Proposal(_),
+                Some(dependencies),
+            ) => {
                 let expected = provisional_result_identity(job_id, *generation);
                 if expected.extraction_run_id != self.extraction_run_id
                     || expected.candidate_id != self.candidate_id
+                    || dependencies.generation != *generation
                 {
                     return Err(ReviewStageRefusal::Invalid);
                 }
+                dependencies.validate()?;
             }
             _ => return Err(ReviewStageRefusal::Invalid),
         }
@@ -711,7 +770,7 @@ impl ReviewStagingSpec {
                 detections: Vec::new(),
             },
             provenance: None,
-            witness: binding.witness_bytes()?,
+            witness: binding.witness_bytes(self.dependencies.as_ref())?,
             replay: StagingReplay::Immutable,
             recorded_at: self.recorded_at,
             lease_expires_at: self.queue_deadline_at,
@@ -760,11 +819,12 @@ impl KernelStore {
             .clone()
             .normalized()
             .map_err(|_| ReviewReadError::Invalid)?;
-        let (row, sealed_at, binding) = self.load_staged_review(reference, now, true)?;
+        let (row, sealed_at, binding, dependencies) =
+            self.load_staged_review(reference, now, true)?;
         if binding != expected {
             return Err(ReviewReadRefusal::ScopeMismatch.into());
         }
-        Self::decode_staged_row(row, sealed_at, binding)
+        Self::decode_staged_row(row, sealed_at, binding, dependencies)
     }
 
     /// Reads a sealed proposal row that a completed receipt selected at `selected_at`. The row's queue deadline is judged against that selection time, not against the clock: a result selected while its queue was live stays readable after the queue deadline, and one whose selection postdates the deadline refuses `Expired`. Current liveness is the caller's review hold to check. The stored binding is returned for the caller to compare; nothing here asserts one.
@@ -773,14 +833,42 @@ impl KernelStore {
         reference: &ReviewStagedReference,
         selected_at: i64,
     ) -> Result<ReviewStagedRow, ReviewReadError> {
-        let (row, sealed_at, binding) = self.load_staged_review(reference, selected_at, false)?;
-        Self::decode_staged_row(row, sealed_at, binding)
+        let (row, sealed_at, binding, dependencies) =
+            self.load_staged_review(reference, selected_at, false)?;
+        Self::decode_staged_row(row, sealed_at, binding, dependencies)
+    }
+
+    /// The reference of the sealed proposal row at `candidate_id`, or `None` when no row exists there. The reference names the stored bytes by digest, so a caller that recovers a durable result without the run that staged it reads it through the same path as any other reader. An unsealed or abandoned row is not a result and reads as `None`.
+    pub fn sealed_review_reference(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<ReviewStagedReference>, ReviewReadError> {
+        check_identity(candidate_id).map_err(|_| ReviewReadError::Invalid)?;
+        let reader = self.lock_reader().map_err(ReviewReadError::Store)?;
+        let incarnation =
+            super::open::database_incarnation_id_via(&reader).map_err(ReviewReadError::Store)?;
+        let payload: Option<Vec<u8>> = reader
+            .query_row_cached(
+                "SELECT c.payload FROM candidates c JOIN extraction_runs r USING(extraction_run_id)
+                 WHERE c.candidate_id=?1 AND c.candidate_kind=?2
+                   AND c.terminal_state='completed' AND r.terminal_state='completed'",
+                params![candidate_id, REVIEW_PROPOSAL_KIND],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| ReviewReadError::Store(map_sqlite(error)))?;
+        Ok(payload.map(|payload| ReviewStagedReference {
+            database_incarnation_id: incarnation,
+            candidate_id: candidate_id.to_string(),
+            payload_digest: identity_digest(&payload),
+        }))
     }
 
     fn decode_staged_row(
         row: StoredReviewRow,
         sealed_at: i64,
         binding: ReviewBinding,
+        dependencies: Option<ReviewDependencies>,
     ) -> Result<ReviewStagedRow, ReviewReadError> {
         let payload =
             ReviewPayload::decode(&row.payload).map_err(|_| ReviewReadRefusal::DecodeRefused)?;
@@ -798,6 +886,7 @@ impl KernelStore {
                 queue_deadline_at: row.deadline_at,
                 sealed_at,
             },
+            dependencies,
         })
     }
 
@@ -807,7 +896,7 @@ impl KernelStore {
         reference: &ReviewStagedReference,
         now: i64,
     ) -> Result<ReviewBinding, ReviewReadError> {
-        let (_, _, binding) = self.load_staged_review(reference, now, true)?;
+        let (_, _, binding, _) = self.load_staged_review(reference, now, true)?;
         Ok(binding)
     }
 
@@ -817,7 +906,15 @@ impl KernelStore {
         reference: &ReviewStagedReference,
         live_at: i64,
         live: bool,
-    ) -> Result<(StoredReviewRow, i64, ReviewBinding), ReviewReadError> {
+    ) -> Result<
+        (
+            StoredReviewRow,
+            i64,
+            ReviewBinding,
+            Option<ReviewDependencies>,
+        ),
+        ReviewReadError,
+    > {
         if live_at < 0 {
             return Err(ReviewReadError::Invalid);
         }
@@ -876,9 +973,9 @@ impl KernelStore {
         if identity_digest(&row.payload) != reference.payload_digest {
             return Err(ReviewReadRefusal::Changed.into());
         }
-        let binding =
-            ReviewBinding::from_witness(&row.witness).ok_or(ReviewReadRefusal::ScopeMismatch)?;
-        Ok((row, sealed_at, binding))
+        let (binding, dependencies) =
+            decode_witness(&row.witness).ok_or(ReviewReadRefusal::ScopeMismatch)?;
+        Ok((row, sealed_at, binding, dependencies))
     }
 }
 

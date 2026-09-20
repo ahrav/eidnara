@@ -465,6 +465,7 @@ pub fn reserve_and_stage(
         payload,
         recorded_at: now_ms,
         queue_deadline_at: job.queue_deadline_ms,
+        dependencies: None,
     }) {
         Ok(_) => match target.kernel.finish_staging_run(
             &extraction_run_id,

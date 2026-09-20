@@ -232,6 +232,7 @@ impl Fixture {
                 }),
                 recorded_at: self.now,
                 queue_deadline_at: self.now + 24 * HOUR_MS,
+                dependencies: None,
             })
             .unwrap();
         self.store
@@ -1580,6 +1581,7 @@ fn a_staged_subject_owned_by_another_job_is_out_of_scope() {
             }),
             recorded_at: fixture.now,
             queue_deadline_at: fixture.now + 24 * HOUR_MS,
+            dependencies: None,
         })
         .unwrap();
     fixture

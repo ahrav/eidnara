@@ -21,6 +21,10 @@
 | Sweep inside the settlement window | yes | `Settlement::before_completion_for_test` running `expire_memory_reviewer_work` |
 | Takeover without a losing settlement | yes | `take_over_memory_reviewer_receipt` after `kernel_half` |
 | Stored owner or class changed after selection | yes | direct SQLite update of `candidates.provenance_witness` or `sensitivity_class` |
+| Broker, aliases, and transcript lost | yes | drop the run's `EvidenceBroker`; construct a fresh one with an empty hold id |
+| Dependency record edited or removed | yes | direct SQLite `replace` or `json_remove` on the witness |
+| Unterminated, cancelled, or `not_dispatched` marker before a run | yes | `dispatch_memory_reviewer_attempt` without a terminal, a cancelled first run, or a recheck clock past the attempt deadline |
+| Uncited member retired after selection | yes | `retire_observation` on a disclosed but uncited source |
 | Selection dated at or after the queue deadline | yes | `read_selected_review_input` with `selected_at >= deadline`; the ledger cannot record one |
 
 ## Required faults per property
@@ -30,6 +34,10 @@
 | `production-classes-reach-policy-eligible-proposal` | production selection open; Remote-eligible decision representation; open activation gate | no |
 | `canonical-resolution-refuses-changed-owner-and-target` | supersession after resolution; unregistered owner; stale descriptor revision; stale bound decision revision; wrong-kind owner; owner in another project's scope; Remote destination | yes |
 | `private-result-transfer-preserves-queue-expiry` | crash after transfer; sweep at the earlier deadline; sweep inside the settlement window; late completion; takeover orphaning a hold; selection at the deadline; selected read past the queue deadline and at the hold's expiry; changed owner or class after selection | yes |
+| `receipt-selection-fences-private-generation-results` | takeover to generation 2 after a generation-1 Kernel envelope; adopt and read at generation 2 | yes |
+| `durable-private-result-recovers-without-model-refire` | broker lost; record edited; record removed; member retired; completed marker without a row | yes |
+| `unknown-dispatch-does-not-authorize-resend` | unterminated marker; cancelled marker; `not_dispatched` marker | yes |
+| `uncited-owner-lineage-remains-read-authority` | uncited member retired after selection; fabricated canonical member | yes |
 
 ## Coverage checks to add
 

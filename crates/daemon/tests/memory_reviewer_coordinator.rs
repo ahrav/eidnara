@@ -1025,7 +1025,7 @@ async fn an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the
         attempts[0].terminal.map(|(terminal, _)| terminal),
         Some(MemoryReviewerAttemptTerminal::Cancelled)
     );
-    // An attempt whose terminal is genuinely unknown makes the whole run unknown at settlement.
+    // An unterminated marker at this generation is dispatched work whose answer this process never saw: the resumed run completes the receipt unknown before any request, however many rounds remain.
     let fixture = Fixture::open(CASES[0].sources);
     fixture
         .ledger
@@ -1048,19 +1048,92 @@ async fn an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the
             |()| (),
         )
         .unwrap();
-    let mut peer = Peer::start().await;
-    let server = peer.serve_script(vec![text_response(
-        r#"{"v":1,"step":{"kind":"abstain","reason":"x"}}"#,
-    )]);
+    let peer = Peer::start().await;
     let settled = fixture
         .run(&peer, Some(fixture.approval()), &CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(settled, Settled::Unknown);
-    server.await.unwrap();
+    assert_eq!(
+        peer.connections.load(Ordering::SeqCst),
+        0,
+        "no compensating request is sent for a lost one"
+    );
+    assert_eq!(fixture.attempts().len(), 1);
     assert_eq!(
         fixture.receipt().terminal,
         Some(MemoryReviewerReceiptTerminal::Unknown)
+    );
+}
+
+/// A marker the post-commit recheck closed `not_dispatched` proves no bytes left the host; it consumed an attempt but says nothing about a lost answer, so the resumed run proceeds under the original identity and deadlines with a newly charged attempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_not_dispatched_marker_alone_lets_the_run_proceed_with_a_new_attempt() {
+    let fixture = Fixture::open(CASES[0].sources);
+    // The recheck reads the clock again after the commit; a clock that lapsed past the attempt deadline in between withholds the handoff and records `not_dispatched`.
+    let reads = std::sync::atomic::AtomicU32::new(0);
+    let base = fixture.now + 3;
+    let outcome = fixture
+        .ledger
+        .dispatch_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &fixture.claim.claim_id,
+            &fixture.kernel_incarnation(),
+            &memory_store::memory_reviewer_ledger::AttemptMarker {
+                body_digest: "b".repeat(64),
+                request_bytes: 100,
+                provider: "localhost/v1/messages@2023-06-01".to_string(),
+                model: MODEL.to_string(),
+                credential_id: CREDENTIAL_ID.to_string(),
+                policy_union_digest: "e".repeat(64),
+            },
+            (),
+            || {
+                if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    base
+                } else {
+                    base + memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_ATTEMPT_MAX_MS + 1
+                }
+            },
+            |()| (),
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            memory_store::memory_reviewer_ledger::DispatchOutcome::ChargedNotDispatched {
+                finished: true,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fixture.attempts()[0].terminal.map(|(terminal, _)| terminal),
+        Some(MemoryReviewerAttemptTerminal::NotDispatched)
+    );
+    // The ledger's newest instant is the lapsed recheck; the resumed run's clock is at or after it and still inside the cutoff.
+    fixture.clock.store(
+        base + memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_ATTEMPT_MAX_MS + 2,
+        Ordering::SeqCst,
+    );
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(
+        r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+    )]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
+    assert_eq!(server.await.unwrap().len(), 1);
+    let attempts = fixture.attempts();
+    assert_eq!(attempts.len(), 2, "the unsent marker stays charged");
+    assert_eq!(
+        attempts[1].terminal.map(|(terminal, _)| terminal),
+        Some(MemoryReviewerAttemptTerminal::Complete)
     );
 }
 
@@ -1095,6 +1168,7 @@ async fn a_staged_subject_is_policy_blocked_for_a_remote_model_and_abstains() {
             }),
             recorded_at: fixture.now,
             queue_deadline_at: fixture.now + 20 * 60 * 60 * 1_000,
+            dependencies: None,
         })
         .unwrap();
     fixture
@@ -1645,6 +1719,7 @@ async fn a_staged_subject_with_no_linked_references_is_read_under_an_empty_hold(
             }),
             recorded_at: fixture.now,
             queue_deadline_at: fixture.now + 20 * 60 * 60 * 1_000,
+            dependencies: None,
         })
         .unwrap();
     fixture
@@ -1984,7 +2059,7 @@ async fn host_notices_are_framed_apart_from_evidence_bytes() {
 
 /// An open receipt resumed at the same generation launches under supervisor keys the earlier attempts did not use, so the retained runs of a cancelled investigation do not refuse the resumed one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_resumed_generation_launches_under_fresh_supervisor_keys() {
+async fn a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send() {
     let fixture = Fixture::open(CASES[0].sources);
     let mut peer = Peer::start().await;
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
@@ -2010,18 +2085,393 @@ async fn a_resumed_generation_launches_under_fresh_supervisor_keys() {
     release_tx.send(()).ok();
     let _ = server.await;
     assert_eq!(fixture.receipt().terminal, None);
-    // The same receipt, claim, and generation run again in the same daemon.
+    // The same receipt, claim, and generation run again in the same daemon. The cancelled marker proves a request was dispatched whose answer this process never saw and no durable result records; the resumed run completes the receipt unknown and sends nothing, however many rounds remain.
+    let peer = Peer::start().await;
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Unknown);
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.attempts().len(), 1);
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Unknown)
+    );
+}
+
+/// A predecessor that died after dispatch left an unterminated marker its lapsed claim can never close. The job's outcome is unknown from that marker on (Q20), whatever a later generation hears back, so the successor that takes the receipt over completes it `unknown` without a request rather than paying for an answer its settlement would have to discard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_takeover_past_an_unterminated_marker_completes_unknown_without_a_send() {
+    let mut fixture = Fixture::open(CASES[0].sources);
+    let now = fixture.now + 3;
+    let outcome = fixture
+        .ledger
+        .dispatch_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &fixture.claim.claim_id,
+            &fixture.kernel_incarnation(),
+            &memory_store::memory_reviewer_ledger::AttemptMarker {
+                body_digest: "b".repeat(64),
+                request_bytes: 100,
+                provider: "localhost/v1/messages@2023-06-01".to_string(),
+                model: MODEL.to_string(),
+                credential_id: CREDENTIAL_ID.to_string(),
+                policy_union_digest: "e".repeat(64),
+            },
+            (),
+            || now,
+            |()| (),
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        memory_store::memory_reviewer_ledger::DispatchOutcome::Handed { .. }
+    ));
+    // The predecessor's claim lapses; a second worker claims the job and takes the receipt over at generation 2.
+    let later =
+        fixture.now + memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_TASK_LEASE_MS + 1;
+    let LeaseAcquireOutcome::Claim { claim, .. } = fixture
+        .ledger
+        .acquire_memory_reviewer_task(
+            PROJECT,
+            "acq-2",
+            "worker-b",
+            0,
+            fixture.registration,
+            &fixture.identity,
+            later,
+        )
+        .unwrap()
+    else {
+        panic!("the lapsed job is claimed again")
+    };
+    let successor = TaskClaim {
+        claim_id: claim.claim_id,
+        worker_instance: "worker-b".to_string(),
+        slot: 0,
+    };
+    fixture.receipt = fixture
+        .ledger
+        .take_over_memory_reviewer_receipt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &successor.claim_id,
+            later,
+        )
+        .unwrap();
+    assert_eq!(fixture.receipt.generation, 2);
+    fixture.claim = successor;
+    fixture.clock.store(later + 2, Ordering::SeqCst);
+    // The peer would answer at once; a run that connects has sent.
     let mut peer = Peer::start().await;
     let server = peer.serve_script(vec![text_response(
-        r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#,
+        r#"{"v":1,"step":{"kind":"abstain","reason":"late"}}"#,
     )]);
     let settled = fixture
         .run(&peer, Some(fixture.approval()), &CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(settled, Settled::Abstained(AbstainReason::ModelDeclined));
-    server.await.unwrap();
-    assert_eq!(fixture.attempts().len(), 2);
+    server.abort();
+    assert_eq!(settled, Settled::Unknown);
+    assert_eq!(
+        peer.connections.load(Ordering::SeqCst),
+        0,
+        "a job whose outcome is already unknown is not sent again"
+    );
+    assert_eq!(fixture.attempts().len(), 1, "no attempt was charged");
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Unknown)
+    );
+}
+
+/// A run lost between its Kernel envelope and its Memory Store completion left a sealed result under a review hold. The same claim and generation resumed through the coordinator adopts it: the Kernel refuses a second execution hold for the transferred generation, adoption runs under the review hold, the receipt selects the byte-identical reference, and the peer never hears from the run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resumed_generation_adopts_the_result_a_lost_run_sealed_without_a_send() {
+    use daemon::memory_reviewer::broker::{EvidenceBroker, RunBinding};
+    use daemon::memory_reviewer::settlement::{RunResult, Settlement};
+    let fixture = Fixture::open(CASES[0].sources);
+    let now = fixture.now + 3;
+    let hold_binding = kernel::MemoryReviewerHoldBinding {
+        project_digest: PROJECT.to_string(),
+        kernel_incarnation: fixture.kernel_incarnation(),
+        memstore_incarnation: fixture.ledger.memory_reviewer_store_incarnation().unwrap(),
+        subject: fixture.identity.clone(),
+        generation: 1,
+    };
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&hold_binding, &[], fixture.receipt.execution_cutoff_ms)
+        .unwrap();
+    let lost = EvidenceBroker::new(
+        RunBinding {
+            hold: hold_binding,
+            hold_id: hold.hold_id,
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        QuestionTemplate::ExtractedFacts,
+    )
+    .unwrap();
+    let outcome = fixture
+        .ledger
+        .dispatch_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &fixture.claim.claim_id,
+            &fixture.kernel_incarnation(),
+            &memory_store::memory_reviewer_ledger::AttemptMarker {
+                body_digest: "b".repeat(64),
+                request_bytes: 100,
+                provider: "localhost/v1/messages@2023-06-01".to_string(),
+                model: MODEL.to_string(),
+                credential_id: CREDENTIAL_ID.to_string(),
+                policy_union_digest: lost.ledger.union().encode().unwrap().digest,
+            },
+            (),
+            || now,
+            |()| (),
+        )
+        .unwrap();
+    let memory_store::memory_reviewer_ledger::DispatchOutcome::Handed { attempt_index, .. } =
+        outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    fixture
+        .ledger
+        .finish_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &fixture.claim.claim_id,
+            attempt_index,
+            MemoryReviewerAttemptTerminal::Complete,
+            now,
+        )
+        .unwrap();
+    let binding = fixture.binding();
+    // The lost run dies after the Kernel envelope committed and before the ledger completion.
+    let crash = || panic!("lost between the stores");
+    let lost_run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Settlement {
+            store: &fixture.store,
+            ledger: &fixture.ledger,
+            project: PROJECT,
+            binding: &binding,
+            claim: &fixture.claim,
+            now_ms: &move || now,
+            before_completion_for_test: Some(&crash),
+        }
+        .settle(
+            &lost,
+            RunResult::Proposal(Box::new(support::memory_reviewer_publish::proposal())),
+        )
+    }));
+    assert!(lost_run.is_err());
+    drop(lost);
+    assert_eq!(fixture.receipt().terminal, None);
+    let identity = kernel::provisional_result_identity(&fixture.identity, 1);
+    let sealed = fixture
+        .store
+        .sealed_review_reference(&identity.candidate_id)
+        .unwrap()
+        .expect("the Kernel envelope committed");
+    let peer = Peer::start().await;
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Published(sealed.clone()));
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.attempts().len(), 1);
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Complete)
+    );
+    assert_eq!(
+        read_selected_proposal(
+            &fixture.store,
+            &fixture.ledger,
+            PROJECT,
+            &fixture.identity,
+            now + 5
+        )
+        .unwrap()
+        .reference,
+        sealed
+    );
+}
+
+/// A project at its active-hold cap refuses the resumed run's replacement execution hold. That refusal is transient: the run surfaces it and leaves the receipt open, so a retry adopts the sealed reference once capacity frees, instead of recording `budget_exhausted` against a result that still stands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hold_cap_refusal_on_resume_leaves_the_receipt_open_instead_of_abstaining() {
+    use daemon::memory_reviewer::broker::{EvidenceBroker, RefusalCode, RunBinding};
+    use daemon::memory_reviewer::dependencies;
+    use daemon::memory_reviewer::settlement::SETTLEMENT_PRODUCER;
+    let fixture = Fixture::open(CASES[0].sources);
+    let now = fixture.now + 3;
+    let hold_binding = kernel::MemoryReviewerHoldBinding {
+        project_digest: PROJECT.to_string(),
+        kernel_incarnation: fixture.kernel_incarnation(),
+        memstore_incarnation: fixture.ledger.memory_reviewer_store_incarnation().unwrap(),
+        subject: fixture.identity.clone(),
+        generation: 1,
+    };
+    let hold = fixture
+        .store
+        .acquire_execution_hold(&hold_binding, &[], fixture.receipt.execution_cutoff_ms)
+        .unwrap();
+    let lost = EvidenceBroker::new(
+        RunBinding {
+            hold: hold_binding.clone(),
+            hold_id: hold.hold_id.clone(),
+            destination: kernel::ArtifactDestination::Remote,
+        },
+        QuestionTemplate::ExtractedFacts,
+    )
+    .unwrap();
+    let outcome = fixture
+        .ledger
+        .dispatch_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &fixture.claim.claim_id,
+            &fixture.kernel_incarnation(),
+            &memory_store::memory_reviewer_ledger::AttemptMarker {
+                body_digest: "b".repeat(64),
+                request_bytes: 100,
+                provider: "localhost/v1/messages@2023-06-01".to_string(),
+                model: MODEL.to_string(),
+                credential_id: CREDENTIAL_ID.to_string(),
+                policy_union_digest: lost.ledger.union().encode().unwrap().digest,
+            },
+            (),
+            || now,
+            |()| (),
+        )
+        .unwrap();
+    let memory_store::memory_reviewer_ledger::DispatchOutcome::Handed { attempt_index, .. } =
+        outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    fixture
+        .ledger
+        .finish_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &fixture.claim.claim_id,
+            attempt_index,
+            MemoryReviewerAttemptTerminal::Complete,
+            now,
+        )
+        .unwrap();
+    // The lost run sealed its row with the record, then exited unsettled before the transfer and released its execution hold.
+    let identity = kernel::provisional_result_identity(&fixture.identity, 1);
+    let record = dependencies::record(&lost, &fixture.attempts(), 1)
+        .unwrap()
+        .expect("a completed marker at this generation");
+    let sealed = fixture
+        .store
+        .stage_review_input(kernel::ReviewStagingSpec {
+            extraction_run_id: identity.extraction_run_id.clone(),
+            candidate_id: identity.candidate_id.clone(),
+            producer: SETTLEMENT_PRODUCER.to_string(),
+            binding: ReviewBinding {
+                owner: ReviewOwner::Proposal {
+                    job_id: fixture.identity.clone(),
+                    generation: 1,
+                },
+                ..fixture.binding()
+            },
+            payload: kernel::ReviewPayload::Proposal(Box::new(
+                support::memory_reviewer_publish::proposal(),
+            )),
+            recorded_at: now,
+            queue_deadline_at: fixture.job().queue_deadline_ms,
+            dependencies: Some(record),
+        })
+        .unwrap();
+    fixture
+        .store
+        .finish_staging_run(
+            &identity.extraction_run_id,
+            kernel::StagingTerminalState::Completed,
+            now,
+        )
+        .unwrap();
+    fixture
+        .store
+        .release_execution_hold(&hold.hold_id, &hold_binding)
+        .unwrap();
+    drop(lost);
+    assert_eq!(fixture.receipt().terminal, None);
+    // Other jobs in the project hold every active-hold slot when the claim resumes.
+    let others: Vec<_> = (0..kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_PROJECT)
+        .map(|index| {
+            let binding = kernel::MemoryReviewerHoldBinding {
+                subject: format!("other-job-{index}"),
+                ..hold_binding.clone()
+            };
+            let hold = fixture
+                .store
+                .acquire_execution_hold(&binding, &[], fixture.receipt.execution_cutoff_ms)
+                .unwrap();
+            (binding, hold.hold_id)
+        })
+        .collect();
+    let peer = Peer::start().await;
+    let outcome = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await;
+    assert_eq!(
+        outcome,
+        Err(InvestigationError::Kernel(RefusalCode::HoldLimit)),
+        "a cap refusal is the Kernel's to report, not a budget the run spent"
+    );
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.receipt().terminal,
+        None,
+        "a transient cap refusal must not complete the receipt"
+    );
+    assert_eq!(fixture.attempts().len(), 1);
+    // Capacity frees; the same claim and generation adopt the sealed result under a replacement hold.
+    for (binding, hold_id) in &others {
+        fixture
+            .store
+            .release_execution_hold(hold_id, binding)
+            .unwrap();
+    }
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Published(sealed.clone()));
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Complete)
+    );
+    assert_eq!(
+        read_selected_proposal(
+            &fixture.store,
+            &fixture.ledger,
+            PROJECT,
+            &fixture.identity,
+            now + 5
+        )
+        .unwrap()
+        .reference,
+        sealed
+    );
 }
 
 /// A launch that failed before the ledger recorded an attempt (no approval) is still retained by the supervisor under its key; the retried generation must launch past it.

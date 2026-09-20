@@ -5,6 +5,7 @@ use std::ops::Range;
 pub mod activation;
 pub mod broker;
 pub mod coordinator;
+pub mod dependencies;
 pub mod disclosure;
 pub mod handoff;
 pub mod lifecycle;

@@ -44,6 +44,23 @@ reviews found and how each finding was dispositioned.
 | No test placed the sweep inside the settlement window | gap | fixed: `before_completion_for_test` runs the sweep; the completion is fenced and the settlement releases the hold |
 | No test reopens the stores between envelope and sweep | bias | kept: the rows are SQLite writes already committed; a reopen witness is queued under the U1 qualification owner |
 
+## Broker-free recovery
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| A resumed run acquired an empty execution hold when the lost run's hold had been released on an unsettled exit, so revalidation refused an admissible sealed result as `NotCovered` | gap | fixed: adoption extends the execution hold over the payload's disclosed inputs before revalidating; the released-hold window is tested for both the admissible and the retired-input case |
+| The resume path's hold acquisition swallowed store errors as an empty hold | gap | fixed: only a Kernel refusal yields an empty hold; a store error returns from `prepare` |
+| A resumed run with no hold at all abstained `expectation_changed`, which reads as lineage drift | refinement | fixed: it abstains `budget_exhausted`, the cutoff having passed before retention could be recovered |
+| `Verdict::from_hold` judged a backing limit as a durable change while the broker judges it transient | gap | fixed: it maps through `broker::hold_refusal` |
+| `settle` and `adopt` shared a copied prologue | refinement | fixed: `Settlement::open` returns the opened state to both |
+| `Verdict::from_refusal` ended in a wildcard | refinement | fixed: every code is named |
+| A `failed` or `cancelled` marker with no sealed row completes the receipt `unknown` | bias | kept: the ticket admits a new attempt only after a proven `not_dispatched` terminal, and the run's transcript is gone; the terminal literal is an open question on `unknown-dispatch-does-not-authorize-resend` |
+| Rows staged before the record existed refuse on read for the rest of their hold | bias | kept: fails closed with no migration, stated on `ReviewStagedRow::dependencies` |
+| `Prepared` carries a `resuming` flag beside a sentinel subject the resume path never reads | refinement | kept: an enum would fork `Run` construction for one field; queued with the coordinator's next structural change |
+| The selected read inverts `Verdict` back to a `RefusalCode` by hand; `PolicyUnion::decode` walks `Value` by hand | refinement | kept: both are local and exhaustive; a `Refused(code)` verdict and a serde wire type are queued as refinements with no behavior change |
+| No Kernel negative case for the staging rules; no negative control on the marker join; no test of a live settlement with no completed marker; no coordinator-level adoption to `Published` | gap | fixed: seven refused staging specs, a record joined to a marker index the ledger lacks, a `Failed`-only marker settlement, and a coordinator run that adopts the row a crashed settlement sealed |
+| No adopt case with a `temporary_capture` member under the empty execution hold | bias | kept: the member path is shared with the live read's `TemporaryCapture` expectation; queued in `existing-checks.md` |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner

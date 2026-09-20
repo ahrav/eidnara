@@ -413,6 +413,26 @@ impl Fixture {
         broker
     }
 
+    /// The broker a worker resuming `generation` after retention moved to review has: no aliases, no transcript, and no execution hold, since the Kernel refuses another for a generation that already transferred. `adopt` runs everything under the review hold.
+    fn resumed_broker(&self, generation: u64) -> EvidenceBroker {
+        EvidenceBroker::new(
+            RunBinding {
+                hold: self.hold_binding(generation),
+                hold_id: String::new(),
+                destination: ArtifactDestination::Remote,
+            },
+            QuestionTemplate::ExtractedFacts,
+        )
+        .unwrap()
+    }
+
+    fn adopt(&self, broker: &EvidenceBroker) -> Result<Settled, SettlementError> {
+        let binding = self.review_binding();
+        let now = self.now + 7;
+        self.settlement(&binding, &self.claim, &move || now)
+            .adopt(broker)
+    }
+
     /// A local broker with the commit and one project-text capture disclosed; the capture's acquisition reference ends at `now + HOUR_MS`. Returns the capture's evidence id.
     fn local_broker_with_capture(&self, generation: u64) -> (EvidenceBroker, String) {
         let mut broker = self.broker_to(generation, ArtifactDestination::Local);
@@ -468,6 +488,7 @@ impl Fixture {
                 }),
                 recorded_at: self.now,
                 queue_deadline_at: self.now + 24 * HOUR_MS,
+                dependencies: None,
             })
             .unwrap();
         self.store
@@ -597,19 +618,43 @@ impl Fixture {
         read_selected_proposal(&self.store, &self.ledger, PROJECT, &self.identity, now)
     }
 
-    /// Commits one attempt marker under the fixture's claim and, when `terminal` is given, records it.
-    fn attempt(&self, generation: u64, terminal: Option<MemoryReviewerAttemptTerminal>) {
-        self.attempt_under(generation, &self.claim, terminal, self.now + 3);
+    /// The dependency record settlement would write for `broker`'s run at `generation`: its union and the last completed marker there. A Kernel half staged before any marker is completed gets a record naming the marker the fixture's `attempt` commits, so a marker completed afterwards joins it.
+    fn dependencies(&self, broker: &EvidenceBroker, generation: u64) -> kernel::ReviewDependencies {
+        let attempts = self
+            .ledger
+            .list_memory_reviewer_attempts(PROJECT, &self.identity)
+            .unwrap();
+        daemon::memory_reviewer::dependencies::record(broker, &attempts, generation)
+            .unwrap()
+            .unwrap_or_else(|| {
+                let union = broker.ledger.union().encode().unwrap();
+                kernel::ReviewDependencies {
+                    version: kernel::REVIEW_DEPENDENCIES_VERSION,
+                    union_canonical: union.canonical,
+                    union_digest: union.digest,
+                    generation,
+                    attempt_index: 0,
+                    body_digest: "b".repeat(64),
+                    marker_union_digest: "e".repeat(64),
+                }
+            })
+    }
+
+    /// Commits one attempt marker for `broker`'s run under the fixture's claim and, when `terminal` is given, records it. The marker carries the digest of the union the broker has disclosed so far, as a dispatch would; a disclosure made after it belongs to a later attempt.
+    fn attempt(&self, broker: &EvidenceBroker, terminal: Option<MemoryReviewerAttemptTerminal>) {
+        self.attempt_under(broker, &self.claim, terminal, self.now + 3);
     }
 
     /// [`Self::attempt`] under another claim, dated `now`.
     fn attempt_under(
         &self,
-        generation: u64,
+        broker: &EvidenceBroker,
         claim: &TaskClaim,
         terminal: Option<MemoryReviewerAttemptTerminal>,
         now: i64,
     ) {
+        let generation = broker.binding().hold.generation;
+        let policy_union_digest = broker.ledger.union().encode().unwrap().digest;
         let outcome = self
             .ledger
             .dispatch_memory_reviewer_attempt(
@@ -624,7 +669,7 @@ impl Fixture {
                     provider: "localhost/v1/messages@2023-06-01".to_string(),
                     model: "claude-canonical-1".to_string(),
                     credential_id: "cred-1".to_string(),
-                    policy_union_digest: "e".repeat(64),
+                    policy_union_digest,
                 },
                 (),
                 || now,
@@ -697,6 +742,32 @@ impl Fixture {
         broker: &EvidenceBroker,
         proposal: &ReviewProposal,
     ) -> ReviewStagedReference {
+        let reference = self.stage_only(broker, proposal);
+        let generation = broker.binding().hold.generation;
+        let identity = provisional_result_identity(&self.identity, generation);
+        let created_at = self
+            .store
+            .read_review_input(&reference, &self.proposal_binding(generation), self.now + 5)
+            .unwrap()
+            .lifecycle
+            .created_at;
+        self.store
+            .transfer_execution_to_review(
+                &broker.binding().hold_id,
+                &broker.binding().hold,
+                &self.review_hold_binding(generation, &identity.candidate_id),
+                created_at + REVIEW_EXPIRY_MAX_MS,
+            )
+            .unwrap();
+        reference
+    }
+
+    /// The Kernel half up to the sealed row: staged and completed, retention still on the execution hold.
+    fn stage_only(
+        &self,
+        broker: &EvidenceBroker,
+        proposal: &ReviewProposal,
+    ) -> ReviewStagedReference {
         let generation = broker.binding().hold.generation;
         let identity = provisional_result_identity(&self.identity, generation);
         let queue_deadline = self
@@ -715,6 +786,7 @@ impl Fixture {
                 payload: ReviewPayload::Proposal(Box::new(proposal.clone())),
                 recorded_at: self.now + 5,
                 queue_deadline_at: queue_deadline,
+                dependencies: Some(self.dependencies(broker, generation)),
             })
             .unwrap();
         self.store
@@ -722,20 +794,6 @@ impl Fixture {
                 &identity.extraction_run_id,
                 StagingTerminalState::Completed,
                 self.now + 5,
-            )
-            .unwrap();
-        let created_at = self
-            .store
-            .read_review_input(&reference, &self.proposal_binding(generation), self.now + 5)
-            .unwrap()
-            .lifecycle
-            .created_at;
-        self.store
-            .transfer_execution_to_review(
-                &broker.binding().hold_id,
-                &broker.binding().hold,
-                &self.review_hold_binding(generation, &identity.candidate_id),
-                created_at + REVIEW_EXPIRY_MAX_MS,
             )
             .unwrap();
         reference
@@ -746,7 +804,7 @@ impl Fixture {
 fn a_completed_receipt_selects_the_staged_proposal_and_reads_pass_the_kernel() {
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     // Before settlement nothing is selected, so nothing is readable, though the job is claimed and the attempt is complete.
     assert_eq!(fixture.read(fixture.now + 6), Err(ReadRefusal::NotSelected));
@@ -903,7 +961,6 @@ fn a_completed_receipt_selects_the_staged_proposal_and_reads_pass_the_kernel() {
 fn the_staged_dependencies_are_the_brokers_union_including_uncited_inputs_and_ancestry() {
     let fixture = Fixture::open();
     let mut broker = fixture.broker_with_second(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let second = fixture.second.1.evidence_id.clone();
     // A disclosure whose union member names an owning decision contributes that decision to the ancestry, once, however many times it was disclosed.
@@ -921,6 +978,7 @@ fn the_staged_dependencies_are_the_brokers_union_including_uncited_inputs_and_an
             0..0,
         );
     }
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let Settled::Published(reference) = fixture
         .settle(
             &broker,
@@ -930,8 +988,23 @@ fn the_staged_dependencies_are_the_brokers_union_including_uncited_inputs_and_an
     else {
         panic!("published")
     };
-    let selected = fixture.read(fixture.now + 6).unwrap();
-    assert_eq!(selected.reference, reference);
+    // The staged row is read at the Kernel: the fabricated member names a decision the store never held, so the public read, which revalidates every persisted member, refuses it rather than trusting the ancestry it carries.
+    assert_eq!(
+        fixture.read(fixture.now + 6),
+        Err(ReadRefusal::Dependency(RefusalCode::ExpectationChanged))
+    );
+    let staged = fixture
+        .store
+        .read_review_input(&reference, &fixture.proposal_binding(1), fixture.now + 6)
+        .unwrap();
+    let ReviewPayload::Proposal(staged_proposal) = staged.payload else {
+        panic!("proposal")
+    };
+    let selected = SelectedProposal {
+        reference: reference.clone(),
+        proposal: *staged_proposal,
+        review_expires_at: 0,
+    };
     let deps = &selected.proposal.policy_dependencies;
     let mut expected = fixture.bound_proposal_over(&[&evidence], &[&evidence, &second]);
     expected.policy_dependencies.ancestry = vec!["decision-a".to_string()];
@@ -962,7 +1035,7 @@ fn unknown_partial_and_declined_runs_complete_without_content() {
     // An attempt that never recorded a terminal makes the disclosure unknown: the receipt says so and nothing is staged.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, None);
+    fixture.attempt(&broker, None);
     let evidence = fixture.evidence_id();
     assert_eq!(
         fixture
@@ -1011,7 +1084,7 @@ fn unknown_partial_and_declined_runs_complete_without_content() {
     // A recorded unknown terminal is the same scalar.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Unknown));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Unknown));
     assert_eq!(
         fixture.settle(&broker, RunResult::Declined).unwrap(),
         Settled::Unknown
@@ -1175,6 +1248,7 @@ fn revoked_or_uncited_dependencies_abstain_and_conflicting_content_is_refused() 
     // Different content already at the provisional identity conflicts: nothing completes and nothing is readable.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let mut other = fixture.bound_proposal(&[&evidence]);
     other.new_text = Some("something else entirely".to_string());
@@ -1189,6 +1263,7 @@ fn revoked_or_uncited_dependencies_abstain_and_conflicting_content_is_refused() 
             payload: ReviewPayload::Proposal(Box::new(other)),
             recorded_at: fixture.now + 4,
             queue_deadline_at: fixture.now + 20 * HOUR_MS,
+            dependencies: Some(fixture.dependencies(&broker, 1)),
         })
         .unwrap();
     assert_eq!(
@@ -1209,6 +1284,7 @@ fn revoked_or_uncited_dependencies_abstain_and_conflicting_content_is_refused() 
     // A sealed row with different bytes conflicts the same way: recovery adopts only the identical result.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let mut other = fixture.bound_proposal(&[&evidence]);
     other.new_text = Some("something else entirely".to_string());
@@ -1221,6 +1297,28 @@ fn revoked_or_uncited_dependencies_abstain_and_conflicting_content_is_refused() 
         Err(SettlementError::ConflictingContent)
     );
     assert_eq!(fixture.receipt().terminal, None);
+    // A sealed row with the same bytes but another dependency record is not this settlement's result either: the record is part of what was staged, and a row whose record would fail adoption and every selected read is not published as a replay.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
+    rusqlite::Connection::open(fixture.kernel_dir.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE candidates SET provenance_witness = CAST(json_remove(CAST(provenance_witness AS TEXT), '$.dependencies') AS BLOB) WHERE candidate_id = ?1",
+            [reference.candidate_id.as_str()],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.settle(
+            &broker,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence])))
+        ),
+        Err(SettlementError::ConflictingContent)
+    );
+    assert_eq!(fixture.receipt().terminal, None);
+    assert_eq!(fixture.read(fixture.now + 6), Err(ReadRefusal::NotSelected));
 }
 
 #[test]
@@ -1259,7 +1357,7 @@ fn kernel_results_stay_private_until_the_receipt_selects_them() {
     // The Kernel half committed and the worker crashed before the Memory Store selected anything: completed staging is not publication.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let bound = fixture.bound_proposal(&[&evidence]);
     let reference = fixture.kernel_half(&broker, &bound);
@@ -1341,7 +1439,7 @@ fn kernel_results_stay_private_until_the_receipt_selects_them() {
 fn an_unselected_transferred_result_expires_with_its_queue_and_its_hold_is_reconciled() {
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
     let review = fixture.review_hold_binding(1, &reference.candidate_id);
@@ -1462,7 +1560,7 @@ fn the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners() {
     let fixture = Fixture::open();
     let evidence = fixture.evidence_id();
     let loser = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&loser, Some(MemoryReviewerAttemptTerminal::Complete));
     let losing = fixture.kernel_half(&loser, &fixture.bound_proposal(&[&evidence]));
     let losing_review = fixture.review_hold_binding(1, &losing.candidate_id);
     // The loser's claim lapses without a settlement; a successor takes the receipt over at generation 2 and publishes.
@@ -1490,7 +1588,7 @@ fn the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners() {
     );
     let winner = fixture.broker(2);
     fixture.attempt_under(
-        2,
+        &winner,
         &successor,
         Some(MemoryReviewerAttemptTerminal::Complete),
         later + 1,
@@ -1535,7 +1633,7 @@ fn reconciliation_stops_releasing_once_cancelled() {
     let evidence = fixture.evidence_id();
     // Two crashed generations, each with a transferred hold; the sweep then closes the receipt, so both holds are orphans.
     let first = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&first, Some(MemoryReviewerAttemptTerminal::Complete));
     let first_reference = fixture.kernel_half(&first, &fixture.bound_proposal(&[&evidence]));
     let second = fixture.broker(2);
     let second_reference = fixture.kernel_half(&second, &fixture.bound_proposal(&[&evidence]));
@@ -1595,7 +1693,7 @@ fn reconciliation_leaves_holds_of_another_store_incarnation_alone() {
 
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
     let review = fixture.review_hold_binding(1, &reference.candidate_id);
@@ -1632,7 +1730,7 @@ fn a_failed_hold_reconciliation_publishes_unavailable_and_the_next_pass_recovers
 
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     // A live review hold, so the reconciler reads the receipt sets instead of returning on an empty listing.
     fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
@@ -1674,7 +1772,7 @@ fn a_sweep_inside_the_settlement_window_fences_the_selection_and_releases_the_ho
     let fixture = Fixture::open();
     let evidence = fixture.evidence_id();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let reference = fixture.staged_reference(1, &fixture.bound_proposal(&[&evidence]));
     let review = fixture.review_hold_binding(1, &reference.candidate_id);
     let run_deadline = fixture.receipt().run_deadline_ms;
@@ -1725,7 +1823,7 @@ fn a_selected_row_whose_owner_or_class_changed_refuses_the_read() {
     let fixture = Fixture::open();
     let evidence = fixture.evidence_id();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let Settled::Published(reference) = fixture
         .settle(
             &broker,
@@ -1772,7 +1870,7 @@ fn recovery_adopts_captures_whose_acquisition_reference_moved_to_the_review_expi
     // The committed hold transfer moves every live capture's `retain_until` to the review expiry, so the retry sees a longer reference than the one the alias was issued with; the capture is still the one the run disclosed.
     let fixture = Fixture::open();
     let (broker, capture) = fixture.local_broker_with_capture(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let bound = fixture.bound_proposal_over(&[&evidence], &[&evidence, &capture]);
     let reference = fixture.kernel_half(&broker, &bound);
@@ -1823,7 +1921,7 @@ fn a_citation_span_must_name_the_disclosed_alias_of_its_evidence() {
     // A span says which rendered alias the cited bytes came from. An alias the run never issued, or one that resolves to other evidence, is a citation to bytes the model was not shown under that name, however real the evidence id is.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let cite = |alias: &str| {
         let mut proposal = fixture.proposal(&[&evidence]);
@@ -1842,7 +1940,7 @@ fn a_citation_span_must_name_the_disclosed_alias_of_its_evidence() {
     // The receipt is complete now; a fresh job shows the disclosed alias is accepted.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let disclosed = broker
         .ledger
@@ -1870,12 +1968,12 @@ fn a_citation_span_must_lie_within_the_bytes_rendered_under_its_alias() {
     // An excerpt read discloses a byte range, not the artifact. A span outside every range rendered under the alias cites bytes the model never saw.
     let fixture = Fixture::open();
     let mut broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
     let second = fixture.second.1.evidence_id.clone();
     let alias = broker.aliases.issue(Fixture::expectation(&fixture.second));
     broker
         .read(&fixture.store, alias.as_str(), Some(0..8), fixture.now + 2)
         .unwrap();
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let cite = |start: u64, end: u64| {
         let mut proposal = fixture.proposal(&[&second]);
         proposal.support[0].span = Some(SourceSpan {
@@ -1898,12 +1996,12 @@ fn a_citation_span_must_lie_within_the_bytes_rendered_under_its_alias() {
     // A span of no bytes lies within any range and cites nothing.
     let fixture = Fixture::open();
     let mut broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
     let second = fixture.second.1.evidence_id.clone();
     let alias = broker.aliases.issue(Fixture::expectation(&fixture.second));
     broker
         .read(&fixture.store, alias.as_str(), Some(0..8), fixture.now + 2)
         .unwrap();
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let mut empty = fixture.proposal(&[&second]);
     empty.support[0].span = Some(SourceSpan {
         alias: alias.as_str().to_string(),
@@ -1917,12 +2015,12 @@ fn a_citation_span_must_lie_within_the_bytes_rendered_under_its_alias() {
     );
     let fixture = Fixture::open();
     let mut broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
     let second = fixture.second.1.evidence_id.clone();
     let alias = broker.aliases.issue(Fixture::expectation(&fixture.second));
     broker
         .read(&fixture.store, alias.as_str(), Some(0..8), fixture.now + 2)
         .unwrap();
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let mut proposal = fixture.proposal(&[&second]);
     proposal.support[0].span = Some(SourceSpan {
         alias: alias.as_str().to_string(),
@@ -1942,7 +2040,7 @@ fn a_completion_the_ledger_refuses_as_clock_behind_keeps_the_review_hold_for_the
     // The ledger refuses a completion dated before its newest event and leaves the claim live for a retry. That refusal is not a fence: the review hold this settlement moved retention to must survive it, because the Kernel will not open another execution hold for a transferred generation.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let binding = fixture.review_binding();
     let behind = fixture.now + 2;
@@ -1986,7 +2084,7 @@ fn recovery_releases_a_review_hold_a_purge_degraded() {
     // The transfer committed, then a purge degraded the review pin before the completion. The retry must still find that pin: it protects nothing, so revalidation abstains, and the abstention releases it instead of leaving a degraded pin on the active-hold count until expiry.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
     let review = fixture.review_hold_binding(1, &reference.candidate_id);
@@ -2034,7 +2132,7 @@ fn recovery_after_the_acquisition_reference_lapsed_reads_the_moved_reference() {
     // The transfer moved the capture's reference to the review expiry, so a recovery that runs after the reference the alias was issued with has passed judges the moved one, not the stale one.
     let fixture = Fixture::open();
     let (broker, capture) = fixture.local_broker_with_capture(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let bound = fixture.bound_proposal_over(&[&evidence], &[&evidence, &capture]);
     let reference = fixture.kernel_half(&broker, &bound);
@@ -2065,6 +2163,7 @@ fn recovery_after_the_acquisition_reference_lapsed_reads_the_moved_reference() {
             &fixture.store,
             &alias,
             after_reference,
+            after_reference,
             HeldUnder::Review {
                 hold: &hold,
                 binding: &review,
@@ -2079,6 +2178,7 @@ fn recovery_after_the_acquisition_reference_lapsed_reads_the_moved_reference() {
                 &fixture.store,
                 &alias,
                 after_reference,
+                after_reference,
                 HeldUnder::Execution(broker.binding()),
             )
             .is_err()
@@ -2090,7 +2190,7 @@ fn a_publication_whose_receipt_cannot_be_read_back_keeps_its_review_hold() {
     // The completion applied; the read that reports what it recorded then fails. The receipt may select this proposal, and readers need the hold to reach it, so a store failure is not a reason to release.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let shadow = || {
         // After the completion commits, the connection's view of the receipts is a shadow the row reader refuses.
@@ -2139,7 +2239,7 @@ fn a_staging_binding_from_another_project_or_job_is_refused_before_any_kernel_wr
         job_id: "c".repeat(64),
     };
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     for (label, foreign) in [("project", other_project), ("job", other_job)] {
         let settled = fixture.settlement(&foreign, &fixture.claim, &clock).settle(
             &broker,
@@ -2168,7 +2268,7 @@ fn recovery_revalidates_a_staged_subject_under_the_review_hold() {
     // A staged subject holds no evidence id, so its revalidation is a check that the run's hold is live. Once retention has moved to the review hold, that is the hold to check; the released execution hold would refuse and abstain a result that is already sealed.
     let fixture = Fixture::open();
     let broker = fixture.broker_with_subject(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
     assert_eq!(
@@ -2181,6 +2281,14 @@ fn recovery_revalidates_a_staged_subject_under_the_review_hold() {
         Settled::Published(reference.clone())
     );
     assert_eq!(fixture.read(fixture.now + 6).unwrap().reference, reference);
+    // The subject row shares the job's queue deadline. A selected result outlives that deadline for as long as its review hold does, and so must the subject it was judged on: it is read against the selection time, as the proposal row is, not live.
+    assert_eq!(
+        fixture
+            .read(fixture.now + 24 * HOUR_MS + 1)
+            .map(|selected| selected.reference),
+        Ok(reference),
+        "a staged subject past its queue deadline still stands for a selected read"
+    );
 }
 
 #[test]
@@ -2269,7 +2377,7 @@ fn a_takeover_fences_the_losing_generation_and_selects_only_its_own_result() {
     let evidence = fixture.evidence_id();
     // Generation 1 stages and transfers; in the window before its Memory Store completion its claim lapses and a successor takes over at generation 2. The late losing write is fenced and its review hold released; the Kernel row stays private.
     let loser = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&loser, Some(MemoryReviewerAttemptTerminal::Complete));
     let later = fixture.now + MEMORY_REVIEWER_TASK_LEASE_MS + 1;
     let successor = std::sync::Mutex::new(None);
     let takeover = || {
@@ -2331,7 +2439,7 @@ fn a_takeover_fences_the_losing_generation_and_selects_only_its_own_result() {
     // The successor investigates again under generation 2 and selects a different identity.
     let winner = fixture.broker(2);
     fixture.attempt_under(
-        2,
+        &winner,
         &successor,
         Some(MemoryReviewerAttemptTerminal::Complete),
         later + 1,
@@ -2364,7 +2472,7 @@ fn a_cancelled_or_expired_receipt_records_that_whatever_the_run_produced() {
     // The Memory Store decides these two terminals from the receipt itself; settlement reports what was recorded, and the retention it moved to review is released because nothing was selected.
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     fixture
         .ledger
@@ -2439,7 +2547,7 @@ fn a_cancelled_or_expired_receipt_records_that_whatever_the_run_produced() {
 fn a_selected_result_is_readable_only_through_its_live_review_hold() {
     let fixture = Fixture::open();
     let broker = fixture.broker(1);
-    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
     let evidence = fixture.evidence_id();
     let Settled::Published(reference) = fixture
         .settle(
@@ -2511,13 +2619,432 @@ fn a_selected_result_is_readable_only_through_its_live_review_hold() {
     );
 }
 
+/// Broker-free recovery. The run's broker, aliases, and transcript are gone; the resumed worker at the same generation has only the ledger and the Kernel. Its adopt step finds the sealed row through the provisional identity, revalidates every persisted member from the row's own record under the transferred review hold, and publishes the byte-identical reference with zero model requests. A takeover at the next generation adopts nothing from it.
+#[test]
+fn a_resumed_claim_adopts_the_durable_result_without_the_broker_or_a_new_request() {
+    let fixture = Fixture::open();
+    let lost = fixture.broker_with_second(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let second = fixture.second.1.evidence_id.clone();
+    let bound = fixture.bound_proposal_over(&[&evidence], &[&evidence, &second]);
+    let reference = fixture.kernel_half(&lost, &bound);
+    drop(lost);
+    // The record the lost run staged: its full union and the completed marker whose response the row is.
+    let staged = fixture
+        .store
+        .read_review_input(&reference, &fixture.proposal_binding(1), fixture.now + 6)
+        .unwrap();
+    let record = staged
+        .dependencies
+        .expect("a proposal row carries its record");
+    assert_eq!(record.generation, 1);
+    assert_eq!(record.attempt_index, 0);
+    assert_eq!(record.body_digest, "b".repeat(64));
+    let union = context_core::memory_reviewer_policy_union::PolicyUnion::decode(
+        &record.union_canonical,
+        &record.union_digest,
+    )
+    .unwrap();
+    assert_eq!(
+        union
+            .members()
+            .filter(|member| member.kind == "native_source")
+            .count(),
+        2,
+        "both disclosed sources are members, cited or not"
+    );
+    // Adoption under a fresh broker with nothing in it.
+    let resumed = fixture.resumed_broker(1);
+    assert_eq!(
+        fixture.adopt(&resumed).unwrap(),
+        Settled::Published(reference.clone())
+    );
+    let selected = fixture.read(fixture.now + 8).unwrap();
+    assert_eq!(selected.reference, reference);
+    assert_eq!(selected.proposal, bound);
+    assert_eq!(
+        fixture
+            .ledger
+            .list_memory_reviewer_attempts(PROJECT, &fixture.identity)
+            .unwrap()
+            .len(),
+        1,
+        "no attempt was added"
+    );
+    // A second adopt of the completed receipt is fenced like any second settlement; the published result stands.
+    assert_eq!(
+        fixture.adopt(&fixture.resumed_broker(1)),
+        Err(SettlementError::Fenced)
+    );
+    assert_eq!(fixture.read(fixture.now + 9).unwrap().reference, reference);
+    // A takeover at generation 2 finds no result of its own: it completes unknown rather than adopting the losing generation's row.
+    let fixture = Fixture::open();
+    let later = fixture.now + MEMORY_REVIEWER_TASK_LEASE_MS + 1;
+    let lost = fixture.broker(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let losing = fixture.kernel_half(&lost, &fixture.bound_proposal(&[&evidence]));
+    drop(lost);
+    let successor = fixture.claim_task("acq-2", "worker-b", later).unwrap();
+    fixture
+        .ledger
+        .take_over_memory_reviewer_receipt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &successor.claim_id,
+            later,
+        )
+        .unwrap();
+    let resumed = fixture.resumed_broker(2);
+    fixture.attempt_under(
+        &resumed,
+        &successor,
+        Some(MemoryReviewerAttemptTerminal::Complete),
+        later + 1,
+    );
+    let clock = move || later + 2;
+    let settled = fixture
+        .settlement(&fixture.review_binding(), &successor, &clock)
+        .adopt(&resumed)
+        .unwrap();
+    assert_eq!(settled, Settled::Unknown);
+    assert_eq!(fixture.read(later + 3), Err(ReadRefusal::NotSelected));
+    assert!(
+        fixture
+            .store
+            .read_review_input(&losing, &fixture.proposal_binding(1), later + 3)
+            .is_ok(),
+        "the losing row stays sealed and private"
+    );
+}
+
+/// A live settlement stages nothing for a proposal no completed marker at its generation accounts for: the run abstains and no row is sealed.
+#[test]
+fn a_proposal_without_a_completed_marker_at_its_generation_is_not_staged() {
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Failed));
+    let evidence = fixture.evidence_id();
+    assert_eq!(
+        fixture
+            .settle(
+                &broker,
+                RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+            )
+            .unwrap(),
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    let identity = provisional_result_identity(&fixture.identity, 1);
+    assert_eq!(
+        fixture
+            .store
+            .sealed_review_reference(&identity.candidate_id)
+            .unwrap(),
+        None
+    );
+    assert_eq!(fixture.read(fixture.now + 8), Err(ReadRefusal::NotSelected));
+}
+
+/// A row sealed before retention moved to the review hold is adopted under an execution hold that covers nothing: the lost run's hold was released on its unsettled exit and the resumed run's replacement is empty until adoption extends it over the record's inputs. The published reference is the sealed one, and a retired input refuses through the extension the way the live run's read would have.
+#[test]
+fn a_result_sealed_before_its_transfer_is_adopted_under_an_empty_execution_hold() {
+    let fixture = Fixture::open();
+    let lost = fixture.broker_with_second(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let second = fixture.second.1.evidence_id.clone();
+    let bound = fixture.bound_proposal_over(&[&evidence], &[&evidence, &second]);
+    let reference = fixture.stage_only(&lost, &bound);
+    fixture
+        .store
+        .release_execution_hold(&lost.binding().hold_id, &lost.binding().hold)
+        .unwrap();
+    drop(lost);
+    let empty = fixture
+        .store
+        .acquire_execution_hold(&fixture.hold_binding(1), &[], fixture.now + 2 * HOUR_MS)
+        .unwrap();
+    let resumed = EvidenceBroker::new(
+        RunBinding {
+            hold: fixture.hold_binding(1),
+            hold_id: empty.hold_id,
+            destination: ArtifactDestination::Remote,
+        },
+        QuestionTemplate::ExtractedFacts,
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.adopt(&resumed).unwrap(),
+        Settled::Published(reference.clone())
+    );
+    assert_eq!(fixture.read(fixture.now + 8).unwrap().reference, reference);
+    // The same window with a disclosed input retired in between: the extension refuses and the receipt abstains without content.
+    let fixture = Fixture::open();
+    let lost = fixture.broker(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    fixture.stage_only(&lost, &fixture.bound_proposal(&[&evidence]));
+    fixture
+        .store
+        .release_execution_hold(&lost.binding().hold_id, &lost.binding().hold)
+        .unwrap();
+    drop(lost);
+    fixture
+        .store
+        .commit(intent("retire-source"), |envelope| {
+            envelope.retire_observation(&fixture.source.0)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let empty = fixture
+        .store
+        .acquire_execution_hold(&fixture.hold_binding(1), &[], fixture.now + 2 * HOUR_MS)
+        .unwrap();
+    let resumed = EvidenceBroker::new(
+        RunBinding {
+            hold: fixture.hold_binding(1),
+            hold_id: empty.hold_id,
+            destination: ArtifactDestination::Remote,
+        },
+        QuestionTemplate::ExtractedFacts,
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.adopt(&resumed).unwrap(),
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    assert_eq!(fixture.read(fixture.now + 8), Err(ReadRefusal::NotSelected));
+    // No hold at all: the cutoff passed before the resumed run could acquire one, so the row's inputs are unprotected and the result is out of budget.
+    let fixture = Fixture::open();
+    let lost = fixture.broker(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    fixture.stage_only(&lost, &fixture.bound_proposal(&[&evidence]));
+    fixture
+        .store
+        .release_execution_hold(&lost.binding().hold_id, &lost.binding().hold)
+        .unwrap();
+    drop(lost);
+    assert_eq!(
+        fixture.adopt(&fixture.resumed_broker(1)).unwrap(),
+        Settled::Abstained(AbstainReason::BudgetExhausted)
+    );
+}
+
+/// Adoption revalidates the persisted lineage, not the run's memory of it. A cited member whose source was retired, a record whose union bytes were edited, a row without a record, and a completed marker with no sealed row each end without content and without a request.
+#[test]
+fn a_durable_result_whose_lineage_moved_or_lacks_a_record_is_not_adopted() {
+    // Retired cited source.
+    let fixture = Fixture::open();
+    let lost = fixture.broker(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&lost, &fixture.bound_proposal(&[&evidence]));
+    drop(lost);
+    fixture
+        .store
+        .commit(intent("retire-source"), |envelope| {
+            envelope.retire_observation(&fixture.source.0)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture.adopt(&fixture.resumed_broker(1)).unwrap(),
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    assert_eq!(fixture.read(fixture.now + 8), Err(ReadRefusal::NotSelected));
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(
+                &fixture.review_hold_binding(1, &reference.candidate_id),
+                fixture.now + 8
+            )
+            .unwrap(),
+        None,
+        "the content-free terminal released the recovered hold"
+    );
+    // Edited record: the union bytes no longer re-encode to their digest.
+    let fixture = Fixture::open();
+    let lost = fixture.broker(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&lost, &fixture.bound_proposal(&[&evidence]));
+    drop(lost);
+    let mutate = |sql: &str| {
+        rusqlite::Connection::open(fixture.kernel_dir.path().join("kernel.sqlite"))
+            .unwrap()
+            .execute(sql, [reference.candidate_id.as_str()])
+            .unwrap();
+    };
+    mutate(
+        "UPDATE candidates SET provenance_witness = CAST(replace(CAST(provenance_witness AS TEXT), '\\\"revision\\\":\\\"1\\\"', '\\\"revision\\\":\\\"2\\\"') AS BLOB) WHERE candidate_id = ?1",
+    );
+    assert_eq!(
+        fixture.adopt(&fixture.resumed_broker(1)).unwrap(),
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    // A record joined to a marker the ledger does not hold as completed at this generation: the row is not the response the ledger accounts for.
+    let fixture = Fixture::open();
+    let lost = fixture.broker(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&lost, &fixture.bound_proposal(&[&evidence]));
+    drop(lost);
+    let mutate = |sql: &str| {
+        rusqlite::Connection::open(fixture.kernel_dir.path().join("kernel.sqlite"))
+            .unwrap()
+            .execute(sql, [reference.candidate_id.as_str()])
+            .unwrap();
+    };
+    mutate(
+        "UPDATE candidates SET provenance_witness = CAST(json_replace(CAST(provenance_witness AS TEXT), '$.dependencies.attempt_index', 7) AS BLOB) WHERE candidate_id = ?1",
+    );
+    assert_eq!(
+        fixture.adopt(&fixture.resumed_broker(1)).unwrap(),
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    assert_eq!(fixture.read(fixture.now + 8), Err(ReadRefusal::NotSelected));
+    // A row staged without a record fails closed: nothing infers its lineage from the payload.
+    let fixture = Fixture::open();
+    let lost = fixture.broker(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&lost, &fixture.bound_proposal(&[&evidence]));
+    drop(lost);
+    let mutate = |sql: &str| {
+        rusqlite::Connection::open(fixture.kernel_dir.path().join("kernel.sqlite"))
+            .unwrap()
+            .execute(sql, [reference.candidate_id.as_str()])
+            .unwrap();
+    };
+    mutate(
+        "UPDATE candidates SET provenance_witness = CAST(json_remove(CAST(provenance_witness AS TEXT), '$.dependencies') AS BLOB) WHERE candidate_id = ?1",
+    );
+    assert!(
+        fixture
+            .store
+            .read_review_input(&reference, &fixture.proposal_binding(1), fixture.now + 6)
+            .unwrap()
+            .dependencies
+            .is_none()
+    );
+    assert_eq!(
+        fixture.adopt(&fixture.resumed_broker(1)).unwrap(),
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    // A record whose version this build does not read: the version fences the durable shape, not just staging.
+    let fixture = Fixture::open();
+    let lost = fixture.broker(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&lost, &fixture.bound_proposal(&[&evidence]));
+    drop(lost);
+    let mutate = |sql: &str| {
+        rusqlite::Connection::open(fixture.kernel_dir.path().join("kernel.sqlite"))
+            .unwrap()
+            .execute(sql, [reference.candidate_id.as_str()])
+            .unwrap();
+    };
+    mutate(
+        "UPDATE candidates SET provenance_witness = CAST(json_replace(CAST(provenance_witness AS TEXT), '$.dependencies.version', 2) AS BLOB) WHERE candidate_id = ?1",
+    );
+    assert_eq!(
+        fixture.adopt(&fixture.resumed_broker(1)).unwrap(),
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    // A self-consistent union that is not the one the marker recorded: the staged subject yields no evidence id, so dropping it changes neither the disclosed inputs nor the ancestry, and only the marker's union digest can tell the record apart.
+    let fixture = Fixture::open();
+    let lost = fixture.broker_with_subject(1);
+    fixture.attempt(&lost, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&lost, &fixture.bound_proposal(&[&evidence]));
+    let mut without_subject = context_core::memory_reviewer_policy_union::PolicyUnion::new();
+    for member in lost.ledger.union().members() {
+        if member.kind != "staged_subject" {
+            without_subject.insert(member.clone());
+        }
+    }
+    let substituted = without_subject.encode().unwrap();
+    drop(lost);
+    rusqlite::Connection::open(fixture.kernel_dir.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE candidates SET provenance_witness = CAST(json_set(CAST(provenance_witness AS TEXT), '$.dependencies.union_canonical', ?2, '$.dependencies.union_digest', ?3) AS BLOB) WHERE candidate_id = ?1",
+            [
+                reference.candidate_id.as_str(),
+                substituted.canonical.as_str(),
+                substituted.digest.as_str(),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.adopt(&fixture.resumed_broker(1)).unwrap(),
+        Settled::Abstained(AbstainReason::ExpectationChanged)
+    );
+    // A completed marker with no sealed row is dispatched work whose outcome nothing durable records.
+    let fixture = Fixture::open();
+    let resumed = fixture.resumed_broker(1);
+    fixture.attempt(&resumed, Some(MemoryReviewerAttemptTerminal::Complete));
+    assert_eq!(fixture.adopt(&resumed).unwrap(), Settled::Unknown);
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Unknown)
+    );
+    assert_eq!(
+        fixture
+            .ledger
+            .list_memory_reviewer_attempts(PROJECT, &fixture.identity)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// The selected read revalidates every persisted member, uncited ones included, so a retired uncited source refuses a proposal the receipt still selects.
+#[test]
+fn a_selected_read_refuses_when_an_uncited_member_no_longer_stands() {
+    let fixture = Fixture::open();
+    let broker = fixture.broker_with_second(1);
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let Settled::Published(_) = fixture
+        .settle(
+            &broker,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+        )
+        .unwrap()
+    else {
+        panic!("published")
+    };
+    assert!(fixture.read(fixture.now + 6).is_ok());
+    fixture
+        .store
+        .commit(intent("retire-second"), |envelope| {
+            envelope.retire_observation(&fixture.second.0)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture.read(fixture.now + 7),
+        Err(ReadRefusal::Dependency(RefusalCode::ExpectationChanged))
+    );
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Complete),
+        "a refused read leaves the receipt as it was"
+    );
+}
+
 /// A hold that ends between the review-hold lookup and the evidence validation under it is the same review expiry the lookup reports a moment later, whether it was released or degraded by a purge. Without this, one read in the window reports a dependency refusal that no read before or after it reports.
 #[test]
 fn a_hold_ended_between_lookup_and_validation_reads_as_the_review_expiring() {
     for ending in ["release", "purge"] {
         let fixture = Fixture::open();
         let broker = fixture.broker(1);
-        fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+        fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
         let evidence = fixture.evidence_id();
         let Settled::Published(reference) = fixture
             .settle(

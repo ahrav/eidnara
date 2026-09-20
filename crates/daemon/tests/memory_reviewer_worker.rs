@@ -348,6 +348,7 @@ impl Rig {
                 payload,
                 recorded_at: now,
                 queue_deadline_at: job.queue_deadline_ms,
+                dependencies: None,
             })
             .unwrap();
         self.kernel
