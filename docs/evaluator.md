@@ -75,12 +75,13 @@ The 27 required fields, sorted:
 
 `Manifest::digest` re-parses the manifest, applies the manifest's own residue
 rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
-is `Keep`), and hashes with protocol `eval-manifest-digest/v3`. Version 2
+is `Keep`), and hashes with protocol `eval-manifest-digest/v4`. Version 2
 added `execution_mode` (the reducer differential runs under `enumerate`);
 version 3 added `ingestion`, because no ingestion entry point has a production
-caller and every manifest must say so. The digest is a function of every kept
-field, not of the run identity alone: two processes that record the same
-identity and the same kept contents produce the same digest
+caller and every manifest must say so; version 4 added `failure_class_table_digest`,
+so a report names the failure-class table its classes come from. The digest is
+a function of every kept field, not of the run identity alone: two processes
+that record the same identity and the same kept contents produce the same digest
 (`two_process_same_identity_yields_equal_manifest_and_trace_digests`), and two
 runs that share an identity but differ in `status`, `sample_order`,
 `result_digest`, or any other kept field do not.
@@ -645,11 +646,32 @@ verdict without its stage: clean, first loss, stale ingress, indeterminate) by
 `Outcome` (pass, fail). A pass has no failure to classify. A failing task is
 `Interference` when the store held the knowledge and the chain lost it or
 served stale evidence, `Reasoning` when the knowledge was held and delivered
-and the model was live, `DurableState` when the store refused it and the chain
-did not deliver it, and `Indeterminate` otherwise: an unknown durable state, a
-cassette slice with clean delivery (reasoning is claimable only live), an
-indeterminate delivery, or a refused store paired with a clean delivery, which
-contradicts. `serialize_table` is the whole table in `cells()` order and
+and the model was live, `DurableState` when the store refused it and delivery
+was anything but clean (lost, stale, or indeterminate: a refused store cannot
+have been delivered, so the store is the failure), and `Indeterminate`
+otherwise: an unknown durable state, a cassette slice with clean delivery
+(reasoning is claimable only live), a held store with an indeterminate
+delivery, or a refused store paired with a clean delivery, which contradicts.
+The failing rows, with the class for each slice
+(`crates/eval-core/tests/failure_class.rs` reads this table and checks every
+row against `classify`):
+
+| Durable state | Delivery | Live | Cassette |
+| --- | --- | --- | --- |
+| `held` | `clean` | `reasoning` | `indeterminate` |
+| `held` | `first_loss` | `interference` | `interference` |
+| `held` | `stale_ingress` | `interference` | `interference` |
+| `held` | `indeterminate` | `indeterminate` | `indeterminate` |
+| `refused` | `clean` | `indeterminate` | `indeterminate` |
+| `refused` | `first_loss` | `durable_state` | `durable_state` |
+| `refused` | `stale_ingress` | `durable_state` | `durable_state` |
+| `refused` | `indeterminate` | `durable_state` | `durable_state` |
+| `unknown` | `clean` | `indeterminate` | `indeterminate` |
+| `unknown` | `first_loss` | `indeterminate` | `indeterminate` |
+| `unknown` | `stale_ingress` | `indeterminate` | `indeterminate` |
+| `unknown` | `indeterminate` | `indeterminate` | `indeterminate` |
+
+`serialize_table` is the whole table in `cells()` order and
 `FAILURE_CLASS_TABLE_DIGEST` pins its `eidnara-failure-class-table-v1` digest;
 the manifest carries and checks it.
 

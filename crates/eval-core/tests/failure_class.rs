@@ -210,3 +210,55 @@ fn a_ledger_verdict_maps_to_its_delivery_without_the_stage() {
         Delivery::Indeterminate
     );
 }
+
+/// `docs/evaluator.md` is a test input: its failing-task table has one row per
+/// (durable state, delivery) with the live and cassette classes. Each row must
+/// agree with `classify`, and the rows must cover every pair.
+#[test]
+fn evaluator_document_table_agrees_with_classify() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/evaluator.md");
+    let doc = std::fs::read_to_string(&path).expect("read docs/evaluator.md");
+    let section = doc
+        .split("\n## Failure classes\n")
+        .nth(1)
+        .expect("the document has a `Failure classes` section")
+        .split("\n## ")
+        .next()
+        .unwrap();
+    let header = "| Durable state | Delivery | Live | Cassette |";
+    let mut lines = section
+        .lines()
+        .skip_while(|line| *line != header)
+        .skip(2)
+        .take_while(|line| line.starts_with('|'));
+    let mut covered = BTreeSet::new();
+    for line in &mut lines {
+        let columns: Vec<&str> = line
+            .split('|')
+            .map(str::trim)
+            .filter(|column| !column.is_empty())
+            .map(|column| column.trim_matches('`'))
+            .collect();
+        let [state, delivery, live, cassette] = columns[..] else {
+            panic!("row has four columns: {line}");
+        };
+        let state: DurableState = serde_json::from_value(serde_json::json!(state)).unwrap();
+        let delivery: Delivery = serde_json::from_value(serde_json::json!(delivery)).unwrap();
+        for (slice, stated) in [(Slice::Live, live), (Slice::Cassette, cassette)] {
+            let stated: FailureClass = serde_json::from_value(serde_json::json!(stated)).unwrap();
+            let cell = Cell {
+                delivery,
+                durable_state: state,
+                slice,
+                outcome: Outcome::Fail,
+            };
+            assert_eq!(classify(cell), Some(stated), "{cell:?}");
+        }
+        covered.insert((state, delivery));
+    }
+    assert_eq!(
+        covered.len(),
+        DurableState::ALL.len() * Delivery::ALL.len(),
+        "the document table covers every (durable state, delivery) pair"
+    );
+}

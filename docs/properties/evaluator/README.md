@@ -598,6 +598,15 @@ Failure-class table (`crates/eval-core/tests/failure_class.rs`,
   `failure_class_table_digest`; `crates/eval-core/tests/manifest.rs` refuses a
   different value as `FailureClassTableMismatch`), and
   `a_ledger_verdict_maps_to_its_delivery_without_the_stage`.
+- `evaluator_document_table_agrees_with_classify` reads the twelve-row table
+  in `docs/evaluator.md` under `Failure classes` and checks each row's live and
+  cassette class against `classify`, so the document is a test input and a
+  prose-versus-code disagreement fails here.
+  `evaluator_document_agrees_with_the_manifest_constants`
+  (`crates/eval-core/tests/manifest.rs`) does the same for the manifest
+  section: the schema literal, the digest protocol, the required-field count,
+  the version history, and every versioned `eval-manifest` literal must name
+  `MANIFEST_SCHEMA`'s version.
 
 Surface 1 through the direct-host fixture
 (`crates/daemon/tests/eval_surface_ledger.rs`; `sls-surface1-stage-list-pinned`

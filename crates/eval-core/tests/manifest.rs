@@ -5,9 +5,10 @@ use std::collections::BTreeSet;
 use context_core::canonical_json::{ContractError, canonical_json_encode};
 use eval_core::{
     ArmRates, Attestation, BinaryDigest, CLOCK_FIELD_KEEP_ALLOWLIST, ClaimBoundary, DROPPED_FIELDS,
-    IdentityError, MANIFEST_SCHEMA, Manifest, ManifestError, ObservationSchema, REQUIRED_FIELDS,
-    RUN_ID_PROTOCOL, ResidueEntry, ResidueError, Rule, RunIdentity, SemanticTrace, eval_run_id,
-    is_canonical_decimal, is_clock_named, is_never_kept, parse_manifest, zero_bytes_sha256,
+    IdentityError, MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError,
+    ObservationSchema, REQUIRED_FIELDS, RUN_ID_PROTOCOL, ResidueEntry, ResidueError, Rule,
+    RunIdentity, SemanticTrace, eval_run_id, is_canonical_decimal, is_clock_named, is_never_kept,
+    parse_manifest, zero_bytes_sha256,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -51,6 +52,50 @@ fn required_fields_are_sorted_and_equal_the_struct_field_set() {
 fn fixture_digests_are_frozen() {
     assert_eq!(eval_run_id(&identity()).unwrap(), FIXTURE_RUN_ID);
     assert_eq!(manifest().digest().unwrap(), FIXTURE_MANIFEST_DIGEST);
+}
+
+/// `docs/evaluator.md` is a test input: its schema literal, digest protocol,
+/// field count, and version history must match the manifest constants.
+#[test]
+fn evaluator_document_agrees_with_the_manifest_constants() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/evaluator.md");
+    let doc = std::fs::read_to_string(&path).expect("read docs/evaluator.md");
+    let row = |needle: &str| {
+        assert!(doc.contains(needle), "evaluator document lacks `{needle}`");
+    };
+    row(&format!("## Manifest `{MANIFEST_SCHEMA}`"));
+    row(&format!("| `schema` | `{MANIFEST_SCHEMA}`. |"));
+    row(&format!(
+        "hashes with protocol `{MANIFEST_DIGEST_PROTOCOL}`"
+    ));
+    row(&format!(
+        "The {} required fields, sorted:",
+        REQUIRED_FIELDS.len()
+    ));
+    let version = MANIFEST_SCHEMA
+        .rsplit_once("/v")
+        .map(|(_, version)| version)
+        .expect("schema literal ends in a version");
+    assert_eq!(
+        MANIFEST_DIGEST_PROTOCOL.rsplit_once("/v").map(|(_, v)| v),
+        Some(version),
+        "schema and digest protocol share one version"
+    );
+    // Every `eval-manifest*` literal in the document names the current version.
+    for (offset, _) in doc.match_indices("`eval-manifest") {
+        let literal = doc[offset + 1..]
+            .split('`')
+            .next()
+            .expect("a backtick opens a literal");
+        let stated = literal
+            .rsplit_once("/v")
+            .map(|(_, version)| version)
+            .unwrap_or_else(|| panic!("`{literal}` names no version"));
+        assert_eq!(stated, version, "stale manifest literal `{literal}`");
+    }
+    row(&format!(
+        "version {version} added `failure_class_table_digest`"
+    ));
 }
 
 #[test]
