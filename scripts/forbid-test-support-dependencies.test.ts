@@ -405,14 +405,14 @@ describe("eval-core fences", () => {
                 crates,
             ),
         ).toEqual([
+            "a.rs:10: const HOME: &str = env!(\"HOME\");",
+            "a.rs:11: let opt = option_env!(\"X\");",
+            "a.rs:12: std::thread::sleep(core::time::Duration::from_secs(1));",
             "a.rs:2: extern crate kernel;",
             "a.rs:3: extern crate tokio;",
             "a.rs:5: println!(\"{x}\");",
             "a.rs:6: let d = dbg!(x);",
             "a.rs:7: eprint!(\"e\");",
-            "a.rs:10: const HOME: &str = env!(\"HOME\");",
-            "a.rs:11: let opt = option_env!(\"X\");",
-            "a.rs:12: std::thread::sleep(core::time::Duration::from_secs(1));",
         ]);
     });
 
