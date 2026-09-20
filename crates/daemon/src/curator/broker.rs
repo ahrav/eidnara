@@ -1600,11 +1600,24 @@ fn span_range(
 }
 
 /// The classes whose descriptors are forms of one decision, and so carry an originating decision.
-const fn decision_derived(class: OccurrenceClass) -> bool {
+pub const fn decision_derived(class: OccurrenceClass) -> bool {
     matches!(
         class,
         OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory
     )
+}
+
+/// Returns the originating decision object id of a decision-derived descriptor identity, read from the class's leading identity field so the lookup follows the Kernel identity layout; `None` for a native class or an absent or empty field.
+pub fn originating_decision(class: OccurrenceClass, identity: &[(String, String)]) -> Option<&str> {
+    if !decision_derived(class) {
+        return None;
+    }
+    let field = *class.identity_fields().first()?;
+    identity
+        .iter()
+        .find(|(name, _)| name == field)
+        .map(|(_, value)| value.as_str())
+        .filter(|value| !value.is_empty())
 }
 
 /// Two excerpts or revisions of one native source are one origin: the key is the class and identity fields, without revision, representation, or span. Identity values are control-character free, so the unit separator cannot occur inside one.

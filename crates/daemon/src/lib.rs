@@ -15039,14 +15039,13 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
             Arc::default(),
         );
         let policy_versions = curator::handoff::review_policy_versions();
-        let classes = curator::selection::resolvable_classes();
         curator::selection::select_review_targets(
             &kernel,
             &self.store,
             &curator::selection::SelectionScope {
                 project: binding.kernel_project.scope(),
                 ledger_project: &project.project,
-                classes: &classes,
+                classes: curator::selection::MEMORY_CLASSES,
                 policy_versions: &policy_versions,
             },
             cursor,
@@ -15107,7 +15106,7 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
         }
         let curator_open = self.curator_status.reported().activation_state.0
             == curator::lifecycle::ActivationState::Open
-            && !curator::selection::resolvable_classes().is_empty();
+            && curator::selection::PRODUCTION_SELECTION_OPEN;
         Ok(by_project
             .into_iter()
             .flat_map(
@@ -33067,9 +33066,9 @@ mod tests {
         assert!(bridge.scheduled_projects().unwrap().is_empty());
     }
 
-    /// Selection requires an open gate and at least one resolvable class. No walked class resolves until the coordinator reads canonical and promoted descriptors through their originating decision (Q21), so an open gate alone schedules no selection; when `resolves_class` admits a memory class, this test must assert the selection task instead.
+    /// Selection requires an open activation gate and an open production selection gate: an open activation gate alone schedules no selection while `PRODUCTION_SELECTION_OPEN` is `false`.
     #[tokio::test(flavor = "current_thread")]
-    async fn curator_review_selection_is_not_scheduled_while_no_walked_class_resolves() {
+    async fn curator_review_selection_is_not_scheduled_while_production_selection_is_closed() {
         use memory_classifier_scheduler::{ScheduledTask, SchedulerHost};
         let producer = Arc::new(ProducerState::default());
         let harness = MemoryClassifierHarness::start(&producer).await;
@@ -33089,14 +33088,12 @@ mod tests {
             .handler
             .curator_status
             .set_activation(curator::lifecycle::ActivationState::Open);
-        assert!(
-            curator::selection::resolvable_classes().is_empty(),
-            "a walked class now resolves: assert CuratorReviewSelection is scheduled under an open gate"
-        );
+        // Opening the gate must rewrite this test to assert the selection task; a constant assertion makes that a compile error rather than a silent pass.
+        const _: () = assert!(!curator::selection::PRODUCTION_SELECTION_OPEN);
         assert_eq!(
             tasks(&bridge),
             vec![ScheduledTask::ReviewUserMemories],
-            "no walked class resolves, so an open gate schedules no selection"
+            "production selection is closed, so an open activation gate schedules no selection"
         );
     }
 
