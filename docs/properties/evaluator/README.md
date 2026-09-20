@@ -240,7 +240,9 @@ Spec pin and reduction (`crates/eval-core/tests/reducer.rs`):
   `ELIGIBILITY_SPEC_DIGEST`, compares the predicate order to a list written in
   the test by hand, requires every verdict to have a vector and the
   both-columns-set cell and a remote destination to appear, checks all 22
-  vectors against `judge`, and round-trips the spec through serde.
+  vectors against `judge`, requires the serialized spec to carry no numbers
+  (so a matching digest is value equality and `check_spec` has no shape
+  error), and round-trips the spec through serde.
 - `every_predicate_and_the_surface_fold_are_reachable_from_facts`
   (`wm-reducer-agrees-with-judge-fact-tuples`) flips one fact at a time from a
   live labeled tuple and expects each predicate's verdict, checks the served
@@ -268,7 +270,8 @@ Spec pin and reduction (`crates/eval-core/tests/reducer.rs`):
   checks out-of-scope, unadmitted, and sensitive-remote worlds, purity, and
   every refusal by name (`NotLinearized`, `SchemaMismatch`, `EventBound`, and
   each `InvalidQuery` field).
-- `truth_and_queries_round_trip_through_serde_in_canonical_form` pins the
+- `truth_and_queries_round_trip_through_serde_in_canonical_form` pins
+  `Truth::reducer_version` to `REDUCER_VERSION` (`eval-reducer/v1`), the
   decimal cut times, the state field names, the surface wire names, and
   unknown-field refusal on `Truth` and `Query`.
 - `an_enumerate_run_records_its_mode_and_the_pinned_spec_digest`
@@ -297,6 +300,11 @@ Kernel differential (`crates/kernel/tests/eligibility_spec.rs`, fixture in
   and visibility and agree on `permits`, and the row's hand-authored facts
   must equal the tuple projected from the store's `egress_candidates`. The
   kernel assertion precedes the reducer assertion, so the kernel breaks first.
+  The destinations and surfaces come from the kernel's own
+  `ArtifactDestination::ALL` and `Surface::ALL`, every kernel enum is mapped
+  onto its mirror by an exhaustive match, and the surfaces seen must equal
+  the mirror's `Surface::ALL`, so a kernel variant the mirror lacks fails to
+  compile or fails the test rather than going untested.
   The test records that the admission policy gives both automatic surfaces
   one visibility today.
 - `every_adjacent_transposition_of_the_order_disagrees_with_the_table` shows
@@ -308,9 +316,12 @@ Fences (`wm-eval-core-dependency-fence`, `xc-core-oracles-take-values-only`,
 `scripts/forbid-test-support-dependencies.ts` now asserts `eval-core`'s normal
 dependency set is exactly `context-core`, `serde`, `serde_json`, `sha2`, and
 that no line of `crates/eval-core/src` names a product crate or a `std`
-effect module (`fs`, `path`, `process`, `time`, `net`, `env`, `io`), with
-negative cases in its unit test; `eval-core` enters the kernel only under
-`[dev-dependencies]`; `cargo tree -p daemon -e normal` is unchanged.
+effect module (`fs`, `path`, `process`, `time`, `net`, `env`, `io`), as a full
+path or as a member of a brace-grouped `use std::{...}`, with negative cases
+in its unit test; an empty scan is itself a finding, so the fence cannot pass
+on a wrong working directory or a moved crate; `eval-core` enters the kernel
+only under `[dev-dependencies]`; `cargo tree -p daemon -e normal` is
+unchanged.
 
 ## Gaps recorded here
 

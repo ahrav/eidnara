@@ -15,6 +15,7 @@ function dep(
 
 function workspace(dependencies: MetadataDependency[]): CargoMetadata {
     return {
+        workspace_root: "/workspace",
         packages: [
             { name: "daemon", source: null, dependencies },
             {
@@ -98,6 +99,7 @@ describe("forbiddenDependencyEdges", () => {
 
 describe("eval-core fences", () => {
     const core = (dependencies: MetadataDependency[]): CargoMetadata => ({
+        workspace_root: "/workspace",
         packages: [{ name: "eval-core", source: null, dependencies }],
     });
     const closed = [
@@ -131,6 +133,29 @@ describe("eval-core fences", () => {
             "a.rs:1: use kernel::EligibilityVerdict;",
             "a.rs:2: let t = std::time::Instant::now();",
             "b.rs:2: let p = std::path::Path::new(\"x\");",
+        ]);
+    });
+
+    test("rejects std effect modules named inside a brace-grouped use", () => {
+        expect(
+            forbiddenCoreSources({
+                "grouped.rs": [
+                    "use std::{fs, io};",
+                    "use std::{collections::BTreeMap, time::Instant};",
+                    "use std::{collections::{BTreeMap, BTreeSet}, fmt};",
+                    "use std::collections::{BTreeMap, BTreeSet};",
+                    "",
+                ].join("\n"),
+            }),
+        ).toEqual([
+            "grouped.rs:1: use std::{fs, io};",
+            "grouped.rs:2: use std::{collections::BTreeMap, time::Instant};",
+        ]);
+    });
+
+    test("refuses to pass on an empty source set", () => {
+        expect(forbiddenCoreSources({})).toEqual([
+            "crates/eval-core/src: no source files scanned",
         ]);
     });
 });

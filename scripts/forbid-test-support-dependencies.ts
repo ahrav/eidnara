@@ -10,9 +10,24 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
     "sha2",
 ]);
 
-/** Paths a sans-I/O core must not name: product crates and the std effect modules. */
-const FORBIDDEN_CORE_SOURCE =
-    /\b(kernel|daemon|retrieval|storage|memory_store|host_runtime|rusqlite|tokio)::|\buse (kernel|daemon|retrieval|storage|memory_store|host_runtime|rusqlite|tokio)\b|\bstd::(fs|path|process|time|net|env|io)\b/;
+/**
+ * Paths a sans-I/O core must not name: product crates and the std effect
+ * modules, whether written as a full path (`std::fs::read`) or as a member
+ * of a brace-grouped `use std::{...}` list.
+ */
+const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io";
+const PRODUCT_CRATES = "kernel|daemon|retrieval|storage|memory_store|host_runtime|rusqlite|tokio";
+const FORBIDDEN_CORE_SOURCE = new RegExp(
+    [
+        `\\b(${PRODUCT_CRATES})::`,
+        `\\buse (${PRODUCT_CRATES})\\b`,
+        `\\bstd::(${STD_EFFECT_MODULES})\\b`,
+        `\\bstd::\\{[^;]*(?:[{,]\\s*|::)(${STD_EFFECT_MODULES})\\b`,
+    ].join("|"),
+);
+
+/** The directory the source fence scans, relative to the workspace root. */
+export const EVAL_CORE_SOURCE_DIR = "crates/eval-core/src";
 
 export interface MetadataDependency {
     name: string;
@@ -30,6 +45,7 @@ export interface MetadataPackage {
 
 export interface CargoMetadata {
     packages: MetadataPackage[];
+    workspace_root: string;
 }
 
 function tableName(dep: MetadataDependency): string {
@@ -99,10 +115,17 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
     return findings.sort();
 }
 
-/** Lines of evaluator-core source that reach a product crate or a std effect module. */
+/**
+ * An empty source set is itself a finding: a scan that matched no files
+ * proves nothing about the crate, so the gate must not pass on it.
+ */
 export function forbiddenCoreSources(sources: Record<string, string>): string[] {
+    const entries = Object.entries(sources);
+    if (entries.length === 0) {
+        return [`${EVAL_CORE_SOURCE_DIR}: no source files scanned`];
+    }
     const findings: string[] = [];
-    for (const [path, text] of Object.entries(sources)) {
+    for (const [path, text] of entries) {
         text.split("\n").forEach((line, index) => {
             if (FORBIDDEN_CORE_SOURCE.test(line)) {
                 findings.push(`${path}:${index + 1}: ${line.trim()}`);
@@ -128,10 +151,12 @@ if (import.meta.main) {
         for (const finding of findings) console.error(`  ${finding}`);
         process.exit(1);
     }
+    // `cargo metadata` names the workspace root, so the scan does not depend
+    // on the directory the script was launched from.
     const sources: Record<string, string> = {};
-    const glob = new Bun.Glob("crates/eval-core/src/**/*.rs");
-    for (const path of glob.scanSync(".")) {
-        sources[path] = await Bun.file(path).text();
+    const glob = new Bun.Glob(`${EVAL_CORE_SOURCE_DIR}/**/*.rs`);
+    for (const path of glob.scanSync(metadata.workspace_root)) {
+        sources[path] = await Bun.file(`${metadata.workspace_root}/${path}`).text();
     }
     const leaks = forbiddenCoreSources(sources);
     if (leaks.length > 0) {

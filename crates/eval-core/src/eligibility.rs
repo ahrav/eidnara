@@ -164,7 +164,6 @@ pub struct EligibilitySpec {
 pub enum SpecError {
     SpecDrift { expected: String, found: String },
     NotCanonical(ContractError),
-    Shape(String),
 }
 
 debug_display!(SpecError);
@@ -328,5 +327,6 @@ pub fn check_spec(fixture: &Value) -> Result<EligibilitySpec, SpecError> {
             found,
         });
     }
-    serde_json::from_value(fixture.clone()).map_err(|error| SpecError::Shape(error.to_string()))
+    Ok(EligibilitySpec::deserialize(fixture)
+        .expect("a value digesting to ELIGIBILITY_SPEC_DIGEST is serialize_spec()"))
 }

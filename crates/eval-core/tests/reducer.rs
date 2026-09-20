@@ -9,9 +9,9 @@ use context_core::canonical_json::protocol_digest;
 use eval_core::{
     ArtifactEligibility, Destination, ELIGIBILITY_SPEC_DIGEST, ELIGIBILITY_SPEC_PROTOCOL,
     EligibilitySpec, Event, EventId, FactTuple, LogError, MAX_VALID_TIME_MS, Mode, PREDICATES,
-    Payload, Predicate, PredicateKind, Query, ReduceError, Sensitivity, ServedClass, SpecError,
-    StateFacts, Surface, Truth, Verdict, Visibility, World, check_spec, generate_all, judge,
-    judge_surface, judge_with, reduce, serialize_spec, spec,
+    Payload, Predicate, PredicateKind, Query, REDUCER_VERSION, ReduceError, Sensitivity,
+    ServedClass, SpecError, StateFacts, Surface, Truth, Verdict, Visibility, World, check_spec,
+    generate_all, judge, judge_surface, judge_with, reduce, serialize_spec, spec,
 };
 use serde_json::{Value, json};
 use support::{WORLD_EPOCH_MS as EPOCH_MS, WORLD_SEED as SEED, world_config as config};
@@ -126,6 +126,17 @@ fn the_in_code_table_digests_to_the_pinned_constant_in_judge_order() {
     for vector in &spec.vectors {
         assert_eq!(judge(&vector.facts), vector.verdict, "{vector:?}");
     }
+    // Numbers are the one JSON type canonical encoding can merge (an
+    // integer-valued float with its integer), so the spec keeps none.
+    fn has_number(value: &Value) -> bool {
+        match value {
+            Value::Number(_) => true,
+            Value::Array(items) => items.iter().any(has_number),
+            Value::Object(fields) => fields.values().any(has_number),
+            Value::Null | Value::Bool(_) | Value::String(_) => false,
+        }
+    }
+    assert!(!has_number(&value), "the spec carries no numbers");
     let round_trip: EligibilitySpec = serde_json::from_value(value).unwrap();
     assert_eq!(round_trip, spec);
 }
@@ -560,7 +571,10 @@ fn admission_and_destination_travel_with_the_query_and_refusals_are_typed() {
 fn truth_and_queries_round_trip_through_serde_in_canonical_form() {
     let world = world();
     let truth = reduce(&world.log, &fixture(), &query(END, END)).unwrap();
+    assert_eq!(truth.reducer_version, REDUCER_VERSION);
+    assert_eq!(REDUCER_VERSION, "eval-reducer/v1");
     let value = serde_json::to_value(&truth).unwrap();
+    assert_eq!(value["reducer_version"], json!("eval-reducer/v1"));
     assert_eq!(value["query"]["valid_time_ms"], json!(END.to_string()));
     assert_eq!(
         value["query"]["observation_time_ms"],

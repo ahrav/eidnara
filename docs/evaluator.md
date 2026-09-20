@@ -225,9 +225,11 @@ the depths it was generated with.
 `EventLog::without(id)` removes one event and its incident edges and touches
 no other payload: a correction whose target was removed keeps naming it, and
 the log still validates. This is the deletion rule the ticket asks for ("no
-repair of surviving semantic payloads"); the reducer treats a target that
-names an absent event as a distinct case rather than promoting the correction
-to an original. Equality and `EventLog::digest` (`eval-event-log/v1`) cover
+repair of surviving semantic payloads"); the reducer does not promote such a
+correction to an original or repair it in any way. It stays a `correction`
+unit judged on its own facts, and the absent target contributes no state, so
+every other unit's truth is unchanged (see "Bitemporal reducer"). Equality and
+`EventLog::digest` (`eval-event-log/v1`) cover
 events and edges, so two logs with the same events and different edges differ.
 
 ### Step drive
@@ -295,7 +297,10 @@ by hand. Because the digest is over the parsed value, whitespace is never
 drift; a reordered predicate, an added verdict, or a changed fact cell is.
 `check_spec(&fixture)` returns the parsed `EligibilitySpec` only when the
 digest matches, and otherwise `SpecError::SpecDrift { expected, found }` (or
-`NotCanonical` for a value canonical JSON cannot encode); the reducer refuses
+`NotCanonical` for a value canonical JSON cannot encode). Those are the only
+two refusals: the spec carries no numbers, the one JSON type canonical
+encoding can merge, so a matching digest is value equality with
+`serialize_spec()` and the parse cannot fail. The reducer refuses
 before producing any truth and judges with the predicates it parsed.
 
 The kernel differential
@@ -307,12 +312,17 @@ surfaces against `KernelStore::judge_surface_eligibility` and against
 `judge_surface`, with the hand-authored facts also compared to the tuple
 projected from the store's `egress_candidates`. A second test shows every
 adjacent transposition of the predicate order disagrees with that table
-except the first pair, which no store object can separate. The kernel test
+except the first pair, which no store object can separate. The differential
+iterates the kernel's own `ArtifactDestination::ALL` and `Surface::ALL` and
+maps every kernel enum onto its `eval-core` mirror with an exhaustive match,
+so a variant added on the kernel side fails to compile there. The kernel test
 carries `eval-core` as a dev dependency only; `eval-core` keeps its four
 dependencies and never names a kernel type, and
 `scripts/forbid-test-support-dependencies.ts` now asserts both facts (the
 closed dependency set, and no product-crate or `std` effect-module path in the
-core's source).
+core's source, whether written as a full path or inside a brace-grouped
+`use std::{...}`). The source scan runs from the `cargo metadata` workspace
+root and fails when it matches no files, so it cannot pass vacuously.
 
 ## Bitemporal reducer
 
@@ -336,11 +346,15 @@ outside the cut has no state, which the rules judge `retracted`, the same
 verdict the kernel gives an object it has never seen. Each unit is judged at
 its own revision, so `stale` is out of reach here; the shell produces it by
 asking about an older revision. A correction whose target the log does not
-contain changes nothing, because deletion leaves such targets behind by
-design.
+contain changes nothing: it is still a unit judged on its own facts, no other
+unit gains or loses state, and nothing is repaired, because deletion leaves
+such targets behind by design.
 
 `Truth::required` is the set of units judged `ok`, which is exactly when a
-historical question about the unit must stay answerable. The reducer never
+historical question about the unit must stay answerable. `Truth` also carries
+`reducer_version`, the constant `REDUCER_VERSION` (`eval-reducer/v1`), which
+the shell copies into the manifest's `component_versions.reducer` the same way
+the generator constants reach the run identity. The reducer never
 reads a kernel result and never adjusts truth toward one: a typed kernel
 refusal at run time is recorded as a refusal by the shell, not repaired into
 an expectation here.
