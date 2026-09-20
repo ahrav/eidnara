@@ -185,7 +185,7 @@ Fault/timing angle: none; a pure decoding property
 Required faults and enabling state: response bodies written as raw text with chosen integer tokens; a `host.status` body carrying a counter of 2^53+1 beside a valid counter; a default routed recipe body carrying 2^53+1 inside an inserted value; a `JSON.parse` that hands the reviver no source text
 Confidence: high - [evidence](evidence/status-sanitizer-preserves-inclusive-integer-domain.md). Verified under Bun 1.3.14 through the test suite and under Node 24.18 by direct import; both report `bigint` for 2^53+1 and `number` for 2^53 on the exact path
 Existing check: `client.test.ts::integer lexemes a double cannot reproduce arrive exact through exact-integer routed and control responses`, `a default routed response decodes as JSON.parse does, so module payloads forwarded to OpenCode never carry a bigint`, `routeOpen omits the ambient consumer identity only when asked, for that bind alone`; `connection.test.ts::stream items decode exactly only under the exact_json response mode`; `exact-json.test.ts`
-Impact: A counter or generation past 2^53 would display a neighboring value as exact, and two different receipts or revisions could render identically; a `bigint` reaching a module payload would make the `transform` recipe refuse and OpenCode's serialization throw
+Impact: A counter or generation past 2^53 would display a neighboring value as exact, and two different receipts or revisions could render identically; a `bigint` reaching a module payload would make the `transform` recipe refuse it as malformed, or, past that check, OpenCode's `JSON.stringify` throw
 Open questions: None.
 
 ## Relationship map
