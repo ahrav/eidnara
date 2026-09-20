@@ -195,15 +195,16 @@ impl HandlerCore {
             if !wanted.load(Ordering::Acquire) {
                 return respond(json!({"state":"pending"}));
             }
-            for job in &plan.jobs {
-                match work
-                    .store
-                    .begin_memory_capture_attempt(&job.project, &job.job_id, now_ms())
-                {
-                    Ok(true) => {}
-                    Ok(false) => return respond(json!({"state":"pending"})),
-                    Err(_) => return respond(json!({"state":"store_failed"})),
-                }
+            // One dispatch for the whole batch or none: a source swept since
+            // the queue was read leaves the others' counts untouched.
+            let job_ids: Vec<&str> = plan.jobs.iter().map(|job| job.job_id.as_str()).collect();
+            match work
+                .store
+                .begin_memory_capture_attempts(&work.project(), &job_ids, now_ms())
+            {
+                Ok(true) => {}
+                Ok(false) => return respond(json!({"state":"pending"})),
+                Err(_) => return respond(json!({"state":"store_failed"})),
             }
             let response = json!({"state":"work", "lease":guard.token, "model":plan.model,
                 "system":CAPTURE_SYSTEM_PROMPT,"prompt":prompt,
@@ -360,21 +361,20 @@ pub(super) fn collapse_quotations(
 }
 
 impl CaptureWork {
+    fn project(&self) -> String {
+        capture_project(&self.binding)
+    }
+
     fn claim(&self, primary: Option<&str>) -> NextStep {
         match self.next_native_plan(primary) {
             Ok(Some((plan, prompt))) => NextStep::Work(plan, prompt),
-            Ok(None) => NextStep::Done(
-                match self
-                    .store
-                    .memory_capture_status(&capture_project(&self.binding))
-                {
-                    Ok(status) => respond(
-                        json!({"state":if status.pending == 0 { "ready" } else { "pending" },
+            Ok(None) => NextStep::Done(match self.store.memory_capture_status(&self.project()) {
+                Ok(status) => respond(
+                    json!({"state":if status.pending == 0 { "ready" } else { "pending" },
                         "pending":status.pending,"failed":status.failed,"completed":status.completed}),
-                    ),
-                    Err(_) => respond(json!({"state":"store_failed"})),
-                },
-            ),
+                ),
+                Err(_) => respond(json!({"state":"store_failed"})),
+            }),
             Err(code) => {
                 eprintln!("daemon: native memory capture preparation failed: {code}");
                 NextStep::Done(respond(json!({"state": if code == "store_failed" {
@@ -434,7 +434,7 @@ impl CaptureWork {
         &self,
         primary: Option<&str>,
     ) -> Result<Option<(NativePlan, String)>, &'static str> {
-        let project = capture_project(&self.binding);
+        let project = self.project();
         let jobs = self
             .store
             .pending_memory_captures(&project, &self.binding.harness, now_ms())

@@ -4946,10 +4946,15 @@ impl HandlerCore {
             .expect("boundary token cache mutex")
             .remove(session);
         tail_hygiene::hygiene_memos().remove_session(session);
-        self.capture_memo
-            .lock()
-            .expect("capture memo mutex")
-            .remove_session(session);
+        // A route can close right after its last transform, before that
+        // transform's detached checkpoint has run. Only deletion retires the
+        // memo; a closed session's admitted text still awaits a later harness.
+        if trigger == "session_delete" {
+            self.capture_memo
+                .lock()
+                .expect("capture memo mutex")
+                .remove_session(session);
+        }
         self.prompt_surface_epochs
             .lock()
             .expect("prompt surface epoch mutex")
@@ -22900,6 +22905,125 @@ mod tests {
         );
         assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 0);
         assert_eq!(handler.capture_memo.lock().unwrap().session_len("ses"), 0);
+    }
+
+    #[tokio::test]
+    async fn route_teardown_keeps_an_admitted_checkpoint_alive() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let project_key = &capture_key(&project);
+        let pi = capture_binding(&project, "pi");
+        let messages = [capture_ingress(
+            "m1",
+            "user",
+            "Use port 4321 for staging.",
+            1,
+        )];
+        let request = capture_transform_request(&messages);
+        let checkpoint = handler
+            .capture_checkpoint(
+                Arc::clone(&store),
+                &pi,
+                &request,
+                1,
+                &metered_decode::unbounded_reserve(),
+            )
+            .expect("an unseen fragment needs the store");
+        // The harness exits right after its last transform; nothing will sync again.
+        handler.purge_session_state("ses", "route_teardown");
+        assert_eq!(
+            checkpoint.run().await,
+            1,
+            "completed conversation text awaits a later harness instead of being dropped"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 1);
+    }
+
+    #[tokio::test]
+    async fn a_source_swept_during_preparation_leaves_the_rest_of_the_batch_issued() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        let project_key = &capture_key(&project);
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        handler.bind_route(
+            test_route(8),
+            SessionBinding {
+                session: "ses2".into(),
+                ..capture_binding(&project, "pi")
+            },
+        );
+        for (route, session, id, text) in [
+            (7, "ses", "frozen", "Frozen plan at the head."),
+            (7, "ses", "native-user-1", "Use port 4321 for staging."),
+            (8, "ses2", "native-user-2", "Production listens on 8080."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":session,"messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(
+                    handler
+                        .handle_memory_capture(test_route(route), &request)
+                        .await
+                )["state"],
+                "accepted"
+            );
+        }
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let frozen = jobs.iter().find(|job| job.message_id == "frozen").unwrap();
+        store
+            .prepare_memory_capture(
+                project_key,
+                &frozen.job_id,
+                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                    .to_string(),
+            )
+            .unwrap();
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        // The claim has read its queue and is publishing the frozen head when
+        // the second session is swept out from under it.
+        let (work, ()) = tokio::join!(
+            handler.handle_native_capture_next(test_route(7), &next),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                store
+                    .delete_session("ses2", project.to_str().unwrap())
+                    .unwrap();
+            }
+        );
+        holder.join().unwrap();
+        assert_eq!(
+            tool_body(work)["state"],
+            "pending",
+            "a batch missing a member is not issued"
+        );
+        let survivor = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.message_id == "native-user-1")
+            .unwrap();
+        assert_eq!(
+            survivor.attempts, 0,
+            "no dispatch is recorded for a batch that was never issued"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work", "{work}");
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        assert_eq!(prompt["messages"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
