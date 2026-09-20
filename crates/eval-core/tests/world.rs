@@ -320,6 +320,14 @@ fn replay_refuses_a_missing_changed_or_out_of_range_choice_and_emits_no_log() {
         );
     }
 
+    // Entries past the generator's last choice are ignored, not refused: the
+    // replay succeeds and the returned tape holds only the consumed entries.
+    let mut trailing = base.tape.clone();
+    trailing.entries.push(base.tape.entries[0].clone());
+    let replayed = generate_all(SEED, &config(), Mode::ReplayTape(trailing)).unwrap();
+    assert_eq!(replayed, base);
+    assert_eq!(replayed.tape.entries.len(), entries);
+
     // A refusal mid-drive poisons the generator: no partial log, no finish.
     let mut short = base.tape.clone();
     short.entries.truncate(entries / 2);

@@ -146,8 +146,10 @@ World generation, choice replay, and the event log
   each at the first, a middle, and the last entry, and expects the typed
   refusal naming that entry; probes the exact index boundary on a choice with
   one candidate; expects a tape replayed under another seed or config to
-  refuse with `TapeMismatch`; and after a mid-drive refusal expects `step`,
-  `log`, and `finish` to return the same error.
+  refuse with `TapeMismatch`; expects a tape with an entry past the last
+  choice to replay the same world and return a tape holding only the consumed
+  entries; and after a mid-drive refusal expects `step`, `log`, and `finish`
+  to return the same error.
 - `removing_an_unrelated_event_changes_no_later_text_or_rename_digest`
   (`wm-independent-rng-streams-per-axis-entity`) shortens one session and,
   separately, the repository, and expects every event on the other streams
