@@ -760,8 +760,7 @@ impl KernelStore {
             .clone()
             .normalized()
             .map_err(|_| ReviewReadError::Invalid)?;
-        let (row, sealed_at, binding) =
-            self.load_staged_review(reference, now.max(current_time_ms()))?;
+        let (row, sealed_at, binding) = self.load_staged_review(reference, now, true)?;
         if binding != expected {
             return Err(ReviewReadRefusal::ScopeMismatch.into());
         }
@@ -774,7 +773,7 @@ impl KernelStore {
         reference: &ReviewStagedReference,
         selected_at: i64,
     ) -> Result<ReviewStagedRow, ReviewReadError> {
-        let (row, sealed_at, binding) = self.load_staged_review(reference, selected_at)?;
+        let (row, sealed_at, binding) = self.load_staged_review(reference, selected_at, false)?;
         Self::decode_staged_row(row, sealed_at, binding)
     }
 
@@ -808,15 +807,16 @@ impl KernelStore {
         reference: &ReviewStagedReference,
         now: i64,
     ) -> Result<ReviewBinding, ReviewReadError> {
-        let (_, _, binding) = self.load_staged_review(reference, now.max(current_time_ms()))?;
+        let (_, _, binding) = self.load_staged_review(reference, now, true)?;
         Ok(binding)
     }
 
-    /// The sealed, byte-identical row `reference` names, its sealing time, and its stored binding. The row's deadline must be strictly after `live_at`: the later of the caller's and the store's clocks for a live read, the selection time for a selected read.
+    /// The sealed, byte-identical row `reference` names, its sealing time, and its stored binding. The row's deadline must be strictly after `live_at`: the selection time for a selected read, or, when `live` is set, the later of the caller's clock and the store clock sampled after the reader is acquired, so a wait for a reader cannot carry a live read past the deadline.
     fn load_staged_review(
         &self,
         reference: &ReviewStagedReference,
         live_at: i64,
+        live: bool,
     ) -> Result<(StoredReviewRow, i64, ReviewBinding), ReviewReadError> {
         if live_at < 0 {
             return Err(ReviewReadError::Invalid);
@@ -855,6 +855,11 @@ impl KernelStore {
             .map_err(|error| ReviewReadError::Store(map_sqlite(error)))?
             .ok_or(ReviewReadRefusal::Missing)?;
         drop(reader);
+        let live_at = if live {
+            live_at.max(current_time_ms())
+        } else {
+            live_at
+        };
         // The schema pairs `terminal_state` with `terminal_at`, so a completed row always carries its timestamp.
         let sealed_at = match (
             row.run_terminal.as_deref(),
