@@ -64,7 +64,8 @@ reviews found and how each finding was dispositioned.
 | Finding | Class | Disposition |
 | --- | --- | --- |
 | The observational-harness comment named a consumer that does not exist in the tree | refinement | fixed: the comment states the mechanism only |
-| `OBSERVATIONAL_HARNESS` was `pub` with no Rust consumer outside the crate | refinement | fixed: `pub(crate)` |
+| `OBSERVATIONAL_HARNESS` was `pub` with no Rust consumer outside the crate | refinement | reverted: the wire test in `crates/daemon/tests/memory_reviewer_wire.rs` binds through `daemon::OBSERVATIONAL_HARNESS`, so a change to the value cannot leave that test binding an ordinary route; the constant is `pub` |
+| The operations document listed `host.status` among the reads an observer makes under project authorization | gap | fixed: `host.status` is a route-free channel-0 operation (wire document 7.6) and is stated as unaffected |
 | The wire document did not name the `cli` value whose behavior the daemon defines, so the TypeScript consumer had no contract to mirror | gap | fixed: one sentence in the bind section; the value stays a scoping claim, no operation or literal of the protocol changes |
 | The worker test's comment claimed observation while its view was hand-built | gap | fixed: the comment states the empty-view claim; the catalog record says the composition is two tests |
 | No protocol-3 read through a `cli` route | gap | fixed: `review.list`, `review.read`, and two malformed bodies answer byte-equal through the observer and the ordinary route |
