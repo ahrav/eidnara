@@ -703,6 +703,8 @@ fn clock_named_keep_fields_equal_the_pinned_allowlist() {
         "retry_deadline",
         "wall_clock",
         "created_at",
+        "created_at_ns",
+        "updated_at_us",
         "elapsed_ms",
         "start_time",
     ] {
@@ -744,6 +746,9 @@ fn host_environment_and_incarnation_fields_are_never_kept() {
         "database-incarnation",
         "",
         "Now_ms",
+        "process__id",
+        "process_id_",
+        "_pid",
     ] {
         assert_eq!(
             ObservationSchema::new("spelled", [(field, Rule::Drop)]),

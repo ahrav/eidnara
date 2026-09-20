@@ -22,9 +22,12 @@ pub enum Rule {
     Relative,
 }
 
+/// Field names are snake_case, so `at` and `ms` are matched as tokens
+/// (`created_at`, `created_at_ns`, `now_ms`).
 pub fn is_clock_named(field: &str) -> bool {
-    field.ends_with("_at")
-        || field.ends_with("_ms")
+    let token = |wanted: &str| field.split('_').any(|token| token == wanted);
+    token("at")
+        || token("ms")
         || field.contains("time")
         || field.contains("clock")
         || field.contains("deadline")
@@ -89,12 +92,14 @@ impl ObservationSchema {
     ) -> Result<Self, ResidueError> {
         let mut rules = BTreeMap::new();
         for (field, rule) in rules_iter {
-            // The gates below match snake_case spellings, so nothing else is admitted.
-            if field.is_empty()
-                || !field
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-            {
+            // The gates below match snake_case tokens, so nothing else is admitted:
+            // lowercase ASCII words and digits joined by single underscores.
+            if field.split('_').any(|token| {
+                token.is_empty()
+                    || !token
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            }) {
                 return Err(ResidueError::FieldNotSnakeCase {
                     type_name: type_name.to_string(),
                     field: field.to_string(),

@@ -113,8 +113,9 @@ also produces its run ID. There is no seed-only constructor.
 its schema (`UnclassifiedField`, `MissingField`), so classification is total;
 registering one type twice is refused (`DuplicateType`), declaring one field
 twice in a schema is refused (`DuplicateField`), a field not spelled in
-snake_case is refused (`FieldNotSnakeCase`) because the gates below match that
-spelling, as is a `Keep` or
+snake_case (lowercase words and digits joined by single underscores) is refused
+(`FieldNotSnakeCase`) because the gates below match those tokens, as is a
+`Keep` or
 `Relative` value canonical JSON cannot encode (`NotCanonical`). A refused
 observation leaves the trace and its `Relative` numbering unchanged, so a
 recorded trace always digests.
