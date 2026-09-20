@@ -775,7 +775,9 @@ without this hint.
 a saved memory. Exact replay is idempotent. `disabled` writes nothing.
 `queue_full`, `project_mismatch`, and `store_failed` include `accepted`, the
 identities queued before refusal. A conversation previously captured under a
-different project cannot be copied into this project. Unacknowledged input
+different project cannot be copied into this project while any of its capture
+identities is retained: pending sources until they finish, completed or
+abandoned ones for 30 days after their first enqueue. Unacknowledged input
 must remain available for retry. Limits are 1,024 pending sources per project
 and 8,192 overall.
 
@@ -855,10 +857,11 @@ The canonical plan freezes before publication, and replay uses its exact
 intent. A kernel receipt completes the source and clears source/plan payloads
 while retaining replay identity.
 
-Each source permits three recorded model/output failures per store-owner
-lifetime. Cancellation and unavailable native auth do not consume that
-allowance. Dispatch counts survive restart and drive exponential retry delay
-from one second to 128 seconds. A new store owner resets failures only for
+Each source permits three recorded model/output failures before it pauses
+for six hours; the pause ends with a fresh failure allowance. Cancellation
+and unavailable native auth do not consume that allowance. Dispatch counts
+survive restart and drive exponential retry delay from one second to 128
+seconds. A new store owner clears pauses and resets failures only for
 unfinished, unprepared sources while preserving dispatch counts and deadlines.
 A store refusal of a frozen plan is a recorded model/output failure of that
 source alone; other sources in the batch still commit. A source whose prompt

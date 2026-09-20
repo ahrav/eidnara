@@ -398,6 +398,9 @@ fn fragment_digest(id: &str, role: &str, text: &str) -> FragmentDigest {
 struct SessionCaptureMemo {
     /// Distinguishes this session's memo from one recreated after a purge.
     epoch: u64,
+    /// Checkpoints admitted but not yet run. A pinned memo is not evicted for
+    /// capacity; only deletion removes it.
+    pinned: u32,
     seen: HashSet<FragmentDigest>,
     order: VecDeque<FragmentDigest>,
 }
@@ -418,17 +421,20 @@ impl CaptureCheckpointMemo {
             .is_some_and(|memo| memo.seen.contains(digest))
     }
 
-    /// The current epoch of a session's memo, creating it when absent. A
-    /// purge removes the memo, so a checkpoint holding an older epoch knows
-    /// its session was deleted or evicted underneath it.
+    /// Pins a session's memo for one outstanding checkpoint and returns its
+    /// epoch, creating the memo when absent. A purge removes the memo, so a
+    /// checkpoint holding an older epoch knows its session was deleted.
+    /// Capacity eviction skips pinned memos; with every memo pinned the map
+    /// briefly exceeds its cap, bounded by the outstanding checkpoints.
     fn epoch(&mut self, session: &str) -> u64 {
         if !self.sessions.contains_key(session) {
-            while self.sessions.len() >= CAPTURE_MEMO_SESSIONS {
-                match self.order.pop_front() {
-                    Some(evicted) => {
-                        self.sessions.remove(&evicted);
-                    }
-                    None => break,
+            if self.sessions.len() >= CAPTURE_MEMO_SESSIONS {
+                let victim = self
+                    .order
+                    .iter()
+                    .position(|kept| self.sessions.get(kept).is_none_or(|memo| memo.pinned == 0));
+                if let Some(victim) = victim.and_then(|index| self.order.remove(index)) {
+                    self.sessions.remove(&victim);
                 }
             }
             self.order.push_back(session.to_owned());
@@ -441,7 +447,22 @@ impl CaptureCheckpointMemo {
                 },
             );
         }
-        self.sessions[session].epoch
+        let memo = self
+            .sessions
+            .get_mut(session)
+            .expect("memo was just ensured");
+        memo.pinned += 1;
+        memo.epoch
+    }
+
+    fn release(&mut self, session: &str, epoch: u64) {
+        if let Some(memo) = self
+            .sessions
+            .get_mut(session)
+            .filter(|memo| memo.epoch == epoch)
+        {
+            memo.pinned = memo.pinned.saturating_sub(1);
+        }
     }
 
     fn matches(&self, session: &str, epoch: u64) -> bool {
@@ -481,6 +502,23 @@ impl CaptureCheckpointMemo {
     }
 }
 
+/// Holds a memo pin for one outstanding checkpoint; dropping it, on any path,
+/// makes the session evictable again.
+struct MemoPin {
+    memo: Arc<Mutex<CaptureCheckpointMemo>>,
+    session: String,
+    epoch: u64,
+}
+
+impl Drop for MemoPin {
+    fn drop(&mut self) {
+        self.memo
+            .lock()
+            .expect("capture memo mutex")
+            .release(&self.session, self.epoch);
+    }
+}
+
 struct PendingFragment {
     id: String,
     role: String,
@@ -516,12 +554,10 @@ fn capture_project(binding: &SessionBinding) -> String {
 /// memo epoch is current, so pre-delete work cannot land after the sweep.
 pub(crate) struct CaptureCheckpoint {
     store: Arc<MemoryStore>,
-    memo: Arc<Mutex<CaptureCheckpointMemo>>,
     commit_gate: Arc<Mutex<()>>,
     project: String,
     harness: String,
-    session: String,
-    epoch: u64,
+    pin: MemoPin,
     fragments: Vec<PendingFragment>,
 }
 
@@ -531,15 +567,19 @@ impl CaptureCheckpoint {
     pub(crate) async fn run(self) -> usize {
         let Self {
             store,
-            memo,
             commit_gate,
             project,
             harness,
-            session,
-            epoch,
+            pin,
             fragments,
         } = self;
         kernel_routes::blocking(move || {
+            let MemoPin {
+                memo,
+                session,
+                epoch,
+            } = &pin;
+            let (memo, session, epoch) = (Arc::clone(memo), session.clone(), *epoch);
             let _gate = commit_gate.lock().expect("capture publication mutex");
             if !memo
                 .lock()
@@ -664,12 +704,14 @@ impl HandlerCore {
         };
         Some(CaptureCheckpoint {
             store,
-            memo: Arc::clone(&self.capture_memo),
             commit_gate: Arc::clone(&self.capture_commit_gate),
             project: capture_project(binding),
             harness: binding.harness.clone(),
-            session: binding.session.clone(),
-            epoch,
+            pin: MemoPin {
+                memo: Arc::clone(&self.capture_memo),
+                session: binding.session.clone(),
+                epoch,
+            },
             fragments,
         })
     }
@@ -1396,6 +1438,27 @@ mod tests {
             !ids[0].is_empty() && ids[0].len() <= 256 && !ids[0].chars().any(char::is_control),
             "a fragment id must satisfy the store's id grammar: {:?}",
             ids[0]
+        );
+    }
+
+    #[test]
+    fn an_outstanding_checkpoint_pins_its_session_memo_against_capacity_eviction() {
+        let mut memo = CaptureCheckpointMemo::default();
+        let epoch = memo.epoch("ses");
+        for other in 0..CAPTURE_MEMO_SESSIONS {
+            let session = format!("other-{other}");
+            let released = memo.epoch(&session);
+            memo.release(&session, released);
+        }
+        assert!(
+            memo.matches("ses", epoch),
+            "a session with an admitted checkpoint outlives the capacity sweep"
+        );
+        memo.release("ses", epoch);
+        memo.epoch("one-more");
+        assert!(
+            !memo.matches("ses", epoch),
+            "once released, the oldest session is ordinary eviction fodder again"
         );
     }
 
