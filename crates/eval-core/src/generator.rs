@@ -13,7 +13,20 @@ pub const GENERATOR_VERSION: &str = "eval-generator/v1";
 pub const TAPE_IDENTITY_PROTOCOL: &str = "eval-tape/v1";
 const OID_PROTOCOL: &str = "eval-git-oid/v1";
 
-const TIME_GAP_TICKS: [i64; 4] = [0, 1, 2, 5];
+/// Strictly positive, so a correction always advances its target's revision.
+const TIME_GAP_TICKS: [i64; 3] = [1, 2, 5];
+const _: () = assert!(all_positive(&TIME_GAP_TICKS));
+
+const fn all_positive(ticks: &[i64]) -> bool {
+    let mut i = 0;
+    while i < ticks.len() {
+        if ticks[i] <= 0 {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 const OBSERVATION_LAGS_MS: [i64; 4] = [0, 1_000, 60_000, 3_600_000];
 const WORDS: [&str; 6] = [
     "allocator",

@@ -6,6 +6,7 @@ pub mod dense_projection;
 pub mod direct_host;
 pub mod embedding_fixtures;
 pub mod flock;
+pub mod git_repo;
 pub mod kernel_daemon;
 pub mod memory_reviewer_corpus;
 pub mod memory_reviewer_publish;
