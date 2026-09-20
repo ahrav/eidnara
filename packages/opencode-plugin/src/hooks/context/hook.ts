@@ -18,6 +18,8 @@ import {
     createMemoryCaptureDrain,
     type MemoryCaptureDrain,
     openCodeCaptureMessages,
+    openCodeLastFinalMessageId,
+    openCodeMessagesSince,
 } from "../../shared/memory-capture";
 import { normalizeSDKResponse } from "../../shared/normalize-sdk-response";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
@@ -253,6 +255,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         return model ? `${model.providerID}/${model.modelID}` : undefined;
     };
     const pendingUserCaptures = new BoundedSessionMap<Promise<void>>(MAX_LIVE_USAGE_SESSIONS);
+    /** Per session, the last final message an idle checkpoint offered; later checkpoints read past it. */
+    const captureWatermark = new BoundedSessionMap<string>(MAX_LIVE_USAGE_SESSIONS);
+    /** Messages read back per later checkpoint before falling back to the whole transcript. */
+    const CAPTURE_TAIL_MESSAGES = 32;
     const checkpointUser = (sessionId: string, output: unknown): void => {
         if (
             deps.config.memory?.enabled === false ||
@@ -318,20 +324,32 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             if (!model) return;
             const projectRoot = await sessionDirectoryFor(sessionId);
             const scope = { sessionId, projectRoot, model };
-            const sourceMessages = normalizeSDKResponse(
-                await withTimeout(
-                    Promise.resolve(
-                        deps.client.session.messages({
-                            path: { id: sessionId },
-                            query: { directory: projectRoot },
-                        } as never),
+            const readTranscript = async (limit?: number): Promise<unknown[]> =>
+                normalizeSDKResponse(
+                    await withTimeout(
+                        Promise.resolve(
+                            deps.client.session.messages({
+                                path: { id: sessionId },
+                                query: { directory: projectRoot, limit },
+                            } as never),
+                        ),
+                        HOST_SDK_READ_TIMEOUT_MS,
+                        "memory capture transcript read timed out",
                     ),
-                    HOST_SDK_READ_TIMEOUT_MS,
-                    "memory capture transcript read timed out",
-                ),
-                [] as unknown[],
-                { preferResponseOnMissingData: true },
-            );
+                    [] as unknown[],
+                    { preferResponseOnMissingData: true },
+                );
+            // The first checkpoint offers the whole recent transcript; later ones read only the
+            // tail past the last final message this process already offered.
+            const since = captureWatermark.get(sessionId);
+            const sourceMessages =
+                since === undefined
+                    ? await readTranscript()
+                    : (openCodeMessagesSince(
+                          await readTranscript(CAPTURE_TAIL_MESSAGES),
+                          since,
+                          CAPTURE_TAIL_MESSAGES,
+                      ) ?? (await readTranscript()));
             if (deletedSessions.has(sessionId)) return;
             await captureCheckpoint({
                 ...scope,
@@ -339,6 +357,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                     notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
                 }),
             });
+            const final = openCodeLastFinalMessageId(sourceMessages);
+            if (final !== undefined) captureWatermark.set(sessionId, final);
             memoryCaptureDrain.schedule(scope);
         } catch (error) {
             log(
