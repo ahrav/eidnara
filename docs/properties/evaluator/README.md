@@ -343,7 +343,10 @@ Renderer, encoder, accounting, and registry, store-free
   `encode` of the tuple.
 - `every_payload_kind_renders_to_units_a_commit_or_a_named_exclusion` renders
   a world with every payload kind: messages and corrections become messages,
-  tool spans attach to their own session's message only, commits become
+  tool spans attach to their own session's message only (a span whose session
+  has no message with its `message_id` refuses as `ToolSpanParentMissing`, and
+  one observed at another time than its parent as
+  `ToolSpanObservationDiffers`), commits become
   `RenderedCommit`s at the event's times, renames and invalidations are
   counted under their rule names, every unit has a distinct identity, and a
   correction reuses its target's `message_id` and lineage at a later
@@ -354,7 +357,9 @@ Renderer, encoder, accounting, and registry, store-free
   `CorrectionTargetInOtherSession` for a target in another session (a
   same-session correction one millisecond later shares the target's lineage),
   `CorrectionDoesNotAdvance` for a correction at or before the target's valid
-  time, `UnknownRole` for a role that
+  time, `RevisionReused` for a second correction of one target at one valid
+  time, `SecondRepository` for commits from two repository entities under one
+  `repository_id`, `UnknownRole` for a role that
   is neither `user` nor `assistant`, `NoEarlierCreated` for an assistant turn
   at valid time zero (valid time one renders `created: 0`), and an identity
   value with a tab refuses as `Encoding { event_id, .. }` naming the event,
@@ -393,9 +398,9 @@ marker through `eval_core::Coverage` after asserting its preconditions):
   commit plus two commits that differ only in committer time into a real
   repository, reads them with `read_selection`, destructures `SourceUnit`
   (no time field), expects revision `"1"`, the identity field set, and
-  `commit_message`, publishes each with the evaluator's `oid ->
-  valid_time_ms` projection, and expects the published identity to equal
-  `git_identity(oid)`.
+  `commit_message`, checks the evaluator's `oid -> valid_time_ms` projection
+  against the committer time git recorded for each oid, publishes each, and
+  expects the published identity to equal `git_identity(oid)`.
 - `observation_time_is_inert_for_identity_and_eligibility`
   (`ing-observation-time-inert-for-projection`) ingests one rendering into two
   stores ten years apart in observation time and expects equal occurrence

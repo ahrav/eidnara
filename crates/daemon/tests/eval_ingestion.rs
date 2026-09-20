@@ -424,6 +424,13 @@ fn git_units_keep_revision_one_and_take_valid_time_from_the_projection(coverage:
         assert_eq!(role, "commit");
         assert!(!text.is_empty());
         let expected = git_identity(&render_config(), oid).unwrap();
+        // The projection is the only time source, so it must agree with what
+        // git recorded for the object it names.
+        assert_eq!(
+            projection[oid] / 1_000,
+            repo.committer_seconds(oid),
+            "{oid}"
+        );
         let observation = observations
             .get(oid)
             .copied()

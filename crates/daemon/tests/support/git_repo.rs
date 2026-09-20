@@ -97,6 +97,13 @@ impl Repo {
         self.write(message.as_bytes(), None, seconds, Vec::new())
     }
 
+    /// The committer time git recorded for `oid`, read back from the object store.
+    pub fn committer_seconds(&self, oid: &str) -> i64 {
+        let id = gix::ObjectId::from_hex(oid.as_bytes()).unwrap();
+        let commit = self.repo.find_object(id).unwrap().into_commit();
+        commit.committer().unwrap().time().unwrap().seconds
+    }
+
     /// A commit object written raw, so its message bytes and encoding header are exactly `message` and `encoding`.
     pub fn raw_commit(&self, message: &[u8], encoding: Option<&str>) -> String {
         self.write(message, encoding, 1, Vec::new())

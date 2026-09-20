@@ -62,6 +62,18 @@ pub enum RenderError {
     /// The correction's valid time is at or before its target's. The revision
     /// is the valid time, so rendering it would reuse or precede the target.
     CorrectionDoesNotAdvance(EventId),
+    /// Two rendered messages share session, `message_id`, and valid time, so
+    /// they would share one occurrence: two events, one identity.
+    RevisionReused(EventId),
+    /// No message in the span's session carries its `message_id`; nothing
+    /// renders it and no rule excludes it, so it would vanish from accounting.
+    ToolSpanParentMissing(EventId),
+    /// A message and its tool parts are one fixture observed once; a span
+    /// observed at another time than its parent cannot be rendered faithfully.
+    ToolSpanObservationDiffers(EventId),
+    /// `RenderConfig` binds one `repository_id`; a second repository entity
+    /// would render under the first's identity.
+    SecondRepository(EventId),
     UnknownRole {
         event_id: EventId,
         role: String,
@@ -215,8 +227,16 @@ impl Message<'_> {
         &self,
         parts: Vec<Value>,
         expected: Vec<ExpectedUnit>,
+        revisions: &mut BTreeSet<(String, String, i64)>,
     ) -> Result<RenderedMessage, RenderError> {
         let valid = self.event.valid_time_ms;
+        if !revisions.insert((
+            self.event.entity_id.clone(),
+            self.message_id.to_string(),
+            valid,
+        )) {
+            return Err(RenderError::RevisionReused(self.event.id.clone()));
+        }
         let time = match self.role {
             "user" => json!({"created": valid}),
             "assistant" => {
@@ -254,6 +274,14 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
         commits: Vec::new(),
         excluded_by_rule: BTreeMap::new(),
     };
+    let mut revisions = BTreeSet::new();
+    let mut repository: Option<&str> = None;
+    let has_message = |entity_id: &str, id: &str| {
+        log.events.iter().any(|e| {
+            e.entity_id == entity_id
+                && matches!(&e.payload, Payload::Message { message_id, .. } if message_id == id)
+        })
+    };
     for event in &log.events {
         match &event.payload {
             Payload::Message {
@@ -280,11 +308,16 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                     _ => None,
                 });
                 for (span, call_id, output) in spans {
+                    if span.observation_time_ms != event.observation_time_ms {
+                        return Err(RenderError::ToolSpanObservationDiffers(span.id.clone()));
+                    }
                     let (part, unit) = m.tool_part(config, span, call_id, output)?;
                     parts.push(part);
                     expected.push(unit);
                 }
-                rendering.messages.push(m.rendered(parts, expected)?);
+                rendering
+                    .messages
+                    .push(m.rendered(parts, expected, &mut revisions)?);
             }
             Payload::Correction { target, text } => {
                 let original = log
@@ -311,15 +344,26 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                 };
                 let expected = vec![m.text_unit(config)?];
                 let parts = vec![json!({"type": "text", "text": text})];
-                rendering.messages.push(m.rendered(parts, expected)?);
+                rendering
+                    .messages
+                    .push(m.rendered(parts, expected, &mut revisions)?);
             }
-            Payload::Commit { message, .. } => rendering.commits.push(RenderedCommit {
-                event_id: event.id.clone(),
-                message: message.clone(),
-                valid_time_ms: event.valid_time_ms,
-                observation_time_ms: event.observation_time_ms,
-            }),
-            Payload::ToolSpan { .. } => {}
+            Payload::Commit { message, .. } => {
+                if *repository.get_or_insert(&event.entity_id) != event.entity_id {
+                    return Err(RenderError::SecondRepository(event.id.clone()));
+                }
+                rendering.commits.push(RenderedCommit {
+                    event_id: event.id.clone(),
+                    message: message.clone(),
+                    valid_time_ms: event.valid_time_ms,
+                    observation_time_ms: event.observation_time_ms,
+                })
+            }
+            Payload::ToolSpan { message_id, .. } => {
+                if !has_message(&event.entity_id, message_id) {
+                    return Err(RenderError::ToolSpanParentMissing(event.id.clone()));
+                }
+            }
             Payload::Rename { .. } => {
                 *rendering
                     .excluded_by_rule

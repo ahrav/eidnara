@@ -262,7 +262,9 @@ fn every_payload_kind_renders_to_units_a_commit_or_a_named_exclusion() {
         assert_eq!(commit.observation_time_ms, event.observation_time_ms);
     }
 
-    // Tool spans attach only to their own session's message.
+    // A tool span attaches to its own session's message; a span whose session
+    // has no such message is neither rendered nor excluded by rule, so the
+    // renderer refuses it rather than let it vanish from accounting.
     let other_session = message_event("session-1", 0, EPOCH_MS, "user", "elsewhere");
     let mut foreign_span = message_event("session-1", 1, EPOCH_MS, "user", "x");
     foreign_span.payload = Payload::ToolSpan {
@@ -271,10 +273,41 @@ fn every_payload_kind_renders_to_units_a_commit_or_a_named_exclusion() {
         output: "stray".to_string(),
     };
     let home = message_event("session-0", 0, EPOCH_MS, "user", "home");
-    let rendering = render(&log(vec![home, other_session, foreign_span]), &config()).unwrap();
-    assert!(
-        rendering.messages.iter().all(|m| m.expected.len() == 1),
-        "{rendering:?}"
+    assert_eq!(
+        render(
+            &log(vec![home.clone(), other_session, foreign_span.clone()]),
+            &config()
+        )
+        .unwrap_err(),
+        RenderError::ToolSpanParentMissing(foreign_span.id.clone())
+    );
+    let mut orphan_span = foreign_span.clone();
+    orphan_span.entity_id = "session-0".to_string();
+    orphan_span.id = EventId::derive(StreamLabel::Session, "session-0", 1);
+    orphan_span.payload = Payload::ToolSpan {
+        message_id: "session-0-m9".to_string(),
+        call_id: "stray".to_string(),
+        output: "stray".to_string(),
+    };
+    assert_eq!(
+        render(&log(vec![home.clone(), orphan_span.clone()]), &config()).unwrap_err(),
+        RenderError::ToolSpanParentMissing(orphan_span.id.clone())
+    );
+    // The same span under its parent's observation renders as one tool part;
+    // observed at another time it refuses, since the message JSON is one
+    // fixture observed once.
+    let mut attached = orphan_span.clone();
+    attached.payload = Payload::ToolSpan {
+        message_id: "session-0-m0".to_string(),
+        call_id: "call".to_string(),
+        output: "out".to_string(),
+    };
+    let rendered = render(&log(vec![home.clone(), attached.clone()]), &config()).unwrap();
+    assert_eq!(rendered.messages[0].expected.len(), 2);
+    attached.observation_time_ms += 1;
+    assert_eq!(
+        render(&log(vec![home, attached.clone()]), &config()).unwrap_err(),
+        RenderError::ToolSpanObservationDiffers(attached.id)
     );
 }
 
@@ -348,10 +381,35 @@ fn render_refuses_bad_targets_roles_times_and_unencodable_identities_by_event() 
         target: target.id.clone(),
         text: "fix".to_string(),
     };
-    let rendered = render(&log(vec![target.clone(), advancing]), &config()).unwrap();
+    let rendered = render(&log(vec![target.clone(), advancing.clone()]), &config()).unwrap();
     assert_eq!(
         rendered.messages[1].expected[0].identity.lineage_id,
         rendered.messages[0].expected[0].identity.lineage_id
+    );
+    // Two corrections of one target at one valid time would share an
+    // occurrence: two events, one identity, so the second refuses.
+    let mut twin = advancing.clone();
+    twin.local_seq = 2;
+    twin.id = EventId::derive(StreamLabel::Session, "session-0", 2);
+    twin.payload = Payload::Correction {
+        target: target.id.clone(),
+        text: "other fix".to_string(),
+    };
+    assert_eq!(
+        render(
+            &log(vec![target.clone(), advancing, twin.clone()]),
+            &config()
+        )
+        .unwrap_err(),
+        RenderError::RevisionReused(twin.id)
+    );
+    // One `repository_id` binds one repository entity.
+    let mut second_repo = commit.clone();
+    second_repo.entity_id = "repo-1".to_string();
+    second_repo.id = EventId::derive(StreamLabel::Repository, "repo-1", 0);
+    assert_eq!(
+        render(&log(vec![commit.clone(), second_repo.clone()]), &config()).unwrap_err(),
+        RenderError::SecondRepository(second_repo.id)
     );
 
     let system = message_event("session-0", 0, EPOCH_MS, "system", "x");

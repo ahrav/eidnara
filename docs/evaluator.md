@@ -382,7 +382,11 @@ times:
   tool span. The expected units are the text unit (class `messages`, revision
   the valid time) and one `raw_tool_spans` unit per tool part (revision and
   `result_revision` the span's valid time), each with the identity the encoder
-  assigns.
+  assigns. A message and its tool parts are one fixture observed once, so a
+  span whose `observation_time_ms` differs from its parent's refuses
+  (`ToolSpanObservationDiffers`), and a span whose session has no message with
+  its `message_id` refuses (`ToolSpanParentMissing`) rather than vanish from
+  accounting with neither a unit nor an exclusion rule.
 - Every correction becomes a new message JSON for the same `message_id` at
   the correction's valid time with the corrected text: the same lineage, a
   later revision, so `publish` reports `replaced_object_id`. A rendered unit's
@@ -391,14 +395,20 @@ times:
   (`CorrectionTargetInOtherSession`; the session is an identity field, so the
   result would be a fresh lineage) or a valid time at or before the target's
   (`CorrectionDoesNotAdvance`; the result would reuse or precede the target's
+  occurrence), or a second rendered message with the same session,
+  `message_id`, and valid time (`RevisionReused`; two events would share one
   occurrence). The generator's time gaps are strictly positive
-  (`eval-generator/v2`) and its correction targets stay in the correcting
-  entity, so generated worlds never meet either refusal.
+  (`eval-generator/v2`), each slot emits at most one correction, and its
+  correction targets stay in the correcting entity, so generated worlds never
+  meet these refusals.
 - Every commit becomes a `RenderedCommit { message, valid_time_ms,
   observation_time_ms }`. The oid exists only once the shell writes the commit
   into a real repository, so the shell keeps the evaluator-owned
   `oid -> valid_time_ms` projection and calls `git_identity(&config, oid)` for
-  the expected identity. Git units keep revision `"1"`.
+  the expected identity. Git units keep revision `"1"`. `RenderConfig` binds
+  one `repository_id`, so a log whose commits span two repository entities
+  refuses (`SecondRepository`) rather than render the second under the first's
+  identity.
 - Renames and invalidations have no adapter; `excluded_by_rule` counts them by
   rule so accounting never mistakes them for loss.
 
@@ -432,7 +442,8 @@ unit (the adapter's dropped parts and a message it refuses are both accounted
 for); corrections replace their predecessor and republication replays every
 receipt; generated observations never lead and the lead boundary refuses;
 git units read by `read_selection` from a real repository keep revision `"1"`
-and their identity field set, and take valid time only from the projection;
+and their identity field set, and take valid time only from the projection,
+which agrees with the committer time git recorded for each oid;
 and observation time is inert for identity and eligibility (two stores ten
 years apart agree on every occurrence id and verdict, and a republish at a
 later observation time replays without changing the stored time). Because it
