@@ -86,9 +86,13 @@ fn phase_deadline(outer: Instant, cap: Duration) -> Instant {
 }
 
 /// The deadline for acquiring the transaction lock leaves `TRANSACTION_LOCK_RESERVE` of the aggregate unspent.
+/// The reserve is anchored to `outer`, so work done before the wait shortens the wait rather than the reserve.
 fn transaction_lock_deadline(outer: Instant) -> Instant {
+    let latest = outer
+        .checked_sub(TRANSACTION_LOCK_RESERVE)
+        .unwrap_or_else(Instant::now);
     phase_deadline(
-        outer,
+        latest,
         lock_wait(OUTER_AGGREGATE.saturating_sub(TRANSACTION_LOCK_RESERVE)),
     )
 }
@@ -2002,6 +2006,19 @@ mod tests {
         assert!(
             reserved <= TRANSACTION_LOCK_RESERVE + tolerance,
             "the lock wait must not give up earlier than the reserve requires: reserved {reserved:?}"
+        );
+    }
+
+    #[test]
+    fn transaction_lock_deadline_keeps_the_reserve_when_outer_is_partly_spent() {
+        // Work before the lock wait (for example `Runtime::new`) consumes aggregate time; the reserve is measured from `outer`, not from the call.
+        let outer = Instant::now() + Duration::from_secs(50);
+        let deadline = transaction_lock_deadline(outer);
+        let reserved = outer.saturating_duration_since(deadline);
+        let tolerance = Duration::from_millis(50);
+        assert!(
+            reserved + tolerance >= TRANSACTION_LOCK_RESERVE,
+            "a partly spent aggregate must still leave the reserve: reserved {reserved:?}"
         );
     }
 
