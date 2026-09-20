@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { log } from "../../shared/logger";
 import { NativeCaptureError, type NativeCaptureExecutor } from "../../shared/memory-capture";
 import { normalizeSDKResponse } from "../../shared/normalize-sdk-response";
@@ -149,6 +149,37 @@ async function nativeLimits(
     return { contextLimit, outputLimit };
 }
 
+const OPENCODE_CONFIG_NAMES = ["opencode.json", "opencode.jsonc", ".opencode"];
+
+/** Makes the private directory a project root. With `git` on PATH that is a fresh repository,
+ * which stops OpenCode's config discovery at the directory. Without `git`, OpenCode files the
+ * directory under its global project and walks discovery up to `/`, so the fallback only
+ * accepts a root with no OpenCode config anywhere above it. */
+function isolateRoot(directory: string): void {
+    try {
+        execFileSync("git", ["init", "--quiet", "--template=", directory], {
+            env: {
+                PATH: process.env.PATH,
+                HOME: directory,
+                GIT_CONFIG_NOSYSTEM: "1",
+                GIT_CONFIG_GLOBAL: "/dev/null",
+            },
+            stdio: "ignore",
+        });
+        return;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    for (let parent = dirname(directory); ; parent = dirname(parent)) {
+        for (const name of OPENCODE_CONFIG_NAMES)
+            if (existsSync(join(parent, name)))
+                throw new Error(
+                    `git is unavailable and ${join(parent, name)} would apply to the private project`,
+                );
+        if (parent === dirname(parent)) return;
+    }
+}
+
 /** A private project inherits native user-level providers/auth, never the source
  * repository's provider overrides. The only project config is authored here. */
 async function prepareProject(
@@ -166,15 +197,7 @@ async function prepareProject(
         work.maxOutputTokens,
     );
     // A real root prevents native config discovery from walking into an outer checkout.
-    execFileSync("git", ["init", "--quiet", "--template=", directory], {
-        env: {
-            PATH: process.env.PATH,
-            HOME: directory,
-            GIT_CONFIG_NOSYSTEM: "1",
-            GIT_CONFIG_GLOBAL: "/dev/null",
-        },
-        stdio: "ignore",
-    });
+    isolateRoot(directory);
     // The authored config lives at the root; a `.opencode` directory would make OpenCode's
     // config loader install `@opencode-ai/plugin` into it from the npm registry.
     writeFileSync(
@@ -317,7 +340,11 @@ export function openCodeMemoryCaptureExecutor(
         try {
             try {
                 await project.ready;
-            } catch {
+            } catch (error) {
+                log.warn(
+                    "[eidnara] native memory capture project unavailable",
+                    describeFailure(error),
+                );
                 throw new NativeCaptureError("provider_unavailable");
             }
             if (signal.aborted) throw new NativeCaptureError("cancelled");
@@ -393,10 +420,12 @@ export function openCodeMemoryCaptureExecutor(
             await abortSession().catch((abortError) => {
                 cleanupFailures.push(`abort: ${describeFailure(abortError)}`);
             });
-            failure =
-                error instanceof NativeCaptureError
-                    ? error
-                    : new NativeCaptureError(signal.aborted ? "cancelled" : "model_failed");
+            // A caller's abort outranks whatever OpenCode recorded for the interrupted prompt.
+            failure = signal.aborted
+                ? new NativeCaptureError("cancelled")
+                : error instanceof NativeCaptureError
+                  ? error
+                  : new NativeCaptureError("model_failed");
         } finally {
             signal.removeEventListener("abort", abort);
             if (session)

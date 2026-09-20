@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as logger from "../../shared/logger";
 import {
@@ -35,6 +44,10 @@ function harness(overrides: {
     error?: unknown;
     /** Settles before the private session's answer is returned. */
     answerGate?: Promise<void>;
+    /** The prompt resolves with OpenCode's aborted-message error once the capture signal aborts. */
+    abortedAnswer?: boolean;
+    /** The private root is created without `git`; the harness skips the `.git` expectation. */
+    gitless?: boolean;
 }): Harness {
     const directories: string[] = [];
     const disposed: string[] = [];
@@ -62,7 +75,7 @@ function harness(overrides: {
                 expect(directory).not.toBe(process.cwd());
                 expect(isNativeCaptureProject(directory)).toBe(true);
                 expect(isNativeCaptureProject(process.cwd())).toBe(false);
-                expect(existsSync(join(directory, ".git"))).toBe(true);
+                expect(existsSync(join(directory, ".git"))).toBe(overrides.gitless !== true);
                 // A `.opencode` directory would make OpenCode install `@opencode-ai/plugin` into it.
                 expect(existsSync(join(directory, ".opencode"))).toBe(false);
                 expect(input.body).toMatchObject({
@@ -75,11 +88,30 @@ function harness(overrides: {
             prompt: async (input: {
                 query: { directory: string };
                 body: { model: unknown; system?: unknown; parts: unknown };
+                signal?: AbortSignal;
             }) => {
                 expect(directories).toContain(input.query.directory);
                 expect(input.body.model).toEqual({ providerID: "custom", modelID: "m" });
                 expect(input.body.system).toBeUndefined();
                 expect(input.body.parts).toEqual([{ type: "text", text: work.prompt }]);
+                if (overrides.abortedAnswer) {
+                    await new Promise<void>((resolve) =>
+                        input.signal?.addEventListener("abort", () => resolve(), { once: true }),
+                    );
+                    return {
+                        data: {
+                            info: {
+                                modelID: "m",
+                                providerID: "custom",
+                                error: {
+                                    name: "MessageAbortedError",
+                                    data: { message: "aborted" },
+                                },
+                            },
+                            parts: [],
+                        },
+                    };
+                }
                 await overrides.answerGate;
                 return {
                     data: {
@@ -246,6 +278,60 @@ describe("OpenCode native memory capture executor", () => {
             rmSync(directory as string, { recursive: true, force: true });
         } finally {
             warn.mockRestore();
+        }
+    });
+
+    it("reports a capture aborted by its caller as cancelled even when OpenCode records an error", async () => {
+        const h = harness({ abortedAnswer: true });
+        lastClient = h.client;
+        const controller = new AbortController();
+        const attempt = openCodeMemoryCaptureExecutor(h.client as never)(work, controller.signal);
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        controller.abort();
+        await expect(attempt).rejects.toThrow("Native memory capture: cancelled");
+    });
+
+    it("captures without git when no config sits between the private root and the filesystem root", async () => {
+        const emptyPath = mkdtempSync(join(tmpdir(), "eidnara-no-git-path-"));
+        const savedPath = process.env.PATH;
+        process.env.PATH = emptyPath;
+        try {
+            const h = harness({ gitless: true, onCreate: () => {} });
+            lastClient = h.client;
+            const result = await openCodeMemoryCaptureExecutor(h.client as never)(
+                { ...work, system: "gitless" },
+                new AbortController().signal,
+            );
+            expect(result).toEqual({ model: "custom/m", text: '{"ok":true}' });
+        } finally {
+            process.env.PATH = savedPath;
+            rmSync(emptyPath, { recursive: true, force: true });
+        }
+    });
+
+    it("refuses a gitless private root when a parent directory carries OpenCode config", async () => {
+        const base = mkdtempSync(join(tmpdir(), "eidnara-no-git-config-"));
+        const emptyPath = join(base, "path");
+        mkdirSync(emptyPath);
+        mkdirSync(join(base, "tmp"));
+        writeFileSync(join(base, "opencode.json"), "{}");
+        const saved = { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR };
+        process.env.PATH = emptyPath;
+        process.env.TMPDIR = join(base, "tmp");
+        try {
+            const h = harness({ gitless: true });
+            lastClient = h.client;
+            await expect(
+                openCodeMemoryCaptureExecutor(h.client as never)(
+                    { ...work, system: "gitless-refused" },
+                    new AbortController().signal,
+                ),
+            ).rejects.toThrow("Native memory capture: provider_unavailable");
+        } finally {
+            process.env.PATH = saved.PATH;
+            if (saved.TMPDIR === undefined) delete process.env.TMPDIR;
+            else process.env.TMPDIR = saved.TMPDIR;
+            rmSync(base, { recursive: true, force: true });
         }
     });
 

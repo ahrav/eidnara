@@ -350,12 +350,12 @@ export async function flushMemoryCapture(
                 throw new NativeCaptureError("output_limit");
         } catch (error) {
             controller.abort();
-            const code =
-                error instanceof NativeCaptureError
-                    ? error.code
-                    : signal?.aborted
-                      ? "cancelled"
-                      : "model_failed";
+            // A close outranks whatever the interrupted executor reported.
+            const code = signal?.aborted
+                ? "cancelled"
+                : error instanceof NativeCaptureError
+                  ? error.code
+                  : "model_failed";
             await release(lease, code);
             throw new NativeCaptureError(code);
         } finally {
