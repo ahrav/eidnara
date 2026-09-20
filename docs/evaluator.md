@@ -462,6 +462,12 @@ times:
   or a second rendered message with the same session, `message_id`, and valid
   time, or a second tool span with one `call_id` at one valid time
   (`OccurrenceReused`; two events would share one occurrence).
+  Two corrections of one target at different valid times both render: the
+  store then replaces the earlier correction with the later one inside the
+  lineage, while `eval-reducer/v1` supersedes only each correction's explicit
+  target and leaves both corrections required. No Phase 1 scenario compares
+  `Truth` with store verdicts, so nothing observes that difference yet;
+  closing it is a reducer version change, not a rendering rule.
   The generator's time gaps are strictly positive (`eval-generator/v2`), each
   slot emits at most one correction and one tool span, and its correction
   targets stay in the correcting entity, so generated worlds never meet these
