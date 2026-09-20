@@ -89,7 +89,7 @@ pub enum ReplayRefusal {
 
 debug_display!(ReplayRefusal);
 
-/// The first 64 bits of the protocol digest over the draw key, reduced by `% candidates`.
+/// The first 64 bits of the protocol digest over the draw key; `Chooser::choose` reduces it by `% candidates`.
 pub fn keyed_draw(root_seed: u64, site: &ChoiceSite) -> u64 {
     let key = json!({
         "root_seed": root_seed.to_string(),

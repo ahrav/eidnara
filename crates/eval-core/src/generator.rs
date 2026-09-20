@@ -37,7 +37,8 @@ pub struct WorldConfig {
     pub max_events_per_log: u32,
 }
 
-/// `*_every` of `n` fires on every `n`-th slot; `0` never fires.
+/// `*_every` of `n` fires on every `n`-th slot; `0` never fires. Corrections and
+/// invalidations also skip slot `0`, which has no earlier message to target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSpec {
@@ -95,17 +96,36 @@ fn fires(every: u32, k: u32) -> bool {
     every > 0 && (k + 1).is_multiple_of(every)
 }
 
+/// Slots `k` in `0..slots` where `fires(every, k)`; `skip_first` drops slot `0`, which only `every == 1` reaches.
+fn firings(every: u32, slots: u32, skip_first: bool) -> u64 {
+    if every == 0 {
+        return 0;
+    }
+    u64::from(slots / every) - u64::from(skip_first && every == 1 && slots > 0)
+}
+
 impl SessionSpec {
     fn events_at(&self, k: u32) -> usize {
         1 + usize::from(fires(self.tool_span_every, k))
             + usize::from(k > 0 && fires(self.correction_every, k))
             + usize::from(k > 0 && fires(self.invalidation_every, k))
     }
+
+    fn declared_events(&self) -> u64 {
+        u64::from(self.messages)
+            + firings(self.tool_span_every, self.messages, false)
+            + firings(self.correction_every, self.messages, true)
+            + firings(self.invalidation_every, self.messages, true)
+    }
 }
 
 impl RepositorySpec {
     fn events_at(&self, k: u32) -> usize {
         1 + usize::from(fires(self.rename_every, k))
+    }
+
+    fn declared_events(&self) -> u64 {
+        u64::from(self.commits) + firings(self.rename_every, self.commits, false)
     }
 }
 
@@ -121,38 +141,22 @@ pub fn tape_identity(root_seed: u64, config: &WorldConfig) -> String {
 }
 
 impl WorldConfig {
-    /// The exact number of events generation emits; `O(slots)`, so `validate` gates on slots first.
+    /// The exact number of events generation emits, computed in `O(entities)`.
     pub fn declared_events(&self) -> u64 {
-        let sessions = self
-            .sessions
-            .iter()
-            .flat_map(|spec| (0..spec.messages).map(|k| spec.events_at(k) as u64));
+        let sessions = self.sessions.iter().map(SessionSpec::declared_events);
         let repositories = self
             .repositories
             .iter()
-            .flat_map(|spec| (0..spec.commits).map(|k| spec.events_at(k) as u64));
-        sessions.chain(repositories).sum()
-    }
-
-    fn slots(&self) -> u64 {
-        let sessions: u64 = self
-            .sessions
-            .iter()
-            .map(|spec| u64::from(spec.messages))
-            .sum();
-        let repositories: u64 = self
-            .repositories
-            .iter()
-            .map(|spec| u64::from(spec.commits))
-            .sum();
-        sessions + repositories
+            .map(RepositorySpec::declared_events);
+        sessions.chain(repositories).fold(0, u64::saturating_add)
     }
 
     pub fn validate(&self) -> Result<(), WorldError> {
         let empty_spec = self.sessions.iter().any(|spec| spec.messages == 0)
             || self.repositories.iter().any(|spec| spec.commits == 0);
+        let no_entities = self.sessions.is_empty() && self.repositories.is_empty();
         let invalid = [
-            ("entities", empty_spec || self.slots() == 0),
+            ("entities", empty_spec || no_entities),
             ("tick_ms", self.tick_ms <= 0),
             (
                 "epoch_ms",
@@ -164,12 +168,7 @@ impl WorldConfig {
             return Err(WorldError::InvalidField(field));
         }
         let max = self.max_events_per_log;
-        let slots = self.slots();
-        let events = if slots > u64::from(max) {
-            slots
-        } else {
-            self.declared_events()
-        };
+        let events = self.declared_events();
         if events > u64::from(max) {
             return Err(WorldError::EventBound { events, max });
         }

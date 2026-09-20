@@ -192,7 +192,8 @@ World generation, choice replay, and the event log
   order, checks key uniqueness, checks every edge runs forward, requires
   same-millisecond events on two streams and a cross-stream edge, and expects
   two logs with equal events and different edges to compare unequal; swapped
-  events, a reversed edge, and a flattened depth are refused by name.
+  events, a reversed edge, swapped or duplicated edges, and a flattened depth
+  are refused by name.
 - `logs_tapes_and_times_round_trip_through_serde_in_canonical_form`
   (`wm-typed-choice-tape-and-replay-refusal`) round-trips the log and the tape
   through JSON, refuses unknown fields on both, and accepts only the
@@ -206,8 +207,10 @@ World generation, choice replay, and the event log
 - `the_event_bound_is_refused_before_generation_and_by_the_validator`
   (`wm-log-and-observation-bounds`) expects a bound one below the declared
   count to refuse from `Generator::new` and `generate_all` with `EventBound`,
-  a `u32::MAX` message count to refuse in well under a second through the
-  slot-count gate, a bound equal to the declared count to pass, the validator
+  a `u32::MAX` message count to refuse in well under a second, including with
+  the bound at `u32::MAX` and a tool span on every slot (the count is
+  arithmetic, not a per-slot sweep), a bound equal to the declared count to
+  pass, the validator
   to refuse `EventBound` at one below, and each `InvalidField` refusal (bound,
   tick, epoch, an entity with no slots, no entities) plus a missing, unknown,
   or fractional field at parse time. The record asks for an exported

@@ -154,12 +154,15 @@ repository (commit count and how often a rename fires), the valid-time epoch
 and tick, and `max_events_per_log`. Counts are exact, so
 `WorldConfig::declared_events` is the number of events generation emits, and
 `validate` refuses a config whose declared count exceeds the bound before any
-event exists (`WorldError::EventBound { events, max }`). The check gates on the
-slot count first, so a config declaring billions of messages is refused in
-time proportional to the entity count. There is no default for the bound: a
-missing field fails to parse, and a zero bound, a non-positive tick, an epoch
-outside the valid-time domain, an empty entity set, or an entity with no slots
-is `WorldError::InvalidField(name)`. The bound is a config value rather than a
+event exists (`WorldError::EventBound { events, max }`). The count is
+arithmetic, so a config declaring billions of messages is refused in time
+proportional to the entity count. Corrections and invalidations skip slot `0`,
+which has no earlier message to target, so `*_every = 1` fires on every slot
+for tool spans and renames but on every slot after the first for revisions.
+There is no default for the bound: a missing field fails to parse, and a zero
+bound, a non-positive tick, an epoch outside the valid-time domain, an empty
+entity set, or an entity with no slots is `WorldError::InvalidField(name)`. The
+bound is a config value rather than a
 manifest field; the manifest carries it inside `run_identity.config`.
 `GENERATOR_VERSION`, `RANDOM_SCHEMA_VERSION`, and `LINEARIZATION_RULE_VERSION`
 are constants the shell copies into the run identity's `generator_version`,
@@ -169,15 +172,15 @@ are constants the shell copies into the run identity's `generator_version`,
 
 Every random decision is `keyed_draw(root_seed, &site)`: the first 64 bits of
 the protocol digest (`eval-random/v1`) over `(root_seed, axis, kind, actor,
-site, occurrence)`, reduced by `% candidates` (the small modulo bias is part
-of the random schema). `actor` is the entity (`session-0`, `repository-1`),
-`site` is the mutation slot (`slot:3`), and `occurrence` counts earlier choices
-of the same kind at that slot. A draw depends only on its key, so shortening
-one entity's history leaves every other entity's text, renames, revision
-targets, and times unchanged. The axis label (`text` for words, `topology` for
-rename targets, `evolution` for time gaps, observation lags, citations, and
-correction or invalidation targets) is fixed per `ChoiceKind` through
-`ChoiceKind::axis`.
+site, occurrence)`, which `Chooser::choose` reduces by `% candidates` (the
+small modulo bias is part of the random schema). `actor` is the entity
+(`session-0`, `repository-1`), `site` is the mutation slot (`slot:3`), and
+`occurrence` counts earlier choices of the same kind at that slot. A draw
+depends only on its key, so shortening one entity's history leaves every other
+entity's text, renames, revision targets, and times unchanged. The axis label
+(`text` for words, `topology` for rename targets, `evolution` for time gaps,
+observation lags, citations, and correction or invalidation targets) is fixed
+per `ChoiceKind` through `ChoiceKind::axis`.
 
 One choice is deliberately cross-entity: a message's `Cites` candidates are
 the commits of every repository emitted before it, so adding or removing a
@@ -237,10 +240,11 @@ derived ids (`IdNotDerived`), one event per id (`DuplicateId`), strict key
 order (`NotLinearized`), the valid-time domain `0..=MAX_VALID_TIME_MS` and a
 non-negative observation time (`TimeOutOfDomain`), `valid_time_ms <=
 observation_time_ms + MAX_REVISION_LEAD_MS` (`RevisionAhead`), that every edge
-names present events (`DanglingEdge`), and that each edge runs from an earlier
+names present events (`DanglingEdge`), that each edge runs from an earlier
 position (`EdgeAgainstOrder`) and a smaller depth (`EdgeAgainstDepth`) to a
-later one. It does not recompute depths, so a log with a deleted event keeps
-the depths it was generated with.
+later one, and that the edges are strictly sorted (`EdgesNotSorted`), so equal
+causal graphs have equal digests. It does not recompute depths, so a log with a
+deleted event keeps the depths it was generated with.
 
 `EventLog::without(id)` removes one event and its incident edges and touches
 no other payload: a correction whose target was removed keeps naming it, and
