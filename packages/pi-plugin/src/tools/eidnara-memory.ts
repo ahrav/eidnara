@@ -18,7 +18,10 @@ import {
     isEidnaraMemoryMutation,
     type KernelClientResolver,
 } from "@eidnara/opencode/tools/eidnara-memory/types";
-import { assertEidnaraMemoryWriteShape } from "@eidnara/opencode/tools/eidnara-memory/write-shape";
+import {
+    assertEidnaraMemoryWriteShape,
+    requireTaxonomyCategory,
+} from "@eidnara/opencode/tools/eidnara-memory/write-shape";
 import { unwrapImitatedReducedArgs } from "@eidnara/opencode/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
 
@@ -50,23 +53,19 @@ const AntiMemorySchema = Type.Object(
 const ParamsSchema = Type.Object(
     {
         action: Type.Optional(
-            Type.Union(
-                EIDNARA_MEMORY_ACTIONS.map((action) => Type.Literal(action)),
-                {
-                    description: "create, get, revise, archive, or merge",
-                },
-            ),
+            Type.String({
+                enum: EIDNARA_MEMORY_ACTIONS,
+                description: "create, get, revise, archive, or merge",
+            }),
         ),
         content: Type.Optional(
             Type.String({ description: "Memory content for create/revise/merge" }),
         ),
         category: Type.Optional(
-            Type.Union(
-                WRITABLE_MEMORY_CATEGORIES.map((category) => Type.Literal(category)),
-                {
-                    description: "Memory category for create/revise/merge",
-                },
-            ),
+            Type.String({
+                enum: WRITABLE_MEMORY_CATEGORIES,
+                description: `Memory category for create/revise/merge: ${WRITABLE_MEMORY_CATEGORIES.join(", ")}.`,
+            }),
         ),
         antiMemory: Type.Optional(AntiMemorySchema),
         objectId: Type.Optional(Type.String({ description: "Object id for revise/archive" })),
@@ -109,6 +108,18 @@ export function createEidnaraMemoryTool(
         label: "Eidnara: Memory",
         description: EIDNARA_MEMORY_DESCRIPTION,
         parameters: ParamsSchema,
+        prepareArguments(raw) {
+            if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+                throw new MemoryInputError("eidnara_memory arguments must be an object");
+            }
+            const params = unwrapImitatedReducedArgs(raw, ["action"], EIDNARA_MEMORY_UNWRAP_RULES);
+            // Pi's schema error omits enum choices. Report the domain error before validation.
+            if ("category" in params && typeof params.category === "string") {
+                requireTaxonomyCategory(params.category);
+            }
+            // Pi validates the complete schema immediately after argument preparation.
+            return params as EidnaraMemoryParams;
+        },
         async execute(toolCallId, rawParams, signal, _onUpdate, ctx) {
             try {
                 let params = rawParams as EidnaraMemoryParams & EidnaraMemoryArgs;

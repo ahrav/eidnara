@@ -9,7 +9,7 @@
  */
 
 import { resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import type {
     ContextResearcherConfig,
@@ -32,6 +32,15 @@ import { setHarness } from "@eidnara/opencode/shared/harness";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
 import { log } from "@eidnara/opencode/shared/logger";
 import {
+    CAPTURE_MAX_AGE_MS,
+    createMemoryCaptureCheckpoint,
+    createMemoryCaptureDrain,
+    type MemoryCaptureDrain,
+    type MemoryCaptureFlushResult,
+    type MemoryCaptureScope,
+    piCaptureMessages,
+} from "@eidnara/opencode/shared/memory-capture";
+import {
     createPromptSurfaceGuidanceEpochCache,
     createPromptSurfaceRuntime,
 } from "@eidnara/opencode/shared/prompt-surface-runtime";
@@ -48,6 +57,7 @@ import { registerCtxWrapupCommand } from "./commands/eidnara-wrapup";
 import { registerCtxStatusEntryRenderer } from "./commands/pi-command-utils";
 import { loadPiConfig } from "./config";
 import { createPiKernelClientResolver, forgetPiSessionKernelTokens } from "./kernel-client-pi";
+import { piMemoryCaptureExecutor } from "./memory-capture-native";
 import { createPiRustToolBackends } from "./rust-tool-backends";
 import { registerStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
@@ -221,6 +231,8 @@ function warn(message: string, data?: unknown): void {
 // Deduplicate config summaries and warnings by resolved directory when `args.dedupe` is true.
 const loggedPiConfigDirs = new Set<string>();
 
+let activeMemoryCaptureDrains: () => Iterable<MemoryCaptureDrain> = () => [];
+
 function logPiConfigLoad(args: {
     dir: string;
     loadedFromPaths: string[];
@@ -250,6 +262,10 @@ export const __test = {
     isPiEidnaraActiveInProcess,
     markPiEidnaraActive,
     clearPiEidnaraActive,
+    /** Settles every memory capture drain of the registered runtime. */
+    async settleMemoryCapture(): Promise<void> {
+        for (const drain of activeMemoryCaptureDrains()) await drain.settle();
+    },
 };
 
 setHarness("pi");
@@ -507,6 +523,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     const systemPromptRefreshSessions = new Set<string>();
 
     pi.on("before_agent_start", async (event, ctx) => {
+        scheduleMemoryDrainFor(ctx);
         try {
             const effectiveProjectDeps = resolveCurrentProjectDeps(ctx);
             const effectiveConfig = effectiveProjectDeps.config;
@@ -582,8 +599,103 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     });
     info("registered before_agent_start system prompt handler");
 
-    pi.on("agent_end", () => {
-        log("agent_end: returning synchronously (background work continues)");
+    const captureCheckpoint = createMemoryCaptureCheckpoint(moduleClient);
+    function captureScope(ctx: ExtensionContext): MemoryCaptureScope | undefined {
+        const sessionId = ctx.sessionManager.getSessionId();
+        if (!sessionId) return undefined;
+        const deps = resolveCurrentProjectDeps(ctx);
+        if (
+            deps.config.memory?.enabled === false ||
+            deps.config.memory?.auto_promote === false ||
+            deps.config.memory?.auto_capture === false
+        )
+            return undefined;
+        return {
+            sessionId,
+            projectRoot: resolveProjectRootDirectory(ctx.cwd),
+            model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+        };
+    }
+    function setCaptureStatus(ctx: ExtensionContext, status: string | undefined): void {
+        try {
+            if (ctx.hasUI) ctx.ui.setStatus("eidnara-capture", status);
+        } catch {
+            // The status line is informational; a UI that cannot render it does not stop capture.
+        }
+    }
+    // The drain reports only a scope, while the model executor and the status line need the
+    // harness context, so each project root keeps the context of its latest schedule.
+    interface ProjectCapture {
+        latest: { ctx: ExtensionContext };
+        drain: MemoryCaptureDrain;
+    }
+    const captureByProject = new Map<string, ProjectCapture>();
+    activeMemoryCaptureDrains = () =>
+        [...captureByProject.values()].map((capture) => capture.drain);
+    function createProjectCapture(first: ExtensionContext): ProjectCapture {
+        const latest = { ctx: first };
+        const drain = createMemoryCaptureDrain(
+            moduleClient,
+            (work, signal) => piMemoryCaptureExecutor(latest.ctx)(work, signal),
+            {
+                onSettled: (_scope, result: MemoryCaptureFlushResult) =>
+                    setCaptureStatus(
+                        latest.ctx,
+                        result === "pending" ? "Memory capture: pending" : undefined,
+                    ),
+                onFailed: (_scope, error) => {
+                    warn("memory capture remains pending:", error);
+                    setCaptureStatus(latest.ctx, "Memory capture: unconfirmed");
+                },
+            },
+        );
+        return { latest, drain };
+    }
+    /** Model work runs detached from the lifecycle hook that scheduled it. */
+    function scheduleMemoryDrain(ctx: ExtensionContext, scope: MemoryCaptureScope): void {
+        let capture = captureByProject.get(scope.projectRoot);
+        if (!capture) {
+            capture = createProjectCapture(ctx);
+            captureByProject.set(scope.projectRoot, capture);
+        }
+        capture.latest.ctx = ctx;
+        capture.drain.schedule(scope);
+    }
+    function scheduleMemoryDrainFor(ctx: ExtensionContext): void {
+        try {
+            const scope = captureScope(ctx);
+            if (scope) scheduleMemoryDrain(ctx, scope);
+        } catch (error) {
+            warn("memory capture drain not scheduled:", error);
+        }
+    }
+    /** Resolves after bounded daemon calls; returns the scope once the branch is stored. */
+    async function checkpointMemory(
+        ctx: ExtensionContext,
+    ): Promise<MemoryCaptureScope | undefined> {
+        try {
+            const scope = captureScope(ctx);
+            if (!scope) return undefined;
+            await captureCheckpoint({
+                ...scope,
+                messages: piCaptureMessages(ctx.sessionManager.getBranch(), {
+                    notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
+                }),
+            });
+            return scope;
+        } catch (error) {
+            warn("memory capture checkpoint pending:", error);
+            setCaptureStatus(ctx, "Memory capture: unconfirmed");
+            return undefined;
+        }
+    }
+    async function checkpointAndDrainMemory(ctx: ExtensionContext): Promise<void> {
+        const scope = await checkpointMemory(ctx);
+        if (scope) scheduleMemoryDrain(ctx, scope);
+    }
+
+    pi.on("agent_end", async (_event, ctx) => {
+        await checkpointAndDrainMemory(ctx);
     });
 
     // `tool_execution_start` exposes `event.args` before tool output.
@@ -612,9 +724,10 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         }
     });
 
-    pi.on("session_before_compact", async (_event, ctx) =>
-        handlePiSessionBeforeCompact({ compactionOff, ctx }),
-    );
+    pi.on("session_before_compact", async (_event, ctx) => {
+        await checkpointAndDrainMemory(ctx);
+        return handlePiSessionBeforeCompact({ compactionOff, ctx });
+    });
 
     // Mutating `event.message` changes the message persisted by `sessionManager.appendMessage`.
     // Unstripped prefixes appear in assistant responses in Pi's UI.
@@ -671,6 +784,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
 
     // `/reload` tears down extensions and re-runs the default export.
     pi.on("session_shutdown", async (event, ctx) => {
+        // The transport disconnects below, so no drain starts here.
+        await checkpointMemory(ctx);
         // Long-lived Pi processes can reinitialize the extension after `session_shutdown`, so the handler clears per-session state.
         try {
             const sessionId = sessionIdFromContext(ctx);

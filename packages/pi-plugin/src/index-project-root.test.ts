@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as loggerModule from "@eidnara/opencode/shared/logger";
@@ -13,6 +13,7 @@ const originalEnv = {
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
 };
 const originalCwd = process.cwd();
+const tempRoots: string[] = [];
 
 function restoreEnv() {
     for (const [key, value] of Object.entries(originalEnv)) {
@@ -23,6 +24,7 @@ function restoreEnv() {
 
 function isolateXdgEnv() {
     const root = mkdtempSync(join(tmpdir(), "eidnara-pi-root-test-"));
+    tempRoots.push(root);
     process.env.XDG_CONFIG_HOME = join(root, "config");
     process.env.XDG_DATA_HOME = join(root, "data");
 }
@@ -30,6 +32,7 @@ function isolateXdgEnv() {
 /** A checkout root with a project config and a nested working directory. */
 function checkoutWithProjectConfig() {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "eidnara-pi-checkout-")));
+    tempRoots.push(root);
     mkdirSync(join(root, ".git"));
     mkdirSync(join(root, ".eidnara"));
     const configPath = join(root, ".eidnara", "eidnara.jsonc");
@@ -50,6 +53,7 @@ afterEach(() => {
     restoreEnv();
     __test.clearPiEidnaraActive();
     __test.resetLoggedPiConfigDirs();
+    for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe("Pi project config resolves from the checkout root", () => {
