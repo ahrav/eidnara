@@ -267,6 +267,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         return model ? `${model.providerID}/${model.modelID}` : undefined;
     };
     const pendingUserCaptures = new BoundedSessionMap<Promise<void>>(MAX_LIVE_USAGE_SESSIONS);
+    /** Every user checkpoint still running; the per-session map above evicts, this does not. */
+    const activeUserCaptures = new Set<Promise<void>>();
     /** Per session, the last final message an idle checkpoint offered; later checkpoints read past it. */
     const captureWatermark = new BoundedSessionMap<string>(MAX_LIVE_USAGE_SESSIONS);
     /** Messages read back per later checkpoint before falling back to the whole transcript. */
@@ -313,8 +315,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 });
             })();
             pendingUserCaptures.set(sessionId, pending);
+            activeUserCaptures.add(pending);
             void pending
                 .finally(() => {
+                    activeUserCaptures.delete(pending);
                     if (pendingUserCaptures.get(sessionId) === pending)
                         pendingUserCaptures.delete(sessionId);
                 })
@@ -396,9 +400,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
      * nothing, pending user checkpoints settle, and the drain cancels its batch in flight. */
     const closeMemoryCapture = async (): Promise<void> => {
         captureClosed = true;
-        await Promise.all(
-            [...pendingUserCaptures.entries()].map(([, pending]) => pending.catch(() => undefined)),
-        );
+        await Promise.all([...activeUserCaptures].map((pending) => pending.catch(() => undefined)));
         await memoryCaptureDrain.close();
     };
 

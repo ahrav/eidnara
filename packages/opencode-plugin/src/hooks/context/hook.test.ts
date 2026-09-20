@@ -26,7 +26,7 @@ import {
     resetKernelClientsForTest,
     sharedStateForTest,
 } from "./kernel-transport";
-import { createLiveSessionState } from "./live-session-state";
+import { createLiveSessionState, MAX_LIVE_USAGE_SESSIONS } from "./live-session-state";
 import { isModuleCallBodyValid } from "./module-transport";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
@@ -692,6 +692,47 @@ describe("eidnara hook", () => {
             });
             for (let turn = 0; turn < 5; turn++) await Bun.sleep(0);
             // The first checkpoint is still waiting on the daemon; close must not settle before it.
+            expect(closed).toBe(false);
+            first.resolve({ state: "accepted" });
+            await closing;
+        });
+
+        it("closing capture waits for checkpoints the per-session map has evicted", async () => {
+            useTempDataHome("capture-close-evicted-user-");
+            const first = Promise.withResolvers<unknown>();
+            const others = Promise.withResolvers<unknown>();
+            let firstBatches = 0;
+            const fake = createFakeModuleClient(({ method, sessionId }) => {
+                if (method !== "memory.capture") return { state: "ready" };
+                if (sessionId !== "session-0") return others.promise;
+                firstBatches += 1;
+                return firstBatches === 1 ? first.promise : { state: "accepted" };
+            });
+            const client = createClientMock(undefined, "/project");
+            const hook = requireHook(
+                createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+            );
+            // One more session than the bounded per-session map keeps evicts session-0's entry
+            // while every checkpoint is still waiting on the daemon.
+            for (let index = 0; index <= MAX_LIVE_USAGE_SESSIONS; index++) {
+                const sessionID = `session-${index}`;
+                await hook["chat.message"](
+                    { sessionID, model: { providerID: "provider", modelID: "model" } },
+                    {
+                        message: { id: `native-user-${index}`, role: "user", sessionID },
+                        // session-0 needs two batches, so it has a second daemon call to make.
+                        parts: [{ type: "text", text: index === 0 ? "x".repeat(70_000) : "Fact." }],
+                    },
+                );
+            }
+            for (let turn = 0; turn < 5; turn++) await Bun.sleep(0);
+            let closed = false;
+            const closing = hook.closeMemoryCapture().then(() => {
+                closed = true;
+            });
+            others.resolve({ state: "accepted" });
+            for (let turn = 0; turn < 10; turn++) await Bun.sleep(0);
+            // session-0's first batch is still waiting; close must not settle without it.
             expect(closed).toBe(false);
             first.resolve({ state: "accepted" });
             await closing;
