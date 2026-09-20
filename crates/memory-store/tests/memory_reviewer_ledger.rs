@@ -2305,7 +2305,7 @@ fn the_sweep_closes_an_in_progress_receipt_at_the_queue_deadline_before_its_run_
     assert!(
         fixture
             .store
-            .selected_memory_reviewer_results()
+            .selected_memory_reviewer_results(["review-result:any"])
             .unwrap()
             .is_empty()
     );
@@ -2346,10 +2346,28 @@ fn a_selected_result_answers_only_for_its_project_digest_and_generation() {
         .unwrap(),
         LeaseCompleteOutcome::Applied { .. }
     ));
-    let selected = fixture.store.selected_memory_reviewer_results().unwrap();
+    let selected = fixture
+        .store
+        .selected_memory_reviewer_results(["review-result:selected", "review-result:other"])
+        .unwrap();
     assert_eq!(
         selected,
         vec![(digest.clone(), "review-result:selected".to_string(), 1)]
+    );
+    // The answer is bounded by the asked-for candidates: a listing that names other candidates carries nothing about this one.
+    assert!(
+        fixture
+            .store
+            .selected_memory_reviewer_results(["review-result:other"])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .store
+            .selected_memory_reviewer_results([])
+            .unwrap()
+            .is_empty()
     );
     let contains = |digest: &str, candidate: &str, generation: u64| {
         selected.contains(&(digest.to_string(), candidate.to_string(), generation))

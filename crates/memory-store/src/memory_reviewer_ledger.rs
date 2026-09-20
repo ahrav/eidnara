@@ -1513,21 +1513,25 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Every `(project_digest, candidate_id, generation)` a completed receipt of the live store incarnation selects, ordered by project and causal identity. Receipts of a prior incarnation are excluded.
-    pub fn selected_memory_reviewer_results(
+    /// Every `(project_digest, candidate_id, generation)` a completed receipt of the live store incarnation selects among `candidate_ids`, ordered by project and causal identity. The caller's list bounds the answer, so a reconciliation pass carries at most one triple per live hold rather than every selection the ledger has recorded. Receipts of a prior incarnation are excluded.
+    pub fn selected_memory_reviewer_results<'a>(
         &self,
+        candidate_ids: impl IntoIterator<Item = &'a str>,
     ) -> Result<Vec<(String, String, u64)>, MemoryStoreError> {
+        let candidate_ids = candidate_ids.into_iter().collect::<Vec<_>>();
         self.inner
             .with_conn(|conn| {
+                let candidate_ids = crate::json_id_array(candidate_ids.iter().copied())?;
                 let mut statement = conn.prepare_cached(
                     "SELECT selected_project_digest, selected_candidate_id, selected_generation
                        FROM memory_reviewer_receipts
                       WHERE state = 'complete' AND terminal_kind = 'complete'
+                        AND selected_candidate_id IN (SELECT value FROM json_each(?1))
                         AND database_incarnation_id = (SELECT database_incarnation_id
                                                        FROM memory_reviewer_store_identity WHERE id = 0)
                       ORDER BY project, causal_identity",
                 )?;
-                let rows = statement.query_map([], |row| {
+                let rows = statement.query_map([candidate_ids], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,

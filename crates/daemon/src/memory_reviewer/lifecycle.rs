@@ -230,12 +230,13 @@ pub struct Pass {
     pub healthy: bool,
 }
 
-/// Releases every live review hold of this Memory Store incarnation whose result no completed receipt selects and no in-progress receipt can still select. A hold survives the transfer envelope on its own deadline, so a receipt the sweep closed, a losing generation, or a settlement that failed to release would otherwise keep evidence held until the review expiry; the queue deadline the row keeps already makes such a result unreadable, and this pass ends its retention. A hold of another store incarnation is left alone: a Kernel restored beside a replaced store has no receipt for any of them, and that absence is not orphaning. Returns the number released.
+/// Releases every live review hold of this Memory Store incarnation whose result no completed receipt selects and no in-progress receipt can still select. A hold survives the transfer envelope on its own deadline, so a receipt the sweep closed, a losing generation, or a settlement that failed to release would otherwise keep evidence held until the review expiry; the queue deadline the row keeps already makes such a result unreadable, and this pass ends its retention. A hold of another store incarnation is left alone: a Kernel restored beside a replaced store has no receipt for any of them, and that absence is not orphaning. `cancelled` is read before every Kernel release; `None` means it fired, and the releases already made keep their effects. Otherwise returns the number released.
 pub fn reconcile_review_holds(
     store: &MemoryStore,
     kernel: &kernel::KernelStore,
     now_ms: i64,
-) -> Result<usize, String> {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<usize>, String> {
     let incarnation = store
         .memory_reviewer_store_incarnation()
         .map_err(|error| error.to_string())?;
@@ -247,9 +248,9 @@ pub fn reconcile_review_holds(
         .filter(|hold| hold.binding.memstore_incarnation == incarnation)
         .collect();
     if holds.is_empty() {
-        return Ok(0);
+        return Ok(Some(0));
     }
-    // Both Memory Store sets are read once, ahead of any Kernel release, so filtering the holds performs no store probes. The pending key carries no project: a receipt row names the Memory Store project, not the Kernel project digest of the root it ran under, so a same-identity receipt in another project keeps this project's hold until that receipt completes or the hold expires. Retention is the safe side; a release a live settlement still needs is the one this pass must never make.
+    // Both Memory Store sets are read once, ahead of any Kernel release, so filtering the holds performs no store probes; the selected set is asked for the listed holds' candidates only, so its size is bounded by the hold cap, not by the receipt ledger. The pending key carries no project: a receipt row names the Memory Store project, not the Kernel project digest of the root it ran under, so a same-identity receipt in another project keeps this project's hold until that receipt completes or the hold expires. Retention is the safe side; a release a live settlement still needs is the one this pass must never make.
     let pending: HashSet<(String, u64)> = store
         .in_progress_memory_reviewer_receipts()
         .map_err(|error| error.to_string())?
@@ -262,7 +263,7 @@ pub fn reconcile_review_holds(
         })
         .collect();
     let selected: HashSet<(String, String, u64)> = store
-        .selected_memory_reviewer_results()
+        .selected_memory_reviewer_results(holds.iter().map(|hold| hold.binding.subject.as_str()))
         .map_err(|error| error.to_string())?
         .into_iter()
         .collect();
@@ -280,6 +281,9 @@ pub fn reconcile_review_holds(
         .collect();
     let mut released = 0;
     for hold in orphaned {
+        if cancelled() {
+            return Ok(None);
+        }
         match kernel.release_review_hold(&hold.hold_id, &hold.binding) {
             Ok(()) => released += 1,
             // Released or expired between the listing and this call: nothing left to end.
@@ -290,7 +294,7 @@ pub fn reconcile_review_holds(
             Err(error) => return Err(error.to_string()),
         }
     }
-    Ok(released)
+    Ok(Some(released))
 }
 
 /// Returns whether capture expiry or staging maintenance advanced, or `None` when `cancelled` fired before a step.
@@ -360,11 +364,12 @@ pub fn sweep_and_sample(
             return None;
         }
         // A reconciliation failure is a failed step, but the Kernel's capture expiry, staging maintenance, and artifact reclamation below still run before the pass reports it.
-        let reconciled = match reconcile_review_holds(store, kernel, now_ms) {
-            Ok(released) => {
+        let reconciled = match reconcile_review_holds(store, kernel, now_ms, cancelled) {
+            Ok(Some(released)) => {
                 advanced |= released > 0;
                 true
             }
+            Ok(None) => return None,
             Err(error) => {
                 eprintln!("daemon: memory reviewer hold reconciliation failed: {error}");
                 false
