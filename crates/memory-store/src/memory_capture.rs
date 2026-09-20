@@ -19,16 +19,19 @@ pub const MAX_CAPTURE_ATTEMPTS: u32 = 9;
 
 /// `pending` excludes abandoned jobs; they still count as failed.
 const STATUS_SQL: &str = "SELECT COALESCE(SUM(commit_seq IS NULL AND abandoned_at_ms IS NULL),0),COALESCE(SUM(prepared_json IS NOT NULL),0),COALESCE(SUM(commit_seq IS NOT NULL),0),COALESCE(SUM(commit_seq IS NULL AND last_error IS NOT NULL),0) FROM memory_capture_jobs WHERE project=?1";
+/// Index order is `(project,harness,created_at_ms,rowid)`, so the ORDER BY needs no sorter.
+const PENDING_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND retry_at_ms<=?3 AND (prepared_json IS NOT NULL OR failures<?4) ORDER BY created_at_ms,rowid LIMIT 32";
+/// Without statistics the planner prefers the covering project index, which
+/// holds every completed row; the partial index holds only the pending ones.
+const PENDING_COUNTS_SQL: &str = "SELECT COALESCE(SUM(project=?1),0),COUNT(*) FROM memory_capture_jobs INDEXED BY idx_memory_capture_pending WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL";
 
 fn pending_capture_counts(
     conn: &storage::GuardedConn<'_>,
     project: &str,
 ) -> rusqlite::Result<(i64, i64)> {
-    conn.query_row(
-        "SELECT COALESCE(SUM(project=?1),0),COUNT(*) FROM memory_capture_jobs WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL",
-        [project],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
+    conn.query_row(PENDING_COUNTS_SQL, [project], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })
 }
 
 /// One native completed text message, scoped by the host's route.
@@ -96,11 +99,15 @@ fn job_id(source: &CaptureSource<'_>, redacted_text: &str) -> String {
     format!("{:x}", hash.finalize())
 }
 
+/// State transitions key an existing row; both identities were scanned and
+/// rejected-or-stored at enqueue. A clean re-read skips the audit; a write
+/// that stores new text (`prepared_json`) registers its own scan and keeps it.
 fn prepared_write(project: &str, job: &str) -> Result<PreparedWrite, MemoryStoreError> {
     let mut write = PreparedWrite::new(DurableWriteFamily::MemoryCapture);
     write.domain_owner("project", project, job);
-    write.identity("project", project)?;
-    write.identity("job_id", job)?;
+    write.existing_identity("project", project)?;
+    write.existing_identity("job_id", job)?;
+    write.skip_audit_when_only_clean_identities();
     Ok(write)
 }
 
@@ -178,24 +185,44 @@ impl MemoryStore {
         harness: &str,
         now_ms: i64,
     ) -> Result<Vec<CaptureJob>, MemoryStoreError> {
-        self.inner.with_conn(|conn| {
-            let mut statement = conn.prepare_cached("SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND retry_at_ms<=?3 AND (prepared_json IS NOT NULL OR failures<?4) ORDER BY created_at_ms,rowid LIMIT 32")?;
-            let rows = statement.query_map(params![project,harness,now_ms,MAX_CAPTURE_FAILURES], |row| Ok(CaptureJob {
-                job_id: row.get(0)?, project: row.get(1)?, harness: row.get(2)?, session_id: row.get(3)?, message_id: row.get(4)?, role: row.get(5)?, text: row.get(6)?, prepared: row.get(7)?, attempts: row.get(8)?, failures: row.get(9)?,
-            }))?;
-            let mut jobs = Vec::new();
-            let mut bytes = 0;
-            let mut retained_bytes = 0;
-            for row in rows {
-                let job = row?;
-                let charge = job.text.len() + job.prepared.as_ref().map_or(0, String::len);
-                if bytes + job.text.len() > MAX_CAPTURE_SOURCE_BYTES || retained_bytes + charge > MAX_CAPTURE_BATCH_RETAINED_BYTES { break; }
-                bytes += job.text.len();
-                retained_bytes += charge;
-                jobs.push(job);
-            }
-            Ok(jobs)
-        }).map_err(Into::into)
+        self.inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare_cached(PENDING_SQL)?;
+                let rows = statement.query_map(
+                    params![project, harness, now_ms, MAX_CAPTURE_FAILURES],
+                    |row| {
+                        Ok(CaptureJob {
+                            job_id: row.get(0)?,
+                            project: row.get(1)?,
+                            harness: row.get(2)?,
+                            session_id: row.get(3)?,
+                            message_id: row.get(4)?,
+                            role: row.get(5)?,
+                            text: row.get(6)?,
+                            prepared: row.get(7)?,
+                            attempts: row.get(8)?,
+                            failures: row.get(9)?,
+                        })
+                    },
+                )?;
+                let mut jobs = Vec::new();
+                let mut bytes = 0;
+                let mut retained_bytes = 0;
+                for row in rows {
+                    let job = row?;
+                    let charge = job.text.len() + job.prepared.as_ref().map_or(0, String::len);
+                    if bytes + job.text.len() > MAX_CAPTURE_SOURCE_BYTES
+                        || retained_bytes + charge > MAX_CAPTURE_BATCH_RETAINED_BYTES
+                    {
+                        break;
+                    }
+                    bytes += job.text.len();
+                    retained_bytes += charge;
+                    jobs.push(job);
+                }
+                Ok(jobs)
+            })
+            .map_err(Into::into)
     }
 
     /// Records each dispatch, including interrupted ones, for replay and backoff.
@@ -358,14 +385,32 @@ mod tests {
                 .enqueue_memory_capture(source("Use staging port 4321."), 1)
                 .unwrap(),
         );
+        let scan_batches = |store: &MemoryStore| -> i64 {
+            store
+                .with_conn_for_test(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM scan_batches", [], |row| row.get(0))
+                })
+                .unwrap()
+        };
+        let audited_at_enqueue = scan_batches(&store);
         assert!(
             store
                 .begin_memory_capture_attempt("/project", &id, 100)
                 .unwrap()
         );
         assert_eq!(
+            scan_batches(&store),
+            audited_at_enqueue,
+            "a key-only transition stores no new text and leaves no scan receipt"
+        );
+        assert_eq!(
             store.prepare_memory_capture("/project", &id, "[]").unwrap(),
             Some("[]".into())
+        );
+        assert_eq!(
+            scan_batches(&store),
+            audited_at_enqueue + 1,
+            "frozen output is new durable text and keeps its scan receipt"
         );
         assert_eq!(
             store
@@ -641,23 +686,43 @@ mod tests {
     fn status_query_uses_the_project_index_instead_of_scanning_the_table() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open_for_test(dir.path(), "capture");
-        let plan: Vec<String> = store
-            .with_conn_for_test(|conn| {
-                let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {STATUS_SQL}"))?;
-                let rows = statement.query_map([""], |row| row.get::<_, String>(3))?;
-                rows.collect()
-            })
-            .unwrap();
+        let plan = |sql: &str, binds: &[&str]| -> Vec<String> {
+            store
+                .with_conn_for_test(|conn| {
+                    let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let rows = statement.query_map(rusqlite::params_from_iter(binds), |row| {
+                        row.get::<_, String>(3)
+                    })?;
+                    rows.collect()
+                })
+                .unwrap()
+        };
+        let status = plan(STATUS_SQL, &[""]);
         assert!(
-            plan.iter()
+            status
+                .iter()
                 .any(|step| step.contains("USING COVERING INDEX idx_memory_capture_project")),
-            "{plan:?}"
+            "{status:?}"
         );
         assert!(
-            !plan
+            !status
                 .iter()
                 .any(|step| step.contains("SCAN memory_capture_jobs")),
-            "{plan:?}"
+            "{status:?}"
+        );
+        let pending = plan(PENDING_SQL, &["", "pi", "0", "3"]);
+        assert_eq!(
+            pending,
+            [
+                "SEARCH memory_capture_jobs USING INDEX idx_memory_capture_pending (project=? AND harness=?)"
+            ],
+            "the partial index must supply the ORDER BY without a sorter"
+        );
+        let counts = plan(PENDING_COUNTS_SQL, &[""]);
+        assert_eq!(
+            counts,
+            ["SCAN memory_capture_jobs USING INDEX idx_memory_capture_pending"],
+            "quota counts must read only pending rows, not every completed one"
         );
     }
 
