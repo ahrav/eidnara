@@ -4,6 +4,8 @@ export const DEV_ONLY_PACKAGES: ReadonlySet<string> = new Set(["eval-core"]);
 
 export interface MetadataDependency {
     name: string;
+    /** The alias a `package = "name"` rename gives the dependency; feature entries use it. */
+    rename?: string | null;
     kind: "dev" | "build" | null;
     features?: string[];
     target?: string | null;
@@ -50,6 +52,12 @@ function forwarded(entry: string): [string, string] | null {
     return [entry.slice(0, slash).replace(/\?$/, ""), entry.slice(slash + 1)];
 }
 
+/** The package `owner`'s feature entries call `alias`: its rename, else the name itself. */
+function dependencyPackage(local: Map<string, MetadataPackage>, owner: string, alias: string) {
+    const dep = local.get(owner)?.dependencies.find((d) => (d.rename ?? d.name) === alias);
+    return dep?.name ?? alias;
+}
+
 /**
  * Features reachable from `roots` through `pkg`'s feature table and, via
  * `other/feature` entries, through other local packages' tables. `dep:x`
@@ -73,7 +81,9 @@ function featureClosure(
         for (const entry of entries) {
             const other = forwarded(entry);
             if (other === null) pending.push([owner, entry.replace(/^dep:/, ""), root]);
-            else if (!entry.endsWith("/test-support")) pending.push([...other, root]);
+            else if (!entry.endsWith("/test-support")) {
+                pending.push([dependencyPackage(local, owner, other[0]), other[1], root]);
+            }
         }
     }
     return [...reached.values()];

@@ -150,6 +150,27 @@ describe("forbiddenDependencyEdges", () => {
         ]);
     });
 
+    test("resolves a forwarding entry through a renamed local dependency", () => {
+        const metadata = workspace([dep({ name: "host-runtime", features: ["fixtures"] })]);
+        metadata.packages.push(
+            {
+                name: "host-runtime",
+                source: null,
+                dependencies: [dep({ name: "storage", rename: "store" })],
+                features: { fixtures: ["store/fixtures"], "test-support": [] },
+            },
+            {
+                name: "storage",
+                source: null,
+                dependencies: [],
+                features: { fixtures: ["test-support"], "test-support": [] },
+            },
+        );
+        expect(forbiddenDependencyEdges(metadata)).toEqual([
+            "daemon [dependencies] host-runtime enables storage/test-support through fixtures",
+        ]);
+    });
+
     test("resolves edge features only against local packages", () => {
         const metadata = workspace([dep({ name: "serde", features: ["derive"] })]);
         metadata.packages[1]!.features = { derive: ["serde_derive/test-support"] };

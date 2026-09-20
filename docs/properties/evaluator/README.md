@@ -73,14 +73,18 @@ Surface census (`crates/daemon/src/transform/surface_census.rs` and
   symbol path that implements it and checks the row order against
   `SURFACE1_STAGES`.
 - Order facts witnessed by behavior:
-  `suppression_and_the_length_gate_return_before_any_query`,
+  `suppression_and_the_length_gate_return_before_any_query` and
   `the_token_gate_returns_before_the_candidate_window_reads_the_store` (through
-  the store's statement probe), and
-  `the_threshold_empties_a_result_set_the_cap_would_otherwise_trim`. Decision
+  the store's statement probe). Decision
   freeze is witnessed by `empty_user_hint_decision_skips_future_queries` in
   `crates/daemon/src/transform.rs`; overlay apply by the aged golden below.
-  Deferral and native attachment have no per-hint seam until the Phase 2 taps
-  land and are pinned by symbol only.
+  The threshold reads only the top-ranked score and the cap keeps the
+  top-ranked result, so threshold-before-cap has no observable effect and is
+  pinned by symbol only, like deferral and native attachment, which have no
+  per-hint seam until the Phase 2 taps land.
+  `the_threshold_empties_a_result_set_the_cap_would_otherwise_trim` witnesses
+  that the threshold is all-or-nothing: five below-threshold candidates yield
+  no results, not three.
 - Bounds witnessed by behavior: `hint_bound_constants_equal_the_evaluator_pins`,
   `the_candidate_window_holds_exactly_one_hundred_segments`,
   `the_query_keeps_twenty_four_tokens`, `three_results_survive_the_cap`,
