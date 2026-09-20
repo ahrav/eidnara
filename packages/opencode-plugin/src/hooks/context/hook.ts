@@ -233,7 +233,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 variant: "warning",
             },
         });
-    /** One warning per outage: the toast repeats only after a checkpoint or drain succeeds again. */
+    /** One warning per outage: the toast repeats only after a drain settles again. A checkpoint
+     * alone cannot re-arm it, or a persistent model outage would warn on every turn. */
     let captureWarningShown = false;
     const warnCaptureIncomplete = (): void => {
         if (captureWarningShown) return;
@@ -321,7 +322,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         if (captureDisabled() || excludedFromCapture(sessionId)) return;
         try {
             const model = liveModelKey(sessionId);
-            if (!model) return;
             // The user's message is acknowledged first, so the transcript read below does not resend it.
             await pendingUserCaptures.get(sessionId)?.catch(() => undefined);
             const projectRoot = await sessionDirectoryFor(sessionId);
@@ -361,7 +361,6 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             });
             const final = openCodeLastFinalMessageId(sourceMessages);
             if (final !== undefined) captureWatermark.set(sessionId, final);
-            captureRecovered();
             memoryCaptureDrain.schedule(scope);
         } catch (error) {
             log(

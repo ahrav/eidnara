@@ -98,6 +98,32 @@ describe("native capture exchange", () => {
         ).resolves.toBe("disabled");
     });
 
+    it("submits an answer whose executor cleanup ran past the model deadline", async () => {
+        const calls: Array<Record<string, unknown>> = [];
+        const replies = [
+            { ...work, max_duration_ms: 20 },
+            { state: "processed" },
+            { state: "ready" },
+        ];
+        await expect(
+            flushMemoryCapture(
+                {
+                    call: async ({ body }) => {
+                        calls.push(body as Record<string, unknown>);
+                        return replies.shift();
+                    },
+                },
+                scope,
+                async (request) => {
+                    // The model answered within its deadline; session cleanup finished after it.
+                    await new Promise<void>((resolve) => setTimeout(resolve, 40));
+                    return { model: request.model, text: "{}" };
+                },
+            ),
+        ).resolves.toBe("ready");
+        expect(calls[1]).toMatchObject({ method: "memory.capture.submit", output: "{}" });
+    });
+
     it("still fails loudly on daemon store failures and malformed replies", async () => {
         for (const state of ["store_failed", "unavailable", "something_secret"]) {
             await expect(

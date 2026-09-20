@@ -203,6 +203,25 @@ describe("OpenCode native memory capture executor", () => {
         ).rejects.toThrow(`Native memory capture: ${outcome}`);
     });
 
+    it("evicts a project beyond the bound once its captures finish, not only when the next capture starts", async () => {
+        const gate = Promise.withResolvers<void>();
+        const h = harness({ answerGate: gate.promise });
+        lastClient = h.client;
+        const executor = openCodeMemoryCaptureExecutor(h.client as never);
+        const signal = new AbortController().signal;
+        const busy = ["first", "second", "third", "fourth", "fifth"].map((system) =>
+            executor({ ...work, system }, signal),
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        // Every project is busy, so the admission-time pass finds no victim.
+        expect(h.disposed).toEqual([]);
+        gate.resolve();
+        await Promise.all(busy);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        expect(h.disposed).toHaveLength(1);
+        expect(new Set(h.directories).size).toBe(5);
+    });
+
     it("disposes idle projects at once and a busy project after its capture finishes", async () => {
         const gate = Promise.withResolvers<void>();
         const h = harness({ answerGate: gate.promise });

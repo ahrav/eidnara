@@ -404,6 +404,8 @@ export function openCodeMemoryCaptureExecutor(
                 });
             project.inFlight -= 1;
             state.inFlight -= 1;
+            // Projects that were all busy at admission become evictable only now.
+            evictIdleProjects(client);
             // Cleanup failures never change the capture outcome; the answer is already final.
             if (cleanupFailures.length > 0)
                 log.warn("[eidnara] native memory capture cleanup incomplete", cleanupFailures);

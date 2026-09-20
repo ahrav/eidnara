@@ -260,6 +260,7 @@ describe("eidnara hook", () => {
         function createCaptureHook(
             fake: FakeModuleClient,
             transcript: unknown[],
+            options: { liveModel?: boolean } = {},
         ): {
             hook: NonNullable<ReturnType<typeof createEidnaraHook>>;
             client: EidnaraDeps["client"];
@@ -267,10 +268,11 @@ describe("eidnara hook", () => {
             const client = createClientMock(undefined, "/project");
             client.session.messages = mock(async () => ({ data: transcript })) as never;
             const liveSessionState = createLiveSessionState();
-            liveSessionState.liveModelBySession.set(SESSION, {
-                providerID: "provider",
-                modelID: "model",
-            });
+            if (options.liveModel !== false)
+                liveSessionState.liveModelBySession.set(SESSION, {
+                    providerID: "provider",
+                    modelID: "model",
+                });
             const hook = requireHook(
                 createEidnaraHook(
                     createDeps({ client, liveSessionState, rustModeModuleClient: fake.client }),
@@ -415,6 +417,45 @@ describe("eidnara hook", () => {
             await hook.event(idle);
             await hook.memoryCaptureDrain.settle();
             expect(client.tui.showToast).toHaveBeenCalledTimes(2);
+        });
+
+        it("keeps the warning latched while checkpoints succeed but drains keep failing", async () => {
+            useTempDataHome("capture-drain-latch-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "store_failed" : "accepted",
+            }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            const idle = { event: { type: "session.idle", properties: { sessionID: SESSION } } };
+            for (let turn = 0; turn < 3; turn++) {
+                await hook.event(idle);
+                await hook.memoryCaptureDrain.settle();
+            }
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
+        it("checkpoints and drains without a model hint when the live model is unknown", async () => {
+            useTempDataHome("capture-unknown-model-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "pending" : "accepted",
+            }));
+            const { hook, client } = createCaptureHook(
+                fake,
+                [assistantMessage("native-answer", [{ type: "text", text: "A decision." }])],
+                { liveModel: false },
+            );
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls.map((call) => call.method)).toEqual([
+                "memory.capture",
+                "memory.capture.next",
+            ]);
+            for (const call of fake.calls)
+                expect((call.body as { model?: unknown }).model).toBeUndefined();
+            expect(client.tui.showToast).not.toHaveBeenCalled();
         });
 
         it("skips a child session that the idle checkpoint's directory read classifies", async () => {

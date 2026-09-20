@@ -251,6 +251,9 @@ function nativeWork(response: unknown): { lease: string; work: NativeCaptureWork
 
 /** Bounds one flush to a fixed number of daemon exchanges; the next flush resumes the rest. */
 const FLUSH_MAX_BATCHES = 32;
+/** An executor bounds its model call by `maxDurationMs`; the private session and instance
+ * cleanup that follows a produced answer is bounded separately and must not discard it. */
+const EXECUTOR_CLEANUP_GRACE_MS = 30_000;
 
 /**
  * `"pending"` means the daemon retains work for a later flush: a `pending` or
@@ -326,7 +329,7 @@ export async function flushMemoryCapture(
         try {
             result = await withTimeout(
                 execute(work, controller.signal),
-                work.maxDurationMs,
+                work.maxDurationMs + EXECUTOR_CLEANUP_GRACE_MS,
                 "native capture timed out",
             );
             if (result.model !== work.model || typeof result.text !== "string")
