@@ -35,7 +35,7 @@ use memory_store::memory_reviewer_jobs::{
 use memory_store::memory_reviewer_ledger::{
     AbstainReason, AttemptMarker, DispatchOutcome, MEMORY_REVIEWER_RUN_DEADLINE_MS,
     MEMORY_REVIEWER_TASK_LEASE_MS, MemoryReviewerAttemptTerminal, MemoryReviewerBeginOutcome,
-    MemoryReviewerReceipt, MemoryReviewerReceiptTerminal,
+    MemoryReviewerReceipt, MemoryReviewerReceiptTerminal, ResponseUsage,
 };
 use memory_store::{LeaseAcquireOutcome, MemoryStore};
 use sha2::{Digest, Sha256};
@@ -680,6 +680,7 @@ impl Fixture {
                     &claim.claim_id,
                     attempt_index,
                     terminal,
+                    ResponseUsage::NONE,
                     now + 1,
                 )
                 .unwrap();

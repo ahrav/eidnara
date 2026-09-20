@@ -31,7 +31,7 @@ use memory_store::memory_reviewer_jobs::{
 };
 use memory_store::memory_reviewer_ledger::{
     AbstainReason, MemoryReviewerAttemptTerminal, MemoryReviewerBeginOutcome,
-    MemoryReviewerReceipt, MemoryReviewerReceiptTerminal,
+    MemoryReviewerReceipt, MemoryReviewerReceiptTerminal, ResponseUsage,
 };
 use memory_store::{LeaseAcquireOutcome, MemoryStore};
 use sha2::{Digest, Sha256};
@@ -1310,6 +1310,65 @@ async fn a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_re
     assert!(tip_after >= tip_before);
 }
 
+/// A response legal on its own is not legal against what the job has left: two 600 KiB bodies cross the 1 MiB job ceiling, so the second is refused where it crosses the remainder with the remainder recorded as consumed, and the third round is refused by the ledger as exhaustion before any marker is charged or any byte sent. The run settles as budget exhaustion; every attempt row carries its usage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_consume_the_jobs_raw_ceiling_across_attempts_and_exhaustion_sends_nothing_more()
+{
+    let fixture = Fixture::open(CASES[4].sources);
+    // A read step keeps the run going; JSON whitespace pads each body to 600 KiB without touching the decoded text.
+    let step = fixture.expand(
+        r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"read_reference","alias":"{alias:1}","range":{"start":0,"end":4}}]}}"#,
+    );
+    let padded = |text: &str| {
+        let escaped = serde_json::to_string(text).unwrap();
+        let body = format!(
+            r#"{{"id":"msg_1","type":"message","role":"assistant","model":"claude-canonical-1","content":[{{"type":"text","text":{escaped}}}],"stop_reason":"end_turn","usage":{{"input_tokens":3,"output_tokens":4}}}}"#
+        );
+        let body = format!("{body}{}", " ".repeat(600 * 1024 - body.len()));
+        assert_eq!(body.len(), 600 * 1024);
+        support::tls_peer::json_response("200 OK", &body, "")
+    };
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![padded(&step), padded(&step), padded(&step)]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::BudgetExhausted));
+    // The third round handshakes before the ledger judges it, as every round does; the ledger refuses the marker and no request byte follows.
+    let observed = server.await.unwrap();
+    assert_eq!(observed.len(), 2, "no request follows known exhaustion");
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 3);
+    let attempts = fixture.attempts();
+    assert_eq!(attempts.len(), 2, "the exhausted round charged no marker");
+    assert_eq!(
+        attempts[0].terminal.map(|(terminal, _)| terminal),
+        Some(MemoryReviewerAttemptTerminal::Complete)
+    );
+    assert_eq!(
+        attempts[0].response,
+        memory_store::memory_reviewer_ledger::ResponseUsage {
+            raw_response_bytes: Some(600 * 1024),
+            decoded_text_bytes: Some(u64::try_from(step.len()).unwrap()),
+        }
+    );
+    assert_eq!(
+        attempts[1].terminal.map(|(terminal, _)| terminal),
+        Some(MemoryReviewerAttemptTerminal::Failed)
+    );
+    assert_eq!(
+        attempts[1].response,
+        memory_store::memory_reviewer_ledger::ResponseUsage {
+            raw_response_bytes: Some(1024 * 1024 - 600 * 1024),
+            decoded_text_bytes: Some(0),
+        },
+        "the refused response consumed the whole remainder and decoded nothing"
+    );
+    let facts = fixture.ledger.memory_reviewer_status_facts().unwrap();
+    assert_eq!(facts.attempts_attempted, 2);
+    assert_eq!(facts.jobs_abstained, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inspections_are_charged_once_per_read_and_capped_per_job_and_per_batch() {
     // Two linked sources and a limit of three issued inspections: the subject is the first, the batch of two reads the second and third, and any further read is refused by the job cap, not the batch cap.
@@ -2139,6 +2198,7 @@ async fn a_resumed_generation_adopts_the_result_a_lost_run_sealed_without_a_send
             &fixture.claim.claim_id,
             attempt_index,
             MemoryReviewerAttemptTerminal::Complete,
+            ResponseUsage::NONE,
             now,
         )
         .unwrap();

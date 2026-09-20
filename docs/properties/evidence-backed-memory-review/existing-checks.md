@@ -78,6 +78,17 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `review command against the direct host` | `packages/e2e-tests/src/rust-runner/review-cli.test.ts` | real handshake and flat envelopes against the hermetic host; refusals decoded; backend counters unchanged | unaudited |
 | tarball smoke | `scripts/smoke-tarball-install.ts` | installed `eidnara review status`, `list`, and `show` reach a running daemon | unaudited |
 
+## Response budgets
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `response_usage_accumulates_across_attempts_and_generations_and_exhaustion_refuses_before_a_marker_is_charged` | `crates/memory-store/tests/memory_reviewer_ledger.rs` | full allowance on the first marker; remainder after a completed and a failed response; usage past a ceiling refused; unterminated attempt at takeover exhausts the successor; `unknown` with bytes and `failed` without bytes exhaust; the ceiling-exact boundary | unaudited |
+| `response_usage_columns_are_bounded_and_written_once_at_the_schema` | same | bytes on an in-flight row refused; a recorded terminal and its usage cannot be rewritten or cleared | unaudited |
+| `responses_are_charged_against_the_jobs_remaining_allowance_and_refusals_record_known_consumption` | `crates/daemon/tests/memory_reviewer_model_request.rs` | a chunked body refused at the chunk crossing a 40 KiB remainder; text refused one byte past its remainder before allocation; a declared length past the remainder refused unread; a provider error body charged; the per-response constants still cap a larger allowance | unaudited |
+| `responses_consume_the_jobs_raw_ceiling_across_attempts_and_exhaustion_sends_nothing_more` | `crates/daemon/tests/memory_reviewer_coordinator.rs` | two 600 KiB responses through the real run; the second refused with the remainder recorded; the third round refused before a marker with no request byte; `budget_exhausted` | unaudited |
+| `responses_consume_the_jobs_text_ceiling_across_attempts_and_exhaustion_sends_nothing` | `crates/daemon/tests/memory_reviewer_disclosure.rs` | two 40 KiB texts; the second refused before allocation with 24 KiB recorded; the third attempt refused with no request byte | unaudited |
+| `cancelled_and_failed_responses_record_the_bytes_they_consumed` | same | a provider error body's bytes recorded; a cancelled read records the bytes read | unaudited |
+
 ## Suspiciously quiet areas
 
 - No test exercises class tightening (a decision reclassified `Sensitive`
@@ -107,6 +118,12 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
   wire shape.
 - No test exercises a request timeout or an aborted signal through the real
   transport in the command; the error path is exercised with thrown errors.
+- No test measures wall-clock or memory for the padded-response path; the
+  byte counts the tests assert are the resource evidence, and no latency or
+  quality threshold is claimed.
+- No test crashes between the response and the terminal write and then
+  resumes; the unterminated-is-full rule is exercised by leaving an attempt
+  open at takeover.
 - No test drives observer open, `module_projects`, and a worker pass in one
   process; the view and the pass are exercised in two tests.
 - No test records a `temporary_capture` member and adopts it; the member

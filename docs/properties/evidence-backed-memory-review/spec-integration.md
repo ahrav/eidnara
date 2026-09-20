@@ -23,3 +23,6 @@ Ticket numbers here are tracking metadata, not names of anything in the tree.
 | `review-cli-preserves-shared-kernel-refusal-shapes` | U3 acceptance; OQ5, OQ9 | #730 | `packages/cli/src/commands/review.ts`, `review-wire.ts` |
 | `status-freshness-never-defaults-unknown-to-zero` | U3 acceptance; OQ5, OQ9 | #730 | `packages/cli/src/commands/review.ts`, `review-wire.ts` |
 | `status-counts-preserve-overlapping-ledger-populations` | U3 acceptance; OQ5, OQ9 | #730 | `packages/cli/src/commands/review.ts`, `review-wire.ts` |
+| `provider-response-budget-is-cumulative-per-job` | U4 acceptance; OQ10 | #731 | `crates/daemon/src/memory_reviewer/model_request.rs` (`InFlight::complete`, `collect_body`), `model_response.rs` (`decode_message_within`), `crates/memory-store/src/memory_reviewer_ledger.rs` (`response_allowance`) |
+| `attempt-ledger-preserves-cross-generation-ceilings` | U4 acceptance; OQ10, OQ12 | #731 | `crates/memory-store/baseline.sql`, `crates/memory-store/src/memory_reviewer_ledger.rs` (`ResponseUsage`, `record_attempt_terminal_in_tx`) |
+| `guarded-request-handoff-precedes-network-polling` | U4 acceptance; Q10 | #731 | `crates/memory-store/src/memory_reviewer_ledger.rs` (`dispatch_memory_reviewer_attempt`), `crates/daemon/src/memory_reviewer/disclosure.rs` |

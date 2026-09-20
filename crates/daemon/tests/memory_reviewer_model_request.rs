@@ -8,7 +8,8 @@ use std::time::Duration;
 use daemon::memory_reviewer::model_request::{
     ANTHROPIC_VERSION, AssistantText, Credential, Endpoint, MAX_OUTPUT_TOKENS,
     MAX_RAW_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_FRAMES, MAX_RESPONSE_HEAD_BYTES,
-    MAX_RESPONSE_HEADERS, Message, MessagesRequest, Role, SendError, Sender, Timing,
+    MAX_RESPONSE_HEADERS, Message, MessagesRequest, ResponseAccounting, ResponseAllowance, Role,
+    SendError, Sender, Timing,
 };
 use daemon::memory_reviewer::model_response::{DecodeError, StopReason};
 use tokio::io::AsyncReadExt;
@@ -49,7 +50,11 @@ async fn exchange_with(
         .unwrap()
         .handoff(request().body().unwrap())
         .unwrap()
-        .complete(deadline())
+        .complete(
+            deadline(),
+            ResponseAllowance::FULL,
+            &mut ResponseAccounting::default(),
+        )
         .await;
     let observed = server.await.unwrap();
     assert!(
@@ -86,7 +91,14 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
     armed_tx.send(()).unwrap();
     // Give the peer its whole observation window before the connection is polled.
     tokio::time::sleep(OBSERVATION_WINDOW + Duration::from_millis(100)).await;
-    let answer = in_flight.complete(deadline()).await.unwrap();
+    let answer = in_flight
+        .complete(
+            deadline(),
+            ResponseAllowance::FULL,
+            &mut ResponseAccounting::default(),
+        )
+        .await
+        .unwrap();
     let observed = server.await.unwrap();
     assert_eq!(answer.text, "bun builds it");
     assert_eq!(answer.stop_reason, Some(StopReason::EndTurn));
@@ -160,7 +172,14 @@ async fn no_request_byte_reaches_the_peer_before_the_connection_is_polled() {
         "encrypted bytes reached the peer between the handoff and the first poll"
     );
     release_tx.send(()).unwrap();
-    let answer = in_flight.complete(deadline()).await.unwrap();
+    let answer = in_flight
+        .complete(
+            deadline(),
+            ResponseAllowance::FULL,
+            &mut ResponseAccounting::default(),
+        )
+        .await
+        .unwrap();
     assert_eq!(answer.text, "later");
     let observed = server.await.unwrap();
     assert!(observed.after_handoff.unwrap() > after_handoff);
@@ -430,7 +449,11 @@ async fn request_bounds_and_deadlines_are_enforced_by_the_sender() {
         .handoff(request().body().unwrap())
         .unwrap();
     let outcome = in_flight
-        .complete(Instant::now() + Duration::from_millis(500))
+        .complete(
+            Instant::now() + Duration::from_millis(500),
+            ResponseAllowance::FULL,
+            &mut ResponseAccounting::default(),
+        )
         .await;
     assert_eq!(outcome.unwrap_err(), SendError::Deadline);
     drop(hold_tx);
@@ -475,7 +498,11 @@ async fn the_head_wait_is_bounded_by_the_completion_budget_not_the_frame_idle_li
         .unwrap()
         .handoff(request.body().unwrap())
         .unwrap()
-        .complete(deadline())
+        .complete(
+            deadline(),
+            ResponseAllowance::FULL,
+            &mut ResponseAccounting::default(),
+        )
         .await
         .unwrap();
     assert_eq!(answer.text, "late");
@@ -498,7 +525,11 @@ async fn the_completion_budget_scales_with_the_requested_output_tokens() {
         .unwrap()
         .handoff(generous.body().unwrap())
         .unwrap()
-        .complete(deadline())
+        .complete(
+            deadline(),
+            ResponseAllowance::FULL,
+            &mut ResponseAccounting::default(),
+        )
         .await
         .unwrap();
     assert_eq!(answer.text, "generous");
@@ -517,7 +548,11 @@ async fn the_completion_budget_scales_with_the_requested_output_tokens() {
         .unwrap()
         .handoff(terse.body().unwrap())
         .unwrap()
-        .complete(deadline())
+        .complete(
+            deadline(),
+            ResponseAllowance::FULL,
+            &mut ResponseAccounting::default(),
+        )
         .await;
     assert_eq!(outcome.unwrap_err(), SendError::Deadline);
     let observed = server.await.unwrap();
@@ -535,16 +570,175 @@ async fn a_body_that_stalls_past_the_frame_idle_limit_is_a_deadline() {
     let server = peer.serve(no_wait(), move |_| response);
     let mut request = request();
     request.max_tokens = 5_000;
+    // The caller's accounting outlives the timed-out exchange and holds the body bytes read before the stall.
+    let mut accounting = ResponseAccounting::default();
     let outcome = sender_with(&peer, short_timing())
         .connect(deadline())
         .await
         .unwrap()
         .handoff(request.body().unwrap())
         .unwrap()
-        .complete(deadline())
+        .complete(deadline(), ResponseAllowance::FULL, &mut accounting)
         .await;
     assert_eq!(outcome.unwrap_err(), SendError::Deadline);
+    let body_len = message("stalled").len();
+    assert_eq!(accounting.transport_bytes, body_len - 8);
+    assert_eq!(accounting.decoded_text_bytes, 0);
     let observed = server.await.unwrap();
     assert!(!observed.reconnected);
     assert_eq!(peer.connections.load(Ordering::SeqCst), 1);
+}
+
+/// The exchange under an explicit allowance, returning what the caller's accounting holds afterwards.
+async fn exchange_within(
+    response: Vec<u8>,
+    allowance: ResponseAllowance,
+) -> (Result<AssistantText, SendError>, ResponseAccounting) {
+    let mut peer = Peer::start().await;
+    let server = peer.serve(no_wait(), move |_| response);
+    let mut accounting = ResponseAccounting::default();
+    let outcome = peer
+        .sender()
+        .connect(deadline())
+        .await
+        .unwrap()
+        .handoff(request().body().unwrap())
+        .unwrap()
+        .complete(deadline(), allowance, &mut accounting)
+        .await;
+    server.await.unwrap();
+    (outcome, accounting)
+}
+
+/// The job's remaining allowance, not the per-response constant, bounds a response: a body legal on its own is refused where it crosses the remainder and the refusal records the remainder as consumed; text is charged against the text remainder before it is allocated and a refused text records what it measured; a completed response records exactly the bytes and text it consumed; a declared length past the remainder refuses without reading the body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_are_charged_against_the_jobs_remaining_allowance_and_refusals_record_known_consumption()
+ {
+    // A 64 KiB chunked body is legal alone and refused under a 40 KiB raw remainder at the chunk that crosses it.
+    let piece = vec![b'a'; 16 * 1024];
+    let body = chunked_response("200 OK", std::iter::repeat_n(piece, 4));
+    let (outcome, accounting) = exchange_within(
+        body.clone(),
+        ResponseAllowance {
+            raw_response_bytes: 40 * 1024,
+            decoded_text_bytes: ResponseAllowance::FULL.decoded_text_bytes,
+        },
+    )
+    .await;
+    assert_eq!(outcome.unwrap_err(), SendError::ResponseTooLarge);
+    assert_eq!(accounting.transport_bytes, 40 * 1024);
+    assert_eq!(accounting.decoded_text_bytes, 0);
+
+    // The same body under a remainder it fits reads every byte, and a JSON body decodes with its text measured.
+    let text = "t".repeat(3 * 1024);
+    let message = message(&text);
+    let (outcome, accounting) = exchange_within(
+        json_response("200 OK", &message, ""),
+        ResponseAllowance {
+            raw_response_bytes: u64::try_from(message.len()).unwrap() + 1,
+            decoded_text_bytes: 3 * 1024,
+        },
+    )
+    .await;
+    let answer = outcome.unwrap();
+    assert_eq!(answer.text, text);
+    assert_eq!(accounting.transport_bytes, message.len());
+    assert_eq!(accounting.decoded_text_bytes, 3 * 1024);
+    assert_eq!(answer.accounting, accounting);
+
+    // Text one byte past the remainder is refused before allocation; the whole remainder is recorded as consumed and the body bytes are known.
+    let (outcome, accounting) = exchange_within(
+        json_response("200 OK", &message, ""),
+        ResponseAllowance {
+            raw_response_bytes: ResponseAllowance::FULL.raw_response_bytes,
+            decoded_text_bytes: 3 * 1024 - 1,
+        },
+    )
+    .await;
+    assert_eq!(outcome.unwrap_err(), SendError::Decode(DecodeError::Text));
+    assert_eq!(accounting.decoded_text_bytes, 3 * 1024 - 1);
+    assert_eq!(accounting.transport_bytes, message.len());
+
+    // A declared length past the remainder is refused before the body is read; the remainder is recorded as consumed.
+    let declared = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        1000,
+        "z".repeat(1000)
+    );
+    let (outcome, accounting) = exchange_within(
+        declared.into_bytes(),
+        ResponseAllowance {
+            raw_response_bytes: 999,
+            decoded_text_bytes: ResponseAllowance::FULL.decoded_text_bytes,
+        },
+    )
+    .await;
+    assert_eq!(outcome.unwrap_err(), SendError::ResponseTooLarge);
+    assert_eq!(accounting.transport_bytes, 999);
+
+    // A provider error body is charged for the bytes it delivered.
+    let error_body = r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#;
+    let (outcome, accounting) = exchange_within(
+        json_response("529 Overloaded", error_body, ""),
+        ResponseAllowance::FULL,
+    )
+    .await;
+    assert_eq!(outcome.unwrap_err(), SendError::Status(529));
+    assert_eq!(accounting.transport_bytes, error_body.len());
+    assert_eq!(accounting.decoded_text_bytes, 0);
+
+    // A compressed body is refused before any body byte is read and records nothing consumed; an undecodable body records the bytes it delivered and no text.
+    let (outcome, accounting) = exchange_within(
+        json_response(
+            "200 OK",
+            &support::tls_peer::message("x"),
+            "content-encoding: gzip\r\n",
+        ),
+        ResponseAllowance::FULL,
+    )
+    .await;
+    assert_eq!(outcome.unwrap_err(), SendError::Compressed);
+    assert_eq!(accounting.transport_bytes, 0);
+    assert_eq!(accounting.decoded_text_bytes, 0);
+    let (outcome, accounting) = exchange_within(
+        json_response("200 OK", "{not json", ""),
+        ResponseAllowance::FULL,
+    )
+    .await;
+    assert_eq!(outcome.unwrap_err(), SendError::Decode(DecodeError::Syntax));
+    assert_eq!(accounting.transport_bytes, "{not json".len());
+    assert_eq!(accounting.decoded_text_bytes, 0);
+
+    // A body in more frames than admitted is charged the whole bound like a byte overflow.
+    let (outcome, accounting) = exchange_within(
+        chunked_response(
+            "200 OK",
+            std::iter::repeat_n(b"a".to_vec(), MAX_RESPONSE_FRAMES + 1),
+        ),
+        ResponseAllowance {
+            raw_response_bytes: 10_000,
+            decoded_text_bytes: ResponseAllowance::FULL.decoded_text_bytes,
+        },
+    )
+    .await;
+    assert_eq!(outcome.unwrap_err(), SendError::ResponseTooLarge);
+    assert_eq!(accounting.transport_bytes, 10_000);
+
+    // The per-response constants still cap an allowance larger than they are.
+    let (outcome, accounting) = exchange_within(
+        chunked_response(
+            "200 OK",
+            std::iter::repeat_n(
+                vec![b'a'; 64 * 1024],
+                MAX_RAW_RESPONSE_BYTES / (64 * 1024) + 1,
+            ),
+        ),
+        ResponseAllowance {
+            raw_response_bytes: u64::MAX,
+            decoded_text_bytes: u64::MAX,
+        },
+    )
+    .await;
+    assert_eq!(outcome.unwrap_err(), SendError::ResponseTooLarge);
+    assert_eq!(accounting.transport_bytes, MAX_RAW_RESPONSE_BYTES);
 }

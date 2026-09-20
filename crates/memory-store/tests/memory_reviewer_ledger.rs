@@ -11,10 +11,12 @@ use memory_store::memory_reviewer_jobs::{
 };
 use memory_store::memory_reviewer_ledger::{
     AbstainReason, AttemptMarker, DispatchOutcome, MEMORY_REVIEWER_ATTEMPT_MAX_MS,
-    MEMORY_REVIEWER_MAX_ATTEMPTS, MEMORY_REVIEWER_RUN_DEADLINE_MS,
+    MEMORY_REVIEWER_MAX_ATTEMPTS, MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES,
+    MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES, MEMORY_REVIEWER_RUN_DEADLINE_MS,
     MEMORY_REVIEWER_SETTLEMENT_RESERVE_MS, MEMORY_REVIEWER_TASK_LEASE_MS,
     MemoryReviewerAttemptTerminal, MemoryReviewerBeginOutcome, MemoryReviewerLedgerError,
-    MemoryReviewerLedgerRefusal, MemoryReviewerReceiptTerminal, ReceiptCompletion, ResultSelection,
+    MemoryReviewerLedgerRefusal, MemoryReviewerReceiptTerminal, ReceiptCompletion,
+    ResponseAllowance, ResponseUsage, ResultSelection,
 };
 use memory_store::{LeaseAcquireOutcome, LeaseCompleteOutcome, MemoryStore, MemoryStoreError};
 use storage::StorageDescriptor;
@@ -86,6 +88,30 @@ impl Fixture {
         self.store
             .begin_memory_reviewer_receipt(PROJECT, &self.identity, KERNEL, claim, now)
             .unwrap()
+    }
+
+    /// Closes every unterminated attempt at `generation` as failed with no response consumed, so the job's response allowance is unaffected and a later marker is admitted.
+    fn close_open_attempts(&self, generation: u64, claim: &str, now: i64) {
+        for attempt in self
+            .store
+            .list_memory_reviewer_attempts(PROJECT, &self.identity)
+            .unwrap()
+        {
+            if attempt.generation == generation && attempt.terminal.is_none() {
+                self.store
+                    .finish_memory_reviewer_attempt(
+                        PROJECT,
+                        &self.identity,
+                        generation,
+                        claim,
+                        attempt.attempt_index,
+                        MemoryReviewerAttemptTerminal::Failed,
+                        ResponseUsage::NONE,
+                        now,
+                    )
+                    .unwrap();
+            }
+        }
     }
 
     fn dispatch(
@@ -386,6 +412,7 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
             DispatchOutcome::Handed {
                 attempt_index: 0,
                 attempt_deadline_ms,
+                allowance: ResponseAllowance::FULL,
                 handoff: 6,
                 release: Ok(())
             } if attempt_deadline_ms == T0 + 1 + MEMORY_REVIEWER_ATTEMPT_MAX_MS
@@ -434,6 +461,7 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
     assert_eq!(fixture.attempts(), 1);
 
     // Expiry between commit and handoff leaves a charged marker and sends nothing.
+    fixture.close_open_attempts(1, &claim, T0 + 2);
     let clock = RefCell::new(T0 + 3);
     let outcome = fixture
         .store
@@ -487,6 +515,7 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
                     &claim,
                     1,
                     MemoryReviewerAttemptTerminal::Failed,
+                    ResponseUsage::NONE,
                     T0 + 4 + MEMORY_REVIEWER_ATTEMPT_MAX_MS
                 )
                 .unwrap_err()
@@ -505,6 +534,7 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
                     "crc:someone-else",
                     0,
                     MemoryReviewerAttemptTerminal::Failed,
+                    ResponseUsage::NONE,
                     T0 + 4 + MEMORY_REVIEWER_ATTEMPT_MAX_MS
                 )
                 .unwrap_err()
@@ -543,12 +573,21 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
         .unwrap();
     assert_eq!(*never.borrow(), 0);
     assert_eq!(fixture.attempts(), 2);
-    // A sent attempt left unterminated is unknown: reopen changes nothing and no path finishes or redispatches it.
+    // A committed attempt survives reopen exactly as recorded: the closed first attempt with its usage, and the withheld second with its no-disclosure proof.
     let before = fixture
         .store
         .list_memory_reviewer_attempts(PROJECT, &fixture.identity)
         .unwrap();
-    assert_eq!(before[0].terminal, None);
+    assert_eq!(
+        before[0].terminal,
+        Some((MemoryReviewerAttemptTerminal::Failed, T0 + 2))
+    );
+    assert_eq!(before[0].response, ResponseUsage::NONE);
+    assert_eq!(
+        before[1].terminal.map(|(terminal, _)| terminal),
+        Some(MemoryReviewerAttemptTerminal::NotDispatched)
+    );
+    assert_eq!(before[1].response, ResponseUsage::NONE);
     fixture.reopen();
     assert_eq!(
         fixture
@@ -583,6 +622,7 @@ fn four_attempts_across_generations_exhaust_the_allowance_and_the_cutoff_starts_
             ..
         }
     ));
+    fixture.close_open_attempts(1, &claim, T0 + 1);
     assert!(matches!(
         fixture.dispatch(1, &claim, T0 + 2).unwrap(),
         DispatchOutcome::Handed {
@@ -590,6 +630,7 @@ fn four_attempts_across_generations_exhaust_the_allowance_and_the_cutoff_starts_
             ..
         }
     ));
+    fixture.close_open_attempts(1, &claim, T0 + 2);
     // The first worker's claim lapses; a successor inherits the remaining allowance, not a fresh one.
     let later = T0 + MEMORY_REVIEWER_TASK_LEASE_MS + 1;
     let successor = fixture.claim("acq-2", "worker-b", later).unwrap();
@@ -604,6 +645,7 @@ fn four_attempts_across_generations_exhaust_the_allowance_and_the_cutoff_starts_
             ..
         }
     ));
+    fixture.close_open_attempts(2, &successor, later + 1);
     assert!(matches!(
         fixture.dispatch(2, &successor, later + 2).unwrap(),
         DispatchOutcome::Handed {
@@ -611,6 +653,7 @@ fn four_attempts_across_generations_exhaust_the_allowance_and_the_cutoff_starts_
             ..
         }
     ));
+    fixture.close_open_attempts(2, &successor, later + 2);
     assert_eq!(
         fixture.attempts(),
         usize::try_from(MEMORY_REVIEWER_MAX_ATTEMPTS).unwrap()
@@ -1068,6 +1111,10 @@ fn bounded_transition_sequences_preserve_allowance_deadlines_and_generation_fenc
             match step {
                 Step::Dispatch | Step::ChargedUnsent => {
                     let charged_unsent = matches!(step, Step::ChargedUnsent);
+                    // An attempt still in flight would count as the whole response ceiling; the model closes it before the next marker, as a live run does.
+                    if !completed {
+                        fixture.close_open_attempts(generation, &claim, now);
+                    }
                     let before = fixture.attempts();
                     let reads = RefCell::new(0u32);
                     let result = fixture.store.dispatch_memory_reviewer_attempt(
@@ -1461,6 +1508,7 @@ fn a_failure_after_the_marker_commits_is_a_charged_unsent_attempt_not_a_failed_c
                     &claim,
                     0,
                     MemoryReviewerAttemptTerminal::NotDispatched,
+                    ResponseUsage::NONE,
                     T0 + 2,
                 )
                 .unwrap_err()
@@ -1476,6 +1524,7 @@ fn a_failure_after_the_marker_commits_is_a_charged_unsent_attempt_not_a_failed_c
             &claim,
             0,
             MemoryReviewerAttemptTerminal::Unknown,
+            ResponseUsage::NONE,
             T0 + 2,
         )
         .unwrap();
@@ -1490,6 +1539,7 @@ fn a_clock_behind_the_newest_marker_is_refused_as_clock_behind_not_exhaustion() 
         fixture.dispatch(1, &claim, T0 + 10).unwrap(),
         DispatchOutcome::Handed { .. }
     ));
+    fixture.close_open_attempts(1, &claim, T0 + 10);
     // The same live claim reads a clock 3 ms below the newest marker; three attempts remain.
     let mut skewed = marker(1);
     skewed.body_digest = "b".repeat(64);
@@ -1730,6 +1780,7 @@ fn not_dispatched_is_written_only_by_the_dispatch_path() {
                     &claim,
                     attempt_index,
                     MemoryReviewerAttemptTerminal::NotDispatched,
+                    ResponseUsage::NONE,
                     T0 + 2,
                 )
                 .unwrap_err()
@@ -2100,6 +2151,7 @@ fn a_complete_attempt_terminal_at_or_after_the_attempt_deadline_is_refused() {
             &claim,
             attempt_index,
             terminal,
+            ResponseUsage::NONE,
             now,
         )
     };
@@ -2450,6 +2502,7 @@ impl Fixture {
                 claim,
                 attempt_index,
                 MemoryReviewerAttemptTerminal::Complete,
+                ResponseUsage::NONE,
                 now + 1,
             )
             .unwrap();
@@ -2853,6 +2906,7 @@ fn a_complete_attempt_terminal_dated_before_its_marker_is_refused_as_clock_behin
                         &claim,
                         attempt_index,
                         terminal,
+                        ResponseUsage::NONE,
                         T0 + 9,
                     )
                     .unwrap_err()
@@ -3156,6 +3210,7 @@ fn the_marker_clock_floor_includes_recorded_terminals() {
             &claim,
             attempt_index,
             MemoryReviewerAttemptTerminal::Failed,
+            ResponseUsage::NONE,
             T0 + 20,
         )
         .unwrap();
@@ -3253,31 +3308,31 @@ fn an_attempt_terminal_dated_before_a_later_marker_is_refused_as_clock_behind() 
     let fixture = Fixture::open();
     let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
     fixture.begin(&claim, T0);
-    let DispatchOutcome::Handed { attempt_index, .. } =
-        fixture.dispatch(1, &claim, T0 + 1).unwrap()
-    else {
-        panic!("first attempt hands off")
-    };
-    let mut next = marker(1);
-    next.body_digest = "b".repeat(64);
     assert!(matches!(
-        fixture
-            .store
-            .dispatch_memory_reviewer_attempt(
-                PROJECT,
-                &fixture.identity,
-                1,
-                &claim,
-                KERNEL,
-                &next,
-                "prepared",
-                || T0 + 30,
-                |prepared| prepared,
-            )
-            .unwrap(),
+        fixture.dispatch(1, &claim, T0 + 1).unwrap(),
         DispatchOutcome::Handed { .. }
     ));
-    // The ledger already holds a marker at T0 + 30; the first attempt cannot close at T0 + 20.
+    fixture.close_open_attempts(1, &claim, T0 + 1);
+    let mut next = marker(1);
+    next.body_digest = "b".repeat(64);
+    let DispatchOutcome::Handed { attempt_index, .. } = fixture
+        .store
+        .dispatch_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &claim,
+            KERNEL,
+            &next,
+            "prepared",
+            || T0 + 30,
+            |prepared| prepared,
+        )
+        .unwrap()
+    else {
+        panic!("second attempt hands off")
+    };
+    // The ledger already holds a marker at T0 + 30; the attempt cannot close at T0 + 20.
     assert_eq!(
         refusal(
             fixture
@@ -3289,6 +3344,7 @@ fn an_attempt_terminal_dated_before_a_later_marker_is_refused_as_clock_behind() 
                     &claim,
                     attempt_index,
                     MemoryReviewerAttemptTerminal::Complete,
+                    ResponseUsage::NONE,
                     T0 + 20,
                 )
                 .unwrap_err()
@@ -3551,4 +3607,293 @@ fn a_job_is_not_leasable_at_a_clock_before_its_activation() {
         "a clock behind the job's own timestamps acquires nothing"
     );
     assert!(fixture.claim("acq-2", "worker-a", T0).is_some());
+}
+
+/// The response ceilings are the job's, not the attempt's: every recorded consumption across attempts and generations lowers the allowance the next marker hands off, an attempt that did not record its consumption spends the whole ceiling, a consumed ceiling refuses the next marker as exhaustion before it is charged, and a terminal with its usage is written once.
+#[test]
+fn response_usage_accumulates_across_attempts_and_generations_and_exhaustion_refuses_before_a_marker_is_charged()
+ {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let handed = |generation: u64, claim: &str, now: i64| -> (u32, ResponseAllowance) {
+        match fixture.dispatch(generation, claim, now).unwrap() {
+            DispatchOutcome::Handed {
+                attempt_index,
+                allowance,
+                ..
+            } => (attempt_index, allowance),
+            other => panic!("{other:?}"),
+        }
+    };
+    let finish = |generation: u64,
+                  claim: &str,
+                  attempt_index: u32,
+                  terminal: MemoryReviewerAttemptTerminal,
+                  usage: ResponseUsage,
+                  now: i64| {
+        fixture.store.finish_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            generation,
+            claim,
+            attempt_index,
+            terminal,
+            usage,
+            now,
+        )
+    };
+    // The first marker travels with the whole ceilings.
+    let (first, allowance) = handed(1, &claim, T0 + 1);
+    assert_eq!(allowance, ResponseAllowance::FULL);
+    // A completed response records exactly what it consumed, and the next marker hands off the remainder.
+    let consumed = ResponseUsage {
+        raw_response_bytes: Some(600 * 1024),
+        decoded_text_bytes: Some(40 * 1024),
+    };
+    finish(
+        1,
+        &claim,
+        first,
+        MemoryReviewerAttemptTerminal::Complete,
+        consumed,
+        T0 + 2,
+    )
+    .unwrap();
+    let recorded = fixture
+        .store
+        .list_memory_reviewer_attempts(PROJECT, &fixture.identity)
+        .unwrap();
+    assert_eq!(recorded[0].response, consumed);
+    let (second, allowance) = handed(1, &claim, T0 + 3);
+    assert_eq!(
+        allowance,
+        ResponseAllowance {
+            raw_response_bytes: MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES - 600 * 1024,
+            decoded_text_bytes: MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES - 40 * 1024,
+        }
+    );
+    // A failed response with known consumption is charged too; a terminal and its usage are written once.
+    let failed = ResponseUsage {
+        raw_response_bytes: Some(100 * 1024),
+        decoded_text_bytes: Some(0),
+    };
+    finish(
+        1,
+        &claim,
+        second,
+        MemoryReviewerAttemptTerminal::Failed,
+        failed,
+        T0 + 4,
+    )
+    .unwrap();
+    assert_eq!(
+        refusal(
+            finish(
+                1,
+                &claim,
+                second,
+                MemoryReviewerAttemptTerminal::Complete,
+                ResponseUsage::NONE,
+                T0 + 5
+            )
+            .unwrap_err()
+        ),
+        MemoryReviewerLedgerRefusal::AttemptTerminal
+    );
+    // Usage past a ceiling is refused, not clamped.
+    let (third, allowance) = handed(1, &claim, T0 + 6);
+    assert_eq!(allowance.raw_response_bytes, 324 * 1024);
+    assert_eq!(allowance.decoded_text_bytes, 24 * 1024);
+    assert_eq!(
+        refusal(
+            finish(
+                1,
+                &claim,
+                third,
+                MemoryReviewerAttemptTerminal::Failed,
+                ResponseUsage {
+                    raw_response_bytes: Some(MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES + 1),
+                    decoded_text_bytes: Some(0),
+                },
+                T0 + 7
+            )
+            .unwrap_err()
+        ),
+        MemoryReviewerLedgerRefusal::InvalidRequest
+    );
+    // Recorded usage survives a reopen exactly, and the reopened store hands off the same remainder.
+    let mut fixture = fixture;
+    let before = fixture
+        .store
+        .list_memory_reviewer_attempts(PROJECT, &fixture.identity)
+        .unwrap();
+    fixture.reopen();
+    assert_eq!(
+        fixture
+            .store
+            .list_memory_reviewer_attempts(PROJECT, &fixture.identity)
+            .unwrap(),
+        before
+    );
+    assert_eq!(before[0].response, consumed);
+    assert_eq!(before[1].response, failed);
+    let fixture = fixture;
+    // The successor generation inherits the remainder; the third attempt, left unterminated by the lost run, counts as the whole ceiling, so the successor may send nothing.
+    let later = T0 + MEMORY_REVIEWER_TASK_LEASE_MS + 1;
+    let successor = fixture.claim("acq-2", "worker-b", later).unwrap();
+    fixture
+        .store
+        .take_over_memory_reviewer_receipt(PROJECT, &fixture.identity, 1, &successor, later)
+        .unwrap();
+    assert_eq!(
+        refusal(fixture.dispatch(2, &successor, later + 1).unwrap_err()),
+        MemoryReviewerLedgerRefusal::AttemptsExhausted
+    );
+    assert_eq!(
+        fixture.attempts(),
+        3,
+        "an exhausted dispatch charges no marker"
+    );
+
+    // A fresh job: an unknown terminal counts as the whole ceiling even with bytes recorded, and a terminal without recorded bytes does too.
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let (first, _) = handed_on(&fixture, 1, &claim, T0 + 1);
+    fixture
+        .store
+        .finish_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &claim,
+            first,
+            MemoryReviewerAttemptTerminal::Unknown,
+            ResponseUsage {
+                raw_response_bytes: Some(10),
+                decoded_text_bytes: Some(10),
+            },
+            T0 + 2,
+        )
+        .unwrap();
+    assert_eq!(
+        refusal(fixture.dispatch(1, &claim, T0 + 3).unwrap_err()),
+        MemoryReviewerLedgerRefusal::AttemptsExhausted
+    );
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let (first, _) = handed_on(&fixture, 1, &claim, T0 + 1);
+    fixture
+        .store
+        .finish_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &claim,
+            first,
+            MemoryReviewerAttemptTerminal::Failed,
+            ResponseUsage::default(),
+            T0 + 2,
+        )
+        .unwrap();
+    assert_eq!(
+        refusal(fixture.dispatch(1, &claim, T0 + 3).unwrap_err()),
+        MemoryReviewerLedgerRefusal::AttemptsExhausted
+    );
+    // Exactly the ceiling consumed is exhaustion; one byte under it is not.
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let (first, _) = handed_on(&fixture, 1, &claim, T0 + 1);
+    fixture
+        .store
+        .finish_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &claim,
+            first,
+            MemoryReviewerAttemptTerminal::Complete,
+            ResponseUsage {
+                raw_response_bytes: Some(MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES - 1),
+                decoded_text_bytes: Some(MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES),
+            },
+            T0 + 2,
+        )
+        .unwrap();
+    assert_eq!(
+        refusal(fixture.dispatch(1, &claim, T0 + 3).unwrap_err()),
+        MemoryReviewerLedgerRefusal::AttemptsExhausted,
+        "a consumed text ceiling alone exhausts the job"
+    );
+}
+
+fn handed_on(
+    fixture: &Fixture,
+    generation: u64,
+    claim: &str,
+    now: i64,
+) -> (u32, ResponseAllowance) {
+    match fixture.dispatch(generation, claim, now).unwrap() {
+        DispatchOutcome::Handed {
+            attempt_index,
+            allowance,
+            ..
+        } => (attempt_index, allowance),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The schema refuses response bytes on an attempt still in flight and past either ceiling, and refuses to move a recorded terminal or its usage.
+#[test]
+fn response_usage_columns_are_bounded_and_written_once_at_the_schema() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    let (first, _) = handed_on(&fixture, 1, &claim, T0 + 1);
+    let update = |sql: &str| fixture.store.execute_tag_sql_for_test(sql);
+    assert!(
+        update(
+            "UPDATE memory_reviewer_attempts SET raw_response_bytes = 1 WHERE attempt_index = 0"
+        )
+        .is_err(),
+        "bytes on an attempt in flight"
+    );
+    fixture
+        .store
+        .finish_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &claim,
+            first,
+            MemoryReviewerAttemptTerminal::Complete,
+            ResponseUsage {
+                raw_response_bytes: Some(1),
+                decoded_text_bytes: Some(1),
+            },
+            T0 + 2,
+        )
+        .unwrap();
+    for sql in [
+        "UPDATE memory_reviewer_attempts SET raw_response_bytes = 2 WHERE attempt_index = 0",
+        "UPDATE memory_reviewer_attempts SET decoded_text_bytes = NULL WHERE attempt_index = 0",
+        "UPDATE memory_reviewer_attempts SET terminal_kind = 'failed' WHERE attempt_index = 0",
+        "UPDATE memory_reviewer_attempts SET terminal_kind = NULL, terminal_at_ms = NULL, raw_response_bytes = NULL, decoded_text_bytes = NULL WHERE attempt_index = 0",
+    ] {
+        assert!(update(sql).is_err(), "{sql}");
+    }
+    let recorded = fixture
+        .store
+        .list_memory_reviewer_attempts(PROJECT, &fixture.identity)
+        .unwrap();
+    assert_eq!(
+        recorded[0].response,
+        ResponseUsage {
+            raw_response_bytes: Some(1),
+            decoded_text_bytes: Some(1),
+        }
+    );
 }

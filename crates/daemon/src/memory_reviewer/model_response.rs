@@ -116,18 +116,33 @@ struct Parser<'a> {
     at: usize,
     depth: usize,
     text_bytes: usize,
+    text_budget: usize,
     scratch_bytes: usize,
 }
 
-/// Decodes `body` as one Anthropic message and validates its shape: `type` is `message`, `role` is `assistant`, `content` is an array of at most [`MAX_TEXT_BLOCKS`] `text` blocks. A repeated key anywhere is refused, so no block can carry two `type`s. `tool_use` blocks are refused as tool use; any other block kind is unexpected content; a message with no text is refused.
+/// Decodes `body` as one Anthropic message and validates its shape: `type` is `message`, `role` is `assistant`, `content` is an array of at most [`MAX_TEXT_BLOCKS`] `text` blocks. A repeated key anywhere is refused, so no block can carry two `type`s. `tool_use` blocks are refused as tool use; any other block kind is unexpected content; a message with no text is refused. Text is bounded by [`MAX_ASSISTANT_TEXT_BYTES`].
 pub fn decode_message(body: &[u8]) -> Result<DecodedMessage, DecodeError> {
+    decode_message_within(body, MAX_ASSISTANT_TEXT_BYTES).0
+}
+
+/// [`decode_message`] with the text allowance `text_budget`, at most [`MAX_ASSISTANT_TEXT_BYTES`]. The second value is the decoded text length the parser measured before it stopped, on success and on refusal alike, so a refused body still reports what it consumed of the allowance; it never exceeds the budget.
+pub fn decode_message_within(
+    body: &[u8],
+    text_budget: usize,
+) -> (Result<DecodedMessage, DecodeError>, usize) {
     let mut parser = Parser {
         bytes: body,
         at: 0,
         depth: 0,
         text_bytes: 0,
+        text_budget: text_budget.min(MAX_ASSISTANT_TEXT_BYTES),
         scratch_bytes: 0,
     };
+    let decoded = decode_with(&mut parser, body);
+    (decoded, parser.text_bytes)
+}
+
+fn decode_with(parser: &mut Parser<'_>, body: &[u8]) -> Result<DecodedMessage, DecodeError> {
     parser.skip_whitespace();
     let root = parser.value(Position::Root)?;
     parser.skip_whitespace();
@@ -341,7 +356,9 @@ impl Parser<'_> {
         let (end, decoded_len) =
             scan_string(&self.bytes[start..], None).ok_or(DecodeError::Syntax)?;
         if is_text {
-            if self.text_bytes.saturating_add(decoded_len) > MAX_ASSISTANT_TEXT_BYTES {
+            // An over-budget text spends the whole remaining allowance: the refusal is what consumed it.
+            if self.text_bytes.saturating_add(decoded_len) > self.text_budget {
+                self.text_bytes = self.text_budget;
                 return Err(DecodeError::Text);
             }
             self.text_bytes += decoded_len;

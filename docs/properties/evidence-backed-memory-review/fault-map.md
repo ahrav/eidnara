@@ -27,7 +27,8 @@
 | Raw integer tokens at the extrema and beyond 64 bits | yes | `FakeDaemon.respondText` |
 | Observer bound on a dormant root, beside a live harness, and on a second root; each route closing first | yes |
 | A request that throws each `HostCallError` kind and code; an absent connection file; a catalog without the context module | yes | scripted `ReviewConnection` |
-| Response bodies outside the vocabulary or the byte caps | yes | mutated proposal and page bodies | `bind_route` and `unbind_route` with harness `cli` |
+| Response bodies outside the vocabulary or the byte caps | yes | mutated proposal and page bodies |
+| Responses legal alone that cross the job's raw or text ceiling; a declared length past the remainder; a provider error body; a cancelled read; an unterminated attempt at takeover; direct SQL on the usage columns | yes | padded bodies over local TLS, `Peer` scripts, `execute_tag_sql_for_test` | `bind_route` and `unbind_route` with harness `cli` |
 | Selection dated at or after the queue deadline | yes | `read_selected_review_input` with `selected_at >= deadline`; the ledger cannot record one |
 
 ## Required faults per property
@@ -50,6 +51,9 @@
 | `review-cli-preserves-shared-kernel-refusal-shapes` | each Kernel state and management code | yes |
 | `status-freshness-never-defaults-unknown-to-zero` | starting block with zeros, absent block, out-of-domain counters | yes |
 | `status-counts-preserve-overlapping-ledger-populations` | populated ready block | yes |
+| `provider-response-budget-is-cumulative-per-job` | 600 KiB bodies; 40 KiB texts; explicit remainders | yes |
+| `attempt-ledger-preserves-cross-generation-ceilings` | takeover with an open attempt; `unknown` with bytes; `failed` without bytes; reopen; direct SQL | yes |
+| `guarded-request-handoff-precedes-network-polling` | peer waiting on store release; terminal write refused | yes |
 | `observer-route-does-not-change-background-rosters` | observer alone; observer newer than a live harness; observer-only second root; both close orders; worker pass over an empty view | yes |
 
 ## Coverage checks to add
