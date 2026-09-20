@@ -372,7 +372,7 @@ async function render(
             },
             { exactIntegers: true },
         );
-        const answer = decodePage(raw, parsed.limit);
+        const answer = decodePage(raw, parsed.limit, parsed.after);
         if (answer.kind !== "body") return { ok: false, text: refusalLines(answer, parsed.json) };
         const { items, next } = answer.body;
         if (parsed.json) {

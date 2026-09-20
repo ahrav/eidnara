@@ -322,13 +322,13 @@ describe("review list", () => {
                 kind: "page",
                 items: [
                     {
-                        causal_identity: HEX,
+                        causal_identity: HEX_B,
                         generation: 18446744073709551615n,
                         outcome: "expired",
                         selected: false,
                     },
                 ],
-                next: body.after === HEX ? null : HEX,
+                next: body.after === HEX ? null : HEX_B,
             }),
         });
         expect(
@@ -336,7 +336,7 @@ describe("review list", () => {
         ).toBe(0);
         expect(recorded.requests[0]).toMatchObject({ limit: 2, after: HEX });
         expect(recorded.stdout[0]).toBe(
-            `{"kind":"page","project_root":"/work/project/real","items":[{"causal_identity":"${HEX}","generation":18446744073709551615,"outcome":"expired","selected":false}],"next":null}`,
+            `{"kind":"page","project_root":"/work/project/real","items":[{"causal_identity":"${HEX_B}","generation":18446744073709551615,"outcome":"expired","selected":false}],"next":null}`,
         );
     });
 
@@ -416,8 +416,25 @@ describe("review list", () => {
                     })),
                     next: null,
                 },
-                "The response could not be validated: items is not a bounded array.",
-                '{"kind":"malformed","detail":"items is not a bounded array"}',
+                "The response could not be validated: items exceed the requested page.",
+                '{"kind":"malformed","detail":"items exceed the requested page"}',
+            ],
+            [
+                {
+                    kind: "page",
+                    items: [
+                        {
+                            causal_identity: HEX_B,
+                            generation: 1,
+                            outcome: "complete",
+                            selected: true,
+                        },
+                        { causal_identity: HEX, generation: 2, outcome: "failed", selected: false },
+                    ],
+                    next: null,
+                },
+                "The response could not be validated: items are not ordered after the cursor.",
+                '{"kind":"malformed","detail":"items are not ordered after the cursor"}',
             ],
             [
                 {
@@ -489,13 +506,13 @@ describe("review list vocabulary", () => {
             ...outcomes
                 .filter((o) => o !== "abstained")
                 .map((outcome, i) => ({
-                    causal_identity: HEX,
+                    causal_identity: `${"a".repeat(62)}${i.toString(16).padStart(2, "0")}`,
                     generation: i,
                     outcome,
                     selected: outcome === "complete",
                 })),
             ...reasons.map((reason, i) => ({
-                causal_identity: HEX_B,
+                causal_identity: `${"b".repeat(62)}${i.toString(16).padStart(2, "0")}`,
                 generation: 100 + i,
                 outcome: "abstained",
                 reason,
@@ -546,6 +563,23 @@ describe("review list vocabulary", () => {
 });
 
 describe("review show", () => {
+    test("support and contradictions are each bounded at 256 references, not together", async () => {
+        const references = (prefix: string) =>
+            Array.from({ length: 256 }, (_, i) => ({ evidence_id: `${prefix}-${i}` }));
+        const { deps, recorded } = harness({
+            respond: () => {
+                const body = selectedBody();
+                const proposal = body.proposal as Record<string, unknown>;
+                proposal.support = references("s");
+                proposal.contradictions = references("c");
+                return body;
+            },
+        });
+        expect(await runReviewCommand(["show", HEX], deps)).toBe(0);
+        expect(recorded.stdout[0]).toContain("  s-255");
+        expect(recorded.stdout[0]).toContain("  c-255");
+    });
+
     test("a bounded identifier longer than a display line is rendered whole", async () => {
         const candidate = `c${"x".repeat(510)}`;
         const evidence = `e${"y".repeat(510)}`;
@@ -674,19 +708,6 @@ describe("review show", () => {
                     (b.reference as Record<string, unknown>).candidate_id = "c".repeat(513);
                 },
                 "reference carries a field outside its domain",
-            ],
-            [
-                (b) => {
-                    (b.proposal as Record<string, unknown>).support = Array.from(
-                        { length: 129 },
-                        (_, i) => ({ evidence_id: `s-${i}` }),
-                    );
-                    (b.proposal as Record<string, unknown>).contradictions = Array.from(
-                        { length: 128 },
-                        (_, i) => ({ evidence_id: `c-${i}` }),
-                    );
-                },
-                "support and contradictions exceed the reference bound together",
             ],
             [
                 (b) => {

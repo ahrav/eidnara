@@ -177,19 +177,26 @@ function decodeItem(raw: unknown): ListItem | string {
     return item;
 }
 
-/** `limit` is the requested page size: the wire contract sets `next` to the last identity exactly when the page is full. */
+/**
+ * `limit` and `after` are the request's page size and cursor: the wire contract bounds the page by
+ * `limit`, orders identities strictly after `after`, and sets `next` to the last identity exactly when the page is full.
+ */
 export function decodePage(
     raw: unknown,
     limit: number,
+    after: string | null,
 ): ReviewAnswer<(typeof LIST_TERMINALS)[number], Page> {
     return classify(raw, LIST_TERMINALS, "page", (body) => {
-        if (!Array.isArray(body.items) || body.items.length > MAX_PAGE_ITEMS) {
-            return "items is not a bounded array";
+        if (!Array.isArray(body.items) || body.items.length > limit) {
+            return "items exceed the requested page";
         }
         const items: ListItem[] = [];
+        let previous = after ?? "";
         for (const raw of body.items) {
             const item = decodeItem(raw);
             if (typeof item === "string") return item;
+            if (item.causal_identity <= previous) return "items are not ordered after the cursor";
+            previous = item.causal_identity;
             items.push(item);
         }
         if (body.next !== null && !isHex64(body.next)) return "next is not null or a hex64";
@@ -257,9 +264,6 @@ function decodeProposal(raw: unknown): Proposal | string {
     if (typeof support === "string") return `support ${support}`;
     const contradictions = decodeReferences(raw.contradictions);
     if (typeof contradictions === "string") return `contradictions ${contradictions}`;
-    if (support.length + contradictions.length > MAX_REFERENCES) {
-        return "support and contradictions exceed the reference bound together";
-    }
     if (!Array.isArray(raw.limitations) || raw.limitations.length > MAX_LIMITATIONS) {
         return "limitations are not a bounded array";
     }
