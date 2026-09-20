@@ -17,16 +17,19 @@ macro_rules! debug_display {
 
 mod census;
 mod decimal;
+mod eligibility;
 mod event;
 mod generator;
 mod identity;
 mod manifest;
+mod reducer;
 mod residue;
 mod stream;
 
 pub use census::{
     Construction, HintBounds, Reachability, SURFACE1_HINT_BOUNDS, SURFACE1_STAGES, Surface1Stage,
 };
+pub use eligibility::*;
 pub use event::*;
 pub use generator::*;
 pub use identity::{
@@ -35,10 +38,11 @@ pub use identity::{
 };
 pub use manifest::{
     ArmRates, Attestation, CLAIM_BOUNDARY_EXCLUSIONS, CLAIM_BOUNDARY_SCHEMA, ClaimBoundary,
-    ComponentVersions, Cut, CutOutcome, CutReceipt, DROPPED_FIELDS, MANIFEST_DIGEST_PROTOCOL,
-    MANIFEST_SCHEMA, Manifest, ManifestError, REQUIRED_FIELDS, ResourceLimits, RunStatus,
-    TokenizerProfile, is_canonical_decimal, parse_manifest,
+    ComponentVersions, Cut, CutOutcome, CutReceipt, DROPPED_FIELDS, ExecutionMode,
+    MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError, REQUIRED_FIELDS,
+    ResourceLimits, RunStatus, TokenizerProfile, is_canonical_decimal, parse_manifest,
 };
+pub use reducer::*;
 pub use residue::{
     CLOCK_FIELD_KEEP_ALLOWLIST, ObservationSchema, ResidueEntry, ResidueError, Rule, SemanticTrace,
     TRACE_DIGEST_PROTOCOL, is_clock_named, is_never_kept,

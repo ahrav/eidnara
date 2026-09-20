@@ -11,11 +11,11 @@ use crate::census::{Construction, Reachability};
 use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
 
-pub const MANIFEST_SCHEMA: &str = "eval-manifest/v1";
-pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v1";
+pub const MANIFEST_SCHEMA: &str = "eval-manifest/v2";
+pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v2";
 
 /// Sorted; a field added to [`Manifest`] without a schema version bump fails the closure test.
-pub const REQUIRED_FIELDS: [&str; 24] = [
+pub const REQUIRED_FIELDS: [&str; 25] = [
     "arm_rates",
     "attestation",
     "claim_boundary",
@@ -27,6 +27,7 @@ pub const REQUIRED_FIELDS: [&str; 24] = [
     "envelope_peaks",
     "error",
     "eval_run_id",
+    "execution_mode",
     "reachability",
     "residue",
     "result_digest",
@@ -74,12 +75,23 @@ pub struct Manifest {
     pub cut_receipts: Vec<CutReceipt>,
     pub residue: BTreeSet<ResidueEntry>,
     pub construction: Construction,
+    pub execution_mode: ExecutionMode,
     pub reachability: Reachability,
     pub claim_boundary: ClaimBoundary,
     pub component_versions: ComponentVersions,
     pub envelope_bounds: ResourceLimits,
     pub envelope_peaks: ResourceLimits,
     pub arm_rates: BTreeMap<String, ArmRates>,
+}
+
+/// How the world was driven: generated, replayed from a tape, or enumerated
+/// over fact tuples for the reducer differential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Generate,
+    ReplayTape,
+    Enumerate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

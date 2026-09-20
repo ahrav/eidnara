@@ -2,8 +2,9 @@
 
 `crates/eval-core` holds the value-level contracts of the long-horizon
 evaluator: the run manifest, run identity, residue rules, the surface census
-pins, and the generated world model (keyed draws, the choice tape, the event
-log, and the step drive). It is sans-I/O. Every function takes values and returns values;
+pins, the generated world model (keyed draws, the choice tape, the event log,
+and the step drive), the eligibility spec, and the bitemporal reducer. It is
+sans-I/O. Every function takes values and returns values;
 the runner shell owns processes, stores, clocks, temp roots, and the build
 sub-record.
 
@@ -25,7 +26,7 @@ sub-record.
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
 
-## Manifest `eval-manifest/v1`
+## Manifest `eval-manifest/v2`
 
 `parse_manifest` reads a JSON object, compares its key set against
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
@@ -43,7 +44,7 @@ field to `Manifest` without bumping the schema fails the closure test, and the
 fixture digests in `tests/manifest.rs` are frozen so an encoding change is
 reviewed.
 
-The 24 required fields, sorted:
+The 25 required fields, sorted:
 
 | Field | Content |
 | --- | --- |
@@ -58,22 +59,24 @@ The 24 required fields, sorted:
 | `envelope_peaks` | Observed peaks; a measurement, so it leaves the digest. |
 | `error` | Typed error text or `null`. |
 | `eval_run_id` | The run identity digest. |
+| `execution_mode` | `generate`, `replay_tape`, or `enumerate`: how the world was driven. |
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `residue` | Every non-`Keep` field with its rule, including the manifest's own. |
 | `result_digest`, `witness_digest` | Lowercase hex SHA-256. |
 | `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
-| `schema` | `eval-manifest/v1`. |
+| `schema` | `eval-manifest/v2`. |
 | `status` | `completed`, `incomplete`, `refused`, or `blocked`. |
 | `tokenizer_profile` | Name, revision, digest. |
 
 `Manifest::digest` re-parses the manifest, applies the manifest's own residue
 rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
-is `Keep`), and hashes with protocol `eval-manifest-digest/v1`. The digest is
-a function of every kept field, not of the run identity alone: two processes
-that record the same identity and the same kept contents produce the same
-digest (`two_process_same_identity_yields_equal_manifest_and_trace_digests`),
+is `Keep`), and hashes with protocol `eval-manifest-digest/v2`. Version 2
+added `execution_mode`; the reducer differential runs under `enumerate`. The
+digest is a function of every kept field, not of the run identity alone: two
+processes that record the same identity and the same kept contents produce the
+same digest (`two_process_same_identity_yields_equal_manifest_and_trace_digests`),
 and two runs that share an identity but differ in `status`, `sample_order`,
 `result_digest`, or any other kept field do not.
 
@@ -258,9 +261,11 @@ deleted event keeps the depths it was generated with.
 `EventLog::without(id)` removes one event and its incident edges and touches
 no other payload: a correction whose target was removed keeps naming it, and
 the log still validates. This is the deletion rule the ticket asks for ("no
-repair of surviving semantic payloads"); the reducer treats a target that
-names an absent event as a distinct case rather than promoting the correction
-to an original. Equality and `EventLog::digest` (`eval-event-log/v1`) cover
+repair of surviving semantic payloads"); the reducer does not promote such a
+correction to an original or repair it in any way. It stays a `correction`
+unit judged on its own facts, and the absent target contributes no state, so
+every other unit's truth is unchanged (see "Bitemporal reducer"). Equality and
+`EventLog::digest` (`eval-event-log/v1`) cover
 events and edges, so two logs with the same events and different edges differ.
 
 ### Step drive
@@ -284,3 +289,118 @@ spec shapes keeps the two in agreement.
 
 The crate's `clippy.toml` disallows `HashMap` and `HashSet`, so no
 process-seeded iteration order can reach an event, a digest, or the tape.
+
+## Eligibility spec
+
+The kernel's `judge` decides eligibility by testing predicates in a fixed
+order and returning the first verdict that holds. `eval-core` carries that
+partition as a value, `EligibilitySpec`, built from the in-code table
+`PREDICATES`, an array of `Predicate { name: PredicateKind, verdict }` in the
+kernel's short-circuit order (state absent, superseded, invalidated, revision
+differs, out of scope, sensitivity denies destination, unserved or hidden,
+artifact denied). None holding is `ok`. The order is the kernel's, not the
+`EligibilityVerdict` declaration order (the kernel tests provider sensitivity
+before hidden). `PredicateKind` is a closed enum, so a predicate the table
+does not know is a parse error rather than a runtime surprise.
+
+Three derivations are named in the spec: the sensitivity judged is the served
+class when a read serves the object and the registry class otherwise, with
+secret denying every destination and sensitive denying remote; the
+per-surface visibility is `hidden` when unserved and otherwise the served
+class's `auto_inject`, `auto_search`, or `visibility` by surface, and a
+surface permits a candidate only when the verdict is `ok` and that visibility
+is not `hidden`; and a supersession invalidates its predecessor in the same
+envelope, so superseded implies invalidated.
+
+`FactTuple` is what the judge reads, as values: `state` (present or not; when
+present, supersession, invalidation, revision equality, scope, and registry
+sensitivity), the served class (sensitivity plus three visibilities), artifact
+eligibility, and destination. An object the registry has never seen has no
+state cells to fabricate. `judge(&facts)` evaluates `PREDICATES`;
+`judge_with(&predicates, &facts)` evaluates any predicate list, which is how a
+test shows a wrong order disagrees with a fact table; `judge_surface(&facts,
+surface)` adds the fold.
+
+The spec also carries a vector set, one `FactTuple` and verdict per row,
+mirroring the kernel's independently authored eligibility table including its
+precedence pairs. `serialize_spec()` is the canonical value;
+`ELIGIBILITY_SPEC_DIGEST` pins its `eidnara-eligibility-spec-v1` protocol
+digest. The kernel owns the same value as a file,
+`crates/kernel/testdata/eligibility-spec-v1.json`, and its test
+`eligibility_spec.rs` asserts the file digests to the constant, equals
+`serialize_spec()`, and lists the predicates in the order copied from `judge`
+by hand. Because the digest is over the parsed value, whitespace is never
+drift; a reordered predicate, an added verdict, or a changed fact cell is.
+`check_spec(&fixture)` returns the parsed `EligibilitySpec` only when the
+digest matches, and otherwise `SpecError::SpecDrift { expected, found }` (or
+`NotCanonical` for a value canonical JSON cannot encode). Those are the only
+two refusals: the spec carries no numbers, the one JSON type canonical
+encoding can merge, so a matching digest is value equality with
+`serialize_spec()` and the parse cannot fail. The reducer refuses
+before producing any truth and judges with the predicates it parsed.
+
+The kernel differential
+(`the_reducer_agrees_with_the_kernel_on_the_hand_authored_fact_tuple_table`)
+is the independent check: a hand-authored table of store objects with their
+fact tuples, expected verdicts per destination, and expected visibilities per
+surface, run in `enumerate` mode over both destinations and all three
+surfaces against `KernelStore::judge_surface_eligibility` and against
+`judge_surface`, with the hand-authored facts also compared to the tuple
+projected from the store's `egress_candidates`. A second test shows every
+adjacent transposition of the predicate order disagrees with that table
+except the first pair, which no store object can separate. The differential
+iterates the kernel's own `ArtifactDestination::ALL` and `Surface::ALL` and
+maps every kernel enum onto its `eval-core` mirror with an exhaustive match,
+so a variant added on the kernel side fails to compile there. The kernel test
+carries `eval-core` as a dev dependency only; `eval-core` keeps its four
+dependencies and never names a kernel type, and
+`scripts/forbid-test-support-dependencies.ts` now asserts both facts (the
+closed dependency set with no build script and the library root under `src/`,
+and no path into another workspace
+crate, any eval-core dependency outside the closed set (dev-dependencies
+included), `rusqlite`, `tokio`, or a `std` effect module (`fs`, `path`, `process`,
+`time`, `net`, `env`, `io`, `os`, `thread`) in the core's source; the crate list comes
+from `cargo metadata` under the names Rust code uses (Cargo renames
+included), so a new workspace crate or dev-dependency is fenced without editing
+the script. Paths are caught whether written as a full path or inside a brace-grouped
+`use std::{...}`; renaming a crate root or globbing `std` is refused so no
+alias or bare name can hide an effect path, `extern crate` of a fenced crate
+is refused, `#[path]` and `include*!` are refused so no source enters from
+outside the scanned tree, and the stdio and `env!` macros are refused as
+effects). The source scan runs from the `cargo metadata` workspace
+root and fails when it matches no files, so it cannot pass vacuously.
+
+## Bitemporal reducer
+
+`reduce(&log, &fixture, &query)` turns an `EventLog` into `Truth`. It refuses
+an invalid query (`ReduceError::InvalidQuery`), a drifted fixture
+(`ReduceError::Spec`), and an invalid log (`ReduceError::Log`, including the
+event bound the query carries) before doing anything else. The `Query` is a
+cut plus the facts the world does not carry: `valid_time_ms` (what is true),
+`observation_time_ms` (what is known), the entity ids the project scope
+names, the destination, the served class ingestion gives every unit (`None`
+is unadmitted), the registry sensitivity, and `max_events_per_log`. The
+served class and registry sensitivity apply to every unit alike, so `hidden`
+and `provider_sensitive` are world-wide switches in this phase rather than
+per-unit facts.
+
+An event is in the cut when both its valid time and its observation time are
+at or before the query's. Every event except an invalidation is a unit. A
+unit in the cut has state; it is superseded when an in-cut correction targets
+it, and invalidated when an in-cut correction or invalidation does. A unit
+outside the cut has no state, which the rules judge `retracted`, the same
+verdict the kernel gives an object it has never seen. Each unit is judged at
+its own revision, so `stale` is out of reach here; the shell produces it by
+asking about an older revision. A correction whose target the log does not
+contain changes nothing: it is still a unit judged on its own facts, no other
+unit gains or loses state, and nothing is repaired, because deletion leaves
+such targets behind by design.
+
+`Truth::required` is the set of units judged `ok`, which is exactly when a
+historical question about the unit must stay answerable. `Truth` also carries
+`reducer_version`, the constant `REDUCER_VERSION` (`eval-reducer/v1`), which
+the shell copies into the manifest's `component_versions.reducer` the same way
+the generator constants reach the run identity. The reducer never
+reads a kernel result and never adjusts truth toward one: a typed kernel
+refusal at run time is recorded as a refusal by the shell, not repaired into
+an expectation here.

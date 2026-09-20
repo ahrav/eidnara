@@ -1,0 +1,445 @@
+{
+  "predicates": [
+    {
+      "name": "state_absent",
+      "verdict": "retracted"
+    },
+    {
+      "name": "superseded",
+      "verdict": "superseded"
+    },
+    {
+      "name": "invalidated",
+      "verdict": "retracted"
+    },
+    {
+      "name": "revision_differs",
+      "verdict": "stale"
+    },
+    {
+      "name": "out_of_scope",
+      "verdict": "wrong_scope"
+    },
+    {
+      "name": "sensitivity_denies_destination",
+      "verdict": "provider_sensitive"
+    },
+    {
+      "name": "unserved_or_hidden",
+      "verdict": "hidden"
+    },
+    {
+      "name": "artifact_denied",
+      "verdict": "provider_sensitive"
+    }
+  ],
+  "sensitivity_derivation": "served.sensitivity if served else state.registry_sensitivity; secret denies every destination and sensitive denies remote",
+  "supersession_derivation": "a supersession invalidates the predecessor in the same envelope, so superseded implies invalidated",
+  "vectors": [
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "normal",
+          "visibility": "labeled"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "ok"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "remote",
+        "served": {
+          "auto_inject": "visible",
+          "auto_search": "visible",
+          "sensitivity": "normal",
+          "visibility": "visible"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "ok"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": null,
+        "state": null
+      },
+      "verdict": "retracted"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": null,
+        "state": {
+          "in_scope": true,
+          "invalidated": true,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "retracted"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": null,
+        "state": {
+          "in_scope": true,
+          "invalidated": true,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": true
+        }
+      },
+      "verdict": "superseded"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "remote",
+        "served": null,
+        "state": {
+          "in_scope": false,
+          "invalidated": true,
+          "registry_sensitivity": "secret",
+          "revision_matches": false,
+          "superseded": true
+        }
+      },
+      "verdict": "superseded"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "normal",
+          "visibility": "labeled"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": false,
+          "superseded": false
+        }
+      },
+      "verdict": "stale"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "remote",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "normal",
+          "visibility": "labeled"
+        },
+        "state": {
+          "in_scope": false,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": false,
+          "superseded": false
+        }
+      },
+      "verdict": "stale"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": null,
+        "state": {
+          "in_scope": false,
+          "invalidated": true,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "retracted"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": null,
+        "state": {
+          "in_scope": true,
+          "invalidated": true,
+          "registry_sensitivity": "normal",
+          "revision_matches": false,
+          "superseded": false
+        }
+      },
+      "verdict": "retracted"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "normal",
+          "visibility": "labeled"
+        },
+        "state": {
+          "in_scope": false,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "wrong_scope"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "secret",
+          "visibility": "hidden"
+        },
+        "state": {
+          "in_scope": false,
+          "invalidated": false,
+          "registry_sensitivity": "secret",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "wrong_scope"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "secret",
+          "visibility": "hidden"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "secret",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "provider_sensitive"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": null,
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "secret",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "provider_sensitive"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "sensitive",
+          "visibility": "labeled"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "sensitive",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "ok"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "remote",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "sensitive",
+          "visibility": "labeled"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "sensitive",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "provider_sensitive"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": null,
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "hidden"
+    },
+    {
+      "facts": {
+        "artifact": null,
+        "destination": "local",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "normal",
+          "visibility": "hidden"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "hidden"
+    },
+    {
+      "facts": {
+        "artifact": "denied",
+        "destination": "local",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "normal",
+          "visibility": "hidden"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "hidden"
+    },
+    {
+      "facts": {
+        "artifact": "allowed",
+        "destination": "local",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "normal",
+          "visibility": "labeled"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "ok"
+    },
+    {
+      "facts": {
+        "artifact": "denied",
+        "destination": "remote",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "normal",
+          "visibility": "labeled"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "provider_sensitive"
+    },
+    {
+      "facts": {
+        "artifact": "denied",
+        "destination": "local",
+        "served": {
+          "auto_inject": "hidden",
+          "auto_search": "hidden",
+          "sensitivity": "normal",
+          "visibility": "labeled"
+        },
+        "state": {
+          "in_scope": true,
+          "invalidated": false,
+          "registry_sensitivity": "normal",
+          "revision_matches": true,
+          "superseded": false
+        }
+      },
+      "verdict": "provider_sensitive"
+    }
+  ],
+  "verdicts": [
+    "ok",
+    "retracted",
+    "superseded",
+    "stale",
+    "wrong_scope",
+    "hidden",
+    "provider_sensitive"
+  ],
+  "version": "eidnara-eligibility-spec-v1",
+  "visibility_derivation": "hidden if unserved else served.{auto_inject, auto_search, visibility} by surface; permits = verdict == ok and visibility != hidden"
+}

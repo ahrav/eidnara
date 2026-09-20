@@ -16,7 +16,7 @@ use support::{OBSERVATION_TYPE, build, identity, manifest, observation, observat
 /// Frozen so a field-set or encoding change forces a reviewed schema bump.
 const FIXTURE_RUN_ID: &str = "e9f412ed2ad627c5801959c2c459bbb764bf45443a7774d02ac74a97f41832c9";
 const FIXTURE_MANIFEST_DIGEST: &str =
-    "1e96414ad6c37cd8a285e038eef8015c6b6f49dbd9068e343d53e54ee0fe1837";
+    "a70c439f83a0b694911e6e411a30010726db72da54d8d1c2778e983e9c419ca3";
 
 #[test]
 fn required_fields_are_sorted_and_equal_the_struct_field_set() {
@@ -86,15 +86,15 @@ fn unknown_field_wrong_schema_and_non_object_are_refused() {
         Err(ManifestError::UnknownField("extra".to_string()))
     );
     let mut v2 = valid.clone();
-    v2["schema"] = json!("eval-manifest/v2");
+    v2["schema"] = json!("eval-manifest/v3");
     assert_eq!(
         parse_manifest(&v2),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v2".to_string()
+            found: "eval-manifest/v3".to_string()
         })
     );
     assert_eq!(parse_manifest(&json!([])), Err(ManifestError::NotAnObject));
-    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v1");
+    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v2");
 }
 
 #[test]
@@ -144,6 +144,10 @@ fn every_kept_field_enters_the_digest_and_every_dropped_field_leaves_it() {
                 m.run_identity.root_seed += 1;
                 m.eval_run_id = eval_run_id(&m.run_identity).unwrap();
             }),
+        ),
+        (
+            "execution_mode",
+            Box::new(|m| m.execution_mode = eval_core::ExecutionMode::Enumerate),
         ),
         (
             "reachability",
@@ -575,11 +579,11 @@ fn residue_declarations_are_non_keep_and_one_rule_per_field() {
 #[test]
 fn validate_refuses_what_parse_and_digest_refuse() {
     let mut schema = manifest();
-    schema.schema = "eval-manifest/v2".to_string();
+    schema.schema = "eval-manifest/v3".to_string();
     assert_eq!(
         schema.validate(),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v2".to_string()
+            found: "eval-manifest/v3".to_string()
         })
     );
     let mut epoch = manifest();
@@ -873,4 +877,32 @@ fn dropped_fields_never_reach_the_trace_digest() {
     changed["hint_text"] = json!("other");
     c.record(OBSERVATION_TYPE, &changed).unwrap();
     assert_ne!(a.digest().unwrap(), c.digest().unwrap());
+}
+
+/// The reducer differential runs in `enumerate` mode; a manifest records that
+/// mode and the pinned spec digest, and the mode enters the digest.
+#[test]
+fn an_enumerate_run_records_its_mode_and_the_pinned_spec_digest() {
+    let mut enumerate = manifest();
+    enumerate.execution_mode = eval_core::ExecutionMode::Enumerate;
+    enumerate.run_identity.eligibility_spec_digest = eval_core::ELIGIBILITY_SPEC_DIGEST.to_string();
+    enumerate.eval_run_id = eval_run_id(&enumerate.run_identity).unwrap();
+    let parsed = parse_manifest(&enumerate.to_value()).unwrap();
+    assert_eq!(parsed.execution_mode, eval_core::ExecutionMode::Enumerate);
+    assert_eq!(
+        parsed.run_identity.eligibility_spec_digest,
+        eval_core::ELIGIBILITY_SPEC_DIGEST
+    );
+    assert_eq!(
+        enumerate.to_value()["execution_mode"],
+        serde_json::json!("enumerate")
+    );
+    for mode in [
+        eval_core::ExecutionMode::Generate,
+        eval_core::ExecutionMode::ReplayTape,
+    ] {
+        let mut other = enumerate.clone();
+        other.execution_mode = mode;
+        assert_ne!(other.digest().unwrap(), enumerate.digest().unwrap());
+    }
 }

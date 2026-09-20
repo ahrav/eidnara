@@ -2,6 +2,70 @@
 
 export const DEV_ONLY_PACKAGES: ReadonlySet<string> = new Set(["eval-core"]);
 
+/** The evaluator core's closed normal dependency set (`docs/evaluator.md`). */
+export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
+    "context-core",
+    "serde",
+    "serde_json",
+    "sha2",
+]);
+
+/**
+ * Paths a sans-I/O core must not name: every crate outside its closed
+ * dependency set (see `productCrates`) and the std effect
+ * modules, whether written as a full path (`std::fs::read`) or as a member of a
+ * brace-grouped `use std::{...}` list. Rebinding a root is refused outright:
+ * renaming it (`std as s`, `std::{self as s}`, `extern crate kernel as k`) or
+ * globbing std (`use std::*`, `use std::{.., *}`) would let `s::fs`, `k::X`, or
+ * bare `fs` escape the textual scan. `#[path]` and the `include*!` macros are
+ * refused too: they pull source from outside the scanned tree. The stdio
+ * macros (`print!`, `eprintln!`, `dbg!`, ...) write without naming `std::io`,
+ * and `env!`/`option_env!` read the build environment without `std::env`.
+ * A macro metavariable rooting an effect path (`$root::fs`) is refused: the
+ * scan cannot know what the caller substitutes.
+ */
+const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io|os|thread";
+const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
+
+/**
+ * Crate names as Rust paths spell them: every local package, every dependency
+ * of eval-core outside its closed set (dev-dependencies included, under the
+ * rename Rust code uses), and the external effect crates.
+ */
+export function productCrates(metadata: CargoMetadata): string[] {
+    const local = metadata.packages.filter((pkg) => pkg.source === null).map((pkg) => pkg.name);
+    const deps = (metadata.packages.find((pkg) => pkg.name === "eval-core")?.dependencies ?? [])
+        .filter((dep) => !EVAL_CORE_DEPENDENCIES.has(dep.name))
+        .map((dep) => dep.rename ?? dep.name);
+    return [...new Set([...local, ...deps, ...EXTERNAL_EFFECT_CRATES])]
+        .filter((name) => name !== "eval-core" && !EVAL_CORE_DEPENDENCIES.has(name))
+        .map((name) => name.replaceAll("-", "_"));
+}
+
+function forbiddenCoreSource(crates: readonly string[]): RegExp {
+    const product = crates.join("|");
+    return new RegExp(
+        [
+            `\\b(${product})::`,
+            `\\buse (${product})\\b`,
+            `\\b(${product}) as\\b`,
+            `\\bextern crate (${product})\\b`,
+            `\\bstd::(${STD_EFFECT_MODULES})\\b`,
+            `\\bstd::\\{[^;]*(?:[{,]\\s*|::)(${STD_EFFECT_MODULES})\\b`,
+            `\\bstd as\\b`,
+            `\\bstd::\\{[^;]*\\bself as\\b`,
+            `\\bstd::(?:\\{[^;]*[{,]\\s*)?\\*`,
+            `#\\[path\\b|\\binclude(?:_str|_bytes)?!`,
+            `\\b(?:e?print(?:ln)?|dbg|(?:option_)?env)!`,
+            `\\$\\w+::(${STD_EFFECT_MODULES})\\b`,
+        ].join("|"),
+        "g",
+    );
+}
+
+/** The directory the source fence scans, relative to the workspace root. */
+export const EVAL_CORE_SOURCE_DIR = "crates/eval-core/src";
+
 export interface MetadataDependency {
     name: string;
     /** The alias a `package = "name"` rename gives the dependency; feature entries use it. */
@@ -18,10 +82,13 @@ export interface MetadataPackage {
     source: string | null;
     dependencies: MetadataDependency[];
     features?: Record<string, string[]>;
+    manifest_path?: string;
+    targets?: { name: string; kind: string[]; src_path?: string }[];
 }
 
 export interface CargoMetadata {
     packages: MetadataPackage[];
+    workspace_root: string;
 }
 
 /** A feature or `pkg/feature` entry that turns on test-support, with the feature that holds it. */
@@ -133,6 +200,35 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
         metadata.packages.filter((pkg) => pkg.source === null).map((pkg) => [pkg.name, pkg]),
     );
     for (const pkg of local.values()) {
+        if (pkg.name === "eval-core") {
+            const normal = new Set(
+                pkg.dependencies.filter((dep) => dep.kind !== "dev").map((dep) => dep.name),
+            );
+            const unexpected = [...normal].filter((name) => !EVAL_CORE_DEPENDENCIES.has(name));
+            const missing = [...EVAL_CORE_DEPENDENCIES].filter((name) => !normal.has(name));
+            for (const name of unexpected) {
+                findings.add(`eval-core [dependencies] names ${name} outside its closed set`);
+            }
+            for (const name of missing) {
+                findings.add(`eval-core [dependencies] lacks ${name} from its closed set`);
+            }
+            // A build script runs arbitrary code at compile time and can smuggle
+            // its results into the crate through `cargo:rustc-env`.
+            if ((pkg.targets ?? []).some((target) => target.kind.includes("custom-build"))) {
+                findings.add("eval-core [package] has a build script");
+            }
+            // `[lib] path = "..."` moves the real crate root out of the scanned tree.
+            const crateDir = (pkg.manifest_path ?? "").replace(/\/Cargo\.toml$/, "");
+            for (const target of pkg.targets ?? []) {
+                if (!target.kind.includes("lib") || target.src_path === undefined) continue;
+                if (!target.src_path.startsWith(`${crateDir}/src/`)) {
+                    const shown = target.src_path.replace(`${metadata.workspace_root}/`, "");
+                    findings.add(
+                        `eval-core [lib] ${target.name} lives at ${shown}, outside ${EVAL_CORE_SOURCE_DIR}`,
+                    );
+                }
+            }
+        }
         for (const dep of pkg.dependencies) {
             if (dep.kind === "dev") continue;
             const table = `${pkg.name} [${tableName(dep)}]`;
@@ -171,6 +267,35 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
     return [...findings].sort();
 }
 
+/**
+ * An empty source set is itself a finding: a scan that matched no files
+ * proves nothing about the crate, so the gate must not pass on it.
+ */
+export function forbiddenCoreSources(
+    sources: Record<string, string>,
+    crates: readonly string[],
+): string[] {
+    const entries = Object.entries(sources);
+    if (entries.length === 0) {
+        return [`${EVAL_CORE_SOURCE_DIR}: no source files scanned`];
+    }
+    const pattern = forbiddenCoreSource(crates);
+    const findings: string[] = [];
+    // Match the whole file, not each line: a rustfmt-wrapped `use std::{`
+    // group names its effect module several lines below the `std::` prefix.
+    for (const [path, text] of entries) {
+        const lines = text.split("\n");
+        const reported = new Set<number>();
+        for (const match of text.matchAll(pattern)) {
+            const line = text.slice(0, match.index).split("\n").length;
+            if (reported.has(line)) continue;
+            reported.add(line);
+            findings.push(`${path}:${line}: ${lines[line - 1]!.trim()}`);
+        }
+    }
+    return findings.sort();
+}
+
 if (import.meta.main) {
     const proc = Bun.spawnSync(["cargo", "metadata", "--locked", "--format-version", "1"], {
         stdout: "pipe",
@@ -180,15 +305,34 @@ if (import.meta.main) {
         console.error(`cargo metadata exited ${proc.exitCode}`);
         process.exit(2);
     }
-    const metadata = JSON.parse(proc.stdout.toString()) as CargoMetadata;
+    let metadata: CargoMetadata;
+    try {
+        metadata = JSON.parse(proc.stdout.toString()) as CargoMetadata;
+    } catch (error) {
+        console.error(`cargo metadata produced invalid JSON: ${String(error)}`);
+        process.exit(2);
+    }
     const findings = forbiddenDependencyEdges(metadata);
     if (findings.length > 0) {
         console.error("test-only code reachable from a production dependency table:");
         for (const finding of findings) console.error(`  ${finding}`);
         process.exit(1);
     }
+    // `cargo metadata` names the workspace root, so the scan does not depend
+    // on the directory the script was launched from.
+    const sources: Record<string, string> = {};
+    const glob = new Bun.Glob(`${EVAL_CORE_SOURCE_DIR}/**/*.rs`);
+    for (const path of glob.scanSync(metadata.workspace_root)) {
+        sources[path] = await Bun.file(`${metadata.workspace_root}/${path}`).text();
+    }
+    const leaks = forbiddenCoreSources(sources, productCrates(metadata));
+    if (leaks.length > 0) {
+        console.error("eval-core source names a product crate or a std effect module:");
+        for (const leak of leaks) console.error(`  ${leak}`);
+        process.exit(1);
+    }
     const local = metadata.packages.filter((pkg) => pkg.source === null).length;
     console.log(
-        `dependency tables: ${local} local packages, no test-support or dev-only edges`,
+        `dependency tables: ${local} local packages, no test-support or dev-only edges; eval-core closed set and ${Object.keys(sources).length} source files clean`,
     );
 }

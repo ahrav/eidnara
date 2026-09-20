@@ -17,7 +17,7 @@ provides, so a reader can find them by test name.
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v1` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v2` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -252,11 +252,106 @@ The coverage markers the records name (`wm_generator_two_processes_compared`,
 in the tests above; the evaluator-owned marker registry lands with the
 ingestion ticket and these assertions move onto it then.
 
+## Phase 1 executed checks: eligibility spec and reducer
+
+Spec pin and reduction (`crates/eval-core/tests/reducer.rs`):
+
+- `the_in_code_table_digests_to_the_pinned_constant_in_judge_order`
+  (`wm-reducer-spec-fixture-digest-pinned`) digests `serialize_spec()` to
+  `ELIGIBILITY_SPEC_DIGEST`, compares the predicate order to a list written in
+  the test by hand, requires every verdict to have a vector and the
+  both-columns-set cell and a remote destination to appear, checks all 22
+  vectors against `judge`, requires the serialized spec to carry no numbers
+  (so a matching digest is value equality and `check_spec` has no shape
+  error), and round-trips the spec through serde.
+- `every_predicate_and_the_surface_fold_are_reachable_from_facts`
+  (`wm-reducer-agrees-with-judge-fact-tuples`) flips one fact at a time from a
+  live labeled tuple and expects each predicate's verdict, checks the served
+  versus registry sensitivity derivation and the remote refusal, and checks
+  the fold on labeled, automatic, and split served classes.
+- `reordered_predicates_an_added_verdict_or_a_changed_cell_are_spec_drift`
+  (`wm-reducer-spec-fixture-digest-pinned`) mutates the serialized spec four
+  ways and expects `SpecDrift { expected, found }`, expects a fractional cell
+  to refuse as `NotCanonical`, shows a whitespace-only re-serialization
+  passes, shows `reduce` refuses both and yields no truth, and shows every
+  adjacent transposition of the order disagrees with some vector except the
+  first pair, which no realizable tuple separates.
+- `reduction_agrees_with_an_independent_scan_at_every_cut`
+  (`wm-reducer-agrees-with-judge-fact-tuples`) reduces the shared world at
+  every distinct valid time times every distinct observation time (plus the
+  edges) and compares every unit's facts, verdict, and the required set with
+  an independent scan written in the test; `stale` never appears because
+  units are judged at their own revision.
+- `a_correction_takes_over_when_true_and_known_and_an_invalidation_only_retracts`
+  pins a named correction and target, reduces before, at, and with the
+  correction true but not yet known, reduces an invalidation in a
+  correction-free world, and shows a correction whose target was deleted from
+  the log leaves every other unit unchanged.
+- `admission_and_destination_travel_with_the_query_and_refusals_are_typed`
+  checks out-of-scope, unadmitted, and sensitive-remote worlds, purity, and
+  every refusal by name (`NotLinearized`, `SchemaMismatch`, `EventBound`, and
+  each `InvalidQuery` field).
+- `truth_and_queries_round_trip_through_serde_in_canonical_form` pins
+  `Truth::reducer_version` to `REDUCER_VERSION` (`eval-reducer/v1`), the
+  decimal cut times, the state field names, the surface wire names, and
+  unknown-field refusal on `Truth` and `Query`.
+- `an_enumerate_run_records_its_mode_and_the_pinned_spec_digest`
+  (`crates/eval-core/tests/manifest.rs`) parses a manifest with
+  `execution_mode: enumerate` and the pinned spec digest and shows the mode
+  enters the manifest digest.
+
+Kernel differential (`crates/kernel/tests/eligibility_spec.rs`, fixture in
+`crates/kernel/tests/support/eligibility_fixture.rs`, spec file at
+`crates/kernel/testdata/eligibility-spec-v1.json`):
+
+- `the_kernel_fixture_and_the_evaluator_table_pin_one_digest_in_judge_order`
+  (`wm-reducer-spec-fixture-digest-pinned`) reads the kernel-owned file,
+  expects its digest to equal `ELIGIBILITY_SPEC_DIGEST` and its value to equal
+  `serialize_spec()`, compares the predicate names to the order copied from
+  `judge` by hand, accepts a whitespace-mangled copy, and refuses a swapped
+  pair, an added verdict, and a changed cell.
+- `the_reducer_agrees_with_the_kernel_on_the_hand_authored_fact_tuple_table`
+  (`wm-reducer-agrees-with-judge-fact-tuples`) runs a 24-row hand-authored
+  table (every verdict class, the precedence pairs, the
+  superseded-and-invalidated cell, an automatically served object and labeled
+  ones, a sensitive artifact allowed locally and a secret artifact denied
+  everywhere, a never-written object) over both destinations and all three
+  surfaces in `enumerate` mode: the kernel's `judge_surface_eligibility` and
+  the evaluator's `judge_surface` must both return the row's literal verdict
+  and visibility and agree on `permits`, and the row's hand-authored facts
+  must equal the tuple projected from the store's `egress_candidates`. The
+  kernel assertion precedes the reducer assertion, so the kernel breaks first.
+  The destinations and surfaces come from the kernel's own
+  `ArtifactDestination::ALL` and `Surface::ALL`, every kernel enum is mapped
+  onto its mirror by an exhaustive match, and the surfaces seen must equal
+  the mirror's `Surface::ALL`, so a kernel variant the mirror lacks fails to
+  compile or fails the test rather than going untested.
+  The test records that the admission policy gives both automatic surfaces
+  one visibility today.
+- `every_adjacent_transposition_of_the_order_disagrees_with_the_table` shows
+  a wrong precedence is rejected by the table on its own terms for every
+  adjacent pair but the first, which no store object can separate.
+
+Fences (`wm-eval-core-dependency-fence`, `xc-core-oracles-take-values-only`,
+`mtr-eval-core-dev-only-member-host-graph-unchanged`):
+`scripts/forbid-test-support-dependencies.ts` now asserts `eval-core`'s normal
+dependency set is exactly `context-core`, `serde`, `serde_json`, `sha2`, and
+that no line of `crates/eval-core/src` names a product crate or a `std`
+effect module (`fs`, `path`, `process`, `time`, `net`, `env`, `io`), as a full
+path or as a member of a brace-grouped `use std::{...}`, with negative cases
+in its unit test; an empty scan is itself a finding, so the fence cannot pass
+on a wrong working directory or a moved crate; `eval-core` enters the kernel
+only under `[dev-dependencies]`; `cargo tree -p daemon -e normal` is
+unchanged.
+
 ## Gaps recorded here
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; manifests carry
   `adapter-ingested, production caller: none` once ingestion lands.
+- The reducer takes the served class as a query input because generated
+  worlds carry no admission events; the ingestion ticket decides what
+  `SourcePublisher::publish` actually admits and pins the value.
 - `MAX_EVENTS_PER_LOG` is a required `WorldConfig` field with no default, not
   a top-level manifest field; it reaches the manifest through
   `run_identity.config`. Promoting it to a named manifest field is a schema
