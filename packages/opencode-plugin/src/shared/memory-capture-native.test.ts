@@ -124,6 +124,53 @@ describe("native capture exchange", () => {
         expect(calls[1]).toMatchObject({ method: "memory.capture.submit", output: "{}" });
     });
 
+    it("stops between batches and cancels in-flight work when its signal aborts", async () => {
+        const aborted = new AbortController();
+        aborted.abort();
+        const calls: unknown[] = [];
+        await expect(
+            flushMemoryCapture(
+                {
+                    call: async ({ body }) => {
+                        calls.push(body);
+                        return work;
+                    },
+                },
+                scope,
+                noExecutor,
+                aborted.signal,
+            ),
+        ).resolves.toBe("pending");
+        expect(calls).toEqual([]);
+
+        const live = new AbortController();
+        const submitted: Array<Record<string, unknown>> = [];
+        const replies = [work];
+        const flushing = flushMemoryCapture(
+            {
+                call: async ({ body }) => {
+                    const request = body as Record<string, unknown>;
+                    if (request.method === "memory.capture.submit") submitted.push(request);
+                    return replies.shift() ?? { state: "pending" };
+                },
+            },
+            scope,
+            (_work, signal) =>
+                new Promise((_resolve, reject) => {
+                    signal.addEventListener("abort", () =>
+                        reject(new NativeCaptureError("cancelled")),
+                    );
+                }),
+            live.signal,
+        );
+        await tick();
+        live.abort();
+        await expect(flushing).rejects.toThrow("cancelled");
+        expect(submitted).toEqual([
+            expect.objectContaining({ lease: work.lease, error: "cancelled" }),
+        ]);
+    });
+
     it("still fails loudly on daemon store failures and malformed replies", async () => {
         for (const state of ["store_failed", "unavailable", "something_secret"]) {
             await expect(
@@ -425,5 +472,32 @@ describe("memory capture drain", () => {
         await drain.settle();
         expect(settled.sort()).toEqual(["/a:ready", "/b:ready"]);
         expect(failed).toHaveLength(1);
+    });
+
+    it("close cancels the running drain, waits for it, and refuses later schedules", async () => {
+        const daemon = controlledDaemon();
+        const settled: string[] = [];
+        const failed: unknown[] = [];
+        const drain = createMemoryCaptureDrain(daemon.client, noExecutor, {
+            onSettled: (_scope, result) => settled.push(result),
+            onFailed: (_scope, error) => failed.push(error),
+        });
+        drain.schedule(scope);
+        await tick();
+        expect(daemon.drained).toEqual(["/project"]);
+        let closed = false;
+        const closing = drain.close().then(() => {
+            closed = true;
+        });
+        await tick();
+        expect(closed).toBe(false);
+        daemon.waiting.shift()?.resolve({ state: "ready" });
+        await closing;
+        expect(drain.pending("/project")).toBeUndefined();
+        drain.schedule({ ...scope, projectRoot: "/other" });
+        await tick();
+        expect(daemon.drained).toEqual(["/project"]);
+        expect(settled).toEqual([]);
+        expect(failed).toEqual([]);
     });
 });

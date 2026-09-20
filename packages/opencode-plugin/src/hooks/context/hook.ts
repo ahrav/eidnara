@@ -330,6 +330,11 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             // The user's message is acknowledged first, so the transcript read below does not resend it.
             await pendingUserCaptures.get(sessionId)?.catch(() => undefined);
             const projectRoot = await sessionDirectoryFor(sessionId);
+            // That read can classify this session as a child; a child never checkpoints or drains.
+            if (excludedFromCapture(sessionId)) return;
+            // From here the user checkpoint may have queued a source, so the drain runs whatever
+            // happens to the transcript read or this checkpoint.
+            scope = { sessionId, projectRoot, model };
             const readTranscript = async (limit?: number): Promise<unknown[]> =>
                 normalizeSDKResponse(
                     await withTimeout(
@@ -356,14 +361,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                           since,
                           CAPTURE_TAIL_MESSAGES,
                       ) ?? (await readTranscript()));
-            if (excludedFromCapture(sessionId)) return;
-            scope = { sessionId, projectRoot, model };
-            await captureCheckpoint({
+            const accepted = await captureCheckpoint({
                 ...scope,
                 messages: openCodeCaptureMessages(sourceMessages, {
                     notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
                 }),
             });
+            // A disabled daemon wrote nothing; those messages stay ahead of the watermark.
+            if (accepted !== "accepted") return;
             const final = openCodeLastFinalMessageId(sourceMessages);
             if (final !== undefined) captureWatermark.set(sessionId, final);
         } catch (error) {

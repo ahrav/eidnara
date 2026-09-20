@@ -77,9 +77,9 @@ describe("memory capture checkpoint", () => {
                 return response;
             },
         });
-        await expect(capture({ ...scope, messages: [message] })).resolves.toBeUndefined();
+        await expect(capture({ ...scope, messages: [message] })).resolves.toBe("disabled");
         response = { state: "accepted" };
-        await capture({ ...scope, messages: [message] });
+        await expect(capture({ ...scope, messages: [message] })).resolves.toBe("accepted");
         expect(calls).toHaveLength(2);
     });
 });

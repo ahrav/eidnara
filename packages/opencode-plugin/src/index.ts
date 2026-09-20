@@ -212,13 +212,22 @@ const server: Plugin = async (ctx) => {
                     // best-effort
                 }
                 // Every reload builds a new client, so the old one is torn down here; otherwise its socket, channel poller, route handles, and ring mappings stay cached for the process lifetime.
-                moduleClient.disconnect();
-                // The private projects are process-global; a reloaded instance prepares fresh ones on demand.
-                void disposeNativeCaptureProjects(ctx.client).catch((error) => {
-                    log(`[eidnara] native capture project cleanup failed: ${error}`);
-                });
+                // A capture drain still running would redial that transport on its next daemon call
+                // and prepare fresh private projects nobody disposes, so it stops first.
+                void (eidnara?.memoryCaptureDrain.close() ?? Promise.resolve())
+                    .catch((error) => {
+                        log(`[eidnara] native capture drain stop failed: ${error}`);
+                    })
+                    .then(() => {
+                        moduleClient.disconnect();
+                        // The private projects are process-global; a reloaded instance prepares fresh ones on demand.
+                        return disposeNativeCaptureProjects(ctx.client);
+                    })
+                    .catch((error) => {
+                        log(`[eidnara] native capture project cleanup failed: ${error}`);
+                    });
                 log(
-                    "[eidnara] instance disposed — stopped RPC server and disconnected the daemon transport",
+                    "[eidnara] instance disposed — stopped RPC server; stopping capture and disconnecting the daemon transport",
                 );
             },
         }),

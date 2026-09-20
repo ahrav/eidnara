@@ -427,6 +427,45 @@ describe("eidnara hook", () => {
             expect(client.tui.showToast).not.toHaveBeenCalled();
         });
 
+        it("re-offers messages a disabled daemon did not write once capture is enabled again", async () => {
+            useTempDataHome("capture-disabled-watermark-");
+            let enabled = false;
+            const fake = createFakeModuleClient(({ method }) => ({
+                state:
+                    method === "memory.capture.next" ? "ready" : enabled ? "accepted" : "disabled",
+            }));
+            const { hook } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            const idle = { event: { type: "session.idle", properties: { sessionID: SESSION } } };
+            await hook.event(idle);
+            await hook.memoryCaptureDrain.settle();
+            enabled = true;
+            await hook.event(idle);
+            await hook.memoryCaptureDrain.settle();
+            expect(capturedMessages(fake).map((message) => message.id)).toEqual([
+                "native-answer",
+                "native-answer",
+            ]);
+        });
+
+        it("drains queued work even when the transcript read fails", async () => {
+            useTempDataHome("capture-transcript-read-failed-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "ready" : "accepted",
+            }));
+            const { hook, client } = createCaptureHook(fake, []);
+            client.session.messages = mock(async () => {
+                throw new Error("transcript unavailable");
+            }) as never;
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls.map((call) => call.method)).toEqual(["memory.capture.next"]);
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
         it("isolates a toast that throws synchronously from the idle lifecycle hook", async () => {
             useTempDataHome("capture-toast-throws-");
             const fake = createFakeModuleClient(() => ({ state: "store_failed" }));
