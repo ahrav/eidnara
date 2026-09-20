@@ -2067,6 +2067,18 @@ fn derived(
 // Opening the production gate must rewrite the witnesses below; a constant assertion makes that a compile error rather than a silent pass.
 const _: () = assert!(!PRODUCTION_SELECTION_OPEN);
 
+/// A class the selector walks but the resolver treats as native would be targeted at its own descriptor, so its owner's retraction would never be consulted; a class the resolver treats as decision-derived but the selector skips would never be reviewed. Every class must fall on the same side of both.
+#[test]
+fn the_selected_classes_are_exactly_the_decision_derived_classes() {
+    for class in OccurrenceClass::ALL {
+        assert_eq!(
+            decision_derived(class),
+            MEMORY_CLASSES.contains(&class),
+            "{class:?} is selected and decision-derived together or not at all"
+        );
+    }
+}
+
 #[test]
 fn canonical_and_promoted_descriptors_resolve_to_their_originating_decision_and_target_it() {
     let fixture = Fixture::open();
