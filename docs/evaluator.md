@@ -344,10 +344,12 @@ dependencies and never names a kernel type, and
 `scripts/forbid-test-support-dependencies.ts` now asserts both facts (the
 closed dependency set with no build script and the library root under `src/`,
 and no path into another workspace
-crate, `rusqlite`, `tokio`, or a `std` effect module (`fs`, `path`, `process`,
+crate, any eval-core dependency outside the closed set (dev-dependencies
+included), `rusqlite`, `tokio`, or a `std` effect module (`fs`, `path`, `process`,
 `time`, `net`, `env`, `io`, `os`, `thread`) in the core's source; the crate list comes
-from `cargo metadata` and includes any Cargo rename eval-core gives a fenced
-crate, so a new workspace crate is fenced without editing the script. Paths are caught whether written as a full path or inside a brace-grouped
+from `cargo metadata` under the names Rust code uses (Cargo renames
+included), so a new workspace crate or dev-dependency is fenced without editing
+the script. Paths are caught whether written as a full path or inside a brace-grouped
 `use std::{...}`; renaming a crate root or globbing `std` is refused so no
 alias or bare name can hide an effect path, `extern crate` of a fenced crate
 is refused, `#[path]` and `include*!` are refused so no source enters from

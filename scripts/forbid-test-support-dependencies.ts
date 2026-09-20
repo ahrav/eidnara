@@ -11,8 +11,8 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Paths a sans-I/O core must not name: every other workspace crate outside its
- * closed dependency set, the external effect crates below, and the std effect
+ * Paths a sans-I/O core must not name: every crate outside its closed
+ * dependency set (see `productCrates`) and the std effect
  * modules, whether written as a full path (`std::fs::read`) or as a member of a
  * brace-grouped `use std::{...}` list. Rebinding a root is refused outright:
  * renaming it (`std as s`, `std::{self as s}`, `extern crate kernel as k`) or
@@ -27,21 +27,23 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
 const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io|os|thread";
 const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
 
-/** Crate names as Rust paths spell them: every local package except eval-core and its closed set. */
+/**
+ * Crate names as Rust paths spell them: every local package, every dependency
+ * of eval-core outside its closed set (dev-dependencies included, under the
+ * rename Rust code uses), and the external effect crates.
+ */
 export function productCrates(metadata: CargoMetadata): string[] {
     const local = metadata.packages.filter((pkg) => pkg.source === null).map((pkg) => pkg.name);
-    const fenced = new Set([...local, ...EXTERNAL_EFFECT_CRATES]);
-    // A Cargo rename (`engine = { package = "storage" }`) is the name source uses.
-    const renames = (metadata.packages.find((pkg) => pkg.name === "eval-core")?.dependencies ?? [])
-        .filter((dep) => dep.rename && fenced.has(dep.name))
-        .map((dep) => dep.rename as string);
-    return [...local, ...renames]
+    const deps = (metadata.packages.find((pkg) => pkg.name === "eval-core")?.dependencies ?? [])
+        .filter((dep) => !EVAL_CORE_DEPENDENCIES.has(dep.name))
+        .map((dep) => dep.rename ?? dep.name);
+    return [...new Set([...local, ...deps, ...EXTERNAL_EFFECT_CRATES])]
         .filter((name) => name !== "eval-core" && !EVAL_CORE_DEPENDENCIES.has(name))
         .map((name) => name.replaceAll("-", "_"));
 }
 
 function forbiddenCoreSource(crates: readonly string[]): RegExp {
-    const product = [...crates, ...EXTERNAL_EFFECT_CRATES].join("|");
+    const product = crates.join("|");
     return new RegExp(
         [
             `\\b(${product})::`,

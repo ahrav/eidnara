@@ -193,7 +193,7 @@ describe("forbiddenDependencyEdges", () => {
 });
 
 describe("eval-core fences", () => {
-    const crates = ["kernel", "daemon", "storage"];
+    const crates = ["kernel", "daemon", "storage", "tokio"];
     const core = (dependencies: MetadataDependency[]): CargoMetadata => ({
         workspace_root: "/workspace",
         packages: [{ name: "eval-core", source: null, dependencies }],
@@ -347,7 +347,7 @@ describe("eval-core fences", () => {
         ).toEqual(["a.rs:2: extern crate kernel as k;", "a.rs:3: use {serde::Serialize, storage as st};"]);
     });
 
-    test("fences every local package and eval-core's Cargo renames of them", () => {
+    test("fences every local package and every eval-core dependency outside the closed set", () => {
         const metadata: CargoMetadata = {
             workspace_root: "/workspace",
             packages: [
@@ -360,6 +360,7 @@ describe("eval-core fences", () => {
                         dep({ name: "tokio", rename: "rt", kind: "dev" }),
                         dep({ name: "serde_json", rename: "sj", kind: "dev" }),
                         dep({ name: "proptest", rename: "pt", kind: "dev" }),
+                        dep({ name: "reqwest", kind: "dev" }),
                     ],
                 },
                 { name: "context-core", source: null, dependencies: [] },
@@ -368,7 +369,16 @@ describe("eval-core fences", () => {
                 { name: "serde", source: "registry+x", dependencies: [] },
             ],
         };
-        expect(productCrates(metadata).sort()).toEqual(["engine", "rt", "shm_transport", "storage"]);
+        expect(productCrates(metadata).sort()).toEqual([
+            "engine",
+            "pt",
+            "reqwest",
+            "rt",
+            "rusqlite",
+            "shm_transport",
+            "storage",
+            "tokio",
+        ]);
     });
 
     test("rejects pulling source from outside the scanned tree", () => {
