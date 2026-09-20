@@ -17,39 +17,19 @@ use retrieval::eligibility::Authority;
 use retrieval::fusion::{Lane, RawScore};
 use storage::GuardedConn;
 use support::query_route::{
-    DIMENSION, Fixture, GENERATION, QUERY, dense_reference, entry_ids, limits, request_budget, unit,
+    DIMENSION, Fixture, GENERATION, QUERY, dense_reference, entry_ids, limits, query_vector,
+    request_budget, vector_for,
 };
 use tokio_util::sync::CancellationToken;
 
 fn dense_limits() -> DenseLimits {
-    DenseLimits {
-        k: NonZeroUsize::new(8).unwrap(),
-        page_rows: NonZeroUsize::new(4).unwrap(),
-        max_rows: NonZeroUsize::new(64).unwrap(),
-        unit_norm_tolerance: 1e-3,
-    }
+    support::query_route::dense_limits(8)
 }
 
 fn with_dense() -> QueryRouteLimits {
     let mut limits = limits();
     limits.dense = Some(dense_limits());
     limits
-}
-
-fn vector_for(occurrence_id: &str) -> Vec<f32> {
-    let seed = occurrence_id.bytes().fold(0u32, |acc, b| {
-        acc.wrapping_mul(31).wrapping_add(u32::from(b))
-    });
-    let mut raw = [0.0f32; DIMENSION as usize];
-    for (i, slot) in raw.iter_mut().enumerate() {
-        let bit = (seed >> (i * 3)) & 0b111;
-        *slot = 0.2 + bit as f32 * 0.1;
-    }
-    unit(raw)
-}
-
-fn query_vector() -> Vec<f32> {
-    unit([0.9, 0.1, 0.6, 0.2, 0.3, 0.7, 0.1, 0.4])
 }
 
 fn run(

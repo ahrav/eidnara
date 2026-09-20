@@ -117,7 +117,7 @@ pub use memory_reviewer_hold::{
     MemoryReviewerHoldRefusal, REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
 };
 #[cfg(feature = "test-support")]
-pub use open::OpenPhase;
+pub use open::{ClassificationChange, OpenPhase};
 pub use open::{KernelError, KernelStore, kernel_baseline_digest};
 pub use outbox::{ConsumerAbandonment, OutboxEntry, OutboxPruneResult};
 pub use retention::{

@@ -159,6 +159,15 @@ impl PackingTrace {
         self.payload_loads
     }
 
+    /// A read row can still be excluded, skipped, or refused later.
+    pub fn read_occurrences(&self) -> impl Iterator<Item = OccurrenceId> + '_ {
+        self.events.iter().filter_map(|event| match event {
+            StageEvent::Required(RequiredEvent::Read, Some(occurrence))
+            | StageEvent::Optional(OptionalEvent::Read, Some(occurrence)) => Some(*occurrence),
+            _ => None,
+        })
+    }
+
     /// Candidate-retrieving lanes call this; the packer never does.
     pub fn note_retrieval_call(&mut self) {
         self.retrieval_calls += 1;

@@ -3,7 +3,7 @@
 
 mod support;
 
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -20,22 +20,11 @@ use retrieval::packing::{OptionalBound, OptionalBounds, RequiredContextFailure};
 use retrieval::{Tombstone, TombstoneReason, tombstone_occurrence};
 use support::packing::{
     Fixture, ToolSpan, accounting_bounds, bounds, byte_profile, required_render_total, tool_range,
-    tool_span, while_connection_is_held,
+    tool_span, while_connection_is_held, wide,
 };
 
 const REQUIRED: ToolSpan = tool_span("req", "1", "required bytes\n");
 const PARENT: &str = "0123456789abcdefghij";
-
-fn wide() -> OptionalBounds {
-    OptionalBounds {
-        max_fused_candidates: NonZeroUsize::new(16).unwrap(),
-        max_parents: NonZeroUsize::new(16).unwrap(),
-        max_spans_per_parent: NonZeroUsize::new(16).unwrap(),
-        max_payload_loads: NonZeroUsize::new(16).unwrap(),
-        max_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
-        max_item_bytes: NonZeroU64::new(1 << 19).unwrap(),
-    }
-}
 
 fn optional(span: &ToolSpan) -> OptionalRequest {
     OptionalRequest {

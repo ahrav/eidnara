@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 5] = [
+pub const MARKERS: [Marker; 12] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -30,12 +30,44 @@ pub const MARKERS: [Marker; 5] = [
         name: "ing_observation_time_inert",
         test: "crates/daemon/tests/eval_ingestion.rs::observation_time_is_inert_for_identity_and_eligibility",
     },
+    Marker {
+        name: "ldg_injection_exact_page_bound",
+        test: "crates/daemon/tests/eval_ledger.rs::exact_page_bound_loses_the_rule_at_the_exact_lane",
+    },
+    Marker {
+        name: "ldg_injection_lexical_accepted_bound",
+        test: "crates/daemon/tests/eval_ledger.rs::lexical_accepted_bound_loses_the_rule_at_the_lexical_lane",
+    },
+    Marker {
+        name: "ldg_injection_dense_k_bound",
+        test: "crates/daemon/tests/eval_ledger.rs::dense_k_bound_loses_the_rule_at_the_dense_lane",
+    },
+    Marker {
+        name: "ldg_injection_eligibility_retracted",
+        test: "crates/daemon/tests/eval_ledger.rs::a_retired_object_loses_the_rule_at_eligibility",
+    },
+    Marker {
+        name: "ldg_injection_fusion_union_bound",
+        test: "crates/daemon/tests/eval_ledger.rs::fused_union_bound_loses_the_rule_at_fusion",
+    },
+    Marker {
+        name: "ldg_injection_selection_result_rows",
+        test: "crates/daemon/tests/eval_ledger.rs::result_rows_bound_loses_the_rule_at_selection",
+    },
+    Marker {
+        name: "ldg_injection_packing_skipped",
+        test: "crates/daemon/tests/eval_ledger.rs::optional_budget_loses_the_rule_at_packing",
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoverageError {
     Unregistered(String),
-    Incomplete { missing: BTreeSet<&'static str> },
+    Incomplete {
+        missing: BTreeSet<&'static str>,
+    },
+    /// No registered marker's test path starts with the suite prefix.
+    EmptySuite(String),
 }
 
 debug_display!(CoverageError);
@@ -60,12 +92,21 @@ impl Coverage {
         &self.fired
     }
 
-    /// `Ok` only when every registered marker fired; a missing entry is
-    /// `Incomplete`, never a pass.
-    pub fn complete(&self) -> Result<(), CoverageError> {
-        let missing: BTreeSet<&'static str> = MARKERS
+    /// `Ok` only when every registered marker whose test path starts with
+    /// `suite` fired; a missing entry is `Incomplete`, never a pass, and a
+    /// prefix that selects no marker is `EmptySuite`. An empty `suite` names
+    /// the whole registry.
+    pub fn complete(&self, suite: &str) -> Result<(), CoverageError> {
+        let owned: Vec<&'static str> = MARKERS
             .iter()
+            .filter(|marker| marker.test.starts_with(suite))
             .map(|marker| marker.name)
+            .collect();
+        if owned.is_empty() {
+            return Err(CoverageError::EmptySuite(suite.to_string()));
+        }
+        let missing: BTreeSet<&'static str> = owned
+            .into_iter()
             .filter(|name| !self.fired.contains(name))
             .collect();
         if missing.is_empty() {

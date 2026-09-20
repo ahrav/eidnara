@@ -18,7 +18,7 @@ use kernel::{
     ScopeTermSpec, Sensitivity, SourceClass, TaintClass,
 };
 use retrieval::fusion::OccurrenceId;
-use retrieval::packing::{RequiredBounds, RequiredRequest};
+use retrieval::packing::{OptionalBounds, RequiredBounds, RequiredRequest};
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, persist_occurrences};
 use sha2::{Digest, Sha256};
 use storage::{
@@ -321,6 +321,18 @@ pub fn persist(conn: &GuardedConn<'_>, spans: &[ToolSpan]) {
         1,
     )
     .unwrap();
+}
+
+/// Optional bounds no fixture in this suite reaches.
+pub fn wide() -> OptionalBounds {
+    OptionalBounds {
+        max_fused_candidates: NonZeroUsize::new(16).unwrap(),
+        max_parents: NonZeroUsize::new(16).unwrap(),
+        max_spans_per_parent: NonZeroUsize::new(16).unwrap(),
+        max_payload_loads: NonZeroUsize::new(16).unwrap(),
+        max_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        max_item_bytes: NonZeroU64::new(1 << 19).unwrap(),
+    }
 }
 
 pub fn bounds(token_limit: u64) -> RequiredBounds<ClaudeTokens> {

@@ -194,7 +194,7 @@ impl fmt::Debug for KernelStore {
 }
 
 #[must_use = "dropping the guard immediately closes the window before the change runs"]
-pub(super) struct ClassificationChange<'a> {
+pub struct ClassificationChange<'a> {
     generation: &'a AtomicU64,
 }
 
@@ -487,6 +487,22 @@ impl KernelStore {
         ClassificationChange {
             generation: &self.classification_generation,
         }
+    }
+
+    /// Holds the classification window open without changing any artifact, so
+    /// every eligibility snapshot taken meanwhile has no reusable generation.
+    /// Production openers serialize through the writer lock; this hook does
+    /// not, so it refuses to open while another window is live, where a second
+    /// increment would read as a closed window.
+    #[cfg(feature = "test-support")]
+    pub fn hold_classification_change_for_test(&self) -> ClassificationChange<'_> {
+        assert!(
+            self.classification_generation
+                .load(Ordering::SeqCst)
+                .is_multiple_of(2),
+            "a classification window is already open"
+        );
+        self.begin_classification_change()
     }
 
     /// Polls `candidates` from `start` until one is free or `limit` says stop,

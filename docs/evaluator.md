@@ -4,8 +4,8 @@
 evaluator: the run manifest, run identity, residue rules, the surface census
 pins, the generated world model (keyed draws, the choice tape, the event log,
 and the step drive), the eligibility spec, the bitemporal reducer, the
-occurrence identity rule, the fixture renderer, and the coverage-marker
-registry. It is sans-I/O. Every function takes values and returns values;
+occurrence identity rule, the fixture renderer, the stage ledger, and the
+coverage-marker registry. It is sans-I/O. Every function takes values and returns values;
 the runner shell owns processes, stores, clocks, temp roots, and the build
 sub-record.
 
@@ -480,17 +480,125 @@ failure). `observation_time_ms` is always at or after the valid time, so
 generated fixtures never trip the one-hour `MAX_REVISION_LEAD_MS` refusal;
 the boundary is proved with a hand-built unit.
 
+## Stage ledger
+
+`Ledger<S>` joins value-level observations of one request's stages into a
+`StageVerdict`. A `Stage` type lists its stages in production order (`ALL`;
+a stage's position in it is the only ordinal the ledger uses) and gives each a
+`StageKind`: a `Source` produces candidates in parallel with the other sources,
+a `Filter` receives what the stages before it kept and may drop some.
+`ChainStage` is the activated query route and packer: `Exact`, `Lexical`,
+`Dense` (sources), then `Eligibility`, `Fusion`, `Selection` (revalidation and
+the response cap), and `Packing` (filters). The surface-1 stage list stays a
+census pin until its ledger lands.
+
+An `Observation` is one production return as values: the stage, a sequence
+number (the highest sequence is the stage's output), the shell's token for the
+`CommitReadIncarnation` the return was judged under (`None` when the return
+carries none), and `Evidence`: the `Candidates` the stage kept, bounded by
+`MAX_CANDIDATES_PER_STAGE_OBSERVATION` (1024, the kernel batch, pinned equal
+to `kernel::MAX_ELIGIBILITY_CANDIDATES` by the seam probe) and refused above
+it, or `Unjoinable` when the return describes no reusable state. The fields are
+private, so the bound holds for every observation a ledger sees;
+`Observation::at` relabels one for the self-test's misattribution control. The
+ledger keys observations by (ordinal, sequence), so the fold is the same in
+every arrival order; an identical repeat is a no-op and a different observation
+at the same key is a contradiction, after which that key reads as unjoinable in
+either order. Presence is three-valued: `NotReached` (no observation),
+`ReachedEvidenceAbsent`, `Reached`; `presence` returns `None` for an
+unjoinable stage, never absence.
+
+The shell owns the required list and the terminal stage: each `Required`
+names an occurrence and the source stage it must enter through, and
+`verdict(required, stale, through)` names the stage the run was meant to
+reach. A required occurrence's path is its entry, then every later filter up
+to `through`; other sources are not its path. The verdict is the earliest
+event the observations support: `FirstLoss(stage)` at the first stage on the
+path whose output lacks the occurrence; `StaleIngress(stage)` when a stale
+occurrence is present at `through`, naming the stage where it first appeared
+(stale evidence the chain removed before `through` is `Clean`); at equal
+ordinals the loss is named; `Clean` only when every required occurrence is
+present at `through`. A filter passes only what it received, so presence at a
+later filter proves presence at an unjoinable one before it; an absence right
+behind an unjoinable stage, an unjoinable stage with no later sighting, an
+entry or terminal that was never reached, a contradiction, and two incarnation
+tokens in one fold are all `Indeterminate`. A stage that ends the request
+reports an empty output and is a loss.
+
+`Completed` pairs a verdict with the store's persisted
+`database_incarnation_id`; `Completed::agrees_with` compares two folds'
+verdicts and refuses `CrossStore` when the ids differ, so a restart that keeps
+the database incarnation keeps comparability and a restore does not.
+
+### Production taps
+
+The route returns richer values and nothing else changes: `execute` is
+`admit_lanes` then `select`, and the handler and the evaluator share that one
+path. `Admitted` carries the lane statuses, the `DeclaredLanes` rankings, an
+`ExactReport`, and the request context the lanes were judged under, so
+`select` cannot be handed another. `ExactReport` is the exact lane's live rows
+before admission plus an `ExactAdmission`: `NotJudged` (the lane ended before
+admission or read nothing), `Judged` (every row under one reusable snapshot),
+`Moved` (a batch's state differed from the first batch's or described no
+reusable window; the report covers that batch alone), or `KernelError`.
+`QueryOutcome` carries the same `ExactReport` and the revalidation
+`EligibilityReport` over every fused entry. `PackingTrace::read_occurrences`
+names the occurrences either packer phase read.
+`KernelStore::hold_classification_change_for_test` (feature `test-support`)
+holds the classification window open so every eligibility snapshot taken
+meanwhile has no reusable generation; it refuses to open a second window,
+because production openers serialize through the writer lock and this hook
+does not. The `before_phase` closure is unchanged and is not a ledger channel.
+
+### Ledger shell
+
+`crates/daemon/tests/eval_ledger.rs` maps the returns onto the chain:
+`Exact` is the exact report's rows, or `Unjoinable` when the lane ended before
+reading; `Lexical` and `Dense` are their lane rankings, or `Unjoinable` when
+the lane ended unavailable; `Eligibility` is the exact report's eligible
+verdicts plus the lexical and dense rankings (those lanes judge inside
+retrieval), or `Unjoinable` when the exact admission is `Moved` or
+`KernelError` or a lexical or dense lane ended unavailable; `Fusion` is every
+entry revalidation judged; `Selection` is the entries the response carries.
+A refusal after admission is an empty output at fusion (`fused_union`) or at
+selection (`response_bytes`, `response_measure`); every other refusal
+discards what fusion produced and is `Unjoinable` at fusion. `Packing` is the
+required items plus every member of every `Charged::Range` in the closed
+ledger, joined through the admitted group the range labels. The shell numbers
+each distinct `CommitReadIncarnation` in first-seen order as the observation
+token, and the terminal stage is `Selection` for a query-only run and
+`Packing` once the packer ran.
+
+Seven injections, one per stage, each classify to their stage and record a
+`ldg_` marker only after asserting their preconditions: the exact page bound,
+the lexical accepted bound, the dense `k` bound, a retired object, the fused
+union bound, the result-rows cap, and the optional packing budget. The suite
+also shows that a classification window held from admission or from fusion
+folds as unjoinable (the verdict is `Indeterminate`, never a loss at
+eligibility or selection), that an exact lane which ends after reading leaves
+eligibility unjoinable, that reports from two kernel stores carry two
+incarnation tokens and fold `Indeterminate`, that the observing shell and a
+direct `execute` produce byte-equal bodies and equal packing admissions, that a
+shell which swaps two stage labels names the wrong stage, and that missing
+coverage is `Incomplete`. The query route and the packer are activated
+components with no production caller; these results are labelled
+`test-only` and describe no shipped behavior.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,
 each with the test that records it. A test records a marker through
 `Coverage::record` only after asserting the case's preconditions, never the
-invariant; `record` refuses an unregistered name, and `Coverage::complete` is
-`Incomplete { missing }` unless every registered marker fired. The first entry
-is the four-seam lifecycle witness. The daemon suite `eval_ingestion.rs` owns
-every current marker, checks uniqueness and that each named test exists, and
-runs the completeness proof on every pass: all scenarios once, then
-`Coverage::complete`.
+invariant; `record` refuses an unregistered name, and `Coverage::complete(suite)`
+is `Incomplete { missing }` unless every registered marker whose test path
+starts with `suite` fired, and `EmptySuite` when the prefix selects no marker
+(an empty prefix names the whole registry). Each
+daemon suite owns the markers whose tests it holds: `eval_ingestion.rs` the
+`ing_` markers and `eval_ledger.rs` the `ldg_` markers. Each suite checks that
+every marker it owns names one of its scenarios and runs its completeness
+proof on every pass: all scenarios once, then `Coverage::complete` over its
+own prefix. A whole-registry proof would need one run to reach both suites'
+preconditions and does not exist yet.
 
 ## Ingestion shell
 

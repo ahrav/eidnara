@@ -20,7 +20,7 @@ use retrieval::dense::{
     Metric, OracleBounds, OracleRefusal, exhaustive,
 };
 use retrieval::eligibility::{
-    Authority, AuthorityMoved, Disposition, OccurrenceCandidate, judge_tracked,
+    Authority, AuthorityMoved, Disposition, EligibilityReport, OccurrenceCandidate, judge_tracked,
 };
 use retrieval::exact::{
     ExactQuery, Family, Intent, LookupContext, LookupRefusal, Selector, SelectorBounds,
@@ -253,6 +253,30 @@ pub struct QueryOutcome {
     pub fused: Fused,
     pub truncated: bool,
     pub body: Value,
+    pub exact: ExactReport,
+    /// The kernel's verdicts on every fused entry; `None` when nothing was fused.
+    pub revalidation: Option<EligibilityReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactReport {
+    /// Live rows in page order, before admission.
+    pub rows: Vec<OccurrenceCandidate>,
+    pub admission: ExactAdmission,
+}
+
+/// What the kernel said about the exact lane's rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactAdmission {
+    /// The lane ended before admission, or read no live row.
+    NotJudged,
+    /// Every row judged under one reusable snapshot, in `rows` order.
+    Judged(EligibilityReport),
+    /// A batch's state differed from the first batch's or described no
+    /// reusable window; the report covers that batch alone and its verdicts
+    /// join nothing.
+    Moved(EligibilityReport),
+    KernelError,
 }
 
 struct LaneOutput {
@@ -774,8 +798,15 @@ fn lexical_read(
 }
 
 enum Judged {
-    Eligible(BTreeSet<OccurrenceId>),
-    Moved(&'static str),
+    Eligible {
+        eligible: BTreeSet<OccurrenceId>,
+        /// Every batch's verdicts under the first batch's snapshot and incarnation, which
+        /// every later batch matched or the judgement would have moved; `None` when no
+        /// candidate was judged.
+        report: Option<EligibilityReport>,
+    },
+    /// The batch whose state differed from the first batch's, with its reason.
+    Moved(&'static str, EligibilityReport),
     Kernel,
 }
 
@@ -792,7 +823,7 @@ fn judge_eligible(
 ) -> Result<Judged, QueryFailure> {
     let mut snapshot = None;
     let mut incarnation = None;
-    let mut eligible = BTreeSet::new();
+    let mut merged: Option<EligibilityReport> = None;
     for (index, batch) in candidates.chunks(limits.validation_batch.get()).enumerate() {
         if index > 0 {
             between_batches()?;
@@ -813,20 +844,28 @@ fn judge_eligible(
         };
         match moved {
             Some(AuthorityMoved::Incarnation) => {
-                return Ok(Judged::Moved("kernel_incarnation_changed"));
+                return Ok(Judged::Moved("kernel_incarnation_changed", report));
             }
-            Some(AuthorityMoved::Snapshot) => return Ok(Judged::Moved("snapshot_changed")),
+            Some(AuthorityMoved::Snapshot) => {
+                return Ok(Judged::Moved("snapshot_changed", report));
+            }
             None => {}
         }
-        eligible.extend(
-            batch
-                .iter()
-                .zip(report.occurrences)
-                .filter(|(_, judged)| judged.disposition == Disposition::Eligible)
-                .map(|((occurrence, _), _)| *occurrence),
-        );
+        match &mut merged {
+            Some(merged) => merged.occurrences.extend(report.occurrences),
+            None => merged = Some(report),
+        }
     }
-    Ok(Judged::Eligible(eligible))
+    let eligible = candidates
+        .iter()
+        .zip(merged.iter().flat_map(|report| &report.occurrences))
+        .filter(|(_, judged)| judged.disposition == Disposition::Eligible)
+        .map(|((occurrence, _), _)| *occurrence)
+        .collect();
+    Ok(Judged::Eligible {
+        eligible,
+        report: merged,
+    })
 }
 
 /// Judges the exact lane's rows under the request's authority before any position is assigned, so a row the caller may not see earns no position and consumes no union slot.
@@ -837,35 +876,55 @@ fn admit_exact(
     budget: &SharedBudget,
     read: LaneRead<ExactHits>,
     terms: &mut BTreeMap<OccurrenceId, OccurrenceCandidate>,
-) -> Result<LaneOutput, QueryFailure> {
+) -> Result<(LaneOutput, ExactReport), QueryFailure> {
     let ExactHits { hits, status } = match read {
         LaneRead::Pending(hits) => hits,
         LaneRead::Ended(status) => {
-            return Ok(LaneOutput {
-                ranking: None,
-                status,
-            });
+            return Ok((
+                LaneOutput {
+                    ranking: None,
+                    status,
+                },
+                ExactReport {
+                    rows: Vec::new(),
+                    admission: ExactAdmission::NotJudged,
+                },
+            ));
         }
     };
+    let rows: Vec<OccurrenceCandidate> =
+        hits.iter().map(|scoped| scoped.candidate.clone()).collect();
     let candidates: Vec<(OccurrenceId, &OccurrenceCandidate)> = hits
         .iter()
         .map(|scoped| (scoped.hit.occurrence, &scoped.candidate))
         .collect();
-    let eligible = match judge_eligible(kernel, authority, limits, budget, &candidates, || {
-        check(budget).map_err(Into::into)
-    })? {
-        Judged::Eligible(eligible) => eligible,
-        Judged::Moved(reason) => return Ok(LaneOutput::unavailable(reason)),
-        Judged::Kernel => return Ok(LaneOutput::unavailable("kernel")),
-    };
-    let mut ranked = Vec::new();
-    for scoped in hits {
-        if eligible.contains(&scoped.hit.occurrence) {
-            terms.insert(scoped.hit.occurrence, scoped.candidate);
-            ranked.push(scoped.hit);
-        }
-    }
-    Ok(LaneOutput::ranked(Lane::Exact, ranked, status))
+    let (output, admission) =
+        match judge_eligible(kernel, authority, limits, budget, &candidates, || {
+            check(budget).map_err(Into::into)
+        })? {
+            Judged::Eligible { eligible, report } => {
+                let mut ranked = Vec::new();
+                for scoped in hits {
+                    if eligible.contains(&scoped.hit.occurrence) {
+                        terms.insert(scoped.hit.occurrence, scoped.candidate);
+                        ranked.push(scoped.hit);
+                    }
+                }
+                (
+                    LaneOutput::ranked(Lane::Exact, ranked, status),
+                    report.map_or(ExactAdmission::NotJudged, ExactAdmission::Judged),
+                )
+            }
+            Judged::Moved(reason, report) => (
+                LaneOutput::unavailable(reason),
+                ExactAdmission::Moved(report),
+            ),
+            Judged::Kernel => (
+                LaneOutput::unavailable("kernel"),
+                ExactAdmission::KernelError,
+            ),
+        };
+    Ok((output, ExactReport { rows, admission }))
 }
 
 fn admit_lexical(
@@ -929,6 +988,20 @@ struct Scanned {
     dense: DenseHits,
 }
 
+/// The lanes' admitted rankings before fusion assigns positions, with the
+/// request context they were judged under so [`select`] cannot be given another.
+pub struct Admitted<'a> {
+    pub statuses: [LaneStatus; Lane::ORDER.len()],
+    pub lanes: DeclaredLanes,
+    pub exact: ExactReport,
+    terms: BTreeMap<OccurrenceId, OccurrenceCandidate>,
+    kernel: &'a KernelStore,
+    authority: Authority<'a>,
+    limits: &'a QueryRouteLimits,
+    budget: &'a SharedBudget,
+}
+
+/// [`admit_lanes`] then [`select`]; the handler and the evaluator share this one path.
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
     projection: &SearchProjection,
@@ -940,6 +1013,31 @@ pub fn execute(
     dense: DenseLane<'_>,
     mut before_phase: impl FnMut(Phase),
 ) -> Result<QueryOutcome, QueryFailure> {
+    let admitted = admit_lanes(
+        projection,
+        kernel,
+        authority,
+        limits,
+        budget,
+        query,
+        dense,
+        &mut before_phase,
+    )?;
+    select(admitted, before_phase)
+}
+
+/// Reads and judges every declared lane; ends at the admission phase.
+#[allow(clippy::too_many_arguments)]
+pub fn admit_lanes<'a>(
+    projection: &SearchProjection,
+    kernel: &'a KernelStore,
+    authority: Authority<'a>,
+    limits: &'a QueryRouteLimits,
+    budget: &'a SharedBudget,
+    query: &str,
+    dense: DenseLane<'_>,
+    mut before_phase: impl FnMut(Phase),
+) -> Result<Admitted<'a>, QueryFailure> {
     before_phase(Phase::Probes);
     check(budget)?;
     let intent = classify(query, selector_bounds(limits))
@@ -1005,7 +1103,8 @@ pub fn execute(
     before_phase(Phase::Admission);
     check(budget)?;
     let mut terms: BTreeMap<OccurrenceId, OccurrenceCandidate> = BTreeMap::new();
-    let exact = admit_exact(kernel, authority, limits, budget, scanned.exact, &mut terms)?;
+    let (exact, exact_report) =
+        admit_exact(kernel, authority, limits, budget, scanned.exact, &mut terms)?;
     let lexical = admit_lexical(kernel, authority, budget, scanned.lexical, &mut terms)?;
     terms.extend(dense_candidates);
     if exact.ranking.is_none() && lexical.ranking.is_none() && dense.ranking.is_none() {
@@ -1019,14 +1118,40 @@ pub fn execute(
     ] {
         statuses[lane_slot(lane)] = status;
     }
-
-    before_phase(Phase::Fusion);
-    check(budget)?;
     let rankings = [exact.ranking, lexical.ranking, dense.ranking]
         .into_iter()
         .flatten();
     let lanes =
         DeclaredLanes::admit(rankings).map_err(|_| QueryFailure::Unavailable("duplicate_lane"))?;
+    Ok(Admitted {
+        statuses,
+        lanes,
+        exact: exact_report,
+        terms,
+        kernel,
+        authority,
+        limits,
+        budget,
+    })
+}
+
+/// Fuses, revalidates, and materializes the response from admitted lanes.
+pub fn select(
+    admitted: Admitted<'_>,
+    mut before_phase: impl FnMut(Phase),
+) -> Result<QueryOutcome, QueryFailure> {
+    let Admitted {
+        statuses,
+        lanes,
+        exact: exact_report,
+        terms,
+        kernel,
+        authority,
+        limits,
+        budget,
+    } = admitted;
+    before_phase(Phase::Fusion);
+    check(budget)?;
     let fused = fuse(lanes, &limits.fusion, limits.fused_union)
         .map_err(|_| QueryFailure::Unavailable("fused_union"))?;
 
@@ -1043,14 +1168,15 @@ pub fn execute(
             (occurrence, terms)
         })
         .collect();
-    let eligible = match judge_eligible(kernel, authority, limits, budget, &candidates, || {
-        before_phase(Phase::Revalidation);
-        check(budget).map_err(Into::into)
-    })? {
-        Judged::Eligible(eligible) => eligible,
-        Judged::Moved(reason) => return Err(QueryFailure::Unavailable(reason)),
-        Judged::Kernel => return Err(QueryFailure::Unavailable("eligibility")),
-    };
+    let (eligible, revalidation) =
+        match judge_eligible(kernel, authority, limits, budget, &candidates, || {
+            before_phase(Phase::Revalidation);
+            check(budget).map_err(Into::into)
+        })? {
+            Judged::Eligible { eligible, report } => (eligible, report),
+            Judged::Moved(reason, _) => return Err(QueryFailure::Unavailable(reason)),
+            Judged::Kernel => return Err(QueryFailure::Unavailable("eligibility")),
+        };
     let fused = fused.filter(|entry| eligible.contains(entry.occurrence()));
 
     before_phase(Phase::Materialization);
@@ -1091,6 +1217,8 @@ pub fn execute(
         fused,
         truncated,
         body,
+        exact: exact_report,
+        revalidation,
     })
 }
 
