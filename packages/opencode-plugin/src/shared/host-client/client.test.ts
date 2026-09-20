@@ -608,14 +608,43 @@ describe("HostClient", () => {
         expect(client.authenticated).toBeNull();
     });
 
-    test("integer lexemes a double cannot reproduce arrive exact through routed and control responses", async () => {
+    test("a default routed response decodes as JSON.parse does, so module payloads forwarded to OpenCode never carry a bigint", async () => {
+        const { client, daemon } = await connected();
+        const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);
+        await daemon.acceptRouteOpen();
+        const handle = await opening;
+
+        // A transform recipe inserts session message values verbatim; a model-written integer past 2^53 must round as before rather than refuse the recipe.
+        const routed = client.request(handle, { method: "transform" });
+        const request = await daemon.nextRequest();
+        daemon.respondText(
+            request.header,
+            '{"status":"ok","operations":[{"op":"insert","values":[{"role":"assistant","tool_input":{"seed":9007199254740993,"stamp_ns":1758400000000000000}}]}]}',
+        );
+        const recipe = (await routed) as {
+            operations: { values: { tool_input: Record<string, unknown> }[] }[];
+        };
+        const inserted = recipe.operations[0]?.values[0]?.tool_input;
+        expect(inserted?.seed).toBe(9007199254740992);
+        expect(inserted?.stamp_ns).toBe(1758400000000000000);
+        expect(typeof inserted?.seed).toBe("number");
+        expect(() => JSON.stringify(recipe)).not.toThrow();
+
+        // A lexeme wider than 64 bits is still valid JSON on the default path; only exact decoding refuses it.
+        const wide = client.request(handle, { method: "read" });
+        const wideRequest = await daemon.nextRequest();
+        daemon.respondText(wideRequest.header, '{"n":100000000000000000001}');
+        expect(((await wide) as { n: unknown }).n).toBe(1e20);
+    });
+
+    test("integer lexemes a double cannot reproduce arrive exact through exact-integer routed and control responses", async () => {
         const events: HostDiagnosticsEvent[] = [];
         const { client, daemon } = await connected({ diagnostics: (event) => events.push(event) });
         const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);
         await daemon.acceptRouteOpen();
         const handle = await opening;
 
-        const routed = client.request(handle, { method: "read" });
+        const routed = client.request(handle, { method: "read" }, { exactIntegers: true });
         const request = await daemon.nextRequest();
         daemon.respondText(
             request.header,
@@ -652,7 +681,7 @@ describe("HostClient", () => {
         expect(exactI64(value.u64_max)).toBeNull();
 
         // A lexeme wider than any 64-bit integer refuses the whole body as invalid JSON; the diagnostics carry no payload.
-        const refused = client.request(handle, { method: "read" });
+        const refused = client.request(handle, { method: "read" }, { exactIntegers: true });
         const wide = await daemon.nextRequest();
         daemon.respondText(wide.header, '{"n":100000000000000000001}');
         const error = await rejection(refused);

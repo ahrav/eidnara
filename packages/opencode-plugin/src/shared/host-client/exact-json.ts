@@ -13,7 +13,10 @@ export const U64_MAX = 18446744073709551615n;
 export const I64_MIN = -9223372036854775808n;
 const I64_MAX = 9223372036854775807n;
 
-/** `parseExactJson` preserves integer lexemes exactly and throws `SyntaxError` for invalid JSON. */
+/**
+ * `parseExactJson` preserves integer lexemes exactly and throws `SyntaxError` for invalid JSON.
+ * Throws when `JSON.parse` gives the reviver no source text for an integer-valued double past the safe range, because the value may already be rounded.
+ */
 export function parseExactJson(text: string): unknown {
     return JSON.parse(text, exactIntegerReviver);
 }
@@ -26,7 +29,14 @@ function exactIntegerReviver(
 ): unknown {
     if (typeof value !== "number" || Number.isSafeInteger(value)) return value;
     const source = context?.source;
-    if (source === undefined || !INTEGER_LEXEME.test(source)) return value;
+    if (source === undefined) {
+        // Without the lexeme an integer-valued double past the safe range cannot be told from a rounded one; refusing keeps a rounded value from passing as exact.
+        if (Number.isInteger(value)) {
+            throw new SyntaxError("integer lexeme unavailable to the exact decoder");
+        }
+        return value;
+    }
+    if (!INTEGER_LEXEME.test(source)) return value;
     if (source.length - (source.startsWith("-") ? 1 : 0) > MAX_INTEGER_DIGITS) {
         throw new SyntaxError("integer lexeme wider than 64 bits");
     }
@@ -40,7 +50,9 @@ function isWireInteger(value: unknown): value is WireInteger {
 function exactIntegerWithin(value: unknown, min: bigint, max: bigint): WireInteger | null {
     if (!isWireInteger(value)) return null;
     const exact = typeof value === "bigint" ? value : BigInt(value);
-    return exact < min || exact > max ? null : value;
+    if (exact < min || exact > max) return null;
+    // Unsafe integer-valued numbers return as `bigint`; only safe integers retain `number` form.
+    return typeof value === "number" && Number.isSafeInteger(value) ? value : exact;
 }
 
 /** Accepts nonnegative counts through 2^53 inclusive. */

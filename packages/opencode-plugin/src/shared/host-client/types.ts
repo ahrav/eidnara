@@ -128,6 +128,12 @@ export interface RequestOptions {
     signal?: AbortSignal;
     /** When `expectedDaemonId` is set, the client rejects before publication unless it matches the active authenticated daemon ID. */
     expectedDaemonId?: Uint8Array;
+    /**
+     * `exactIntegers` decodes the response with `parseExactJson`: an integer lexeme past the safe
+     * range arrives as a `bigint` or refuses the body. Absent, the body decodes as `JSON.parse`
+     * does, which module payloads forwarded to OpenCode require since `JSON.stringify` rejects a `bigint`.
+     */
+    exactIntegers?: boolean;
 }
 
 /* */

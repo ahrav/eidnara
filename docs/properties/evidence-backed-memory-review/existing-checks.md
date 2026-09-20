@@ -61,9 +61,11 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
-| `integer lexemes a double cannot reproduce arrive exact through routed and control responses` | `packages/opencode-plugin/src/shared/host-client/client.test.ts` | raw tokens at the extrema and around 2^53 through `request` and `hostStatus`; count, u64, and i64 domains on the decoded values | unaudited |
+| `integer lexemes a double cannot reproduce arrive exact through exact-integer routed and control responses` | `packages/opencode-plugin/src/shared/host-client/client.test.ts` | raw tokens at the extrema and around 2^53 through `request` under `exactIntegers` and through `hostStatus`; count, u64, and i64 domains on the decoded values; a 21-digit lexeme refused with no token in diagnostics | unaudited |
+| `a default routed response decodes as JSON.parse does, so module payloads forwarded to OpenCode never carry a bigint` | same | a `transform` recipe whose inserted message value carries 2^53+1 and a nanosecond timestamp decodes to rounded numbers and survives `JSON.stringify`; a 21-digit lexeme decodes as `1e20` | unaudited |
 | `routeOpen omits the ambient consumer identity only when asked, for that bind alone` | same | the ambient pair is sent by default, omitted with `consumerIdentity: null`, and sent again on the next default bind; the environment is unchanged | unaudited |
-| `exact-json.test.ts` | `packages/opencode-plugin/src/shared/host-client/` | the reviver on every value shape, the width bound, the three domains, human and raw JSON output | unaudited |
+| `stream items decode exactly only under the exact_json response mode` | `packages/opencode-plugin/src/shared/host-client/connection.test.ts` | the same stream item is a rounded `number` under the default mode and a `bigint` under `exact_json` | unaudited |
+| `exact-json.test.ts` | `packages/opencode-plugin/src/shared/host-client/` | the reviver on every value shape, the width bound, refusal when `JSON.parse` withholds the lexeme, the three domains including an unsafe integer-valued double, human and raw JSON output | unaudited |
 
 ## Suspiciously quiet areas
 
@@ -85,10 +87,13 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
   durable rows are read through the same handles that wrote them.
 - No test decodes a maximum-size response body full of twenty-digit tokens;
   the width bound is read from code.
-- A reviver makes `JSON.parse` walk the value recursively, so nesting a few
-  thousand levels deep now fails as invalid JSON where the plain parse
-  accepted it; the daemon's serializer nests no deeper than 128, and no test
-  pins the bound.
+- A reviver makes `JSON.parse` walk the value recursively, so on the exact path
+  nesting a few thousand levels deep fails as invalid JSON where the plain
+  parse accepts it; the daemon's serializer nests no deeper than 128, and no
+  test pins the bound.
+- No test drives a real `transform` pass end to end with a message value past
+  2^53; the default-mode decode is asserted at the host client, and the recipe
+  consumer's rejection of a `bigint` is read from `validateJsonValue`.
 - No test drives observer open, `module_projects`, and a worker pass in one
   process; the view and the pass are exercised in two tests.
 - No test records a `temporary_capture` member and adopts it; the member

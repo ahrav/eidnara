@@ -40,6 +40,36 @@ describe("parseExactJson", () => {
     test("invalid JSON throws like JSON.parse", () => {
         expect(() => parseExactJson("{")).toThrow(SyntaxError);
     });
+
+    test("a runtime that withholds the lexeme refuses an unsafe integer-valued double instead of presenting it as exact", () => {
+        const original = JSON.parse;
+        // Strips the reviver's source-text context, as an engine without JSON.parse source access would.
+        JSON.parse = ((
+            text: string,
+            reviver?: (this: unknown, key: string, value: unknown) => unknown,
+        ) =>
+            original(
+                text,
+                reviver &&
+                    function (this: unknown, key: string, value: unknown) {
+                        return reviver.call(this, key, value);
+                    },
+            )) as typeof JSON.parse;
+        try {
+            expect(() => parseExactJson("9007199254740993")).toThrow(SyntaxError);
+            expect(() => parseExactJson('{"n":[1,9007199254740992]}')).toThrow(SyntaxError);
+            expect(
+                parseExactJson('{"a":9007199254740991,"b":1.5,"c":-0,"d":"9007199254740993"}'),
+            ).toEqual({
+                a: 9007199254740991,
+                b: 1.5,
+                c: -0,
+                d: "9007199254740993",
+            });
+        } finally {
+            JSON.parse = original;
+        }
+    });
 });
 
 describe("domains", () => {
@@ -64,6 +94,15 @@ describe("domains", () => {
         expect(exactI64(-9223372036854775809n)).toBeNull();
         expect(exactI64(9223372036854775807n)).toBe(9223372036854775807n);
         expect(exactI64(9223372036854775808n)).toBeNull();
+    });
+
+    test("an in-range integer-valued double outside the safe range comes back as the exact bigint, never as the double", () => {
+        // 2^60 is exactly representable, yet `String(2 ** 60)` prints 1152921504606847000.
+        expect(exactU64(2 ** 60)).toBe(1152921504606846976n);
+        expect(exactI64(-(2 ** 60))).toBe(-1152921504606846976n);
+        expect(exactU64(9007199254740992)).toBe(9007199254740992n);
+        expect(formatExactInteger(exactU64(2 ** 60) as bigint)).toBe("1152921504606846976");
+        expect(exactCount(9007199254740992)).toBe(9007199254740992);
     });
 });
 

@@ -24,7 +24,7 @@
 | Dependency record edited or removed | yes | direct SQLite `replace` or `json_remove` on the witness |
 | Unterminated, cancelled, or `not_dispatched` marker before a run | yes | `dispatch_memory_reviewer_attempt` without a terminal, a cancelled first run, or a recheck clock past the attempt deadline |
 | Uncited member retired after selection | yes | `retire_observation` on a disclosed but uncited source |
-| Raw integer tokens at the extrema and beyond 64 bits | yes | `FakeDaemon.respondText` |
+| Raw integer tokens at the extrema and beyond 64 bits | yes | `FakeDaemon.respondText`; a `JSON.parse` wrapper that withholds the reviver's source text |
 | Observer bound on a dormant root, beside a live harness, and on a second root; each route closing first | yes | `bind_route` and `unbind_route` with harness `cli` |
 | Selection dated at or after the queue deadline | yes | `read_selected_review_input` with `selected_at >= deadline`; the ledger cannot record one |
 
@@ -39,7 +39,7 @@
 | `durable-private-result-recovers-without-model-refire` | broker lost; record edited; record removed; member retired; completed marker without a row | yes |
 | `unknown-dispatch-does-not-authorize-resend` | unterminated marker; cancelled marker; `not_dispatched` marker | yes |
 | `uncited-owner-lineage-remains-read-authority` | uncited member retired after selection; fabricated canonical member | yes |
-| `status-sanitizer-preserves-inclusive-integer-domain` | tokens at 2^53±1, the u64 and i64 extrema, `-0`, a width past 64 bits | yes |
+| `status-sanitizer-preserves-inclusive-integer-domain` | tokens at 2^53±1, the u64 and i64 extrema, `-0`, a width past 64 bits, a withheld lexeme, 2^53+1 inside a default-mode recipe value | yes |
 | `observer-route-does-not-change-background-rosters` | observer alone; observer newer than a live harness; observer-only second root; both close orders; worker pass over an empty view | yes |
 
 ## Coverage checks to add
