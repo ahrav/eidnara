@@ -356,6 +356,8 @@ fn restart_start_failure_from_stopped_reports_false_false() {
     assert_eq!(effects(&value), (false, false));
 }
 
+/// A permanently held transaction lock is reported as `lifecycle_busy` once the lock wait expires.
+/// The `EIDNARA_HOST_TEST_LOCK_WAIT_MS` override keeps this expiry test short.
 #[cfg(target_os = "linux")]
 #[test]
 fn start_reports_lifecycle_busy_while_transaction_lock_is_held() {
@@ -378,12 +380,55 @@ fn start_reports_lifecycle_busy_while_transaction_lock_is_held() {
         "test holds the transaction lock"
     );
 
-    let out = run(&data, &["start"]);
+    let started = Instant::now();
+    let out = run_with_envelope_and_env(
+        &data,
+        &["start"],
+        None,
+        &[("EIDNARA_HOST_TEST_LOCK_WAIT_MS", "200")],
+    );
+    let elapsed = started.elapsed();
     assert_eq!(out.code, 1);
     let value = out.json();
     // A held transaction lock names no observed incarnation, so the state stays `stopped`.
     assert_result(&value, "start", false, "stopped", "lifecycle_busy");
     assert_eq!(value["remediation"], "wait_and_retry");
+    if cfg!(debug_assertions) {
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "a shortened lock wait must report expiry promptly, took {elapsed:?}"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn start_waits_for_a_concurrent_lifecycle_transaction_to_finish() {
+    require_debug_build();
+    let root = tempfile::tempdir().expect("root");
+    let data = root.path().join("data");
+    let payload = root.path().join("payload");
+    write_payload(&payload);
+    let holder = host_runtime::LifecycleTransactionLock::acquire_exclusive(Some(&data))
+        .expect("hold the transaction lock");
+    let waiting_root = data.clone();
+    let waiter = std::thread::spawn(move || {
+        run(
+            &waiting_root,
+            &["start", "--payload-dir", payload.to_str().expect("payload")],
+        )
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    drop(holder);
+    let out = waiter.join().expect("startup waiter joins");
+    let stopped = run(&data, &["stop"]);
+    assert_eq!(
+        stopped.code, 0,
+        "cleanup: {} {}",
+        stopped.stdout, stopped.stderr
+    );
+    assert_eq!(out.code, 0, "startup: {} {}", out.stdout, out.stderr);
+    assert_result(&out.json(), "start", true, "running", "started");
 }
 
 /// Pins concrete check ids per state and holds every emitted id to the contract's `cli.check_ids`.

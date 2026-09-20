@@ -860,6 +860,46 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_memory_reviewer
     );
 }
 
+/// A live read judges the row's deadline against the store clock as read, not as the call began: a wait for a reader connection that crosses the queue deadline refuses `Expired` instead of returning the Sensitive payload late. A selected read keeps its selection time.
+#[test]
+fn a_live_read_that_waits_for_a_reader_across_the_queue_deadline_is_expired() {
+    let fixture = Fixture::open();
+    let now = now_ms();
+    let deadline = now + 1_500;
+    fixture.stage_proposal("job-1", 1, now, deadline);
+    let identity = provisional_result_identity("job-1", 1);
+    let reference = kernel::ReviewStagedReference {
+        database_incarnation_id: incarnation(fixture.root()),
+        candidate_id: identity.candidate_id.clone(),
+        payload_digest: fixture.proposal_digest(),
+    };
+    let binding = fixture.review_binding("job-1", 1);
+    let held = std::sync::Barrier::new(2);
+    let (live, selected) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            fixture
+                .store
+                .hold_readers_for_test(&held, std::time::Duration::from_millis(3_000));
+        });
+        held.wait();
+        // Both calls start before the deadline and acquire a reader only after it has passed.
+        let live = fixture.store.read_review_input(&reference, &binding, now);
+        let selected = fixture
+            .store
+            .read_selected_review_input(&reference, deadline - 1);
+        (live, selected)
+    });
+    assert!(
+        now_ms() >= deadline,
+        "the reader hold outlasted the deadline"
+    );
+    assert_eq!(
+        live.unwrap_err(),
+        kernel::ReviewReadError::Refused(kernel::ReviewReadRefusal::Expired)
+    );
+    assert_eq!(selected.unwrap().lifecycle.queue_deadline_at, deadline);
+}
+
 #[test]
 fn review_transfer_requires_the_execution_generation_and_a_live_proposal_deadline() {
     let fixture = Fixture::open();

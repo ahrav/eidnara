@@ -112,6 +112,8 @@ pub struct Revalidation<'a> {
     pub hold: HeldUnder<'a>,
     pub destination: kernel::ArtifactDestination,
     pub now: i64,
+    /// The instant a staged subject's queue deadline is judged at: `now` for an adoption, the selection time for a selected read.
+    pub staged_at: i64,
 }
 
 /// Revalidates a sealed proposal row from its dependency record alone. Refuses a row without a record, a record whose canonical bytes do not re-encode to their digest, a record whose marker is not a completed attempt at the row's generation with the recorded digests, any member whose live kind, revision, owner, owner revision, scope, or egress no longer matches, and a record whose members do not produce exactly the payload's disclosed inputs and ancestry. Returns the disclosed evidence ids the hold validated.
@@ -125,7 +127,10 @@ pub fn revalidate(
         return Err(Verdict::changed());
     };
     let dependencies = row.dependencies.as_ref().ok_or_else(Verdict::changed)?;
-    if dependencies.generation != revalidation.run.generation {
+    // The version fences a durable shape this build does not read; the union digest must be the one the marker recorded, or the union is not the one the recorded request disclosed.
+    if dependencies.version != REVIEW_DEPENDENCIES_VERSION
+        || dependencies.generation != revalidation.run.generation
+    {
         return Err(Verdict::changed());
     }
     let union = PolicyUnion::decode(&dependencies.union_canonical, &dependencies.union_digest)
@@ -139,6 +144,7 @@ pub fn revalidate(
             )
             && attempt.marker.body_digest == dependencies.body_digest
             && attempt.marker.policy_union_digest == dependencies.marker_union_digest
+            && attempt.marker.policy_union_digest == dependencies.union_digest
     });
     if !marker_matches {
         return Err(Verdict::changed());
@@ -174,6 +180,7 @@ pub fn revalidate(
                 revalidation.store,
                 alias.as_str(),
                 revalidation.now,
+                revalidation.staged_at,
                 revalidation.hold,
             )
             .map_err(|refusal| Verdict::from_refusal(refusal.code))?
@@ -320,5 +327,15 @@ mod tests {
             Verdict::from_refusal(RefusalCode::Store),
             Verdict::Store(_)
         ));
+        // A hold cap is capacity, not a changed input: transient here as on a live read.
+        for cap in [
+            kernel::MemoryReviewerHoldRefusal::ProjectHoldLimit,
+            kernel::MemoryReviewerHoldRefusal::HostHoldLimit,
+        ] {
+            assert!(matches!(
+                Verdict::from_hold(kernel::MemoryReviewerHoldError::Refused(cap)),
+                Verdict::Store(_)
+            ));
+        }
     }
 }

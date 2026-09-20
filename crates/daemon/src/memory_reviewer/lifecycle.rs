@@ -230,20 +230,27 @@ pub struct Pass {
     pub healthy: bool,
 }
 
-/// Releases every live review hold whose result no completed receipt selects and no in-progress receipt can still select. A hold survives the transfer envelope on its own deadline, so a receipt the sweep closed, a losing generation, or a settlement that failed to release would otherwise keep evidence held until the review expiry; the queue deadline the row keeps already makes such a result unreadable, and this pass ends its retention. Returns the number released.
+/// Releases every live review hold of this Memory Store incarnation whose result no completed receipt selects and no in-progress receipt can still select. A hold survives the transfer envelope on its own deadline, so a receipt the sweep closed, a losing generation, or a settlement that failed to release would otherwise keep evidence held until the review expiry; the queue deadline the row keeps already makes such a result unreadable, and this pass ends its retention. A hold of another store incarnation is left alone: a Kernel restored beside a replaced store has no receipt for any of them, and that absence is not orphaning. `cancelled` is read before every Kernel release; `None` means it fired, and the releases already made keep their effects. Otherwise returns the number released.
 pub fn reconcile_review_holds(
     store: &MemoryStore,
     kernel: &kernel::KernelStore,
     now_ms: i64,
-) -> Result<usize, String> {
-    // The Kernel admits at most this many active holds host-wide, so one listing covers every live review hold.
-    let holds = kernel
-        .list_active_review_holds(now_ms, kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST)
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<usize>, String> {
+    let incarnation = store
+        .memory_reviewer_store_incarnation()
         .map_err(|error| error.to_string())?;
+    // The Kernel admits at most this many active holds host-wide, so one listing covers every live review hold.
+    let holds: Vec<_> = kernel
+        .list_active_review_holds(now_ms, kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|hold| hold.binding.memstore_incarnation == incarnation)
+        .collect();
     if holds.is_empty() {
-        return Ok(0);
+        return Ok(Some(0));
     }
-    // Every Memory Store read finishes before the first Kernel release.
+    // Both Memory Store sets are read once, ahead of any Kernel release, so filtering the holds performs no store probes; the selected set is asked for the listed holds' candidates only, so its size is bounded by the hold cap, not by the receipt ledger. The pending key carries no project: a receipt row names the Memory Store project, not the Kernel project digest of the root it ran under, so a same-identity receipt in another project keeps this project's hold until that receipt completes or the hold expires. Retention is the safe side; a release a live settlement still needs is the one this pass must never make.
     let pending: HashSet<(String, u64)> = store
         .in_progress_memory_reviewer_receipts()
         .map_err(|error| error.to_string())?
@@ -255,24 +262,28 @@ pub fn reconcile_review_holds(
             )
         })
         .collect();
-    let mut orphaned = Vec::new();
-    for hold in holds {
-        let key = (hold.binding.subject.clone(), hold.binding.generation);
-        if pending.contains(&key)
-            || store
-                .memory_reviewer_result_is_selected(
-                    &hold.binding.project_digest,
-                    &hold.binding.subject,
-                    hold.binding.generation,
-                )
-                .map_err(|error| error.to_string())?
-        {
-            continue;
-        }
-        orphaned.push(hold);
-    }
+    let selected: HashSet<(String, String, u64)> = store
+        .selected_memory_reviewer_results(holds.iter().map(|hold| hold.binding.subject.as_str()))
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect();
+    let orphaned: Vec<_> = holds
+        .into_iter()
+        .filter(|hold| {
+            let binding = &hold.binding;
+            !pending.contains(&(binding.subject.clone(), binding.generation))
+                && !selected.contains(&(
+                    binding.project_digest.clone(),
+                    binding.subject.clone(),
+                    binding.generation,
+                ))
+        })
+        .collect();
     let mut released = 0;
     for hold in orphaned {
+        if cancelled() {
+            return Ok(None);
+        }
         match kernel.release_review_hold(&hold.hold_id, &hold.binding) {
             Ok(()) => released += 1,
             // Released or expired between the listing and this call: nothing left to end.
@@ -283,7 +294,7 @@ pub fn reconcile_review_holds(
             Err(error) => return Err(error.to_string()),
         }
     }
-    Ok(released)
+    Ok(Some(released))
 }
 
 /// Returns whether capture expiry or staging maintenance advanced, or `None` when `cancelled` fired before a step.
@@ -348,19 +359,22 @@ pub fn sweep_and_sample(
         }
     };
     let mut advanced = swept_jobs + swept_selections > 0;
-    let mut healthy = true;
     if let Some(kernel) = kernel {
         if cancelled() {
             return None;
         }
-        // A reconciliation failure is reported but does not stop capture expiry, staging maintenance, or artifact reclamation below.
-        match reconcile_review_holds(store, kernel, now_ms) {
-            Ok(released) => advanced |= released > 0,
+        // A reconciliation failure is a failed step, but the Kernel's capture expiry, staging maintenance, and artifact reclamation below still run before the pass reports it.
+        let reconciled = match reconcile_review_holds(store, kernel, now_ms, cancelled) {
+            Ok(Some(released)) => {
+                advanced |= released > 0;
+                true
+            }
+            Ok(None) => return None,
             Err(error) => {
                 eprintln!("daemon: memory reviewer hold reconciliation failed: {error}");
-                healthy = false;
+                false
             }
-        }
+        };
         match kernel_slice(kernel, now_ms, cancelled) {
             Ok(Some(slice_advanced)) => advanced |= slice_advanced,
             Ok(None) => return None,
@@ -368,6 +382,9 @@ pub fn sweep_and_sample(
                 eprintln!("daemon: kernel staging maintenance failed: {error:?}");
                 return Some(unavailable(advanced));
             }
+        }
+        if !reconciled {
+            return Some(unavailable(advanced));
         }
     }
     if cancelled() {
@@ -384,7 +401,7 @@ pub fn sweep_and_sample(
                 facts: Some(facts),
             },
             advanced,
-            healthy,
+            healthy: true,
         },
         Err(error) => {
             eprintln!("daemon: memory_reviewer facts sample failed: {error}");
@@ -630,8 +647,9 @@ mod tests {
         let kernel_dir = tempfile::tempdir().unwrap();
         let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
         let t0 = crate::now_ms();
-        seed_retained_capture(&kernel_store, t0 + 1_000);
-        let sweep_at = t0 + 2_000;
+        // A minute of slack past the wall clock: the Kernel judges the deadline against its own clock at the write, and opening two stores on a loaded runner has taken longer than a second.
+        seed_retained_capture(&kernel_store, t0 + 60_000);
+        let sweep_at = t0 + 61_000;
         let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &|| false)
             .expect("not cancelled");
         assert!(pass.healthy);
@@ -1079,8 +1097,8 @@ mod tests {
             other => panic!("{other:?}"),
         };
         let (staged, binding) =
-            stage_review_input(&kernel_store, &expired.causal_identity, t0, t0 + 1_000);
-        let sweep_at = t0 + 2_000;
+            stage_review_input(&kernel_store, &expired.causal_identity, t0, t0 + 60_000);
+        let sweep_at = t0 + 61_000;
         let job_state = || {
             store
                 .lookup_memory_reviewer_job("git:p", &expired.causal_identity)
