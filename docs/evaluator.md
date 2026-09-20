@@ -13,10 +13,13 @@ sub-record.
   or tokio edge.
 - `eval-core` appears in the workspace only under `[dev-dependencies]`
   (`crates/daemon`). `scripts/forbid-test-support-dependencies.ts` rejects a
-  normal, build, or target-specific edge to it, rejects any such edge that
-  names a `*/test-support` feature, and rejects a `default` feature that
-  reaches a `*/test-support` entry through the package's own feature table.
-  The `gates` CI job runs the scan.
+  normal, build, or target-specific edge to it, and rejects any such edge whose
+  requested features turn on test-support in the target package, either by
+  naming a `*test-support` feature or by reaching one through the target's
+  feature table (a forwarding alias such as `bench = ["kernel/test-support"]`
+  counts). It also rejects a local package whose `default` feature enables its
+  own `test-support` or reaches a `*/test-support` entry. The `gates` CI job
+  runs the scan.
 - Digests come from `context_core::canonical_json::protocol_digest`, which is
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
@@ -51,7 +54,7 @@ The 24 required fields, sorted:
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `residue` | Every non-`Keep` field with its rule, including the manifest's own. |
 | `result_digest`, `witness_digest` | Lowercase hex SHA-256. |
-| `retry_lineage` | Prior `eval_run_id` values of retried attempts. |
+| `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
 | `schema` | `eval-manifest/v1`. |

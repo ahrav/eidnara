@@ -92,7 +92,6 @@ jobs:
               - 'docs/properties/search-projection/witness-matrix.md'
               - 'docs/properties/search-projection/spec-traceability.md'
               - 'docs/properties/search-projection/projection-schema.md'
-              - 'docs/properties/evaluator/**'
             native:
               - *workflow
               - *cargo
@@ -478,7 +477,9 @@ jobs:
       - name: Test-support features and eval-core stay in dev-dependencies
         # Feature unification enables a `*/test-support` edge for every build
         # of the dependent, so the scan reads every normal, build, and
-        # target-specific dependency table from `cargo metadata`.
+        # target-specific dependency table from `cargo metadata` and resolves
+        # each requested feature, and each `default`, through the target's
+        # feature table.
         run: bun scripts/forbid-test-support-dependencies.ts
 
   lint:

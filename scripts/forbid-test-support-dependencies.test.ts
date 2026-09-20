@@ -90,7 +90,48 @@ describe("forbiddenDependencyEdges", () => {
             "test-support": ["host-runtime/test-support"],
         };
         expect(forbiddenDependencyEdges(metadata)).toEqual([
+            "daemon [features] default enables test-support",
             "daemon [features] default reaches host-runtime/test-support through test-support",
         ]);
+    });
+
+    test("rejects a default feature that enables the package's own leaf test-support", () => {
+        const metadata = workspace([]);
+        metadata.packages[0]!.features = {
+            default: ["test-support"],
+            "test-support": [],
+        };
+        expect(forbiddenDependencyEdges(metadata)).toEqual([
+            "daemon [features] default enables test-support",
+        ]);
+    });
+
+    test("rejects a forwarding feature enabled from another package's normal table", () => {
+        const metadata = workspace([dep({ name: "host-runtime" })]);
+        metadata.packages[0]!.features = {
+            "direct-host-fixture": ["host-runtime/test-support"],
+            bench: ["fixtures"],
+            fixtures: ["test-support"],
+            "test-support": [],
+        };
+        metadata.packages.push({
+            name: "cli",
+            source: null,
+            dependencies: [
+                dep({ name: "daemon", features: ["direct-host-fixture"] }),
+                dep({ name: "daemon", kind: "build", features: ["bench"] }),
+                dep({ name: "daemon", kind: "dev", features: ["bench"] }),
+            ],
+        });
+        expect(forbiddenDependencyEdges(metadata)).toEqual([
+            "cli [build-dependencies] daemon enables test-support through bench",
+            "cli [dependencies] daemon reaches host-runtime/test-support through direct-host-fixture",
+        ]);
+    });
+
+    test("resolves edge features only against local packages", () => {
+        const metadata = workspace([dep({ name: "serde", features: ["derive"] })]);
+        metadata.packages[1]!.features = { derive: ["serde_derive/test-support"] };
+        expect(forbiddenDependencyEdges(metadata)).toEqual([]);
     });
 });

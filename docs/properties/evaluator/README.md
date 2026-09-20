@@ -111,10 +111,11 @@ Fresh versus aged transform goldens
 Placement fences (`scripts/forbid-test-support-dependencies.ts`, run in the
 `gates` CI job):
 
-- No normal, build, or target-specific dependency table names a
-  `*/test-support` feature or the dev-only `eval-core` package, and no
-  `default` feature reaches a `*/test-support` entry through a package's own
-  feature table.
+- No normal, build, or target-specific dependency table names the dev-only
+  `eval-core` package or requests a feature that turns on test-support in the
+  target package, directly or through a forwarding alias in the target's
+  feature table, and no local package's `default` feature enables its own
+  `test-support` or reaches a `*/test-support` entry.
 
 ## Gaps recorded here
 

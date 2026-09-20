@@ -434,6 +434,16 @@ fn manifest_consistency_refusals_name_their_cause() {
             field: "result_digest".to_string()
         })
     );
+    let mut lineage = manifest();
+    lineage.retry_lineage = vec!["77".repeat(32), "not-a-run-id".to_string()];
+    assert_eq!(
+        parse_manifest(&lineage.to_value()),
+        Err(ManifestError::MalformedDigest {
+            field: "retry_lineage[1]".to_string()
+        })
+    );
+    lineage.retry_lineage.pop();
+    assert!(parse_manifest(&lineage.to_value()).is_ok());
     assert!(
         manifest().digest().is_ok() && wrong_id.digest().is_err(),
         "digest re-parses before hashing"

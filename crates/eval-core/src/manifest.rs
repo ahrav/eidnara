@@ -293,21 +293,25 @@ impl Manifest {
             return Err(ManifestError::SampleOrderNotAPermutation);
         }
         let mut digests = vec![
-            ("result_digest", &self.result_digest),
-            ("witness_digest", &self.witness_digest),
-            ("tokenizer_profile.digest", &self.tokenizer_profile.digest),
+            ("result_digest".to_string(), &self.result_digest),
+            ("witness_digest".to_string(), &self.witness_digest),
+            (
+                "tokenizer_profile.digest".to_string(),
+                &self.tokenizer_profile.digest,
+            ),
         ];
         if let Attestation::Signed {
             signature_digest, ..
         } = &self.attestation
         {
-            digests.push(("attestation.signature_digest", signature_digest));
+            digests.push(("attestation.signature_digest".to_string(), signature_digest));
+        }
+        for (index, prior) in self.retry_lineage.iter().enumerate() {
+            digests.push((format!("retry_lineage[{index}]"), prior));
         }
         for (field, digest) in digests {
             if !is_lower_hex(digest, 64) {
-                return Err(ManifestError::MalformedDigest {
-                    field: field.to_string(),
-                });
+                return Err(ManifestError::MalformedDigest { field });
             }
         }
         for (arm, rates) in &self.arm_rates {
