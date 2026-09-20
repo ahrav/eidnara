@@ -89,6 +89,15 @@ struct CaptureOutput {
     decisions: Vec<MessageDecision>,
 }
 
+/// The batch parser's view: whole-document shape is typed once, and each
+/// decision stays untyped until its own source validates it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureDocument {
+    version: u32,
+    decisions: Vec<Value>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MessageDecision {
@@ -203,18 +212,22 @@ fn capture_json_text(text: &str) -> Result<&str, &'static str> {
 
 /// Each source owns its own durable job. A bad quotation for one source must
 /// not discard independently valid facts from another source in the batch.
+///
+/// Whole-document defects (schema, version, bounds, unknown or duplicate
+/// sources) refuse the batch; a defect inside one decision refuses only its
+/// source. Either refusal fails the affected jobs the same way.
 fn parse_capture_batch(
     text: &str,
     messages: &[CaptureMessage],
     existing: &[ExistingCaptureMemory],
 ) -> Result<Vec<Result<CapturedMessage, &'static str>>, &'static str> {
     validate_capture_messages(messages)?;
-    let document: Value = serde_json::from_str(capture_json_text(text)?)
+    let document: CaptureDocument = serde_json::from_str(capture_json_text(text)?)
         .map_err(|_| "capture output does not match the JSON schema")?;
-    let rows = document
-        .get("decisions")
-        .and_then(Value::as_array)
-        .ok_or("capture output requires decisions")?;
+    if document.version != CAPTURE_SCHEMA_VERSION {
+        return Err("capture output version is unsupported");
+    }
+    let rows = &document.decisions;
     if rows.len() > messages.len()
         || rows
             .iter()
@@ -247,16 +260,62 @@ fn parse_capture_batch(
                     row.get("message_id").and_then(Value::as_str) == Some(message.id.as_str())
                 })
                 .ok_or("capture output omits a source message")?;
-            let mut single = document.clone();
-            single["decisions"] = json!([row]);
-            let encoded =
-                serde_json::to_string(&single).map_err(|_| "capture output cannot be encoded")?;
-            parse_capture_output_with_existing(&encoded, std::slice::from_ref(message), existing)?
-                .into_iter()
-                .next()
-                .ok_or("capture output omits a source message")
+            let decision = MessageDecision::deserialize(row)
+                .map_err(|_| "capture output does not match the JSON schema")?;
+            validate_capture_memories(&decision.memories, message, existing, &mut BTreeSet::new())?;
+            Ok(CapturedMessage {
+                source_id: message.id.clone(),
+                memories: decision.memories,
+            })
         })
         .collect())
+}
+
+/// One source's proposed memories against its own text and the provided
+/// targets. `replaced` carries replacement uniqueness across the caller's scope.
+fn validate_capture_memories(
+    memories: &[CapturedMemory],
+    source: &CaptureMessage,
+    existing: &[ExistingCaptureMemory],
+    replaced: &mut BTreeSet<String>,
+) -> Result<(), &'static str> {
+    let mut distinct = BTreeSet::new();
+    for memory in memories {
+        if !MEMORY_CATEGORY_ORDER.contains(&memory.category.as_str()) {
+            return Err(
+                "capture category must be PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING",
+            );
+        }
+        if memory.content.trim().is_empty() || memory.content.len() > MAX_CAPTURE_MEMORY_BYTES {
+            return Err("capture memory content must be nonempty and at most 2048 bytes");
+        }
+        if memory.quote.trim().is_empty()
+            || memory.quote.len() > MAX_CAPTURE_MEMORY_BYTES
+            || !source.text.contains(&memory.quote)
+        {
+            return Err("capture memory must quote its source exactly in at most 2048 bytes");
+        }
+        if memory.replaces.is_some() && source.role != CaptureRole::User {
+            return Err("only user statements may replace captured memories");
+        }
+        if memory.replaces.is_some() && memory.duplicate_of.is_some() {
+            return Err("capture cannot both replace and duplicate a memory");
+        }
+        if let Some(target) = memory.replaces.as_ref().or(memory.duplicate_of.as_ref()) {
+            let Some(previous) = existing.iter().find(|previous| previous.id == *target) else {
+                return Err("capture names an unprovided memory target");
+            };
+            if memory.replaces.is_some()
+                && (!previous.can_replace || !replaced.insert(target.clone()))
+            {
+                return Err("capture target is protected or already replaced");
+            }
+        }
+        if !distinct.insert((memory.category.as_str(), memory.content.as_str())) {
+            return Err("capture output repeats a memory in one source");
+        }
+    }
+    Ok(())
 }
 
 fn parse_capture_output_with_existing(
@@ -289,42 +348,7 @@ fn parse_capture_output_with_existing(
         if count > MAX_CAPTURE_MEMORIES {
             return Err("capture output exceeds 64 memories");
         }
-        let mut distinct = BTreeSet::new();
-        for memory in &decision.memories {
-            if !MEMORY_CATEGORY_ORDER.contains(&memory.category.as_str()) {
-                return Err(
-                    "capture category must be PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING",
-                );
-            }
-            if memory.content.trim().is_empty() || memory.content.len() > MAX_CAPTURE_MEMORY_BYTES {
-                return Err("capture memory content must be nonempty and at most 2048 bytes");
-            }
-            if memory.quote.trim().is_empty()
-                || memory.quote.len() > MAX_CAPTURE_MEMORY_BYTES
-                || !source.text.contains(&memory.quote)
-            {
-                return Err("capture memory must quote its source exactly in at most 2048 bytes");
-            }
-            if memory.replaces.is_some() && source.role != CaptureRole::User {
-                return Err("only user statements may replace captured memories");
-            }
-            if memory.replaces.is_some() && memory.duplicate_of.is_some() {
-                return Err("capture cannot both replace and duplicate a memory");
-            }
-            if let Some(target) = memory.replaces.as_ref().or(memory.duplicate_of.as_ref()) {
-                let Some(previous) = existing.iter().find(|previous| previous.id == *target) else {
-                    return Err("capture names an unprovided memory target");
-                };
-                if memory.replaces.is_some()
-                    && (!previous.can_replace || !replaced.insert(target.clone()))
-                {
-                    return Err("capture target is protected or already replaced");
-                }
-            }
-            if !distinct.insert((memory.category.as_str(), memory.content.as_str())) {
-                return Err("capture output repeats a memory in one source");
-            }
-        }
+        validate_capture_memories(&decision.memories, source, existing, &mut replaced)?;
         if decisions
             .insert(decision.message_id, decision.memories)
             .is_some()
@@ -382,15 +406,21 @@ fn native_capture_fragments(
         offset += chunk.len();
         result
     };
-    for ch in texts()
-        .enumerate()
-        .flat_map(|(index, text)| (index > 0).then_some('\n').into_iter().chain(text.chars()))
-    {
-        if chunk.len() + ch.len_utf8() > CAPTURE_FRAGMENT_BYTES {
-            send(&chunk)?;
-            chunk.clear();
+    for (index, text) in texts().enumerate() {
+        for piece in [if index > 0 { "\n" } else { "" }, text] {
+            let mut pending = piece;
+            while !pending.is_empty() {
+                let room = CAPTURE_FRAGMENT_BYTES - chunk.len();
+                let take = pending.floor_char_boundary(room.min(pending.len()));
+                if take == 0 {
+                    send(&chunk)?;
+                    chunk.clear();
+                    continue;
+                }
+                chunk.push_str(&pending[..take]);
+                pending = &pending[take..];
+            }
         }
-        chunk.push(ch);
     }
     if !chunk.is_empty() {
         send(&chunk)?;
@@ -612,11 +642,13 @@ impl HandlerCore {
         {
             return respond(json!({"state":"disabled"}));
         }
-        let messages: Vec<CaptureMessage> =
-            match request.get("messages").cloned().map(serde_json::from_value) {
-                Some(Ok(messages)) => messages,
-                _ => return invalid_params_error("memory.capture requires messages"),
-            };
+        let messages: Vec<CaptureMessage> = match request
+            .get("messages")
+            .map(<Vec<CaptureMessage>>::deserialize)
+        {
+            Some(Ok(messages)) => messages,
+            _ => return invalid_params_error("memory.capture requires messages"),
+        };
         if let Err(error) = validate_capture_messages(&messages) {
             return invalid_params_error(error);
         }
@@ -756,61 +788,9 @@ impl CaptureWork {
             .filter(|word| word.chars().count() >= 3)
             .map(str::to_lowercase)
             .collect();
-        kernel_routes::blocking(move || {
-            let read = kernel_routes::read::read_visible(
-                &kernel,
-                &project,
-                kernel::Surface::ExplicitSearch,
-                None,
-                kernel_routes::read::RowSelection::DomainDecisions("memory"),
-            )
-            .map_err(|_| "kernel_unavailable")?;
-            let mut candidates: Vec<_> = read
-                .rows
-                .iter()
-                .filter_map(|row| {
-                    if row.object.sensitivity != kernel::Sensitivity::Normal {
-                        return None;
-                    }
-                    let decision = read.decisions.get(&row.object.object_id)?;
-                    if !MEMORY_CATEGORY_ORDER.contains(&decision.decision_kind.as_str())
-                        || decision.payload.summary.len() > MAX_CAPTURE_MEMORY_BYTES + 32
-                    {
-                        return None;
-                    }
-                    let score = decision
-                        .payload
-                        .summary
-                        .split(|ch: char| !ch.is_alphanumeric())
-                        .filter(|word| words.contains(&word.to_lowercase()))
-                        .count();
-                    Some((
-                        score,
-                        ExistingCaptureMemory {
-                            id: row.object.object_id.clone(),
-                            category: decision.decision_kind.clone(),
-                            content: decision.payload.summary.clone(),
-                            can_replace: row.object.source_id == "memory_capture"
-                                && row.visibility == kernel::SurfaceVisibility::Labeled,
-                            source_revision: row.object.source_revision,
-                            created_commit_seq: row.object.created_commit_seq,
-                        },
-                    ))
-                })
-                .collect();
-            candidates.sort_by(|a, b| {
-                b.0.cmp(&a.0)
-                    .then_with(|| b.1.created_commit_seq.cmp(&a.1.created_commit_seq))
-                    .then_with(|| a.1.id.cmp(&b.1.id))
-            });
-            Ok(candidates
-                .into_iter()
-                .take(64)
-                .map(|(_, memory)| memory)
-                .collect())
-        })
-        .await
-        .map_err(|_| "kernel_unavailable")?
+        kernel_routes::blocking(move || select_existing_memories(&kernel, &project, &words))
+            .await
+            .map_err(|_| "kernel_unavailable")?
     }
 
     /// Transport, provider, store, and kernel outcomes say nothing about the
@@ -881,6 +861,78 @@ impl CaptureWork {
         .await
         .map_err(|_| "kernel_unavailable")?
     }
+}
+
+/// The bounded candidate set for one batch: the 64 memory decisions sharing
+/// the most of the batch's lowercase words, newest first among ties.
+fn select_existing_memories(
+    kernel: &kernel::KernelStore,
+    project: &ProjectBinding,
+    words: &HashSet<String>,
+) -> Result<Vec<ExistingCaptureMemory>, &'static str> {
+    let read = kernel_routes::read::read_visible(
+        kernel,
+        project,
+        kernel::Surface::ExplicitSearch,
+        None,
+        kernel_routes::read::RowSelection::DomainDecisions("memory"),
+    )
+    .map_err(|_| "kernel_unavailable")?;
+    // Score borrows the read; only the 64 kept candidates are materialized.
+    let mut lowered = String::new();
+    let mut candidates: Vec<(usize, &kernel::VisibleRow, &kernel::DecisionRow)> = read
+        .rows
+        .iter()
+        .filter_map(|row| {
+            if row.object.sensitivity != kernel::Sensitivity::Normal {
+                return None;
+            }
+            let decision = read.decisions.get(&row.object.object_id)?;
+            if !MEMORY_CATEGORY_ORDER.contains(&decision.decision_kind.as_str())
+                || decision.payload.summary.len() > MAX_CAPTURE_MEMORY_BYTES + 32
+            {
+                return None;
+            }
+            let score = decision
+                .payload
+                .summary
+                .split(|ch: char| !ch.is_alphanumeric())
+                .filter(|word| {
+                    if word.is_ascii() {
+                        lowered.clear();
+                        lowered.push_str(word);
+                        lowered.make_ascii_lowercase();
+                        words.contains(lowered.as_str())
+                    } else {
+                        words.contains(&word.to_lowercase())
+                    }
+                })
+                .count();
+            Some((score, row, decision))
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| {
+                b.1.object
+                    .created_commit_seq
+                    .cmp(&a.1.object.created_commit_seq)
+            })
+            .then_with(|| a.1.object.object_id.cmp(&b.1.object.object_id))
+    });
+    Ok(candidates
+        .into_iter()
+        .take(64)
+        .map(|(_, row, decision)| ExistingCaptureMemory {
+            id: row.object.object_id.clone(),
+            category: decision.decision_kind.clone(),
+            content: decision.payload.summary.clone(),
+            can_replace: row.object.source_id == "memory_capture"
+                && row.visibility == kernel::SurfaceVisibility::Labeled,
+            source_revision: row.object.source_revision,
+            created_commit_seq: row.object.created_commit_seq,
+        })
+        .collect())
 }
 
 fn checked_capture_target(
@@ -1070,6 +1122,22 @@ mod tests {
         assert!(batch[1].is_err());
         // The strict whole-document interface still refuses incomplete results.
         assert!(parse_capture_output(&response.to_string(), &sources()).is_err());
+        // A shape defect inside one decision refuses only that source.
+        let mut malformed = output();
+        malformed["decisions"][0]["extra"] = json!(true);
+        let batch = parse_capture_batch(&malformed.to_string(), &sources(), &[]).unwrap();
+        assert!(batch[0].is_ok());
+        assert!(batch[1].is_err());
+        // Whole-document defects refuse the batch before any source is judged.
+        for (path, value) in [
+            ("version", json!(2)),
+            ("extra", json!(true)),
+            ("decisions", json!({})),
+        ] {
+            let mut document = output();
+            document[path] = value;
+            assert!(parse_capture_batch(&document.to_string(), &sources(), &[]).is_err());
+        }
     }
 
     #[test]
