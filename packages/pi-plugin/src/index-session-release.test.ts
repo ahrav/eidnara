@@ -252,6 +252,75 @@ describe("Pi daemon transport across runtime teardown", () => {
         }
     });
 
+    it("offers only entries appended after the last stored leaf, and rescans after a branch switch", async () => {
+        const bodies: Array<{ messages: Array<{ id: string }> }> = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                if (input.method === "memory.capture")
+                    bodies.push(input.body as { messages: Array<{ id: string }> });
+                return { state: input.method === "memory.capture" ? "accepted" : "ready" };
+            },
+        );
+        const entry = (id: string) => ({
+            type: "message",
+            id,
+            message: { role: "user", content: `Fact ${id}.` },
+        });
+        try {
+            const { agentEnd } = await agentEndHandler();
+            const branch = [entry("one"), entry("two")];
+            const ctx = captureContext({ model: { provider: "openai", id: "test" }, branch });
+            await agentEnd({}, ctx);
+            // A stored entry is never read again, even when its object changes in place.
+            branch[0].message.content = "Rewritten.";
+            branch.push(entry("three"));
+            await agentEnd({}, ctx);
+            // The stored leaf "three" is gone, so the whole branch is offered; "one" is a
+            // repeat of the accepted digest only when its content is unchanged.
+            branch.splice(0, branch.length, entry("one"), entry("four"));
+            await agentEnd({}, ctx);
+            await __test.settleMemoryCapture();
+            expect(bodies.map((body) => body.messages.map((message) => message.id))).toEqual([
+                ["one", "two"],
+                ["three"],
+                ["four"],
+            ]);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("offers the same entries again after a checkpoint the daemon did not accept", async () => {
+        let accept = false;
+        const bodies: Array<{ messages: Array<{ id: string }> }> = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                if (input.method !== "memory.capture") return { state: "ready" };
+                bodies.push(input.body as { messages: Array<{ id: string }> });
+                return { state: accept ? "accepted" : "store_failed" };
+            },
+        );
+        try {
+            const { agentEnd } = await agentEndHandler();
+            const setStatus = mock(() => undefined);
+            const ctx = captureContext({ model: { provider: "openai", id: "test" }, setStatus });
+            await agentEnd({}, ctx);
+            expect(setStatus).toHaveBeenLastCalledWith(
+                "eidnara-capture",
+                "Memory capture: unconfirmed",
+            );
+            accept = true;
+            await agentEnd({}, ctx);
+            await __test.settleMemoryCapture();
+            expect(bodies.map((body) => body.messages.map((message) => message.id))).toEqual([
+                ["source-1"],
+                ["source-1"],
+            ]);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("disconnects the runtime's transport on session_shutdown, for a reload and for a quit", async () => {
         for (const reason of ["reload", "quit"]) {
             const disconnect = spyOn(

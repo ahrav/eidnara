@@ -612,9 +612,20 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             return undefined;
         return {
             sessionId,
-            projectRoot: resolveProjectRootDirectory(ctx.cwd),
+            projectRoot: deps.projectDir,
             model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
         };
+    }
+    // Session entries are immutable and append-only, so a branch that still ends in the last
+    // stored leaf only has new entries after it. A branch switch that dropped that leaf rescans.
+    const checkpointedLeafBySession = new Map<string, string>();
+    function entriesAfterCheckpoint(sessionId: string, branch: readonly { id: string }[]) {
+        const leaf = checkpointedLeafBySession.get(sessionId);
+        if (leaf === undefined) return branch;
+        for (let index = branch.length - 1; index >= 0; index--) {
+            if (branch[index]?.id === leaf) return branch.slice(index + 1);
+        }
+        return branch;
     }
     function setCaptureStatus(ctx: ExtensionContext, status: string | undefined): void {
         try {
@@ -676,12 +687,15 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         try {
             const scope = captureScope(ctx);
             if (!scope) return undefined;
+            const branch = ctx.sessionManager.getBranch();
             await captureCheckpoint({
                 ...scope,
-                messages: piCaptureMessages(ctx.sessionManager.getBranch(), {
+                messages: piCaptureMessages(entriesAfterCheckpoint(scope.sessionId, branch), {
                     notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
                 }),
             });
+            const leaf = branch.at(-1);
+            if (leaf) checkpointedLeafBySession.set(scope.sessionId, leaf.id);
             return scope;
         } catch (error) {
             warn("memory capture checkpoint pending:", error);
@@ -773,6 +787,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // Clears one session's prompt state and closes its routes on both daemon transports; a closed route reopens on the session's next call, so no durable state is lost.
     // The kernel transport is shared per connection file, and a session that `/cd`s across projects with distinct connection files holds routes on each, so every project config this process has resolved is released.
     function releaseSessionResources(sessionId: string): void {
+        checkpointedLeafBySession.delete(sessionId);
         clearPiSystemPromptSession(sessionId);
         promptSurfaceGuidanceEpochs.clear(sessionId);
         systemPromptRefreshSessions.delete(sessionId);
