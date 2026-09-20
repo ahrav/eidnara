@@ -75,6 +75,21 @@ function describeFailure(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
 }
 
+/** OpenCode records missing/expired credentials and provider transport failures on the
+ * answer; they say nothing about the model's output, so they must not spend the daemon's
+ * model-failure allowance. Non-retryable HTTP errors other than auth are the model's. */
+function isProviderUnavailable(error: unknown): boolean {
+    const failure = error as {
+        name?: unknown;
+        data?: { statusCode?: unknown; isRetryable?: unknown };
+    } | null;
+    if (!failure || typeof failure !== "object") return false;
+    if (failure.name === "ProviderAuthError") return true;
+    if (failure.name !== "APIError") return false;
+    const status = failure.data?.statusCode;
+    return failure.data?.isRetryable === true || status === 401 || status === 403;
+}
+
 /** Removes the directory; the guard outlives a directory that cannot be removed, and
  * `isNativeCaptureProject` resolves through `realpathSync`, so a removed one needs no entry. */
 function removeDirectory(directory: string, failures: string[]): void {
@@ -190,7 +205,8 @@ async function prepareProject(
     );
 }
 
-/** Disposes the project's instance before its directory goes away; failures are reported, not fatal. */
+/** Disposes the project's instance before its directory goes away; failures are reported, not fatal.
+ * An instance that could not be disposed keeps its directory and recursion guard until process exit. */
 async function evictProject(client: EidnaraDeps["client"], project: PrivateProject): Promise<void> {
     if (state.byKey.get(project.key) === project) state.byKey.delete(project.key);
     const failures: string[] = [];
@@ -204,7 +220,7 @@ async function evictProject(client: EidnaraDeps["client"], project: PrivateProje
         ).catch((error) => {
             failures.push(`dispose: ${describeFailure(error)}`);
         });
-    removeDirectory(project.directory, failures);
+    if (failures.length === 0) removeDirectory(project.directory, failures);
     if (failures.length > 0)
         log.warn("[eidnara] native memory capture cleanup incomplete", failures);
 }
@@ -351,6 +367,8 @@ export function openCodeMemoryCaptureExecutor(
                 } | null,
                 { preferResponseOnMissingData: true },
             );
+            if (isProviderUnavailable(result?.info?.error))
+                throw new NativeCaptureError("provider_unavailable");
             if (
                 !result ||
                 result.info?.error ||
@@ -387,6 +405,8 @@ export function openCodeMemoryCaptureExecutor(
                 });
             project.inFlight -= 1;
             state.inFlight -= 1;
+            // Projects that were all busy at admission become evictable only now.
+            evictIdleProjects(client);
             // Cleanup failures never change the capture outcome; the answer is already final.
             if (cleanupFailures.length > 0)
                 log.warn("[eidnara] native memory capture cleanup incomplete", cleanupFailures);

@@ -31,6 +31,8 @@ function harness(overrides: {
     onCreate?: (directory: string) => void;
     /** OpenCode's unified finish reason for the private session's answer. */
     finish?: string;
+    /** OpenCode's recorded failure on the private session's answer. */
+    error?: unknown;
     /** Settles before the private session's answer is returned. */
     answerGate?: Promise<void>;
 }): Harness {
@@ -85,6 +87,7 @@ function harness(overrides: {
                             modelID: "m",
                             providerID: "custom",
                             finish: overrides.finish ?? "stop",
+                            ...(overrides.error === undefined ? {} : { error: overrides.error }),
                         },
                         parts: [
                             { type: "reasoning", text: "private" },
@@ -166,6 +169,83 @@ describe("OpenCode native memory capture executor", () => {
             expect(await attempt).toEqual({ model: "custom/m", text: '{"ok":true}' });
         } else {
             await expect(attempt).rejects.toThrow(`Native memory capture: ${outcome}`);
+        }
+    });
+
+    it.each([
+        [
+            { name: "ProviderAuthError", data: { providerID: "custom", message: "no key" } },
+            "provider_unavailable",
+        ],
+        [
+            { name: "APIError", data: { message: "503", statusCode: 503, isRetryable: true } },
+            "provider_unavailable",
+        ],
+        [
+            { name: "APIError", data: { message: "reset", isRetryable: true } },
+            "provider_unavailable",
+        ],
+        [
+            { name: "APIError", data: { message: "401", statusCode: 401, isRetryable: false } },
+            "provider_unavailable",
+        ],
+        [
+            { name: "APIError", data: { message: "400", statusCode: 400, isRetryable: false } },
+            "model_failed",
+        ],
+        [{ name: "ContextOverflowError", data: { message: "too long" } }, "model_failed"],
+        [{ name: "UnknownError", data: { message: "boom" } }, "model_failed"],
+    ] as const)("maps recorded error %j to %s", async (error, outcome) => {
+        const h = harness({ error });
+        lastClient = h.client;
+        await expect(
+            openCodeMemoryCaptureExecutor(h.client as never)(work, new AbortController().signal),
+        ).rejects.toThrow(`Native memory capture: ${outcome}`);
+    });
+
+    it("evicts a project beyond the bound once its captures finish, not only when the next capture starts", async () => {
+        const gate = Promise.withResolvers<void>();
+        const h = harness({ answerGate: gate.promise });
+        lastClient = h.client;
+        const executor = openCodeMemoryCaptureExecutor(h.client as never);
+        const signal = new AbortController().signal;
+        const busy = ["first", "second", "third", "fourth", "fifth"].map((system) =>
+            executor({ ...work, system }, signal),
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        // Every project is busy, so the admission-time pass finds no victim.
+        expect(h.disposed).toEqual([]);
+        gate.resolve();
+        await Promise.all(busy);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        expect(h.disposed).toHaveLength(1);
+        expect(new Set(h.directories).size).toBe(5);
+    });
+
+    it("keeps the directory and recursion guard of a project whose instance cannot be disposed", async () => {
+        const h = harness({
+            dispose: async () => {
+                throw new Error("dispose refused");
+            },
+        });
+        lastClient = h.client;
+        const warn = spyOn(logger.log, "warn");
+        try {
+            await openCodeMemoryCaptureExecutor(h.client as never)(
+                work,
+                new AbortController().signal,
+            );
+            const [directory] = h.directories;
+            expect(directory).toBeDefined();
+            await disposeNativeCaptureProjects(h.client as never);
+            expect(h.disposed).toEqual([directory]);
+            // A live instance still points at the directory; the guard must outlive the eviction.
+            expect(existsSync(directory as string)).toBe(true);
+            expect(isNativeCaptureProject(directory as string)).toBe(true);
+            expect(JSON.stringify(warn.mock.calls)).toContain("dispose refused");
+            rmSync(directory as string, { recursive: true, force: true });
+        } finally {
+            warn.mockRestore();
         }
     });
 

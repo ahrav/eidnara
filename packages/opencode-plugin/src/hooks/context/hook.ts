@@ -17,6 +17,7 @@ import {
     createMemoryCaptureCheckpoint,
     createMemoryCaptureDrain,
     type MemoryCaptureDrain,
+    type MemoryCaptureScope,
     memoryAutoCaptureEnabled,
     openCodeCaptureMessages,
     openCodeLastFinalMessageId,
@@ -234,13 +235,16 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 variant: "warning",
             },
         });
-    /** One warning per outage: the toast repeats only after a checkpoint or drain succeeds again. */
+    /** One warning per outage: the toast repeats only after a drain ends with no work left. A
+     * checkpoint alone or a `pending` drain (retry backoff, another claimant) cannot re-arm it,
+     * or a persistent model outage would warn on every eligible retry. */
     let captureWarningShown = false;
     const warnCaptureIncomplete = (): void => {
         if (captureWarningShown) return;
         captureWarningShown = true;
+        // `.then` turns a synchronous throw from a disposed client into a rejection this swallows.
         void withTimeout(
-            Promise.resolve(notifyCaptureIncomplete()),
+            Promise.resolve().then(notifyCaptureIncomplete),
             HOST_SDK_READ_TIMEOUT_MS,
             "capture notification timed out",
         ).catch(() => undefined);
@@ -252,8 +256,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     // returns before any extraction work. One drain per completed turn sees the user's message
     // and the answer together.
     const memoryCaptureDrain = createMemoryCaptureDrain(moduleClient, executeCapture, {
-        // `"pending"` leaves work for a later drain and is not a failure to report.
-        onSettled: captureRecovered,
+        onSettled: (_scope, result) => {
+            if (result !== "pending") captureRecovered();
+        },
         onFailed: (scope, error) => {
             sessionLog.warn(scope.sessionId, "memory capture drain failed:", error);
             warnCaptureIncomplete();
@@ -317,13 +322,12 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     };
     const checkpointMemory = async (sessionId: string): Promise<void> => {
         if (captureDisabled() || excludedFromCapture(sessionId)) return;
+        let scope: MemoryCaptureScope | undefined;
         try {
             const model = liveModelKey(sessionId);
-            if (!model) return;
             // The user's message is acknowledged first, so the transcript read below does not resend it.
             await pendingUserCaptures.get(sessionId)?.catch(() => undefined);
             const projectRoot = await sessionDirectoryFor(sessionId);
-            const scope = { sessionId, projectRoot, model };
             const readTranscript = async (limit?: number): Promise<unknown[]> =>
                 normalizeSDKResponse(
                     await withTimeout(
@@ -351,6 +355,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                           CAPTURE_TAIL_MESSAGES,
                       ) ?? (await readTranscript()));
             if (excludedFromCapture(sessionId)) return;
+            scope = { sessionId, projectRoot, model };
             await captureCheckpoint({
                 ...scope,
                 messages: openCodeCaptureMessages(sourceMessages, {
@@ -359,13 +364,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             });
             const final = openCodeLastFinalMessageId(sourceMessages);
             if (final !== undefined) captureWatermark.set(sessionId, final);
-            captureRecovered();
-            memoryCaptureDrain.schedule(scope);
         } catch (error) {
             log(
                 `memory capture checkpoint pending: ${error instanceof Error ? error.message : "unknown error"}`,
             );
             warnCaptureIncomplete();
+        } finally {
+            // Draining is what frees a full queue, so a refused checkpoint must not skip it.
+            if (scope) memoryCaptureDrain.schedule(scope);
         }
     };
 

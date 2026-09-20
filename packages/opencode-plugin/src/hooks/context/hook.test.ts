@@ -260,6 +260,7 @@ describe("eidnara hook", () => {
         function createCaptureHook(
             fake: FakeModuleClient,
             transcript: unknown[],
+            options: { liveModel?: boolean } = {},
         ): {
             hook: NonNullable<ReturnType<typeof createEidnaraHook>>;
             client: EidnaraDeps["client"];
@@ -267,10 +268,11 @@ describe("eidnara hook", () => {
             const client = createClientMock(undefined, "/project");
             client.session.messages = mock(async () => ({ data: transcript })) as never;
             const liveSessionState = createLiveSessionState();
-            liveSessionState.liveModelBySession.set(SESSION, {
-                providerID: "provider",
-                modelID: "model",
-            });
+            if (options.liveModel !== false)
+                liveSessionState.liveModelBySession.set(SESSION, {
+                    providerID: "provider",
+                    modelID: "model",
+                });
             const hook = requireHook(
                 createEidnaraHook(
                     createDeps({ client, liveSessionState, rustModeModuleClient: fake.client }),
@@ -376,7 +378,7 @@ describe("eidnara hook", () => {
             }
         });
 
-        it("warns when the idle checkpoint itself fails", async () => {
+        it("warns once when the idle checkpoint fails and still drains queued work", async () => {
             useTempDataHome("capture-checkpoint-failure-");
             const fake = createFakeModuleClient(() => ({ state: "store_failed" }));
             const { hook, client } = createCaptureHook(fake, [
@@ -386,7 +388,60 @@ describe("eidnara hook", () => {
                 event: { type: "session.idle", properties: { sessionID: SESSION } },
             });
             await hook.memoryCaptureDrain.settle();
-            expect(fake.calls.map((call) => call.method)).toEqual(["memory.capture"]);
+            expect(fake.calls.map((call) => call.method)).toEqual([
+                "memory.capture",
+                "memory.capture.next",
+            ]);
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
+        it("drains after a queue-full checkpoint, since draining is what frees the quota", async () => {
+            useTempDataHome("capture-queue-full-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "ready" : "queue_full",
+            }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls.map((call) => call.method)).toEqual([
+                "memory.capture",
+                "memory.capture.next",
+            ]);
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
+        it("stays quiet when the daemon reports capture disabled", async () => {
+            useTempDataHome("capture-daemon-disabled-");
+            const fake = createFakeModuleClient(() => ({ state: "disabled" }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(client.tui.showToast).not.toHaveBeenCalled();
+        });
+
+        it("isolates a toast that throws synchronously from the idle lifecycle hook", async () => {
+            useTempDataHome("capture-toast-throws-");
+            const fake = createFakeModuleClient(() => ({ state: "store_failed" }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            client.tui.showToast = mock(() => {
+                throw new Error("client disposed");
+            }) as never;
+            await expect(
+                hook.event({
+                    event: { type: "session.idle", properties: { sessionID: SESSION } },
+                }),
+            ).resolves.toBeUndefined();
+            await hook.memoryCaptureDrain.settle();
             expect(client.tui.showToast).toHaveBeenCalledTimes(1);
         });
 
@@ -415,6 +470,63 @@ describe("eidnara hook", () => {
             await hook.event(idle);
             await hook.memoryCaptureDrain.settle();
             expect(client.tui.showToast).toHaveBeenCalledTimes(2);
+        });
+
+        it("keeps the warning latched while checkpoints succeed but drains keep failing", async () => {
+            useTempDataHome("capture-drain-latch-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "store_failed" : "accepted",
+            }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            const idle = { event: { type: "session.idle", properties: { sessionID: SESSION } } };
+            for (let turn = 0; turn < 3; turn++) {
+                await hook.event(idle);
+                await hook.memoryCaptureDrain.settle();
+            }
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
+        it("keeps the warning latched across a pending drain between two failing ones", async () => {
+            useTempDataHome("capture-pending-latch-");
+            const nextStates = ["store_failed", "pending", "store_failed"];
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? nextStates.shift() : "accepted",
+            }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            const idle = { event: { type: "session.idle", properties: { sessionID: SESSION } } };
+            for (let turn = 0; turn < 3; turn++) {
+                await hook.event(idle);
+                await hook.memoryCaptureDrain.settle();
+            }
+            expect(nextStates).toHaveLength(0);
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
+        it("checkpoints and drains without a model hint when the live model is unknown", async () => {
+            useTempDataHome("capture-unknown-model-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "pending" : "accepted",
+            }));
+            const { hook, client } = createCaptureHook(
+                fake,
+                [assistantMessage("native-answer", [{ type: "text", text: "A decision." }])],
+                { liveModel: false },
+            );
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls.map((call) => call.method)).toEqual([
+                "memory.capture",
+                "memory.capture.next",
+            ]);
+            for (const call of fake.calls)
+                expect((call.body as { model?: unknown }).model).toBeUndefined();
+            expect(client.tui.showToast).not.toHaveBeenCalled();
         });
 
         it("skips a child session that the idle checkpoint's directory read classifies", async () => {

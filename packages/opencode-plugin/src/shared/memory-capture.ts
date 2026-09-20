@@ -263,6 +263,9 @@ function nativeWork(response: unknown): { lease: string; work: NativeCaptureWork
 
 /** Bounds one flush to a fixed number of daemon exchanges; the next flush resumes the rest. */
 const FLUSH_MAX_BATCHES = 32;
+/** An executor bounds its model call by `maxDurationMs`; the private session and instance
+ * cleanup that follows a produced answer is bounded separately and must not discard it. */
+const EXECUTOR_CLEANUP_GRACE_MS = 30_000;
 
 /**
  * `"pending"` means the daemon retains work for a later flush: a `pending` or
@@ -348,7 +351,7 @@ export async function flushMemoryCapture(
         try {
             result = await withTimeout(
                 execute(work, controller.signal),
-                work.maxDurationMs,
+                work.maxDurationMs + EXECUTOR_CLEANUP_GRACE_MS,
                 "native capture timed out",
             );
             if (result.model !== work.model || typeof result.text !== "string")
@@ -371,6 +374,7 @@ export async function flushMemoryCapture(
         });
         const receipt = stateOf(submitted);
         if (receipt === "processed") continue;
+        if (receipt === "disabled") return "disabled";
         if (receipt === "pending" || receipt === "stale") return "pending";
         throw unfinished();
     }
@@ -506,9 +510,17 @@ export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient,
                 },
             });
             const state = stateOf(response);
+            // The daemon may be disabled while this hook's config still permits capture; it wrote
+            // nothing, so nothing is acknowledged and nothing failed.
+            if (state === "disabled") {
+                batch = [];
+                batchKeys = [];
+                bytes = 0;
+                return;
+            }
             if (state !== "accepted") {
                 throw new Error(
-                    `Memory capture checkpoint not accepted (${state === "disabled" || state === "queue_full" || state === "store_failed" || state === "project_mismatch" ? state : "invalid_response"})`,
+                    `Memory capture checkpoint not accepted (${state === "queue_full" || state === "store_failed" || state === "project_mismatch" ? state : "invalid_response"})`,
                 );
             }
             for (const [key, digest] of batchKeys) {
