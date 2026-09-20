@@ -34,12 +34,13 @@ validates. Refusals are typed: `MissingField(name)`, `UnknownField(name)`,
 entry or two rules for one field), `SampleOrderNotAPermutation`,
 `MalformedDigest`, `MalformedDecimal`, `RateOutOfRange` (an arm rate outside
 `[0, 1]`), `EmptyComponent` (an empty component version, tokenizer name or
-revision, or attestation signer), `NotCanonical` (an integer outside the canonical safe range).
-`Manifest::validate` is public so a manifest built in code can be checked
-before it is written; it applies every check above except the key-set closure,
-so a manifest it accepts also parses and digests. Adding a field to `Manifest`
-without bumping the schema fails the closure test, and the fixture digests in
-`tests/manifest.rs` are frozen so an encoding change is reviewed.
+revision, or attestation signer), `NotCanonical` (an integer outside the
+canonical safe range). `Manifest::validate` is public so a manifest built in
+code can be checked before it is written; it applies every check above except
+the key-set closure, so a manifest it accepts also parses and digests. Adding a
+field to `Manifest` without bumping the schema fails the closure test, and the
+fixture digests in `tests/manifest.rs` are frozen so an encoding change is
+reviewed.
 
 The 24 required fields, sorted:
 
