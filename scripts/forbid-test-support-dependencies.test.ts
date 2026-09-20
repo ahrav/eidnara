@@ -153,6 +153,24 @@ describe("eval-core fences", () => {
         ]);
     });
 
+    test("rejects std effect modules in a rustfmt-wrapped brace-grouped use", () => {
+        expect(
+            forbiddenCoreSources({
+                "wrapped.rs": [
+                    "use std::{",
+                    "    collections::HashMap,",
+                    "    fs,",
+                    "};",
+                    "use std::{",
+                    "    collections::{BTreeMap, BTreeSet},",
+                    "    fmt,",
+                    "};",
+                    "",
+                ].join("\n"),
+            }),
+        ).toEqual(["wrapped.rs:1: use std::{"]);
+    });
+
     test("refuses to pass on an empty source set", () => {
         expect(forbiddenCoreSources({})).toEqual([
             "crates/eval-core/src: no source files scanned",

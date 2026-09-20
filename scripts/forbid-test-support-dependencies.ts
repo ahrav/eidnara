@@ -24,6 +24,7 @@ const FORBIDDEN_CORE_SOURCE = new RegExp(
         `\\bstd::(${STD_EFFECT_MODULES})\\b`,
         `\\bstd::\\{[^;]*(?:[{,]\\s*|::)(${STD_EFFECT_MODULES})\\b`,
     ].join("|"),
+    "g",
 );
 
 /** The directory the source fence scans, relative to the workspace root. */
@@ -125,12 +126,17 @@ export function forbiddenCoreSources(sources: Record<string, string>): string[] 
         return [`${EVAL_CORE_SOURCE_DIR}: no source files scanned`];
     }
     const findings: string[] = [];
+    // Match the whole file, not each line: a rustfmt-wrapped `use std::{`
+    // group names its effect module several lines below the `std::` prefix.
     for (const [path, text] of entries) {
-        text.split("\n").forEach((line, index) => {
-            if (FORBIDDEN_CORE_SOURCE.test(line)) {
-                findings.push(`${path}:${index + 1}: ${line.trim()}`);
-            }
-        });
+        const lines = text.split("\n");
+        const reported = new Set<number>();
+        for (const match of text.matchAll(FORBIDDEN_CORE_SOURCE)) {
+            const line = text.slice(0, match.index).split("\n").length;
+            if (reported.has(line)) continue;
+            reported.add(line);
+            findings.push(`${path}:${line}: ${lines[line - 1]!.trim()}`);
+        }
     }
     return findings.sort();
 }
@@ -144,7 +150,13 @@ if (import.meta.main) {
         console.error(`cargo metadata exited ${proc.exitCode}`);
         process.exit(2);
     }
-    const metadata = JSON.parse(proc.stdout.toString()) as CargoMetadata;
+    let metadata: CargoMetadata;
+    try {
+        metadata = JSON.parse(proc.stdout.toString()) as CargoMetadata;
+    } catch (error) {
+        console.error(`cargo metadata produced invalid JSON: ${String(error)}`);
+        process.exit(2);
+    }
     const findings = forbiddenDependencyEdges(metadata);
     if (findings.length > 0) {
         console.error("test-only code reachable from a production dependency table:");
