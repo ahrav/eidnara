@@ -222,6 +222,33 @@ describe("OpenCode native memory capture executor", () => {
         expect(new Set(h.directories).size).toBe(5);
     });
 
+    it("keeps the directory and recursion guard of a project whose instance cannot be disposed", async () => {
+        const h = harness({
+            dispose: async () => {
+                throw new Error("dispose refused");
+            },
+        });
+        lastClient = h.client;
+        const warn = spyOn(logger.log, "warn");
+        try {
+            await openCodeMemoryCaptureExecutor(h.client as never)(
+                work,
+                new AbortController().signal,
+            );
+            const [directory] = h.directories;
+            expect(directory).toBeDefined();
+            await disposeNativeCaptureProjects(h.client as never);
+            expect(h.disposed).toEqual([directory]);
+            // A live instance still points at the directory; the guard must outlive the eviction.
+            expect(existsSync(directory as string)).toBe(true);
+            expect(isNativeCaptureProject(directory as string)).toBe(true);
+            expect(JSON.stringify(warn.mock.calls)).toContain("dispose refused");
+            rmSync(directory as string, { recursive: true, force: true });
+        } finally {
+            warn.mockRestore();
+        }
+    });
+
     it("disposes idle projects at once and a busy project after its capture finishes", async () => {
         const gate = Promise.withResolvers<void>();
         const h = harness({ answerGate: gate.promise });

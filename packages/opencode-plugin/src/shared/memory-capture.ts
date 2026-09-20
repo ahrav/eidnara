@@ -467,9 +467,17 @@ export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient,
                 },
             });
             const state = stateOf(response);
+            // The daemon may be disabled while this hook's config still permits capture; it wrote
+            // nothing, so nothing is acknowledged and nothing failed.
+            if (state === "disabled") {
+                batch = [];
+                batchKeys = [];
+                bytes = 0;
+                return;
+            }
             if (state !== "accepted") {
                 throw new Error(
-                    `Memory capture checkpoint not accepted (${state === "disabled" || state === "queue_full" || state === "store_failed" || state === "project_mismatch" ? state : "invalid_response"})`,
+                    `Memory capture checkpoint not accepted (${state === "queue_full" || state === "store_failed" || state === "project_mismatch" ? state : "invalid_response"})`,
                 );
             }
             for (const [key, digest] of batchKeys) {

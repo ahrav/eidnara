@@ -67,6 +67,21 @@ describe("memory capture checkpoint", () => {
             );
         }
     });
+
+    it("treats a disabled checkpoint as a quiet no-op that acknowledges nothing", async () => {
+        const calls: unknown[] = [];
+        let response = { state: "disabled" };
+        const capture = createMemoryCaptureCheckpoint({
+            call: async (args) => {
+                calls.push(args.body);
+                return response;
+            },
+        });
+        await expect(capture({ ...scope, messages: [message] })).resolves.toBeUndefined();
+        response = { state: "accepted" };
+        await capture({ ...scope, messages: [message] });
+        expect(calls).toHaveLength(2);
+    });
 });
 
 describe("capture native source adapters", () => {

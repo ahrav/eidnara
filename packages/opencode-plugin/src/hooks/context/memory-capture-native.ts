@@ -205,7 +205,8 @@ async function prepareProject(
     );
 }
 
-/** Disposes the project's instance before its directory goes away; failures are reported, not fatal. */
+/** Disposes the project's instance before its directory goes away; failures are reported, not fatal.
+ * An instance that could not be disposed keeps its directory and recursion guard until process exit. */
 async function evictProject(client: EidnaraDeps["client"], project: PrivateProject): Promise<void> {
     if (state.byKey.get(project.key) === project) state.byKey.delete(project.key);
     const failures: string[] = [];
@@ -219,7 +220,7 @@ async function evictProject(client: EidnaraDeps["client"], project: PrivateProje
         ).catch((error) => {
             failures.push(`dispose: ${describeFailure(error)}`);
         });
-    removeDirectory(project.directory, failures);
+    if (failures.length === 0) removeDirectory(project.directory, failures);
     if (failures.length > 0)
         log.warn("[eidnara] native memory capture cleanup incomplete", failures);
 }

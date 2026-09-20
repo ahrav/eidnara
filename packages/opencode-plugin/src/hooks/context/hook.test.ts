@@ -378,7 +378,7 @@ describe("eidnara hook", () => {
             }
         });
 
-        it("warns when the idle checkpoint itself fails", async () => {
+        it("warns once when the idle checkpoint fails and still drains queued work", async () => {
             useTempDataHome("capture-checkpoint-failure-");
             const fake = createFakeModuleClient(() => ({ state: "store_failed" }));
             const { hook, client } = createCaptureHook(fake, [
@@ -388,7 +388,60 @@ describe("eidnara hook", () => {
                 event: { type: "session.idle", properties: { sessionID: SESSION } },
             });
             await hook.memoryCaptureDrain.settle();
-            expect(fake.calls.map((call) => call.method)).toEqual(["memory.capture"]);
+            expect(fake.calls.map((call) => call.method)).toEqual([
+                "memory.capture",
+                "memory.capture.next",
+            ]);
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
+        it("drains after a queue-full checkpoint, since draining is what frees the quota", async () => {
+            useTempDataHome("capture-queue-full-");
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "ready" : "queue_full",
+            }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls.map((call) => call.method)).toEqual([
+                "memory.capture",
+                "memory.capture.next",
+            ]);
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
+        it("stays quiet when the daemon reports capture disabled", async () => {
+            useTempDataHome("capture-daemon-disabled-");
+            const fake = createFakeModuleClient(() => ({ state: "disabled" }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(client.tui.showToast).not.toHaveBeenCalled();
+        });
+
+        it("isolates a toast that throws synchronously from the idle lifecycle hook", async () => {
+            useTempDataHome("capture-toast-throws-");
+            const fake = createFakeModuleClient(() => ({ state: "store_failed" }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            client.tui.showToast = mock(() => {
+                throw new Error("client disposed");
+            }) as never;
+            await expect(
+                hook.event({
+                    event: { type: "session.idle", properties: { sessionID: SESSION } },
+                }),
+            ).resolves.toBeUndefined();
+            await hook.memoryCaptureDrain.settle();
             expect(client.tui.showToast).toHaveBeenCalledTimes(1);
         });
 
