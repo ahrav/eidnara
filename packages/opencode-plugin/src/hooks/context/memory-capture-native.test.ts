@@ -39,6 +39,8 @@ function harness(overrides: {
     delete?: (directory: string) => Promise<void>;
     dispose?: (directory: string) => Promise<void>;
     onCreate?: (directory: string) => void;
+    /** The private session create rejects with this error. */
+    createError?: Error;
     /** OpenCode's unified finish reason for the private session's answer. */
     finish?: string;
     /** OpenCode's recorded failure on the private session's answer. */
@@ -79,6 +81,7 @@ function harness(overrides: {
                 expect(existsSync(join(directory, ".git"))).toBe(overrides.gitless !== true);
                 // A `.opencode` directory would make OpenCode install `@opencode-ai/plugin` into it.
                 expect(existsSync(join(directory, ".opencode"))).toBe(false);
+                if (overrides.createError) throw overrides.createError;
                 expect(input.body).toMatchObject({
                     title: "eidnara-memory-capture",
                     permission: [{ permission: "*", pattern: "*", action: "deny" }],
@@ -280,6 +283,14 @@ describe("OpenCode native memory capture executor", () => {
         } finally {
             warn.mockRestore();
         }
+    });
+
+    it("reports a failed private session create as unavailable, not as a model failure", async () => {
+        const h = harness({ createError: new Error("session service down") });
+        lastClient = h.client;
+        await expect(
+            openCodeMemoryCaptureExecutor(h.client as never)(work, new AbortController().signal),
+        ).rejects.toThrow("Native memory capture: provider_unavailable");
     });
 
     it("reports a capture aborted by its caller as cancelled even when OpenCode records an error", async () => {

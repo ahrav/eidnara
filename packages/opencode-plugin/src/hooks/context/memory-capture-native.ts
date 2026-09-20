@@ -351,12 +351,19 @@ export function openCodeMemoryCaptureExecutor(
             }
             if (signal.aborted) throw new NativeCaptureError("cancelled");
             project.started = true;
+            // Session creation precedes any model call; its failure says nothing about the model.
             const created = normalizeSDKResponse(
                 await createChildSession({
                     client,
                     title: `eidnara-memory-capture`,
                     directory,
                     denyTools: true,
+                }).catch((error) => {
+                    log.warn(
+                        "[eidnara] native memory capture session create failed",
+                        describeFailure(error),
+                    );
+                    throw new NativeCaptureError("provider_unavailable");
                 }),
                 null as { id?: string } | null,
                 { preferResponseOnMissingData: true },

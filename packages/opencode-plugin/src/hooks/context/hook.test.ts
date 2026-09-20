@@ -630,6 +630,62 @@ describe("eidnara hook", () => {
             expect(client.tui.showToast).not.toHaveBeenCalled();
         });
 
+        it("closing capture waits for a pending user checkpoint and lets it write nothing", async () => {
+            useTempDataHome("capture-close-user-checkpoint-");
+            const directory = Promise.withResolvers<{ data: { directory: string } }>();
+            const client = createClientMock();
+            client.session.get = mock(() => directory.promise) as never;
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? "ready" : "accepted",
+            }));
+            const hook = requireHook(
+                createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+            );
+            await hook["chat.message"](
+                { sessionID: SESSION, model: { providerID: "provider", modelID: "model" } },
+                {
+                    message: { id: "native-user", role: "user", sessionID: SESSION },
+                    parts: [{ type: "text", text: "A durable project fact." }],
+                },
+            );
+            let closed = false;
+            const closing = hook.closeMemoryCapture().then(() => {
+                closed = true;
+            });
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            expect(closed).toBe(false);
+            directory.resolve({ data: { directory: "/project" } });
+            await closing;
+            await hook.event({
+                event: { type: "session.idle", properties: { sessionID: SESSION } },
+            });
+            await hook.memoryCaptureDrain.settle();
+            expect(fake.calls).toHaveLength(0);
+        });
+
+        it("does not capture when OpenCode ignores project configuration", async () => {
+            useTempDataHome("capture-project-config-disabled-");
+            const saved = process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
+            process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
+            try {
+                const fake = createFakeModuleClient(({ method }) => ({
+                    state: method === "memory.capture.next" ? "ready" : "accepted",
+                }));
+                const { hook, client } = createCaptureHook(fake, [
+                    assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+                ]);
+                await hook.event({
+                    event: { type: "session.idle", properties: { sessionID: SESSION } },
+                });
+                await hook.memoryCaptureDrain.settle();
+                expect(fake.calls).toHaveLength(0);
+                expect(client.tui.showToast).not.toHaveBeenCalled();
+            } finally {
+                if (saved === undefined) delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
+                else process.env.OPENCODE_DISABLE_PROJECT_CONFIG = saved;
+            }
+        });
+
         it("skips a child session that the idle checkpoint's directory read classifies", async () => {
             useTempDataHome("capture-restored-child-");
             const fake = createFakeModuleClient(({ method }) => ({

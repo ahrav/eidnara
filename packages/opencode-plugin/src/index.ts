@@ -213,8 +213,9 @@ const server: Plugin = async (ctx) => {
                 }
                 // Every reload builds a new client, so the old one is torn down here; otherwise its socket, channel poller, route handles, and ring mappings stay cached for the process lifetime.
                 // A capture drain still running would redial that transport on its next daemon call
-                // and prepare fresh private projects nobody disposes, so it stops first.
-                void (eidnara?.memoryCaptureDrain.close() ?? Promise.resolve())
+                // and prepare fresh private projects nobody disposes, and a user checkpoint still
+                // resolving its directory would do the same, so capture stops first.
+                void (eidnara?.closeMemoryCapture() ?? Promise.resolve())
                     .catch((error) => {
                         log(`[eidnara] native capture drain stop failed: ${error}`);
                     })
