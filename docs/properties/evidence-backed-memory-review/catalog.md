@@ -36,14 +36,14 @@ Every slug the seven residual tickets own. Slugs the specification assigns to ot
 | `uncited-owner-lineage-remains-read-authority` | #727 | yes |
 | `observer-route-does-not-change-background-rosters` | #728 | yes |
 | `status-sanitizer-preserves-inclusive-integer-domain` | #729 | yes |
-| `completed-outcome-pages-have-live-keyset-semantics` | #730 | not yet |
-| `shared-path-fixture-reaches-selected-readable-proposal` | #730 | not yet |
-| `reference-only-cli-outcomes-preserve-meaning` | #730 | not yet |
-| `review-cli-owns-one-replay-free-connection` | #730 | not yet |
-| `review-cli-validates-byte-exact-inert-payloads` | #730 | not yet |
-| `review-cli-preserves-shared-kernel-refusal-shapes` | #730 | not yet |
-| `status-freshness-never-defaults-unknown-to-zero` | #730 | not yet |
-| `status-counts-preserve-overlapping-ledger-populations` | #730 | not yet |
+| `completed-outcome-pages-have-live-keyset-semantics` | #730 | yes |
+| `shared-path-fixture-reaches-selected-readable-proposal` | #730 | yes |
+| `reference-only-cli-outcomes-preserve-meaning` | #730 | yes |
+| `review-cli-owns-one-replay-free-connection` | #730 | yes |
+| `review-cli-validates-byte-exact-inert-payloads` | #730 | yes |
+| `review-cli-preserves-shared-kernel-refusal-shapes` | #730 | yes |
+| `status-freshness-never-defaults-unknown-to-zero` | #730 | yes |
+| `status-counts-preserve-overlapping-ledger-populations` | #730 | yes |
 | `provider-response-budget-is-cumulative-per-job` | #731 | not yet |
 | `attempt-ledger-preserves-cross-generation-ceilings` | #731 | not yet |
 | `guarded-request-handoff-precedes-network-polling` | #731 | not yet |
@@ -188,6 +188,127 @@ Existing check: `client.test.ts::integer lexemes a double cannot reproduce arriv
 Impact: A counter or generation past 2^53 would display a neighboring value as exact, and two different receipts or revisions could render identically
 Open questions: None.
 
+### completed-outcome-pages-have-live-keyset-semantics
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` sends an explicit `limit` and `after`, renders a full page's continuation and an empty page's end, and never issues a second request; the daemon's page semantics are exercised in `crates/daemon/tests/memory_reviewer_wire.rs`
+Guarantee: `review list` asks for exactly one page with an explicit limit and an optional causal-identity cursor, prints the cursor the daemon returns as the operator's next command, and never walks pages, reads a Kernel payload, or presents the walk as a chronological or stable snapshot.
+Check: `always` - one `request` per invocation with `limit` and `after` in the envelope; asserted on every list
+Fault/timing angle: an outcome completing behind the cursor during a walk
+Required faults and enabling state: a page whose `next` is a cursor, then a follow-up whose `next` is null
+Confidence: high - [evidence](evidence/completed-outcome-pages-have-live-keyset-semantics.md). Verified the envelope and the single request at the fake connection and over the real transport
+Existing check: `packages/cli/src/commands/review.test.ts`::`review list`; `packages/cli/src/commands/review.wire.test.ts`
+Impact: An automatic walk would read every page on each invocation and hide that new identities behind the cursor need a fresh walk
+Open questions: None.
+
+### shared-path-fixture-reaches-selected-readable-proposal
+
+Type: reachability
+Reachability: test-only
+Status: active
+Exercised: partially - `crates/daemon/tests/memory_reviewer_wire.rs` reaches a selected proposal over the real handler with a completed receipt through the shared `publish` fixture; `packages/cli/src/commands/review.test.ts` decodes a proposal body with nonempty spans through the command's validator; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` drives status, list, and show against the direct-host fixture, where no MODULE authority is bound and the answers are refusals
+Guarantee: The command's decoder accepts exactly the fields the Kernel's staged `ReviewProposal` serializes, span for span, and the real host answers the command's flat envelopes over the installed transport.
+Check: `sometimes` - a real-store run must reach a selected proposal the command renders; the situation is the selected read, not a branch
+Fault/timing angle: none
+Required faults and enabling state: MODULE authority on a root, a completed receipt, a staged proposal with nonempty spans, the command reading it
+Confidence: medium - [evidence](evidence/shared-path-fixture-reaches-selected-readable-proposal.md). The positive read through the command against a real host is not constructed; the Rust wire test and the command's decoder are joined by the wire document's shape, not by one process
+Existing check: `crates/daemon/tests/memory_reviewer_wire.rs::a_published_proposal_reads_from_every_root_after_a_newer_root_binds`; `packages/cli/src/commands/review.test.ts`::`review show`; `packages/e2e-tests/src/rust-runner/review-cli.test.ts`
+Impact: A field the Kernel serializes differently from the decoder's expectation would refuse every real proposal as malformed
+Open questions:
+- A TypeScript path that activates MODULE authority on the hermetic host and publishes a proposal with nonempty spans is needed to drive `review show` to a rendered proposal in one process (needs human input)
+
+### reference-only-cli-outcomes-preserve-meaning
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` renders each of the six outcomes and each of the nine abstention reasons, maps every read terminal and the `disabled` sentence, and refuses an unknown outcome, an unknown reason, a reason on a non-abstained item, and a terminal outside the operation's vocabulary
+Guarantee: Every receipt terminal and abstention reason the protocol names renders as itself, the `disabled` terminal renders as the owner's sentence, `not_selected` never triggers a list walk or a guessed reason, and an unknown variant refuses without success output or a raw dump.
+Check: `always` - closed vocabularies at decode; asserted on every item and terminal
+Fault/timing angle: none
+Required faults and enabling state: bodies with each terminal, an unknown outcome, a reason on a complete item, a `not_selected` terminal on the list operation
+Confidence: high - [evidence](evidence/reference-only-cli-outcomes-preserve-meaning.md). Verified each mapping and each refusal
+Existing check: `packages/cli/src/commands/review.test.ts`::`review list`, `review list vocabulary`, `review show`
+Impact: A guessed reason or a walked list would present an inference as the daemon's outcome
+Open questions: None.
+
+### review-cli-owns-one-replay-free-connection
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` counts one `closeAsync` on success, terminal, malformed, thrown request, and incompatible catalog; `packages/cli/src/commands/review.wire.test.ts` asserts `isClosed` after success and after a route refusal; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` asserts it against the real host
+Guarantee: One connection is opened per invocation and closed on every path; the catalog probe, the route open, and the request share it; routed requests use `request`, never a managed `call`, so nothing is replayed; and no model call, canonical write, cache, poll, or retry occurs.
+Check: `always` - `closeAsync` in `finally`; asserted on every path
+Fault/timing angle: a thrown request, an aborted request, a refused route
+Required faults and enabling state: a connection whose request throws each error kind
+Confidence: high - [evidence](evidence/review-cli-owns-one-replay-free-connection.md). Verified the close count on nine paths and the closed client over the real transport
+Existing check: `packages/cli/src/commands/review.test.ts`::`connection lifecycle`; `packages/cli/src/commands/review.wire.test.ts`; `packages/e2e-tests/src/rust-runner/review-cli.test.ts`
+Impact: A leaked connection would hold a payload block; a managed call would replay a read after an unknown outcome
+Open questions: None.
+
+### review-cli-validates-byte-exact-inert-payloads
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` refuses text past 32 KiB, an identifier past 512 bytes, a span whose end does not follow its start, a page past 64 items, and renders control sequences inert; `packages/cli/src/commands/review.wire.test.ts` decodes 2^53+1 exactly through the real transport
+Guarantee: Every field is validated against the Kernel's byte caps and its exact integer domain before rendering; text output strips control and escape sequences and JSON output keeps exact integer tokens; no peer, provider, or error body is echoed and nothing reaches a diagnostic, transcript, file, model context, or remote request.
+Check: `always` - the decoder runs before any output; asserted on every body
+Fault/timing angle: none
+Required faults and enabling state: oversize text, escape sequences in text, unsafe integers in every integer field
+Confidence: high - [evidence](evidence/review-cli-validates-byte-exact-inert-payloads.md). Verified the caps, the inert rendering, and the exact tokens
+Existing check: `packages/cli/src/commands/review.test.ts`::`review show`, `connection lifecycle`; `packages/cli/src/commands/review.wire.test.ts`
+Impact: A crafted proposal could move the cursor, forge output, or round an identifier's revision
+Open questions: None.
+
+### review-cli-preserves-shared-kernel-refusal-shapes
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` renders `invalid:project_mismatch`, `unavailable:store_starting`, and an unrecognized state, and the management codes `route_unbound`, `session_mismatch`, `bad_request`, `unrecognized_request_shape`, `invalid_params`, `invalid_response_body`; `packages/cli/src/commands/review.wire.test.ts` drives `session_mismatch` over the real transport; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` drives an unbound root against the real host
+Guarantee: A Kernel state answers as the kernel client's state key, a management code as its code, and a closed terminal as the owner's text; none of them prints the daemon's message or body.
+Check: `always` - `parseKernelState` and `isHostCallError` on the refusal paths; asserted on every refusal
+Fault/timing angle: none
+Required faults and enabling state: each state and code body
+Confidence: high - [evidence](evidence/review-cli-preserves-shared-kernel-refusal-shapes.md). Verified each rendering
+Existing check: `packages/cli/src/commands/review.test.ts`::`review list`, `connection lifecycle`; `packages/cli/src/commands/review.wire.test.ts`; `packages/e2e-tests/src/rust-runner/review-cli.test.ts`
+Impact: A wrong-root or unready refusal rendered as raw text would leak the daemon's message and hide the shared state
+Open questions: None.
+
+### status-freshness-never-defaults-unknown-to-zero
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` renders a `starting` block with present `swept_*` zeros as all unavailable, an absent block as unavailable, a missing or invalid counter as unavailable beside a valid sibling, and an unknown activation state as unknown
+Guarantee: A store that is not `ready` reports every counter unavailable; a counter that is absent, negative, fractional, `null`, or past 2^53 is unavailable, never zero; `sampled_at_ms` and the activation state stay unknown when missing or unrecognized; unknown fields are ignored.
+Check: `always` - `decodeReviewStatus` runs the wire document's rules field by field; asserted on every status
+Fault/timing angle: a stale or starting sampler
+Required faults and enabling state: a `starting` block with zeros, an absent block, out-of-domain counters
+Confidence: high - [evidence](evidence/status-freshness-never-defaults-unknown-to-zero.md). Verified each rule
+Existing check: `packages/cli/src/commands/review.test.ts`::`review status`; `packages/cli/src/commands/review.wire.test.ts`
+Impact: A zero printed for an unsampled counter would read as an idle store
+Open questions: None.
+
+### status-counts-preserve-overlapping-ledger-populations
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/cli/src/commands/review.test.ts` asserts every counter prints under its own name with no total, ratio, or success line and that the command binds no route and names no project
+Guarantee: Status prints the sampler's counters as the overlapping populations they are, over the whole data home, with no synthetic total, success ratio, or per-project attribution.
+Check: `always` - the renderer emits one line per counter and no derived value; asserted on every status
+Fault/timing angle: none
+Required faults and enabling state: a `ready` block with several populated counters
+Confidence: high - [evidence](evidence/status-counts-preserve-overlapping-ledger-populations.md). Verified the output has no derived line and no route open
+Existing check: `packages/cli/src/commands/review.test.ts`::`review status`
+Impact: A total or ratio over overlapping populations would misstate the store's work
+Open questions: None.
+
 ## Relationship map
 
 `canonical-resolution-refuses-changed-owner-and-target` is the safety half of
@@ -208,6 +329,11 @@ run's decision, `receipt-selection-fences-private-generation-results` is the
 generation scope both derive their candidate id under, and
 `uncited-owner-lineage-remains-read-authority` is the same revalidation run by
 the reader instead of the resumer.
+
+The eight review-command records share one consumer: `review-cli-owns-one-replay-free-connection` is the
+connection every other record's request travels on, `review-cli-validates-byte-exact-inert-payloads` and
+`status-sanitizer-preserves-inclusive-integer-domain` are the same decoding discipline at two layers, and
+`observer-route-does-not-change-background-rosters` is what the command's `cli` harness relies on.
 
 `observer-route-does-not-change-background-rosters` sits upstream of every
 worker record: the participating view decides which projects the worker sees

@@ -25,7 +25,9 @@
 | Unterminated, cancelled, or `not_dispatched` marker before a run | yes | `dispatch_memory_reviewer_attempt` without a terminal, a cancelled first run, or a recheck clock past the attempt deadline |
 | Uncited member retired after selection | yes | `retire_observation` on a disclosed but uncited source |
 | Raw integer tokens at the extrema and beyond 64 bits | yes | `FakeDaemon.respondText` |
-| Observer bound on a dormant root, beside a live harness, and on a second root; each route closing first | yes | `bind_route` and `unbind_route` with harness `cli` |
+| Observer bound on a dormant root, beside a live harness, and on a second root; each route closing first | yes |
+| A request that throws each `HostCallError` kind and code; an absent connection file; a catalog without the context module | yes | scripted `ReviewConnection` |
+| Response bodies outside the vocabulary or the byte caps | yes | mutated proposal and page bodies | `bind_route` and `unbind_route` with harness `cli` |
 | Selection dated at or after the queue deadline | yes | `read_selected_review_input` with `selected_at >= deadline`; the ledger cannot record one |
 
 ## Required faults per property
@@ -40,6 +42,14 @@
 | `unknown-dispatch-does-not-authorize-resend` | unterminated marker; cancelled marker; `not_dispatched` marker | yes |
 | `uncited-owner-lineage-remains-read-authority` | uncited member retired after selection; fabricated canonical member | yes |
 | `status-sanitizer-preserves-inclusive-integer-domain` | tokens at 2^53±1, the u64 and i64 extrema, `-0`, a width past 64 bits | yes |
+| `completed-outcome-pages-have-live-keyset-semantics` | a full page then an empty follow-up | yes |
+| `shared-path-fixture-reaches-selected-readable-proposal` | none; a positive read against the real host is not constructed | partially |
+| `reference-only-cli-outcomes-preserve-meaning` | every terminal and reason; a reason on a complete item | yes |
+| `review-cli-owns-one-replay-free-connection` | thrown request, aborted request, refused route, incompatible catalog | yes |
+| `review-cli-validates-byte-exact-inert-payloads` | oversize text and identifiers, inverted span, escape sequences, unsafe integers | yes |
+| `review-cli-preserves-shared-kernel-refusal-shapes` | each Kernel state and management code | yes |
+| `status-freshness-never-defaults-unknown-to-zero` | starting block with zeros, absent block, out-of-domain counters | yes |
+| `status-counts-preserve-overlapping-ledger-populations` | populated ready block | yes |
 | `observer-route-does-not-change-background-rosters` | observer alone; observer newer than a live harness; observer-only second root; both close orders; worker pass over an empty view | yes |
 
 ## Coverage checks to add

@@ -416,13 +416,18 @@ function daemon(
         cwd: project,
         timeoutMs,
     });
-    let parsed: Record<string, unknown> = {};
+    return { result, parsed: parseJson(result.stdout) };
+}
+
+function parseJson(text: string): Record<string, unknown> {
     try {
-        parsed = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(text.trim());
+        return typeof parsed === "object" && parsed !== null
+            ? (parsed as Record<string, unknown>)
+            : {};
     } catch {
-        parsed = {};
+        return {};
     }
-    return { result, parsed };
 }
 
 function assertDaemon(
@@ -681,6 +686,36 @@ function main(): void {
             state: "running",
             command: "status",
         });
+        // The shipped review commands reach the running daemon through the
+        // installed transport: status decodes, and the unbound project answers
+        // a decoded refusal rather than raw text.
+        const reviewStatus = run([cli, "review", "status", "--json"], {
+            cwd: project,
+        });
+        const reviewStatusJson = parseJson(reviewStatus.stdout);
+        assert(
+            reviewStatus.code === 0 &&
+                reviewStatusJson.kind === "status" &&
+                typeof reviewStatusJson.counters === "object",
+            "eidnara review status --json exits 0 with kind=status",
+            describe(reviewStatus),
+        );
+        for (const [action, argv] of [
+            ["list", ["review", "list", "--project", project, "--json"]],
+            [
+                "show",
+                ["review", "show", "e".repeat(64), "--project", project, "--json"],
+            ],
+        ] as const) {
+            const result = run([cli, ...argv], { cwd: project });
+            const parsed = parseJson(result.stdout);
+            assert(
+                result.code === 1 &&
+                    (parsed.kind === "terminal" || parsed.kind === "state"),
+                `eidnara review ${action} --json on an unbound project exits 1 with a decoded refusal`,
+                describe(result),
+            );
+        }
         const stop = daemon(cli, project, "stop");
         stopped = stop.result.code === 0;
         assertDaemon("stop", stop, 0, {
