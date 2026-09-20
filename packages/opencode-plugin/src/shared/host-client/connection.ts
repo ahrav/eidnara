@@ -19,6 +19,7 @@
 
 import { armExpiryTimer, type Deadline } from "./deadline";
 import { HostCallError, SocketClosedError, SocketTimeoutError } from "./errors";
+import { parseExactJson } from "./exact-json";
 import {
     ByteBudget,
     bytesFrameBody,
@@ -1177,7 +1178,7 @@ export class ConnectionGeneration {
             }
             text += decoder.decode();
             try {
-                value = JSON.parse(text);
+                value = parseExactJson(text);
                 valid = true;
             } catch {
                 value = undefined;

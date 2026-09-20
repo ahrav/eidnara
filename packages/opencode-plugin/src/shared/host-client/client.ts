@@ -516,6 +516,8 @@ export class HostClient {
         identity: BindIdentity,
         options: Pick<RequestOptions, "expectedDaemonId"> & {
             credentialSource?: Record<string, string | undefined>;
+            /** `null` omits the ambient `EIDNARA_MODULE_ID` / `EIDNARA_LAUNCH_NONCE` pair for this bind only; absent, the pair is read from the process environment. */
+            consumerIdentity?: null;
         } = {},
     ): Promise<RouteHandle> {
         const deadline = Deadline.start(this.routeOpenDeadlineMs, this.clock);
@@ -524,7 +526,7 @@ export class HostClient {
             active,
             target,
             this.identityForConnection(active, identity, options.credentialSource),
-            this.envConsumerIdentity(),
+            options.consumerIdentity === null ? undefined : this.envConsumerIdentity(),
             deadline,
         );
     }

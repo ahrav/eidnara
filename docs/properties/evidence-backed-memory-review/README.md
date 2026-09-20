@@ -34,7 +34,8 @@ claims to reproduce its text.
 Records enter this catalog with the implementation ticket that gives them a
 code surface. Slugs assigned to a later ticket appear in the index with no
 record until that ticket lands. Landed so far: #725 (canonical resolution), #726 (private result expiry),
-#727 (broker-free recovery), and #728 (observational routes).
+#727 (broker-free recovery), #728 (observational routes), and #729 (exact
+integers at the client seam).
 
 ## Landed by
 

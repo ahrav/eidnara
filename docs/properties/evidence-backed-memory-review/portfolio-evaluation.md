@@ -71,6 +71,19 @@ reviews found and how each finding was dispositioned.
 | The empty-view worker construction repeated `worker_for` | refinement | fixed: `worker_with_projects` serves both |
 | `values()` consumers in bind and unbind remain unfiltered | bias | kept: session-liveness and note-capability decisions are route-local and must see observers; the security check found no read an observer gains or any scheduling an ordinary route escapes |
 
+## Exact integers at the client seam
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The number-or-bigint split compared `String(value)` with the lexeme, which keys on shortest-digit printing rather than exactness: 2^60 became a `bigint` and 10^20 stayed a `number`, contradicting the twenty-digit refusal | gap | fixed: the split is `Number.isSafeInteger`; every lexeme outside the safe range is a `bigint` or refused, and the tests pin 2^60 and 10^20 |
+| `module-wire.ts` declared its own `I64_MIN` and `U64_MAX` | refinement | fixed: imported from `exact-json` |
+| Exports with no caller outside tests | refinement | fixed: `exactIntegerWithin`, `isWireInteger`, and the count and i64 bounds are module-private |
+| The bigint-to-number branch in `exactIntegerWithin` was unreachable from the reviver | refinement | fixed: removed |
+| No routed body with a lexeme past 64 bits reached a caller as `invalid_response_body` | gap | fixed: asserted with the diagnostics checked for the token |
+| A reviver walks the value recursively, so nesting a few thousand levels deep fails as invalid JSON where the plain parse accepted it | bias | kept: the daemon's serializer nests no deeper than 128; recorded in `existing-checks.md` |
+| The observer bind in the identity test changes `session`, so the separate cache slot for `consumerIdentity: null` under an identical identity is not shown | bias | kept: `routeOpen` does not cache; the slot question belongs to managed `call`, which does not take the option |
+| Every integer lexeme could become a `bigint`, as the decision's wording admits | bias | kept: converting only lexemes outside the safe range preserves every existing consumer's values; recorded on the evidence page |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner

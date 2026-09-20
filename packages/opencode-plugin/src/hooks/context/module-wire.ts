@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { I64_MIN, U64_MAX } from "../../shared/host-client/exact-json";
 import {
     type SerializedJsonBody,
     serializedJsonText,
@@ -57,9 +58,6 @@ function shortestDecimal(value: number): { negative: boolean; digits: string; po
     while (digits.endsWith("0") && digits.length > 1) digits = digits.slice(0, -1);
     return { negative: value < 0, digits, pointIndex };
 }
-
-const I64_MIN = -(2n ** 63n);
-const U64_MAX = 2n ** 64n - 1n;
 
 /** Serde treats negative zero and decimal/exponent tokens as f64 rather than i64/u64. */
 function wireIntegerText(value: number | string): string | undefined {

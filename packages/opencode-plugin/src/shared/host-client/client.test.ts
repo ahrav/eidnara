@@ -25,6 +25,7 @@ import {
 import { HostClient, type HostClientOptions, type HostDiagnosticsEvent } from "./client";
 import { credentialFingerprints } from "./credential-fingerprint";
 import { HostCallError, HostClientError } from "./errors";
+import { exactCount, exactI64, exactU64 } from "./exact-json";
 import { FrameType } from "./protocol";
 import { serializedJsonText, serializeJsonBody } from "./serialized-json-body";
 import { AdmissionClass, type BindIdentity } from "./types";
@@ -605,6 +606,118 @@ describe("HostClient", () => {
         const failure = await rejection(second);
         expect(failure.code).toBe("malformed_control_response");
         expect(client.authenticated).toBeNull();
+    });
+
+    test("integer lexemes a double cannot reproduce arrive exact through routed and control responses", async () => {
+        const events: HostDiagnosticsEvent[] = [];
+        const { client, daemon } = await connected({ diagnostics: (event) => events.push(event) });
+        const opening = client.routeOpen(MANAGED_TARGET, IDENTITY);
+        await daemon.acceptRouteOpen();
+        const handle = await opening;
+
+        const routed = client.request(handle, { method: "read" });
+        const request = await daemon.nextRequest();
+        daemon.respondText(
+            request.header,
+            '{"at_limit":9007199254740992,"past_limit":9007199254740993,"even":9007199254740994,' +
+                '"u64_max":18446744073709551615,"i64_min":-9223372036854775808,"i64_max":9223372036854775807,' +
+                '"fraction":1.5,"exponent":1e3,"negative_zero":-0,"digits":"9007199254740993","nested":[[9007199254740993]]}',
+        );
+        const value = (await routed) as Record<string, unknown>;
+        expect(value.at_limit).toBe(9007199254740992n);
+        expect(value.past_limit).toBe(9007199254740993n);
+        expect(value.even).toBe(9007199254740994n);
+        expect(value.u64_max).toBe(18446744073709551615n);
+        expect(value.i64_min).toBe(-9223372036854775808n);
+        expect(value.i64_max).toBe(9223372036854775807n);
+        expect(value.fraction).toBe(1.5);
+        expect(value.exponent).toBe(1000);
+        expect(value.negative_zero).toBe(-0);
+        expect(value.digits).toBe("9007199254740993");
+        expect(value.nested).toEqual([[9007199254740993n]]);
+        // Adjacent unequal wire integers never compare equal after decoding.
+        expect(value.at_limit === value.past_limit).toBe(false);
+        // The count domain admits 2^53 exactly and refuses its neighbor and every unsupported shape.
+        expect(exactCount(value.at_limit)).toBe(9007199254740992);
+        expect(exactCount(value.past_limit)).toBeNull();
+        expect(exactCount(value.even)).toBeNull();
+        expect(exactCount(value.fraction)).toBeNull();
+        expect(exactCount(-1)).toBeNull();
+        expect(exactCount(null)).toBeNull();
+        expect(exactCount(undefined)).toBeNull();
+        expect(exactU64(value.u64_max)).toBe(18446744073709551615n);
+        expect(exactU64(value.i64_min)).toBeNull();
+        expect(exactI64(value.i64_min)).toBe(-9223372036854775808n);
+        expect(exactI64(value.i64_max)).toBe(9223372036854775807n);
+        expect(exactI64(value.u64_max)).toBeNull();
+
+        // A lexeme wider than any 64-bit integer refuses the whole body as invalid JSON; the diagnostics carry no payload.
+        const refused = client.request(handle, { method: "read" });
+        const wide = await daemon.nextRequest();
+        daemon.respondText(wide.header, '{"n":100000000000000000001}');
+        const error = await rejection(refused);
+        expect(error.code).toBe("invalid_response_body");
+        expect(
+            JSON.stringify(events, (_key, entry) =>
+                typeof entry === "bigint" ? entry.toString() : entry,
+            ),
+        ).not.toContain("100000000000000000001");
+
+        const status = client.hostStatus();
+        const control = await daemon.nextRequest();
+        daemon.respondText(
+            control.header,
+            '{"op":"host.status","health":"ok","metrics":{"components":{},"jobs_ready":9007199254740993,"jobs_done":7}}',
+        );
+        const snapshot = await status;
+        expect(snapshot.metrics.jobs_ready).toBe(9007199254740993n);
+        expect(exactCount(snapshot.metrics.jobs_ready)).toBeNull();
+        expect(exactCount(snapshot.metrics.jobs_done)).toBe(7);
+    });
+
+    test("routeOpen omits the ambient consumer identity only when asked, for that bind alone", async () => {
+        const saved = {
+            module: process.env.EIDNARA_MODULE_ID,
+            nonce: process.env.EIDNARA_LAUNCH_NONCE,
+        };
+        process.env.EIDNARA_MODULE_ID = "context";
+        process.env.EIDNARA_LAUNCH_NONCE = "nonce-1";
+        try {
+            const { client, daemon } = await connected();
+            const ambient = client.routeOpen(MANAGED_TARGET, IDENTITY);
+            const first = await daemon.acceptRouteOpen();
+            await ambient;
+            expect(first.consumer_identity).toEqual({
+                module_id: "context",
+                launch_nonce: "nonce-1",
+            });
+
+            const observer = client.routeOpen(
+                MANAGED_TARGET,
+                { ...IDENTITY, harness: "cli", session: "eidnara-review:1" },
+                { consumerIdentity: null },
+            );
+            const open = await daemon.nextRequest();
+            expect(open.json.op).toBe("route.open");
+            expect("consumer_identity" in open.json).toBe(false);
+            daemon.respond(open.header, { op: "route.open", route_channel: 9, route_epoch: 1 });
+            await observer;
+
+            const again = client.routeOpen(MANAGED_TARGET, IDENTITY);
+            const third = await daemon.nextRequest();
+            expect(third.json.consumer_identity).toEqual({
+                module_id: "context",
+                launch_nonce: "nonce-1",
+            });
+            daemon.respond(third.header, { op: "route.open", route_channel: 10, route_epoch: 1 });
+            await again;
+            expect(process.env.EIDNARA_MODULE_ID).toBe("context");
+        } finally {
+            if (saved.module === undefined) delete process.env.EIDNARA_MODULE_ID;
+            else process.env.EIDNARA_MODULE_ID = saved.module;
+            if (saved.nonce === undefined) delete process.env.EIDNARA_LAUNCH_NONCE;
+            else process.env.EIDNARA_LAUNCH_NONCE = saved.nonce;
+        }
     });
 
     test("aborting a managed call during route setup detaches it without cancelling the shared open", async () => {

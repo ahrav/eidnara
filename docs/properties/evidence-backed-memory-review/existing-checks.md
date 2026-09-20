@@ -57,6 +57,14 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_pass_over_a_view_without_the_project_leaves_its_ready_job_unclaimed` | `crates/daemon/tests/memory_reviewer_worker.rs` | gate open, Ready job, two passes over a hand-built empty view: no claim, no receipt, zero connections; a view naming the project runs it on the next pass | unaudited |
 | `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route` | `crates/daemon/tests/memory_reviewer_wire.rs` | `review.list`, `review.read`, a malformed identity, and an unknown field answer byte-equal through a `cli` route and the ordinary route | unaudited |
 
+## Exact integers at the client seam
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `integer lexemes a double cannot reproduce arrive exact through routed and control responses` | `packages/opencode-plugin/src/shared/host-client/client.test.ts` | raw tokens at the extrema and around 2^53 through `request` and `hostStatus`; count, u64, and i64 domains on the decoded values | unaudited |
+| `routeOpen omits the ambient consumer identity only when asked, for that bind alone` | same | the ambient pair is sent by default, omitted with `consumerIdentity: null`, and sent again on the next default bind; the environment is unchanged | unaudited |
+| `exact-json.test.ts` | `packages/opencode-plugin/src/shared/host-client/` | the reviver on every value shape, the width bound, the three domains, human and raw JSON output | unaudited |
+
 ## Suspiciously quiet areas
 
 - No test exercises class tightening (a decision reclassified `Sensitive`
@@ -75,6 +83,12 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
   read from code.
 - No test reopens either store between the Kernel envelope and the sweep; the
   durable rows are read through the same handles that wrote them.
+- No test decodes a maximum-size response body full of twenty-digit tokens;
+  the width bound is read from code.
+- A reviver makes `JSON.parse` walk the value recursively, so nesting a few
+  thousand levels deep now fails as invalid JSON where the plain parse
+  accepted it; the daemon's serializer nests no deeper than 128, and no test
+  pins the bound.
 - No test drives observer open, `module_projects`, and a worker pass in one
   process; the view and the pass are exercised in two tests.
 - No test records a `temporary_capture` member and adopts it; the member
