@@ -1543,6 +1543,15 @@ impl MemoryStore {
     pub fn in_progress_memory_reviewer_receipts(
         &self,
     ) -> Result<Vec<(String, u64)>, MemoryStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .in_progress_receipts_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(storage::StoreError::Backend(
+                "injected in-progress receipt listing failure".to_string(),
+            )));
+        }
         self.inner
             .with_conn(|conn| {
                 let mut statement = conn.prepare_cached(

@@ -1520,6 +1520,49 @@ fn the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners() {
     );
 }
 
+/// A reconciliation failure is a failed step like any other: the pass publishes `unavailable` with the last good sample time and retries early, while the Kernel's maintenance still ran. The next pass on a healthy store publishes `ready` again.
+#[test]
+fn a_failed_hold_reconciliation_publishes_unavailable_and_the_next_pass_recovers() {
+    use daemon::memory_reviewer::lifecycle::{MemoryReviewerState, sweep_and_sample};
+
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    // A live review hold, so the reconciler reads the receipt sets instead of returning on an empty listing.
+    fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
+    fixture
+        .ledger
+        .fail_next_in_progress_memory_reviewer_receipts_for_test();
+    let pass = sweep_and_sample(
+        &fixture.ledger,
+        Some(&fixture.store),
+        fixture.now + 6,
+        Some(41),
+        &|| false,
+    )
+    .expect("not cancelled");
+    assert!(!pass.healthy);
+    assert_eq!(
+        pass.block.memory_reviewer_state,
+        MemoryReviewerState::Unavailable
+    );
+    assert_eq!(pass.block.sampled_at_ms, Some(41));
+    assert!(pass.block.facts.is_none());
+
+    let pass = sweep_and_sample(
+        &fixture.ledger,
+        Some(&fixture.store),
+        fixture.now + 7,
+        Some(41),
+        &|| false,
+    )
+    .expect("not cancelled");
+    assert!(pass.healthy);
+    assert_eq!(pass.block.memory_reviewer_state, MemoryReviewerState::Ready);
+    assert_eq!(pass.block.sampled_at_ms, Some(fixture.now + 7));
+}
+
 /// The sweep beats the selection inside the settlement window: the receipt closes `expired` at its run deadline before the completion write, the completion is fenced, and the settlement itself releases the hold it had transferred.
 #[test]
 fn a_sweep_inside_the_settlement_window_fences_the_selection_and_releases_the_hold() {

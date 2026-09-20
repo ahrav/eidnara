@@ -243,7 +243,7 @@ pub fn reconcile_review_holds(
     if holds.is_empty() {
         return Ok(0);
     }
-    // Both Memory Store sets are read once, ahead of any Kernel release, so filtering the holds performs no store probes.
+    // Both Memory Store sets are read once, ahead of any Kernel release, so filtering the holds performs no store probes. The pending key carries no project: a receipt row names the Memory Store project, not the Kernel project digest of the root it ran under, so a same-identity receipt in another project keeps this project's hold until that receipt completes or the hold expires. Retention is the safe side; a release a live settlement still needs is the one this pass must never make.
     let pending: HashSet<(String, u64)> = store
         .in_progress_memory_reviewer_receipts()
         .map_err(|error| error.to_string())?
@@ -349,19 +349,21 @@ pub fn sweep_and_sample(
         }
     };
     let mut advanced = swept_jobs + swept_selections > 0;
-    let mut healthy = true;
     if let Some(kernel) = kernel {
         if cancelled() {
             return None;
         }
-        // A reconciliation failure is reported but does not stop capture expiry, staging maintenance, or artifact reclamation below.
-        match reconcile_review_holds(store, kernel, now_ms) {
-            Ok(released) => advanced |= released > 0,
+        // A reconciliation failure is a failed step, but the Kernel's capture expiry, staging maintenance, and artifact reclamation below still run before the pass reports it.
+        let reconciled = match reconcile_review_holds(store, kernel, now_ms) {
+            Ok(released) => {
+                advanced |= released > 0;
+                true
+            }
             Err(error) => {
                 eprintln!("daemon: memory reviewer hold reconciliation failed: {error}");
-                healthy = false;
+                false
             }
-        }
+        };
         match kernel_slice(kernel, now_ms, cancelled) {
             Ok(Some(slice_advanced)) => advanced |= slice_advanced,
             Ok(None) => return None,
@@ -369,6 +371,9 @@ pub fn sweep_and_sample(
                 eprintln!("daemon: kernel staging maintenance failed: {error:?}");
                 return Some(unavailable(advanced));
             }
+        }
+        if !reconciled {
+            return Some(unavailable(advanced));
         }
     }
     if cancelled() {
@@ -385,7 +390,7 @@ pub fn sweep_and_sample(
                 facts: Some(facts),
             },
             advanced,
-            healthy,
+            healthy: true,
         },
         Err(error) => {
             eprintln!("daemon: memory_reviewer facts sample failed: {error}");
