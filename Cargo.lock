@@ -1989,6 +1989,7 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "context-core",
+ "eval-core",
  "gix",
  "kernel",
  "lease",

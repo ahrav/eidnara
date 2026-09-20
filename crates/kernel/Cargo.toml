@@ -36,3 +36,6 @@ storage = { workspace = true }
 secret-scanner = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+# The evaluator's eligibility-spec pin and reducer are checked against the
+# kernel's judge here, so the kernel breaks first when its rules change.
+eval-core = { workspace = true }

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
     type CargoMetadata,
+    forbiddenCoreSources,
     forbiddenDependencyEdges,
     type MetadataDependency,
 } from "./forbid-test-support-dependencies";
@@ -91,6 +92,45 @@ describe("forbiddenDependencyEdges", () => {
         };
         expect(forbiddenDependencyEdges(metadata)).toEqual([
             "daemon [features] default reaches host-runtime/test-support through test-support",
+        ]);
+    });
+});
+
+describe("eval-core fences", () => {
+    const core = (dependencies: MetadataDependency[]): CargoMetadata => ({
+        packages: [{ name: "eval-core", source: null, dependencies }],
+    });
+    const closed = [
+        dep({ name: "context-core" }),
+        dep({ name: "serde" }),
+        dep({ name: "serde_json" }),
+        dep({ name: "sha2" }),
+    ];
+
+    test("accepts exactly the closed dependency set plus dev-dependencies", () => {
+        expect(forbiddenDependencyEdges(core([...closed, dep({ name: "proptest", kind: "dev" })]))).toEqual([]);
+    });
+
+    test("rejects a kernel edge and a missing member of the closed set", () => {
+        expect(forbiddenDependencyEdges(core([...closed, dep({ name: "kernel" })]))).toEqual([
+            "eval-core [dependencies] names kernel outside its closed set",
+        ]);
+        expect(forbiddenDependencyEdges(core(closed.slice(1)))).toEqual([
+            "eval-core [dependencies] lacks context-core from its closed set",
+        ]);
+    });
+
+    test("rejects product-crate paths and std effect modules in core source", () => {
+        expect(
+            forbiddenCoreSources({
+                "a.rs": "use kernel::EligibilityVerdict;\nlet t = std::time::Instant::now();\n",
+                "b.rs": "use std::collections::BTreeMap;\nlet p = std::path::Path::new(\"x\");\n",
+                "c.rs": "use serde::Serialize;\n",
+            }),
+        ).toEqual([
+            "a.rs:1: use kernel::EligibilityVerdict;",
+            "a.rs:2: let t = std::time::Instant::now();",
+            "b.rs:2: let p = std::path::Path::new(\"x\");",
         ]);
     });
 });
