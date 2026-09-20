@@ -132,11 +132,135 @@ Placement fences (`scripts/forbid-test-support-dependencies.ts`, run in the
   package's `default` feature enables its own
   `test-support` or reaches a `*/*test-support` entry.
 
+## Phase 1 executed checks: generated worlds
+
+World generation, choice replay, and the event log
+(`crates/eval-core/tests/world.rs`, fixture in `tests/support/mod.rs`):
+
+- `generation_is_a_pure_function_of_seed_and_config`
+  (`wm-generator-pure-function-of-identity`) generates the fixture twice and
+  expects equal worlds and digests, then changes the seed and a config field
+  and expects different digests; it pins the log header literals to
+  `EVENT_SCHEMA_VERSION` and `LINEARIZATION_RULE_VERSION` and the tape
+  identity to `tape_identity`, and builds a `RunIdentity` from the generator
+  constants to show that the seed, the config, and each constant change
+  `eval_run_id`.
+- `keyed_draws_are_pinned_and_distinct_per_kind_actor_site_and_occurrence`
+  (`wm-independent-rng-streams-per-axis-entity`) freezes one `keyed_draw`
+  value so a key-shape or protocol change is reviewed, and shows that
+  changing the kind, actor, site, occurrence, or seed changes the draw.
+- `every_choice_kind_is_recorded_and_the_tape_replays_the_same_world`
+  (`wm-typed-choice-tape-and-replay-refusal`) checks that every `ChoiceKind`
+  appears on the tape with an occurrence above zero somewhere, that
+  `Mode::ReplayTape` over the unmodified tape reproduces the world through
+  `generate_all` and through the step drive, and recomputes the candidate
+  digest of every citation and revision-target choice from the log so the
+  digest is shown to cover candidate values.
+- `replay_refuses_a_missing_changed_or_out_of_range_choice_and_emits_no_log`
+  (`wm-typed-choice-tape-and-replay-refusal`) truncates the tape, changes a
+  candidates digest, sets an out-of-range index, and moves an entry's actor,
+  each at the first, a middle, and the last entry, and expects the typed
+  refusal naming that entry; probes the exact index boundary on a choice with
+  one candidate; expects a tape replayed under another seed or config to
+  refuse with `TapeMismatch`; expects a tape with an entry past the last
+  choice to replay the same world and return a tape holding only the consumed
+  entries; and after a mid-drive refusal expects `step`, `log`, and `finish`
+  to return the same error.
+- `removing_an_unrelated_event_changes_no_later_text_or_rename_digest`
+  (`wm-independent-rng-streams-per-axis-entity`) shortens one session and,
+  separately, the repository, and expects every event on the other streams
+  to keep its text, revision target, rename digest, and both times, checking
+  that later events on two other streams exist. Adding a repository shows the
+  one deliberate coupling: only `cites` fields move, never text. The negative
+  control is a hand-built generator with one sequential SHA-256 stream, which
+  fails the same comparison.
+- `events_are_self_contained_and_any_single_deletion_leaves_a_valid_log`
+  (`wm-events-self-contained-under-deletion`) requires all six payload kinds,
+  a rename chain, a cross-stream citation, and well-formed unique commit oids
+  in the fixture, deletes every event in turn through `EventLog::without`,
+  expects the result to validate with every surviving event byte-equal to the
+  original, and expects a deletion that leaves edges behind (`DanglingEdge`),
+  a positional id (`IdNotDerived`), two events sharing an id (`DuplicateId`),
+  and each wrong header literal (`SchemaMismatch`) to be refused. The
+  deletion rule is "drop the incident edges, repair nothing"; the record's
+  open question is resolved that way because the ticket forbids repairing
+  surviving payloads.
+- `the_log_is_linearized_by_the_versioned_key_and_equality_checks_the_edges`
+  (`wm-linearization-versioned-total-order`) recomputes every `causal_depth`
+  as the longest path over the edges, recomputes the order from the key tuple
+  with those depths and the stream wire names, pins the wire names and their
+  order, checks key uniqueness, checks every edge runs forward, requires
+  same-millisecond events on two streams and a cross-stream edge, and expects
+  two logs with equal events and different edges to compare unequal; swapped
+  events, a reversed edge, swapped or duplicated edges, and a flattened depth
+  are refused by name.
+- `logs_tapes_and_times_round_trip_through_serde_in_canonical_form`
+  (`wm-typed-choice-tape-and-replay-refusal`) round-trips the log and the tape
+  through JSON, refuses unknown fields on both, and accepts only the
+  `i64::to_string` form for times (a number, a leading zero, a sign, a space,
+  an empty string, and an exponent are refused).
+- `time_domain_and_observation_lead_are_enforced` (C-DST-6; no `wm-` record
+  owns the time domain) checks generated worlds never lead observation time,
+  and that the validator refuses a lead past `MAX_REVISION_LEAD_MS`, a valid
+  time past `MAX_VALID_TIME_MS`, and a negative observation time, while an
+  epoch at the domain edge refuses as `TimeOverflow` before generation.
+- `the_event_bound_is_refused_before_generation_and_by_the_validator`
+  (`wm-log-and-observation-bounds`) expects a bound one below the declared
+  count to refuse from `Generator::new` and `generate_all` with `EventBound`,
+  a `u32::MAX` message count to refuse in well under a second, including with
+  the bound at `u32::MAX` and a tool span on every slot (the count is
+  arithmetic, not a per-slot sweep), a bound equal to the declared count to
+  pass, the validator
+  to refuse `EventBound` at one below, and each `InvalidField` refusal (bound,
+  tick, epoch, an entity with no slots, no entities) plus a missing, unknown,
+  or fractional field at parse time. The record asks for an exported
+  `MAX_EVENTS_PER_LOG` constant; the ticket's profile clarification makes it
+  a required config field with no default instead.
+- `declared_events_equals_the_emitted_count_across_spec_shapes`
+  (`wm-log-and-observation-bounds`) generates 432 worlds over a grid of
+  message counts and `*_every` values and expects the declared count to equal
+  the emitted count in each, which is what keeps the drive-time bound check
+  a consistency assertion rather than a reachable refusal.
+- `generate_all_equals_the_step_fold_and_every_partial_log_validates`
+  (`wm-generate-all-equals-step-drive`) folds `step` until `Done`, checks
+  every batch is one entity at one valid time with exactly the slot's
+  independently restated event count, validates the re-linearized snapshot
+  after every step, bounds the step count by the slot count, expects `Done`
+  to repeat, expects the folded world to equal `generate_all`, expects the
+  emission-ordered batches sorted by the key to equal the log, expects
+  `finish` after one step to drive the rest, and shows a batch cut before
+  quiescence fails the per-slot count.
+
+Cross-process determinism (`crates/eval-core/tests/two_process.rs`):
+
+- `two_process_same_world_inputs_yield_equal_log_and_tape_digests`
+  (`wm-generator-pure-function-of-identity`, `wm-no-map-order-reaches-output`)
+  runs two child processes that generate the shared fixture (the child asserts
+  every choice kind is drawn) and compares their log and tape digests with
+  each other and with the parent; a reseeded child differs. The planted-map
+  negative control from Phase 0 exercises the trace digest path in the same
+  file; the log and tape have no map-backed field, and
+  `crates/eval-core/clippy.toml` disallows `HashMap` and `HashSet` in the
+  crate.
+
+The coverage markers the records name (`wm_generator_two_processes_compared`,
+`wm_removal_two_live_streams_after_event`, `wm_tape_each_choice_kind_recorded`,
+`wm_log_has_cross_event_reference`,
+`wm_log_has_same_millisecond_cross_stream_events`,
+`wm_log_has_cross_stream_causal_edge`, `wm_bound_refusal_arm_entered`,
+`wm_step_drive_validated_between_steps`) are asserted inline as preconditions
+in the tests above; the evaluator-owned marker registry lands with the
+ingestion ticket and these assertions move onto it then.
+
 ## Gaps recorded here
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; manifests carry
   `adapter-ingested, production caller: none` once ingestion lands.
+- `MAX_EVENTS_PER_LOG` is a required `WorldConfig` field with no default, not
+  a top-level manifest field; it reaches the manifest through
+  `run_identity.config`. Promoting it to a named manifest field is a schema
+  bump deferred to pre-run profile approval.
 - The 800-unit total cap is not reachable through `render_user_hint` under the
   80-unit fragment cap and 3-result cap; the census exercises the cap function
   directly.

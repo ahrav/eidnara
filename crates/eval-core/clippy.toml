@@ -1,0 +1,4 @@
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "per-process iteration order; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "per-process iteration order; use BTreeSet" },
+]

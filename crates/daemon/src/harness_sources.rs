@@ -826,3 +826,12 @@ fn provenance(unit: &SourceUnit) -> ProvenanceRule {
         _ => ProvenanceRule::Fixed(SourceClass::ModelInference, TaintClass::AssistantInference),
     }
 }
+
+#[cfg(test)]
+mod pins {
+    /// `eval-core` has a closed dependency set and cannot name this crate.
+    #[test]
+    fn revision_lead_matches_the_evaluator_pin() {
+        assert_eq!(super::MAX_REVISION_LEAD_MS, eval_core::MAX_REVISION_LEAD_MS);
+    }
+}

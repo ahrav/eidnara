@@ -4,7 +4,7 @@ use std::fmt;
 use context_core::canonical_json::{
     ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
 };
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -38,7 +38,7 @@ pub struct RunIdentity {
     pub config: Value,
     pub scenario: Value,
     /// Serialized as a canonical decimal string: canonical JSON rejects integers above 2^53 - 1.
-    #[serde(with = "decimal_u64")]
+    #[serde(with = "crate::decimal")]
     pub root_seed: u64,
     pub random_schema_version: String,
     pub generator_version: String,
@@ -151,24 +151,4 @@ pub fn eval_run_id(identity: &RunIdentity) -> Result<String, IdentityError> {
     let mut tuple = serde_json::to_value(identity).expect("run identity serializes");
     tuple["build"] = Value::String(identity.build.digest()?);
     Ok(protocol_digest(RUN_ID_PROTOCOL, &tuple)?)
-}
-
-mod decimal_u64 {
-    use super::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&value.to_string())
-    }
-
-    /// Accepts only the string `u64::to_string` produces, so one value has one encoding.
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        let value: u64 = text.parse().map_err(serde::de::Error::custom)?;
-        if value.to_string() != text {
-            return Err(serde::de::Error::custom(format!(
-                "root_seed {text:?} is not the canonical decimal form"
-            )));
-        }
-        Ok(value)
-    }
 }
