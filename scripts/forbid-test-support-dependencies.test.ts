@@ -273,8 +273,12 @@ describe("eval-core fences", () => {
                     "use ::std as s;",
                     "use std::{self as st, fmt};",
                     "extern crate std as core_std;",
+                    "use {serde::Serialize, std as s};",
+                    "use std::*;",
+                    "use std::{collections::BTreeMap, *};",
                     "let bytes = standard::fs::read(\"x\");",
                     "use std::collections::HashMap as Map;",
+                    "use std::collections::*;",
                     "",
                 ].join("\n"),
             }),
@@ -283,6 +287,9 @@ describe("eval-core fences", () => {
             "alias.rs:2: use ::std as s;",
             "alias.rs:3: use std::{self as st, fmt};",
             "alias.rs:4: extern crate std as core_std;",
+            "alias.rs:5: use {serde::Serialize, std as s};",
+            "alias.rs:6: use std::*;",
+            "alias.rs:7: use std::{collections::BTreeMap, *};",
         ]);
     });
 

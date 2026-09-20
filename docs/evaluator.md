@@ -344,8 +344,8 @@ dependencies and never names a kernel type, and
 `scripts/forbid-test-support-dependencies.ts` now asserts both facts (the
 closed dependency set, and no product-crate or `std` effect-module path in the
 core's source, whether written as a full path or inside a brace-grouped
-`use std::{...}`; renaming the `std` root is refused so no alias can hide an
-effect path). The source scan runs from the `cargo metadata` workspace
+`use std::{...}`; renaming or globbing the `std` root is refused so no alias
+or bare name can hide an effect path). The source scan runs from the `cargo metadata` workspace
 root and fails when it matches no files, so it cannot pass vacuously.
 
 ## Bitemporal reducer

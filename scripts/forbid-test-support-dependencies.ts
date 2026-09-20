@@ -13,9 +13,10 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
 /**
  * Paths a sans-I/O core must not name: product crates and the std effect
  * modules, whether written as a full path (`std::fs::read`) or as a member
- * of a brace-grouped `use std::{...}` list. Renaming the `std` root
- * (`use std as s`, `use std::{self as s}`, `extern crate std as s`) is
- * refused outright, since it would let `s::fs` escape the textual scan.
+ * of a brace-grouped `use std::{...}` list. Rebinding the `std` root is
+ * refused outright: renaming it (`std as s`, `std::{self as s}`) or globbing
+ * it (`use std::*`, `use std::{.., *}`) would let `s::fs` or bare `fs` escape
+ * the textual scan.
  */
 const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io";
 const PRODUCT_CRATES = "kernel|daemon|retrieval|storage|memory_store|host_runtime|rusqlite|tokio";
@@ -25,8 +26,9 @@ const FORBIDDEN_CORE_SOURCE = new RegExp(
         `\\buse (${PRODUCT_CRATES})\\b`,
         `\\bstd::(${STD_EFFECT_MODULES})\\b`,
         `\\bstd::\\{[^;]*(?:[{,]\\s*|::)(${STD_EFFECT_MODULES})\\b`,
-        `\\b(?:use|extern crate) (?:::)?std as\\b`,
+        `\\bstd as\\b`,
         `\\bstd::\\{[^;]*\\bself as\\b`,
+        `\\bstd::(?:\\{[^;]*[{,]\\s*)?\\*`,
     ].join("|"),
     "g",
 );
