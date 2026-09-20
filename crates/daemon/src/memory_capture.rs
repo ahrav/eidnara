@@ -498,10 +498,11 @@ pub(crate) fn capture_enabled(binding: &SessionBinding) -> bool {
         && binding.config.memory_auto_capture
 }
 
-/// Capture storage and leases key on the canonical root the kernel binding
-/// uses, so a symlinked spelling of one project is one capture queue.
+/// Capture storage and leases key on the kernel binding's project digest:
+/// one canonical root is one queue however it is spelled, and two roots that
+/// differ only in bytes a lossy string would fold together stay distinct.
 fn capture_project(binding: &SessionBinding) -> String {
-    binding.kernel_project.root().to_string_lossy().into_owned()
+    binding.kernel_project.digest().to_owned()
 }
 
 /// Fragments a transform admitted but has not yet handed to the store.

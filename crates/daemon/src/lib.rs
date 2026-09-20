@@ -22491,7 +22491,7 @@ mod tests {
         assert_eq!(state.starts.load(Ordering::SeqCst), 0);
         assert_eq!(
             store
-                .memory_capture_status(project.to_str().unwrap())
+                .memory_capture_status(&capture_key(&project))
                 .unwrap()
                 .pending,
             0
@@ -22567,9 +22567,7 @@ mod tests {
             )["state"],
             "ready"
         );
-        let status = store
-            .memory_capture_status(project.to_str().unwrap())
-            .unwrap();
+        let status = store.memory_capture_status(&capture_key(&project)).unwrap();
         assert_eq!(status.completed, 1);
         assert_eq!(status.pending, 0);
         let memories = kernel_routes::read::read_visible(
@@ -22611,7 +22609,7 @@ mod tests {
         assert_eq!(state.starts.load(Ordering::SeqCst), 0);
         assert_eq!(
             store
-                .memory_capture_status(project.to_str().unwrap())
+                .memory_capture_status(&capture_key(&project))
                 .unwrap()
                 .completed,
             1
@@ -22698,7 +22696,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .memory_capture_status(project.to_str().unwrap())
+                .memory_capture_status(&capture_key(&project))
                 .unwrap()
                 .completed,
             0
@@ -22752,9 +22750,7 @@ mod tests {
             "processed"
         );
         assert_eq!(
-            store
-                .memory_capture_status(project.to_str().unwrap())
-                .unwrap(),
+            store.memory_capture_status(&capture_key(&project)).unwrap(),
             memory_store::memory_capture::CaptureQueueStatus {
                 pending: 1,
                 prepared: 0,
@@ -22762,6 +22758,13 @@ mod tests {
                 failed: 1
             }
         );
+    }
+
+    /// The store key capture uses for a project: the kernel binding's digest.
+    fn capture_key(project: &Path) -> String {
+        kernel_routes::ProjectBinding::new(project)
+            .digest()
+            .to_owned()
     }
 
     fn capture_binding(project: &Path, harness: &str) -> SessionBinding {
@@ -22834,7 +22837,7 @@ mod tests {
         let state = Arc::new(ProducerState::default());
         let (handler, store, _dir, project) =
             handler_with_store(Arc::clone(&state), default_test_config());
-        let project_key = project.to_str().unwrap();
+        let project_key = &capture_key(&project);
         let pi = capture_binding(&project, "pi");
         let messages = [capture_ingress(
             "m1",
@@ -22864,7 +22867,7 @@ mod tests {
         let state = Arc::new(ProducerState::default());
         let (handler, store, _dir, project) =
             handler_with_store(Arc::clone(&state), default_test_config());
-        let project_key = project.to_str().unwrap();
+        let project_key = &capture_key(&project);
         let pi = capture_binding(&project, "pi");
         handler.bind_route(test_route(7), pi.clone());
         let messages = [capture_ingress(
@@ -22897,6 +22900,124 @@ mod tests {
         );
         assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 0);
         assert_eq!(handler.capture_memo.lock().unwrap().session_len("ses"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_claim_whose_request_was_dropped_records_no_dispatch() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        for (id, text) in [
+            ("native-user-1", "Use port 4321 for staging."),
+            ("native-user-2", "Production listens on 8080."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+        }
+        // A frozen plan at the head publishes during the claim and waits on the gate.
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let frozen = jobs
+            .iter()
+            .find(|job| job.message_id == "native-user-1")
+            .unwrap();
+        store
+            .prepare_memory_capture(
+                project_key,
+                &frozen.job_id,
+                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                    .to_string(),
+            )
+            .unwrap();
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(100),
+            handler.handle_native_capture_next(test_route(7), &next),
+        )
+        .await;
+        assert!(dropped.is_err(), "the request is dropped mid-claim");
+        holder.join().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            handler.native_capture.lock().unwrap().reserved_for_test(),
+            0
+        );
+        let unprepared = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.message_id == "native-user-2")
+            .unwrap();
+        assert_eq!(
+            unprepared.attempts, 0,
+            "work that was never issued is not a dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_keys_keep_distinct_non_utf8_roots_apart() {
+        use std::os::unix::ffi::OsStrExt;
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, dir, _project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let roots: Vec<PathBuf> = [b"proj-\xff".as_slice(), b"proj-\xfe".as_slice()]
+            .into_iter()
+            .map(|name| {
+                let root = dir.path().join(std::ffi::OsStr::from_bytes(name));
+                std::fs::create_dir_all(&root).unwrap();
+                root
+            })
+            .collect();
+        assert_eq!(
+            roots[0].to_string_lossy(),
+            roots[1].to_string_lossy(),
+            "the two roots are indistinguishable once rendered lossily"
+        );
+        for (index, root) in roots.iter().enumerate() {
+            handler.bind_route(
+                test_route(7 + index as u16),
+                SessionBinding {
+                    project_root: root.clone(),
+                    kernel_project: kernel_routes::ProjectBinding::new(root),
+                    ..capture_binding(dir.path(), "pi")
+                },
+            );
+        }
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(8), &source).await)["state"],
+            "project_mismatch",
+            "a session captured under one root cannot be copied into a root that only renders the same"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uppercase_lease_token_is_a_malformed_envelope_not_stale_work() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":"0123456789ABCDEF0123456789ABCDEF","error":"cancelled"});
+        assert!(
+            matches!(handler.handle_native_capture_submit(test_route(7), &submit).await, PreparedOutcome::Error { ref code, .. } if code == "invalid_params"),
+            "the wire contract requires 32 lowercase hexadecimal characters"
+        );
     }
 
     #[tokio::test]
@@ -22949,7 +23070,7 @@ mod tests {
         let (handler, store, _dir, project) =
             handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
-        let project_key = project.to_str().unwrap();
+        let project_key = &capture_key(&project);
         let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
@@ -23067,7 +23188,7 @@ mod tests {
         let (handler, store, _dir, project) =
             handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
-        let project_key = project.to_str().unwrap();
+        let project_key = &capture_key(&project);
         for (id, text) in [
             ("native-user-1", "Use port 4321 for staging."),
             ("native-user-2", "Production listens on 8080."),
@@ -23129,7 +23250,7 @@ mod tests {
         let state = Arc::new(ProducerState::default());
         let (handler, store, _dir, project) =
             handler_with_store(Arc::clone(&state), default_test_config());
-        let project_key = project.to_str().unwrap();
+        let project_key = &capture_key(&project);
         let messages = [
             capture_ingress("m1", "user", "Use port 4321 for staging.", 1),
             capture_ingress("m2", "assistant", "Staging now listens on 4321.", 2),
@@ -23240,9 +23361,7 @@ mod tests {
             )["state"],
             "processed"
         );
-        let status = store
-            .memory_capture_status(project.to_str().unwrap())
-            .unwrap();
+        let status = store.memory_capture_status(&capture_key(&project)).unwrap();
         assert_eq!(
             status,
             memory_store::memory_capture::CaptureQueueStatus {
@@ -23280,7 +23399,7 @@ mod tests {
                 ..capture_binding(&project, "pi")
             },
         );
-        let project_key = project.to_str().unwrap();
+        let project_key = &capture_key(&project);
         let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
@@ -23339,7 +23458,7 @@ mod tests {
         let mut pi = capture_binding(&project, "pi");
         pi.config.model_chain = vec!["chain/a".into(), "chain/b".into(), "chain/c".into()];
         handler.bind_route(test_route(7), pi);
-        let project_key = project.to_str().unwrap();
+        let project_key = &capture_key(&project);
         for (id, text) in [
             ("native-user-1", "Use port 4321 for staging."),
             ("native-user-2", "Production listens on 8080."),
@@ -23394,7 +23513,7 @@ mod tests {
         let (handler, store, _dir, project) =
             handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
-        let project_key = project.to_str().unwrap();
+        let project_key = &capture_key(&project);
         for (id, text) in [
             ("native-user-1", "Use port 4321 for staging."),
             ("native-user-2", "Production listens on 8080."),
@@ -23490,7 +23609,7 @@ mod tests {
         let (handler, store, _dir, project) =
             handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
         handler.bind_route(test_route(7), capture_binding(&project, "pi"));
-        let project_key = project.to_str().unwrap();
+        let project_key = &capture_key(&project);
         // Each control character escapes to six JSON bytes, so this source alone
         // renders past the native prompt ceiling however much else is dropped.
         let oversized = "\u{1}".repeat(memory_capture::MAX_CAPTURE_INPUT_BYTES);
@@ -23575,7 +23694,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .memory_capture_status(project.to_str().unwrap())
+                .memory_capture_status(&capture_key(&project))
                 .unwrap()
                 .completed,
             1

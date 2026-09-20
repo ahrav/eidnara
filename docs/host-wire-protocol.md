@@ -800,8 +800,11 @@ be replaced. Preparing or submitting work remains reserved until its store
 work finishes, even when the request itself is cancelled first.
 A stale reply cannot remove or publish against a successor reservation.
 Leases are process-local; source jobs and frozen plans are durable. Capture
-queues and leases key on the canonical project root, so a symlinked spelling
-of one root is the same project.
+queues and leases key on the same canonical project identity the kernel scope
+uses, so a symlinked spelling of one root is the same project and two roots
+that differ only in raw path bytes stay distinct. A dispatch is recorded only
+when work is issued; a `next` request cancelled during preparation records
+none.
 
 Other `next` states are `ready`, `pending`, `stale`, `disabled`,
 `store_failed`, and `unavailable`. `ready` means the project has no pending

@@ -3,6 +3,7 @@
 
 use super::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) const LEASE_DURATION: Duration = Duration::from_secs(180);
 const MAX_NATIVE_PROMPT_BYTES: usize = 240 * 1024;
@@ -90,6 +91,16 @@ fn messages_for(jobs: &[CaptureJob]) -> Vec<CaptureMessage> {
         .collect()
 }
 
+/// Dropped with a request future; the blocking claim reads it before it
+/// records a dispatch, so a request nobody is waiting on issues no work.
+struct DeliveryWatch(Arc<AtomicBool>);
+
+impl Drop for DeliveryWatch {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// What one blocking-pool claim produced: a plan to lease, or the final reply.
 enum NextStep {
     Work(NativePlan, String),
@@ -169,37 +180,54 @@ impl HandlerCore {
             retained: false,
         };
         let work = self.native_capture_work(store, binding);
+        let wanted = Arc::new(AtomicBool::new(true));
+        let _watch = DeliveryWatch(Arc::clone(&wanted));
+        let state = Arc::clone(&self.native_capture);
         // The guard travels with the blocking work: a request future dropped
-        // mid-claim keeps the reservation until that work has finished.
-        let (plan, prompt, mut guard) =
-            match kernel_routes::blocking(move || (work.claim(primary.as_deref()), guard)).await {
-                Ok((NextStep::Work(plan, prompt), guard)) => (plan, prompt, guard),
-                Ok((NextStep::Done(outcome), _)) => return outcome,
-                Err(_) => {
-                    eprintln!("daemon: native memory capture preparation failed: pool_unavailable");
-                    return respond(json!({"state":"pending"}));
-                }
+        // mid-claim keeps the reservation until that work has finished, and
+        // the dispatch is recorded only once the work is issued.
+        kernel_routes::blocking(move || {
+            let mut guard = guard;
+            let (plan, prompt) = match work.claim(primary.as_deref()) {
+                NextStep::Work(plan, prompt) => (plan, prompt),
+                NextStep::Done(outcome) => return outcome,
             };
-        let response = json!({"state":"work", "lease":token, "model":plan.model,
-            "system":CAPTURE_SYSTEM_PROMPT,"prompt":prompt,
-            "max_output_tokens":8192,"max_output_bytes":MAX_CAPTURE_OUTPUT_BYTES,"max_duration_ms":90_000});
-        let mut state = self
-            .native_capture
-            .lock()
-            .expect("native capture leases mutex");
-        let Some(lease) = state
-            .leases
-            .get_mut(&guard.key)
-            .filter(|lease| lease.token == token && lease.expires > Instant::now())
-        else {
-            return respond(json!({"state":"stale"}));
-        };
-        // The lease clock starts when work is issued, so the advertised
-        // execution window fits however long preparation waited.
-        lease.expires = Instant::now() + LEASE_DURATION;
-        lease.plan = Some(plan);
-        guard.retained = true;
-        respond(response)
+            if !wanted.load(Ordering::Acquire) {
+                return respond(json!({"state":"pending"}));
+            }
+            for job in &plan.jobs {
+                match work
+                    .store
+                    .begin_memory_capture_attempt(&job.project, &job.job_id, now_ms())
+                {
+                    Ok(true) => {}
+                    Ok(false) => return respond(json!({"state":"pending"})),
+                    Err(_) => return respond(json!({"state":"store_failed"})),
+                }
+            }
+            let response = json!({"state":"work", "lease":guard.token, "model":plan.model,
+                "system":CAPTURE_SYSTEM_PROMPT,"prompt":prompt,
+                "max_output_tokens":8192,"max_output_bytes":MAX_CAPTURE_OUTPUT_BYTES,"max_duration_ms":90_000});
+            let mut state = state.lock().expect("native capture leases mutex");
+            let Some(lease) = state
+                .leases
+                .get_mut(&guard.key)
+                .filter(|lease| lease.token == guard.token && lease.expires > Instant::now())
+            else {
+                return respond(json!({"state":"stale"}));
+            };
+            // The lease clock starts when work is issued, so the advertised
+            // execution window fits however long preparation waited.
+            lease.expires = Instant::now() + LEASE_DURATION;
+            lease.plan = Some(plan);
+            guard.retained = true;
+            respond(response)
+        })
+        .await
+        .unwrap_or_else(|_| {
+            eprintln!("daemon: native memory capture preparation failed: pool_unavailable");
+            respond(json!({"state":"pending"}))
+        })
     }
 
     /// Accepts only a matching, unexpired lease from the same project, harness,
@@ -222,7 +250,10 @@ impl HandlerCore {
             .get("lease")
             .and_then(Value::as_str)
             .filter(|token| {
-                token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+                token.len() == 32
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             })
         else {
             return invalid_params_error("native capture requires a lease token");
@@ -461,15 +492,6 @@ impl CaptureWork {
                 messages = messages_for(&unprepared);
             }
         };
-        for job in &unprepared {
-            if !self
-                .store
-                .begin_memory_capture_attempt(&job.project, &job.job_id, now_ms())
-                .map_err(|_| "store_failed")?
-            {
-                return Ok(None);
-            }
-        }
         Ok(Some((
             NativePlan {
                 jobs: unprepared,
