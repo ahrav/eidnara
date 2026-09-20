@@ -29,7 +29,6 @@ import {
 
 export const REVIEW_HARNESS = "cli";
 export const DEFAULT_LIMIT = 16;
-const MAX_LINE = 200;
 const REQUEST_TIMEOUT_MS = 10_000;
 
 /** One bound covers every daemon wait: the control calls, `route.open`, and the routed request. */
