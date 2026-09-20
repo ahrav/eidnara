@@ -258,6 +258,8 @@ pub struct MemoryReviewerReceipt {
     pub abstained_reason: Option<AbstainReason>,
     pub selected: Option<(u64, ResultSelection)>,
     pub created_at_ms: i64,
+    /// The instant the receipt completed, `None` while in progress. A completed receipt is never rewritten, so this is the selection time a selected result is judged against.
+    pub completed_at_ms: Option<i64>,
 }
 
 /// The KTD7 marker tuple a caller binds before disclosure.
@@ -372,7 +374,7 @@ const RECEIPT_COLUMNS: &str =
      authority_generation, state, generation, claim_id, run_deadline_ms, execution_cutoff_ms,
      cancelled_at_ms, terminal_kind, selected_generation, selected_candidate_id,
      selected_payload_digest, created_at_ms, authority_context_store, abstained_reason,
-     selected_project_digest";
+     selected_project_digest, updated_at_ms";
 
 fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryReviewerReceipt> {
     let invalid = |column: usize, value: String| {
@@ -428,6 +430,7 @@ fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryReviewerR
         abstained_reason,
         selected,
         created_at_ms: row.get(15)?,
+        completed_at_ms: terminal.is_some().then(|| row.get(19)).transpose()?,
     })
 }
 
@@ -1507,6 +1510,53 @@ impl MemoryStore {
         check_project(project)?;
         self.inner
             .with_conn(|conn| list_memory_reviewer_attempts_in_tx(conn, project, causal_identity))
+            .map_err(Into::into)
+    }
+
+    /// Whether a completed receipt of the live store incarnation selects `candidate_id` at `generation` under `project_digest`. The lifecycle reconciler asks this for each live review hold before releasing one no receipt selects; the digest and incarnation come from the hold's binding, so a same-target job in another project or a prior incarnation cannot keep a hold alive.
+    pub fn memory_reviewer_result_is_selected(
+        &self,
+        project_digest: &str,
+        candidate_id: &str,
+        generation: u64,
+    ) -> Result<bool, MemoryStoreError> {
+        let Ok(generation) = i64::try_from(generation) else {
+            return Ok(false);
+        };
+        self.inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM memory_reviewer_receipts
+                                    WHERE state = 'complete' AND terminal_kind = 'complete'
+                                      AND selected_project_digest = ?1
+                                      AND selected_candidate_id = ?2 AND selected_generation = ?3
+                                      AND database_incarnation_id = (SELECT database_incarnation_id
+                                                                     FROM memory_reviewer_store_identity WHERE id = 0))",
+                    params![project_digest, candidate_id, generation],
+                    |row| row.get(0),
+                )
+            })
+            .map_err(Into::into)
+    }
+
+    /// Every in-progress receipt as `(causal_identity, generation)`. These are the receipts that may still select a private result, so their derived candidate ids keep review holds alive; the list is unbounded because omitting one would release a hold a live settlement still needs, and every in-progress receipt holds a pending job under the store's own job bounds.
+    pub fn in_progress_memory_reviewer_receipts(
+        &self,
+    ) -> Result<Vec<(String, u64)>, MemoryStoreError> {
+        self.inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare_cached(
+                    "SELECT causal_identity, generation FROM memory_reviewer_receipts
+                      WHERE state = 'in_progress'",
+                )?;
+                let rows = statement.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    ))
+                })?;
+                rows.collect()
+            })
             .map_err(Into::into)
     }
 }

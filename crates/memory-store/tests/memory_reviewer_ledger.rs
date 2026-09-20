@@ -2255,6 +2255,115 @@ fn a_receipt_binds_only_a_well_formed_kernel_incarnation_that_matches_its_staged
     ));
 }
 
+/// A receipt begun in the last two minutes of its queue has a run deadline past the queue deadline. Completion is fenced on the queue, so nothing can select the result after it; the sweep closes the receipt at the queue deadline instead of shielding the job until the run deadline.
+#[test]
+fn the_sweep_closes_an_in_progress_receipt_at_the_queue_deadline_before_its_run_deadline() {
+    let fixture = Fixture::open();
+    let queue_deadline = T0 + MEMORY_REVIEWER_QUEUE_LIFETIME_MS;
+    let late = queue_deadline - 60_000;
+    let claim = fixture.claim("acq-1", "worker-a", late).unwrap();
+    let MemoryReviewerBeginOutcome::Begun(begun) = fixture.begin(&claim, late) else {
+        panic!("first claim begins")
+    };
+    assert!(
+        begun.run_deadline_ms > queue_deadline,
+        "the run deadline outlives the queue deadline"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .expire_memory_reviewer_work(queue_deadline - 1)
+            .unwrap(),
+        (0, 0),
+        "inside both deadlines the receipt shields its job"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .expire_memory_reviewer_work(queue_deadline)
+            .unwrap(),
+        (1, 0),
+        "the queue deadline closes the receipt and the job together"
+    );
+    let closed = receipt(&fixture);
+    assert_eq!(
+        closed.terminal,
+        Some(MemoryReviewerReceiptTerminal::Expired)
+    );
+    assert_eq!(closed.completed_at_ms, Some(queue_deadline));
+    assert!(closed.selected.is_none());
+    assert_eq!(
+        fixture
+            .store
+            .lookup_memory_reviewer_job(PROJECT, &fixture.identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Expired)
+    );
+    // The reconciler's questions: nothing selects this result, and it is no longer pending.
+    assert!(
+        !fixture
+            .store
+            .memory_reviewer_result_is_selected(&"a".repeat(64), "review-result:any", 1)
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .store
+            .in_progress_memory_reviewer_receipts()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// The reconciler's selection question is scoped to the selection's project digest and the exact generation: a completed selection answers only for those, never for another digest, another generation, or an unselected terminal.
+#[test]
+fn a_selected_result_answers_only_for_its_project_digest_and_generation() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    fixture.completed_attempt(1, &claim, T0);
+    let digest = "d".repeat(64);
+    let selection = ResultSelection {
+        candidate_id: "review-result:selected".to_string(),
+        payload_digest: "e".repeat(64),
+        project_digest: digest.clone(),
+    };
+    assert!(matches!(
+        complete(
+            &fixture,
+            &fixture.identity,
+            &claim,
+            "c-1",
+            "worker-a",
+            1,
+            MemoryReviewerReceiptTerminal::Complete,
+            Some(&selection),
+            T0 + 5,
+        )
+        .unwrap(),
+        LeaseCompleteOutcome::Applied { .. }
+    ));
+    let selected = |digest: &str, candidate: &str, generation: u64| {
+        fixture
+            .store
+            .memory_reviewer_result_is_selected(digest, candidate, generation)
+            .unwrap()
+    };
+    assert!(selected(&digest, "review-result:selected", 1));
+    assert!(!selected(&"f".repeat(64), "review-result:selected", 1));
+    assert!(!selected(&digest, "review-result:selected", 2));
+    assert!(!selected(&digest, "review-result:other", 1));
+    assert!(
+        fixture
+            .store
+            .in_progress_memory_reviewer_receipts()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[test]
 fn an_attempt_never_outlives_the_job_queue_deadline() {
     let fixture = Fixture::open();

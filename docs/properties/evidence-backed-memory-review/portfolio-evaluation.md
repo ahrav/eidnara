@@ -25,6 +25,23 @@ reviews found and how each finding was dispositioned.
 | The wrong-kind owner refusal at the broker is `Scope`, not a kind-specific code, because the evidence object is unscoped | bias | kept: the Kernel judges scope before kind; `proposal_target` supplies the kind refusal, and the evidence file records the ordering |
 | `PRODUCTION_SELECTION_OPEN` is a compile-time constant rather than an operator switch | bias | kept: opening is a reviewed code change with its own witness, not a deployment action |
 
+## Private result expiry
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| A reconciliation error returned before Kernel maintenance, so one unparsable pin could starve capture expiry and staging cleanup for up to seven days | gap | fixed: the pass records `healthy = false` and continues into Kernel maintenance; an unparsable owner is skipped rather than failing the listing |
+| `in_progress_memory_reviewer_receipts` took a `LIMIT` ordered by run deadline, so overflow would omit the newest receipts and release holds their settlements still needed | gap | fixed: the query is unbounded; every in-progress receipt holds a pending job under the store's own bounds |
+| `memory_reviewer_result_is_selected` ignored the selection's project digest and store incarnation, so a same-target job elsewhere could keep a hold alive | gap | fixed: both predicates added from the hold's binding |
+| Memory Store reads were interleaved with Kernel releases inside one loop | refinement | fixed: orphans are collected first, then released |
+| `DeadlineClock` enum encoded one integer floor | refinement | fixed: `load_staged_review` takes the instant directly |
+| `read_selected_review_input` carried an unused `now`; `ActiveReviewHold` carried an unread `expires_at` | refinement | fixed: both removed |
+| `updated_at_ms` is not covered by the receipts' immutability trigger, so `completed_at_ms` rests on `WHERE state = 'in_progress'` clauses | bias | kept: every write site is gated on the in-progress state today; a trigger or dedicated column would change the Memory Store baseline and belongs with the owner's next baseline change |
+| Capture `retain_until` still moves to the review expiry at transfer | bias | kept: a retention floor, not a visibility path; recorded as an open question on the record |
+| The selected read's owner check moved from the Kernel to the daemon and had no witness; the reconciler's generation and project scoping had none either | gap | fixed: tests mutate the stored owner and class after selection, orphan a hold through takeover, and query the selection question across digests and generations |
+| `completed_at_ms` was asserted only as earlier than the deadline, and no test swept after a completed selection | gap | fixed: exact completion time asserted and re-asserted after a sweep at the queue deadline |
+| No test placed the sweep inside the settlement window | gap | fixed: `before_completion_for_test` runs the sweep; the completion is fenced and the settlement releases the hold |
+| No test reopens the stores between envelope and sweep | bias | kept: the rows are SQLite writes already committed; a reopen witness is queued under the U1 qualification owner |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner

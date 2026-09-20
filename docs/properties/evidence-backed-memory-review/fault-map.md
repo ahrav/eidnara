@@ -14,6 +14,13 @@
 | Decision reclassified Sensitive after resolution | no | no test helper reclassifies a live decision; the broker folds `decision.sensitivity` on every read |
 | Decision scoped to another project | yes, unconstructed | `DecisionSpec.scope_id` naming a scope whose project term differs |
 | Descriptor republished at a new revision after binding | yes, unconstructed | `publish_source_descriptor` with `revision: "2"` for the same occurrence |
+| Crash after transfer, before completion | yes | `Fixture::kernel_half` in `memory_reviewer_settlement.rs` commits the Kernel half and returns without completing |
+| Sweep at the earlier of run and queue deadlines | yes | `MemoryStore::expire_memory_reviewer_work` at the chosen instant |
+| Late completion after a sweep terminal | yes | `Settlement::settle` after `expire_memory_reviewer_work` |
+| Sweep inside the settlement window | yes | `Settlement::before_completion_for_test` running `expire_memory_reviewer_work` |
+| Takeover without a losing settlement | yes | `take_over_memory_reviewer_receipt` after `kernel_half` |
+| Stored owner or class changed after selection | yes | direct SQLite update of `candidates.provenance_witness` or `sensitivity_class` |
+| Selection dated at or after the queue deadline | yes | `read_selected_review_input` with `selected_at >= deadline`; the ledger cannot record one |
 
 ## Required faults per property
 
@@ -21,6 +28,7 @@
 | --- | --- | --- |
 | `production-classes-reach-policy-eligible-proposal` | production selection open; Remote-eligible decision representation; open activation gate | no |
 | `canonical-resolution-refuses-changed-owner-and-target` | supersession after resolution; unregistered owner; stale descriptor revision; stale bound decision revision; wrong-kind owner; Remote destination | yes |
+| `private-result-transfer-preserves-queue-expiry` | crash after transfer; sweep at the earlier deadline; sweep inside the settlement window; late completion; takeover orphaning a hold; selection at the deadline; selected read past the queue deadline and at the hold's expiry; changed owner or class after selection | yes |
 
 ## Coverage checks to add
 

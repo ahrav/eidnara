@@ -184,6 +184,29 @@ impl MemoryReviewerHoldBinding {
             sep = OWNER_SEPARATOR
         )
     }
+
+    /// The inverse of [`Self::owner_id`]; `None` for a stored owner that is not a well-formed binding.
+    fn from_owner_id(owner_id: &str) -> Option<Self> {
+        let mut parts = owner_id.split(OWNER_SEPARATOR);
+        let binding = Self {
+            project_digest: parts.next()?.to_string(),
+            kernel_incarnation: parts.next()?.to_string(),
+            memstore_incarnation: parts.next()?.to_string(),
+            subject: parts.next()?.to_string(),
+            generation: parts.next()?.parse().ok()?,
+        };
+        if parts.next().is_some() || binding.validate().is_err() {
+            return None;
+        }
+        Some(binding)
+    }
+}
+
+/// One live review hold and the binding that owns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveReviewHold {
+    pub hold_id: String,
+    pub binding: MemoryReviewerHoldBinding,
 }
 
 pub(crate) struct StoredHold {
@@ -256,7 +279,7 @@ impl KernelStore {
         Ok(hold)
     }
 
-    /// In one envelope: acquire the review hold over the execution hold's still-live references, move the still-future `retain_until` of MemoryReviewer-captured evidence forward to the review expiry, then release the execution hold. `review` must carry the execution binding's generation, and `review.subject` must be the sealed review proposal that generation staged under its derived run id, with both its candidate and run deadlines still ahead of the store clock and no later than `review_expires_at`; `review_expires_at` is at most [`REVIEW_EXPIRY_MAX_MS`] after that candidate's creation. Those deadlines then move up to the review expiry so the proposal stays readable exactly as long as its bytes are held. Deadlines only move later; expired references are never extended and ownership never changes.
+    /// In one envelope: acquire the review hold over the execution hold's still-live references, move the still-future `retain_until` of MemoryReviewer-captured evidence forward to the review expiry, then release the execution hold. `review` must carry the execution binding's generation, and `review.subject` must be the sealed review proposal that generation staged under its derived run id, with both its candidate and run deadlines still ahead of the store clock and no later than `review_expires_at`; `review_expires_at` is at most [`REVIEW_EXPIRY_MAX_MS`] after that candidate's creation. The candidate and run deadlines stay at the job's queue deadline: the transfer proves retention, not selection, and an unselected result expires with its queue whatever the hold's lifetime. A result the Memory Store selects before that deadline is read through [`KernelStore::read_selected_review_input`], which judges the row against the selection time and leaves current liveness to this hold. Expired references are never extended and ownership never changes.
     pub fn transfer_execution_to_review(
         &self,
         execution_hold_id: &str,
@@ -377,30 +400,6 @@ impl KernelStore {
             ],
         )
         .map_err(sqlite)?;
-        // The selected proposal stays readable through its review window; its run and row deadlines move together and only later.
-        for table in ["candidates", "extraction_runs"] {
-            tx.execute_cached(
-                &format!(
-                    "UPDATE {table} SET lease_expires_at=?1
-                     WHERE {key}=?2 AND lease_expires_at>?3 AND lease_expires_at<?1",
-                    key = if table == "candidates" {
-                        "candidate_id"
-                    } else {
-                        "extraction_run_id"
-                    }
-                ),
-                params![
-                    review_expires_at,
-                    if table == "candidates" {
-                        &review.subject
-                    } else {
-                        &expected.extraction_run_id
-                    },
-                    now
-                ],
-            )
-            .map_err(sqlite)?;
-        }
         let hold = admit_totals(
             &tx,
             &review_hold_id,
@@ -436,6 +435,46 @@ impl KernelStore {
             return Ok(None);
         };
         admit_totals(&tx, &hold_id, MemoryReviewerHoldKind::Review, expires_at).map(Some)
+    }
+
+    /// Every unreleased, unexpired review hold at `now`, oldest first, at most `limit`. The lifecycle reconciler joins each hold's binding to its receipt and releases the ones no completed receipt selects and no in-progress receipt can still select. Purge-degraded holds are listed like live ones: they are still their owner's to release.
+    pub fn list_active_review_holds(
+        &self,
+        now: i64,
+        limit: usize,
+    ) -> Result<Vec<ActiveReviewHold>, MemoryReviewerHoldError> {
+        let mut reader = self.lock_reader()?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sqlite)?;
+        let mut statement = tx
+            .prepare_cached(
+                "SELECT capture_pin_id,owner_id FROM capture_pins
+                 WHERE pin_kind=?1 AND released_at IS NULL AND expires_at>?2
+                 ORDER BY created_at,capture_pin_id LIMIT ?3",
+            )
+            .map_err(sqlite)?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement
+            .query_map(
+                params![
+                    MEMORY_REVIEWER_REVIEW_HOLD_KIND,
+                    now.max(current_time_ms()),
+                    limit
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(sqlite)?;
+        let mut holds = Vec::new();
+        for row in rows {
+            let (hold_id, owner_id) = row.map_err(sqlite)?;
+            // A pin whose owner is not a binding was not written by this module; it is left to its own expiry rather than failing the listing every pass.
+            let Some(binding) = MemoryReviewerHoldBinding::from_owner_id(&owner_id) else {
+                continue;
+            };
+            holds.push(ActiveReviewHold { hold_id, binding });
+        }
+        Ok(holds)
     }
 
     /// Releases an execution hold on a trusted terminal receipt for its job and generation.

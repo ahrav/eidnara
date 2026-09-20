@@ -1,5 +1,6 @@
 //! The MemoryReviewer's operator surface and expiry maintenance: one task per data home samples content-free ledger facts from the Memory Store into the `metrics.memory_reviewer` block and runs the kind-specific cleanup between samples. The Memory Store closes jobs and frozen selections past their queue deadlines with recorded terminal outcomes. The Kernel retires expired MemoryReviewer-only captures, then abandons expired staging runs and review inputs, releases capture pins, and reclaims unreferenced artifacts through its own staging maintenance. Neither sweep touches a live reservation, an accepted dependency, or an independent original: the Memory Store spares receipts in progress, and the Kernel abandons only runs past their deadline and deletes only terminal rows past retention.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -229,6 +230,62 @@ pub struct Pass {
     pub healthy: bool,
 }
 
+/// Releases every live review hold whose result no completed receipt selects and no in-progress receipt can still select. A hold survives the transfer envelope on its own deadline, so a receipt the sweep closed, a losing generation, or a settlement that failed to release would otherwise keep evidence held until the review expiry; the queue deadline the row keeps already makes such a result unreadable, and this pass ends its retention. Returns the number released.
+pub fn reconcile_review_holds(
+    store: &MemoryStore,
+    kernel: &kernel::KernelStore,
+    now_ms: i64,
+) -> Result<usize, String> {
+    // The Kernel admits at most this many active holds host-wide, so one listing covers every live review hold.
+    let holds = kernel
+        .list_active_review_holds(now_ms, kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST)
+        .map_err(|error| error.to_string())?;
+    if holds.is_empty() {
+        return Ok(0);
+    }
+    // Every Memory Store read finishes before the first Kernel release.
+    let pending: HashSet<(String, u64)> = store
+        .in_progress_memory_reviewer_receipts()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(causal_identity, generation)| {
+            (
+                kernel::provisional_result_identity(&causal_identity, generation).candidate_id,
+                generation,
+            )
+        })
+        .collect();
+    let mut orphaned = Vec::new();
+    for hold in holds {
+        let key = (hold.binding.subject.clone(), hold.binding.generation);
+        if pending.contains(&key)
+            || store
+                .memory_reviewer_result_is_selected(
+                    &hold.binding.project_digest,
+                    &hold.binding.subject,
+                    hold.binding.generation,
+                )
+                .map_err(|error| error.to_string())?
+        {
+            continue;
+        }
+        orphaned.push(hold);
+    }
+    let mut released = 0;
+    for hold in orphaned {
+        match kernel.release_review_hold(&hold.hold_id, &hold.binding) {
+            Ok(()) => released += 1,
+            // Released or expired between the listing and this call: nothing left to end.
+            Err(kernel::MemoryReviewerHoldError::Refused(
+                kernel::MemoryReviewerHoldRefusal::Released
+                | kernel::MemoryReviewerHoldRefusal::Expired,
+            )) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(released)
+}
+
 /// Returns whether capture expiry or staging maintenance advanced, or `None` when `cancelled` fired before a step.
 fn kernel_slice(
     kernel: &kernel::KernelStore,
@@ -291,7 +348,19 @@ pub fn sweep_and_sample(
         }
     };
     let mut advanced = swept_jobs + swept_selections > 0;
+    let mut healthy = true;
     if let Some(kernel) = kernel {
+        if cancelled() {
+            return None;
+        }
+        // A reconciliation failure is reported but does not stop capture expiry, staging maintenance, or artifact reclamation below.
+        match reconcile_review_holds(store, kernel, now_ms) {
+            Ok(released) => advanced |= released > 0,
+            Err(error) => {
+                eprintln!("daemon: memory reviewer hold reconciliation failed: {error}");
+                healthy = false;
+            }
+        }
         match kernel_slice(kernel, now_ms, cancelled) {
             Ok(Some(slice_advanced)) => advanced |= slice_advanced,
             Ok(None) => return None,
@@ -315,7 +384,7 @@ pub fn sweep_and_sample(
                 facts: Some(facts),
             },
             advanced,
-            healthy: true,
+            healthy,
         },
         Err(error) => {
             eprintln!("daemon: memory_reviewer facts sample failed: {error}");

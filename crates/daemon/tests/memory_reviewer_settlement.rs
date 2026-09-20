@@ -8,7 +8,7 @@ use std::sync::Arc;
 use daemon::git_sources::{GitReadBounds, RepositoryBinding, read_selection};
 use daemon::harness_sources::SourcePublisher;
 use daemon::memory_reviewer::broker::{
-    EvidenceBroker, HeldUnder, QuestionTemplate, ReferenceExpectation, RunBinding,
+    EvidenceBroker, HeldUnder, QuestionTemplate, ReferenceExpectation, RefusalCode, RunBinding,
 };
 use daemon::memory_reviewer::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
 use daemon::memory_reviewer::settlement::{
@@ -582,6 +582,11 @@ impl Fixture {
             .settle(broker, result)
     }
 
+    fn reconcile(&self, now: i64) -> usize {
+        daemon::memory_reviewer::lifecycle::reconcile_review_holds(&self.ledger, &self.store, now)
+            .unwrap()
+    }
+
     fn read(&self, now: i64) -> Result<SelectedProposal, ReadRefusal> {
         read_selected_proposal(&self.store, &self.ledger, PROJECT, &self.identity, now)
     }
@@ -812,13 +817,66 @@ fn a_completed_receipt_selects_the_staged_proposal_and_reads_pass_the_kernel() {
         ),
         Err(SettlementError::Fenced)
     );
-    // Selection moved the row's deadline with the hold: readable past the 24-hour queue deadline, refused at the review expiry.
-    assert!(fixture.read(fixture.now + 25 * HOUR_MS).is_ok());
+    // Q27: the row keeps its queue deadline; the selected read judges it against the selection time, so a result selected inside the queue window stays readable past the 24-hour deadline and is refused only at the review expiry.
+    let queue_deadline = fixture
+        .ledger
+        .lookup_memory_reviewer_job(PROJECT, &fixture.identity)
+        .unwrap()
+        .unwrap()
+        .queue_deadline_ms;
+    assert_eq!(
+        fixture
+            .store
+            .read_selected_review_input(&expected, fixture.now + 5)
+            .unwrap()
+            .lifecycle
+            .queue_deadline_at,
+        queue_deadline,
+        "selection did not move the row's deadline"
+    );
+    assert_eq!(
+        fixture.receipt().completed_at_ms,
+        Some(fixture.now + 5),
+        "the receipt completed at the settlement clock, inside the queue window"
+    );
+    // Selection then sweep: a complete receipt is not the sweep's to touch, so the selection, its completion time, its hold, and its read all survive the queue deadline passing.
+    fixture
+        .ledger
+        .expire_memory_reviewer_work(queue_deadline)
+        .unwrap();
+    let after_sweep = fixture.receipt();
+    assert_eq!(
+        after_sweep.terminal,
+        Some(MemoryReviewerReceiptTerminal::Complete)
+    );
+    assert_eq!(after_sweep.completed_at_ms, Some(fixture.now + 5));
+    assert!(after_sweep.selected.is_some());
+    assert!(fixture.read(queue_deadline + HOUR_MS).is_ok());
     assert!(fixture.read(hold.expires_at - 1).is_ok());
     assert_eq!(
         fixture.read(hold.expires_at),
         Err(ReadRefusal::ReviewExpired),
-        "the moved deadline is the review expiry, not a Kernel refusal"
+        "the review hold's expiry ends the read, not a Kernel deadline"
+    );
+    // A live read of the same row past its queue deadline is expired: only the selected read survives the queue.
+    assert_eq!(
+        fixture
+            .store
+            .read_review_input(&expected, &fixture.proposal_binding(1), queue_deadline)
+            .unwrap_err(),
+        kernel::ReviewReadError::Refused(ReviewReadRefusal::Expired)
+    );
+    // Nothing selects any other result and this one is selected, so the reconciler leaves its hold alone.
+    assert_eq!(fixture.reconcile(fixture.now + 7), 0);
+    assert!(
+        fixture
+            .store
+            .lookup_review_hold(
+                &fixture.review_hold_binding(1, &expected.candidate_id),
+                fixture.now + 7
+            )
+            .unwrap()
+            .is_some()
     );
     // The list pages by causal identity: a full page carries a cursor, and the page after it is empty.
     let page = list_review_outcomes(&fixture.ledger, PROJECT, None, 1).unwrap();
@@ -1270,6 +1328,295 @@ fn kernel_results_stay_private_until_the_receipt_selects_them() {
         None
     );
     assert_eq!(fixture.read(fixture.now + 6), Err(ReadRefusal::NotSelected));
+}
+
+/// Q27 crash windows. A Kernel result whose hold transferred but whose receipt never completed keeps the job's queue deadline: while the receipt is in progress the hold is pending and stays; once the sweep closes the receipt at the earlier of the run and queue deadlines, the result lists as `expired`, reads as not selected, and the reconciler releases the hold it would otherwise keep for seven days.
+#[test]
+fn an_unselected_transferred_result_expires_with_its_queue_and_its_hold_is_reconciled() {
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
+    let review = fixture.review_hold_binding(1, &reference.candidate_id);
+    let job = fixture
+        .ledger
+        .lookup_memory_reviewer_job(PROJECT, &fixture.identity)
+        .unwrap()
+        .unwrap();
+    let hold = fixture
+        .store
+        .lookup_review_hold(&review, fixture.now + 6)
+        .unwrap()
+        .expect("the transfer committed a review hold");
+    assert!(
+        hold.expires_at > job.queue_deadline_ms,
+        "the hold outlives the queue deadline on its own clock"
+    );
+    // The row keeps the queue deadline through the transfer, on both its candidate and its run.
+    let row = fixture
+        .store
+        .read_review_input(&reference, &fixture.proposal_binding(1), fixture.now + 6)
+        .unwrap();
+    assert_eq!(row.lifecycle.queue_deadline_at, job.queue_deadline_ms);
+    // The receipt is in progress: its result is pending, so the reconciler keeps the hold.
+    assert_eq!(fixture.receipt().terminal, None);
+    assert_eq!(fixture.reconcile(fixture.now + 6), 0);
+    assert!(
+        fixture
+            .store
+            .lookup_review_hold(&review, fixture.now + 6)
+            .unwrap()
+            .is_some()
+    );
+    // The unselected row expires with its queue whatever the hold says.
+    assert_eq!(
+        fixture
+            .store
+            .read_review_input(
+                &reference,
+                &fixture.proposal_binding(1),
+                job.queue_deadline_ms
+            )
+            .unwrap_err(),
+        kernel::ReviewReadError::Refused(ReviewReadRefusal::Expired)
+    );
+    // The worker never returns. The sweep at the run deadline closes the receipt `expired` and the job with it; the queue deadline is later here, so the run deadline is the earlier of the two.
+    let receipt = fixture.receipt();
+    assert!(receipt.run_deadline_ms < job.queue_deadline_ms);
+    fixture
+        .ledger
+        .expire_memory_reviewer_work(receipt.run_deadline_ms)
+        .unwrap();
+    let closed = fixture.receipt();
+    assert_eq!(
+        closed.terminal,
+        Some(MemoryReviewerReceiptTerminal::Expired)
+    );
+    assert_eq!(closed.selected, None);
+    assert_eq!(closed.completed_at_ms, Some(receipt.run_deadline_ms));
+    // List shows the recorded limitation and read discloses nothing; the row itself stays sealed and private under its queue deadline.
+    let page = list_review_outcomes(&fixture.ledger, PROJECT, None, 10).unwrap();
+    assert_eq!(page.outcomes.len(), 1);
+    assert_eq!(
+        page.outcomes[0].terminal,
+        MemoryReviewerReceiptTerminal::Expired
+    );
+    assert!(!page.outcomes[0].selected);
+    assert_eq!(
+        fixture.read(receipt.run_deadline_ms + 1),
+        Err(ReadRefusal::NotSelected)
+    );
+    assert!(
+        fixture
+            .store
+            .read_review_input(
+                &reference,
+                &fixture.proposal_binding(1),
+                receipt.run_deadline_ms + 1
+            )
+            .is_ok(),
+        "the private row is unpublished, not deleted, until its queue deadline"
+    );
+    // The reconciler ends the orphaned hold's retention: no completed receipt selects the result and no in-progress receipt can.
+    assert_eq!(fixture.reconcile(receipt.run_deadline_ms + 1), 1);
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(&review, receipt.run_deadline_ms + 1)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        fixture.reconcile(receipt.run_deadline_ms + 2),
+        0,
+        "a second pass finds nothing to release"
+    );
+    // A late completion under the same claim is fenced by the terminal: expiry cannot become a selection and nothing is published or refreshed.
+    assert_eq!(
+        fixture.settle(
+            &broker,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence])))
+        ),
+        Err(SettlementError::Fenced)
+    );
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Expired)
+    );
+    assert_eq!(
+        fixture.read(receipt.run_deadline_ms + 3),
+        Err(ReadRefusal::NotSelected)
+    );
+}
+
+/// A crashed generation's transferred hold is keyed by its own candidate id and generation. After a takeover publishes at the next generation, the reconciler releases the losing hold and keeps the winner's: the pending and selected checks are per generation, not per job.
+#[test]
+fn the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners() {
+    let fixture = Fixture::open();
+    let evidence = fixture.evidence_id();
+    let loser = fixture.broker(1);
+    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    let losing = fixture.kernel_half(&loser, &fixture.bound_proposal(&[&evidence]));
+    let losing_review = fixture.review_hold_binding(1, &losing.candidate_id);
+    // The loser's claim lapses without a settlement; a successor takes the receipt over at generation 2 and publishes.
+    let later = fixture.now + MEMORY_REVIEWER_TASK_LEASE_MS + 1;
+    let successor = fixture.claim_task("acq-2", "worker-b", later).unwrap();
+    let taken = fixture
+        .ledger
+        .take_over_memory_reviewer_receipt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &successor.claim_id,
+            later,
+        )
+        .unwrap();
+    assert_eq!(taken.generation, 2);
+    // Between takeover and the winner's settlement the receipt is in progress at generation 2: the losing hold is already an orphan, since nothing at generation 1 can select it.
+    assert_eq!(fixture.reconcile(later), 1);
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(&losing_review, later)
+            .unwrap(),
+        None
+    );
+    let winner = fixture.broker(2);
+    fixture.attempt_under(
+        2,
+        &successor,
+        Some(MemoryReviewerAttemptTerminal::Complete),
+        later + 1,
+    );
+    let clock = move || later + 2;
+    let settled = fixture
+        .settlement(&fixture.review_binding(), &successor, &clock)
+        .settle(
+            &winner,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+        )
+        .unwrap();
+    let Settled::Published(winning) = settled else {
+        panic!("{settled:?}")
+    };
+    let winning_review = fixture.review_hold_binding(2, &winning.candidate_id);
+    assert_eq!(fixture.reconcile(later + 3), 0);
+    assert!(
+        fixture
+            .store
+            .lookup_review_hold(&winning_review, later + 3)
+            .unwrap()
+            .is_some(),
+        "the selected generation's hold stays"
+    );
+    assert_eq!(fixture.read(later + 3).unwrap().reference, winning);
+    assert!(
+        fixture
+            .store
+            .read_review_input(&losing, &fixture.proposal_binding(1), later + 3)
+            .is_ok(),
+        "the losing row is sealed and private, unreadable through the receipt"
+    );
+}
+
+/// The sweep beats the selection inside the settlement window: the receipt closes `expired` at its run deadline before the completion write, the completion is fenced, and the settlement itself releases the hold it had transferred.
+#[test]
+fn a_sweep_inside_the_settlement_window_fences_the_selection_and_releases_the_hold() {
+    let fixture = Fixture::open();
+    let evidence = fixture.evidence_id();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    let reference = fixture.staged_reference(1, &fixture.bound_proposal(&[&evidence]));
+    let review = fixture.review_hold_binding(1, &reference.candidate_id);
+    let run_deadline = fixture.receipt().run_deadline_ms;
+    let sweep = || {
+        fixture
+            .ledger
+            .expire_memory_reviewer_work(run_deadline)
+            .unwrap();
+    };
+    let binding = fixture.review_binding();
+    // The run's own clock is inside its cutoff; the sweep observes the run deadline between the Kernel envelope and the completion write.
+    let now = fixture.now + 5;
+    let clock = move || now;
+    let mut settlement = fixture.settlement(&binding, &fixture.claim, &clock);
+    settlement.before_completion_for_test = Some(&sweep);
+    assert_eq!(
+        settlement.settle(
+            &broker,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence])))
+        ),
+        Err(SettlementError::Fenced)
+    );
+    let receipt = fixture.receipt();
+    assert_eq!(
+        receipt.terminal,
+        Some(MemoryReviewerReceiptTerminal::Expired)
+    );
+    assert_eq!(receipt.selected, None);
+    assert_eq!(receipt.completed_at_ms, Some(run_deadline));
+    assert_eq!(
+        fixture.read(run_deadline + 1),
+        Err(ReadRefusal::NotSelected)
+    );
+    assert_eq!(
+        fixture
+            .store
+            .lookup_review_hold(&review, run_deadline + 1)
+            .unwrap(),
+        None,
+        "the fenced settlement released the hold without waiting for the reconciler"
+    );
+    assert_eq!(fixture.reconcile(run_deadline + 1), 0);
+}
+
+/// The selected read compares the row's stored binding itself: an owner or project the row no longer names refuses as a scope mismatch, and a row reclassified `secret` refuses as a policy-blocked dependency, both after selection and both without touching the receipt.
+#[test]
+fn a_selected_row_whose_owner_or_class_changed_refuses_the_read() {
+    let fixture = Fixture::open();
+    let evidence = fixture.evidence_id();
+    let broker = fixture.broker(1);
+    fixture.attempt(1, Some(MemoryReviewerAttemptTerminal::Complete));
+    let Settled::Published(reference) = fixture
+        .settle(
+            &broker,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence]))),
+        )
+        .unwrap()
+    else {
+        panic!("published")
+    };
+    assert!(fixture.read(fixture.now + 6).is_ok());
+    let mutate = |sql: &str| {
+        rusqlite::Connection::open(fixture.kernel_dir.path().join("kernel.sqlite"))
+            .unwrap()
+            .execute(sql, [reference.candidate_id.as_str()])
+            .unwrap();
+    };
+    // The stored witness names another generation as the proposal's owner.
+    mutate(
+        "UPDATE candidates SET provenance_witness = CAST(replace(CAST(provenance_witness AS TEXT), '\"generation\":1', '\"generation\":2') AS BLOB) WHERE candidate_id = ?1",
+    );
+    assert_eq!(
+        fixture.read(fixture.now + 6),
+        Err(ReadRefusal::Kernel(ReviewReadRefusal::ScopeMismatch))
+    );
+    mutate(
+        "UPDATE candidates SET provenance_witness = CAST(replace(CAST(provenance_witness AS TEXT), '\"generation\":2', '\"generation\":1') AS BLOB) WHERE candidate_id = ?1",
+    );
+    assert!(fixture.read(fixture.now + 6).is_ok());
+    // The row is reclassified to the strictest class after selection.
+    mutate("UPDATE candidates SET sensitivity_class = 'secret' WHERE candidate_id = ?1");
+    assert_eq!(
+        fixture.read(fixture.now + 6),
+        Err(ReadRefusal::Dependency(RefusalCode::PolicyBlocked))
+    );
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Complete),
+        "a refused read changes nothing in the ledger"
+    );
 }
 
 #[test]

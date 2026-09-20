@@ -29,7 +29,7 @@ Every slug the seven residual tickets own. Slugs the specification assigns to ot
 | --- | --- | --- |
 | `production-classes-reach-policy-eligible-proposal` | #725 | yes |
 | `canonical-resolution-refuses-changed-owner-and-target` | #725 | yes |
-| `private-result-transfer-preserves-queue-expiry` | #726 | not yet |
+| `private-result-transfer-preserves-queue-expiry` | #726 | yes |
 | `receipt-selection-fences-private-generation-results` | #727 | not yet |
 | `durable-private-result-recovers-without-model-refire` | #727 | not yet |
 | `unknown-dispatch-does-not-authorize-resend` | #727 | not yet |
@@ -81,6 +81,22 @@ Existing check: `crates/daemon/tests/memory_reviewer_broker.rs::canonical_and_pr
 Impact: A proposal bound to the descriptor or to a moved decision would carry a mutation token that a later application could apply to the wrong object or revision
 Open questions: None.
 
+### private-result-transfer-preserves-queue-expiry
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/kernel/tests/kernel_memory_reviewer_holds.rs` transfers a hold and reads the row live and as selected on either side of the queue deadline; `crates/daemon/tests/memory_reviewer_settlement.rs` closes an in-progress receipt by sweep after transfer, lists and reads it, reconciles the hold, fences a late completion, sweeps inside the settlement window, orphans a losing generation's hold through takeover, and refuses a selected row whose owner or class changed; `crates/memory-store/tests/memory_reviewer_ledger.rs` closes a receipt at a queue deadline earlier than its run deadline and scopes the selection question
+Guarantee: A private Kernel result not selected by a completed receipt remains subject to the job's original queue deadline after execution-to-review hold transfer: the candidate and run rows keep that deadline, a live read past it refuses `Expired`, the public read answers `not_selected`, and the sweep closes the receipt at the earlier of run and queue deadlines. A result selected before the queue deadline is read against its selection time and stays readable only while its review hold is live and its inputs pass policy. Selection, rejection, cancellation, expiry, and reconciliation never move a deadline or publish an unselected row.
+Check: `always` - after `transfer_execution_to_review`, `candidates.lease_expires_at` and `extraction_runs.lease_expires_at` equal the job's `queue_deadline_ms`; `read_selected_review_input` refuses when `selected_at >= deadline`; `read_selected_proposal` succeeds only for a `complete` receipt whose `completed_at_ms` precedes the deadline and whose hold is live; asserted on every evaluation because a moved deadline would let an unselected result outlive its queue
+Fault/timing angle: crash after the Kernel envelope committed and before the Memory Store completion; sweep and selection racing at the deadline; a run deadline later than the queue deadline
+Required faults and enabling state: a sealed proposal row and transferred hold with no completed receipt; the sweep at the run deadline or the queue deadline, whichever is earlier; a late completion under the original claim after the terminal
+Confidence: high - [evidence](evidence/private-result-transfer-preserves-queue-expiry.md). Verified the removed deadline promotion, the new selected-read predicate, the ledger's completion fence on the queue deadline, and the reconciler's release of an orphaned hold
+Existing check: `crates/kernel/tests/kernel_memory_reviewer_holds.rs::review_transfer_acquires_before_releasing_and_moves_only_live_memory_reviewer_references`; `crates/daemon/tests/memory_reviewer_settlement.rs::an_unselected_transferred_result_expires_with_its_queue_and_its_hold_is_reconciled`, `a_completed_receipt_selects_the_staged_proposal_and_reads_pass_the_kernel`, `kernel_results_stay_private_until_the_receipt_selects_them`, `the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners`, `a_sweep_inside_the_settlement_window_fences_the_selection_and_releases_the_hold`, `a_selected_row_whose_owner_or_class_changed_refuses_the_read`; `crates/memory-store/tests/memory_reviewer_ledger.rs::the_sweep_closes_an_in_progress_receipt_at_the_queue_deadline_before_its_run_deadline`, `an_attempt_never_outlives_the_job_queue_deadline`, `a_selected_result_answers_only_for_its_project_digest_and_generation`
+Impact: An unselected result would stay readable by identity, and its evidence held, for up to seven days past the queue that admitted it
+Open questions:
+- Whether the capture `retain_until` promotion at transfer should also stay at the queue deadline for an unselected result; the retention floor is a resource bound, not a visibility path, and is left in place (needs human input)
+
 ## Relationship map
 
 `canonical-resolution-refuses-changed-owner-and-target` is the safety half of
@@ -89,3 +105,7 @@ must reach a proposal when eligible and refuse when the owner or target moved.
 Both consume the broker's canonical judgement (`judge_canonical_source`) and the
 Kernel's egress fold, which `served-sensitivity-and-artifact-policy-govern-egress`
 in `../canonical-positive-claim-projection/` records.
+
+`private-result-transfer-preserves-queue-expiry` shares the settlement and
+selected-read path with the two records above: the proposal a canonical run
+publishes is the row whose deadline this record pins.

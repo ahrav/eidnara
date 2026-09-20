@@ -744,29 +744,52 @@ fn review_transfer_acquires_before_releasing_and_moves_only_live_memory_reviewer
         None,
         "independently owned evidence keeps its own retention"
     );
-    // The staged proposal stays readable through the review window: its queue deadline moved with the hold.
-    let deadline: i64 = inspect(fixture.root(), |conn| {
+    // Q27: the transfer proves retention, not selection. The staged proposal keeps the job's queue deadline on both its candidate and run rows, so an unselected result expires with its queue while the hold outlives it.
+    let queue_deadline = now + DAY_MS - 1_000;
+    let (candidate_deadline, run_deadline): (i64, i64) = inspect(fixture.root(), |conn| {
         conn.query_row(
-            "SELECT lease_expires_at FROM candidates WHERE candidate_id=?1",
+            "SELECT c.lease_expires_at,r.lease_expires_at FROM candidates c
+             JOIN extraction_runs r USING(extraction_run_id) WHERE c.candidate_id=?1",
             [identity.candidate_id.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap()
     });
-    assert_eq!(deadline, review_expires_at);
+    assert_eq!(
+        (candidate_deadline, run_deadline),
+        (queue_deadline, queue_deadline)
+    );
+    let reference = kernel::ReviewStagedReference {
+        database_incarnation_id: incarnation(fixture.root()),
+        candidate_id: identity.candidate_id.clone(),
+        payload_digest: fixture.proposal_digest(),
+    };
+    // A live read past the queue deadline is expired even though the review hold is live for seven days.
+    assert_eq!(
+        fixture
+            .store
+            .read_review_input(
+                &reference,
+                &fixture.review_binding("job-1", 1),
+                queue_deadline
+            )
+            .unwrap_err(),
+        kernel::ReviewReadError::Refused(kernel::ReviewReadRefusal::Expired)
+    );
+    // A selected read judges the row against the selection time: a selection inside the queue window reads, a selection at or after the deadline does not, whatever the clock says now.
     let row = fixture
         .store
-        .read_review_input(
-            &kernel::ReviewStagedReference {
-                database_incarnation_id: incarnation(fixture.root()),
-                candidate_id: identity.candidate_id.clone(),
-                payload_digest: fixture.proposal_digest(),
-            },
-            &fixture.review_binding("job-1", 1),
-            now + 2 * DAY_MS,
-        )
+        .read_selected_review_input(&reference, queue_deadline - 1)
         .unwrap();
-    assert_eq!(row.lifecycle.queue_deadline_at, review_expires_at);
+    assert_eq!(row.lifecycle.queue_deadline_at, queue_deadline);
+    assert_eq!(row.binding, fixture.review_binding("job-1", 1));
+    assert_eq!(
+        fixture
+            .store
+            .read_selected_review_input(&reference, queue_deadline)
+            .unwrap_err(),
+        kernel::ReviewReadError::Refused(kernel::ReviewReadRefusal::Expired)
+    );
     // A review hold cannot grow; the execution binding cannot release it; the review binding can, once.
     assert_eq!(
         refusal(

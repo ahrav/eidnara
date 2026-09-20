@@ -110,10 +110,11 @@ pub use local_file::{
     local_file_capture_id,
 };
 pub use memory_reviewer_hold::{
-    HeldEvidence, MAX_MEMORY_REVIEWER_HOLD_REFERENCES, MAX_RUN_BUFFER_BYTES,
-    MEMORY_REVIEWER_EXECUTION_HOLD_KIND, MEMORY_REVIEWER_REVIEW_HOLD_KIND, MemoryReviewerHold,
-    MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldKind,
-    MemoryReviewerHoldRefusal, REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
+    ActiveReviewHold, HeldEvidence, MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST,
+    MAX_MEMORY_REVIEWER_HOLD_REFERENCES, MAX_RUN_BUFFER_BYTES, MEMORY_REVIEWER_EXECUTION_HOLD_KIND,
+    MEMORY_REVIEWER_REVIEW_HOLD_KIND, MemoryReviewerHold, MemoryReviewerHoldBinding,
+    MemoryReviewerHoldError, MemoryReviewerHoldKind, MemoryReviewerHoldRefusal,
+    REVIEW_EXPIRY_MAX_MS, RunBufferMap, RunBufferRefusal,
 };
 #[cfg(feature = "test-support")]
 pub use open::OpenPhase;

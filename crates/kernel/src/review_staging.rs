@@ -760,10 +760,29 @@ impl KernelStore {
             .clone()
             .normalized()
             .map_err(|_| ReviewReadError::Invalid)?;
-        let (row, sealed_at, binding) = self.load_staged_review(reference, now)?;
+        let (row, sealed_at, binding) =
+            self.load_staged_review(reference, now.max(current_time_ms()))?;
         if binding != expected {
             return Err(ReviewReadRefusal::ScopeMismatch.into());
         }
+        Self::decode_staged_row(row, sealed_at, binding)
+    }
+
+    /// Reads a sealed proposal row that a completed receipt selected at `selected_at`. The row's queue deadline is judged against that selection time, not against the clock: a result selected while its queue was live stays readable after the queue deadline, and one whose selection postdates the deadline refuses `Expired`. Current liveness is the caller's review hold to check. The stored binding is returned for the caller to compare; nothing here asserts one.
+    pub fn read_selected_review_input(
+        &self,
+        reference: &ReviewStagedReference,
+        selected_at: i64,
+    ) -> Result<ReviewStagedRow, ReviewReadError> {
+        let (row, sealed_at, binding) = self.load_staged_review(reference, selected_at)?;
+        Self::decode_staged_row(row, sealed_at, binding)
+    }
+
+    fn decode_staged_row(
+        row: StoredReviewRow,
+        sealed_at: i64,
+        binding: ReviewBinding,
+    ) -> Result<ReviewStagedRow, ReviewReadError> {
         let payload =
             ReviewPayload::decode(&row.payload).map_err(|_| ReviewReadRefusal::DecodeRefused)?;
         if payload.kind() != row.candidate_kind {
@@ -789,17 +808,17 @@ impl KernelStore {
         reference: &ReviewStagedReference,
         now: i64,
     ) -> Result<ReviewBinding, ReviewReadError> {
-        let (_, _, binding) = self.load_staged_review(reference, now)?;
+        let (_, _, binding) = self.load_staged_review(reference, now.max(current_time_ms()))?;
         Ok(binding)
     }
 
-    /// The sealed, unexpired, byte-identical row `reference` names, its sealing time, and its stored binding.
+    /// The sealed, byte-identical row `reference` names, its sealing time, and its stored binding. The row's deadline must be strictly after `live_at`: the later of the caller's and the store's clocks for a live read, the selection time for a selected read.
     fn load_staged_review(
         &self,
         reference: &ReviewStagedReference,
-        now: i64,
+        live_at: i64,
     ) -> Result<(StoredReviewRow, i64, ReviewBinding), ReviewReadError> {
-        if now < 0 {
+        if live_at < 0 {
             return Err(ReviewReadError::Invalid);
         }
         check_identity(&reference.candidate_id).map_err(|_| ReviewReadError::Invalid)?;
@@ -846,7 +865,7 @@ impl KernelStore {
             (None, None, _) => return Err(ReviewReadRefusal::Unsealed.into()),
             _ => return Err(ReviewReadRefusal::Abandoned.into()),
         };
-        if row.deadline_at <= now || row.deadline_at <= current_time_ms() {
+        if row.deadline_at <= live_at {
             return Err(ReviewReadRefusal::Expired.into());
         }
         if identity_digest(&row.payload) != reference.payload_digest {

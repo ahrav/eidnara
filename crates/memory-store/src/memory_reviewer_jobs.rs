@@ -1488,7 +1488,7 @@ impl MemoryStore {
         )
     }
 
-    /// Expires reserved or ready jobs and frozen selections at their deadlines. An in-progress receipt inside its run deadline shields its job; at the run deadline the receipt closes as `cancelled` when a cancellation was recorded, `unknown` when it has an unterminated attempt, otherwise `expired`, and its job goes terminal in the same sweep with the outcome a completion would have mapped. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts, and the live claim of any terminal job is fenced `expired`, so a worker that keeps renewing cannot hold a ledger slot for a job that no longer exists.
+    /// Expires reserved or ready jobs and frozen selections at their deadlines. An in-progress receipt inside both its run deadline and its job's queue deadline shields its job; at the earlier of the two the receipt closes as `cancelled` when a cancellation was recorded, `unknown` when it has an unterminated attempt, otherwise `expired`, and its job goes terminal in the same sweep with the outcome a completion would have mapped. Job expiry clears `allowance_bytes` and `input_json` without deleting receipts, and the live claim of any terminal job is fenced `expired`, so a worker that keeps renewing cannot hold a ledger slot for a job that no longer exists.
     pub fn expire_memory_reviewer_work(
         &self,
         now_ms: i64,
@@ -1497,7 +1497,7 @@ impl MemoryStore {
         let write = PreparedWrite::new(DurableWriteFamily::MemoryReviewerJobs);
         write
             .execute(&self.inner, |coordinated| {
-                // Nothing can publish once a receipt's run deadline has passed, so an in-progress receipt closes there whatever its job's state, and the job follows in the same transaction rather than holding a pending slot until its queue deadline.
+                // Nothing can publish once a receipt's run deadline or its job's queue deadline has passed: completion requires the queue to be live, so an in-progress receipt closes at the earlier of the two whatever its job's state, and the job follows in the same transaction rather than holding a pending slot.
                 coordinated.tx().execute(
                     "UPDATE memory_reviewer_receipts
                         SET state = 'complete', updated_at_ms = ?1,
@@ -1509,7 +1509,12 @@ impl MemoryStore {
                                    AND a.causal_identity = memory_reviewer_receipts.causal_identity
                                    AND a.terminal_kind IS NULL)
                               THEN 'unknown' ELSE 'expired' END
-                      WHERE state = 'in_progress' AND run_deadline_ms <= ?1",
+                      WHERE state = 'in_progress'
+                        AND (run_deadline_ms <= ?1
+                             OR EXISTS(SELECT 1 FROM memory_reviewer_jobs j
+                                        WHERE j.project = memory_reviewer_receipts.project
+                                          AND j.causal_identity = memory_reviewer_receipts.causal_identity
+                                          AND j.queue_deadline_ms <= ?1))",
                     [now_ms],
                 )?;
                 // A job expires at its queue deadline, or as soon as its receipt is closed; an in-progress receipt inside its run deadline still shields the job.
