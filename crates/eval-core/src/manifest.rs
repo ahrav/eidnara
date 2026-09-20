@@ -11,11 +11,11 @@ use crate::census::{Construction, Reachability};
 use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
 
-pub const MANIFEST_SCHEMA: &str = "eval-manifest/v3";
-pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v3";
+pub const MANIFEST_SCHEMA: &str = "eval-manifest/v4";
+pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v4";
 
 /// Sorted; a field added to [`Manifest`] without a schema version bump fails the closure test.
-pub const REQUIRED_FIELDS: [&str; 26] = [
+pub const REQUIRED_FIELDS: [&str; 27] = [
     "arm_rates",
     "attestation",
     "claim_boundary",
@@ -28,6 +28,7 @@ pub const REQUIRED_FIELDS: [&str; 26] = [
     "error",
     "eval_run_id",
     "execution_mode",
+    "failure_class_table_digest",
     "ingestion",
     "reachability",
     "residue",
@@ -77,6 +78,9 @@ pub struct Manifest {
     pub residue: BTreeSet<ResidueEntry>,
     pub construction: Construction,
     pub execution_mode: ExecutionMode,
+    /// The failure-class truth table the run's classes come from; must equal
+    /// [`crate::FAILURE_CLASS_TABLE_DIGEST`].
+    pub failure_class_table_digest: String,
     pub ingestion: Ingestion,
     pub reachability: Reachability,
     pub claim_boundary: ClaimBoundary,
@@ -219,6 +223,7 @@ pub enum ManifestError {
     RunIdMismatch { declared: String, derived: String },
     GeneratorVersionMismatch,
     ClaimBoundaryMismatch,
+    FailureClassTableMismatch { found: String },
     DirectDatabaseAged,
     ResidueIncomplete { field: String },
     ResidueContradiction { type_name: String, field: String },
@@ -317,6 +322,11 @@ impl Manifest {
         }
         if self.claim_boundary != ClaimBoundary::pinned() {
             return Err(ManifestError::ClaimBoundaryMismatch);
+        }
+        if self.failure_class_table_digest != crate::failure_class::FAILURE_CLASS_TABLE_DIGEST {
+            return Err(ManifestError::FailureClassTableMismatch {
+                found: self.failure_class_table_digest.clone(),
+            });
         }
         if self.ingestion == Ingestion::DirectDatabaseNonAged
             && self.construction == Construction::Replay

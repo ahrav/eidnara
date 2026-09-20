@@ -27,7 +27,7 @@ sub-record.
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
 
-## Manifest `eval-manifest/v3`
+## Manifest `eval-manifest/v4`
 
 `parse_manifest` reads a JSON object, compares its key set against
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
@@ -45,7 +45,7 @@ field to `Manifest` without bumping the schema fails the closure test, and the
 fixture digests in `tests/manifest.rs` are frozen so an encoding change is
 reviewed.
 
-The 26 required fields, sorted:
+The 27 required fields, sorted:
 
 | Field | Content |
 | --- | --- |
@@ -61,6 +61,7 @@ The 26 required fields, sorted:
 | `error` | Typed error text or `null`. |
 | `eval_run_id` | The run identity digest. |
 | `execution_mode` | `generate`, `replay_tape`, or `enumerate`: how the world was driven. |
+| `failure_class_table_digest` | The `eidnara-failure-class-table-v1` digest of the pinned truth table; refused unless it equals `FAILURE_CLASS_TABLE_DIGEST`. |
 | `ingestion` | `adapter-ingested, production caller: none` or `direct-database, non-aged`; the latter with a `replay` construction is refused (`DirectDatabaseAged`). |
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `residue` | Every non-`Keep` field with its rule, including the manifest's own. |
@@ -68,7 +69,7 @@ The 26 required fields, sorted:
 | `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
-| `schema` | `eval-manifest/v3`. |
+| `schema` | `eval-manifest/v4`. |
 | `status` | `completed`, `incomplete`, `refused`, or `blocked`. |
 | `tokenizer_profile` | Name, revision, digest. |
 
@@ -489,8 +490,10 @@ a stage's position in it is the only ordinal the ledger uses) and gives each a
 a `Filter` receives what the stages before it kept and may drop some.
 `ChainStage` is the activated query route and packer: `Exact`, `Lexical`,
 `Dense` (sources), then `Eligibility`, `Fusion`, `Selection` (revalidation and
-the response cap), and `Packing` (filters). The surface-1 stage list stays a
-census pin until its ledger lands.
+the response cap), and `Packing` (filters), labelled `test-only` through
+`Stage::REACHABILITY`. `Surface1Stage` is the default surface, labelled
+`default-production`: all thirteen stages are filters over the session's
+segments and a required occurrence enters at the tail.
 
 An `Observation` is one production return as values: the stage, a sequence
 number (the highest sequence is the stage's output), the shell's token for the
@@ -584,6 +587,72 @@ coverage is `Incomplete`. The query route and the packer are activated
 components with no production caller; these results are labelled
 `test-only` and describe no shipped behavior.
 
+### Default-surface taps and shell
+
+The transform returns what auto-search did: `TransformResponse.user_hint`
+(daemon-internal, never on the wire) is a `UserHintPass`, either `Decided`
+with a `UserHintOutcome` or `Skipped` with a `UserHintSkip` reason
+(`no_eligible_tail`, `exempt_tail`, `no_text_block`, `already_decided`,
+`behind_frontier`), or `None` when auto-search did not run. The outcome holds
+the frozen `block_id` and `hint_text`, a `UserHintTrace`, and three fates. The
+trace records each stage as the stage computed it: the suppression, length,
+and token gates as passed or not (a gate field is meaningful only when every
+earlier gate passed); the candidate window as the segment sequences loaded,
+newest first; the match filter as the sequences with enough matched tokens,
+best first; the threshold as met or not; and the capped selection the hint
+renders. `deferred` is the pass holding the hint back for an already served
+block, `applied` is the served block ending with the hint (the overlay's own
+idempotence test), and `attached` is `attach_native_messages_incremental`'s
+check that the native output carries the hint on the message the block names.
+`Handler::core_for_test` and `HandlerCore::user_hint_outcome_for_test`
+(features `test-support` or `direct-host-fixture`) let the direct-host
+fixture's control socket return the newest pass through its
+`user-hint-outcome` command, so the survivor proof is the host process's own.
+The fixture build stays the production configuration: the feature compiles
+only the recorder and its readers.
+
+`crates/daemon/tests/eval_surface_ledger.rs` renders a one-session world, seeds
+the fixture's store with one history segment per message whose
+`end_message_id` is the message's native identity, drives a native-serving
+transform through the fixture, and maps the pass onto the thirteen stages in
+the evaluator's occurrence-id space. A decided pass: a gate that passed kept
+every segment and a refusing gate kept none, with the search stages unreached;
+the window, match filter, threshold, and cap keep the traced sequences; render,
+decision freeze, deferral, overlay apply, and attachment keep the selection
+when the hint is non-empty, not deferred, applied, and attached respectively.
+A pass skipped as `already_decided` or `behind_frontier` is unjoinable at the
+tail, because an earlier decision may still be served; any other skip is an
+empty tail. Segment sequences reach occurrence ids through the segment's
+stored native identity, and the identity proof runs the production adapter
+over the request's own native message and the evaluator encoder over its
+units to reproduce the renderer's expected id. Five injections classify to
+their stage and record `sls_` markers: a segment older than the 100-segment
+window (`CandidateWindow`), a prompt under the minimum length (`LengthGate`),
+a raised score threshold (`Threshold`), a fourth matching segment (`Cap`), and
+a native array without the tail message (`Attachment`, rendered but
+undelivered). A forged adapter-side survivor and a mis-mapped identity both
+fail the self-test, and a repeated pass over a frozen decision folds
+`Indeterminate`. Every verdict is also placed in the failure-class table: the
+lost ones classify as `interference`, the clean run as `indeterminate` under a
+cassette. Surface 1 is default production, so these results are labelled
+`default-production`, distinct from the activated chain's `test-only` ones.
+
+## Failure classes
+
+`classify(Cell)` is the pinned 48-cell truth table: `Delivery` (the ledger
+verdict without its stage: clean, first loss, stale ingress, indeterminate) by
+`DurableState` (held, refused, unknown) by `Slice` (live, cassette) by
+`Outcome` (pass, fail). A pass has no failure to classify. A failing task is
+`Interference` when the store held the knowledge and the chain lost it or
+served stale evidence, `Reasoning` when the knowledge was held and delivered
+and the model was live, `DurableState` when the store refused it and the chain
+did not deliver it, and `Indeterminate` otherwise: an unknown durable state, a
+cassette slice with clean delivery (reasoning is claimable only live), an
+indeterminate delivery, or a refused store paired with a clean delivery, which
+contradicts. `serialize_table` is the whole table in `cells()` order and
+`FAILURE_CLASS_TABLE_DIGEST` pins its `eidnara-failure-class-table-v1` digest;
+the manifest carries and checks it.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,
@@ -594,7 +663,8 @@ is `Incomplete { missing }` unless every registered marker whose test path
 starts with `suite` fired, and `EmptySuite` when the prefix selects no marker
 (an empty prefix names the whole registry). Each
 daemon suite owns the markers whose tests it holds: `eval_ingestion.rs` the
-`ing_` markers and `eval_ledger.rs` the `ldg_` markers. Each suite checks that
+`ing_` markers, `eval_ledger.rs` the `ldg_` markers, and
+`eval_surface_ledger.rs` the `sls_` markers. Each suite checks that
 every marker it owns names one of its scenarios and runs its completeness
 proof on every pass: all scenarios once, then `Coverage::complete` over its
 own prefix. A whole-registry proof would need one run to reach both suites'

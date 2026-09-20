@@ -2954,6 +2954,9 @@ pub struct HandlerCore {
     transform_snapshots: Arc<Mutex<TransformSnapshotCache>>,
     serialized_outputs: Mutex<SerializedOutputCache>,
     native_attachments: Mutex<NativeAttachmentCache>,
+    /// The newest native-serving pass's auto-search outcome, kept for the evaluator's host-side survivor check.
+    #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+    last_user_hint: Mutex<Option<transform::UserHintPass>>,
     output_revisions: RevisionAllocator,
     projections: Mutex<ProjectionCache>,
     boundary_tokens: Mutex<BoundaryTokenCache>,
@@ -3675,6 +3678,15 @@ pub struct Handler {
     core: Arc<HandlerCore>,
 }
 
+impl Handler {
+    /// A second reader of the daemon's state; the fixture's control socket reads
+    /// observations through it while the host owns the `Handler`.
+    #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+    pub fn core_for_test(&self) -> Arc<HandlerCore> {
+        Arc::clone(&self.core)
+    }
+}
+
 impl Deref for Handler {
     type Target = HandlerCore;
 
@@ -3888,6 +3900,8 @@ impl Handler {
             ))),
             serialized_outputs: Mutex::new(SerializedOutputCache::default()),
             native_attachments: Mutex::new(NativeAttachmentCache::default()),
+            #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+            last_user_hint: Mutex::new(None),
             output_revisions: RevisionAllocator::default(),
             projections: Mutex::new(ProjectionCache::default()),
             boundary_tokens: Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES)),
@@ -4381,6 +4395,8 @@ impl Handler {
             ))),
             serialized_outputs: Mutex::new(SerializedOutputCache::default()),
             native_attachments: Mutex::new(NativeAttachmentCache::default()),
+            #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+            last_user_hint: Mutex::new(None),
             output_revisions: RevisionAllocator::default(),
             projections: Mutex::new(ProjectionCache::default()),
             boundary_tokens: Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES)),
@@ -9427,6 +9443,14 @@ impl HandlerCore {
                 &self.native_attachments,
                 NativeCacheKeyMode::Normal,
             );
+            #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+            {
+                *self
+                    .last_user_hint
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    response.user_hint.clone();
+            }
             (
                 attachment.stats,
                 RecipeInputs::Native {
@@ -13492,6 +13516,16 @@ impl HandlerCore {
         self.store()
     }
 
+    /// What auto-search did on the newest native-serving pass of any session,
+    /// or `None` when no such pass has run or auto-search was inactive for it.
+    #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+    pub fn user_hint_outcome_for_test(&self) -> Option<transform::UserHintPass> {
+        self.last_user_hint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// The Kernel project digest a bound route stages and reads review inputs under.
     #[cfg(any(test, feature = "test-support"))]
     pub fn project_digest_for_test(&self, channel: RouteHandle) -> Option<String> {
@@ -14480,6 +14514,9 @@ fn attach_native_messages_incremental(
             reason.as_str(),
         );
     }
+    if let Some(transform::UserHintPass::Decided(outcome)) = response.user_hint.as_mut() {
+        outcome.attached = native_carries_user_hint(&native_messages, outcome);
+    }
     NativeAttachment {
         stats,
         output: NativeOutput {
@@ -14488,6 +14525,23 @@ fn attach_native_messages_incremental(
         },
         previous,
     }
+}
+
+/// The host's own survivor check: the native output the recipe will insert or
+/// keep carries the hint on the message its block names.
+fn native_carries_user_hint(native: &[Arc<Value>], outcome: &transform::UserHintOutcome) -> bool {
+    let Some((mid, _)) = wire::split_block_id(&outcome.block_id) else {
+        return false;
+    };
+    native
+        .iter()
+        .filter(|message| message["info"]["id"].as_str() == Some(mid))
+        .flat_map(|message| message["parts"].as_array().into_iter().flatten())
+        .any(|part| {
+            part["text"]
+                .as_str()
+                .is_some_and(|text| outcome.carried_by(text))
+        })
 }
 
 fn need_full_sync_response(request: &TransformRequest) -> PreparedOutcome {

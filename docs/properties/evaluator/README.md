@@ -18,7 +18,7 @@ find them by test name.
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v3` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v4` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -584,6 +584,68 @@ classifies to its stage.
   `CommitReadIncarnation`, `EligibilityReport`, `OccurrenceId`, and
   `Disposition` directly, with no wrapper trait or newtype).
 
+## Phase 2 executed checks: default surface and failure classes
+
+Failure-class table (`crates/eval-core/tests/failure_class.rs`,
+`xc-failure-class-separation-truth-table`):
+
+- `the_table_has_forty_eight_distinct_cells_in_axis_order` and
+  `every_cell_agrees_with_the_hand_authored_rows`: all 48 cells are reached
+  and each agrees with a twelve-row hand-authored table over (durable state,
+  delivery) with live and cassette columns; passes are never classified.
+- `reasoning_is_claimable_only_in_the_live_slice`,
+  `the_serialized_table_digests_to_the_pinned_constant` (the manifest's
+  `failure_class_table_digest`; `crates/eval-core/tests/manifest.rs` refuses a
+  different value as `FailureClassTableMismatch`), and
+  `a_ledger_verdict_maps_to_its_delivery_without_the_stage`.
+
+Surface 1 through the direct-host fixture
+(`crates/daemon/tests/eval_surface_ledger.rs`; `sls-surface1-stage-list-pinned`
+through `Surface1Stage: Stage` over `SURFACE1_STAGES`):
+
+- `a_matching_segment_is_delivered_through_every_stage`: one matching segment
+  is `Reached` at all thirteen stages, the verdict is `Clean`, and every
+  selected segment's stored native identity resolves through the production
+  adapter and the evaluator encoder to the renderer's expected id
+  (`ldg-terminal-survivor-proof-captured-host-side`: `attached` is the host's
+  own check, read back over the fixture's control socket).
+- `an_old_segment_outside_the_window_is_lost_at_the_candidate_window`
+  (`sls-surface1-candidate-window-injection-forces-first-loss`): 101 segments,
+  the oldest matches, the window holds the newest 100; `FirstLoss(CandidateWindow)`,
+  distinct from the in-window rejections below.
+- `a_short_prompt_is_lost_at_the_length_gate`
+  (`sls-surface1-prompt-gate-injection-forces-first-loss`): a prompt under 20
+  characters; `FirstLoss(LengthGate)` with the search stages `NotReached`.
+- `a_raised_threshold_is_lost_at_the_threshold`
+  (`sls-surface1-score-injection-forces-first-loss`): the segment matches and
+  the threshold of 1.5 empties the result; `FirstLoss(Threshold)`.
+- `a_fourth_match_is_lost_at_the_cap`
+  (`sls-surface1-render-cap-injection-forces-first-loss`): four of twelve
+  segments match with equal scores; the cap keeps three; `FirstLoss(Cap)` for
+  the fourth and `Clean` for the first.
+- `a_native_array_without_the_tail_is_lost_at_attachment`
+  (`sls-surface1-attach-injection-forces-first-loss`): the served block carries
+  the hint and no native message does; `Attachment` is
+  `ReachedEvidenceAbsent`; `FirstLoss(Attachment)`.
+- `a_false_survivor_from_the_adapter_fails_the_self_test`: an adapter-supplied
+  `attached` would fold the same run `Clean`; a mis-mapped identity does not
+  reproduce the expected verdict.
+- `a_repeated_pass_reports_the_frozen_decision_as_unjoinable`: the second pass
+  over the same tail is `Skipped { already_decided }`, folds the tail as
+  unjoinable, and the verdict is `Indeterminate`, never a tail loss.
+- `the_user_hint_pass_leaves_the_wire_response_bytes_unchanged`: a
+  `TransformResponse` serializes to the same bytes with no pass, a skipped
+  pass, and a decided pass; `Surface1Stage::REACHABILITY` is
+  `default-production` and `ChainStage::REACHABILITY` is `test-only`
+  (`crates/eval-core/tests/ledger.rs`), so the two ledgers' verdicts carry
+  distinct labels.
+- Every injection's verdict classifies as `interference` under a held store
+  and a cassette slice; the clean run classifies as `indeterminate` under a
+  cassette and `reasoning` live.
+- `surface_markers_each_name_a_scenario_here` and
+  `every_surface_marker_fires_across_the_scenarios` are this suite's registry
+  check and completeness proof over the `sls_` prefix.
+
 ## Gaps recorded here
 
 - Every ingestion entry point lacks a production caller. No world is labelled
@@ -625,5 +687,30 @@ classifies to its stage.
 - The query route and the packer have no production caller. Every result in
   `eval_ledger.rs` is activated-component evidence labelled `test-only`; a
   ledger verdict there is not a statement about shipped retrieval or packing.
-- `Surface1Stage` does not implement `Stage`; the default-surface ledger and
-  its five injections land with the surface-1 attribution work.
+- The render stage is observed as the capped selection: under the pinned
+  80-unit fragment cap and 3-result cap the 800-unit total cap cannot drop a
+  selected segment, and `render_user_hint` keeps no per-segment record. Its
+  one per-segment drop, a fragment that compresses to under three bytes, is
+  not observed; a segment body starts with its title, so no seeded segment
+  reaches it.
+- The host records one pass per process, the newest native-serving one of any
+  session; the shell asserts the recorded `block_id` names its own tail.
+  `DurableState::Held` is asserted by the shell from what it seeded, not read
+  back from the store.
+- The surface-1 suite hand-builds one history segment per rendered message
+  with a chosen summary phrase; the segment's native identity is real, its
+  text is not summarizer output. Replay-built segments arrive with the aged
+  worlds.
+- Surface-1 observations carry no incarnation token: the hint scorer reads
+  the memory store, which has no `CommitReadIncarnation`.
+- The deferral stage is observed but not injected; a deferred pass needs a
+  block the host already served, which the five injections do not construct.
+  The suppression and token gates are observed as passed in every scenario and
+  not injected either.
+- `native_carries_user_hint` filters native messages by the block's `mid`; no
+  scenario plants the hint text on another message, so the filter is read, not
+  exercised.
+- The transform's wire response is unchanged by the tap (`user_hint` is a
+  `#[serde(skip)]` field); the aged and differential goldens in the daemon
+  library tests pin that output, and the surface suite asserts the key is
+  absent from the response.

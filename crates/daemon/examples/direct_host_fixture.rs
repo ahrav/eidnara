@@ -351,6 +351,8 @@ mod unix {
         ReleaseBlockedCall,
         TypedFailure,
         Counters,
+        /// The newest native-serving pass's auto-search decision and its fate, as the host recorded it.
+        UserHintOutcome,
         GracefulShutdown,
     }
 
@@ -373,8 +375,13 @@ mod unix {
     #[derive(Serialize)]
     #[serde(untagged)]
     enum ControlResult {
-        Ack { accepted: bool },
+        Ack {
+            accepted: bool,
+        },
         Counters(CounterSnapshot),
+        UserHint {
+            outcome: Option<daemon::transform::UserHintPass>,
+        },
     }
 
     /// One control frame after draining through its newline or end of stream.
@@ -446,6 +453,7 @@ mod unix {
     async fn handle_control_connection(
         mut stream: UnixStream,
         backend: Arc<ControlledBackend>,
+        core: Arc<daemon::HandlerCore>,
         shutdown: CancellationToken,
     ) -> io::Result<()> {
         loop {
@@ -483,6 +491,12 @@ mod unix {
                             ControlCommand::Counters => {
                                 (ControlResult::Counters(backend.counters.snapshot()), false)
                             }
+                            ControlCommand::UserHintOutcome => (
+                                ControlResult::UserHint {
+                                    outcome: core.user_hint_outcome_for_test(),
+                                },
+                                false,
+                            ),
                             ControlCommand::GracefulShutdown => {
                                 (ControlResult::Ack { accepted: true }, true)
                             }
@@ -523,6 +537,7 @@ mod unix {
     async fn run_control_server(
         listener: Arc<UnixListener>,
         backend: Arc<ControlledBackend>,
+        core: Arc<daemon::HandlerCore>,
         shutdown: CancellationToken,
         accepting: tokio::sync::oneshot::Sender<()>,
     ) -> io::Result<()> {
@@ -542,9 +557,10 @@ mod unix {
                         }
                     };
                     let backend = Arc::clone(&backend);
+                    let core = Arc::clone(&core);
                     let shutdown = shutdown.clone();
                     connections.spawn(async move {
-                        let _ = handle_control_connection(stream, backend, shutdown).await;
+                        let _ = handle_control_connection(stream, backend, core, shutdown).await;
                     });
                 }
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
@@ -699,14 +715,19 @@ mod unix {
 
         let shutdown = CancellationToken::new();
         let backend = ControlledBackend::new(shutdown.clone());
+        let publication =
+            host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
+        let handler = daemon::Handler::new_with_connection_file(Some(publication.clone()));
         let (accepting_tx, accepting_rx) = tokio::sync::oneshot::channel();
         let control_shutdown = shutdown.clone();
         let control_backend = Arc::clone(&backend);
+        let control_core = handler.core_for_test();
         let control_listener = Arc::clone(&listener);
         let control_task = tokio::spawn(async move {
             run_control_server(
                 control_listener,
                 control_backend,
+                control_core,
                 control_shutdown,
                 accepting_tx,
             )
@@ -716,11 +737,9 @@ mod unix {
             .await
             .map_err(|_| "control server failed to start")?;
 
-        let publication =
-            host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
         let local_embeddings = local_embeddings_component();
         let composite = StaticComposite::new(
-            daemon::Handler::new_with_connection_file(Some(publication.clone())),
+            handler,
             local_embeddings,
             ModelExecutionComponent::new(
                 backend,

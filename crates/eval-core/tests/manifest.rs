@@ -16,7 +16,7 @@ use support::{OBSERVATION_TYPE, build, identity, manifest, observation, observat
 /// Frozen so a field-set or encoding change forces a reviewed schema bump.
 const FIXTURE_RUN_ID: &str = "e9f412ed2ad627c5801959c2c459bbb764bf45443a7774d02ac74a97f41832c9";
 const FIXTURE_MANIFEST_DIGEST: &str =
-    "8e6787eccba4c2dac03d4d1df4ad9d80064b936c83426718e3fa10cfab3c6e81";
+    "0a9d9de8f725832e9f1db9f39a56107c4a9c7f4bae27737ca9f75f1e65c19d3d";
 
 #[test]
 fn required_fields_are_sorted_and_equal_the_struct_field_set() {
@@ -85,16 +85,16 @@ fn unknown_field_wrong_schema_and_non_object_are_refused() {
         parse_manifest(&extra),
         Err(ManifestError::UnknownField("extra".to_string()))
     );
-    let mut v2 = valid.clone();
-    v2["schema"] = json!("eval-manifest/v4");
+    let mut v5 = valid.clone();
+    v5["schema"] = json!("eval-manifest/v5");
     assert_eq!(
-        parse_manifest(&v2),
+        parse_manifest(&v5),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v4".to_string()
+            found: "eval-manifest/v5".to_string()
         })
     );
     assert_eq!(parse_manifest(&json!([])), Err(ManifestError::NotAnObject));
-    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v3");
+    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v4");
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn every_kept_field_enters_the_digest_and_every_dropped_field_leaves_it() {
         ),
     ];
     let mut digests = BTreeSet::from([base.digest().unwrap()]);
-    let mut covered = BTreeSet::from(["schema", "claim_boundary"]);
+    let mut covered = BTreeSet::from(["schema", "claim_boundary", "failure_class_table_digest"]);
     for (field, mutate) in mutations {
         let mut mutated = base.clone();
         mutate(&mut mutated);
@@ -594,11 +594,19 @@ fn residue_declarations_are_non_keep_and_one_rule_per_field() {
 #[test]
 fn validate_refuses_what_parse_and_digest_refuse() {
     let mut schema = manifest();
-    schema.schema = "eval-manifest/v4".to_string();
+    schema.schema = "eval-manifest/v5".to_string();
     assert_eq!(
         schema.validate(),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v4".to_string()
+            found: "eval-manifest/v5".to_string()
+        })
+    );
+    let mut table = manifest();
+    table.failure_class_table_digest = "00".repeat(32);
+    assert_eq!(
+        table.validate(),
+        Err(ManifestError::FailureClassTableMismatch {
+            found: "00".repeat(32)
         })
     );
     let mut epoch = manifest();

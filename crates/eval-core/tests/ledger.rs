@@ -62,6 +62,23 @@ fn run_dropping(dropped: &[ChainStage]) -> Vec<Observation<ChainStage>> {
 #[test]
 fn the_chain_stages_are_pinned_in_production_order_with_their_kinds() {
     assert_eq!(<ChainStage as Stage>::ALL, &CHAIN_STAGES);
+    assert_eq!(
+        <ChainStage as Stage>::REACHABILITY,
+        eval_core::Reachability::TestOnly
+    );
+    assert_eq!(
+        <eval_core::Surface1Stage as Stage>::REACHABILITY,
+        eval_core::Reachability::DefaultProduction
+    );
+    assert_eq!(
+        <eval_core::Surface1Stage as Stage>::ALL,
+        &eval_core::SURFACE1_STAGES
+    );
+    assert!(
+        eval_core::SURFACE1_STAGES
+            .iter()
+            .all(|stage| stage.kind() == StageKind::Filter)
+    );
     let kinds: Vec<(ChainStage, StageKind, usize)> = CHAIN_STAGES
         .iter()
         .map(|stage| (*stage, stage.kind(), stage.ordinal()))

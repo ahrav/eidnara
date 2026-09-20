@@ -109,6 +109,67 @@ const USER_HINT_CANDIDATE_LIMIT: usize = 100;
 const USER_HINT_TOKEN_CAP: usize = 24;
 const USER_HINT_RESULT_LIMIT: usize = 3;
 const USER_HINT_MIN_MATCHED_TOKENS: usize = 2;
+
+/// What each auto-search stage kept for one live user tail, as the stages
+/// computed it. A gate field is `true` when the gate passed and is meaningful
+/// only when every earlier gate passed; segment lists carry
+/// `history_segments.sequence` values in the order the stage produced.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserHintTrace {
+    pub suppression: bool,
+    pub length: bool,
+    pub tokens: bool,
+    /// The candidate window, newest first.
+    pub window: Vec<i64>,
+    /// Segments with enough matched tokens, best first.
+    pub matched: Vec<i64>,
+    pub threshold: bool,
+    /// The capped selection the hint renders, in rank order.
+    pub selected: Vec<i64>,
+}
+
+/// Why a pass decided no hint for its tail. `AlreadyDecided` and
+/// `BehindFrontier` mean an earlier pass's decision stands and may still be
+/// served; the others mean no live user tail was eligible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserHintSkip {
+    NoEligibleTail,
+    ExemptTail,
+    NoTextBlock,
+    AlreadyDecided,
+    BehindFrontier,
+}
+
+/// What auto-search did for one pass: decided a hint for the live tail, or
+/// skipped for a named reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "pass", rename_all = "snake_case")]
+pub enum UserHintPass {
+    Decided(UserHintOutcome),
+    Skipped { reason: UserHintSkip },
+}
+
+/// The auto-search decision for one live user tail and what became of it in
+/// this pass: frozen as `hint_text` for `block_id`, held back by deferral,
+/// written into the served block, and attached to the native output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserHintOutcome {
+    pub block_id: String,
+    pub hint_text: String,
+    pub trace: UserHintTrace,
+    pub deferred: bool,
+    pub applied: bool,
+    pub attached: bool,
+}
+
+impl UserHintOutcome {
+    /// Whether `text` ends with this pass's hint, the same test the overlay
+    /// uses for idempotence; an empty hint is never carried.
+    pub fn carried_by(&self, text: &str) -> bool {
+        !self.hint_text.is_empty() && text.ends_with(&self.hint_text)
+    }
+}
 const DEFAULT_CLEAR_REASONING_AGE: u64 = 50;
 const DEFAULT_TERSE_TEXT_COMPRESSION_MIN_CHARS: usize = 500;
 const FIVE_MINUTE_CACHE_TTL_MS: u64 = 5 * 60 * 1_000;
@@ -1519,6 +1580,10 @@ pub struct TransformResponse {
     /// Incremental attachment returns its output directly instead of populating this field.
     #[serde(skip)]
     pub native_messages: Option<Vec<Arc<Value>>>,
+    /// This pass's auto-search decision and its fate; daemon-internal, never
+    /// on the wire. `None` when auto-search did not run for the pass.
+    #[serde(skip)]
+    pub user_hint: Option<UserHintPass>,
     /// The request's `base_revision`, echoed so the applier can bind the recipe to its input snapshot.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub base_revision: Option<crate::edit_recipe::Revision>,
@@ -1575,6 +1640,7 @@ impl TransformResponse {
             history_summarizer: None,
             messages: None,
             native_messages: None,
+            user_hint: None,
             base_revision: None,
             output_revision: None,
             previous_output_revision: None,
@@ -2958,6 +3024,7 @@ fn apply_additive_only(
             history_summarizer: None,
             messages: Some(messages),
             native_messages: None,
+            user_hint: None,
             base_revision: req.base_revision.clone(),
             output_revision: None,
             previous_output_revision: None,
@@ -4062,8 +4129,9 @@ fn apply_once(
     );
     let is_bust_pass = !req.is_subagent && is_provider_prefix_mutation_pass;
     let user_hint_started_at = Instant::now();
+    let mut user_hint_pass = None;
     if auto_search_active {
-        if let Some(hint) = maybe_decide_live_user_hint(
+        let decided = match maybe_decide_live_user_hint(
             store,
             req,
             ctx,
@@ -4073,10 +4141,17 @@ fn apply_once(
             mutation_exempt_mid,
             lineage_anchor_mid,
         )? {
-            if !hint.hint_text.is_empty()
+            Ok(decided) => Some(decided),
+            Err(reason) => {
+                user_hint_pass = Some(UserHintPass::Skipped { reason });
+                None
+            }
+        };
+        if let Some((hint, trace)) = decided {
+            let deferred = !hint.hint_text.is_empty()
                 && user_hint_target_was_served(&loaded.meta, &hint.block_id)
-                && !is_bust_pass
-            {
+                && !is_bust_pass;
+            if deferred {
                 meta.pending_user_hint_block_ids
                     .insert(hint.block_id.clone());
             }
@@ -4085,6 +4160,14 @@ fn apply_once(
                 hint_text: hint.hint_text.clone(),
                 created_at: ctx.now_ms,
             });
+            user_hint_pass = Some(UserHintPass::Decided(UserHintOutcome {
+                block_id: hint.block_id.clone(),
+                hint_text: hint.hint_text.clone(),
+                trace,
+                deferred,
+                applied: false,
+                attached: false,
+            }));
             pending_overlays.user_hint = Some(hint);
         }
         if is_bust_pass {
@@ -4990,6 +5073,22 @@ fn apply_once(
     timings.frozen_units = core.frozen_units.len();
     timings.tail_units_matched = frozen_units_matched_to_tail(&core, req, meta.coverage_ordinal);
 
+    if let Some(UserHintPass::Decided(outcome)) = user_hint_pass.as_mut() {
+        outcome.applied = wire::split_block_id(&outcome.block_id).is_some_and(|(mid, index)| {
+            wire_messages.iter().any(|message| {
+                !message.meta.synthetic
+                    && message.meta.harness_id.as_deref() == Some(mid)
+                    && message
+                        .content()
+                        .get(index)
+                        .is_some_and(|block| match block.kind() {
+                            wire::BlockKind::Text { text } => outcome.carried_by(text),
+                            _ => false,
+                        })
+            })
+        });
+    }
+
     let finalize_started_at = Instant::now();
     let divergence_started_at = Instant::now();
     let served_fingerprints = served_output_fingerprints(&wire_messages);
@@ -5173,6 +5272,7 @@ fn apply_once(
             history_summarizer: None,
             messages: Some(wire_messages),
             native_messages: None,
+            user_hint: user_hint_pass,
             base_revision: req.base_revision.clone(),
             output_revision: None,
             previous_output_revision: None,
@@ -8172,39 +8272,44 @@ fn maybe_decide_live_user_hint(
     overlay_frontier: Option<u64>,
     mutation_exempt_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
-) -> Result<Option<UserHintDecisionInput>, TransformError> {
-    let Some(message) = eligible_authored_user_tail(req)
-        .filter(|message| {
-            req.messages
-                .last()
-                .is_some_and(|tail| tail.mid == message.mid)
-        })
-        .filter(|message| mutation_exempt_mid != Some(message.mid.as_str()))
-        .filter(|message| lineage_anchor_mid != Some(message.mid.as_str()))
-    else {
-        return Ok(None);
+) -> Result<Result<(UserHintDecisionInput, UserHintTrace), UserHintSkip>, TransformError> {
+    let Some(message) = eligible_authored_user_tail(req).filter(|message| {
+        req.messages
+            .last()
+            .is_some_and(|tail| tail.mid == message.mid)
+    }) else {
+        return Ok(Err(UserHintSkip::NoEligibleTail));
     };
+    if mutation_exempt_mid == Some(message.mid.as_str())
+        || lineage_anchor_mid == Some(message.mid.as_str())
+    {
+        return Ok(Err(UserHintSkip::ExemptTail));
+    }
     let Some(block) = projection.blocks.iter().find(|block| {
         block.mid == message.mid
             && block.role == "user"
             && matches!(block.wire.kind(), wire::BlockKind::Text { .. })
     }) else {
-        return Ok(None);
+        return Ok(Err(UserHintSkip::NoTextBlock));
     };
-    if user_hint_rows.iter().any(|row| row.block_id == block.id)
-        || overlay_frontier.is_some_and(|frontier| message.ordinal <= frontier)
-    {
-        return Ok(None);
+    if user_hint_rows.iter().any(|row| row.block_id == block.id) {
+        return Ok(Err(UserHintSkip::AlreadyDecided));
+    }
+    if overlay_frontier.is_some_and(|frontier| message.ordinal <= frontier) {
+        return Ok(Err(UserHintSkip::BehindFrontier));
     }
 
     // Suppression must inspect raw user text before sanitization removes markers identifying an existing augmentation.
     // Search and length admission use the full sanitized prompt so ranking sees terms late in a long authored request.
     let message_text = user_hint_message_text(message);
     let raw_prompt = sanitize_user_hint_query(&message_text);
-    let hint_text = if has_stacked_user_hint_augmentation(&message_text)
-        || utf16_len(&raw_prompt) < req.auto_search_min_prompt_chars
-        || raw_prompt.is_empty()
-    {
+    let mut trace = UserHintTrace {
+        suppression: !has_stacked_user_hint_augmentation(&message_text),
+        length: utf16_len(&raw_prompt) >= req.auto_search_min_prompt_chars
+            && !raw_prompt.is_empty(),
+        ..UserHintTrace::default()
+    };
+    let hint_text = if !trace.suppression || !trace.length {
         String::new()
     } else {
         let results = run_user_hint_lexical_search(
@@ -8212,14 +8317,18 @@ fn maybe_decide_live_user_hint(
             &req.session_id,
             &raw_prompt,
             req.auto_search_score_threshold,
+            &mut trace,
         )?;
         render_user_hint(&results).unwrap_or_default()
     };
-    Ok(Some(UserHintDecisionInput {
-        ordinal: message.ordinal,
-        block_id: block.id.clone(),
-        hint_text,
-    }))
+    Ok(Ok((
+        UserHintDecisionInput {
+            ordinal: message.ordinal,
+            block_id: block.id.clone(),
+            hint_text,
+        },
+        trace,
+    )))
 }
 
 fn lexical_tokens(text: &str) -> BTreeSet<String> {
@@ -8243,6 +8352,7 @@ fn run_user_hint_lexical_search(
     session_id: &str,
     query: &str,
     score_threshold: f64,
+    trace: &mut UserHintTrace,
 ) -> Result<Vec<crate::memory_tool::MemorySearchResult>, TransformError> {
     #[cfg(test)]
     USER_HINT_LEXICAL_QUERY_COUNT.with(|count| count.set(count.get() + 1));
@@ -8254,13 +8364,15 @@ fn run_user_hint_lexical_search(
     }
 
     let query_tokens = lexical_tokens(query);
-    if query_tokens.len() < USER_HINT_MIN_MATCHED_TOKENS {
+    trace.tokens = query_tokens.len() >= USER_HINT_MIN_MATCHED_TOKENS;
+    if !trace.tokens {
         return Ok(Vec::new());
     }
     let mut candidates = Vec::new();
     for history_segment in
         store.load_history_segment_candidates(session_id, USER_HINT_CANDIDATE_LIMIT)?
     {
+        trace.window.push(history_segment.sequence);
         let body = [
             Some(history_segment.title.as_str()),
             Some(history_segment.content.as_str()),
@@ -8350,17 +8462,20 @@ fn run_user_hint_lexical_search(
             .then_with(|| right.2.cmp(&left.2))
             .then_with(|| left.3.id.cmp(&right.3.id))
     });
-    if scored
+    trace.matched = scored.iter().map(|(_, _, _, result)| result.id).collect();
+    trace.threshold = scored
         .first()
-        .is_none_or(|(score, _, _, _)| *score < score_threshold)
-    {
+        .is_some_and(|(score, _, _, _)| *score >= score_threshold);
+    if !trace.threshold {
         return Ok(Vec::new());
     }
-    Ok(scored
+    let selected: Vec<_> = scored
         .into_iter()
         .take(USER_HINT_RESULT_LIMIT)
         .map(|(_, _, _, result)| result)
-        .collect())
+        .collect();
+    trace.selected = selected.iter().map(|result| result.id).collect();
+    Ok(selected)
 }
 
 #[cfg(test)]

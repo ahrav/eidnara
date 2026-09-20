@@ -9,7 +9,7 @@ pub struct Marker {
 }
 
 /// Every marker the evaluator's suites may record, globally unique by name.
-pub const MARKERS: [Marker; 12] = [
+pub const MARKERS: [Marker; 17] = [
     Marker {
         name: "ing_four_seam_hold_correct_release_query",
         test: "crates/daemon/tests/eval_ingestion.rs::hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete",
@@ -57,6 +57,26 @@ pub const MARKERS: [Marker; 12] = [
     Marker {
         name: "ldg_injection_packing_skipped",
         test: "crates/daemon/tests/eval_ledger.rs::optional_budget_loses_the_rule_at_packing",
+    },
+    Marker {
+        name: "sls_injection_candidate_window",
+        test: "crates/daemon/tests/eval_surface_ledger.rs::an_old_segment_outside_the_window_is_lost_at_the_candidate_window",
+    },
+    Marker {
+        name: "sls_injection_prompt_gate",
+        test: "crates/daemon/tests/eval_surface_ledger.rs::a_short_prompt_is_lost_at_the_length_gate",
+    },
+    Marker {
+        name: "sls_injection_score_threshold",
+        test: "crates/daemon/tests/eval_surface_ledger.rs::a_raised_threshold_is_lost_at_the_threshold",
+    },
+    Marker {
+        name: "sls_injection_result_cap",
+        test: "crates/daemon/tests/eval_surface_ledger.rs::a_fourth_match_is_lost_at_the_cap",
+    },
+    Marker {
+        name: "sls_injection_attachment",
+        test: "crates/daemon/tests/eval_surface_ledger.rs::a_native_array_without_the_tail_is_lost_at_attachment",
     },
 ];
 

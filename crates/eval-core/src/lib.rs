@@ -19,6 +19,7 @@ mod census;
 mod decimal;
 mod eligibility;
 mod event;
+mod failure_class;
 mod generator;
 mod identity;
 mod ledger;
@@ -35,6 +36,10 @@ pub use census::{
 };
 pub use eligibility::*;
 pub use event::*;
+pub use failure_class::{
+    Cell, Delivery, DurableState, FAILURE_CLASS_TABLE_DIGEST, FAILURE_CLASS_TABLE_PROTOCOL,
+    FailureClass, Outcome, Slice, cells, classify, serialize_table, table_digest,
+};
 pub use generator::*;
 pub use identity::{
     BUILD_PROTOCOL, BinaryDigest, BuildRecord, IdentityError, RUN_ID_PROTOCOL, RunIdentity,

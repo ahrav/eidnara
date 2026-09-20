@@ -11,6 +11,9 @@ use daemon::harness_sources::{MAX_REVISION_LEAD_MS, SourcePublisher, opencode_un
 use daemon::packing::PackingTrace;
 use daemon::query_route::{Admitted, ExactAdmission, ExactReport, admit_lanes, execute, select};
 use daemon::search_catchup::SearchCatchUp;
+use daemon::transform::UserHintOutcome;
+use daemon::{Handler, HandlerCore};
+use eval_core::{Stage, Surface1Stage};
 use kernel::KernelStore;
 use retrieval::batch::{BatchFault, apply_batch_with_fault_for_test};
 use retrieval::persist_occurrences_with_digests_for_test;
@@ -46,6 +49,24 @@ fn every_evaluator_seam_is_reachable_under_all_features() {
     assert_eq!(
         kernel::MAX_ELIGIBILITY_CANDIDATES,
         eval_core::MAX_CANDIDATES_PER_STAGE_OBSERVATION
+    );
+    let _ = Handler::core_for_test;
+    let _ = HandlerCore::user_hint_outcome_for_test;
+    let _ = |outcome: &UserHintOutcome| {
+        (
+            outcome.trace.selected.len(),
+            outcome.deferred,
+            outcome.applied,
+            outcome.attached,
+        )
+    };
+    assert_eq!(
+        <Surface1Stage as Stage>::ALL.len(),
+        eval_core::SURFACE1_STAGES.len()
+    );
+    assert_eq!(
+        eval_core::table_digest(),
+        eval_core::FAILURE_CLASS_TABLE_DIGEST
     );
     // `execute` and its halves take an `impl FnMut`, so a non-executed call names each.
     let _ = |p, k, a, l, b, q, d| execute(p, k, a, l, b, q, d, |_| {});
