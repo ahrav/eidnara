@@ -38,6 +38,7 @@ import {
     type MemoryCaptureDrain,
     type MemoryCaptureFlushResult,
     type MemoryCaptureScope,
+    memoryAutoCaptureEnabled,
     piCaptureMessages,
 } from "@eidnara/opencode/shared/memory-capture";
 import {
@@ -604,12 +605,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         const sessionId = ctx.sessionManager.getSessionId();
         if (!sessionId) return undefined;
         const deps = resolveCurrentProjectDeps(ctx);
-        if (
-            deps.config.memory?.enabled === false ||
-            deps.config.memory?.auto_promote === false ||
-            deps.config.memory?.auto_capture === false
-        )
-            return undefined;
+        if (!memoryAutoCaptureEnabled(deps.config)) return undefined;
         return {
             sessionId,
             projectRoot: deps.projectDir,
@@ -801,6 +797,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     pi.on("session_shutdown", async (event, ctx) => {
         // The transport disconnects below, so no drain starts here.
         await checkpointMemory(ctx);
+        // Closing drains prevents in-flight work from redialing the disconnected transport.
+        for (const capture of captureByProject.values()) capture.drain.close();
         // Long-lived Pi processes can reinitialize the extension after `session_shutdown`, so the handler clears per-session state.
         try {
             const sessionId = sessionIdFromContext(ctx);

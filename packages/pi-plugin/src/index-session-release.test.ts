@@ -338,6 +338,53 @@ describe("Pi daemon transport across runtime teardown", () => {
         }
     });
 
+    it("stops an in-flight capture drain on session_shutdown so nothing dials the disconnected transport", async () => {
+        const next = Promise.withResolvers<unknown>();
+        const afterDisconnect: string[] = [];
+        let disconnected = false;
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                if (disconnected) afterDisconnect.push(input.method);
+                if (input.method === "memory.capture.next") return next.promise;
+                return { state: "accepted" };
+            },
+        );
+        const disconnect = spyOn(HostModuleTransport.prototype, "disconnect").mockImplementation(
+            () => {
+                disconnected = true;
+            },
+        );
+        try {
+            const { agentEnd, registrations } = await agentEndHandler();
+            const shutdown = registrations.handlers.get("session_shutdown") as SessionHandler;
+            const setStatus = mock(() => undefined);
+            const ctx = captureContext({ model: { provider: "openai", id: "test" }, setStatus });
+            await agentEnd({}, ctx);
+            await shutdown({ reason: "reload" }, ctx);
+            expect(disconnect).toHaveBeenCalledTimes(1);
+            // The daemon answers the drain's pending exchange only after the runtime is gone.
+            next.resolve({
+                state: "work",
+                lease: "a".repeat(32),
+                model: "openai/test",
+                system: "Extract facts.",
+                prompt: "A fact.",
+                max_output_tokens: 8192,
+                max_output_bytes: 131072,
+                max_duration_ms: 90000,
+            });
+            await __test.settleMemoryCapture();
+            expect(afterDisconnect).toEqual([]);
+            expect(setStatus).not.toHaveBeenCalledWith(
+                "eidnara-capture",
+                "Memory capture: unconfirmed",
+            );
+        } finally {
+            call.mockRestore();
+            disconnect.mockRestore();
+        }
+    });
+
     it("keeps the transport connected across a session switch", async () => {
         const disconnect = spyOn(HostModuleTransport.prototype, "disconnect").mockImplementation(
             () => undefined,

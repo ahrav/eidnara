@@ -390,4 +390,70 @@ describe("memory capture drain", () => {
         expect(settled.sort()).toEqual(["/a:ready", "/b:ready"]);
         expect(failed).toHaveLength(1);
     });
+
+    it("close() drops queued reruns and makes no daemon call after a pending reply lands", async () => {
+        const daemon = controlledDaemon();
+        const executed: unknown[] = [];
+        const notified: string[] = [];
+        const drain = createMemoryCaptureDrain(
+            daemon.client,
+            async (request) => {
+                executed.push(request);
+                return { model: request.model, text: "{}" };
+            },
+            {
+                onSettled: (_scope, result) => notified.push(result),
+                onFailed: () => notified.push("failed"),
+            },
+        );
+        drain.schedule(scope);
+        drain.schedule({ ...scope, sessionId: "rerun" });
+        await tick();
+        expect(daemon.drained).toEqual(["/project"]);
+        drain.close();
+        daemon.waiting.shift()?.resolve(work);
+        await drain.settle();
+        expect(daemon.drained).toEqual(["/project"]);
+        expect(executed).toEqual([]);
+        expect(notified).toEqual([]);
+        drain.schedule(scope);
+        await tick();
+        expect(daemon.drained).toEqual(["/project"]);
+        expect(drain.pending("/project")).toBeUndefined();
+    });
+
+    it("close() aborts a running executor and skips the lease release", async () => {
+        const calls: string[] = [];
+        let aborted = false;
+        const drain = createMemoryCaptureDrain(
+            {
+                call: async ({ method }) => {
+                    calls.push(method);
+                    return work;
+                },
+            },
+            (_request, signal) =>
+                new Promise((_resolve, reject) => {
+                    signal.addEventListener("abort", () => {
+                        aborted = true;
+                        reject(new NativeCaptureError("cancelled"));
+                    });
+                }),
+            {
+                onSettled: () => {
+                    throw new Error("must not settle");
+                },
+                onFailed: () => {
+                    throw new Error("must not report");
+                },
+            },
+        );
+        drain.schedule(scope);
+        await tick();
+        expect(calls).toEqual(["memory.capture.next"]);
+        drain.close();
+        await drain.settle();
+        expect(aborted).toBe(true);
+        expect(calls).toEqual(["memory.capture.next"]);
+    });
 });

@@ -17,6 +17,7 @@ import {
     createMemoryCaptureCheckpoint,
     createMemoryCaptureDrain,
     type MemoryCaptureDrain,
+    memoryAutoCaptureEnabled,
     openCodeCaptureMessages,
 } from "../../shared/memory-capture";
 import { normalizeSDKResponse } from "../../shared/normalize-sdk-response";
@@ -254,12 +255,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     };
     const pendingUserCaptures = new BoundedSessionMap<Promise<void>>(MAX_LIVE_USAGE_SESSIONS);
     const checkpointUser = (sessionId: string, output: unknown): void => {
-        if (
-            deps.config.memory?.enabled === false ||
-            deps.config.memory?.auto_promote === false ||
-            deps.config.memory?.auto_capture === false
-        )
-            return;
+        if (!memoryAutoCaptureEnabled(deps.config)) return;
         try {
             const messages = [
                 ...openCodeCaptureMessages([
@@ -305,9 +301,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     };
     const checkpointMemory = async (sessionId: string): Promise<void> => {
         if (
-            deps.config.memory?.enabled === false ||
-            deps.config.memory?.auto_promote === false ||
-            deps.config.memory?.auto_capture === false ||
+            !memoryAutoCaptureEnabled(deps.config) ||
             deletedSessions.has(sessionId) ||
             subagentSessions.has(sessionId) ||
             internalChildSessions.has(sessionId)
@@ -589,12 +583,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             // joined message text with a different digest. The drain works on stored sources only.
             async (input) => {
                 await pendingUserCaptures.get(input.sessionID)?.catch(() => undefined);
-                if (
-                    deps.config.memory?.enabled === false ||
-                    deps.config.memory?.auto_promote === false ||
-                    deps.config.memory?.auto_capture === false
-                )
-                    return;
+                if (!memoryAutoCaptureEnabled(deps.config)) return;
                 const projectRoot = await sessionDirectoryFor(input.sessionID);
                 if (
                     deletedSessions.has(input.sessionID) ||

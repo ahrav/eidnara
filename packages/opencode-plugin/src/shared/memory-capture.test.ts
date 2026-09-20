@@ -4,6 +4,7 @@ import {
     type CaptureMessage,
     captureFragments,
     createMemoryCaptureCheckpoint,
+    memoryAutoCaptureEnabled,
     openCodeCaptureMessages,
     piCaptureMessages,
 } from "./memory-capture";
@@ -14,6 +15,17 @@ const message: CaptureMessage = {
     text: "Use port 4321. Fix the test.",
 };
 const scope = { sessionId: "session", projectRoot: "/project", model: "provider/model" };
+
+describe("memory auto-capture gate", () => {
+    it("is on unless memory, auto_promote, or auto_capture is explicitly false", () => {
+        expect(memoryAutoCaptureEnabled({})).toBe(true);
+        expect(memoryAutoCaptureEnabled({ memory: {} })).toBe(true);
+        expect(memoryAutoCaptureEnabled({ memory: { auto_capture: true } })).toBe(true);
+        expect(memoryAutoCaptureEnabled({ memory: { enabled: false } })).toBe(false);
+        expect(memoryAutoCaptureEnabled({ memory: { auto_promote: false } })).toBe(false);
+        expect(memoryAutoCaptureEnabled({ memory: { auto_capture: false } })).toBe(false);
+    });
+});
 
 describe("memory capture checkpoint", () => {
     it("acknowledges only durable acceptance and retries refused or changed input", async () => {
