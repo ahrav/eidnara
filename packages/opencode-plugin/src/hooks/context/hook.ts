@@ -240,8 +240,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             "capture notification timed out",
         ).catch(() => undefined);
     };
-    // Model batches run detached from the lifecycle hooks that schedule them, so a completed
-    // response and an idle event return before any extraction work.
+    // Model batches run detached from the idle checkpoint that schedules them, so the idle event
+    // returns before any extraction work. One drain per completed turn sees the user's message
+    // and the answer together.
     const memoryCaptureDrain = createMemoryCaptureDrain(moduleClient, executeCapture, {
         // `"pending"` leaves work for a later drain and is not a failure to report.
         onSettled: () => undefined,
@@ -322,6 +323,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         try {
             const model = liveModelKey(sessionId);
             if (!model) return;
+            // The user's message is acknowledged first, so the transcript read below does not resend it.
+            await pendingUserCaptures.get(sessionId)?.catch(() => undefined);
             const projectRoot = await sessionDirectoryFor(sessionId);
             const scope = { sessionId, projectRoot, model };
             const readTranscript = async (limit?: number): Promise<unknown[]> =>
@@ -604,30 +607,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const hooks = {
         "experimental.chat.messages.transform": messagesTransform,
         "experimental.chat.system.transform": systemPromptHash.handler,
-        "experimental.text.complete": createTextCompleteHandler(
-            // A completed part is not checkpointed: under the message id it would duplicate the
-            // joined message text with a different digest. The drain works on stored sources only.
-            async (input) => {
-                await pendingUserCaptures.get(input.sessionID)?.catch(() => undefined);
-                if (
-                    deps.config.memory?.enabled === false ||
-                    deps.config.memory?.auto_promote === false ||
-                    deps.config.memory?.auto_capture === false
-                )
-                    return;
-                const projectRoot = await sessionDirectoryFor(input.sessionID);
-                if (
-                    deletedSessions.has(input.sessionID) ||
-                    subagentSessions.has(input.sessionID) ||
-                    internalChildSessions.has(input.sessionID)
-                )
-                    return;
-                const model = liveModelKey(input.sessionID);
-                if (!model) return;
-                memoryCaptureDrain.schedule({ sessionId: input.sessionID, projectRoot, model });
-            },
-            notifyCaptureIncomplete,
-        ),
+        "experimental.text.complete": createTextCompleteHandler(),
         "chat.message": createChatMessageHook({
             checkpointUser,
             liveModelBySession,

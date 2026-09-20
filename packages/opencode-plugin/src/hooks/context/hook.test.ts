@@ -189,7 +189,7 @@ async function expectSentinel(promise: Promise<unknown>, sentinel: string): Prom
 }
 
 describe("eidnara hook", () => {
-    it("queues user capture without blocking chat and awaits it before the final-text drain", async () => {
+    it("queues user capture without blocking chat and acknowledges it before the idle checkpoint", async () => {
         useTempDataHome("capture-user-");
         let release = (_value: { data: { directory: string } }) => {};
         const directory = new Promise<{ data: { directory: string } }>((resolve) => {
@@ -211,17 +211,22 @@ describe("eidnara hook", () => {
             },
         );
         expect(fake.calls).toHaveLength(0);
-        let finished = false;
-        const final = hook["experimental.text.complete"](
+        // The completed part neither checkpoints nor drains; the turn's idle event does both.
+        await hook["experimental.text.complete"](
             { sessionID: "capture-user", messageID: "native-answer", partID: "part" },
             { text: "Completed." },
-        ).then(() => {
-            finished = true;
-        });
+        );
+        expect(fake.calls).toHaveLength(0);
+        let finished = false;
+        const idle = hook
+            .event({ event: { type: "session.idle", properties: { sessionID: "capture-user" } } })
+            .then(() => {
+                finished = true;
+            });
         await Promise.resolve();
         expect(finished).toBe(false);
         release({ data: { directory: "/project" } });
-        await final;
+        await idle;
         await hook.memoryCaptureDrain.settle();
         expect(fake.calls.map((call) => call.method)).toEqual([
             "memory.capture",
@@ -324,24 +329,6 @@ describe("eidnara hook", () => {
                 );
             }
             for (const texts of textsById.values()) expect(texts.size).toBe(1);
-        });
-
-        it("resolves the final-text hook before the drain finishes", async () => {
-            useTempDataHome("capture-final-text-detached-");
-            const next = Promise.withResolvers<unknown>();
-            const fake = createFakeModuleClient(({ method }) =>
-                method === "memory.capture.next" ? next.promise : { state: "accepted" },
-            );
-            const { hook } = createCaptureHook(fake, []);
-            await hook["experimental.text.complete"](
-                { sessionID: SESSION, messageID: "native-answer", partID: "part" },
-                { text: "Completed." },
-            );
-            expect(fake.calls.map((call) => call.method)).toEqual(["memory.capture.next"]);
-            expect(hook.memoryCaptureDrain.pending("/project")).toBeDefined();
-            next.resolve({ state: "ready" });
-            await hook.memoryCaptureDrain.settle();
-            expect(hook.memoryCaptureDrain.pending("/project")).toBeUndefined();
         });
 
         it("resolves the idle checkpoint before the drain finishes and coalesces reruns", async () => {
