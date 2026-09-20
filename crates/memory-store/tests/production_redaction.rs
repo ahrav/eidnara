@@ -334,6 +334,52 @@ fn active_scan_audit_expires_with_its_capture_source_text() {
 }
 
 #[test]
+fn reconciliation_retry_retires_the_frozen_output_audit_and_keeps_the_source_audit() {
+    let temp = tempfile::tempdir().unwrap();
+    let descriptor =
+        MemoryStore::test_descriptor(temp.path(), "production-capture-reconciliation-audit");
+    let store = MemoryStore::open(&descriptor).unwrap();
+
+    let job = accepted_capture(
+        store
+            .enqueue_memory_capture(capture_source("native-1"), 1)
+            .unwrap(),
+    );
+    let source_audit = scan_audit_counts(temp.path());
+    assert_ne!(source_audit, ScanAuditCounts::EMPTY);
+
+    for _ in 0..3 {
+        assert!(
+            store
+                .begin_memory_capture_attempt("/project", &job, 0)
+                .unwrap()
+        );
+        store
+            .prepare_memory_capture("/project", &job, "[]")
+            .unwrap();
+        assert_ne!(
+            scan_audit_counts(temp.path()),
+            source_audit,
+            "frozen output records its own audit"
+        );
+        store
+            .retry_memory_capture_reconciliation("/project", &job, "[]")
+            .unwrap();
+        assert_eq!(
+            scan_audit_counts(temp.path()),
+            source_audit,
+            "clearing the frozen output retires its audit and keeps the source audit"
+        );
+    }
+
+    store
+        .prepare_memory_capture("/project", &job, "[]")
+        .unwrap();
+    assert!(store.complete_memory_capture("/project", &job, 7).unwrap());
+    assert_eq!(scan_audit_counts(temp.path()), ScanAuditCounts::EMPTY);
+}
+
+#[test]
 fn active_scan_audit_survives_until_its_last_owner_expires() {
     let temp = tempfile::tempdir().unwrap();
     let descriptor = MemoryStore::test_descriptor(temp.path(), "production-scan-shared-retention");

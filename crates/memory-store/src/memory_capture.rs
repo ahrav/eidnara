@@ -124,12 +124,22 @@ fn job_id(source: &CaptureSource<'_>, redacted_text: &str) -> String {
     format!("{:x}", hash.finalize())
 }
 
+/// Frozen output is audited under its own owner, so clearing it retires that
+/// audit alone and leaves the source-text audit in place.
+fn prepared_output_owner(job: &str) -> String {
+    format!("{job}/prepared_json")
+}
+
 /// State transitions key an existing row; both identities were scanned and
 /// rejected-or-stored at enqueue. A clean re-read skips the audit; a write
-/// that stores new text (`prepared_json`) registers its own scan and keeps it.
-fn prepared_write(project: &str, job: &str) -> Result<PreparedWrite, MemoryStoreError> {
+/// that stores new text (`prepared_json`) registers its own scan under `owner`.
+fn prepared_write(
+    project: &str,
+    job: &str,
+    owner: &str,
+) -> Result<PreparedWrite, MemoryStoreError> {
     let mut write = PreparedWrite::new(DurableWriteFamily::MemoryCapture);
-    write.domain_owner("project", project, job);
+    write.domain_owner("project", project, owner);
     write.existing_identity("project", project)?;
     write.existing_identity("job_id", job)?;
     write.skip_audit_when_only_clean_identities();
@@ -139,12 +149,27 @@ fn prepared_write(project: &str, job: &str) -> Result<PreparedWrite, MemoryStore
 /// The scan audit vouches for text the row holds; a terminal write or a row
 /// deletion removes that text, so the audit is removed with it.
 fn retire_capture_scans(tx: &GuardedConn<'_>, project: &str, job: &str) -> rusqlite::Result<()> {
+    retire_prepared_output_scans(tx, project, job)?;
     retire_active_scan_domain_owner(
         tx,
         "project",
         project,
         DurableWriteFamily::MemoryCapture.owner_kind(),
         job,
+    )
+}
+
+fn retire_prepared_output_scans(
+    tx: &GuardedConn<'_>,
+    project: &str,
+    job: &str,
+) -> rusqlite::Result<()> {
+    retire_active_scan_domain_owner(
+        tx,
+        "project",
+        project,
+        DurableWriteFamily::MemoryCapture.owner_kind(),
+        &prepared_output_owner(job),
     )
 }
 
@@ -298,7 +323,7 @@ impl MemoryStore {
         job: &str,
         retry_at_ms: i64,
     ) -> Result<bool, MemoryStoreError> {
-        prepared_write(project, job)?.execute(&self.inner, |tx| {
+        prepared_write(project, job, job)?.execute(&self.inner, |tx| {
             let changed = tx.tx().execute("UPDATE memory_capture_jobs SET attempts=attempts+1,retry_at_ms=?3 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL", params![project,job,retry_at_ms])?;
             Ok(WriteDisposition::Applied(changed == 1))
         })
@@ -326,7 +351,7 @@ impl MemoryStore {
             None | Some((_, Some(_), _)) | Some((_, _, Some(_))) => return Ok(None),
             Some((None, None, None)) => {}
         }
-        let mut write = prepared_write(project, job)?;
+        let mut write = prepared_write(project, job, &prepared_output_owner(job))?;
         // Redaction here would invalidate source quotations. Refuse instead of
         // storing output different from what the daemon validated.
         let output = write.identity("prepared_json", output)?;
@@ -345,8 +370,12 @@ impl MemoryStore {
         job: &str,
         frozen: &str,
     ) -> Result<(), MemoryStoreError> {
-        prepared_write(project, job)?.execute(&self.inner, |tx| {
-            tx.tx().execute("UPDATE memory_capture_jobs SET prepared_json=NULL,last_error='reconciliation_conflict',retry_at_ms=0 WHERE project=?1 AND job_id=?2 AND prepared_json=?3 AND commit_seq IS NULL", params![project, job, frozen])?;
+        prepared_write(project, job, job)?.execute(&self.inner, |tx| {
+            let tx = tx.tx();
+            let changed = tx.execute("UPDATE memory_capture_jobs SET prepared_json=NULL,last_error='reconciliation_conflict',retry_at_ms=0 WHERE project=?1 AND job_id=?2 AND prepared_json=?3 AND commit_seq IS NULL", params![project, job, frozen])?;
+            if changed == 1 {
+                retire_prepared_output_scans(tx, project, job)?;
+            }
             Ok(WriteDisposition::Applied(()))
         })
     }
@@ -364,7 +393,7 @@ impl MemoryStore {
                 "invalid capture commit sequence".into(),
             ));
         }
-        prepared_write(project, job)?.execute(&self.inner, |tx| {
+        prepared_write(project, job, job)?.execute(&self.inner, |tx| {
             let tx = tx.tx();
             let changed = tx.execute("UPDATE memory_capture_jobs SET commit_seq=?3,text='',prepared_json=NULL,last_error=NULL WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND prepared_json IS NOT NULL",params![project,job,commit_seq])?;
             if changed == 1 {
@@ -392,7 +421,7 @@ impl MemoryStore {
         {
             return Err(MemoryStoreError::Serde("invalid capture error code".into()));
         }
-        prepared_write(project, job)?.execute(&self.inner, |tx| {
+        prepared_write(project, job, job)?.execute(&self.inner, |tx| {
             let tx = tx.tx();
             tx.execute("UPDATE memory_capture_jobs SET last_error=?3,retry_at_ms=?4,failures=failures+?5 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL",params![project,job,code,retry_at_ms, i64::from(model_failure)])?;
             if model_failure {
