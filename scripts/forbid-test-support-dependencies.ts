@@ -21,6 +21,8 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
  * refused too: they pull source from outside the scanned tree. The stdio
  * macros (`print!`, `eprintln!`, `dbg!`, ...) write without naming `std::io`,
  * and `env!`/`option_env!` read the build environment without `std::env`.
+ * A macro metavariable rooting an effect path (`$root::fs`) is refused: the
+ * scan cannot know what the caller substitutes.
  */
 const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io|os|thread";
 const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
@@ -53,6 +55,7 @@ function forbiddenCoreSource(crates: readonly string[]): RegExp {
             `\\bstd::(?:\\{[^;]*[{,]\\s*)?\\*`,
             `#\\[path\\b|\\binclude(?:_str|_bytes)?!`,
             `\\b(?:e?print(?:ln)?|dbg|(?:option_)?env)!`,
+            `\\$\\w+::(${STD_EFFECT_MODULES})\\b`,
         ].join("|"),
         "g",
     );
@@ -75,7 +78,8 @@ export interface MetadataPackage {
     source: string | null;
     dependencies: MetadataDependency[];
     features?: Record<string, string[]>;
-    targets?: { name: string; kind: string[] }[];
+    manifest_path?: string;
+    targets?: { name: string; kind: string[]; src_path?: string }[];
 }
 
 export interface CargoMetadata {
@@ -193,6 +197,17 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
             // its results into the crate through `cargo:rustc-env`.
             if ((pkg.targets ?? []).some((target) => target.kind.includes("custom-build"))) {
                 findings.add("eval-core [package] has a build script");
+            }
+            // `[lib] path = "..."` moves the real crate root out of the scanned tree.
+            const crateDir = (pkg.manifest_path ?? "").replace(/\/Cargo\.toml$/, "");
+            for (const target of pkg.targets ?? []) {
+                if (!target.kind.includes("lib") || target.src_path === undefined) continue;
+                if (!target.src_path.startsWith(`${crateDir}/src/`)) {
+                    const shown = target.src_path.replace(`${metadata.workspace_root}/`, "");
+                    findings.add(
+                        `eval-core [lib] ${target.name} lives at ${shown}, outside ${EVAL_CORE_SOURCE_DIR}`,
+                    );
+                }
             }
         }
         for (const dep of pkg.dependencies) {

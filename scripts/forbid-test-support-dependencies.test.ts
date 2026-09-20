@@ -218,6 +218,20 @@ describe("eval-core fences", () => {
         ]);
     });
 
+    test("rejects a library target outside the scanned tree", () => {
+        const metadata = core(closed);
+        metadata.packages[0]!.manifest_path = "/workspace/crates/eval-core/Cargo.toml";
+        metadata.packages[0]!.targets = [
+            { name: "eval_core", kind: ["lib"], src_path: "/workspace/crates/eval-core/eval.rs" },
+            { name: "world", kind: ["test"], src_path: "/workspace/crates/eval-core/tests/world.rs" },
+        ];
+        expect(forbiddenDependencyEdges(metadata)).toEqual([
+            "eval-core [lib] eval_core lives at crates/eval-core/eval.rs, outside crates/eval-core/src",
+        ]);
+        metadata.packages[0]!.targets![0]!.src_path = "/workspace/crates/eval-core/src/lib.rs";
+        expect(forbiddenDependencyEdges(metadata)).toEqual([]);
+    });
+
     test("rejects a build script on eval-core", () => {
         const metadata = core(closed);
         metadata.packages[0]!.targets = [
@@ -399,6 +413,8 @@ describe("eval-core fences", () => {
                         "let opt = option_env!(\"X\");",
                         "std::thread::sleep(core::time::Duration::from_secs(1));",
                         "let environment = 1;",
+                        "macro_rules! effect { ($root:ident) => { $root::fs::read(\"x\") }; }",
+                        "macro_rules! show { ($t:ty) => { impl std::fmt::Display for $t {} }; }",
                         "",
                     ].join("\n"),
                 },
@@ -408,6 +424,7 @@ describe("eval-core fences", () => {
             "a.rs:10: const HOME: &str = env!(\"HOME\");",
             "a.rs:11: let opt = option_env!(\"X\");",
             "a.rs:12: std::thread::sleep(core::time::Duration::from_secs(1));",
+            "a.rs:14: macro_rules! effect { ($root:ident) => { $root::fs::read(\"x\") }; }",
             "a.rs:2: extern crate kernel;",
             "a.rs:3: extern crate tokio;",
             "a.rs:5: println!(\"{x}\");",

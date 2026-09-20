@@ -342,7 +342,8 @@ so a variant added on the kernel side fails to compile there. The kernel test
 carries `eval-core` as a dev dependency only; `eval-core` keeps its four
 dependencies and never names a kernel type, and
 `scripts/forbid-test-support-dependencies.ts` now asserts both facts (the
-closed dependency set with no build script, and no path into another workspace
+closed dependency set with no build script and the library root under `src/`,
+and no path into another workspace
 crate, `rusqlite`, `tokio`, or a `std` effect module (`fs`, `path`, `process`,
 `time`, `net`, `env`, `io`, `os`, `thread`) in the core's source; the crate list comes
 from `cargo metadata` and includes any Cargo rename eval-core gives a fenced
