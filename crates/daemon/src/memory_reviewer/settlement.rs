@@ -505,7 +505,7 @@ impl Settlement<'_> {
         Ok(evidence)
     }
 
-    /// Stages the proposal at the provisional identity and seals its run; returns the reference and the row's creation time. A byte-identical row already sealed by an earlier attempt of this settlement is adopted; different bytes at the identity conflict.
+    /// Stages the proposal at the provisional identity and seals its run; returns the reference and the row's creation time. A row already sealed by an earlier attempt of this settlement is adopted when its bytes and its dependency record are this settlement's; different bytes or another record at the identity conflict.
     fn stage(
         &self,
         run: &MemoryReviewerHoldBinding,
@@ -524,7 +524,7 @@ impl Settlement<'_> {
             payload: payload.clone(),
             recorded_at: now,
             queue_deadline_at,
-            dependencies: Some(dependencies),
+            dependencies: Some(dependencies.clone()),
         });
         let reference = match staged {
             Ok(reference) => reference,
@@ -539,6 +539,10 @@ impl Settlement<'_> {
                     payload_digest: payload.digest().map_err(kernel)?,
                 };
                 return match self.store.read_review_input(&reference, &binding, now) {
+                    // The record is part of what this settlement staged: a row carrying another, or none, is not its result, whatever its bytes.
+                    Ok(row) if row.dependencies.as_ref() != Some(&dependencies) => {
+                        Err(SettlementError::ConflictingContent)
+                    }
                     Ok(row) => Ok((reference, row.lifecycle.created_at)),
                     Err(ReviewReadError::Refused(ReviewReadRefusal::Changed)) => {
                         Err(SettlementError::ConflictingContent)

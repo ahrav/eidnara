@@ -2100,6 +2100,95 @@ async fn a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_
     );
 }
 
+/// A predecessor that died after dispatch left an unterminated marker its lapsed claim can never close. The job's outcome is unknown from that marker on (Q20), whatever a later generation hears back, so the successor that takes the receipt over completes it `unknown` without a request rather than paying for an answer its settlement would have to discard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_takeover_past_an_unterminated_marker_completes_unknown_without_a_send() {
+    let mut fixture = Fixture::open(CASES[0].sources);
+    let now = fixture.now + 3;
+    let outcome = fixture
+        .ledger
+        .dispatch_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &fixture.claim.claim_id,
+            &fixture.kernel_incarnation(),
+            &memory_store::memory_reviewer_ledger::AttemptMarker {
+                body_digest: "b".repeat(64),
+                request_bytes: 100,
+                provider: "localhost/v1/messages@2023-06-01".to_string(),
+                model: MODEL.to_string(),
+                credential_id: CREDENTIAL_ID.to_string(),
+                policy_union_digest: "e".repeat(64),
+            },
+            (),
+            || now,
+            |()| (),
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        memory_store::memory_reviewer_ledger::DispatchOutcome::Handed { .. }
+    ));
+    // The predecessor's claim lapses; a second worker claims the job and takes the receipt over at generation 2.
+    let later =
+        fixture.now + memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_TASK_LEASE_MS + 1;
+    let LeaseAcquireOutcome::Claim { claim, .. } = fixture
+        .ledger
+        .acquire_memory_reviewer_task(
+            PROJECT,
+            "acq-2",
+            "worker-b",
+            0,
+            fixture.registration,
+            &fixture.identity,
+            later,
+        )
+        .unwrap()
+    else {
+        panic!("the lapsed job is claimed again")
+    };
+    let successor = TaskClaim {
+        claim_id: claim.claim_id,
+        worker_instance: "worker-b".to_string(),
+        slot: 0,
+    };
+    fixture.receipt = fixture
+        .ledger
+        .take_over_memory_reviewer_receipt(
+            PROJECT,
+            &fixture.identity,
+            1,
+            &successor.claim_id,
+            later,
+        )
+        .unwrap();
+    assert_eq!(fixture.receipt.generation, 2);
+    fixture.claim = successor;
+    fixture.clock.store(later + 2, Ordering::SeqCst);
+    // The peer would answer at once; a run that connects has sent.
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![text_response(
+        r#"{"v":1,"step":{"kind":"abstain","reason":"late"}}"#,
+    )]);
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    server.abort();
+    assert_eq!(settled, Settled::Unknown);
+    assert_eq!(
+        peer.connections.load(Ordering::SeqCst),
+        0,
+        "a job whose outcome is already unknown is not sent again"
+    );
+    assert_eq!(fixture.attempts().len(), 1, "no attempt was charged");
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Unknown)
+    );
+}
+
 /// A run lost between its Kernel envelope and its Memory Store completion left a sealed result under a review hold. The same claim and generation resumed through the coordinator adopts it: the Kernel refuses a second execution hold for the transferred generation, adoption runs under the review hold, the receipt selects the byte-identical reference, and the peer never hears from the run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_resumed_generation_adopts_the_result_a_lost_run_sealed_without_a_send() {

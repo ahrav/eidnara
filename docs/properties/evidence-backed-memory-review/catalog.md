@@ -133,12 +133,12 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - `crates/daemon/tests/memory_reviewer_coordinator.rs` plants an unterminated marker, a cancelled marker, and a `not_dispatched` marker before a run against a live peer
-Guarantee: A marker at the run's generation other than a proven `not_dispatched` ends the resumed run without a request: the receipt completes `unknown` when no sealed row exists, and adopts or abstains on the row when one does. Only `not_dispatched` markers, or none, admit a newly charged attempt, under the original identity, deadlines, and remaining count.
+Guarantee: A marker at the run's generation other than a proven `not_dispatched`, or an unterminated or `unknown` marker at any generation, ends the resumed run without a request: the receipt completes `unknown` when no sealed row exists, and adopts or abstains on the row when one does. Only `not_dispatched` markers, or none, admit a newly charged attempt, under the original identity, deadlines, and remaining count.
 Check: `always` - `resumes_dispatched_work` is evaluated in `prepare` before subject resolution and hold growth; a `true` result skips both and routes to `adopt`; asserted on every run start
 Fault/timing angle: crash between marker commit and terminal write; cancellation mid-attempt; a lapsed recheck after commit
 Required faults and enabling state: `dispatch_memory_reviewer_attempt` with no terminal; a cancelled first run; a recheck clock past the attempt deadline
 Confidence: high - [evidence](evidence/unknown-dispatch-does-not-authorize-resend.md). Verified the three marker classes at the coordinator with connection counts and attempt counts
-Existing check: `crates/daemon/tests/memory_reviewer_coordinator.rs::an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt`, `a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send`, `a_not_dispatched_marker_alone_lets_the_run_proceed_with_a_new_attempt`
+Existing check: `crates/daemon/tests/memory_reviewer_coordinator.rs::an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt`, `a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send`, `a_not_dispatched_marker_alone_lets_the_run_proceed_with_a_new_attempt`, `a_takeover_past_an_unterminated_marker_completes_unknown_without_a_send`
 Impact: A lost answer would be retried with a fresh physical request, exceeding the attempt and byte ceilings the marker already charged
 Open questions:
 - Whether a `failed` or `cancelled` marker with no sealed row should complete the receipt as `unknown` or under its own terminal; the ledger's sweep maps a cancelled receipt to `cancelled`, while the resumed run maps every non-`not_dispatched` marker to `unknown` (needs human input)

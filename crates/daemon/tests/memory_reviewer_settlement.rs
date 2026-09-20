@@ -1297,6 +1297,28 @@ fn revoked_or_uncited_dependencies_abstain_and_conflicting_content_is_refused() 
         Err(SettlementError::ConflictingContent)
     );
     assert_eq!(fixture.receipt().terminal, None);
+    // A sealed row with the same bytes but another dependency record is not this settlement's result either: the record is part of what was staged, and a row whose record would fail adoption and every selected read is not published as a replay.
+    let fixture = Fixture::open();
+    let broker = fixture.broker(1);
+    fixture.attempt(&broker, Some(MemoryReviewerAttemptTerminal::Complete));
+    let evidence = fixture.evidence_id();
+    let reference = fixture.kernel_half(&broker, &fixture.bound_proposal(&[&evidence]));
+    rusqlite::Connection::open(fixture.kernel_dir.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE candidates SET provenance_witness = CAST(json_remove(CAST(provenance_witness AS TEXT), '$.dependencies') AS BLOB) WHERE candidate_id = ?1",
+            [reference.candidate_id.as_str()],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.settle(
+            &broker,
+            RunResult::Proposal(Box::new(fixture.proposal(&[&evidence])))
+        ),
+        Err(SettlementError::ConflictingContent)
+    );
+    assert_eq!(fixture.receipt().terminal, None);
+    assert_eq!(fixture.read(fixture.now + 6), Err(ReadRefusal::NotSelected));
 }
 
 #[test]
