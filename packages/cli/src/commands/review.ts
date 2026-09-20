@@ -344,12 +344,16 @@ async function render(
     );
     const envelope = { v: 1, session_id: session, project_root: projectRoot };
     if (parsed.command === "list") {
-        const raw = await connection.request(handle, {
-            ...envelope,
-            method: "review.list",
-            limit: parsed.limit,
-            after: parsed.after,
-        });
+        const raw = await connection.request(
+            handle,
+            {
+                ...envelope,
+                method: "review.list",
+                limit: parsed.limit,
+                after: parsed.after,
+            },
+            { exactIntegers: true },
+        );
         const answer = decodePage(raw);
         if (answer.kind !== "body") return { ok: false, text: refusalLines(answer, parsed.json) };
         const { items, next } = answer.body;
@@ -375,11 +379,15 @@ async function render(
         );
         return { ok: true, text: lines.join("\n") };
     }
-    const raw = await connection.request(handle, {
-        ...envelope,
-        method: "review.read",
-        causal_identity: parsed.causalIdentity,
-    });
+    const raw = await connection.request(
+        handle,
+        {
+            ...envelope,
+            method: "review.read",
+            causal_identity: parsed.causalIdentity,
+        },
+        { exactIntegers: true },
+    );
     const answer = decodeSelected(raw);
     if (answer.kind !== "body") return { ok: false, text: refusalLines(answer, parsed.json) };
     const selected = answer.body;

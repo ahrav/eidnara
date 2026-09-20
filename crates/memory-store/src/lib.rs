@@ -5716,6 +5716,10 @@ pub struct MemoryStore {
     /// it touches the ledger.
     #[cfg(any(test, feature = "test-support"))]
     memory_classifier_task_complete_fail_once: std::sync::atomic::AtomicBool,
+    /// Makes the next `in_progress_memory_reviewer_receipts` fail as a backend error before
+    /// it reads the ledger.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) in_progress_receipts_fail_once: std::sync::atomic::AtomicBool,
 }
 
 fn valid_drop_seed_block_id(block_id: &str) -> bool {
@@ -6152,6 +6156,8 @@ impl MemoryStore {
             memory_classifier_task_acquire_fail_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             memory_classifier_task_complete_fail_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-support"))]
+            in_progress_receipts_fail_once: std::sync::atomic::AtomicBool::new(false),
         };
         store.prune_transform_session_roots()?;
         store.ensure_memory_reviewer_store_identity(current_time_ms())?;
@@ -6675,6 +6681,13 @@ impl MemoryStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn fail_next_memory_classifier_task_complete_for_test(&self) {
         self.memory_classifier_task_complete_fail_once
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The next `in_progress_memory_reviewer_receipts` fails as a backend error; later calls run normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_in_progress_memory_reviewer_receipts_for_test(&self) {
+        self.in_progress_receipts_fail_once
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 

@@ -16,6 +16,7 @@ interface Recorded {
     connected: string[];
     routeOpens: unknown[][];
     requests: unknown[];
+    requestOptions: unknown[];
     closes: number;
     stdout: string[];
     stderr: string[];
@@ -33,6 +34,7 @@ function harness(
         connected: [],
         routeOpens: [],
         requests: [],
+        requestOptions: [],
         closes: 0,
         stdout: [],
         stderr: [],
@@ -47,8 +49,9 @@ function harness(
             recorded.routeOpens.push(args);
             return { channel: 7, epoch: 1 } as never;
         },
-        request: async (_handle, body) => {
+        request: async (_handle, body, options) => {
             recorded.requests.push(body);
+            recorded.requestOptions.push(options);
             const respond = answers.respond ?? (() => ({ kind: "page", items: [], next: null }));
             return respond(body as Record<string, unknown>);
         },
@@ -203,6 +206,7 @@ describe("review list", () => {
                 after: null,
             },
         ]);
+        expect(recorded.requestOptions).toEqual([{ exactIntegers: true }]);
         expect(recorded.closes).toBe(1);
         const text = recorded.stdout.join("\n");
         expect(text).toContain("Project: /p/real");
@@ -486,6 +490,7 @@ describe("review show", () => {
         expect(await runReviewCommand(["show", HEX], deps)).toBe(0);
         expect(recorded.requests).toHaveLength(1);
         expect(recorded.requests[0]).toMatchObject({ method: "review.read", causal_identity: HEX });
+        expect(recorded.requestOptions).toEqual([{ exactIntegers: true }]);
         const text = recorded.stdout[0];
         expect(text).toContain("Action: revise");
         expect(text).toContain(
@@ -643,7 +648,7 @@ describe("review status", () => {
                     memory_reviewer_state: "ready",
                     activation_state: "open",
                     sampled_at_ms: 1_700_000_000_000,
-                    jobs_ready: 9007199254740992,
+                    jobs_ready: 9007199254740992n,
                     jobs_reserved: 9007199254740993n,
                     jobs_abstained: -1,
                     jobs_completed: 2.5,

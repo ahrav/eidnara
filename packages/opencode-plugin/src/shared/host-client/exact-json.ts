@@ -13,7 +13,10 @@ export const U64_MAX = 18446744073709551615n;
 export const I64_MIN = -9223372036854775808n;
 const I64_MAX = 9223372036854775807n;
 
-/** `parseExactJson` preserves integer lexemes exactly and throws `SyntaxError` for invalid JSON. */
+/**
+ * `parseExactJson` preserves integer lexemes exactly and throws `SyntaxError` for invalid JSON.
+ * Throws when `JSON.parse` gives the reviver no source text for an integer-valued double past the safe range, because the value may already be rounded.
+ */
 export function parseExactJson(text: string): unknown {
     return JSON.parse(text, exactIntegerReviver);
 }
@@ -26,15 +29,30 @@ function exactIntegerReviver(
 ): unknown {
     if (typeof value !== "number" || Number.isSafeInteger(value)) return value;
     const source = context?.source;
-    if (source === undefined || !INTEGER_LEXEME.test(source)) return value;
+    if (source === undefined) {
+        // Without the lexeme an integer-valued double past the safe range cannot be told from a rounded one; refusing keeps a rounded value from passing as exact.
+        if (Number.isInteger(value)) {
+            throw new SyntaxError("integer lexeme unavailable to the exact decoder");
+        }
+        return value;
+    }
+    if (!INTEGER_LEXEME.test(source)) return value;
     if (source.length - (source.startsWith("-") ? 1 : 0) > MAX_INTEGER_DIGITS) {
         throw new SyntaxError("integer lexeme wider than 64 bits");
     }
     return BigInt(source);
 }
 
+/**
+ * A `number` is a wire integer only when it is a safe integer other than `-0`. Serde reads `-0` and every
+ * decimal or exponent spelling as `f64`, and a double past the safe range may already be rounded, so only a
+ * `bigint` carries a value outside that range.
+ */
 function isWireInteger(value: unknown): value is WireInteger {
-    return typeof value === "bigint" || (typeof value === "number" && Number.isInteger(value));
+    return (
+        typeof value === "bigint" ||
+        (typeof value === "number" && Number.isSafeInteger(value) && !Object.is(value, -0))
+    );
 }
 
 function exactIntegerWithin(value: unknown, min: bigint, max: bigint): WireInteger | null {

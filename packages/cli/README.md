@@ -91,6 +91,15 @@ the daemon. `restart` is one serialized lifecycle transaction, not separate
 CLI stop and start calls. `stop` uses authenticated lifecycle control and does
 not signal a publication PID.
 
+`start` waits for another lifecycle transaction to finish within its existing
+60-second startup budget. Waiting does not reset that budget. The wait stops
+after 45 seconds so the remaining startup stages keep their 15 seconds of
+budget. If the lock is still busy at that point, startup reports
+`lifecycle_busy` with remediation `wait_and_retry` and sends no application
+operation. Filesystem and ownership validation failures are not retried.
+`stop`, `restart`, and read-only probes retain their shorter lock-contention
+policy.
+
 Exit code `0` means the v1 result has `ok: true`. Exit code `1` means an
 operational lifecycle failure. Exit code `2` means invalid CLI arguments and
 does not invoke lifecycle policy.

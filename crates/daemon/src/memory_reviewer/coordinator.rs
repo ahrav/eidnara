@@ -235,14 +235,16 @@ impl Coordinator {
             context.receipt.generation,
         )?;
         if resuming {
-            // The lost run's execution hold is returned when it is still live, and a released one is replaced by an empty hold that adoption extends over the record's inputs. Once retention moved to a review hold the Kernel refuses another execution hold for this generation, and adoption runs under that review hold instead.
             let hold_id = match self.store.acquire_execution_hold(
                 &hold_binding,
                 &[],
                 context.receipt.execution_cutoff_ms,
             ) {
                 Ok(hold) => hold.hold_id,
-                Err(kernel::MemoryReviewerHoldError::Refused(_)) => String::new(),
+                // An invalid request means adoption proceeds without an execution hold; any other refusal is transient and aborts the run instead.
+                Err(kernel::MemoryReviewerHoldError::Refused(
+                    kernel::MemoryReviewerHoldRefusal::InvalidRequest,
+                )) => String::new(),
                 Err(error) => {
                     return Err(InvestigationError::Kernel(super::broker::hold_refusal(
                         error,
@@ -316,7 +318,7 @@ struct Prepared {
     resuming: bool,
 }
 
-/// Whether the ledger holds a marker at `generation` other than a proven `not_dispatched`: a completed, failed, cancelled, unknown, or unterminated attempt whose response, if any, this process never saw.
+/// Whether the ledger holds a marker at `generation` other than a proven `not_dispatched`: a completed, failed, cancelled, unknown, or unterminated attempt whose response, if any, this process never saw. An unterminated or `unknown` marker at any generation counts too: the job's outcome is unknown from that marker on (Q20), and the settlement would record it so whatever a new request answered, so the run sends nothing.
 fn resumes_dispatched_work(
     ledger: &MemoryStore,
     project: &str,
@@ -327,10 +329,14 @@ fn resumes_dispatched_work(
         .list_memory_reviewer_attempts(project, causal_identity)
         .map_err(|error| InvestigationError::Store(error.to_string()))?;
     Ok(attempts.iter().any(|attempt| {
-        attempt.generation == generation
+        (attempt.generation == generation
             && !matches!(
                 attempt.terminal,
                 Some((MemoryReviewerAttemptTerminal::NotDispatched, _))
+            ))
+            || matches!(
+                attempt.terminal,
+                None | Some((MemoryReviewerAttemptTerminal::Unknown, _))
             )
     }))
 }

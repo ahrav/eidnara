@@ -8,13 +8,15 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
 | `canonical_and_promoted_descriptors_resolve_to_their_originating_decision_and_target_it` | `crates/daemon/tests/memory_reviewer_broker.rs` | both production classes resolve to `CanonicalSource` with the decision's id and live revision; the hold protects exactly the descriptor's evidence; two descriptors bind one equal `CanonicalTarget` whose commit token is the decision's last change, not its creation; `MEMORY_CLASSES` excludes `git_commits`; registry rows equal before and after | unaudited |
-| `a_moved_missing_stale_or_wrong_kind_owner_refuses_the_subject_and_the_target` | same | supersession refuses `OriginRevoked` from the bound target and from fresh resolution; a stale descriptor revision refuses `ExpectationChanged` at the broker with zero bytes; an unregistered owner refuses `NotFound`; a stale bound decision revision refuses `ExpectationChanged`; an evidence object as owner refuses `ExpectationChanged` at `proposal_target` and `Scope` at the broker with zero bytes; tracked rows equal before and after | unaudited |
+| `a_moved_missing_stale_or_wrong_kind_owner_refuses_the_subject_and_the_target` | same | supersession refuses `OriginRevoked` from the bound target and from fresh resolution; a stale descriptor revision refuses `ExpectationChanged` at the broker with zero bytes; an unregistered owner refuses `NotFound`; a stale bound decision revision refuses `ExpectationChanged`; an evidence object as owner refuses `ExpectationChanged` at `proposal_target` and `Scope` at the broker with zero bytes; a decision in another project's scope as owner resolves but refuses `Scope` at the broker with zero bytes; tracked rows equal before and after | unaudited |
 | `a_resolved_canonical_subject_still_refuses_the_remote_destination` | same | the Remote destination refuses a resolved canonical artifact `PolicyBlocked` with zero bytes | unaudited |
 | `canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_both` | same | shared origin across the two forms; Remote `PolicyBlocked`; decision retirement revokes both forms; stale native revision refused | unaudited |
 | `a_canonical_owner_must_be_a_live_decision` | same | a scoped observation as owner refuses `ExpectationChanged` | unaudited |
 | `a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_remote_model` | `crates/daemon/tests/memory_reviewer_coordinator.rs` | a canonical `ReviewTarget::Memory` subject reaches the coordinator, resolves, and settles `owner_sensitive` with zero connections, no attempt, and the decision and descriptor rows live | unaudited |
 | `the_production_classes_are_walked_in_order_and_unproven_canonical_descriptors_are_not_selected` | `crates/daemon/tests/memory_reviewer_selection.rs` | the production walk passes Sensitive canonical descriptors without a job, through both classes and from a mid-walk cursor | unaudited |
 | `memory_reviewer_review_selection_is_not_scheduled_while_production_selection_is_closed` | `crates/daemon/src/lib.rs` | an open activation gate schedules no `MemoryReviewerReviewSelection` while `PRODUCTION_SELECTION_OPEN` is `false`; a constant assertion forces the test to change when the gate opens | unaudited |
+| `the_selected_classes_are_exactly_the_decision_derived_classes` | `crates/daemon/tests/memory_reviewer_broker.rs` | over every `OccurrenceClass`, `decision_derived` and `MEMORY_CLASSES` membership agree, so no class is selected without resolving through its decision or resolves through a decision without being selectable | unaudited |
+| `const` assertion after `MEMORY_CLASSES` | `crates/daemon/src/memory_reviewer/selection.rs` | every walked class satisfies `decision_derived` at compile time; `related_memories::CLASSES` is the same constant, so discovery cannot walk a different set | unaudited |
 | `a_selected_eligible_memory_becomes_a_published_proposal_through_the_shared_path` | `crates/daemon/tests/memory_reviewer_coordinator.rs` | Git-only shared path from selection to a readable proposal; a native subject's target is the descriptor | unaudited |
 
 ## Private result expiry and reconciliation
@@ -27,7 +29,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `kernel_results_stay_private_until_the_receipt_selects_them` | same | sealed row readable by identity, public read `not_selected`, list empty; same-generation recovery reuses the hold; abstaining recovery releases it | unaudited |
 | `the_sweep_closes_an_in_progress_receipt_at_the_queue_deadline_before_its_run_deadline` | `crates/memory-store/tests/memory_reviewer_ledger.rs` | a receipt with a run deadline past the queue deadline closes `expired` at the queue deadline with `completed_at_ms` set and no selection; the job expires with it; the reconciler's two questions answer false and empty | unaudited |
 | `an_attempt_never_outlives_the_job_queue_deadline` | same | completion at the queue deadline is stale and writes nothing | unaudited |
-| `a_selected_result_answers_only_for_its_project_digest_and_generation` | same | the reconciler's selection question answers true for the selection's digest, candidate, and generation and false for another digest, another generation, or another candidate | unaudited |
+| `a_selected_result_answers_only_for_its_project_digest_and_generation` | same | the reconciler's selection listing carries exactly the selection's digest, candidate, and generation, so another digest, another generation, or another candidate does not match | unaudited |
 | `the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners` | `crates/daemon/tests/memory_reviewer_settlement.rs` | after a takeover the losing generation's hold is released as an orphan while the receipt is in progress at the next generation; the winner's hold survives its selection; the losing row stays sealed and unreadable through the receipt | unaudited |
 | `a_sweep_inside_the_settlement_window_fences_the_selection_and_releases_the_hold` | same | the sweep closes the receipt `expired` between the Kernel envelope and the completion write; the completion is fenced; the settlement releases the hold; the reconciler finds nothing | unaudited |
 | `a_selected_row_whose_owner_or_class_changed_refuses_the_read` | same | a stored witness naming another generation refuses `scope_mismatch`; a row reclassified `secret` refuses `dependency_refused`; the receipt is unchanged | unaudited |
@@ -47,6 +49,7 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt` | `crates/daemon/tests/memory_reviewer_coordinator.rs` | an unterminated marker completes the receipt `unknown` with zero connections and no added attempt | unaudited |
 | `a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send` | same | a cancelled marker on a resumed run completes `unknown` with zero connections | unaudited |
 | `a_not_dispatched_marker_alone_lets_the_run_proceed_with_a_new_attempt` | same | a recheck-lapsed `not_dispatched` marker admits one request and a second, completed attempt | unaudited |
+| `a_hold_cap_refusal_on_resume_leaves_the_receipt_open_instead_of_abstaining` | same | a project at its active-hold cap refuses the resumed run's replacement hold; the run returns the Kernel refusal with the receipt still open and zero connections, and adopts the sealed reference once the cap clears | unaudited |
 | `decoding_accepts_only_bytes_that_re_encode_to_themselves_and_their_digest` | `crates/context-core/src/memory_reviewer_policy_union.rs` | decode refuses a wrong digest, edited bytes, whitespace, and another version | unaudited |
 
 ## Observational routes
@@ -61,9 +64,11 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
-| `integer lexemes a double cannot reproduce arrive exact through routed and control responses` | `packages/opencode-plugin/src/shared/host-client/client.test.ts` | raw tokens at the extrema and around 2^53 through `request` and `hostStatus`; count, u64, and i64 domains on the decoded values | unaudited |
+| `integer lexemes a double cannot reproduce arrive exact through exact-integer routed and control responses` | `packages/opencode-plugin/src/shared/host-client/client.test.ts` | raw tokens at the extrema and around 2^53 through `request` under `exactIntegers` and through `hostStatus`; count, u64, and i64 domains on the decoded values; a 21-digit lexeme refused with no token in diagnostics | unaudited |
+| `a default routed response decodes as JSON.parse does, so module payloads forwarded to OpenCode never carry a bigint` | same | a `transform` recipe whose inserted message value carries 2^53+1 and a nanosecond timestamp decodes to rounded numbers and survives `JSON.stringify`; a 21-digit lexeme decodes as `1e20` | unaudited |
 | `routeOpen omits the ambient consumer identity only when asked, for that bind alone` | same | the ambient pair is sent by default, omitted with `consumerIdentity: null`, and sent again on the next default bind; the environment is unchanged | unaudited |
-| `exact-json.test.ts` | `packages/opencode-plugin/src/shared/host-client/` | the reviver on every value shape, the width bound, the three domains, human and raw JSON output | unaudited |
+| `stream items decode exactly only under the exact_json response mode` | `packages/opencode-plugin/src/shared/host-client/connection.test.ts` | the same stream item is a rounded `number` under the default mode and a `bigint` under `exact_json` | unaudited |
+| `exact-json.test.ts` | `packages/opencode-plugin/src/shared/host-client/` | the reviver on every value shape, the width bound, refusal when `JSON.parse` withholds the lexeme, the three domains including an unsafe integer-valued double, human and raw JSON output | unaudited |
 
 ## Review command
 
@@ -84,9 +89,6 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
   after resolution) at the coordinator seam; the broker's `judge` folds the
   decision's sensitivity into the descriptor's on every read, which the broker
   tests cover for retirement but not reclassification.
-- No test places the originating decision in another project's scope; the
-  Kernel's `WrongScope` verdict on the decision candidate maps to `Scope` in
-  `judge`, but only the staged-subject scope test constructs it.
 - No test re-publishes the descriptor at a new revision after binding to show
   the bound target is unchanged; each revision is its own object, so the bound
   expectation cannot observe the new row, but no witness records that.
@@ -98,10 +100,13 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
   durable rows are read through the same handles that wrote them.
 - No test decodes a maximum-size response body full of twenty-digit tokens;
   the width bound is read from code.
-- A reviver makes `JSON.parse` walk the value recursively, so nesting a few
-  thousand levels deep now fails as invalid JSON where the plain parse
-  accepted it; the daemon's serializer nests no deeper than 128, and no test
-  pins the bound.
+- A reviver makes `JSON.parse` walk the value recursively, so on the exact path
+  nesting a few thousand levels deep fails as invalid JSON where the plain
+  parse accepts it; the daemon's serializer nests no deeper than 128, and no
+  test pins the bound.
+- No test drives a real `transform` pass end to end with a message value past
+  2^53; the default-mode decode is asserted at the host client, and the recipe
+  consumer's rejection of a `bigint` is read from `validateJsonValue`.
 - No test drives `review show` to a rendered proposal against a real host; the
   selected read is reached in Rust and decoded in TypeScript from the same
   wire shape.

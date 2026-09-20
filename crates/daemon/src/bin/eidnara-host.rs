@@ -44,12 +44,21 @@ const REPROBE_INTERVAL: Duration = Duration::from_millis(100);
 /// Expiry after a proven handshake does not change the authentication verdict.
 /// The handshake settles the authentication verdict before close grace begins.
 const CLOSE_GRACE: Duration = Duration::from_millis(500);
+/// `start` stops waiting for the transaction lock while this much of the aggregate remains.
+/// The reserve keeps the settle and spawn/publication/auth budgets available after a late acquisition.
+/// The launcher anchors its own aggregate before it spawns this process and kills the process at that deadline.
+/// A lock wait that ran to `outer` would therefore be killed and reported as `startup_timeout` instead of `lifecycle_busy`.
+const TRANSACTION_LOCK_RESERVE: Duration = TRANSITION_SETTLE.saturating_add(SPAWN_PUBLICATION_AUTH);
 
 /// The override can lengthen only the spawn/publication/auth and teardown caps.
 /// The aggregate deadline prevents any phase-cap value from causing an unbounded wait.
 /// Release builds ignore the variable, like the other `EIDNARA_HOST_TEST_*` overrides.
 #[cfg(debug_assertions)]
 const PHASE_CAP_ENV: &str = "EIDNARA_HOST_TEST_PHASE_CAP_MS";
+/// The override can only shorten the transaction lock wait, so a test observes expiry without the production wait.
+/// Release builds ignore the variable, like the other `EIDNARA_HOST_TEST_*` overrides.
+#[cfg(debug_assertions)]
+const LOCK_WAIT_ENV: &str = "EIDNARA_HOST_TEST_LOCK_WAIT_MS";
 
 #[cfg(debug_assertions)]
 fn phase_cap(default: Duration) -> Duration {
@@ -74,6 +83,38 @@ fn phase_deadline(outer: Instant, cap: Duration) -> Instant {
     let now = Instant::now();
     let remaining = outer.saturating_duration_since(now);
     now + cap.min(remaining)
+}
+
+/// The deadline for acquiring the transaction lock leaves `TRANSACTION_LOCK_RESERVE` of the aggregate unspent.
+/// The reserve is anchored to `outer`, so work done before the wait shortens the wait rather than the reserve.
+fn transaction_lock_deadline(outer: Instant) -> Instant {
+    let latest = outer
+        .checked_sub(TRANSACTION_LOCK_RESERVE)
+        .unwrap_or_else(Instant::now);
+    phase_deadline(
+        latest,
+        lock_wait(OUTER_AGGREGATE.saturating_sub(TRANSACTION_LOCK_RESERVE)),
+    )
+}
+
+#[cfg(debug_assertions)]
+fn lock_wait(default: Duration) -> Duration {
+    let raw = std::env::var_os(LOCK_WAIT_ENV);
+    lock_wait_override(default, raw.as_deref().and_then(|value| value.to_str()))
+}
+
+#[cfg(not(debug_assertions))]
+fn lock_wait(default: Duration) -> Duration {
+    default
+}
+
+/// A zero wait would report `lifecycle_busy` before one acquisition attempt, so `0` is ignored like other unusable values.
+#[cfg(debug_assertions)]
+fn lock_wait_override(default: Duration, raw: Option<&str>) -> Duration {
+    match raw.and_then(|value| value.parse::<u64>().ok()) {
+        Some(ms) if ms > 0 => default.min(Duration::from_millis(ms)),
+        _ => default,
+    }
 }
 
 /// Deadline for the successor's publication and authentication evidence.
@@ -1321,7 +1362,10 @@ fn cmd_start(
         Err(_) => return DaemonResult::new(command, false, "stopped", "internal_error"),
     };
 
-    let _tx = match LifecycleTransactionLock::acquire_exclusive(None) {
+    let _tx = match LifecycleTransactionLock::acquire_exclusive_until(
+        None,
+        transaction_lock_deadline(outer),
+    ) {
         Ok(tx) => tx,
         Err(error) => {
             let (state, reason) = instance_failure(&error);
@@ -1946,6 +1990,59 @@ mod tests {
         assert_eq!(phase_cap_override(default, Some("0")), default);
         assert_eq!(phase_cap_override(default, Some("-5")), default);
         assert_eq!(phase_cap_override(default, Some("fast")), default);
+    }
+
+    #[test]
+    fn transaction_lock_deadline_reserves_the_post_acquisition_budget() {
+        let outer = Instant::now() + OUTER_AGGREGATE;
+        let deadline = transaction_lock_deadline(outer);
+        let reserved = outer.saturating_duration_since(deadline);
+        // `phase_deadline` reads its own clock, so the reserve is compared with a small tolerance.
+        let tolerance = Duration::from_millis(50);
+        assert!(
+            reserved + tolerance >= TRANSACTION_LOCK_RESERVE,
+            "the lock wait must leave the settle and spawn/publication/auth budgets: reserved {reserved:?}"
+        );
+        assert!(
+            reserved <= TRANSACTION_LOCK_RESERVE + tolerance,
+            "the lock wait must not give up earlier than the reserve requires: reserved {reserved:?}"
+        );
+    }
+
+    #[test]
+    fn transaction_lock_deadline_keeps_the_reserve_when_outer_is_partly_spent() {
+        // Work before the lock wait (for example `Runtime::new`) consumes aggregate time; the reserve is measured from `outer`, not from the call.
+        let outer = Instant::now() + Duration::from_secs(50);
+        let deadline = transaction_lock_deadline(outer);
+        let reserved = outer.saturating_duration_since(deadline);
+        let tolerance = Duration::from_millis(50);
+        assert!(
+            reserved + tolerance >= TRANSACTION_LOCK_RESERVE,
+            "a partly spent aggregate must still leave the reserve: reserved {reserved:?}"
+        );
+    }
+
+    #[test]
+    fn transaction_lock_deadline_never_waits_past_outer() {
+        let nearly_spent = Instant::now() + Duration::from_secs(1);
+        assert!(transaction_lock_deadline(nearly_spent) <= nearly_spent);
+        let spent = Instant::now() - Duration::from_secs(1);
+        assert!(transaction_lock_deadline(spent) <= Instant::now());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn lock_wait_override_only_shortens() {
+        let default = Duration::from_secs(45);
+        assert_eq!(lock_wait_override(default, None), default);
+        assert_eq!(
+            lock_wait_override(default, Some("200")),
+            Duration::from_millis(200)
+        );
+        assert_eq!(lock_wait_override(default, Some("999999999")), default);
+        assert_eq!(lock_wait_override(default, Some("0")), default);
+        assert_eq!(lock_wait_override(default, Some("-5")), default);
+        assert_eq!(lock_wait_override(default, Some("fast")), default);
     }
 
     #[test]

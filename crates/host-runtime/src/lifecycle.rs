@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use rustix::fd::OwnedFd;
 use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags, flock, openat, unlinkat};
@@ -15,9 +15,9 @@ use crate::connection_file::{ConnectionInfo, KEY_LEN};
 
 use crate::instance::{
     CONNECTION_FILE_NAME, InstanceError, InstanceGuard, S_IFMT, S_IFREG, data_dir_path,
-    flock_bounded, flock_exclusive_bounded, hex, io_err, is_owner_only_dir, is_safe_ancestor,
-    is_secure_regular, mode_bits, open_secure_dir_existing, read_all_fd, repair_owner_access,
-    runtime_dir_path, secure_runtime_dir, stat_identity,
+    flock_bounded, flock_exclusive_bounded, flock_exclusive_until, hex, io_err, is_owner_only_dir,
+    is_safe_ancestor, is_secure_regular, mode_bits, open_secure_dir_existing, read_all_fd,
+    repair_owner_access, runtime_dir_path, secure_runtime_dir, stat_identity,
 };
 
 /// `LIFECYCLE_RECORD_NAME` identifies the lifecycle record in the runtime directory.
@@ -474,6 +474,20 @@ impl LifecycleTransactionLock {
     pub fn acquire_exclusive(data_dir_override: Option<&Path>) -> Result<Self, InstanceError> {
         let (file, path) = open_coordination_lock_create(data_dir_override, TRANSACTION_LOCK_NAME)?;
         flock_exclusive_bounded(&file, &path, "flock_transaction")?;
+        Ok(Self { _file: file, path })
+    }
+
+    /// Waits on the calling thread until the transaction lock is acquired or the deadline expires.
+    /// Expiry returns `AlreadyRunning`; filesystem validation failures return immediately.
+    pub fn acquire_exclusive_until(
+        data_dir_override: Option<&Path>,
+        deadline: Instant,
+    ) -> Result<Self, InstanceError> {
+        if Instant::now() >= deadline {
+            return Err(InstanceError::AlreadyRunning);
+        }
+        let (file, path) = open_coordination_lock_create(data_dir_override, TRANSACTION_LOCK_NAME)?;
+        flock_exclusive_until(&file, &path, "flock_transaction", deadline)?;
         Ok(Self { _file: file, path })
     }
 
@@ -1614,6 +1628,58 @@ mod tests {
     }
 
     #[test]
+    fn expired_transaction_deadline_neither_acquires_nor_creates() {
+        let root = temp_root();
+        assert!(matches!(
+            LifecycleTransactionLock::acquire_exclusive_until(Some(root.path()), Instant::now()),
+            Err(InstanceError::AlreadyRunning)
+        ));
+        assert!(
+            std::fs::read_dir(root.path())
+                .expect("root")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn transaction_deadline_bounds_contention_and_releases_the_waiter() {
+        let root = temp_root();
+        let holder =
+            LifecycleTransactionLock::acquire_exclusive(Some(root.path())).expect("holder");
+        let deadline = Instant::now() + Duration::from_millis(120);
+        assert!(matches!(
+            LifecycleTransactionLock::acquire_exclusive_until(Some(root.path()), deadline),
+            Err(InstanceError::AlreadyRunning)
+        ));
+        assert!(Instant::now() >= deadline);
+        drop(holder);
+        LifecycleTransactionLock::acquire_exclusive_until(
+            Some(root.path()),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("expired waiter retains no lock");
+    }
+
+    #[test]
+    fn transaction_waiter_acquires_after_the_holder_releases() {
+        let root = temp_root();
+        let holder =
+            LifecycleTransactionLock::acquire_exclusive(Some(root.path())).expect("holder");
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(120));
+                drop(holder);
+            });
+            let _waiter = LifecycleTransactionLock::acquire_exclusive_until(
+                Some(root.path()),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("waiter acquires the released lock");
+        });
+    }
+
+    #[test]
     fn shared_probe_lock_never_creates_and_yields_none_under_a_mutator() {
         let root = temp_root();
         assert!(
@@ -1658,6 +1724,13 @@ mod tests {
         ));
         assert!(matches!(
             LifecycleTransactionLock::acquire_exclusive(Some(root.path())),
+            Err(InstanceError::Insecure { .. })
+        ));
+        assert!(matches!(
+            LifecycleTransactionLock::acquire_exclusive_until(
+                Some(root.path()),
+                Instant::now() + Duration::from_secs(1)
+            ),
             Err(InstanceError::Insecure { .. })
         ));
         assert!(

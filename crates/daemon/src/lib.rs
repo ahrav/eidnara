@@ -220,7 +220,7 @@ impl SessionBinding {
 }
 
 /// The harness whose bindings are observational. `harness` is scoping metadata the client claims on `route.open`, never authority: the value selects observation and grants nothing.
-pub(crate) const OBSERVATIONAL_HARNESS: &str = "cli";
+pub const OBSERVATIONAL_HARNESS: &str = "cli";
 
 #[derive(Default)]
 pub(crate) struct RouteBindings {

@@ -40,12 +40,41 @@ describe("parseExactJson", () => {
     test("invalid JSON throws like JSON.parse", () => {
         expect(() => parseExactJson("{")).toThrow(SyntaxError);
     });
+
+    test("a runtime that withholds the lexeme refuses an unsafe integer-valued double instead of presenting it as exact", () => {
+        const original = JSON.parse;
+        // Strips the reviver's source-text context, as an engine without JSON.parse source access would.
+        JSON.parse = ((
+            text: string,
+            reviver?: (this: unknown, key: string, value: unknown) => unknown,
+        ) =>
+            original(
+                text,
+                reviver &&
+                    function (this: unknown, key: string, value: unknown) {
+                        return reviver.call(this, key, value);
+                    },
+            )) as typeof JSON.parse;
+        try {
+            expect(() => parseExactJson("9007199254740993")).toThrow(SyntaxError);
+            expect(() => parseExactJson('{"n":[1,9007199254740992]}')).toThrow(SyntaxError);
+            expect(
+                parseExactJson('{"a":9007199254740991,"b":1.5,"c":-0,"d":"9007199254740993"}'),
+            ).toEqual({
+                a: 9007199254740991,
+                b: 1.5,
+                c: -0,
+                d: "9007199254740993",
+            });
+        } finally {
+            JSON.parse = original;
+        }
+    });
 });
 
 describe("domains", () => {
     test("exactCount admits 0 through 2^53 inclusive and nothing else", () => {
         expect(exactCount(0)).toBe(0);
-        expect(exactCount(9007199254740992)).toBe(9007199254740992);
         expect(exactCount(9007199254740992n)).toBe(9007199254740992);
         expect(exactCount(9007199254740993n)).toBeNull();
         expect(exactCount(9007199254740994)).toBeNull();
@@ -64,6 +93,28 @@ describe("domains", () => {
         expect(exactI64(-9223372036854775809n)).toBeNull();
         expect(exactI64(9223372036854775807n)).toBe(9223372036854775807n);
         expect(exactI64(9223372036854775808n)).toBeNull();
+    });
+
+    test("an integer-valued double outside the safe range is refused: only a bigint carries such a value exactly", () => {
+        // A decimal or exponent spelling is an f64 on the wire and may already be rounded: 9007199254740993e0 parses to 2^53.
+        expect(exactCount(parseExactJson("9007199254740993e0"))).toBeNull();
+        expect(exactCount(parseExactJson("9007199254740993.0"))).toBeNull();
+        expect(exactU64(parseExactJson("9007199254740993e0"))).toBeNull();
+        expect(exactI64(parseExactJson("-9007199254740993e0"))).toBeNull();
+        expect(exactU64(2 ** 60)).toBeNull();
+        expect(exactI64(-(2 ** 60))).toBeNull();
+        expect(exactU64(9007199254740992)).toBeNull();
+        expect(exactCount(9007199254740992)).toBeNull();
+        expect(exactU64(9007199254740992n)).toBe(9007199254740992n);
+        expect(exactCount(9007199254740991)).toBe(9007199254740991);
+    });
+
+    test("negative zero is not a wire integer", () => {
+        expect(exactCount(-0)).toBeNull();
+        expect(exactU64(-0)).toBeNull();
+        expect(exactI64(-0)).toBeNull();
+        expect(exactCount(parseExactJson("-0"))).toBeNull();
+        expect(exactCount(0)).toBe(0);
     });
 });
 

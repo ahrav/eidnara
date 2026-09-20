@@ -301,7 +301,7 @@ async fn an_observational_route_reads_the_same_outcomes_as_an_ordinary_route() {
         &published,
         now,
     );
-    let observer = daemon.bind_another(9, "cli").await;
+    let observer = daemon.bind_another(9, daemon::OBSERVATIONAL_HARNESS).await;
     let requests = [
         envelope("review.list", &root, json!({ "limit": 1 })),
         envelope(

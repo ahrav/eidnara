@@ -1513,28 +1513,32 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Whether a completed receipt of the live store incarnation selects `candidate_id` at `generation` under `project_digest`. The lifecycle reconciler asks this for each live review hold before releasing one no receipt selects; the digest and incarnation come from the hold's binding, so a same-target job in another project or a prior incarnation cannot keep a hold alive.
-    pub fn memory_reviewer_result_is_selected(
+    /// Every `(project_digest, candidate_id, generation)` a completed receipt of the live store incarnation selects among `candidate_ids`, ordered by project and causal identity. The caller's list bounds the answer, so a reconciliation pass carries at most one triple per live hold rather than every selection the ledger has recorded. Receipts of a prior incarnation are excluded.
+    pub fn selected_memory_reviewer_results<'a>(
         &self,
-        project_digest: &str,
-        candidate_id: &str,
-        generation: u64,
-    ) -> Result<bool, MemoryStoreError> {
-        let Ok(generation) = i64::try_from(generation) else {
-            return Ok(false);
-        };
+        candidate_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<(String, String, u64)>, MemoryStoreError> {
+        let candidate_ids = candidate_ids.into_iter().collect::<Vec<_>>();
         self.inner
             .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM memory_reviewer_receipts
-                                    WHERE state = 'complete' AND terminal_kind = 'complete'
-                                      AND selected_project_digest = ?1
-                                      AND selected_candidate_id = ?2 AND selected_generation = ?3
-                                      AND database_incarnation_id = (SELECT database_incarnation_id
-                                                                     FROM memory_reviewer_store_identity WHERE id = 0))",
-                    params![project_digest, candidate_id, generation],
-                    |row| row.get(0),
-                )
+                let candidate_ids = crate::json_id_array(candidate_ids.iter().copied())?;
+                let mut statement = conn.prepare_cached(
+                    "SELECT selected_project_digest, selected_candidate_id, selected_generation
+                       FROM memory_reviewer_receipts
+                      WHERE state = 'complete' AND terminal_kind = 'complete'
+                        AND selected_candidate_id IN (SELECT value FROM json_each(?1))
+                        AND database_incarnation_id = (SELECT database_incarnation_id
+                                                       FROM memory_reviewer_store_identity WHERE id = 0)
+                      ORDER BY project, causal_identity",
+                )?;
+                let rows = statement.query_map([candidate_ids], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                    ))
+                })?;
+                rows.collect()
             })
             .map_err(Into::into)
     }
@@ -1543,6 +1547,15 @@ impl MemoryStore {
     pub fn in_progress_memory_reviewer_receipts(
         &self,
     ) -> Result<Vec<(String, u64)>, MemoryStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .in_progress_receipts_fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(MemoryStoreError::Store(storage::StoreError::Backend(
+                "injected in-progress receipt listing failure".to_string(),
+            )));
+        }
         self.inner
             .with_conn(|conn| {
                 let mut statement = conn.prepare_cached(
