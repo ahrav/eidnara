@@ -2,29 +2,14 @@
 
 mod support;
 
-use std::path::Path;
-
 use daemon::dispatch::PreparedOutcome;
 use kernel::ReviewProposal;
 use serde_json::{Value, json};
-use support::kernel_daemon::{KernelDaemon, SESSION};
+use support::kernel_daemon::{KernelDaemon, envelope};
 use support::memory_reviewer_publish::{
     PROJECT, abstain, activate_module_authority, begin_job, commit_memory_domain,
     kernel_incarnation, now_ms, publish,
 };
-
-fn envelope(method: &str, project: &Path, body: Value) -> Value {
-    let mut request = json!({
-        "method": method,
-        "v": 1,
-        "session_id": SESSION,
-        "project_root": project.to_str().unwrap(),
-    });
-    for (key, value) in body.as_object().unwrap() {
-        request[key] = value.clone();
-    }
-    request
-}
 
 #[tokio::test]
 async fn review_operations_are_disabled_without_module_authority_and_list_and_read_receipts_under_it()

@@ -11881,6 +11881,12 @@ fn action_str(plan: &PassPlan, _core: &CoreState) -> String {
 }
 
 #[cfg(test)]
+mod aged_goldens;
+
+#[cfg(test)]
+mod surface_census;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use storage::{Isolation, StorageBackend, StorageDescriptor};
@@ -12357,7 +12363,7 @@ pub(crate) mod tests {
     }
     use serde_json::{Value, json};
 
-    fn store(dir: &std::path::Path) -> MemoryStore {
+    pub(crate) fn store(dir: &std::path::Path) -> MemoryStore {
         MemoryStore::open(&StorageDescriptor {
             module_id: "eidnara-test".to_string(),
             storage_namespace: "memory".to_string(),
@@ -12586,7 +12592,7 @@ pub(crate) mod tests {
     }
 
     /// Builds the message through wire deserialization, the shape plugin ingress takes.
-    fn wire_item(role: &str, id: &str, ordinal: u64, texts: &[&str]) -> IngressMessage {
+    pub(crate) fn wire_item(role: &str, id: &str, ordinal: u64, texts: &[&str]) -> IngressMessage {
         let content: Vec<Value> = texts
             .iter()
             .map(|text| json!({ "kind": { "type": "text", "text": text } }))
@@ -13148,11 +13154,17 @@ pub(crate) mod tests {
         }
     }
 
-    fn spine() -> Vec<ReductionDecision> {
+    pub(crate) fn spine() -> Vec<ReductionDecision> {
         Vec::new()
     }
 
-    fn comp(seq: i64, start: i64, end: i64, end_id: &str, p1: &str) -> StoredHistorySegment {
+    pub(crate) fn comp(
+        seq: i64,
+        start: i64,
+        end: i64,
+        end_id: &str,
+        p1: &str,
+    ) -> StoredHistorySegment {
         StoredHistorySegment {
             sequence: seq,
             start_message: start,
@@ -13526,7 +13538,11 @@ pub(crate) mod tests {
         assert_no_orphaned_tool_arcs(&answered);
     }
 
-    fn run(s: &MemoryStore, req: &TransformRequest, d: &[ReductionDecision]) -> TransformResponse {
+    pub(crate) fn run(
+        s: &MemoryStore,
+        req: &TransformRequest,
+        d: &[ReductionDecision],
+    ) -> TransformResponse {
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
         ctx.injected_reductions = d.to_vec();
         let response = transform(s, req, &ctx).unwrap();
@@ -21831,7 +21847,7 @@ pub(crate) mod tests {
             _ => None,
         }
     }
-    fn tail_bytes<'a>(r: &'a TransformResponse, id: &str) -> &'a str {
+    pub(crate) fn tail_bytes<'a>(r: &'a TransformResponse, id: &str) -> &'a str {
         let msg = r
             .messages()
             .iter()
@@ -25055,7 +25071,11 @@ pub(crate) mod tests {
         )
     }
 
-    fn active_cc_req(session: &str, cfg: &str, messages: Vec<IngressMessage>) -> TransformRequest {
+    pub(crate) fn active_cc_req(
+        session: &str,
+        cfg: &str,
+        messages: Vec<IngressMessage>,
+    ) -> TransformRequest {
         let mut request = cc_req(session, cfg, messages);
         request.tool_present = true;
         request

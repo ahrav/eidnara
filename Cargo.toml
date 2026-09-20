@@ -14,6 +14,7 @@ members = [
     "crates/memory-store",
     "crates/retrieval",
     "crates/daemon",
+    "crates/eval-core",
     "packages/shm-native",
 ]
 exclude = ["crates/shm-transport/fuzz"]
@@ -34,6 +35,7 @@ storage-types = { path = "crates/storage-types" }
 cache-stability = { path = "crates/cache-stability" }
 secret-scanner = { path = "crates/secret-scanner" }
 context-core = { path = "crates/context-core" }
+eval-core = { path = "crates/eval-core" }
 storage = { path = "crates/storage" }
 kernel = { path = "crates/kernel" }
 memory-store = { path = "crates/memory-store" }

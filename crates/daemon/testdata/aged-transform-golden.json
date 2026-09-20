@@ -1,0 +1,144 @@
+{
+  "schema": 1,
+  "provenance": {
+    "generator": "hand-built",
+    "generator_version": "aged-transform-golden-v1",
+    "reachability": "default-production",
+    "construction": "hand_built",
+    "input_sha256": "39e22524dab2c5eb2f855687f917be45ca56c5f5936bba6e71c9a11b9f267237"
+  },
+  "cases": [
+    {
+      "id": "AG-1-quasar-cadence",
+      "input": {
+        "prompt": "quasar nebula survey cadence decision",
+        "history": [
+          {
+            "id": "h1",
+            "text": "we met to plan the quasar nebula survey cadence"
+          },
+          {
+            "id": "h2",
+            "text": "weekly cadence was fixed for the quasar nebula survey"
+          },
+          {
+            "id": "h3",
+            "text": "unrelated chatter about lunch options"
+          },
+          {
+            "id": "h4",
+            "text": "more unrelated chatter about the office plants"
+          },
+          {
+            "id": "h5",
+            "text": "release notes were drafted for the calendar module"
+          },
+          {
+            "id": "h6",
+            "text": "the calendar module release shipped on friday"
+          }
+        ],
+        "segments": [
+          {
+            "sequence": 1,
+            "start": 1,
+            "end": 2,
+            "end_id": "h2",
+            "p1": "quasar nebula survey cadence decision: weekly"
+          },
+          {
+            "sequence": 2,
+            "start": 3,
+            "end": 4,
+            "end_id": "h4",
+            "p1": "lunch and office plants chatter"
+          },
+          {
+            "sequence": 3,
+            "start": 5,
+            "end": 6,
+            "end_id": "h6",
+            "p1": "calendar module release shipped friday"
+          }
+        ],
+        "aged_hint_expected": true
+      },
+      "expected": {
+        "fresh": {
+          "tail": "§1§ quasar nebula survey cadence decision",
+          "wire_digest": "eec722186546a18a543eb2962f0fe1d522c0b05a51102d56bc9f55337162c07c"
+        },
+        "aged": {
+          "tail": "§7§ quasar nebula survey cadence decision\n\n<eidnara-search-hint>\nYour memory may contain 1 related fragment:\n- C1 quasar nebula survey cadence decision: weekly quasar nebula survey cadence d…\nIf the fragments above seem relevant to the current request, you may run eidnara_search to retrieve full context. Otherwise ignore.\n</eidnara-search-hint>",
+          "wire_digest": "4e5615b20d27b407f3f174cb34a8ffd709f05f6625e630d1a816a55097799821"
+        }
+      }
+    },
+    {
+      "id": "AG-2-irrelevant-history",
+      "input": {
+        "prompt": "quasar nebula survey cadence decision",
+        "history": [
+          {
+            "id": "h1",
+            "text": "we met to plan the quasar nebula survey cadence"
+          },
+          {
+            "id": "h2",
+            "text": "weekly cadence was fixed for the quasar nebula survey"
+          },
+          {
+            "id": "h3",
+            "text": "unrelated chatter about lunch options"
+          },
+          {
+            "id": "h4",
+            "text": "more unrelated chatter about the office plants"
+          },
+          {
+            "id": "h5",
+            "text": "release notes were drafted for the calendar module"
+          },
+          {
+            "id": "h6",
+            "text": "the calendar module release shipped on friday"
+          }
+        ],
+        "segments": [
+          {
+            "sequence": 1,
+            "start": 1,
+            "end": 2,
+            "end_id": "h2",
+            "p1": "lunch and office plants chatter"
+          },
+          {
+            "sequence": 2,
+            "start": 3,
+            "end": 4,
+            "end_id": "h4",
+            "p1": "calendar module release shipped friday"
+          },
+          {
+            "sequence": 3,
+            "start": 5,
+            "end": 6,
+            "end_id": "h6",
+            "p1": "parking permits renew in march"
+          }
+        ],
+        "aged_hint_expected": false
+      },
+      "expected": {
+        "fresh": {
+          "tail": "§1§ quasar nebula survey cadence decision",
+          "wire_digest": "eec722186546a18a543eb2962f0fe1d522c0b05a51102d56bc9f55337162c07c"
+        },
+        "aged": {
+          "tail": "§7§ quasar nebula survey cadence decision",
+          "wire_digest": "009ab78d530b9b8cc30b7f078c017400c68ec57c4e43b7317232af3acf193bda"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,623 @@
+mod support;
+
+use std::collections::BTreeSet;
+
+use context_core::canonical_json::{ContractError, canonical_json_encode};
+use eval_core::{
+    ArmRates, Attestation, BinaryDigest, CLOCK_FIELD_KEEP_ALLOWLIST, ClaimBoundary, DROPPED_FIELDS,
+    IdentityError, MANIFEST_SCHEMA, Manifest, ManifestError, ObservationSchema, REQUIRED_FIELDS,
+    RUN_ID_PROTOCOL, ResidueEntry, ResidueError, Rule, RunIdentity, SemanticTrace, eval_run_id,
+    is_canonical_decimal, is_clock_named, is_never_kept, parse_manifest, zero_bytes_sha256,
+};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use support::{OBSERVATION_TYPE, build, identity, manifest, observation, observation_schema};
+
+/// Frozen so a field-set or encoding change forces a reviewed schema bump.
+const FIXTURE_RUN_ID: &str = "e9f412ed2ad627c5801959c2c459bbb764bf45443a7774d02ac74a97f41832c9";
+const FIXTURE_MANIFEST_DIGEST: &str =
+    "1e96414ad6c37cd8a285e038eef8015c6b6f49dbd9068e343d53e54ee0fe1837";
+
+#[test]
+fn required_fields_are_sorted_and_equal_the_struct_field_set() {
+    let mut sorted = REQUIRED_FIELDS.to_vec();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        REQUIRED_FIELDS.to_vec(),
+        "REQUIRED_FIELDS is sorted"
+    );
+    let struct_fields: BTreeSet<String> = manifest()
+        .to_value()
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let pinned: BTreeSet<String> = REQUIRED_FIELDS.iter().map(|f| f.to_string()).collect();
+    assert_eq!(struct_fields, pinned);
+    assert!(DROPPED_FIELDS.iter().all(|f| REQUIRED_FIELDS.contains(f)));
+    assert_eq!(
+        Manifest::field_schema()
+            .rules()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        pinned
+    );
+}
+
+#[test]
+fn fixture_digests_are_frozen() {
+    assert_eq!(eval_run_id(&identity()).unwrap(), FIXTURE_RUN_ID);
+    assert_eq!(manifest().digest().unwrap(), FIXTURE_MANIFEST_DIGEST);
+}
+
+#[test]
+fn a_valid_manifest_parses_and_round_trips() {
+    let manifest = manifest();
+    let value = manifest.to_value();
+    let parsed = parse_manifest(&value).unwrap();
+    assert_eq!(parsed, manifest);
+    assert_eq!(parsed.to_value(), value);
+    assert_eq!(value["attestation"], json!({"kind": "none"}));
+}
+
+#[test]
+fn every_missing_field_is_refused_by_name_before_digesting() {
+    let valid = manifest().to_value();
+    for field in REQUIRED_FIELDS {
+        let mut mutated = valid.clone();
+        mutated.as_object_mut().unwrap().remove(field);
+        assert_eq!(
+            parse_manifest(&mutated),
+            Err(ManifestError::MissingField(field.to_string()))
+        );
+    }
+}
+
+#[test]
+fn unknown_field_wrong_schema_and_non_object_are_refused() {
+    let valid = manifest().to_value();
+    let mut extra = valid.clone();
+    extra["extra"] = json!(1);
+    assert_eq!(
+        parse_manifest(&extra),
+        Err(ManifestError::UnknownField("extra".to_string()))
+    );
+    let mut v2 = valid.clone();
+    v2["schema"] = json!("eval-manifest/v2");
+    assert_eq!(
+        parse_manifest(&v2),
+        Err(ManifestError::SchemaMismatch {
+            found: "eval-manifest/v2".to_string()
+        })
+    );
+    assert_eq!(parse_manifest(&json!([])), Err(ManifestError::NotAnObject));
+    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v1");
+}
+
+#[test]
+fn every_kept_field_enters_the_digest_and_every_dropped_field_leaves_it() {
+    let base = manifest();
+    let mut restamped = base.clone();
+    restamped.start_ms += 86_400_000;
+    restamped.end_ms += 86_400_000;
+    restamped.envelope_peaks.elapsed_ms *= 3;
+    restamped.envelope_peaks.processes += 1;
+    assert_eq!(base.digest().unwrap(), restamped.digest().unwrap());
+
+    type Mutation = Box<dyn Fn(&mut Manifest)>;
+    let mutations: Vec<(&str, Mutation)> = vec![
+        (
+            "arm_rates",
+            Box::new(|m| {
+                m.arm_rates.get_mut("fresh").unwrap().miss_rate = "0.5".to_string();
+            }),
+        ),
+        (
+            "attestation",
+            Box::new(|m| {
+                m.attestation = Attestation::Signed {
+                    signer: "s".to_string(),
+                    signature_digest: "9a".repeat(32),
+                };
+            }),
+        ),
+        (
+            "component_versions",
+            Box::new(|m| m.component_versions.judge = "judge-2".to_string()),
+        ),
+        (
+            "construction",
+            Box::new(|m| m.construction = eval_core::Construction::Replay),
+        ),
+        ("cut_receipts", Box::new(|m| m.cut_receipts.clear())),
+        (
+            "envelope_bounds",
+            Box::new(|m| m.envelope_bounds.processes += 1),
+        ),
+        ("error", Box::new(|m| m.error = Some("typed".to_string()))),
+        (
+            "eval_run_id",
+            Box::new(|m| {
+                m.run_identity.root_seed += 1;
+                m.eval_run_id = eval_run_id(&m.run_identity).unwrap();
+            }),
+        ),
+        (
+            "reachability",
+            Box::new(|m| m.reachability = eval_core::Reachability::TestOnly),
+        ),
+        (
+            "residue",
+            Box::new(|m| {
+                m.residue.insert(ResidueEntry {
+                    type_name: "extra".to_string(),
+                    field: "field".to_string(),
+                    rule: Rule::Drop,
+                });
+            }),
+        ),
+        (
+            "result_digest",
+            Box::new(|m| m.result_digest = "13".repeat(32)),
+        ),
+        (
+            "retry_lineage",
+            Box::new(|m| m.retry_lineage.push("00".repeat(32))),
+        ),
+        (
+            "run_identity",
+            Box::new(|m| {
+                m.run_identity.simulator_version = "sim-2".to_string();
+                m.eval_run_id = eval_run_id(&m.run_identity).unwrap();
+            }),
+        ),
+        ("sample_epoch", Box::new(|m| m.sample_epoch += 1)),
+        (
+            "sample_ids",
+            Box::new(|m| {
+                m.sample_ids.push("pair-3".to_string());
+                m.sample_order.push("pair-3".to_string());
+            }),
+        ),
+        ("sample_order", Box::new(|m| m.sample_order.swap(0, 1))),
+        (
+            "status",
+            Box::new(|m| m.status = eval_core::RunStatus::Refused),
+        ),
+        (
+            "tokenizer_profile",
+            Box::new(|m| m.tokenizer_profile.revision = "r2".to_string()),
+        ),
+        (
+            "witness_digest",
+            Box::new(|m| m.witness_digest = "35".repeat(32)),
+        ),
+    ];
+    let mut digests = BTreeSet::from([base.digest().unwrap()]);
+    let mut covered = BTreeSet::from(["schema", "claim_boundary"]);
+    for (field, mutate) in mutations {
+        let mut mutated = base.clone();
+        mutate(&mut mutated);
+        assert!(
+            digests.insert(mutated.digest().unwrap()),
+            "{field} left the digest unchanged"
+        );
+        covered.insert(field);
+    }
+    let kept: BTreeSet<&str> = REQUIRED_FIELDS
+        .into_iter()
+        .filter(|field| !DROPPED_FIELDS.contains(field))
+        .collect();
+    assert_eq!(covered, kept, "every kept field has a digest witness");
+    assert!(
+        DROPPED_FIELDS
+            .iter()
+            .all(|f| is_clock_named(f) || *f == "envelope_peaks")
+    );
+}
+
+#[test]
+fn fractions_travel_as_canonical_decimal_strings() {
+    for accepted in ["0", "12", "0.25", "1.5", "100"] {
+        assert!(is_canonical_decimal(accepted), "{accepted}");
+    }
+    for refused in [
+        "", ".5", "5.", "1/2", "-0.5", "1e3", "0.5.1", "0,5", "007", "0.250", "1.000",
+    ] {
+        assert!(!is_canonical_decimal(refused), "{refused}");
+    }
+    let mut manifest = manifest();
+    manifest.arm_rates.insert(
+        "aged".to_string(),
+        ArmRates {
+            miss_rate: "0.250".to_string(),
+            refusal_rate: "0".to_string(),
+        },
+    );
+    assert_eq!(
+        parse_manifest(&manifest.to_value()),
+        Err(ManifestError::MalformedDecimal {
+            field: "arm_rates[aged].miss_rate".to_string(),
+            value: "0.250".to_string(),
+        })
+    );
+    let mut fractional = identity();
+    fractional.config = json!({"temperature": 0.7});
+    assert!(matches!(
+        eval_run_id(&fractional),
+        Err(IdentityError::NotCanonical(ContractError::NotCanonical(_)))
+    ));
+    let mut seed = serde_json::to_value(identity()).unwrap();
+    seed["root_seed"] = json!("007");
+    assert!(serde_json::from_value::<RunIdentity>(seed).is_err());
+}
+
+#[test]
+fn run_id_is_the_protocol_digest_of_the_full_tuple() {
+    let identity = identity();
+    let mut tuple = serde_json::to_value(&identity).unwrap();
+    tuple["build"] = Value::String(identity.build.digest().unwrap());
+    let mut hasher = Sha256::new();
+    hasher.update(RUN_ID_PROTOCOL.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(canonical_json_encode(&tuple).unwrap().as_bytes());
+    assert_eq!(
+        eval_run_id(&identity).unwrap(),
+        format!("{:x}", hasher.finalize())
+    );
+    assert_eq!(RUN_ID_PROTOCOL, "eval-run-id/v1");
+    assert_eq!(tuple.as_object().unwrap().len(), 9);
+}
+
+#[test]
+fn changing_any_identity_or_build_component_changes_the_run_id() {
+    let base = eval_run_id(&identity()).unwrap();
+    type Mutation = Box<dyn Fn(&mut RunIdentity)>;
+    let mutations: Vec<(&str, Mutation)> = vec![
+        (
+            "build.code_sha",
+            Box::new(|i| i.build.code_sha = "4f".repeat(20)),
+        ),
+        ("build.dirty", Box::new(|i| i.build.dirty = true)),
+        (
+            "build.lockfile_digest",
+            Box::new(|i| i.build.lockfile_digest = "ac".repeat(32)),
+        ),
+        (
+            "build.rustc_version",
+            Box::new(|i| i.build.rustc_version = "rustc 1.99.0".to_string()),
+        ),
+        ("build.features", Box::new(|i| i.build.features.clear())),
+        (
+            "build.target_triple",
+            Box::new(|i| i.build.target_triple = "aarch64-unknown-linux-gnu".to_string()),
+        ),
+        (
+            "build.binary_digest",
+            Box::new(|i| {
+                i.build.binary_digest = BinaryDigest::Absent {
+                    reason: "composed in cargo test".to_string(),
+                }
+            }),
+        ),
+        (
+            "simulator_version",
+            Box::new(|i| i.simulator_version = "sim-2".to_string()),
+        ),
+        (
+            "config",
+            Box::new(|i| i.config = json!({"auto_search": false})),
+        ),
+        (
+            "scenario",
+            Box::new(|i| i.scenario = json!({"world": "other"})),
+        ),
+        ("root_seed", Box::new(|i| i.root_seed += 1)),
+        (
+            "random_schema_version",
+            Box::new(|i| i.random_schema_version = "rng-2".to_string()),
+        ),
+        (
+            "generator_version",
+            Box::new(|i| i.generator_version = "gen-2".to_string()),
+        ),
+        (
+            "eligibility_spec_digest",
+            Box::new(|i| i.eligibility_spec_digest = "ee".repeat(32)),
+        ),
+        (
+            "linearization_rule_version",
+            Box::new(|i| i.linearization_rule_version = "lin-2".to_string()),
+        ),
+    ];
+    let mut seen = BTreeSet::from([base.clone()]);
+    for (name, mutate) in mutations {
+        let mut mutated = identity();
+        mutate(&mut mutated);
+        let id = eval_run_id(&mutated).unwrap();
+        assert!(seen.insert(id), "{name} did not change the run id");
+    }
+}
+
+#[test]
+fn malformed_or_empty_identity_components_are_refused() {
+    let mut build = build();
+    build.binary_digest = BinaryDigest::Present {
+        sha256: zero_bytes_sha256(),
+    };
+    assert_eq!(build.digest(), Err(IdentityError::ZeroBytesBinaryDigest));
+    let mut identity_with_zero = identity();
+    identity_with_zero.build = build;
+    assert_eq!(
+        eval_run_id(&identity_with_zero),
+        Err(IdentityError::ZeroBytesBinaryDigest)
+    );
+    let mut malformed = support::build();
+    malformed.binary_digest = BinaryDigest::Present {
+        sha256: "CD".repeat(32),
+    };
+    assert_eq!(
+        malformed.digest(),
+        Err(IdentityError::MalformedDigest {
+            field: "binary_digest"
+        })
+    );
+    let mut short_sha = support::build();
+    short_sha.code_sha = "abc".to_string();
+    assert_eq!(
+        short_sha.digest(),
+        Err(IdentityError::MalformedDigest { field: "code_sha" })
+    );
+    let mut spec = identity();
+    spec.eligibility_spec_digest = "not-hex".to_string();
+    assert_eq!(
+        eval_run_id(&spec),
+        Err(IdentityError::MalformedDigest {
+            field: "eligibility_spec_digest"
+        })
+    );
+    let mut empty = identity();
+    empty.generator_version.clear();
+    assert_eq!(
+        eval_run_id(&empty),
+        Err(IdentityError::EmptyComponent {
+            field: "generator_version"
+        })
+    );
+}
+
+#[test]
+fn manifest_consistency_refusals_name_their_cause() {
+    let mut wrong_id = manifest();
+    wrong_id.eval_run_id = "00".repeat(32);
+    assert!(matches!(
+        parse_manifest(&wrong_id.to_value()),
+        Err(ManifestError::RunIdMismatch { .. })
+    ));
+    let mut generator = manifest();
+    generator.component_versions.generator = "gen-9".to_string();
+    assert_eq!(
+        parse_manifest(&generator.to_value()),
+        Err(ManifestError::GeneratorVersionMismatch)
+    );
+    let mut boundary = manifest();
+    boundary.claim_boundary = ClaimBoundary {
+        schema: "claim-boundary/v1".to_string(),
+        exclusions: vec!["live-model quality".to_string()],
+    };
+    assert_eq!(
+        parse_manifest(&boundary.to_value()),
+        Err(ManifestError::ClaimBoundaryMismatch)
+    );
+    let mut residue = manifest();
+    residue.residue.retain(|entry| entry.field != "start_ms");
+    assert_eq!(
+        parse_manifest(&residue.to_value()),
+        Err(ManifestError::ResidueIncomplete {
+            field: "start_ms".to_string()
+        })
+    );
+    let mut order = manifest();
+    order.sample_order.push("pair-1".to_string());
+    assert_eq!(
+        parse_manifest(&order.to_value()),
+        Err(ManifestError::SampleOrderNotAPermutation)
+    );
+    let mut digest = manifest();
+    digest.result_digest = "xyz".to_string();
+    assert_eq!(
+        parse_manifest(&digest.to_value()),
+        Err(ManifestError::MalformedDigest {
+            field: "result_digest".to_string()
+        })
+    );
+    assert!(
+        manifest().digest().is_ok() && wrong_id.digest().is_err(),
+        "digest re-parses before hashing"
+    );
+}
+
+#[test]
+fn attestation_is_a_tagged_value() {
+    let mut signed = manifest();
+    signed.attestation = Attestation::Signed {
+        signer: "release-owner".to_string(),
+        signature_digest: "9a".repeat(32),
+    };
+    let value = signed.to_value();
+    assert_eq!(value["attestation"]["kind"], "signed");
+    assert_eq!(value["attestation"]["signer"], "release-owner");
+    assert_eq!(parse_manifest(&value).unwrap(), signed);
+    assert_ne!(signed.digest().unwrap(), manifest().digest().unwrap());
+    signed.attestation = Attestation::Signed {
+        signer: "release-owner".to_string(),
+        signature_digest: "short".to_string(),
+    };
+    assert_eq!(
+        parse_manifest(&signed.to_value()),
+        Err(ManifestError::MalformedDigest {
+            field: "attestation.signature_digest".to_string()
+        })
+    );
+}
+
+#[test]
+fn residue_classification_is_total_over_observation_fields() {
+    let mut trace = SemanticTrace::new([observation_schema()]).unwrap();
+    let mut extra = observation(0, "inc-a", None);
+    extra["attempt_started_at"] = json!(1);
+    assert_eq!(
+        trace.record(OBSERVATION_TYPE, &extra),
+        Err(ResidueError::UnclassifiedField {
+            type_name: OBSERVATION_TYPE.to_string(),
+            field: "attempt_started_at".to_string(),
+        })
+    );
+    let mut missing = observation(0, "inc-a", None);
+    missing.as_object_mut().unwrap().remove("hint_text");
+    assert_eq!(
+        trace.record(OBSERVATION_TYPE, &missing),
+        Err(ResidueError::MissingField {
+            type_name: OBSERVATION_TYPE.to_string(),
+            field: "hint_text".to_string(),
+        })
+    );
+    assert_eq!(
+        trace.record("unregistered", &json!({})),
+        Err(ResidueError::UnknownType {
+            type_name: "unregistered".to_string()
+        })
+    );
+    assert_eq!(
+        trace.record(OBSERVATION_TYPE, &json!(1)),
+        Err(ResidueError::NotAnObject {
+            type_name: OBSERVATION_TYPE.to_string()
+        })
+    );
+    assert!(matches!(
+        SemanticTrace::new([observation_schema(), observation_schema()]),
+        Err(ResidueError::DuplicateType { .. })
+    ));
+    let expected: Vec<ResidueEntry> = [
+        ("database_incarnation_id", Rule::Relative),
+        ("decided_at_ms", Rule::Drop),
+        ("hold_expires_at", Rule::Presence),
+        ("run_id", Rule::Drop),
+    ]
+    .into_iter()
+    .map(|(field, rule)| ResidueEntry {
+        type_name: OBSERVATION_TYPE.to_string(),
+        field: field.to_string(),
+        rule,
+    })
+    .collect();
+    assert_eq!(trace.residue(), expected);
+}
+
+#[test]
+fn clock_named_keep_fields_equal_the_pinned_allowlist() {
+    let schemas = [observation_schema(), Manifest::field_schema()];
+    let kept_clock_fields: BTreeSet<&str> = schemas
+        .iter()
+        .flat_map(|schema| schema.rules().iter())
+        .filter(|(field, rule)| **rule == Rule::Keep && is_clock_named(field))
+        .map(|(field, _)| field.as_str())
+        .collect();
+    assert_eq!(
+        kept_clock_fields,
+        CLOCK_FIELD_KEEP_ALLOWLIST
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        ObservationSchema::new("leaky", [("decided_at_ms", Rule::Keep)]),
+        Err(ResidueError::ClockFieldKept {
+            type_name: "leaky".to_string(),
+            field: "decided_at_ms".to_string(),
+        })
+    );
+    assert!(ObservationSchema::new("dropped", [("decided_at_ms", Rule::Drop)]).is_ok());
+    for word in [
+        "retry_deadline",
+        "wall_clock",
+        "created_at",
+        "elapsed_ms",
+        "start_time",
+    ] {
+        assert!(is_clock_named(word), "{word}");
+    }
+    assert!(!is_clock_named("occurrence_id"));
+}
+
+#[test]
+fn host_environment_and_incarnation_fields_are_never_kept() {
+    for field in [
+        "hostname",
+        "host_hostname",
+        "cwd",
+        "pid",
+        "writer_pid",
+        "database_incarnation_id",
+    ] {
+        assert!(is_never_kept(field), "{field}");
+        assert_eq!(
+            ObservationSchema::new("leaky", [(field, Rule::Keep)]),
+            Err(ResidueError::HostFieldKept {
+                type_name: "leaky".to_string(),
+                field: field.to_string(),
+            })
+        );
+        assert!(ObservationSchema::new("dropped", [(field, Rule::Drop)]).is_ok());
+    }
+    assert!(!is_never_kept("occurrence_id"));
+    assert!(!is_never_kept("rapid_response"));
+}
+
+#[test]
+fn presence_and_relative_rules_hide_incarnation_values_but_not_their_structure() {
+    let run = |incarnations: [&str; 3], holds: [Option<i64>; 3]| {
+        let mut trace = SemanticTrace::new([observation_schema()]).unwrap();
+        for (sequence, (incarnation, hold)) in incarnations.into_iter().zip(holds).enumerate() {
+            trace
+                .record(
+                    OBSERVATION_TYPE,
+                    &observation(sequence as u64, incarnation, hold),
+                )
+                .unwrap();
+        }
+        trace.digest().unwrap()
+    };
+    let base = run(["a", "a", "b"], [Some(1), Some(2), None]);
+    assert_eq!(base, run(["x", "x", "y"], [Some(9), Some(8), None]));
+    assert_ne!(
+        base,
+        run(["x", "y", "y"], [Some(1), Some(2), None]),
+        "merged ids differ"
+    );
+    assert_ne!(
+        base,
+        run(["a", "a", "b"], [Some(1), None, None]),
+        "presence differs"
+    );
+}
+
+#[test]
+fn dropped_fields_never_reach_the_trace_digest() {
+    let mut a = SemanticTrace::new([observation_schema()]).unwrap();
+    let mut b = SemanticTrace::new([observation_schema()]).unwrap();
+    let mut late = observation(0, "inc", None);
+    late["decided_at_ms"] = json!(1);
+    late["run_id"] = json!("model_execution-9-9");
+    a.record(OBSERVATION_TYPE, &observation(0, "inc", None))
+        .unwrap();
+    b.record(OBSERVATION_TYPE, &late).unwrap();
+    assert_eq!(a.digest().unwrap(), b.digest().unwrap());
+    let mut c = SemanticTrace::new([observation_schema()]).unwrap();
+    let mut changed = observation(0, "inc", None);
+    changed["hint_text"] = json!("other");
+    c.record(OBSERVATION_TYPE, &changed).unwrap();
+    assert_ne!(a.digest().unwrap(), c.digest().unwrap());
+}
