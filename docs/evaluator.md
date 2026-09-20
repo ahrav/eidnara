@@ -122,8 +122,9 @@ recorded trace always digests.
 `CLOCK_FIELD_KEEP_ALLOWLIST` (`now_ms`, `observed_at_ms`, `valid_time_ms`)
 names the only clock-named fields a schema may keep; any other clock-named
 field under `Keep` is refused at schema construction, as is any field named
-for a hostname (`hostname` or a `host` token), cwd, pid (a `pid` or `ppid`
-token or `process_id` anywhere), or incarnation (`HostFieldKept`). The trace
+for a hostname (`hostname` or a `host` token), cwd, a filesystem location (a
+`root` or `path` token), pid (a `pid` or `ppid` token or `process_id`
+anywhere), or incarnation (`HostFieldKept`). The trace
 digest uses protocol `eval-trace/v1`. Rules apply to the top-level fields of an
 observation; nested values under `Keep` enter the digest whole.
 

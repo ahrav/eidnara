@@ -69,6 +69,13 @@ describe("forbiddenDependencyEdges", () => {
         ]);
     });
 
+    test("accepts a registry package that happens to be named eval-core", () => {
+        const metadata = workspace([
+            dep({ name: "eval-core", source: "registry+https://github.com/rust-lang/crates.io-index" }),
+        ]);
+        expect(forbiddenDependencyEdges(metadata)).toEqual([]);
+    });
+
     test("ignores registry packages", () => {
         expect(forbiddenDependencyEdges(workspace([]))).toEqual([]);
     });

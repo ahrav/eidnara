@@ -142,14 +142,16 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
             if (testSupport.length > 0) {
                 findings.add(`${edge} enables ${testSupport.join(", ")}`);
             }
+            // A registry or git target is only checked for the features it is
+            // asked for above: it is not the workspace's dev-only package, and its
+            // table is not read, even if a local package shares its name.
+            if (dep.source != null) continue;
             if (DEV_ONLY_PACKAGES.has(dep.name)) {
                 findings.add(`${table} depends on dev-only package ${dep.name}`);
             }
             // A requested feature can forward to test-support under another name,
             // in the target or in a local package it forwards to; the target's
-            // own `default` is reported once below, on the target. A registry or
-            // git target's table is not read, even if a local package shares its name.
-            if (dep.source != null) continue;
+            // own `default` is reported once below, on the target.
             for (const hit of testSupportReach(local, dep.name, requested)) {
                 if (hit.entry !== null) {
                     findings.add(`${edge} reaches ${hit.entry} through ${hit.feature}`);
