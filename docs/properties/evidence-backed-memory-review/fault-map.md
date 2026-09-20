@@ -14,6 +14,7 @@
 | Decision reclassified Sensitive after resolution | no | no test helper reclassifies a live decision; the broker folds `decision.sensitivity` on every read |
 | Decision scoped to another project | yes, unconstructed | `DecisionSpec.scope_id` naming a scope whose project term differs |
 | Descriptor republished at a new revision after binding | yes, unconstructed | `publish_source_descriptor` with `revision: "2"` for the same occurrence |
+| Selected class set drifts from the decision-derived set | yes | add a class to `MEMORY_CLASSES` alone (compile error from the `const` assertion in `selection.rs`) or to `decision_derived` alone (`the_selected_classes_are_exactly_the_decision_derived_classes` fails) |
 
 ## Required faults per property
 
@@ -31,7 +32,7 @@
 - A reclassification fault: a live decision moved to `Sensitive` after the run
   bound it, asserted at the broker read as `PolicyBlocked` with zero bytes.
 
-## Leverage ranking
+## Priority ranking
 
 1. Supersession after resolution: one Kernel commit, exact refusal code, covers
    the target-binding invariant end to end.

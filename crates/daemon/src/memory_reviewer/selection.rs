@@ -20,6 +20,15 @@ pub const MEMORY_CLASSES: &[OccurrenceClass] = &[
     OccurrenceClass::PromotedMemory,
 ];
 
+// Every walked class must be decision-derived: native resolution targets its own descriptor and bypasses its owner's retraction. This assertion detects classes omitted from `decision_derived`.
+const _: () = {
+    let mut index = 0;
+    while index < MEMORY_CLASSES.len() {
+        assert!(super::broker::decision_derived(MEMORY_CLASSES[index]));
+        index += 1;
+    }
+};
+
 /// Gates scheduling of selection over [`MEMORY_CLASSES`]; the scheduler adds no selection task while this is `false`. Opening requires the owner decision and positive witness recorded under "Production selection gate" in `docs/memory-reviewer-operations.md`.
 pub const PRODUCTION_SELECTION_OPEN: bool = false;
 /// Live descriptors examined per selection page, so one slot's work is bounded whatever the inventory's size.

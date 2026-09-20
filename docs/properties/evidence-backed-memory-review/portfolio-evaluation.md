@@ -24,6 +24,7 @@ reviews found and how each finding was dispositioned.
 | Canonical before/after equality was asserted only on the Git path | gap | fixed: tracked registry rows compared before and after in both broker tests |
 | The wrong-kind owner refusal at the broker is `Scope`, not a kind-specific code, because the evidence object is unscoped | bias | kept: the Kernel judges scope before kind; `proposal_target` supplies the kind refusal, and the evidence file records the ordering |
 | `PRODUCTION_SELECTION_OPEN` is a compile-time constant rather than an operator switch | bias | kept: opening is a reviewed code change with its own witness, not a deployment action |
+| `MEMORY_CLASSES`, `related_memories::CLASSES`, and `decision_derived` enumerated the same class set independently, so a class added to one list alone would be selected without resolving through its decision, or resolve without being selectable | gap | fixed: `related_memories::CLASSES` is `MEMORY_CLASSES`; a `const` assertion in `selection.rs` requires every walked class to be decision-derived; `the_selected_classes_are_exactly_the_decision_derived_classes` checks the reverse direction over every `OccurrenceClass` |
 
 ## Gaps queued
 
