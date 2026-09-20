@@ -210,8 +210,8 @@ async fn converged_daemon() -> KernelDaemon {
         deadline: now() + 60_000,
         authorization_ref: None,
     };
-    ProjectionLifecycle::open(&home)
-        .unwrap()
+    let lifecycle = ProjectionLifecycle::open(&home).unwrap();
+    lifecycle
         .record(&open_gate(), &request_record, now())
         .unwrap();
 
@@ -222,15 +222,13 @@ async fn converged_daemon() -> KernelDaemon {
         .unwrap();
     let started = Instant::now();
     loop {
-        if let Ok(lifecycle) = ProjectionLifecycle::open(&home)
-            && matches!(lifecycle.read(), ControlState::Current(_))
-        {
+        if matches!(lifecycle.read(), ControlState::Current(_)) {
             break;
         }
         assert!(
             started.elapsed() < Duration::from_secs(30),
             "scheduled slices did not reach Current: {:?}",
-            ProjectionLifecycle::open(&home).map(|l| l.read())
+            lifecycle.read()
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

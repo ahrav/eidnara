@@ -747,6 +747,134 @@ A **context** is `{"context_revision": string, "representation": string, "spans"
 
 Receipt state is in memory and cleared by a daemon restart or by uninstalling the limit set; either retires the incarnation, so the earlier keys are `unknown`. It is bounded per project by a key count enforced when a key is minted or a read-back is recorded, and store-wide by a retention measured from creation that MUST be at least twice the 30 s request deadline of Section 11 so one request plus one full-length retry never meets an expired key. The key count has a fixed ceiling; a limit set above it or below the retention floor is refused at installation. A limits change keeps the receipts and applies the new bounds to them at the next access: a narrower count evicts the excess settled receipts at the next mint, and a shorter retention expires the receipts already past it.
 
+### 7.9 Native automatic memory capture, application revision 2
+
+`memory.capture`, `memory.capture.next`, `memory.capture.submit`, and
+`memory.capture.status` use the Context route and `v: 2`. Revision 1 capture
+requests are refused; `memory.capture.flush` is no longer served. These are
+harness lifecycle calls, not model tools. The route supplies project, harness,
+and session identity. Unknown fields are refused. Optional `project_root` must
+be an absolute path matching the route, never null or another type.
+
+A checkpoint is:
+
+```json
+{"method":"memory.capture","v":2,"session_id":"session-1","project_root":"/workspace/project","messages":[{"id":"native-message-1","role":"user","text":"Project conversation text."}]}
+```
+
+`messages` contains 1 to 32 entries with exactly `id`, `role`, and `text`.
+IDs are distinct, nonempty, at most 256 UTF-8 bytes, and contain no control
+characters. Role is `user` or `assistant`. Text is nonblank and its aggregate
+size is at most 65,536 bytes. Clients split larger native text on UTF-8
+boundaries. Reasoning, tool output, and synthetic summaries are excluded.
+Optional `model` is a nonempty provider/model identifier of at most 512 bytes
+without control characters. A checkpoint never invokes a model, with or
+without this hint.
+
+`accepted` with `jobs` acknowledges redacted, durably queued source text, not
+a saved memory. Exact replay is idempotent. `disabled` writes nothing.
+`queue_full`, `project_mismatch`, and `store_failed` include `accepted`, the
+identities queued before refusal. A conversation previously captured under a
+different project cannot be copied into this project. Unacknowledged input
+must remain available for retry. Limits are 1,024 pending sources per project
+and 8,192 overall.
+
+A connected harness requests work with the common envelope and
+`method: "memory.capture.next"`; optional `model` supplies the current native
+model when no history-summarizer model chain is configured. The host first
+attempts already-frozen commits, which need no model. It then reserves at most
+one batch per project/harness pair, with at most 16 reservations overall.
+
+A `work` response contains:
+
+- `lease`: 32 lowercase hexadecimal characters identifying this attempt.
+- `model`: selected provider/model identifier.
+- `system` and `prompt`: host-authored extraction instructions and bounded,
+  redacted source/reference data. Prompt text is at most 245,760 bytes.
+- `max_output_tokens: 8192`, `max_output_bytes: 131072`, and
+  `max_duration_ms: 90000`.
+
+The lease lasts 180 seconds and belongs to the claiming route's project,
+harness, and session. A ready lease can expire and be replaced. Preparing or
+submitting work remains reserved until its handler finishes or is cancelled.
+A stale reply cannot remove or publish against a successor reservation.
+Leases are process-local; source jobs and frozen plans are durable.
+
+Other `next` states are `ready`, `pending`, `stale`, `disabled`,
+`store_failed`, and `unavailable`. `ready` means the project has no pending
+sources. It does not count saved memories. Retry backoff, exhausted failures,
+another claimant, missing model selection, or unavailable preparation can
+produce `pending`. A lease that expired or was replaced while its work was
+being prepared produces `stale`. Clients treat `pending` and `stale` as work
+left for a later drain, not as failures; a bound in a `work` response above
+the documented ceiling is refused by releasing the lease with `cancelled`.
+
+The harness executes without tools using its native model/auth manager.
+OAuth refresh tokens and provider credentials are never capture API fields.
+Pi resolves native auth, headers, and registered custom APIs in process.
+OpenCode creates a private project with a tool-denied agent and an output-cap
+model override, inheriting user-level providers rather than the source
+repository's provider overrides. Only process-registered private projects skip
+Eidnara startup, preventing recursive extraction. Caller-text config
+substitution tokens are escaped. Private sessions and instances are cleaned up
+before their directories are removed. A produced proposal is submitted even
+when that cleanup fails; a private directory that cannot be removed keeps its
+recursion guard, and the admission slot is released either way.
+
+The harness submits either bounded `output` with matching `model`, or one
+content-free `error`: `cancelled`, `provider_unavailable`, `model_failed`, or
+`output_limit`. Both forms carry `lease` and the common envelope:
+
+```json
+{"method":"memory.capture.submit","v":2,"session_id":"session-1","lease":"0123456789abcdef0123456789abcdef","model":"provider/model","output":"{\"version\":1,\"decisions\":[]}"}
+```
+
+`processed` acknowledges processing the proposal, not successful capture of
+every source. Malformed or source-local invalid proposals leave sources
+pending with failures recorded. Valid decisions from other sources may still
+commit. Clients must request `next` again and see `ready` before reporting
+completion. Other submission states include `stale`, `pending`, `disabled`,
+and `store_failed`; mismatched models and malformed envelopes are errors.
+
+Before freezing, each memory's text becomes its exact supporting quotation,
+prefixed with `User stated:` or `Assistant reported:` from the native role.
+The model's paraphrase is not published. Relevant and sufficiently complete
+quote selection still depends on model quality. Only user-source proposals
+may replace capture-owned memories; parsing and kernel publication both
+enforce this rule. User intent and observed implementation remain distinct.
+The canonical plan freezes before publication, and replay uses its exact
+intent. A kernel receipt completes the source and clears source/plan payloads
+while retaining replay identity.
+
+Each source permits three recorded model/output failures per store-owner
+lifetime. Cancellation and unavailable native auth do not consume that
+allowance. Dispatch counts survive restart and drive exponential retry delay
+from one second to 128 seconds. A new store owner resets failures only for
+unfinished, unprepared sources while preserving dispatch counts and deadlines.
+A store refusal of a frozen plan is a recorded model/output failure of that
+source alone; other sources in the batch still commit. Dispatches are capped
+at nine per source across owners: a model/output failure on or after the ninth
+dispatch abandons the source. An abandoned source keeps its replay identity
+and its last error, releases its text, no longer counts toward the pending
+quota or the `pending` status count, is never returned as work, and is not
+revived by a new store owner. The native drain processes at most 32 batches
+per invocation. No model work runs in the daemon after a harness exits;
+unfinished sources await a later connected harness, and an abandoned lease may
+first need to expire.
+
+`memory.capture.status` returns `available` with project-level `pending`,
+`prepared`, `completed`, and `failed` source counts, or `store_failed`.
+Abandoned sources count as `failed`, not `pending`. Completed sources may
+contain zero facts. `memory.auto_capture` is user-only and defaults to true.
+It, `memory.enabled`, and `memory.auto_promote` must all
+permit capture. Captured facts remain labeled model inference for explicit
+search, not human approval or automatic-context eligibility. Session deletion
+fences publication and removes queued sources; committed memories remain
+project-owned. Lifecycle hooks store sources and return; the drain that runs
+model work continues after them. Pi's status line shows pending or unconfirmed
+capture; OpenCode warns only when a checkpoint or drain fails. Notification
+failure never discards the answer.
+
 ## 8. Host and handler lifecycle
 
 ### 8.1 Startup and readiness

@@ -86,6 +86,8 @@ pub struct DaemonConfig {
     /// Compaction resolution determines the component that controls request context-window compaction.
     pub compaction_enabled: bool,
     pub memory_enabled: bool,
+    /// User-only consent for unattended extraction from completed conversation text.
+    pub memory_auto_capture: bool,
     /// Auto-search hint controls operate independently at transform time.
     pub auto_search: AutoSearchConfig,
     /// TerseTextCompression compression uses deterministic age-tier controls.
@@ -122,6 +124,7 @@ impl Default for DaemonConfig {
             execute_threshold_percentage: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
             compaction_enabled: true,
             memory_enabled: true,
+            memory_auto_capture: true,
             auto_search: AutoSearchConfig::default(),
             terse_text_compression: TerseTextCompressionConfig::default(),
             auto_promote: true,
@@ -540,6 +543,7 @@ pub enum ConfigKey {
     ExecuteThresholdPercentage,
     CompactionEnabled,
     MemoryEnabled,
+    MemoryAutoCapture,
     AutoSearchEnabled,
     AutoSearchScoreThreshold,
     AutoSearchMinPromptChars,
@@ -574,6 +578,7 @@ impl ConfigKey {
         Self::ExecuteThresholdPercentage,
         Self::CompactionEnabled,
         Self::MemoryEnabled,
+        Self::MemoryAutoCapture,
         Self::AutoSearchEnabled,
         Self::AutoSearchScoreThreshold,
         Self::AutoSearchMinPromptChars,
@@ -605,6 +610,7 @@ impl ConfigKey {
             Self::ExecuteThresholdPercentage => "/execute_threshold_percentage",
             Self::CompactionEnabled => "/compaction/enabled",
             Self::MemoryEnabled => "/memory/enabled",
+            Self::MemoryAutoCapture => "/memory/auto_capture",
             Self::AutoSearchEnabled => "/memory/auto_search/enabled",
             Self::AutoSearchScoreThreshold => "/memory/auto_search/score_threshold",
             Self::AutoSearchMinPromptChars => "/memory/auto_search/min_prompt_chars",
@@ -648,6 +654,7 @@ impl ConfigKey {
             | Self::MemoryClassifierReviewUserMemoriesSchedule
             | Self::UserMemoriesEnabled
             | Self::MemoryClassifierInjectDocs
+            | Self::MemoryAutoCapture
             | Self::CacheTtl => true,
             Self::ExecuteThresholdPercentage
             | Self::CompactionEnabled
@@ -678,6 +685,7 @@ impl ConfigKey {
             | Self::MemoryClassifierReviewUserMemoriesSchedule
             | Self::HistorySummarizerContextLimitTokens
             | Self::MemoryClassifierInjectDocs
+            | Self::MemoryAutoCapture
             | Self::PromptSurfaceGuidanceOverrideText
             | Self::PromptSurfaceGuidanceOverridePath
             | Self::CacheTtl => TierClass::UserOnly,
@@ -828,6 +836,11 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
         ConfigKey::MemoryEnabled => {
             if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
                 cfg.memory_enabled = enabled;
+            }
+        }
+        ConfigKey::MemoryAutoCapture => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.memory_auto_capture = enabled;
             }
         }
         ConfigKey::AutoSearchEnabled => {
@@ -1706,6 +1719,7 @@ mod tests {
                 ConfigKey::HistorySummarizerModuleFallbackModels,
                 ConfigKey::HistorySummarizerModel,
                 ConfigKey::HistorySummarizerFallbackModels,
+                ConfigKey::MemoryAutoCapture,
                 ConfigKey::MemoryInjectionBudgetTokens,
                 ConfigKey::MemoryBudgetTokens,
                 ConfigKey::UserProfileBudgetTokens,
@@ -1732,6 +1746,7 @@ mod tests {
             "history_summarizer": { "module_model": "user/model", "module_fallback_models": ["user/fb"] },
             "execute_threshold_percentage": 70,
             "user_memories": { "enabled": false },
+            "memory": { "auto_capture": false },
             "memory_classifier": { "inject_docs": false }
         });
         let project = serde_json::json!({
@@ -1750,7 +1765,8 @@ mod tests {
                 "injection_budget_tokens": 999,
                 "budget_tokens": 999,
                 "user_profile_budget_tokens": 999,
-                "auto_promote": true
+                "auto_promote": true,
+                "auto_capture": true
             },
             "terse_text_compression": { "enabled": true, "min_chars": 999 },
             "user_memories": { "enabled": true },
@@ -1785,6 +1801,10 @@ mod tests {
             );
         }
         assert_eq!(cfg.model_chain, user_only.model_chain);
+        assert!(
+            !cfg.memory_auto_capture,
+            "project tier cannot enable unattended capture"
+        );
         assert_eq!(cfg.inject_docs, user_only.inject_docs);
         assert_eq!(
             cfg.user_memory_collection_enabled,
@@ -1881,7 +1901,7 @@ mod tests {
             0,
             "tier values are read through ConfigKey::pointer(), never a raw literal"
         );
-        assert_eq!(ConfigKey::ALL.len(), 25);
+        assert_eq!(ConfigKey::ALL.len(), 26);
     }
 
     /// The user-memory gate's two keys and the budget's two keys resolve the
