@@ -119,8 +119,10 @@ fn inline_config(request: &BackendRequest) -> String {
         "mode": "primary",
         // zero-tool contract.
         "tools": { "*": false },
-        "temperature": request.temperature,
     });
+    if let Some(temperature) = request.temperature {
+        agent["temperature"] = serde_json::json!(temperature);
+    }
     if let Some(system) = &request.system {
         agent["prompt"] = serde_json::Value::String(system.clone());
     }
@@ -451,7 +453,7 @@ mod tests {
             provider: "{env:P}".into(),
             model: "{file:/x}".into(),
             max_output_tokens: 1,
-            temperature: 0.0,
+            temperature: Some(0.0),
             harness: Harness::OpenCode,
             session: String::new(),
             run_id: String::new(),

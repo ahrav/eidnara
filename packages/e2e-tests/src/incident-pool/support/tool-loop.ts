@@ -13,7 +13,8 @@ export async function createCaseHarness(
     context: CaseDriverContext,
     options: RustTestHarnessOptions,
 ): Promise<RustTestHarness> {
-    const harnessTmp = join(context.workspaceRoot, "case-harness");
+    // The host's Unix socket shares this prefix; keep room for a disk-backed TMPDIR.
+    const harnessTmp = join(context.workspaceRoot, "h");
     mkdirSync(harnessTmp, { recursive: true });
     const saved = {
         TMPDIR: process.env.TMPDIR,

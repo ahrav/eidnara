@@ -203,6 +203,8 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
         execute_threshold_percentage: 40,
         history_budget_percentage: 0.15,
         context_researcher: { disable: true },
+        // Generic mock responses do not implement extraction; capture scenarios opt in explicitly.
+        memory: { auto_capture: false },
         ...(eidnaraConfig ?? {}),
     };
     if (opts.userHostConnectionFile) {
@@ -261,7 +263,13 @@ function canonicalConfig(
 ): Record<string, unknown> | undefined {
     if (value === undefined) return undefined;
     /** A spread copies own enumerable fields whatever `toJSON()` reported, so the scan and the write must read one representation; `writeConfigs` assembles every file from this return value. */
-    const serialized = JSON.parse(JSON.stringify(value)) as unknown;
+    let serialized: unknown;
+    try {
+        serialized = JSON.parse(JSON.stringify(value));
+    } catch {
+        // A caller's toJSON exception may contain credentials; retain only the config channel.
+        throw new Error(`${label} must serialize to a JSON object`);
+    }
     /** A `toJSON()` returning a non-object leaves no fields to spread, and treating it as a config would write the scalar's own properties instead. */
     if (serialized === null || typeof serialized !== "object" || Array.isArray(serialized)) {
         throw new Error(`${label} must serialize to a JSON object`);

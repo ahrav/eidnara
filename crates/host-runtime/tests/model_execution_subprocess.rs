@@ -983,7 +983,7 @@ fn request(
         provider: provider.to_owned(),
         model: model.to_owned(),
         max_output_tokens: 32_000,
-        temperature: 0.25,
+        temperature: Some(0.25),
         harness,
         session: "session-1".to_owned(),
         run_id: "run-1".to_owned(),
@@ -1712,8 +1712,14 @@ function apply(payload) {{
 }}
 console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, temperature: 0.7, messages: [], keep: "yes" }})));
 console.log(JSON.stringify(apply({{ contents: [], generationConfig: {{ maxOutputTokens: 999, temperature: 1.9, topK: 3 }}, keep: "g" }})));
-console.log(JSON.stringify(apply({{ model: "m", max_completion_tokens: 8192, max_tokens: 4096, messages: [] }})));
+console.log(JSON.stringify(apply({{ modelId: "bedrock-profile", messages: [], inferenceConfig: {{ maxTokens: 999, temperature: 1.9, topP: 0.8 }}, keep: "b" }})));
+for (const invalid of [null, [], 7]) {{ try {{ apply({{ max_tokens: 1, inferenceConfig: invalid }}); console.log("ACCEPTED"); }} catch {{ console.log("REJECTED_BEDROCK"); }} }}
+console.log(JSON.stringify(apply({{ model: "m", max_completion_tokens: 8192, max_tokens: 4096, inferenceConfig: {{ maxTokens: 999 }}, messages: [] }})));
 try {{ apply({{ foo: "bar" }}); console.log("ACCEPTED"); }} catch {{ console.log("REJECTED"); }}
+delete process.env.EIDNARA_MODEL_EXECUTION_TEMPERATURE;
+handlers.shift();
+console.log(JSON.stringify(apply({{ model: "reasoning-model", max_output_tokens: 999 }})));
+console.log(JSON.stringify(apply({{ modelId: "thinking-model", inferenceConfig: {{ maxTokens: 999, temperature: 1 }} }})));
 "#,
         hook = hook_path.to_string_lossy()
     );
@@ -1753,15 +1759,35 @@ try {{ apply({{ foo: "bar" }}); console.log("ACCEPTED"); }} catch {{ console.log
     assert_eq!(gemini["generationConfig"]["topK"], 3);
     assert_eq!(gemini["keep"], "g");
 
+    let bedrock: serde_json::Value =
+        serde_json::from_str(lines.next().expect("bedrock line")).expect("bedrock json");
+    assert_eq!(bedrock["inferenceConfig"]["maxTokens"], 32_000);
+    assert_eq!(bedrock["inferenceConfig"]["temperature"], 0.25);
+    assert_eq!(bedrock["inferenceConfig"]["topP"], 0.8);
+    assert_eq!(bedrock["modelId"], "bedrock-profile");
+    assert_eq!(bedrock["keep"], "b");
+    for _ in 0..3 {
+        assert_eq!(lines.next(), Some("REJECTED_BEDROCK"));
+    }
+
     // The hook caps every recognized spelling, so an earlier extension's larger limit cannot survive in the provider-honored field.
     let mixed: serde_json::Value =
         serde_json::from_str(lines.next().expect("mixed line")).expect("mixed json");
     assert_eq!(mixed["max_completion_tokens"], 32_000);
     assert_eq!(mixed["max_tokens"], 32_000);
     assert_eq!(mixed["temperature"], 0.25);
+    assert_eq!(mixed["inferenceConfig"]["maxTokens"], 32_000);
 
     // The hook rejects unknown shapes instead of silently leaving them uncapped.
     assert_eq!(lines.next(), Some("REJECTED"));
+    let native_openai: serde_json::Value =
+        serde_json::from_str(lines.next().expect("native openai")).unwrap();
+    assert_eq!(native_openai["max_output_tokens"], 32_000);
+    assert!(native_openai.get("temperature").is_none());
+    let native_bedrock: serde_json::Value =
+        serde_json::from_str(lines.next().expect("native bedrock")).unwrap();
+    assert_eq!(native_bedrock["inferenceConfig"]["maxTokens"], 32_000);
+    assert_eq!(native_bedrock["inferenceConfig"]["temperature"], 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -2695,7 +2721,7 @@ fn model_execution_send_request() -> (SendRequest, Vec<u8>) {
             provider: "anthropic".to_owned(),
             model: "m".to_owned(),
             max_output_tokens: 32_000,
-            temperature: 0.25,
+            temperature: Some(0.25),
         },
         b"frozen-send-bytes".to_vec(),
     )

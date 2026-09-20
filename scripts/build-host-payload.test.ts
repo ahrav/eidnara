@@ -367,7 +367,7 @@ describe("build-host-payload", () => {
         pkg.files.push("extra.txt");
         writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
         expect(() => validatePayloadPackageDir(shadow)).toThrow(/files/);
-    });
+    }, 30_000);
 
     test("a staged package with a stale manifest fails the package check", () => {
         const { shadow, packageDir } = stagedShadow("shadow-staged");

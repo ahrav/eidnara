@@ -40,7 +40,8 @@ pub struct BackendRequest {
     pub provider: String,
     pub model: String,
     pub max_output_tokens: u64,
-    pub temperature: f64,
+    /// None preserves the model/provider's native decoding behavior.
+    pub temperature: Option<f64>,
     pub harness: Harness,
     pub session: String,
     pub run_id: String,
