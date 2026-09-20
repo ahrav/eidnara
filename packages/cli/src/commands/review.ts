@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import type { HostClient } from "@eidnara/opencode/shared/host-client";
+import type { HostClient, HostClientOptions } from "@eidnara/opencode/shared/host-client";
 import { isHostCallError, rawJsonInteger } from "@eidnara/opencode/shared/host-client";
 import {
     connectionFilePath,
     resolveLifecycleDataRoot,
 } from "@eidnara/opencode/shared/host-lifecycle";
 import { stateKey } from "@eidnara/opencode/shared/kernel-client/state";
+import { shellQuote } from "@eidnara/opencode/shared/shell-quote";
 import { printableBlock, printableLine } from "../lib/terminal-text";
 import {
     decodePage,
@@ -28,6 +29,13 @@ export const DEFAULT_LIMIT = 16;
 const MAX_LINE = 200;
 const REQUEST_TIMEOUT_MS = 10_000;
 
+/** One bound covers every daemon wait: the control calls, `route.open`, and the routed request. */
+export function hostClientOptions(
+    timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Pick<HostClientOptions, "requestTimeoutMs" | "routeOpenDeadlineMs"> {
+    return { requestTimeoutMs: timeoutMs, routeOpenDeadlineMs: timeoutMs };
+}
+
 /** The connection-scoped operations the command uses. */
 export type ReviewConnection = Pick<
     HostClient,
@@ -47,7 +55,7 @@ export interface ReviewCommandDependencies {
 const defaultDependencies: ReviewCommandDependencies = {
     connect: async (connectionFile) => {
         const { HostClient } = await import("@eidnara/opencode/shared/host-client");
-        return HostClient.connect({ connectionFile, requestTimeoutMs: REQUEST_TIMEOUT_MS });
+        return HostClient.connect({ connectionFile, ...hostClientOptions() });
     },
     realpath: (path) => realpathSync.native(path),
     cwd: () => process.cwd(),
@@ -213,10 +221,25 @@ function proposalLines(proposal: Proposal): string[] {
     return lines;
 }
 
+const UNREPORTED = "unreported";
+
+/** Characters a POSIX shell passes through unquoted. */
+const SHELL_PLAIN = /^[A-Za-z0-9_./-]+$/;
+/** Linux `PATH_MAX`. */
+const MAX_PATH_LINE = 4096;
+
+/** The command reruns the same walk from any directory: the root is explicit and a non-default page size is repeated. */
+function nextPageCommand(projectRoot: string, limit: number, next: string): string {
+    const flat = printableLine(projectRoot, MAX_PATH_LINE);
+    const project = SHELL_PLAIN.test(flat) ? flat : shellQuote(flat);
+    const size = limit === DEFAULT_LIMIT ? "" : ` --limit ${limit}`;
+    return `eidnara review list --project ${project}${size} --after ${next}`;
+}
+
 function statusLines(status: ReviewStatus): string[] {
     const lines = [
-        `MemoryReviewer store: ${status.memory_reviewer_state ?? "unavailable"}`,
-        `Activation (disclosure admission, not application): ${status.activation_state ?? "unknown"}`,
+        `MemoryReviewer store: ${status.memory_reviewer_state ?? UNREPORTED}`,
+        `Activation (disclosure admission, not application): ${status.activation_state ?? UNREPORTED}`,
         `Sampled at: ${status.sampled_at_ms === null ? "unavailable" : `${status.sampled_at_ms} ms`}`,
     ];
     for (const name of STATUS_COUNTERS) {
@@ -348,7 +371,7 @@ async function render(
         lines.push(
             next === null
                 ? "End of walk. Outcomes completing behind the cursor appear on a fresh walk."
-                : `Next page: eidnara review list --after ${next}`,
+                : `Next page: ${nextPageCommand(projectRoot, parsed.limit, next)}`,
         );
         return { ok: true, text: lines.join("\n") };
     }

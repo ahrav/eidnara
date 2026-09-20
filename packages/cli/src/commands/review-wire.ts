@@ -17,8 +17,15 @@ const MAX_REFERENCES = 256;
 const MAX_LIMITATIONS = 16;
 export const MAX_PAGE_ITEMS = 64;
 
-const OUTCOMES = ["complete", "abstained", "failed", "cancelled", "unknown", "expired"] as const;
-const ABSTAIN_REASONS = [
+export const OUTCOMES = [
+    "complete",
+    "abstained",
+    "failed",
+    "cancelled",
+    "unknown",
+    "expired",
+] as const;
+export const ABSTAIN_REASONS = [
     "owner_sensitive",
     "wrong_scope",
     "secret",
@@ -40,7 +47,10 @@ export const READ_TERMINALS = [
     "store_unavailable",
 ] as const;
 export type ReadTerminal = (typeof READ_TERMINALS)[number];
-const LIST_TERMINALS = ["disabled", "store_unavailable"] as const satisfies readonly ReadTerminal[];
+export const LIST_TERMINALS = [
+    "disabled",
+    "store_unavailable",
+] as const satisfies readonly ReadTerminal[];
 const ACTIONS = ["create", "revise", "retain", "retire", "no_change"] as const;
 const UNCERTAINTIES = ["low", "medium", "high"] as const;
 
@@ -299,8 +309,8 @@ export function decodeSelected(
     });
 }
 
-const MEMORY_REVIEWER_STATES = ["ready", "starting", "unavailable"] as const;
-const ACTIVATION_STATES = [
+export const MEMORY_REVIEWER_STATES = ["ready", "starting", "unavailable"] as const;
+export const ACTIVATION_STATES = [
     "open",
     "unknown",
     "stale",
@@ -363,9 +373,15 @@ export interface ReviewStatus {
     counters: Record<(typeof STATUS_COUNTERS)[number], number | null>;
 }
 
-/** The `metrics.memory_reviewer` block as the wire document sanitizes it: a block whose state is not `ready` reports every counter unavailable, and a present counter outside its domain is unavailable, never zero. */
+function memoryReviewerBlock(metrics: Record<string, unknown>): Record<string, unknown> | null {
+    if (!isRecord(metrics.components) || !isRecord(metrics.components.context)) return null;
+    const context = metrics.components.context;
+    if (!isRecord(context.metrics) || !isRecord(context.metrics.memory_reviewer)) return null;
+    return context.metrics.memory_reviewer;
+}
+
 export function decodeReviewStatus(metrics: Record<string, unknown>): ReviewStatus {
-    const block = isRecord(metrics.memory_reviewer) ? metrics.memory_reviewer : null;
+    const block = memoryReviewerBlock(metrics);
     const state = oneOf(MEMORY_REVIEWER_STATES, block?.memory_reviewer_state)
         ? block?.memory_reviewer_state
         : null;

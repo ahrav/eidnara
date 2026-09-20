@@ -53,10 +53,19 @@ describe("review command against the direct host", () => {
                 expect(await runReviewCommand(["status", "--json"], status.deps)).toBe(0);
                 const snapshot = JSON.parse(status.out[0]) as {
                     kind: string;
+                    memory_reviewer_state: string | null;
                     counters: Record<string, unknown>;
                 };
                 expect(snapshot.kind).toBe("status");
+                expect(["ready", "starting", "unavailable"]).toContain(
+                    snapshot.memory_reviewer_state ?? "unreported",
+                );
                 expect(Object.keys(snapshot.counters)).toHaveLength(36);
+                if (snapshot.memory_reviewer_state === "ready") {
+                    expect(
+                        Object.values(snapshot.counters).some((value) => typeof value === "number"),
+                    ).toBe(true);
+                }
                 expect(status.clients[0]?.isClosed).toBe(true);
 
                 const project = join(root, "project");

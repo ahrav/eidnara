@@ -194,7 +194,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: yes - `packages/cli/src/commands/review.test.ts` sends an explicit `limit` and `after`, renders a full page's continuation and an empty page's end, and never issues a second request; the daemon's page semantics are exercised in `crates/daemon/tests/memory_reviewer_wire.rs`
-Guarantee: `review list` asks for exactly one page with an explicit limit and an optional causal-identity cursor, prints the cursor the daemon returns as the operator's next command, and never walks pages, reads a Kernel payload, or presents the walk as a chronological or stable snapshot.
+Guarantee: `review list` asks for exactly one page with an explicit limit and an optional causal-identity cursor, prints the cursor the daemon returns as the operator's next command carrying the bound root and any non-default limit so it reruns the same walk from any directory, and never walks pages, reads a Kernel payload, or presents the walk as a chronological or stable snapshot.
 Check: `always` - one `request` per invocation with `limit` and `after` in the envelope; asserted on every list
 Fault/timing angle: an outcome completing behind the cursor during a walk
 Required faults and enabling state: a page whose `next` is a cursor, then a follow-up whose `next` is null
@@ -239,7 +239,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `packages/cli/src/commands/review.test.ts` counts one `closeAsync` on success, terminal, malformed, thrown request, and incompatible catalog; `packages/cli/src/commands/review.wire.test.ts` asserts `isClosed` after success and after a route refusal; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` asserts it against the real host
+Exercised: yes - `packages/cli/src/commands/review.test.ts` counts one `closeAsync` on success, terminal, malformed, thrown request, and incompatible catalog; `packages/cli/src/commands/review.wire.test.ts` asserts `isClosed` after success, after a route refusal, and after a `route.open` the daemon never answers, which fails within the command's one timeout; `packages/e2e-tests/src/rust-runner/review-cli.test.ts` asserts it against the real host under the `native-addon` job's `test:fixture-contract` step
 Guarantee: One connection is opened per invocation and closed on every path; the catalog probe, the route open, and the request share it; routed requests use `request`, never a managed `call`, so nothing is replayed; and no model call, canonical write, cache, poll, or retry occurs.
 Check: `always` - `closeAsync` in `finally`; asserted on every path
 Fault/timing angle: a thrown request, an aborted request, a refused route
@@ -284,13 +284,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - `packages/cli/src/commands/review.test.ts` renders a `starting` block with present `swept_*` zeros as all unavailable, an absent block as unavailable, a missing or invalid counter as unavailable beside a valid sibling, and an unknown activation state as unknown
-Guarantee: A store that is not `ready` reports every counter unavailable; a counter that is absent, negative, fractional, `null`, or past 2^53 is unavailable, never zero; `sampled_at_ms` and the activation state stay unknown when missing or unrecognized; unknown fields are ignored.
+Exercised: yes - `packages/cli/src/commands/review.test.ts` feeds the block under `metrics.components.context.metrics`, the path `host.status` publishes, and rejects the same block at the top of `metrics`; renders a `starting` block with present `swept_*` zeros as all unavailable, an absent block and an absent or unrecognized activation state as `unreported`, the wire's own `unknown` and `unavailable` as themselves, and a missing or invalid counter as unavailable beside a valid sibling; `packages/cli/src/commands/review-wire.contract.test.ts` pins the state and counter vocabularies to the wire document's `metrics.memory_reviewer` table in its order
+Guarantee: The block is read where `host.status` publishes it, under the `context` component's metrics. A store that is not `ready` reports every counter unavailable; a counter that is absent, negative, fractional, `null`, or past 2^53 is unavailable, never zero; a missing or unrecognized store or activation state renders as `unreported`, a word outside both vocabularies, so it never reads as the wire's `unknown` or `unavailable`; unknown fields are ignored.
 Check: `always` - `decodeReviewStatus` runs the wire document's rules field by field; asserted on every status
 Fault/timing angle: a stale or starting sampler
 Required faults and enabling state: a `starting` block with zeros, an absent block, out-of-domain counters
 Confidence: high - [evidence](evidence/status-freshness-never-defaults-unknown-to-zero.md). Verified each rule
-Existing check: `packages/cli/src/commands/review.test.ts`::`review status`; `packages/cli/src/commands/review.wire.test.ts`
+Existing check: `packages/cli/src/commands/review.test.ts`::`review status`; `packages/cli/src/commands/review.wire.test.ts`; `packages/cli/src/commands/review-wire.contract.test.ts`; `scripts/smoke-tarball-install.ts` and `packages/e2e-tests/src/rust-runner/review-cli.test.ts` require a reported store state from the running daemon
 Impact: A zero printed for an unsampled counter would read as an idle store
 Open questions: None.
 

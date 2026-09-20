@@ -72,6 +72,20 @@ function harness(
     return { deps, recorded };
 }
 
+function statusMetrics(memoryReviewer?: Record<string, unknown>): Record<string, unknown> {
+    return {
+        components: {
+            context: {
+                status: "ok",
+                metrics: {
+                    storage_state: "ready",
+                    ...(memoryReviewer === undefined ? {} : { memory_reviewer: memoryReviewer }),
+                },
+            },
+        },
+    };
+}
+
 function selectedBody(): Record<string, unknown> {
     return {
         kind: "proposal",
@@ -194,7 +208,7 @@ describe("review list", () => {
         expect(text).toContain("Project: /p/real");
         expect(text).toContain(`${HEX} gen 1 complete selected`);
         expect(text).toContain(`${HEX_B} gen 9007199254740993 abstained (owner_sensitive)`);
-        expect(text).toContain(`--after ${HEX_B}`);
+        expect(text).toContain(`Next page: eidnara review list --project /p/real --after ${HEX_B}`);
 
         const cwd = harness();
         expect(await runReviewCommand(["list"], cwd.deps)).toBe(0);
@@ -203,6 +217,30 @@ describe("review list", () => {
         ).toBe("/work/project/real");
         expect(cwd.recorded.stdout.join("\n")).toContain("No completed outcomes on this page.");
         expect(cwd.recorded.stdout.join("\n")).toContain("End of walk.");
+    });
+
+    test("the next-page command carries the bound root and a non-default limit so it reruns from any directory", async () => {
+        const page = { kind: "page", items: [], next: HEX_B };
+        const quoted = harness({ respond: () => page });
+        expect(
+            await runReviewCommand(
+                ["list", "--project", "/space d/it's", "--limit", "5"],
+                quoted.deps,
+            ),
+        ).toBe(0);
+        expect(quoted.recorded.stdout[0]).toContain(
+            `Next page: eidnara review list --project '/space d/it'\\''s/real' --limit 5 --after ${HEX_B}`,
+        );
+        const cwd = harness({ respond: () => page });
+        expect(await runReviewCommand(["list"], cwd.deps)).toBe(0);
+        expect(cwd.recorded.stdout[0]).toContain(
+            `Next page: eidnara review list --project /work/project/real --after ${HEX_B}`,
+        );
+        expect(cwd.recorded.stdout[0]).not.toContain("--limit");
+        const long = harness({ respond: () => page });
+        const deep = `/${"segment/".repeat(40)}leaf`;
+        expect(await runReviewCommand(["list", "--project", deep], long.deps)).toBe(0);
+        expect(long.recorded.stdout[0]).toContain(`--project ${deep}/real --after`);
     });
 
     test("an exact-full page yields a cursor whose follow-up may be empty, and nothing walks it automatically", async () => {
@@ -234,7 +272,7 @@ describe("review list", () => {
         expect(await runReviewCommand(["list", "--limit", "2"], first.deps)).toBe(0);
         expect(first.recorded.requests).toHaveLength(1);
         expect(first.recorded.stdout[0]).toContain(
-            `Next page: eidnara review list --after ${HEX_B}`,
+            `Next page: eidnara review list --project /work/project/real --limit 2 --after ${HEX_B}`,
         );
         const second = harness({ respond: (body) => pages.get(body.after as string | null) });
         expect(
@@ -601,22 +639,19 @@ describe("review status", () => {
         const { deps, recorded } = harness({
             status: {
                 health: "degraded",
-                metrics: {
-                    components: {},
-                    memory_reviewer: {
-                        memory_reviewer_state: "ready",
-                        activation_state: "open",
-                        sampled_at_ms: 1_700_000_000_000,
-                        jobs_ready: 9007199254740992,
-                        jobs_reserved: 9007199254740993n,
-                        jobs_abstained: -1,
-                        jobs_completed: 2.5,
-                        jobs_failed: null,
-                        receipts_complete: 4,
-                        swept_jobs: 0,
-                        future_counter: 7,
-                    },
-                },
+                metrics: statusMetrics({
+                    memory_reviewer_state: "ready",
+                    activation_state: "open",
+                    sampled_at_ms: 1_700_000_000_000,
+                    jobs_ready: 9007199254740992,
+                    jobs_reserved: 9007199254740993n,
+                    jobs_abstained: -1,
+                    jobs_completed: 2.5,
+                    jobs_failed: null,
+                    receipts_complete: 4,
+                    swept_jobs: 0,
+                    future_counter: 7,
+                }),
             },
         });
         expect(await runReviewCommand(["status"], deps)).toBe(0);
@@ -639,21 +674,30 @@ describe("review status", () => {
         expect(text).not.toMatch(/^(total|ratio|success)/im);
     });
 
+    test("the block is read only under the context component, never from the top of metrics", () => {
+        const block = { memory_reviewer_state: "ready", jobs_ready: 1 };
+        expect(decodeReviewStatus(statusMetrics(block)).counters.jobs_ready).toBe(1);
+        const flat = decodeReviewStatus({ components: {}, memory_reviewer: block });
+        expect(flat.memory_reviewer_state).toBeNull();
+        expect(flat.counters.jobs_ready).toBeNull();
+        const otherComponent = decodeReviewStatus({
+            components: { local_embeddings: { status: "ok", metrics: { memory_reviewer: block } } },
+        });
+        expect(otherComponent.memory_reviewer_state).toBeNull();
+    });
+
     test("a store that is not ready reports every counter unavailable, even present zeros, and an absent block is unavailable", async () => {
         const starting = harness({
             status: {
                 health: "ok",
-                metrics: {
-                    components: {},
-                    memory_reviewer: {
-                        memory_reviewer_state: "starting",
-                        activation_state: "stale",
-                        sampled_at_ms: null,
-                        swept_jobs: 0,
-                        swept_selections: 0,
-                        jobs_ready: 3,
-                    },
-                },
+                metrics: statusMetrics({
+                    memory_reviewer_state: "starting",
+                    activation_state: "stale",
+                    sampled_at_ms: null,
+                    swept_jobs: 0,
+                    swept_selections: 0,
+                    jobs_ready: 3,
+                }),
             },
         });
         expect(await runReviewCommand(["status", "--json"], starting.deps)).toBe(0);
@@ -674,39 +718,51 @@ describe("review status", () => {
         const noActivation = harness({
             status: {
                 health: "ok",
-                metrics: {
-                    components: {},
-                    memory_reviewer: {
-                        memory_reviewer_state: "ready",
-                        sampled_at_ms: 42,
-                        jobs_ready: 1,
-                    },
-                },
+                metrics: statusMetrics({
+                    memory_reviewer_state: "ready",
+                    sampled_at_ms: 42,
+                    jobs_ready: 1,
+                }),
             },
         });
         expect(await runReviewCommand(["status"], noActivation.deps)).toBe(0);
         expect(noActivation.recorded.stdout[0]).toContain(
-            "Activation (disclosure admission, not application): unknown",
+            "Activation (disclosure admission, not application): unreported",
         );
         expect(noActivation.recorded.stdout[0]).toContain("Sampled at: 42 ms");
         expect(noActivation.recorded.stdout[0]).toContain("jobs_ready: 1");
 
-        const absent = harness({ status: { health: "ok", metrics: { components: {} } } });
+        const absent = harness({ status: { health: "ok", metrics: statusMetrics() } });
         expect(await runReviewCommand(["status"], absent.deps)).toBe(0);
-        expect(absent.recorded.stdout[0]).toContain("MemoryReviewer store: unavailable");
+        expect(absent.recorded.stdout[0]).toContain("MemoryReviewer store: unreported");
         expect(absent.recorded.stdout[0]).toContain(
+            "Activation (disclosure admission, not application): unreported",
+        );
+
+        // The wire's own `unknown` and `unavailable` render as themselves, distinct from an absent field.
+        const literal = harness({
+            status: {
+                health: "ok",
+                metrics: statusMetrics({
+                    memory_reviewer_state: "unavailable",
+                    activation_state: "unknown",
+                }),
+            },
+        });
+        expect(await runReviewCommand(["status"], literal.deps)).toBe(0);
+        expect(literal.recorded.stdout[0]).toContain("MemoryReviewer store: unavailable");
+        expect(literal.recorded.stdout[0]).toContain(
             "Activation (disclosure admission, not application): unknown",
         );
 
         expect(
-            decodeReviewStatus({
-                memory_reviewer: { memory_reviewer_state: "later", jobs_ready: 1 },
-            }).memory_reviewer_state,
+            decodeReviewStatus(statusMetrics({ memory_reviewer_state: "later", jobs_ready: 1 }))
+                .memory_reviewer_state,
         ).toBeNull();
         expect(
-            decodeReviewStatus({
-                memory_reviewer: { memory_reviewer_state: "ready", activation_state: "later" },
-            }).activation_state,
+            decodeReviewStatus(
+                statusMetrics({ memory_reviewer_state: "ready", activation_state: "later" }),
+            ).activation_state,
         ).toBeNull();
     });
 });

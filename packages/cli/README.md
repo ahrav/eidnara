@@ -112,18 +112,21 @@ canonical memory, accepts a proposal, starts review work, or enrolls the project
 in background work.
 
 `list` asks for one page of `--limit` outcomes (16 by default) in causal-identity
-order. A full page prints the `--after` cursor for the next page; the walk is
-live, so an outcome that completes behind the cursor appears on a fresh walk,
-and the command never walks pages on its own. `show` issues exactly one read and
+order. A full page prints the next command, naming the bound root, any
+non-default `--limit`, and the `--after` cursor, so it reruns the same walk
+from any directory; the walk is live, so an outcome that completes behind the
+cursor appears on a fresh walk, and the command never walks pages on its own. `show` issues exactly one read and
 prints the proposal the completed receipt selects: action, exact target, text,
 support and contradiction spans, limitations, uncertainty, manifest reference,
 and the live review expiry. A `retain` or `no_change` proposal changes,
 extends, and corroborates nothing.
 
 `status` reads `host.status` only and names no project: the MemoryReviewer
-store state, the activation state, and every counter the wire document lists,
-each printed as `unavailable` when the store is not ready or the value is
-missing or outside its domain, never as zero. Counters are overlapping
+store state, the activation state, and every counter the wire document lists.
+A counter prints as `unavailable` when the store is not ready or the value is
+missing or outside its domain, never as zero; a store or activation state the
+host did not report prints as `unreported`, which is not a state the wire
+defines. Counters are overlapping
 populations over the whole data home; no total or ratio is derived. An `open`
 activation state means the deployment owner admits model disclosure; it is not
 compaction status, and it applies nothing.

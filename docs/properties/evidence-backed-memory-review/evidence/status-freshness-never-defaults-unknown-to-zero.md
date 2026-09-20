@@ -24,6 +24,14 @@ Tests named in the catalog record.
 
 A `starting` block's `swept_jobs: 0` prints as zero, reading as an idle store.
 
+The decoder reads the block from the top of `metrics`, where `host.status`
+never publishes it, so every real daemon reports an absent store and every
+counter unavailable while exiting 0. The unit fixtures agreed with the decoder
+rather than with the host, and the smoke asserted only the answer's `kind`.
+
+An absent activation state prints as `unknown`, the wire's own literal for a
+worker that has not evaluated yet, so a dropped field reads as a real state.
+
 ## Timing windows and dependencies
 
 The sampler's first five minutes and its staleness window.
@@ -31,7 +39,10 @@ The sampler's first five minutes and its staleness window.
 ## What a test must construct
 
 A `starting` block carrying zeros, an absent block, counters outside the
-domain beside valid siblings.
+domain beside valid siblings, each placed under
+`metrics.components.context.metrics` as the host publishes it, and the same
+block at the top of `metrics`, which must not be read. A running daemon's
+status must report a recognized store state.
 
 ## Investigation log
 
