@@ -650,7 +650,7 @@ describe("HostClient", () => {
             request.header,
             '{"at_limit":9007199254740992,"past_limit":9007199254740993,"even":9007199254740994,' +
                 '"u64_max":18446744073709551615,"i64_min":-9223372036854775808,"i64_max":9223372036854775807,' +
-                '"fraction":1.5,"exponent":1e3,"negative_zero":-0,"digits":"9007199254740993","nested":[[9007199254740993]]}',
+                '"fraction":1.5,"exponent":1e3,"negative_zero":-0,"rounded":9007199254740993e0,"digits":"9007199254740993","nested":[[9007199254740993]]}',
         );
         const value = (await routed) as Record<string, unknown>;
         expect(value.at_limit).toBe(9007199254740992n);
@@ -662,6 +662,8 @@ describe("HostClient", () => {
         expect(value.fraction).toBe(1.5);
         expect(value.exponent).toBe(1000);
         expect(value.negative_zero).toBe(-0);
+        // An exponent spelling is an f64 token: it decodes as the (rounded) double, as before.
+        expect(value.rounded).toBe(9007199254740992);
         expect(value.digits).toBe("9007199254740993");
         expect(value.nested).toEqual([[9007199254740993n]]);
         // Adjacent unequal wire integers never compare equal after decoding.
@@ -671,6 +673,11 @@ describe("HostClient", () => {
         expect(exactCount(value.past_limit)).toBeNull();
         expect(exactCount(value.even)).toBeNull();
         expect(exactCount(value.fraction)).toBeNull();
+        // A rounded double and `-0` are outside every wire-integer domain, whatever their spelling.
+        expect(exactCount(value.rounded)).toBeNull();
+        expect(exactU64(value.rounded)).toBeNull();
+        expect(exactCount(value.negative_zero)).toBeNull();
+        expect(exactI64(value.negative_zero)).toBeNull();
         expect(exactCount(-1)).toBeNull();
         expect(exactCount(null)).toBeNull();
         expect(exactCount(undefined)).toBeNull();

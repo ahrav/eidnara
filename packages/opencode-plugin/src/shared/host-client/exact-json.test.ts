@@ -75,7 +75,6 @@ describe("parseExactJson", () => {
 describe("domains", () => {
     test("exactCount admits 0 through 2^53 inclusive and nothing else", () => {
         expect(exactCount(0)).toBe(0);
-        expect(exactCount(9007199254740992)).toBe(9007199254740992);
         expect(exactCount(9007199254740992n)).toBe(9007199254740992);
         expect(exactCount(9007199254740993n)).toBeNull();
         expect(exactCount(9007199254740994)).toBeNull();
@@ -96,13 +95,26 @@ describe("domains", () => {
         expect(exactI64(9223372036854775808n)).toBeNull();
     });
 
-    test("an in-range integer-valued double outside the safe range comes back as the exact bigint, never as the double", () => {
-        // 2^60 is exactly representable, yet `String(2 ** 60)` prints 1152921504606847000.
-        expect(exactU64(2 ** 60)).toBe(1152921504606846976n);
-        expect(exactI64(-(2 ** 60))).toBe(-1152921504606846976n);
-        expect(exactU64(9007199254740992)).toBe(9007199254740992n);
-        expect(formatExactInteger(exactU64(2 ** 60) as bigint)).toBe("1152921504606846976");
-        expect(exactCount(9007199254740992)).toBe(9007199254740992);
+    test("an integer-valued double outside the safe range is refused: only a bigint carries such a value exactly", () => {
+        // A decimal or exponent spelling is an f64 on the wire and may already be rounded: 9007199254740993e0 parses to 2^53.
+        expect(exactCount(parseExactJson("9007199254740993e0"))).toBeNull();
+        expect(exactCount(parseExactJson("9007199254740993.0"))).toBeNull();
+        expect(exactU64(parseExactJson("9007199254740993e0"))).toBeNull();
+        expect(exactI64(parseExactJson("-9007199254740993e0"))).toBeNull();
+        expect(exactU64(2 ** 60)).toBeNull();
+        expect(exactI64(-(2 ** 60))).toBeNull();
+        expect(exactU64(9007199254740992)).toBeNull();
+        expect(exactCount(9007199254740992)).toBeNull();
+        expect(exactU64(9007199254740992n)).toBe(9007199254740992n);
+        expect(exactCount(9007199254740991)).toBe(9007199254740991);
+    });
+
+    test("negative zero is not a wire integer", () => {
+        expect(exactCount(-0)).toBeNull();
+        expect(exactU64(-0)).toBeNull();
+        expect(exactI64(-0)).toBeNull();
+        expect(exactCount(parseExactJson("-0"))).toBeNull();
+        expect(exactCount(0)).toBe(0);
     });
 });
 

@@ -43,16 +43,22 @@ function exactIntegerReviver(
     return BigInt(source);
 }
 
+/**
+ * A `number` is a wire integer only when it is a safe integer other than `-0`. Serde reads `-0` and every
+ * decimal or exponent spelling as `f64`, and a double past the safe range may already be rounded, so only a
+ * `bigint` carries a value outside that range.
+ */
 function isWireInteger(value: unknown): value is WireInteger {
-    return typeof value === "bigint" || (typeof value === "number" && Number.isInteger(value));
+    return (
+        typeof value === "bigint" ||
+        (typeof value === "number" && Number.isSafeInteger(value) && !Object.is(value, -0))
+    );
 }
 
 function exactIntegerWithin(value: unknown, min: bigint, max: bigint): WireInteger | null {
     if (!isWireInteger(value)) return null;
     const exact = typeof value === "bigint" ? value : BigInt(value);
-    if (exact < min || exact > max) return null;
-    // Unsafe integer-valued numbers return as `bigint`; only safe integers retain `number` form.
-    return typeof value === "number" && Number.isSafeInteger(value) ? value : exact;
+    return exact < min || exact > max ? null : value;
 }
 
 /** Accepts nonnegative counts through 2^53 inclusive. */

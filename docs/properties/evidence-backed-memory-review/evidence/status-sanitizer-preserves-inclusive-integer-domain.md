@@ -94,13 +94,18 @@ environment and with the route-local override.
 
 ### Q: What does a domain validator return for an unsafe integer-valued double?
 
-- Sources examined: `exactIntegerWithin`; `String(2 ** 60)`.
-- Findings: the reviver never produces an unsafe integer `number`, but the
-  validators accept `unknown`, and a caller passing `2 ** 60` as a `number`
-  formerly got the same `number` back; `String` renders it as
-  `1152921504606847000`, so `formatExactInteger` would print wrong digits as
-  exact. The validators now return the `bigint` for any in-range value outside
-  the safe range.
+- Sources examined: `exactIntegerWithin`; `String(2 ** 60)`;
+  `parseExactJson("9007199254740993e0")`; `module-wire.ts`'s `wireIntegerText`.
+- Findings: the reviver produces an unsafe integer-valued `number` from a
+  decimal or exponent spelling, and that value may already be rounded:
+  `9007199254740993e0` and `9007199254740993.0` both decode as 2^53, which
+  `exactCount` formerly accepted as the exact boundary. A caller passing
+  `2 ** 60` as a `number` formerly got a `bigint` back, though nothing on the
+  wire can prove such a double was not rounded. Serde reads every such
+  spelling, and `-0`, as `f64` rather than `i64`/`u64`, and the send path
+  already refuses both. The validators now admit a `number` only when it is a
+  safe integer other than `-0`; any value outside the safe range must arrive
+  as a `bigint`, which only an integer lexeme produces.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
