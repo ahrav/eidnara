@@ -17,7 +17,7 @@ provides, so a reader can find them by test name.
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v2` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v3` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -243,14 +243,16 @@ Cross-process determinism (`crates/eval-core/tests/two_process.rs`):
   `crates/eval-core/clippy.toml` disallows `HashMap` and `HashSet` in the
   crate.
 
-The coverage markers the records name (`wm_generator_two_processes_compared`,
+The coverage markers the world-model records name
+(`wm_generator_two_processes_compared`,
 `wm_removal_two_live_streams_after_event`, `wm_tape_each_choice_kind_recorded`,
 `wm_log_has_cross_event_reference`,
 `wm_log_has_same_millisecond_cross_stream_events`,
 `wm_log_has_cross_stream_causal_edge`, `wm_bound_refusal_arm_entered`,
 `wm_step_drive_validated_between_steps`) are asserted inline as preconditions
-in the tests above; the evaluator-owned marker registry lands with the
-ingestion ticket and these assertions move onto it then.
+in the tests above. The registry (`eval_core::MARKERS`) holds the ingestion
+suite's markers, whose completeness proof runs in one test binary; the
+world-model assertions join it when a single run can witness them all.
 
 ## Phase 1 executed checks: eligibility spec and reducer
 
@@ -344,11 +346,144 @@ on a wrong working directory or a moved crate; `eval-core` enters the kernel
 only under `[dev-dependencies]`; `cargo tree -p daemon -e normal` is
 unchanged.
 
+## Phase 1 executed checks: rendering and ingestion
+
+Identity rule (`crates/kernel/tests/eval_identity.rs`):
+
+- `the_core_encoder_reproduces_every_identity_golden_and_the_kernel_encoder`
+  (`wm-occurrence-identity-recomputation`) encodes all 23 records of the
+  independent identity goldens with the evaluator's copy and the kernel's
+  `encode_preserving_span`, expects both to equal the expected occurrence and
+  lineage ids, pins `OCCURRENCE_ENCODING_VERSION`, the contract version,
+  `MAX_IDENTITY_VALUE_BYTES`, `HARNESSES`, and `OBJECT_FORMATS` to the
+  kernel's (the goldens hold no identity value between 65 and 512 bytes, so
+  the limit is pinned directly), and compares the refusal names and order on
+  the tuple-level invalid records.
+- `a_later_message_time_changes_the_occurrence_but_not_the_lineage` is the
+  identity-mapping matrix: a message twin with a later completion time is a
+  new occurrence of the same lineage; a commit's time is not an input.
+
+Renderer, encoder, accounting, and registry, store-free
+(`crates/eval-core/tests/render.rs`):
+
+- `rendered_messages_have_the_shape_the_adapter_reads_with_valid_time_as_revision`
+  pins the OpenCode message JSON the renderer emits: a user turn carries
+  `time.created` at its valid time, an assistant turn carries
+  `time.completed` at its valid time with `created` one millisecond earlier,
+  a tool span renders as a settled `tool` part whose `state.time.end` is the
+  valid time, and each expected unit's identity equals an independent
+  `encode` of the tuple.
+- `every_payload_kind_renders_to_units_a_commit_or_a_named_exclusion` renders
+  a world with every payload kind: messages and corrections become messages,
+  tool spans attach to their own session's message only (a span whose session
+  has no message with its `message_id` refuses as `ToolSpanParentMissing`, and
+  one observed at another time than its parent as
+  `ToolSpanObservationDiffers`), commits become
+  `RenderedCommit`s at the event's times, renames and invalidations are
+  counted under their rule names, every unit has a distinct identity, and a
+  correction reuses its target's `message_id` and lineage at a later
+  revision.
+- `render_refuses_bad_targets_roles_times_and_unencodable_identities_by_event`:
+  `CorrectionTargetIsNotAMessage` for a commit target,
+  `CorrectionTargetMissing` for an unknown one,
+  `CorrectionTargetInOtherSession` for a target in another session (a
+  same-session correction one millisecond later shares the target's lineage),
+  `CorrectionDoesNotAdvance` for a correction at or before the target's valid
+  time, `MessageIdReused` for two base messages with one `message_id` in one
+  session, `OccurrenceReused` for a second correction of one target at one valid
+  time and for a second tool span with one `call_id` at one valid time,
+  `SecondRepository` for commits from two repository entities under one
+  `repository_id`, `UnknownRole` for a role that
+  is neither `user` nor `assistant`, `NoEarlierCreated` for an assistant turn
+  at valid time zero (valid time one renders `created: 0`), and an identity
+  value with a tab refuses as `Encoding { event_id, .. }` naming the event,
+  with `MalformedIdentityValue` checked before the oid format.
+- `the_identity_flip_matrix_names_what_enters_each_id` is the tuple-level
+  matrix: each identity field moves both ids, revision moves the occurrence
+  only, representation and span move both, the same tuple is one identity,
+  and `UnknownClass`, `MissingIdentityField`, `MalformedRevision`,
+  `MissingRevision`, and `UnknownRepresentation` fire for their malformed
+  input (the identity goldens in `eval_identity.rs` fire all nine variants
+  in kernel order).
+- `accounting_names_every_way_a_unit_can_go_missing` and
+  `the_marker_registry_is_unique_and_incomplete_until_every_marker_fires`
+  cover `check_accounting` and `Coverage` off the store.
+
+Adapters (`crates/daemon/tests/eval_ingestion.rs`; every scenario records its
+marker through `eval_core::Coverage` after asserting its preconditions):
+
+- `rendered_worlds_round_trip_through_the_opencode_adapter_with_exact_accounting`
+  (`ing-adapter-round-trip-ids-equal-expected`,
+  `ing-ingestion-outcome-accounting-no-silent-loss`) publishes a rendered
+  world through `opencode_units` and `SourcePublisher::publish`, expects the
+  published identity set to equal the renderer's expected set with no
+  refusals, expects each correction to replace the latest predecessor of its
+  lineage and every first publication to replace nothing, expects a
+  republish to replay every receipt, then adds a step marker, an ignored text
+  part, and a running tool to one message and a tool without a `callID` to
+  another and expects the dropped parts to move no identity, the broken
+  message to refuse every unit it carried as `MissingIdentity`, and
+  `expected == published + refused` to hold; removing one outcome or
+  double-counting one fails `check_accounting` by name.
+- `generated_observations_never_lead_and_a_boundary_fixture_refuses`
+  checks every rendered revision is at or before its observation time and in
+  the valid-time domain, publishes the world without a refusal, and shows a
+  hand-built unit one millisecond past `MAX_REVISION_LEAD_MS` refuses as
+  `RevisionAhead` with no tip movement while exactly one hour of lead passes.
+- `git_units_keep_revision_one_and_take_valid_time_from_the_projection`
+  (`ing-git-units-fixed-revision-drop-commit-time`) writes each rendered
+  commit plus two commits that differ only in committer time into a real
+  repository, reads them with `read_selection`, destructures `SourceUnit`
+  (no time field), expects revision `"1"`, the identity field set, and
+  `commit_message`, checks the evaluator's `oid -> valid_time_ms` projection
+  against the committer time git recorded for each oid, publishes each, and
+  expects the published identity to equal `git_identity(oid)`.
+- `observation_time_is_inert_for_identity_and_eligibility`
+  (`ing-observation-time-inert-for-projection`) ingests one rendering into two
+  stores ten years apart in observation time and expects equal occurrence
+  ids, object ids, and eligibility verdicts, then republishes at a later
+  observation time and expects a replay with the stored `observed_at`
+  unchanged. Residue classification from this evidence: `observed_at_ms`
+  stays `Keep` as an evaluator-controlled parameter.
+- `hold_embedding_commit_correction_release_query_makes_the_predecessor_obsolete`
+  (the four-seam witness, marker `ing_four_seam_hold_correct_release_query`)
+  publishes a predecessor, bootstraps a projection with its embedding job
+  pending, shows a same-time and a backdated correction refuse as broken
+  fixtures, commits the correction through the adapter, catches the
+  projection up, releases the held embedding into
+  `Obsolete(Canonical(Superseded))` while the successor embeds, and runs the
+  query route: the successor is returned and the predecessor is not; a
+  republish of the successor replays and leaves the result unchanged.
+- `each_adapter_identity_field_flips_its_ids_and_payload_fields_flip_none`
+  (`ing-adapter-round-trip-ids-equal-expected`) takes a rendered assistant
+  message with a text and a tool part through `opencode_units` and flips one
+  field at a time: `info.id`, `sessionID`, and `project_id` move both ids;
+  `time.completed` and the text part's position move the text unit only;
+  `callID` and `state.time.end` move the tool unit only; `text`, `role`, and
+  the tool output move neither.
+- `coverage_markers_are_unique_and_each_names_a_scenario_here` and
+  `every_registered_marker_fires_across_the_scenarios` are the registry's
+  uniqueness test and completeness proof: the second runs every scenario once
+  and requires `Coverage::complete` to succeed, so it runs in every CI pass.
+
+Feature closure (`crates/daemon/tests/eval_seam_probe.rs`,
+`sls-evaluator-target-feature-closure-complete`): names every adapter,
+kernel, publication, catch-up, route, and retrieval `test-support` seam the
+shell uses, so the `--all-features` daemon build fails when one moves;
+retrieval's `test-support` feature is enabled only under the daemon's
+`[dev-dependencies]`.
+
+Manifest (`crates/eval-core/tests/manifest.rs`): `ingestion` is a required
+field (`ing-adapter-path-no-production-caller-labelled`); its wire value is
+`adapter-ingested, production caller: none`, and `direct-database, non-aged`
+with a `replay` construction is refused as `DirectDatabaseAged`.
+
 ## Gaps recorded here
 
 - Every ingestion entry point lacks a production caller. No world is labelled
-  "validated real ingestion" until one exists; manifests carry
-  `adapter-ingested, production caller: none` once ingestion lands.
+  "validated real ingestion" until one exists; every manifest carries
+  `adapter-ingested, production caller: none` (a required field), and the
+  ingestion suite drives the adapters from tests only.
 - The reducer takes the served class as a query input because generated
   worlds carry no admission events; the ingestion ticket decides what
   `SourcePublisher::publish` actually admits and pins the value.

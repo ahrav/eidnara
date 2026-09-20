@@ -88,6 +88,8 @@ kernel = { workspace = true, features = ["test-support"] }
 host-runtime = { workspace = true, features = ["test-support"] }
 daemon = { path = ".", features = ["test-support"] }
 eval-core = { workspace = true }
+# The evaluator's shell reaches the retrieval fault seams only from tests.
+retrieval = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 filetime = "0.2"
 rcgen = { workspace = true }
