@@ -32,6 +32,23 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_sweep_inside_the_settlement_window_fences_the_selection_and_releases_the_hold` | same | the sweep closes the receipt `expired` between the Kernel envelope and the completion write; the completion is fenced; the settlement releases the hold; the reconciler finds nothing | unaudited |
 | `a_selected_row_whose_owner_or_class_changed_refuses_the_read` | same | a stored witness naming another generation refuses `scope_mismatch`; a row reclassified `secret` refuses `dependency_refused`; the receipt is unchanged | unaudited |
 
+## Broker-free recovery and full-lineage reads
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `a_resumed_claim_adopts_the_durable_result_without_the_broker_or_a_new_request` | `crates/daemon/tests/memory_reviewer_settlement.rs` | the staged record's union and marker; adoption under a fresh broker publishes the byte-identical reference with no added attempt; a second adopt is fenced; a takeover at generation 2 completes `unknown` and leaves the generation-1 row sealed | unaudited |
+| `a_result_sealed_before_its_transfer_is_adopted_under_an_empty_execution_hold` | same | a row sealed before its transfer, the lost run's hold released, and a replacement hold covering nothing: adoption extends the hold over the record's inputs and publishes; the same window with a retired input abstains `expectation_changed`; with no hold at all it abstains `budget_exhausted` | unaudited |
+| `a_durable_result_whose_lineage_moved_or_lacks_a_record_is_not_adopted` | same | retired cited source abstains `expectation_changed` and releases the hold; edited union bytes abstain; a record joined to an attempt index the ledger lacks abstains; a record removed from the witness abstains; a completed marker with no row completes `unknown` | unaudited |
+| `a_selected_read_refuses_when_an_uncited_member_no_longer_stands` | same | retiring an uncited disclosed source after selection refuses the read `dependency_refused`; the receipt is unchanged | unaudited |
+| `the_staged_dependencies_are_the_brokers_union_including_uncited_inputs_and_ancestry` | same | a fabricated canonical member reaches the row's ancestry and the read refuses it | unaudited |
+| `a_proposal_without_a_completed_marker_at_its_generation_is_not_staged` | same | a live settlement with only a `Failed` marker abstains `expectation_changed` and seals no row | unaudited |
+| `schema_illegal_proposals_are_refused_at_decode` (staging rules) | `crates/kernel/tests/kernel_review_staging.rs` | a proposal spec without a record, a subject spec with one, another generation, another version, an empty or oversized union, and a short digest are each `Invalid` | unaudited |
+| `a_resumed_generation_adopts_the_result_a_lost_run_sealed_without_a_send` | `crates/daemon/tests/memory_reviewer_coordinator.rs` | a settlement that panics between the Kernel envelope and the ledger completion; the coordinator resumes the same claim, adopts the sealed reference under the transferred review hold, and the peer sees zero connections | unaudited |
+| `an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt` | `crates/daemon/tests/memory_reviewer_coordinator.rs` | an unterminated marker completes the receipt `unknown` with zero connections and no added attempt | unaudited |
+| `a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send` | same | a cancelled marker on a resumed run completes `unknown` with zero connections | unaudited |
+| `a_not_dispatched_marker_alone_lets_the_run_proceed_with_a_new_attempt` | same | a recheck-lapsed `not_dispatched` marker admits one request and a second, completed attempt | unaudited |
+| `decoding_accepts_only_bytes_that_re_encode_to_themselves_and_their_digest` | `crates/context-core/src/memory_reviewer_policy_union.rs` | decode refuses a wrong digest, edited bytes, whitespace, and another version | unaudited |
+
 ## Suspiciously quiet areas
 
 - No test exercises class tightening (a decision reclassified `Sensitive`
@@ -50,6 +67,8 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
   read from code.
 - No test reopens either store between the Kernel envelope and the sweep; the
   durable rows are read through the same handles that wrote them.
+- No test records a `temporary_capture` member and adopts it; the member
+  reconstruction for captures is read from code.
 - No test constructs the window after the Kernel result and before the hold
   transfer; the execution hold expires on its own cutoff and the row keeps its
   queue deadline by the same mechanism the post-transfer tests witness.

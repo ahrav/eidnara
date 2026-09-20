@@ -523,6 +523,7 @@ mod tests {
                 payload,
                 recorded_at,
                 queue_deadline_at,
+                dependencies: None,
             })
             .unwrap();
         assert!(matches!(

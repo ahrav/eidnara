@@ -131,6 +131,7 @@ pub fn begin_job(
             payload,
             recorded_at: now,
             queue_deadline_at: job.queue_deadline_ms,
+            dependencies: None,
         })
         .unwrap();
     kernel

@@ -30,10 +30,10 @@ Every slug the seven residual tickets own. Slugs the specification assigns to ot
 | `production-classes-reach-policy-eligible-proposal` | #725 | yes |
 | `canonical-resolution-refuses-changed-owner-and-target` | #725 | yes |
 | `private-result-transfer-preserves-queue-expiry` | #726 | yes |
-| `receipt-selection-fences-private-generation-results` | #727 | not yet |
-| `durable-private-result-recovers-without-model-refire` | #727 | not yet |
-| `unknown-dispatch-does-not-authorize-resend` | #727 | not yet |
-| `uncited-owner-lineage-remains-read-authority` | #727 | not yet |
+| `receipt-selection-fences-private-generation-results` | #727 | yes |
+| `durable-private-result-recovers-without-model-refire` | #727 | yes |
+| `unknown-dispatch-does-not-authorize-resend` | #727 | yes |
+| `uncited-owner-lineage-remains-read-authority` | #727 | yes |
 | `observer-route-does-not-change-background-rosters` | #728 | not yet |
 | `status-sanitizer-preserves-inclusive-integer-domain` | #729 | not yet |
 | `completed-outcome-pages-have-live-keyset-semantics` | #730 | not yet |
@@ -97,6 +97,67 @@ Impact: An unselected result would stay readable by identity, and its evidence h
 Open questions:
 - Whether the capture `retain_until` promotion at transfer should also stay at the queue deadline for an unselected result; the retention floor is a resource bound, not a visibility path, and is left in place (needs human input)
 
+### receipt-selection-fences-private-generation-results
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_settlement.rs` stages a generation-1 result, takes the receipt over at generation 2, and adopts and reads under generation 2
+Guarantee: A Kernel result stays private to its generation: only the completed receipt of the same generation selects it, a successor generation adopts only a result at its own provisional identity, and the losing generation's row stays sealed, unpublished, and unreadable through the receipt.
+Check: `always` - `adopt` and `read_selected_proposal` derive the candidate id from `(causal_identity, receipt.generation)` and refuse any other row; asserted on every evaluation because a row at another generation is another run's result
+Fault/timing angle: takeover between a run's Kernel envelope and its Memory Store completion
+Required faults and enabling state: a sealed row and transferred hold at generation 1; `take_over_memory_reviewer_receipt` to generation 2; an adopt at generation 2
+Confidence: high - [evidence](evidence/receipt-selection-fences-private-generation-results.md). Verified the provisional identity derivation on both the adopt and the read paths and the takeover test's outcomes
+Existing check: `crates/daemon/tests/memory_reviewer_settlement.rs::a_resumed_claim_adopts_the_durable_result_without_the_broker_or_a_new_request` (second half), `a_takeover_fences_the_losing_generation_and_selects_only_its_own_result`, `the_reconciler_releases_a_losing_generations_hold_and_keeps_the_winners`
+Impact: A successor could publish a result whose lineage and marker belong to a fenced generation
+Open questions: None.
+
+### durable-private-result-recovers-without-model-refire
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_settlement.rs` drops the run's broker and adopts under a fresh one with no aliases and no execution hold; `crates/daemon/tests/memory_reviewer_coordinator.rs` runs a resumed generation against a live peer that receives nothing
+Guarantee: A valid same-generation claim that finds a sealed result adopts it from the row's dependency record alone, publishing the byte-identical reference with zero model requests; a record that fails revalidation or is absent refuses without content, without a request, and without rewriting the row.
+Check: `always` - `Settlement::adopt` never reaches the disclosure path; the coordinator returns from `adopt` before `open`; asserted on every resumed run because a compensating request is the failure this record forbids
+Fault/timing angle: process loss after the Kernel envelope and before the Memory Store completion; process loss after the completed marker and before staging
+Required faults and enabling state: a completed marker at the generation; a sealed row with a record, or no row; a fresh broker under the transferred review hold or under an execution hold covering nothing; a retired member, an edited record, and a record removed from the witness
+Confidence: high - [evidence](evidence/durable-private-result-recovers-without-model-refire.md). Verified the record's contents after staging, the adopt outcomes for each fault, and the zero-connection assertion at the coordinator
+Existing check: `crates/daemon/tests/memory_reviewer_settlement.rs::a_resumed_claim_adopts_the_durable_result_without_the_broker_or_a_new_request`, `a_result_sealed_before_its_transfer_is_adopted_under_an_empty_execution_hold`, `a_durable_result_whose_lineage_moved_or_lacks_a_record_is_not_adopted`, `a_proposal_without_a_completed_marker_at_its_generation_is_not_staged`; `crates/daemon/tests/memory_reviewer_coordinator.rs::a_resumed_generation_adopts_the_result_a_lost_run_sealed_without_a_send`, `a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send`; `crates/kernel/tests/kernel_review_staging.rs::schema_illegal_proposals_are_refused_at_decode`; `crates/context-core/src/memory_reviewer_policy_union.rs::decoding_accepts_only_bytes_that_re_encode_to_themselves_and_their_digest`
+Impact: A restart would spend a second physical request and a second attempt for a result the store already holds, or publish a result nothing revalidated
+Open questions: None.
+
+### unknown-dispatch-does-not-authorize-resend
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_coordinator.rs` plants an unterminated marker, a cancelled marker, and a `not_dispatched` marker before a run against a live peer
+Guarantee: A marker at the run's generation other than a proven `not_dispatched` ends the resumed run without a request: the receipt completes `unknown` when no sealed row exists, and adopts or abstains on the row when one does. Only `not_dispatched` markers, or none, admit a newly charged attempt, under the original identity, deadlines, and remaining count.
+Check: `always` - `resumes_dispatched_work` is evaluated in `prepare` before subject resolution and hold growth; a `true` result skips both and routes to `adopt`; asserted on every run start
+Fault/timing angle: crash between marker commit and terminal write; cancellation mid-attempt; a lapsed recheck after commit
+Required faults and enabling state: `dispatch_memory_reviewer_attempt` with no terminal; a cancelled first run; a recheck clock past the attempt deadline
+Confidence: high - [evidence](evidence/unknown-dispatch-does-not-authorize-resend.md). Verified the three marker classes at the coordinator with connection counts and attempt counts
+Existing check: `crates/daemon/tests/memory_reviewer_coordinator.rs::an_unknown_attempt_outcome_completes_unknown_and_cancellation_joins_the_attempt`, `a_resumed_generation_with_a_cancelled_marker_completes_unknown_without_a_send`, `a_not_dispatched_marker_alone_lets_the_run_proceed_with_a_new_attempt`
+Impact: A lost answer would be retried with a fresh physical request, exceeding the attempt and byte ceilings the marker already charged
+Open questions:
+- Whether a `failed` or `cancelled` marker with no sealed row should complete the receipt as `unknown` or under its own terminal; the ledger's sweep maps a cancelled receipt to `cancelled`, while the resumed run maps every non-`not_dispatched` marker to `unknown` (needs human input)
+
+### uncited-owner-lineage-remains-read-authority
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_settlement.rs` retires an uncited source after selection and reads; a fabricated canonical member is refused on read
+Guarantee: The selected read revalidates every persisted union member, cited or not, including each canonical member's originating decision and owner revision, and refuses the proposal when any no longer stands, while the receipt continues to select it.
+Check: `always` - `read_selected_proposal` calls `dependencies::revalidate` under the review hold for a local reader and maps its verdict to `dependency_refused`; asserted on every read
+Fault/timing angle: a source retired or a decision re-revised between selection and read
+Required faults and enabling state: a selected proposal over two disclosed sources with one uncited; `retire_observation` on the uncited one
+Confidence: high - [evidence](evidence/uncited-owner-lineage-remains-read-authority.md). Verified the refusal after retiring an uncited member, the fabricated-member refusal, and that the receipt is unchanged by a refused read
+Existing check: `crates/daemon/tests/memory_reviewer_settlement.rs::a_selected_read_refuses_when_an_uncited_member_no_longer_stands`, `the_staged_dependencies_are_the_brokers_union_including_uncited_inputs_and_ancestry`, `revoked_or_uncited_dependencies_abstain_and_conflicting_content_is_refused`
+Impact: A proposal whose uncited context was retired or whose canonical owner moved would still be served as a supported proposal
+Open questions: None.
+
 ## Relationship map
 
 `canonical-resolution-refuses-changed-owner-and-target` is the safety half of
@@ -109,3 +170,11 @@ in `../canonical-positive-claim-projection/` records.
 `private-result-transfer-preserves-queue-expiry` shares the settlement and
 selected-read path with the two records above: the proposal a canonical run
 publishes is the row whose deadline this record pins.
+
+The four recovery records share one mechanism, `dependencies::revalidate`:
+`durable-private-result-recovers-without-model-refire` and
+`unknown-dispatch-does-not-authorize-resend` are the two branches of the resumed
+run's decision, `receipt-selection-fences-private-generation-results` is the
+generation scope both derive their candidate id under, and
+`uncited-owner-lineage-remains-read-authority` is the same revalidation run by
+the reader instead of the resumer.

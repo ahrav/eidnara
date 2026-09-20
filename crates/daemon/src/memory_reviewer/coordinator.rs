@@ -20,7 +20,8 @@ use kernel::{
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{MemoryReviewerJob, MemoryReviewerJobInput, ReviewTarget};
 use memory_store::memory_reviewer_ledger::{
-    MEMORY_REVIEWER_ATTEMPT_MAX_MS, MemoryReviewerLedgerRefusal, MemoryReviewerReceipt,
+    MEMORY_REVIEWER_ATTEMPT_MAX_MS, MemoryReviewerAttemptTerminal, MemoryReviewerLedgerRefusal,
+    MemoryReviewerReceipt,
 };
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -192,6 +193,7 @@ impl Coordinator {
             coordinator: self,
             context,
             hold_binding: prepared.hold_binding,
+            resuming: prepared.resuming,
             broker: Arc::new(tokio::sync::Mutex::new(broker)),
             transcript: Vec::new(),
             sent: 0,
@@ -225,6 +227,36 @@ impl Coordinator {
             subject: context.job.causal_identity.clone(),
             generation: context.receipt.generation,
         };
+        // Markers at this generation other than a proven `not_dispatched` mean a run already dispatched under this claim and its transcript is gone: the resumed run adopts that run's durable result or completes without content, so it resolves nothing and holds only what the lost run still holds.
+        let resuming = resumes_dispatched_work(
+            &self.ledger,
+            &context.job.project,
+            &context.job.causal_identity,
+            context.receipt.generation,
+        )?;
+        if resuming {
+            // The lost run's execution hold is returned when it is still live, and a released one is replaced by an empty hold that adoption extends over the record's inputs. Once retention moved to a review hold the Kernel refuses another execution hold for this generation, and adoption runs under that review hold instead.
+            let hold_id = match self.store.acquire_execution_hold(
+                &hold_binding,
+                &[],
+                context.receipt.execution_cutoff_ms,
+            ) {
+                Ok(hold) => hold.hold_id,
+                Err(kernel::MemoryReviewerHoldError::Refused(_)) => String::new(),
+                Err(error) => {
+                    return Err(InvestigationError::Kernel(super::broker::hold_refusal(
+                        error,
+                    )));
+                }
+            };
+            return Ok(Prepared {
+                hold_binding,
+                subject: Err(RefusalCode::Unsupported),
+                starting: Vec::new(),
+                hold_id,
+                resuming,
+            });
+        }
         // A subject or linked reference the run cannot resolve for a remote model settles the run on that refusal; nothing is sent.
         let mut protected = Vec::new();
         let mut starting = Vec::with_capacity(context.input.starting_references.len());
@@ -269,6 +301,7 @@ impl Coordinator {
             subject,
             starting,
             hold_id,
+            resuming,
         })
     }
 }
@@ -277,8 +310,29 @@ struct Prepared {
     hold_binding: MemoryReviewerHoldBinding,
     subject: Result<ReferenceExpectation, RefusalCode>,
     starting: Vec<ReferenceExpectation>,
-    /// `hold_id` is empty when the run took no hold: past the cutoff or with a refused subject.
+    /// `hold_id` is empty when the run took no hold: past the cutoff, with a refused subject, or resuming a generation whose retention already moved to review.
     hold_id: String,
+    /// Whether markers at this generation prove dispatched work this process never saw the end of.
+    resuming: bool,
+}
+
+/// Whether the ledger holds a marker at `generation` other than a proven `not_dispatched`: a completed, failed, cancelled, unknown, or unterminated attempt whose response, if any, this process never saw.
+fn resumes_dispatched_work(
+    ledger: &MemoryStore,
+    project: &str,
+    causal_identity: &str,
+    generation: u64,
+) -> Result<bool, InvestigationError> {
+    let attempts = ledger
+        .list_memory_reviewer_attempts(project, causal_identity)
+        .map_err(|error| InvestigationError::Store(error.to_string()))?;
+    Ok(attempts.iter().any(|attempt| {
+        attempt.generation == generation
+            && !matches!(
+                attempt.terminal,
+                Some((MemoryReviewerAttemptTerminal::NotDispatched, _))
+            )
+    }))
 }
 
 /// One investigation's state: the broker every disclosure goes through, the transcript resent each round, the related-memory cursors, and the cutoff every wait is bounded by.
@@ -286,6 +340,7 @@ struct Run<'a> {
     coordinator: &'a Coordinator,
     context: JobContext<'a>,
     hold_binding: MemoryReviewerHoldBinding,
+    resuming: bool,
     /// The broker is shared with the launch future, which must be `'static`; the coordinator is idle while an attempt runs, so the lock is never contended.
     broker: Arc<tokio::sync::Mutex<EvidenceBroker>>,
     transcript: Vec<RenderedBuffer>,
@@ -341,6 +396,10 @@ impl Run<'_> {
         let subject = {
             let broker = Arc::clone(&self.broker);
             let mut broker = broker.lock().await;
+            // A lost run's durable result is adopted, or the receipt completes without content; a new request is never the answer to a lost one.
+            if self.resuming {
+                return self.adopt(&broker);
+            }
             if now >= self.context.receipt.execution_cutoff_ms {
                 return self.settle(&broker, RunResult::Exhausted);
             }
@@ -472,6 +531,11 @@ impl Run<'_> {
         Ok(Ok(()))
     }
 
+    fn adopt(&self, broker: &EvidenceBroker) -> Result<Settled, InvestigationError> {
+        tokio::task::block_in_place(|| self.settlement().adopt(broker))
+            .map_err(InvestigationError::from)
+    }
+
     async fn settle_now(&self, result: RunResult) -> Result<Settled, InvestigationError> {
         let broker = Arc::clone(&self.broker);
         let broker = broker.lock().await;
@@ -483,21 +547,21 @@ impl Run<'_> {
         broker: &EvidenceBroker,
         result: RunResult,
     ) -> Result<Settled, InvestigationError> {
-        let now_ms = Arc::clone(&self.coordinator.now_ms);
-        tokio::task::block_in_place(|| {
-            Settlement {
-                store: &self.coordinator.store,
-                ledger: &self.coordinator.ledger,
-                project: &self.context.job.project,
-                binding: self.context.binding,
-                claim: self.context.claim,
-                now_ms: &move || now_ms(),
-                #[cfg(any(test, feature = "test-support"))]
-                before_completion_for_test: None,
-            }
-            .settle(broker, result)
-        })
-        .map_err(InvestigationError::from)
+        tokio::task::block_in_place(|| self.settlement().settle(broker, result))
+            .map_err(InvestigationError::from)
+    }
+
+    fn settlement(&self) -> Settlement<'_> {
+        Settlement {
+            store: &self.coordinator.store,
+            ledger: &self.coordinator.ledger,
+            project: &self.context.job.project,
+            binding: self.context.binding,
+            claim: self.context.claim,
+            now_ms: &*self.coordinator.now_ms,
+            #[cfg(any(test, feature = "test-support"))]
+            before_completion_for_test: None,
+        }
     }
 
     /// One supervised physical request: the prepared body is disclosed inside the supervisor's internal launch, so the backend permit, cutoff, cancellation, and physical completion are the supervisor's, and the text comes back only after the disclosure accepted it.

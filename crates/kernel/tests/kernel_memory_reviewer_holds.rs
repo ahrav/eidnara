@@ -49,6 +49,22 @@ fn mutate(root: &std::path::Path, sql: &str, params: impl rusqlite::Params) {
     conn.execute(sql, params).unwrap();
 }
 
+/// A well-formed dependency record for `generation` over the empty union; the hold tests exercise retention, not member revalidation.
+fn dependencies(generation: u64) -> kernel::ReviewDependencies {
+    let union = context_core::memory_reviewer_policy_union::PolicyUnion::new()
+        .encode()
+        .unwrap();
+    kernel::ReviewDependencies {
+        version: kernel::REVIEW_DEPENDENCIES_VERSION,
+        union_canonical: union.canonical,
+        union_digest: union.digest,
+        generation,
+        attempt_index: 0,
+        body_digest: "b".repeat(64),
+        marker_union_digest: "e".repeat(64),
+    }
+}
+
 fn incarnation(root: &std::path::Path) -> String {
     inspect(root, |conn| {
         conn.query_row(
@@ -258,6 +274,7 @@ impl Fixture {
                 payload,
                 recorded_at,
                 queue_deadline_at: deadline,
+                dependencies: Some(dependencies(generation)),
             })
             .unwrap();
         self.store
@@ -1213,6 +1230,7 @@ fn review_transfer_requires_a_sealed_proposal_row_covered_by_the_review_window()
             payload: fixture.proposal_payload(),
             recorded_at: now - 1_000,
             queue_deadline_at: now + DAY_MS - 1_000,
+            dependencies: Some(dependencies(1)),
         })
         .unwrap();
     let review = fixture.binding(&identity.candidate_id, 1);
