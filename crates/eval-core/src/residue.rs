@@ -31,9 +31,11 @@ pub fn is_clock_named(field: &str) -> bool {
 }
 
 /// Host environment and store incarnation values never enter a digest, so a
-/// field named for one may not be `Keep`.
+/// field named for one may not be `Keep`. Field names are snake_case, so
+/// `host` is matched as a token (`host_name`) as well as inside `hostname`.
 pub fn is_never_kept(field: &str) -> bool {
     field.contains("hostname")
+        || field.split('_').any(|token| token == "host")
         || field.contains("cwd")
         || field == "pid"
         || field.ends_with("_pid")

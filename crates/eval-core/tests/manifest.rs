@@ -715,6 +715,7 @@ fn clock_named_keep_fields_equal_the_pinned_allowlist() {
 fn host_environment_and_incarnation_fields_are_never_kept() {
     for field in [
         "hostname",
+        "host_name",
         "host_hostname",
         "cwd",
         "pid",

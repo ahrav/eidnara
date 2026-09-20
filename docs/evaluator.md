@@ -69,8 +69,12 @@ The 24 required fields, sorted:
 
 `Manifest::digest` re-parses the manifest, applies the manifest's own residue
 rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
-is `Keep`), and hashes with protocol `eval-manifest-digest/v1`. Two processes
-with the same identity produce the same digest.
+is `Keep`), and hashes with protocol `eval-manifest-digest/v1`. The digest is
+a function of every kept field, not of the run identity alone: two processes
+that record the same identity and the same kept contents produce the same
+digest (`two_process_same_identity_yields_equal_manifest_and_trace_digests`),
+and two runs that share an identity but differ in `status`, `sample_order`,
+`result_digest`, or any other kept field do not.
 
 Canonical JSON rejects fractional numbers, so every fraction is a canonical
 decimal string: `is_canonical_decimal` accepts `0`, `12`, `0.25` and rejects
@@ -117,7 +121,8 @@ recorded trace always digests.
 `CLOCK_FIELD_KEEP_ALLOWLIST` (`now_ms`, `observed_at_ms`, `valid_time_ms`)
 names the only clock-named fields a schema may keep; any other clock-named
 field under `Keep` is refused at schema construction, as is any field named
-for a hostname, cwd, pid, or incarnation (`HostFieldKept`). The trace digest
+for a hostname (`hostname` or a `host` token), cwd, pid, or incarnation
+(`HostFieldKept`). The trace digest
 uses protocol `eval-trace/v1`. Rules apply to the top-level fields of an
 observation; nested values under `Keep` enter the digest whole.
 
