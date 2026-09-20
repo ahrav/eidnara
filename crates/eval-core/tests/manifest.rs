@@ -724,6 +724,7 @@ fn host_environment_and_incarnation_fields_are_never_kept() {
         "writer_pid",
         "process_id",
         "parent_process_id",
+        "source_process_id_value",
         "ppid",
         "database_incarnation_id",
     ] {
