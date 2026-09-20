@@ -1,8 +1,12 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as logger from "../../shared/logger";
-import { isNativeCaptureProject, openCodeMemoryCaptureExecutor } from "./memory-capture-native";
+import {
+    disposeNativeCaptureProjects,
+    isNativeCaptureProject,
+    openCodeMemoryCaptureExecutor,
+} from "./memory-capture-native";
 
 const work = {
     model: "custom/m",
@@ -16,7 +20,9 @@ const work = {
 interface Harness {
     client: unknown;
     cleanup: string[];
-    directory(): string;
+    directories: string[];
+    disposed: string[];
+    providerReads: number;
 }
 
 function harness(overrides: {
@@ -24,24 +30,29 @@ function harness(overrides: {
     dispose?: (directory: string) => Promise<void>;
     onCreate?: (directory: string) => void;
 }): Harness {
-    let directory = "";
+    const directories: string[] = [];
+    const disposed: string[] = [];
     const cleanup: string[] = [];
     const client = {
         config: {
-            providers: async () => ({
-                data: {
-                    providers: [
-                        {
-                            id: "custom",
-                            models: { m: { limit: { context: 12000, output: 1000 } } },
-                        },
-                    ],
-                },
-            }),
+            providers: async () => {
+                state.providerReads += 1;
+                return {
+                    data: {
+                        providers: [
+                            {
+                                id: "custom",
+                                models: { m: { limit: { context: 12000, output: 1000 } } },
+                            },
+                        ],
+                    },
+                };
+            },
         },
         session: {
             create: async (input: { query: { directory: string }; body: unknown }) => {
-                directory = input.query.directory;
+                const directory = input.query.directory;
+                directories.push(directory);
                 expect(directory).not.toBe(process.cwd());
                 expect(isNativeCaptureProject(directory)).toBe(true);
                 expect(isNativeCaptureProject(process.cwd())).toBe(false);
@@ -51,10 +62,10 @@ function harness(overrides: {
                     permission: [{ permission: "*", pattern: "*", action: "deny" }],
                 });
                 overrides.onCreate?.(directory);
-                return { data: { id: "native-child" } };
+                return { data: { id: `native-child-${directories.length}` } };
             },
             prompt: async (input: { query: { directory: string }; body: { model: unknown } }) => {
-                expect(input.query.directory).toBe(directory);
+                expect(directories).toContain(input.query.directory);
                 expect(input.body.model).toEqual({ providerID: "custom", modelID: "m" });
                 return {
                     data: {
@@ -70,27 +81,37 @@ function harness(overrides: {
                 cleanup.push("abort");
             },
             delete: async (input: { query: { directory: string } }) => {
-                expect(input.query.directory).toBe(directory);
+                expect(directories).toContain(input.query.directory);
                 cleanup.push("delete");
-                await overrides.delete?.(directory);
+                await overrides.delete?.(input.query.directory);
             },
         },
         instance: {
             dispose: async (input: { query: { directory: string } }) => {
-                expect(input.query.directory).toBe(directory);
+                disposed.push(input.query.directory);
                 cleanup.push("dispose");
-                await overrides.dispose?.(directory);
+                await overrides.dispose?.(input.query.directory);
             },
         },
     };
-    return { client, cleanup, directory: () => directory };
+    const state: Harness = { client, cleanup, directories, disposed, providerReads: 0 };
+    return state;
 }
+
+let lastClient: unknown;
+
+afterEach(async () => {
+    if (lastClient) await disposeNativeCaptureProjects(lastClient as never);
+    lastClient = undefined;
+});
 
 describe("OpenCode native memory capture executor", () => {
     it("isolates native auth/model execution from repository config and denies tools", async () => {
-        const { client, cleanup, directory } = harness({
+        const configs: string[] = [];
+        const h = harness({
             onCreate: (directory) => {
                 const raw = readFileSync(join(directory, "opencode.json"), "utf8");
+                configs.push(raw);
                 expect(raw).not.toContain("{env:");
                 const config = JSON.parse(raw);
                 expect(config.agent["eidnara-memory-capture"].permission).toEqual({ "*": "deny" });
@@ -99,66 +120,85 @@ describe("OpenCode native memory capture executor", () => {
                 expect(config.provider.custom.options).toBeUndefined();
             },
         });
-        const executor = openCodeMemoryCaptureExecutor(client as never);
+        lastClient = h.client;
+        const executor = openCodeMemoryCaptureExecutor(h.client as never);
         const result = await executor(work, new AbortController().signal);
         expect(result).toEqual({ model: "custom/m", text: '{"ok":true}' });
-        expect(cleanup).toEqual(["delete", "dispose"]);
-        expect(existsSync(directory())).toBe(false);
-        expect(isNativeCaptureProject(directory())).toBe(false);
+        expect(h.cleanup).toEqual(["delete"]);
+        const [directory] = h.directories;
+        expect(directory).toBeDefined();
+        expect(existsSync(directory as string)).toBe(true);
+        expect(isNativeCaptureProject(directory as string)).toBe(true);
+    });
+
+    it("reuses one warm private project per model and system prompt across captures", async () => {
+        const h = harness({});
+        lastClient = h.client;
+        const executor = openCodeMemoryCaptureExecutor(h.client as never);
+        const signal = new AbortController().signal;
+        await Promise.all([executor(work, signal), executor(work, signal)]);
+        await executor(work, signal);
+        expect(new Set(h.directories).size).toBe(1);
+        expect(h.providerReads).toBe(1);
+        expect(h.cleanup).toEqual(["delete", "delete", "delete"]);
+        expect(h.disposed).toEqual([]);
+        await executor({ ...work, system: "Other instructions" }, signal);
+        expect(new Set(h.directories).size).toBe(2);
+        expect(h.providerReads).toBe(2);
     });
 
     it("keeps a produced answer when only cleanup fails and releases the admission slot", async () => {
         const warn = spyOn(logger.log, "warn");
         try {
-            const directories: string[] = [];
+            const h = harness({
+                delete: async () => {
+                    throw new Error("delete refused");
+                },
+            });
+            lastClient = h.client;
             for (let run = 0; run < 17; run++) {
-                const { client, cleanup, directory } = harness({
-                    dispose: async () => {
-                        throw new Error("dispose refused");
-                    },
-                });
-                const result = await openCodeMemoryCaptureExecutor(client as never)(
+                const result = await openCodeMemoryCaptureExecutor(h.client as never)(
                     work,
                     new AbortController().signal,
                 );
                 expect(result).toEqual({ model: "custom/m", text: '{"ok":true}' });
-                expect(cleanup).toEqual(["delete", "dispose"]);
-                expect(existsSync(directory())).toBe(false);
-                expect(isNativeCaptureProject(directory())).toBe(false);
-                directories.push(directory());
             }
-            expect(new Set(directories).size).toBe(17);
+            expect(h.cleanup).toHaveLength(17);
             expect(warn).toHaveBeenCalledTimes(17);
-            expect(JSON.stringify(warn.mock.calls)).toContain("dispose refused");
+            expect(JSON.stringify(warn.mock.calls)).toContain("delete refused");
         } finally {
             warn.mockRestore();
         }
     });
 
-    it("keeps the recursion guard only while the private directory still exists", async () => {
+    it("disposes the least recently used project beyond the bound and keeps the guard of one it cannot remove", async () => {
         // Root ignores directory modes, so an undeletable tree cannot be staged for it.
         if (process.getuid?.() === 0) return;
-        let locked = "";
-        const { client, directory } = harness({
-            dispose: async (directory) => {
-                locked = join(directory, "locked");
-                mkdirSync(locked);
-                writeFileSync(join(locked, "pinned"), "");
-                chmodSync(locked, 0o500);
-            },
-        });
+        const h = harness({});
+        lastClient = h.client;
+        const executor = openCodeMemoryCaptureExecutor(h.client as never);
+        const signal = new AbortController().signal;
+        await executor({ ...work, system: "first" }, signal);
+        const first = h.directories[0] as string;
+        const locked = join(first, "locked");
+        mkdirSync(locked);
+        writeFileSync(join(locked, "pinned"), "");
+        chmodSync(locked, 0o500);
         try {
-            const result = await openCodeMemoryCaptureExecutor(client as never)(
-                work,
-                new AbortController().signal,
-            );
-            expect(result).toEqual({ model: "custom/m", text: '{"ok":true}' });
-            expect(existsSync(directory())).toBe(true);
-            expect(isNativeCaptureProject(directory())).toBe(true);
+            for (const system of ["second", "third", "fourth"])
+                await executor({ ...work, system }, signal);
+            expect(h.disposed).toEqual([]);
+            await executor({ ...work, system: "fifth" }, signal);
+            await Promise.resolve();
+            expect(h.disposed).toEqual([first]);
+            expect(existsSync(first)).toBe(true);
+            expect(isNativeCaptureProject(first)).toBe(true);
+            for (const directory of new Set(h.directories.slice(1)))
+                expect(isNativeCaptureProject(directory)).toBe(true);
         } finally {
-            if (locked) chmodSync(locked, 0o700);
-            rmSync(directory(), { recursive: true, force: true });
+            chmodSync(locked, 0o700);
+            rmSync(first, { recursive: true, force: true });
         }
-        expect(isNativeCaptureProject(directory())).toBe(false);
+        expect(isNativeCaptureProject(first)).toBe(false);
     });
 });
