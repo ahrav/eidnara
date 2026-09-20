@@ -6,6 +6,17 @@ import {
 } from "@eidnara/opencode/shared/memory-capture";
 import { resolveModelRefForHost } from "./subagent-runner";
 
+/** Provider auth and transport failures say nothing about the model's output, so they must not
+ * spend the daemon's model-failure allowance. Pi surfaces them only as `errorMessage` text at
+ * this pin; the classes match Pi's own retry matcher plus credential rejections. */
+const PROVIDER_UNAVAILABLE =
+    /\b(?:401|403|429|5\d\d)\b|unauthori[sz]ed|forbidden|invalid.?api.?key|authentication|rate.?limit|too many requests|overloaded|service.?unavailable|server.?error|network|connection|fetch failed|socket|timed? ?out|timeout|terminated/i;
+
+function failureCode(message: string | undefined, signal: AbortSignal): NativeCaptureError["code"] {
+    if (signal.aborted) return "cancelled";
+    return PROVIDER_UNAVAILABLE.test(message ?? "") ? "provider_unavailable" : "model_failed";
+}
+
 /** Resolve auth inside the active harness, including its OAuth refresh and
  * registered custom providers. Neither credentials nor reasoning leave it. */
 export function piMemoryCaptureExecutor(ctx: ExtensionContext): NativeCaptureExecutor {
@@ -65,7 +76,7 @@ export function piMemoryCaptureExecutor(ctx: ExtensionContext): NativeCaptureExe
                     text += event.delta;
                 }
                 if (event.type === "error")
-                    throw new NativeCaptureError(signal.aborted ? "cancelled" : "model_failed");
+                    throw new NativeCaptureError(failureCode(event.error.errorMessage, signal));
                 if (event.type === "done" && event.reason !== "stop")
                     throw new NativeCaptureError(
                         event.reason === "length" ? "output_limit" : "model_failed",
@@ -80,7 +91,9 @@ export function piMemoryCaptureExecutor(ctx: ExtensionContext): NativeCaptureExe
             controller.abort();
             throw error instanceof NativeCaptureError
                 ? error
-                : new NativeCaptureError(signal.aborted ? "cancelled" : "model_failed");
+                : new NativeCaptureError(
+                      failureCode(error instanceof Error ? error.message : undefined, signal),
+                  );
         } finally {
             signal.removeEventListener("abort", abort);
         }

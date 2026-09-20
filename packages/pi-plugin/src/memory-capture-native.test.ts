@@ -159,3 +159,72 @@ it("resolves a canonical lease model to the host provider and returns the lease 
     expect(output).toEqual({ model: "openai/m", text: "ok" });
     expect(streamed).toEqual(["openai-codex/m"]);
 });
+
+it("reports provider auth and transport failures as provider_unavailable, not model_failed", async () => {
+    const model: Model<Api> = {
+        id: "m",
+        name: "custom",
+        provider: "custom-native",
+        api: source,
+        baseUrl: "http://127.0.0.1",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32000,
+        maxTokens: 16000,
+    };
+    const failed = (errorMessage: string): AssistantMessage => ({
+        role: "assistant",
+        content: [],
+        api: source,
+        provider: model.provider,
+        model: model.id,
+        stopReason: "error",
+        errorMessage,
+        timestamp: 0,
+        usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+    });
+    let errorMessage = "";
+    const stream: Parameters<typeof registerApiProvider>[0]["streamSimple"] = () => {
+        const events = createAssistantMessageEventStream();
+        events.push({ type: "error", reason: "error", error: failed(errorMessage) });
+        return events;
+    };
+    registerApiProvider({ api: source, stream, streamSimple: stream }, source);
+    const executor = piMemoryCaptureExecutor({
+        modelRegistry: {
+            find: () => model,
+            getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {} }),
+        },
+    } as never);
+    const codeFor = async (message: string): Promise<string> => {
+        errorMessage = message;
+        try {
+            await executor(
+                {
+                    model: "custom-native/m",
+                    system: "system",
+                    prompt: "source",
+                    maxOutputTokens: 8192,
+                    maxOutputBytes: 131072,
+                    maxDurationMs: 90000,
+                },
+                new AbortController().signal,
+            );
+        } catch (error) {
+            return (error as { code: string }).code;
+        }
+        return "resolved";
+    };
+    expect(await codeFor("401 Unauthorized: invalid API key")).toBe("provider_unavailable");
+    expect(await codeFor("429 Too Many Requests")).toBe("provider_unavailable");
+    expect(await codeFor("fetch failed: ECONNREFUSED")).toBe("provider_unavailable");
+    expect(await codeFor("invalid_request_error: unsupported parameter")).toBe("model_failed");
+});
