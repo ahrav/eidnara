@@ -647,8 +647,9 @@ mod tests {
         let kernel_dir = tempfile::tempdir().unwrap();
         let kernel_store = kernel::KernelStore::open(kernel_dir.path()).unwrap();
         let t0 = crate::now_ms();
-        seed_retained_capture(&kernel_store, t0 + 1_000);
-        let sweep_at = t0 + 2_000;
+        // A minute of slack past the wall clock: the Kernel judges the deadline against its own clock at the write, and opening two stores on a loaded runner has taken longer than a second.
+        seed_retained_capture(&kernel_store, t0 + 60_000);
+        let sweep_at = t0 + 61_000;
         let pass = sweep_and_sample(&store, Some(&kernel_store), sweep_at, None, &|| false)
             .expect("not cancelled");
         assert!(pass.healthy);
@@ -1096,8 +1097,8 @@ mod tests {
             other => panic!("{other:?}"),
         };
         let (staged, binding) =
-            stage_review_input(&kernel_store, &expired.causal_identity, t0, t0 + 1_000);
-        let sweep_at = t0 + 2_000;
+            stage_review_input(&kernel_store, &expired.causal_identity, t0, t0 + 60_000);
+        let sweep_at = t0 + 61_000;
         let job_state = || {
             store
                 .lookup_memory_reviewer_job("git:p", &expired.causal_identity)
