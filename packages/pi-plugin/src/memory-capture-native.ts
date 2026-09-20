@@ -4,14 +4,18 @@ import {
     NativeCaptureError,
     type NativeCaptureExecutor,
 } from "@eidnara/opencode/shared/memory-capture";
+import { resolveModelRefForHost } from "./subagent-runner";
 
 /** Resolve auth inside the active harness, including its OAuth refresh and
  * registered custom providers. Neither credentials nor reasoning leave it. */
 export function piMemoryCaptureExecutor(ctx: ExtensionContext): NativeCaptureExecutor {
     return async (work, signal) => {
-        const separator = work.model.indexOf("/");
-        const provider = work.model.slice(0, separator);
-        const id = work.model.slice(separator + 1);
+        // The daemon's configured chain names canonical refs (`openai/...`); this host registers
+        // the same provider under its own name (`openai-codex`). The lease keeps the daemon's ref.
+        const native = resolveModelRefForHost(work.model);
+        const separator = native.indexOf("/");
+        const provider = native.slice(0, separator);
+        const id = native.slice(separator + 1);
         const model =
             ctx.model?.provider === provider && ctx.model.id === id
                 ? ctx.model

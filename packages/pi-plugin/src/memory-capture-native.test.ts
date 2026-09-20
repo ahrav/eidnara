@@ -96,3 +96,66 @@ it("uses native custom-provider auth without exposing credentials or reasoning",
     expect(authCalls).toBe(1);
     expect(calls).toBe(1);
 });
+
+it("resolves a canonical lease model to the host provider and returns the lease model", async () => {
+    const model: Model<Api> = {
+        id: "m",
+        name: "codex",
+        provider: "openai-codex",
+        api: source,
+        baseUrl: "http://127.0.0.1",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32000,
+        maxTokens: 16000,
+    };
+    const result: AssistantMessage = {
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+        api: source,
+        provider: model.provider,
+        model: model.id,
+        stopReason: "stop",
+        timestamp: 0,
+        usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 2,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+    };
+    const streamed: string[] = [];
+    const stream: Parameters<typeof registerApiProvider>[0]["streamSimple"] = (streamModel) => {
+        streamed.push(`${streamModel.provider}/${streamModel.id}`);
+        const events = createAssistantMessageEventStream();
+        events.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: result });
+        events.push({ type: "done", reason: "stop", message: result });
+        return events;
+    };
+    registerApiProvider({ api: source, stream, streamSimple: stream }, source);
+    const executor = piMemoryCaptureExecutor({
+        modelRegistry: {
+            // Pi registers the OAuth provider as `openai-codex`; the daemon's configured chain
+            // names the canonical `openai/...` ref.
+            find: (provider: string, id: string) =>
+                provider === "openai-codex" && id === model.id ? model : undefined,
+            getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {} }),
+        },
+    } as never);
+    const output = await executor(
+        {
+            model: "openai/m",
+            system: "system",
+            prompt: "source",
+            maxOutputTokens: 8192,
+            maxOutputBytes: 131072,
+            maxDurationMs: 90000,
+        },
+        new AbortController().signal,
+    );
+    expect(output).toEqual({ model: "openai/m", text: "ok" });
+    expect(streamed).toEqual(["openai-codex/m"]);
+});

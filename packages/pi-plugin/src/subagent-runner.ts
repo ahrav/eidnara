@@ -176,7 +176,8 @@ function modelRefToCanonicalForHost(ref: string): string {
     return isOmpHostProcess() ? ompModelRefToCanonical(ref) : piModelRefToCanonical(ref);
 }
 
-function resolveModelRefForHost(ref: string): string {
+/** Maps a canonical or host-form model ref to the form this host registers its providers under. */
+export function resolveModelRefForHost(ref: string): string {
     return isOmpHostProcess() ? resolveModelRefForOmp(ref) : resolveModelRefForPi(ref);
 }
 let configuredSubagentExtensions: readonly string[] | undefined;

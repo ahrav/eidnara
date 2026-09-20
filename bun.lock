@@ -110,10 +110,12 @@
         "@eidnara/host-linux-x64-gnu": "0.1.0",
       },
       "peerDependencies": {
+        "@earendil-works/pi-ai": "^0.80.2",
         "@earendil-works/pi-coding-agent": "^0.80.2",
         "@earendil-works/pi-tui": "^0.80.2",
       },
       "optionalPeers": [
+        "@earendil-works/pi-ai",
         "@earendil-works/pi-coding-agent",
         "@earendil-works/pi-tui",
       ],
