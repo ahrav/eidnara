@@ -1120,6 +1120,125 @@ async fn a_staged_subject_is_policy_blocked_for_a_remote_model_and_abstains() {
     assert!(fixture.attempts().is_empty());
 }
 
+/// The production selector's classes reach the coordinator: a canonical-claim subject resolves through its originating decision and is refused for the remote destination before any request, since its artifact carries no repository provenance and is therefore Sensitive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_canonical_subject_resolves_through_its_decision_and_abstains_for_a_remote_model() {
+    let mut fixture = Fixture::open(CASES[0].sources);
+    let claim_text = "the claim as canonical text";
+    let handle = fixture
+        .store
+        .ingest_artifact(kernel::ArtifactIngestRequest {
+            intent: intent("ingest-claim"),
+            payload: claim_text.as_bytes().to_vec(),
+            evidence_id: "evidence-claim".to_string(),
+            object_id: "evidence-object-claim".to_string(),
+            object_kind: "evidence".to_string(),
+            domain_id: DOMAIN.to_string(),
+            source_kind: "conversation".to_string(),
+            source_id: "src/claim".to_string(),
+            source_revision: 1,
+            media_type: "text/plain".to_string(),
+            retention_class: "canonical".to_string(),
+            retain_until: None,
+            asserted_sensitivity: Sensitivity::Normal,
+            provider_egress: ProviderEgress::RemoteAllowed,
+            provenance: None,
+        })
+        .unwrap();
+    let mut claim_object = None;
+    fixture
+        .store
+        .commit(intent("decision-and-claim"), |envelope| {
+            envelope.insert_decision(kernel::DecisionSpec {
+                decision_id: "decision-decision-a".to_string(),
+                object_id: "decision-a".to_string(),
+                domain_id: DOMAIN.to_string(),
+                proposition_id: None,
+                scope_id: Some(SCOPE.to_string()),
+                anchor_id: None,
+                evidence_id: None,
+                decision_kind: "architecture".to_string(),
+                payload: kernel::DecisionPayload {
+                    summary: "summary".to_string(),
+                    rationale: "rationale".to_string(),
+                },
+                source_kind: "repo".to_string(),
+                source_id: "src/decision".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            envelope.record_admission(kernel::AdmissionRequest {
+                candidate_id: None,
+                subject_object_id: Some("decision-a".to_string()),
+                source_class: Some(kernel::SourceClass::ExplicitUser),
+                taint_class: Some(kernel::TaintClass::UserExplicit),
+                event: kernel::AdmissionEvent {
+                    kind: kernel::EventKind::Other,
+                    trigger_object_id: None,
+                    approval_object_id: None,
+                    evidence_id: None,
+                    reason: "test".to_string(),
+                },
+            })?;
+            let outcome = envelope
+                .publish_source_descriptor(&kernel::SourceDescriptorRequest {
+                    occurrence: kernel::source_identity::Occurrence {
+                        class: "canonical_claims",
+                        identity: &[("object_id", "decision-a")],
+                        revision: "1",
+                        representation: "decision_summary",
+                        span: None,
+                    },
+                    source_policy: kernel::SourceDescriptorPolicy::Native,
+                    domain_id: DOMAIN,
+                    scope_id: Some(SCOPE),
+                    evidence_id: &handle.evidence_id,
+                    artifact_digest: &handle.digest,
+                    buffer: claim_text,
+                    sensitivity: Sensitivity::Normal,
+                    observed_at: 1,
+                })
+                .unwrap_or_else(|error| panic!("descriptor publication: {error:?}"));
+            claim_object = Some(outcome.object_id);
+            Ok(String::new())
+        })
+        .unwrap();
+    let claim_object = claim_object.unwrap();
+    fixture.input.subject = ReviewTarget::Memory {
+        object_id: claim_object.clone(),
+        source_revision: 1,
+    };
+    let tip_before = fixture.store.tip().unwrap();
+    let peer = Peer::start().await;
+    let settled = fixture
+        .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(settled, Settled::Abstained(AbstainReason::OwnerSensitive));
+    assert_eq!(peer.connections.load(Ordering::SeqCst), 0);
+    assert!(fixture.attempts().is_empty());
+    // The subject was resolved, not refused as unsupported: the hold was taken over the claim's evidence, which only a resolved subject protects.
+    assert_eq!(
+        fixture.receipt().terminal,
+        Some(MemoryReviewerReceiptTerminal::Abstained)
+    );
+    let (tip_after, states) = fixture
+        .store
+        .object_states(&["decision-a".to_string(), claim_object])
+        .unwrap();
+    assert!(
+        states.iter().all(|state| state
+            .as_ref()
+            .is_some_and(|state| state.object.invalidated_commit_seq.is_none())),
+        "the decision and its descriptor are untouched"
+    );
+    // The abstention is a ledger write, and the hold this run took and released lives in `capture_pins`: nothing here commits to the Kernel.
+    assert_eq!(
+        tip_after, tip_before,
+        "the abstained run must not create a Kernel commit"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inspections_are_charged_once_per_read_and_capped_per_job_and_per_batch() {
     // Two linked sources and a limit of three issued inspections: the subject is the first, the batch of two reads the second and third, and any further read is refused by the job cap, not the batch cap.

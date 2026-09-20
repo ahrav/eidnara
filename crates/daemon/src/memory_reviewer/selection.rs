@@ -14,19 +14,23 @@ use memory_store::memory_reviewer_jobs::{
     CausalInputs, EvidenceAvailability, FrozenSelectionPage, MAX_SELECTION_REFERENCES, ReviewTarget,
 };
 
-/// Descriptor classes the production selector walks: the memories the Memory Classifier reviews. The coordinator resolves both only through their originating decision (Q21), which `resolve_descriptor` does not do yet: a job over either class settles `Unsupported` before investigation and its causal row then suppresses the target under the same inputs. Activating the selection kind (Q36) therefore waits on Q21, or on narrowing this list to classes the coordinator resolves.
+/// The descriptor classes the production selector walks: the memories the Memory Classifier reviews, each resolved by the coordinator through its originating decision.
 pub const MEMORY_CLASSES: &[OccurrenceClass] = &[
     OccurrenceClass::CanonicalClaims,
     OccurrenceClass::PromotedMemory,
 ];
 
-pub fn resolvable_classes() -> Vec<OccurrenceClass> {
-    MEMORY_CLASSES
-        .iter()
-        .copied()
-        .filter(|class| super::coordinator::resolves_class(*class))
-        .collect()
-}
+// Every walked class must be decision-derived: native resolution targets its own descriptor and bypasses its owner's retraction. This assertion detects classes omitted from `decision_derived`.
+const _: () = {
+    let mut index = 0;
+    while index < MEMORY_CLASSES.len() {
+        assert!(super::broker::decision_derived(MEMORY_CLASSES[index]));
+        index += 1;
+    }
+};
+
+/// Gates scheduling of selection over [`MEMORY_CLASSES`]; the scheduler adds no selection task while this is `false`. Opening requires the owner decision and positive witness recorded under "Production selection gate" in `docs/memory-reviewer-operations.md`.
+pub const PRODUCTION_SELECTION_OPEN: bool = false;
 /// Live descriptors examined per selection page, so one slot's work is bounded whatever the inventory's size.
 pub const MAX_EXAMINED_PER_PAGE: usize = 256;
 

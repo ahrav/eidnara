@@ -14,7 +14,9 @@ use kernel::{KernelStore, LiveDescriptor};
 
 use super::broker::{
     Alias, EvidenceBroker, Probed, ReferenceExpectation, Refusal, RefusalCode, RenderedBuffer,
+    originating_decision,
 };
+use super::selection::MEMORY_CLASSES;
 use super::{Completeness, EXCERPT_LEAD_BYTES, MAX_EXCERPT_BYTES, excerpt_window};
 
 /// Hits per page; one page fills at most one model batch.
@@ -34,10 +36,8 @@ const MIN_TERM_BYTES: usize = 4;
 /// Longest subject token used as a matcher: the excerpt after its lead must hold the whole term.
 const MAX_TERM_BYTES: usize = MAX_EXCERPT_BYTES - EXCERPT_LEAD_BYTES;
 const CURSOR_PREFIX: &str = "cur-";
-const CLASSES: [OccurrenceClass; 2] = [
-    OccurrenceClass::CanonicalClaims,
-    OccurrenceClass::PromotedMemory,
-];
+/// Discovery walks the classes the production selector walks, so a related memory is always a form of a decision.
+const CLASSES: &[OccurrenceClass] = MEMORY_CLASSES;
 
 /// One related memory, disclosed through the broker.
 #[derive(Debug)]
@@ -350,7 +350,7 @@ fn decision_revisions(
 ) -> Result<BTreeMap<String, i64>, Refusal> {
     let decisions: Vec<String> = rows
         .iter()
-        .filter_map(|row| originating_decision(OccurrenceClass::from_code(&row.detail.class)?, row))
+        .filter_map(|row| row_decision(row).map(str::to_string))
         .collect();
     let (_, states) = store
         .object_states(&decisions)
@@ -368,27 +368,25 @@ fn expectation(
     revisions: &BTreeMap<String, i64>,
 ) -> Option<ReferenceExpectation> {
     let class = OccurrenceClass::from_code(&row.detail.class)?;
-    let decision = originating_decision(class, row)?;
-    let decision_source_revision = *revisions.get(&decision)?;
+    let decision = originating_decision(class, &row.detail.identity)?;
+    let decision_source_revision = *revisions.get(decision)?;
     Some(ReferenceExpectation::CanonicalSource {
         object_id: row.object_id.clone(),
         class,
         source_revision: row.detail.revision.parse().ok()?,
         artifact_digest: row.detail.artifact_digest.clone(),
         evidence_id: row.detail.evidence_id.clone(),
-        originating_decision_id: decision,
+        originating_decision_id: decision.to_string(),
         decision_source_revision,
     })
 }
 
-/// The decision a descriptor row derives from: the value of the class's leading identity field, which is the decision object id for every class in [`CLASSES`]. Reading the field name from the class keeps discovery in step with the Kernel's identity layout.
-fn originating_decision(class: OccurrenceClass, row: &LiveDescriptor) -> Option<String> {
-    let field = *class.identity_fields().first()?;
-    row.detail
-        .identity
-        .iter()
-        .find(|(name, _)| name == field)
-        .map(|(_, value)| value.clone())
+/// The originating decision named by one live descriptor row, or `None` for a row of a native class.
+fn row_decision(row: &LiveDescriptor) -> Option<&str> {
+    originating_decision(
+        OccurrenceClass::from_code(&row.detail.class)?,
+        &row.detail.identity,
+    )
 }
 
 fn refusal(code: RefusalCode) -> Refusal {
