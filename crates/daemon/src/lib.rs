@@ -23027,6 +23027,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancelled_submission_backs_its_sources_off_like_any_dispatch() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"error":"cancelled"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submit)
+                    .await
+            )["state"],
+            "pending"
+        );
+        let job = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(job.attempts, 1);
+        assert_eq!(
+            job.failures, 0,
+            "cancellation does not consume the allowance"
+        );
+        assert!(
+            store
+                .pending_memory_captures(project_key, "pi", now_ms())
+                .unwrap()
+                .is_empty(),
+            "a cancelled dispatch still backs off, so a tight claim/cancel loop cannot form"
+        );
+    }
+
+    #[tokio::test]
     async fn a_claim_whose_request_was_dropped_records_no_dispatch() {
         let state = Arc::new(ProducerState::default());
         let (handler, store, _dir, project) =
