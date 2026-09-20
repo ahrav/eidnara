@@ -80,7 +80,7 @@ Before a resumed run resolves its subject or takes any evidence work, it reads t
 
 - A sealed proposal row at the generation's provisional identity is revalidated from its record: the union bytes must re-encode to their digest; the marker must be a completed attempt at that generation with the recorded body and union digests; every member is rebuilt from the live store and judged as a live run would judge it, including uncited members and each canonical member's originating decision and its revision; the members must produce exactly the payload's disclosed inputs and ancestry. A row that passes is published exactly as a live settlement would, under the review hold the lost run transferred or, when it had not, under this run's execution hold, extended over the record's inputs first because a hold recovered or replaced after an unsettled exit may cover nothing. Zero model requests.
 - A row that fails revalidation, or a row staged without a record, ends the receipt `abstained` with the reason revalidation names. Nothing infers lineage from the payload, and no migration rewrites old rows.
-- No sealed row ends the receipt `unknown`. A committed marker with an unknown outcome is not authority to send again.
+- When no sealed row exists, the receipt completes `unknown`. A committed marker with an unknown outcome is not authority to send again.
 
 A takeover advances the generation, so a successor adopts only a result of its own generation; the losing generation's row stays sealed and private. The selected read runs the same revalidation for a local reader on every `review.read`, so a proposal whose cited or uncited lineage moved after selection answers `dependency_refused` while the receipt still selects it.
 
