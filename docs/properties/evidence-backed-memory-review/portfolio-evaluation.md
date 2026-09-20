@@ -31,7 +31,8 @@ reviews found and how each finding was dispositioned.
 | --- | --- | --- |
 | A reconciliation error returned before Kernel maintenance, so one unparsable pin could starve capture expiry and staging cleanup for up to seven days | gap | fixed: the pass records `healthy = false` and continues into Kernel maintenance; an unparsable owner is skipped rather than failing the listing |
 | `in_progress_memory_reviewer_receipts` took a `LIMIT` ordered by run deadline, so overflow would omit the newest receipts and release holds their settlements still needed | gap | fixed: the query is unbounded; every in-progress receipt holds a pending job under the store's own bounds |
-| `memory_reviewer_result_is_selected` ignored the selection's project digest and store incarnation, so a same-target job elsewhere could keep a hold alive | gap | fixed: both predicates added from the hold's binding |
+| The reconciler's selection question ignored the selection's project digest and store incarnation, so a same-target job elsewhere could keep a hold alive | gap | fixed: both predicates come from the receipt's recorded selection and the live incarnation |
+| The selection question was one query per live review hold, and `memory_reviewer_receipts` is indexed by state alone, so each pass walked every complete receipt once per hold for as long as selected results kept their holds | gap | fixed: `selected_memory_reviewer_results` lists every selected triple once per pass and holds are filtered against the set, matching the pending set |
 | Memory Store reads were interleaved with Kernel releases inside one loop | refinement | fixed: orphans are collected first, then released |
 | `DeadlineClock` enum encoded one integer floor | refinement | fixed: `load_staged_review` takes the instant directly |
 | `read_selected_review_input` carried an unused `now`; `ActiveReviewHold` carried an unread `expires_at` | refinement | fixed: both removed |

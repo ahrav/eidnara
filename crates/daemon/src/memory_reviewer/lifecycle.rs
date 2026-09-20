@@ -243,7 +243,7 @@ pub fn reconcile_review_holds(
     if holds.is_empty() {
         return Ok(0);
     }
-    // Every Memory Store read finishes before the first Kernel release.
+    // Both Memory Store sets are read once, ahead of any Kernel release, so filtering the holds performs no store probes.
     let pending: HashSet<(String, u64)> = store
         .in_progress_memory_reviewer_receipts()
         .map_err(|error| error.to_string())?
@@ -255,22 +255,23 @@ pub fn reconcile_review_holds(
             )
         })
         .collect();
-    let mut orphaned = Vec::new();
-    for hold in holds {
-        let key = (hold.binding.subject.clone(), hold.binding.generation);
-        if pending.contains(&key)
-            || store
-                .memory_reviewer_result_is_selected(
-                    &hold.binding.project_digest,
-                    &hold.binding.subject,
-                    hold.binding.generation,
-                )
-                .map_err(|error| error.to_string())?
-        {
-            continue;
-        }
-        orphaned.push(hold);
-    }
+    let selected: HashSet<(String, String, u64)> = store
+        .selected_memory_reviewer_results()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect();
+    let orphaned: Vec<_> = holds
+        .into_iter()
+        .filter(|hold| {
+            let binding = &hold.binding;
+            !pending.contains(&(binding.subject.clone(), binding.generation))
+                && !selected.contains(&(
+                    binding.project_digest.clone(),
+                    binding.subject.clone(),
+                    binding.generation,
+                ))
+        })
+        .collect();
     let mut released = 0;
     for hold in orphaned {
         match kernel.release_review_hold(&hold.hold_id, &hold.binding) {

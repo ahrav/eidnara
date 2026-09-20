@@ -1513,28 +1513,28 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
-    /// Whether a completed receipt of the live store incarnation selects `candidate_id` at `generation` under `project_digest`. The lifecycle reconciler asks this for each live review hold before releasing one no receipt selects; the digest and incarnation come from the hold's binding, so a same-target job in another project or a prior incarnation cannot keep a hold alive.
-    pub fn memory_reviewer_result_is_selected(
+    /// Every `(project_digest, candidate_id, generation)` a completed receipt of the live store incarnation selects, ordered by project and causal identity. Receipts of a prior incarnation are excluded.
+    pub fn selected_memory_reviewer_results(
         &self,
-        project_digest: &str,
-        candidate_id: &str,
-        generation: u64,
-    ) -> Result<bool, MemoryStoreError> {
-        let Ok(generation) = i64::try_from(generation) else {
-            return Ok(false);
-        };
+    ) -> Result<Vec<(String, String, u64)>, MemoryStoreError> {
         self.inner
             .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM memory_reviewer_receipts
-                                    WHERE state = 'complete' AND terminal_kind = 'complete'
-                                      AND selected_project_digest = ?1
-                                      AND selected_candidate_id = ?2 AND selected_generation = ?3
-                                      AND database_incarnation_id = (SELECT database_incarnation_id
-                                                                     FROM memory_reviewer_store_identity WHERE id = 0))",
-                    params![project_digest, candidate_id, generation],
-                    |row| row.get(0),
-                )
+                let mut statement = conn.prepare_cached(
+                    "SELECT selected_project_digest, selected_candidate_id, selected_generation
+                       FROM memory_reviewer_receipts
+                      WHERE state = 'complete' AND terminal_kind = 'complete'
+                        AND database_incarnation_id = (SELECT database_incarnation_id
+                                                       FROM memory_reviewer_store_identity WHERE id = 0)
+                      ORDER BY project, causal_identity",
+                )?;
+                let rows = statement.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                    ))
+                })?;
+                rows.collect()
             })
             .map_err(Into::into)
     }

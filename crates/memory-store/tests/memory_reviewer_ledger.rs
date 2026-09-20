@@ -2301,12 +2301,13 @@ fn the_sweep_closes_an_in_progress_receipt_at_the_queue_deadline_before_its_run_
             .state,
         MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Expired)
     );
-    // The reconciler's questions: nothing selects this result, and it is no longer pending.
+    // An expired terminal result is neither selected nor pending.
     assert!(
-        !fixture
+        fixture
             .store
-            .memory_reviewer_result_is_selected(&"a".repeat(64), "review-result:any", 1)
+            .selected_memory_reviewer_results()
             .unwrap()
+            .is_empty()
     );
     assert!(
         fixture
@@ -2317,7 +2318,7 @@ fn the_sweep_closes_an_in_progress_receipt_at_the_queue_deadline_before_its_run_
     );
 }
 
-/// The reconciler's selection question is scoped to the selection's project digest and the exact generation: a completed selection answers only for those, never for another digest, another generation, or an unselected terminal.
+/// A completed selection is listed as one exact triple; a hold matches only its project digest, candidate, and generation.
 #[test]
 fn a_selected_result_answers_only_for_its_project_digest_and_generation() {
     let fixture = Fixture::open();
@@ -2345,16 +2346,18 @@ fn a_selected_result_answers_only_for_its_project_digest_and_generation() {
         .unwrap(),
         LeaseCompleteOutcome::Applied { .. }
     ));
-    let selected = |digest: &str, candidate: &str, generation: u64| {
-        fixture
-            .store
-            .memory_reviewer_result_is_selected(digest, candidate, generation)
-            .unwrap()
+    let selected = fixture.store.selected_memory_reviewer_results().unwrap();
+    assert_eq!(
+        selected,
+        vec![(digest.clone(), "review-result:selected".to_string(), 1)]
+    );
+    let contains = |digest: &str, candidate: &str, generation: u64| {
+        selected.contains(&(digest.to_string(), candidate.to_string(), generation))
     };
-    assert!(selected(&digest, "review-result:selected", 1));
-    assert!(!selected(&"f".repeat(64), "review-result:selected", 1));
-    assert!(!selected(&digest, "review-result:selected", 2));
-    assert!(!selected(&digest, "review-result:other", 1));
+    assert!(contains(&digest, "review-result:selected", 1));
+    assert!(!contains(&"f".repeat(64), "review-result:selected", 1));
+    assert!(!contains(&digest, "review-result:selected", 2));
+    assert!(!contains(&digest, "review-result:other", 1));
     assert!(
         fixture
             .store
