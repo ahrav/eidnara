@@ -5,12 +5,42 @@ use std::collections::{BTreeMap, BTreeSet};
 use eval_core::{
     ArmRates, Attestation, BinaryDigest, BuildRecord, ClaimBoundary, ComponentVersions,
     Construction, Cut, CutOutcome, CutReceipt, MANIFEST_SCHEMA, Manifest, ObservationSchema,
-    Reachability, ResourceLimits, Rule, RunIdentity, RunStatus, SemanticTrace, TokenizerProfile,
-    eval_run_id,
+    Reachability, RepositorySpec, ResourceLimits, Rule, RunIdentity, RunStatus, SemanticTrace,
+    SessionSpec, TokenizerProfile, WorldConfig, eval_run_id,
 };
 use serde_json::json;
 
 pub const OBSERVATION_TYPE: &str = "surface1_hint_decision";
+pub const WORLD_SEED: u64 = 0x5EED_0000_0000_0001;
+pub const WORLD_EPOCH_MS: i64 = 1_700_000_000_000;
+
+/// Two sessions and one repository. Session 1 fires a correction and an
+/// invalidation on the same slot; four renames over three paths force a chain.
+pub fn world_config() -> WorldConfig {
+    WorldConfig {
+        sessions: vec![
+            SessionSpec {
+                messages: 6,
+                tool_span_every: 2,
+                correction_every: 3,
+                invalidation_every: 5,
+            },
+            SessionSpec {
+                messages: 5,
+                tool_span_every: 3,
+                correction_every: 2,
+                invalidation_every: 2,
+            },
+        ],
+        repositories: vec![RepositorySpec {
+            commits: 8,
+            rename_every: 2,
+        }],
+        epoch_ms: WORLD_EPOCH_MS,
+        tick_ms: 1_000,
+        max_events_per_log: 64,
+    }
+}
 
 pub fn build() -> BuildRecord {
     BuildRecord {

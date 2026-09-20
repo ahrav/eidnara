@@ -1,0 +1,511 @@
+use std::collections::BTreeMap;
+
+use context_core::canonical_json::protocol_digest;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::event::{
+    CausalEdge, Event, EventId, EventLog, LogError, MAX_VALID_TIME_MS, Payload, StreamLabel,
+};
+use crate::stream::{ChoiceKind, Chooser, RANDOM_SCHEMA_VERSION, ReplayRefusal, Tape};
+
+pub const GENERATOR_VERSION: &str = "eval-generator/v1";
+pub const TAPE_IDENTITY_PROTOCOL: &str = "eval-tape/v1";
+const OID_PROTOCOL: &str = "eval-git-oid/v1";
+
+const TIME_GAP_TICKS: [i64; 4] = [0, 1, 2, 5];
+const OBSERVATION_LAGS_MS: [i64; 4] = [0, 1_000, 60_000, 3_600_000];
+const WORDS: [&str; 6] = [
+    "allocator",
+    "barrier",
+    "cursor",
+    "digest",
+    "envelope",
+    "fence",
+];
+const INITIAL_PATHS: [&str; 3] = ["src/lib.rs", "src/main.rs", "README.md"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorldConfig {
+    pub sessions: Vec<SessionSpec>,
+    pub repositories: Vec<RepositorySpec>,
+    #[serde(with = "crate::decimal")]
+    pub epoch_ms: i64,
+    #[serde(with = "crate::decimal")]
+    pub tick_ms: i64,
+    pub max_events_per_log: u32,
+}
+
+/// `*_every` of `n` fires on every `n`-th slot; `0` never fires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSpec {
+    pub messages: u32,
+    pub tool_span_every: u32,
+    pub correction_every: u32,
+    pub invalidation_every: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositorySpec {
+    pub commits: u32,
+    pub rename_every: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorldError {
+    InvalidField(&'static str),
+    /// Raised before generation from the declared count, and while driving
+    /// from the running count.
+    EventBound {
+        events: u64,
+        max: u32,
+    },
+    TimeOverflow {
+        entity_id: String,
+    },
+    Replay(ReplayRefusal),
+    Log(LogError),
+}
+
+debug_display!(WorldError);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mode {
+    Generate,
+    ReplayTape(Tape),
+}
+
+/// `Emitted` batches are never empty and arrive in emission order; `Done` repeats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    Emitted(Vec<Event>),
+    Done,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct World {
+    pub log: EventLog,
+    pub tape: Tape,
+}
+
+fn fires(every: u32, k: u32) -> bool {
+    every > 0 && (k + 1).is_multiple_of(every)
+}
+
+impl SessionSpec {
+    fn events_at(&self, k: u32) -> usize {
+        1 + usize::from(fires(self.tool_span_every, k))
+            + usize::from(k > 0 && fires(self.correction_every, k))
+            + usize::from(k > 0 && fires(self.invalidation_every, k))
+    }
+}
+
+impl RepositorySpec {
+    fn events_at(&self, k: u32) -> usize {
+        1 + usize::from(fires(self.rename_every, k))
+    }
+}
+
+/// Binds a tape to the seed, config, and generator it was recorded under.
+pub fn tape_identity(root_seed: u64, config: &WorldConfig) -> String {
+    let key = json!({
+        "root_seed": root_seed.to_string(),
+        "config": config,
+        "generator_version": GENERATOR_VERSION,
+        "random_schema_version": RANDOM_SCHEMA_VERSION,
+    });
+    protocol_digest(TAPE_IDENTITY_PROTOCOL, &key).expect("tape identity is canonical")
+}
+
+impl WorldConfig {
+    /// The exact number of events generation emits; `O(slots)`, so `validate` gates on slots first.
+    pub fn declared_events(&self) -> u64 {
+        let sessions = self
+            .sessions
+            .iter()
+            .flat_map(|spec| (0..spec.messages).map(|k| spec.events_at(k) as u64));
+        let repositories = self
+            .repositories
+            .iter()
+            .flat_map(|spec| (0..spec.commits).map(|k| spec.events_at(k) as u64));
+        sessions.chain(repositories).sum()
+    }
+
+    fn slots(&self) -> u64 {
+        let sessions: u64 = self
+            .sessions
+            .iter()
+            .map(|spec| u64::from(spec.messages))
+            .sum();
+        let repositories: u64 = self
+            .repositories
+            .iter()
+            .map(|spec| u64::from(spec.commits))
+            .sum();
+        sessions + repositories
+    }
+
+    pub fn validate(&self) -> Result<(), WorldError> {
+        let empty_spec = self.sessions.iter().any(|spec| spec.messages == 0)
+            || self.repositories.iter().any(|spec| spec.commits == 0);
+        let invalid = [
+            ("entities", empty_spec || self.slots() == 0),
+            ("tick_ms", self.tick_ms <= 0),
+            (
+                "epoch_ms",
+                !(0..=MAX_VALID_TIME_MS).contains(&self.epoch_ms),
+            ),
+            ("max_events_per_log", self.max_events_per_log == 0),
+        ];
+        if let Some((field, _)) = invalid.into_iter().find(|(_, invalid)| *invalid) {
+            return Err(WorldError::InvalidField(field));
+        }
+        let max = self.max_events_per_log;
+        let slots = self.slots();
+        let events = if slots > u64::from(max) {
+            slots
+        } else {
+            self.declared_events()
+        };
+        if events > u64::from(max) {
+            return Err(WorldError::EventBound { events, max });
+        }
+        Ok(())
+    }
+}
+
+/// One entity's `k`-th mutation; `entity` indexes `Generator::entities`, `spec` the stream's list.
+#[derive(Clone)]
+struct Slot {
+    stream: StreamLabel,
+    entity: usize,
+    spec: usize,
+    actor: String,
+    k: u32,
+    valid_time_ms: i64,
+}
+
+#[derive(Default)]
+struct EntityState {
+    seq: u32,
+    messages: Vec<EventId>,
+    last_commit: Option<EventId>,
+    paths: Vec<(String, Option<EventId>)>,
+}
+
+pub struct Generator {
+    config: WorldConfig,
+    chooser: Chooser,
+    schedule: Vec<Slot>,
+    cursor: usize,
+    events: Vec<Event>,
+    edges: Vec<CausalEdge>,
+    depths: BTreeMap<EventId, u32>,
+    commits: Vec<EventId>,
+    entities: Vec<EntityState>,
+    failed: Option<WorldError>,
+}
+
+impl Generator {
+    /// Draws every slot time up front, so the cost is `O(declared slots)`.
+    pub fn new(root_seed: u64, config: &WorldConfig, mode: Mode) -> Result<Self, WorldError> {
+        config.validate()?;
+        let identity = tape_identity(root_seed, config);
+        let chooser = match mode {
+            Mode::Generate => Chooser::generate(root_seed, identity),
+            Mode::ReplayTape(tape) => {
+                Chooser::replay(tape, identity).map_err(WorldError::Replay)?
+            }
+        };
+        let entities = config.sessions.len() + config.repositories.len();
+        let mut generator = Self {
+            schedule: Vec::new(),
+            cursor: 0,
+            events: Vec::new(),
+            edges: Vec::new(),
+            depths: BTreeMap::new(),
+            commits: Vec::new(),
+            entities: (0..entities).map(|_| EntityState::default()).collect(),
+            failed: None,
+            chooser,
+            config: config.clone(),
+        };
+        for entity in 0..entities {
+            generator.schedule_entity(entity)?;
+        }
+        generator
+            .schedule
+            .sort_by_key(|slot| (slot.valid_time_ms, slot.stream, slot.entity, slot.k));
+        Ok(generator)
+    }
+
+    /// Slot times are chosen per entity, so no entity's schedule depends on another's slots.
+    fn schedule_entity(&mut self, entity: usize) -> Result<(), WorldError> {
+        let sessions = self.config.sessions.len();
+        let (stream, spec, slots) = match entity < sessions {
+            true => (
+                StreamLabel::Session,
+                entity,
+                self.config.sessions[entity].messages,
+            ),
+            false => (
+                StreamLabel::Repository,
+                entity - sessions,
+                self.config.repositories[entity - sessions].commits,
+            ),
+        };
+        let actor = format!("{}-{spec}", stream.label());
+        if stream == StreamLabel::Repository {
+            self.entities[entity].paths = INITIAL_PATHS
+                .iter()
+                .map(|path| (path.to_string(), None))
+                .collect();
+        }
+        let mut valid_time_ms = self.config.epoch_ms;
+        for k in 0..slots {
+            let mut slot = Slot {
+                stream,
+                entity,
+                spec,
+                actor: actor.clone(),
+                k,
+                valid_time_ms,
+            };
+            if k > 0 {
+                let gap = self.choose(ChoiceKind::TimeGap, &slot, &TIME_GAP_TICKS)?;
+                valid_time_ms = TIME_GAP_TICKS[gap]
+                    .checked_mul(self.config.tick_ms)
+                    .and_then(|gap| valid_time_ms.checked_add(gap))
+                    .filter(|time| *time <= MAX_VALID_TIME_MS)
+                    .ok_or_else(|| WorldError::TimeOverflow {
+                        entity_id: actor.clone(),
+                    })?;
+                slot.valid_time_ms = valid_time_ms;
+            }
+            self.schedule.push(slot);
+        }
+        Ok(())
+    }
+
+    /// Emits one mutation's events and returns at quiescence; batches are provisional
+    /// until `finish` succeeds, and after an error every later call returns that error.
+    pub fn step(&mut self) -> Result<Step, WorldError> {
+        if let Some(error) = &self.failed {
+            return Err(error.clone());
+        }
+        let Some(slot) = self.schedule.get(self.cursor).cloned() else {
+            return Ok(Step::Done);
+        };
+        let first = self.events.len();
+        let result = match slot.stream {
+            StreamLabel::Session => self.message_slot(slot),
+            StreamLabel::Repository => self.commit_slot(slot),
+        };
+        match result {
+            Ok(()) => {
+                self.cursor += 1;
+                Ok(Step::Emitted(self.events[first..].to_vec()))
+            }
+            Err(error) => {
+                self.failed = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    /// The events emitted so far, re-linearized; an earlier snapshot is not a prefix of a later one.
+    pub fn log(&self) -> Result<EventLog, WorldError> {
+        if let Some(error) = &self.failed {
+            return Err(error.clone());
+        }
+        Ok(EventLog::new(self.events.clone(), self.edges.clone()))
+    }
+
+    /// Drives the remaining slots, then closes the tape and validates the log.
+    pub fn finish(mut self) -> Result<World, WorldError> {
+        while let Step::Emitted(_) = self.step()? {}
+        let log = EventLog::new(self.events, self.edges);
+        log.validate(self.config.max_events_per_log as usize)
+            .map_err(WorldError::Log)?;
+        Ok(World {
+            log,
+            tape: self.chooser.finish(),
+        })
+    }
+
+    /// Reserves the slot's events first; every lag is at most `MAX_REVISION_LEAD_MS`, so no overflow.
+    fn open(&mut self, slot: &Slot, count: usize) -> Result<i64, WorldError> {
+        let max = self.config.max_events_per_log;
+        let events = (self.events.len() + count) as u64;
+        if events > u64::from(max) {
+            return Err(WorldError::EventBound { events, max });
+        }
+        let lag = self.choose(ChoiceKind::ObservationLag, slot, &OBSERVATION_LAGS_MS)?;
+        Ok(slot.valid_time_ms + OBSERVATION_LAGS_MS[lag])
+    }
+
+    fn choose<T: Serialize>(
+        &mut self,
+        kind: ChoiceKind,
+        slot: &Slot,
+        candidates: &[T],
+    ) -> Result<usize, WorldError> {
+        let site = format!("slot:{}", slot.k);
+        self.chooser
+            .choose(kind, &slot.actor, &site, candidates)
+            .map_err(WorldError::Replay)
+    }
+
+    fn text(&mut self, slot: &Slot) -> Result<String, WorldError> {
+        let word = self.choose(ChoiceKind::TextWord, slot, &WORDS)?;
+        Ok(format!("{} {}", WORDS[word], slot.k))
+    }
+
+    fn emit(
+        &mut self,
+        slot: &Slot,
+        observation_time_ms: i64,
+        payload: Payload,
+        predecessors: &[EventId],
+    ) -> EventId {
+        let depth = predecessors
+            .iter()
+            .map(|id| self.depths[id] + 1)
+            .max()
+            .unwrap_or(0);
+        let seq = self.entities[slot.entity].seq;
+        self.entities[slot.entity].seq += 1;
+        let id = EventId::derive(slot.stream, &slot.actor, seq);
+        self.edges
+            .extend(predecessors.iter().map(|from| CausalEdge {
+                from: from.clone(),
+                to: id.clone(),
+            }));
+        self.events.push(Event {
+            id: id.clone(),
+            stream: slot.stream,
+            entity_id: slot.actor.clone(),
+            local_seq: seq,
+            valid_time_ms: slot.valid_time_ms,
+            observation_time_ms,
+            causal_depth: depth,
+            payload,
+        });
+        self.depths.insert(id.clone(), depth);
+        id
+    }
+
+    fn message_slot(&mut self, slot: Slot) -> Result<(), WorldError> {
+        let spec = self.config.sessions[slot.spec].clone();
+        let k = slot.k;
+        let observation = self.open(&slot, spec.events_at(k))?;
+        let text = self.text(&slot)?;
+        let earlier = self.entities[slot.entity].messages.clone();
+        let commits = self.commits.clone();
+        let cites = match commits.is_empty() {
+            true => None,
+            false => Some(commits[self.choose(ChoiceKind::Cites, &slot, &commits)?].clone()),
+        };
+        let message_id = format!("{}-m{k}", slot.actor);
+        let predecessors: Vec<EventId> = cites.iter().cloned().collect();
+        let role = if k.is_multiple_of(2) {
+            "user"
+        } else {
+            "assistant"
+        };
+        let payload = Payload::Message {
+            message_id: message_id.clone(),
+            role: role.to_string(),
+            text,
+            cites,
+        };
+        let message = self.emit(&slot, observation, payload, &predecessors);
+        if fires(spec.tool_span_every, k) {
+            let output = self.text(&slot)?;
+            let payload = Payload::ToolSpan {
+                call_id: format!("{message_id}-call0"),
+                message_id,
+                output,
+            };
+            self.emit(&slot, observation, payload, std::slice::from_ref(&message));
+        }
+        let revisions = [
+            (ChoiceKind::CorrectionTarget, spec.correction_every),
+            (ChoiceKind::InvalidationTarget, spec.invalidation_every),
+        ];
+        for (kind, every) in revisions {
+            if k == 0 || !fires(every, k) {
+                continue;
+            }
+            let target = earlier[self.choose(kind, &slot, &earlier)?].clone();
+            let payload = match kind {
+                ChoiceKind::CorrectionTarget => Payload::Correction {
+                    target: target.clone(),
+                    text: self.text(&slot)?,
+                },
+                ChoiceKind::InvalidationTarget => Payload::Invalidation {
+                    target: target.clone(),
+                },
+                other => unreachable!("{other:?} is not a revision"),
+            };
+            self.emit(&slot, observation, payload, &[target]);
+        }
+        self.entities[slot.entity].messages.push(message);
+        Ok(())
+    }
+
+    fn commit_slot(&mut self, slot: Slot) -> Result<(), WorldError> {
+        let spec = self.config.repositories[slot.spec].clone();
+        let k = slot.k;
+        let observation = self.open(&slot, spec.events_at(k))?;
+        let message = self.text(&slot)?;
+        let oid_key = json!({"repository": slot.actor, "seq": k});
+        let oid = protocol_digest(OID_PROTOCOL, &oid_key).expect("oid key is canonical")[..40]
+            .to_string();
+        let parent: Vec<EventId> = self.entities[slot.entity]
+            .last_commit
+            .iter()
+            .cloned()
+            .collect();
+        let commit = self.emit(
+            &slot,
+            observation,
+            Payload::Commit {
+                oid: oid.clone(),
+                message,
+            },
+            &parent,
+        );
+        if fires(spec.rename_every, k) {
+            let paths: Vec<String> = self.entities[slot.entity]
+                .paths
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect();
+            let index = self.choose(ChoiceKind::RenameTarget, &slot, &paths)?;
+            let (from_path, previous) = self.entities[slot.entity].paths[index].clone();
+            let to_path = format!("renamed/{k}/{from_path}");
+            let predecessors: Vec<EventId> = std::iter::once(commit.clone())
+                .chain(previous.clone())
+                .collect();
+            let payload = Payload::Rename {
+                oid,
+                from_path,
+                to_path: to_path.clone(),
+                previous,
+            };
+            let rename = self.emit(&slot, observation, payload, &predecessors);
+            self.entities[slot.entity].paths[index] = (to_path, Some(rename));
+        }
+        self.entities[slot.entity].last_commit = Some(commit.clone());
+        self.commits.push(commit);
+        Ok(())
+    }
+}
+
+pub fn generate_all(root_seed: u64, config: &WorldConfig, mode: Mode) -> Result<World, WorldError> {
+    Generator::new(root_seed, config, mode)?.finish()
+}

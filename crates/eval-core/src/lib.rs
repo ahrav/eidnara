@@ -3,14 +3,32 @@
 
 #![forbid(unsafe_code)]
 
+/// Variant names and fields are the message; callers match on the variant.
+macro_rules! debug_display {
+    ($($error:ty),*) => {$(
+        impl std::fmt::Display for $error {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                std::fmt::Debug::fmt(self, f)
+            }
+        }
+        impl std::error::Error for $error {}
+    )*};
+}
+
 mod census;
+mod decimal;
+mod event;
+mod generator;
 mod identity;
 mod manifest;
 mod residue;
+mod stream;
 
 pub use census::{
     Construction, HintBounds, Reachability, SURFACE1_HINT_BOUNDS, SURFACE1_STAGES, Surface1Stage,
 };
+pub use event::*;
+pub use generator::*;
 pub use identity::{
     BUILD_PROTOCOL, BinaryDigest, BuildRecord, IdentityError, RUN_ID_PROTOCOL, RunIdentity,
     eval_run_id, zero_bytes_sha256,
@@ -25,3 +43,4 @@ pub use residue::{
     CLOCK_FIELD_KEEP_ALLOWLIST, ObservationSchema, ResidueEntry, ResidueError, Rule, SemanticTrace,
     TRACE_DIGEST_PROTOCOL, is_clock_named, is_never_kept,
 };
+pub use stream::*;

@@ -1,8 +1,9 @@
 # Evaluator core
 
 `crates/eval-core` holds the value-level contracts of the long-horizon
-evaluator: the run manifest, run identity, residue rules, and the surface
-census pins. It is sans-I/O. Every function takes values and returns values;
+evaluator: the run manifest, run identity, residue rules, the surface census
+pins, and the generated world model (keyed draws, the choice tape, the event
+log, and the step drive). It is sans-I/O. Every function takes values and returns values;
 the runner shell owns processes, stores, clocks, temp roots, and the build
 sub-record.
 
@@ -120,3 +121,130 @@ Every manifest carries `claim-boundary/v1` with the four exclusions:
 scheduler-order independence, power-loss durability, wall-clock retention
 behavior under manipulated age, and live-model quality. A manifest with a
 different block is refused.
+
+## Generated worlds
+
+`generate_all(root_seed, &config, mode)` builds a `World { log, tape }` from a
+`WorldConfig` and nothing else. The config lists each session (message count
+and how often a tool span, correction, or invalidation fires) and each
+repository (commit count and how often a rename fires), the valid-time epoch
+and tick, and `max_events_per_log`. Counts are exact, so
+`WorldConfig::declared_events` is the number of events generation emits, and
+`validate` refuses a config whose declared count exceeds the bound before any
+event exists (`WorldError::EventBound { events, max }`). The check gates on the
+slot count first, so a config declaring billions of messages is refused in
+time proportional to the entity count. There is no default for the bound: a
+missing field fails to parse, and a zero bound, a non-positive tick, an epoch
+outside the valid-time domain, an empty entity set, or an entity with no slots
+is `WorldError::InvalidField(name)`. The bound is a config value rather than a
+manifest field; the manifest carries it inside `run_identity.config`.
+`GENERATOR_VERSION`, `RANDOM_SCHEMA_VERSION`, and `LINEARIZATION_RULE_VERSION`
+are constants the shell copies into the run identity's `generator_version`,
+`random_schema_version`, and `linearization_rule_version`.
+
+### Keyed draws
+
+Every random decision is `keyed_draw(root_seed, &site)`: the first 64 bits of
+the protocol digest (`eval-random/v1`) over `(root_seed, axis, kind, actor,
+site, occurrence)`, reduced by `% candidates` (the small modulo bias is part
+of the random schema). `actor` is the entity (`session-0`, `repository-1`),
+`site` is the mutation slot (`slot:3`), and `occurrence` counts earlier choices
+of the same kind at that slot. A draw depends only on its key, so shortening
+one entity's history leaves every other entity's text, renames, revision
+targets, and times unchanged. The axis label (`text` for words, `topology` for
+rename targets, `evolution` for time gaps, observation lags, citations, and
+correction or invalidation targets) is fixed per `ChoiceKind` through
+`ChoiceKind::axis`.
+
+One choice is deliberately cross-entity: a message's `Cites` candidates are
+the commits of every repository emitted before it, so adding or removing a
+repository commit may re-point later citations (and with them `causal_depth`
+and the log order) while leaving every text and rename digest alone. The
+independence test asserts exactly this split.
+
+### The choice tape
+
+Each draw is a typed `Choice`: kind, actor, site, occurrence, a digest of the
+candidate set (`eval-candidates/v1` over the candidates as serialized), and
+the selected index. The tape's `identity` is `tape_identity(root_seed,
+&config)`, the `eval-tape/v1` digest over the seed, the config, and the two
+generator constants, so a tape replays only under the identity it was
+recorded under. `Mode::Generate` records the tape; `Mode::ReplayTape` reads
+it and refuses to deviate:
+
+| Refusal | Cause |
+| --- | --- |
+| `TapeMismatch { expected, found }` | The tape was recorded under another seed, config, or generator. |
+| `MissingChoice { entry }` | The tape ended before the generator's next choice. |
+| `SiteMismatch { entry, expected, found }` | The next entry belongs to a different kind, actor, site, or occurrence. |
+| `ChangedCandidates { entry, expected, found }` | The candidate set at this point differs from the recorded one. |
+| `IndexOutOfRange { entry, selected_index, candidates }` | The recorded index does not name a candidate. |
+
+A refusal poisons the `Generator`: every later `step`, `log`, and `finish`
+returns the same error and no `World` is produced. Replay never falls through
+to fresh generation; extending a replayed prefix is a separate mode that does
+not exist in Phase 1. Under replay no draw is computed, so a replay pass
+proves the tape reproduces the world, not that the draw function is
+unchanged; the two-process generation test covers the latter. Entries past
+the last choice the generator makes are ignored.
+
+### Events and the log
+
+An `Event` carries `id`, `stream` (`repository` or `session`), `entity_id`,
+`local_seq`, `valid_time_ms`, `observation_time_ms`, `causal_depth`, and a
+`Payload`: `message` (with an optional `cites` link to a commit), `tool_span`,
+`commit`, `rename` (with an optional `previous` rename on the same path),
+`correction { target }`, or `invalidation { target }`. Links name other events
+by `EventId`, never by position; `EventId::derive(stream, entity_id,
+local_seq)` forms the id and the validator refuses any other. Times are
+canonical decimal strings on the wire, and only `i64::to_string` forms are
+read back. Commits chain to their parent, renames chain to the previous
+rename of the same path, tool spans follow their message, and corrections and
+invalidations follow their target, so every stream has within-stream causal
+edges and citations give cross-stream ones.
+
+`EventLog` holds `events` in linearization order and `causal_edges` sorted.
+The linearization key is `(valid_time_ms, causal_depth, stream label,
+entity_id, local_seq)`, comparing the stream by its wire name;
+`causal_depth` is one more than the deepest causal predecessor over the whole
+log, so a cause always sorts before its effect even when both share a
+millisecond. `EventLog::validate(max_events)` checks the schema and
+rule-version literals (`SchemaMismatch`), the event bound (`EventBound`),
+derived ids (`IdNotDerived`), one event per id (`DuplicateId`), strict key
+order (`NotLinearized`), the valid-time domain `0..=MAX_VALID_TIME_MS` and a
+non-negative observation time (`TimeOutOfDomain`), `valid_time_ms <=
+observation_time_ms + MAX_REVISION_LEAD_MS` (`RevisionAhead`), that every edge
+names present events (`DanglingEdge`), and that each edge runs from an earlier
+position (`EdgeAgainstOrder`) and a smaller depth (`EdgeAgainstDepth`) to a
+later one. It does not recompute depths, so a log with a deleted event keeps
+the depths it was generated with.
+
+`EventLog::without(id)` removes one event and its incident edges and touches
+no other payload: a correction whose target was removed keeps naming it, and
+the log still validates. This is the deletion rule the ticket asks for ("no
+repair of surviving semantic payloads"); the reducer treats a target that
+names an absent event as a distinct case rather than promoting the correction
+to an original. Equality and `EventLog::digest` (`eval-event-log/v1`) cover
+events and edges, so two logs with the same events and different edges differ.
+
+### Step drive
+
+`Generator::new` validates the config, binds the tape, and draws every slot
+time up front, so its cost is proportional to the declared slot count.
+`Generator::step` executes one mutation slot (a message with its optional tool
+span, correction, and invalidation; or a commit with its optional rename) and
+returns `Step::Emitted(events)` only at quiescence, or `Step::Done`. Batches
+are non-empty, arrive in emission order, and are provisional until `finish`
+succeeds: a shell must treat one drive as one transaction. `Generator::log`
+returns the events emitted so far, re-linearized; because the key sorts on
+depth and stream, an earlier snapshot is not a prefix of a later one, though
+every snapshot validates. `Generator::finish` drives any remaining slots,
+closes the tape, validates the log against `max_events_per_log`, and returns
+the `World`; `generate_all` is `new` followed by `finish`, so both produce
+equal worlds and the emission-ordered batches sorted by the key are the log.
+The bound is re-checked before each mutation's events are reserved; that check
+can only fire if `declared_events` drifts from the emitters, and a sweep over
+spec shapes keeps the two in agreement.
+
+The crate's `clippy.toml` disallows `HashMap` and `HashSet`, so no
+process-seeded iteration order can reach an event, a digest, or the tape.
