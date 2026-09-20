@@ -38,8 +38,33 @@ function record(value: unknown): Record<string, unknown> | undefined {
         : undefined;
 }
 
+/** Source messages older than this are not offered for capture. */
+export const CAPTURE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+export interface CaptureSourceOptions {
+    /** Epoch milliseconds; messages created before this are skipped. Undated messages stay. */
+    notBefore?: number;
+}
+
+/** `undefined` means the age is unknown, which never excludes a message. */
+function createdAtMs(value: unknown): number | undefined {
+    if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+    if (typeof value === "string") {
+        const parsed = Date.parse(value);
+        return Number.isNaN(parsed) ? undefined : parsed;
+    }
+    return undefined;
+}
+
+function tooOld(createdAt: number | undefined, notBefore: number | undefined): boolean {
+    return createdAt !== undefined && notBefore !== undefined && createdAt < notBefore;
+}
+
 /** Native text only: no tool results, reasoning, synthetic summaries, or failed responses. */
-export function* piCaptureMessages(entries: Iterable<unknown>): Generator<CaptureMessage> {
+export function* piCaptureMessages(
+    entries: Iterable<unknown>,
+    options: CaptureSourceOptions = {},
+): Generator<CaptureMessage> {
     for (const value of entries) {
         const entry = record(value);
         const message = record(entry?.message);
@@ -48,6 +73,13 @@ export function* piCaptureMessages(entries: Iterable<unknown>): Generator<Captur
         if (
             message.role === "assistant" &&
             (message.stopReason === "error" || message.stopReason === "aborted")
+        )
+            continue;
+        if (
+            tooOld(
+                createdAtMs(entry.timestamp) ?? createdAtMs(message.timestamp),
+                options.notBefore,
+            )
         )
             continue;
         const text =
@@ -67,8 +99,20 @@ export function* piCaptureMessages(entries: Iterable<unknown>): Generator<Captur
     }
 }
 
+/** OpenCode records creation time under `time.created`, `time_created`, or `timeCreated`. */
+function openCodeCreatedAtMs(info: Record<string, unknown>): number | undefined {
+    return (
+        createdAtMs(record(info.time)?.created) ??
+        createdAtMs(info.time_created) ??
+        createdAtMs(info.timeCreated)
+    );
+}
+
 /** Complete OpenCode conversation records; ignored/synthetic text is not source evidence. */
-export function* openCodeCaptureMessages(messages: Iterable<unknown>): Generator<CaptureMessage> {
+export function* openCodeCaptureMessages(
+    messages: Iterable<unknown>,
+    options: CaptureSourceOptions = {},
+): Generator<CaptureMessage> {
     for (const value of messages) {
         const message = record(value);
         const info = record(message?.info);
@@ -76,6 +120,7 @@ export function* openCodeCaptureMessages(messages: Iterable<unknown>): Generator
         if (info.role !== "user" && info.role !== "assistant") continue;
         if (info.summary === true || info.error !== undefined) continue;
         if (info.role === "assistant" && typeof record(info.time)?.completed !== "number") continue;
+        if (tooOld(openCodeCreatedAtMs(info), options.notBefore)) continue;
         const text = message.parts
             .flatMap((part: unknown) => {
                 const block = record(part);
@@ -123,12 +168,31 @@ export class NativeCaptureError extends Error {
     }
 }
 
+const LEASE_PATTERN = /^[a-f0-9]{32}$/;
+
+/** Harness ceilings; the daemon may lower any bound but never raise one past these. */
+const MAX_OUTPUT_TOKENS = 8192;
+const MAX_OUTPUT_BYTES = 128 * 1024;
+const MAX_DURATION_MS = 90_000;
+
+function boundedInteger(value: unknown, ceiling: number): value is number {
+    return (
+        typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= ceiling
+    );
+}
+
+/** The lease of a malformed work response, when its shape alone is valid. */
+function leaseOf(response: unknown): string | undefined {
+    const lease = record(response)?.lease;
+    return typeof lease === "string" && LEASE_PATTERN.test(lease) ? lease : undefined;
+}
+
 function nativeWork(response: unknown): { lease: string; work: NativeCaptureWork } {
     const value = record(response);
     if (
         !value ||
         typeof value.lease !== "string" ||
-        !/^[a-f0-9]{32}$/.test(value.lease) ||
+        !LEASE_PATTERN.test(value.lease) ||
         typeof value.model !== "string" ||
         !value.model.includes("/") ||
         value.model.length > 512 ||
@@ -136,9 +200,9 @@ function nativeWork(response: unknown): { lease: string; work: NativeCaptureWork
         Buffer.byteLength(value.system) > 32 * 1024 ||
         typeof value.prompt !== "string" ||
         Buffer.byteLength(value.prompt) > 240 * 1024 ||
-        value.max_output_tokens !== 8192 ||
-        value.max_output_bytes !== 128 * 1024 ||
-        value.max_duration_ms !== 90_000
+        !boundedInteger(value.max_output_tokens, MAX_OUTPUT_TOKENS) ||
+        !boundedInteger(value.max_output_bytes, MAX_OUTPUT_BYTES) ||
+        !boundedInteger(value.max_duration_ms, MAX_DURATION_MS)
     ) {
         throw new Error("Invalid native capture work response");
     }
@@ -155,13 +219,37 @@ function nativeWork(response: unknown): { lease: string; work: NativeCaptureWork
     };
 }
 
+/** Bounds one flush to a fixed number of daemon exchanges; the next flush resumes the rest. */
+const FLUSH_MAX_BATCHES = 32;
+
+/**
+ * `"pending"` means the daemon retains work for a later flush: a `pending` or
+ * `stale` reply, or the batch bound reached with work still flowing.
+ * Only `store_failed`, `unavailable`, and malformed replies reject.
+ */
+export type MemoryCaptureFlushResult = "ready" | "disabled" | "pending";
+
+function flushOutcome(state: string | undefined): MemoryCaptureFlushResult | "work" | "failed" {
+    switch (state) {
+        case "ready":
+        case "disabled":
+        case "work":
+            return state;
+        case "pending":
+        case "stale":
+            return "pending";
+        default:
+            return "failed";
+    }
+}
+
 /** Native auth/model execution stays in the harness. Only bounded proposals go
  * back to the daemon; its confirmed receipts, not model success, finish capture. */
 export async function flushMemoryCapture(
     client: Pick<RustModeModuleClient, "call">,
     input: { sessionId: string; projectRoot: string; model?: string },
     execute: NativeCaptureExecutor,
-): Promise<void> {
+): Promise<MemoryCaptureFlushResult> {
     const call = (
         method: "memory.capture.next" | "memory.capture.submit",
         extra: Record<string, unknown> = {},
@@ -179,12 +267,30 @@ export async function flushMemoryCapture(
                 ...extra,
             },
         });
-    for (let batch = 0; batch < 32; batch++) {
+    const unfinished = () =>
+        new Error("Memory capture has unfinished work; durable facts are not yet confirmed saved.");
+    // Losing this notification leaves an expiring lease, not a successful capture.
+    const release = (lease: string, code: NativeCaptureError["code"]) =>
+        withTimeout(
+            call("memory.capture.submit", { lease, error: code }),
+            HOST_SDK_READ_TIMEOUT_MS,
+            "capture failure notification timed out",
+        ).catch(() => undefined);
+    for (let batch = 0; batch < FLUSH_MAX_BATCHES; batch++) {
         const response = await call("memory.capture.next", { model: input.model });
-        const state = stateOf(response);
-        if (state === "ready" || state === "disabled") return;
-        if (state !== "work") break;
-        const { lease, work } = nativeWork(response);
+        const outcome = flushOutcome(stateOf(response));
+        if (outcome === "failed") throw unfinished();
+        if (outcome !== "work") return outcome;
+        let lease: string;
+        let work: NativeCaptureWork;
+        try {
+            ({ lease, work } = nativeWork(response));
+        } catch (error) {
+            // The daemon reserved this lease; without a release it stays held until expiry.
+            const reserved = leaseOf(response);
+            if (reserved !== undefined) await release(reserved, "cancelled");
+            throw error;
+        }
         const controller = new AbortController();
         let result: { model: string; text: string };
         try {
@@ -200,12 +306,7 @@ export async function flushMemoryCapture(
         } catch (error) {
             controller.abort();
             const code = error instanceof NativeCaptureError ? error.code : "model_failed";
-            // Losing this notification leaves an expiring lease, not a successful capture.
-            await withTimeout(
-                call("memory.capture.submit", { lease, error: code }),
-                HOST_SDK_READ_TIMEOUT_MS,
-                "capture failure notification timed out",
-            ).catch(() => undefined);
+            await release(lease, code);
             throw new NativeCaptureError(code);
         }
         const submitted = await call("memory.capture.submit", {
@@ -213,11 +314,93 @@ export async function flushMemoryCapture(
             model: result.model,
             output: result.text,
         });
-        if (stateOf(submitted) !== "processed") break;
+        const receipt = stateOf(submitted);
+        if (receipt === "processed") continue;
+        if (receipt === "pending" || receipt === "stale") return "pending";
+        throw unfinished();
     }
-    throw new Error(
-        "Memory capture has unfinished work; durable facts are not yet confirmed saved.",
-    );
+    return "pending";
+}
+
+export interface MemoryCaptureScope {
+    sessionId: string;
+    projectRoot: string;
+    model?: string;
+}
+
+export interface MemoryCaptureDrainHooks {
+    /** Receives every settled pass, including quiet `"pending"` outcomes. */
+    onSettled(scope: MemoryCaptureScope, result: MemoryCaptureFlushResult): void;
+    /** Receives only failures thrown by `flushMemoryCapture`. */
+    onFailed(scope: MemoryCaptureScope, error: unknown): void;
+}
+
+export interface MemoryCaptureDrain {
+    /** Starts a drain for `scope.projectRoot`, or marks one rerun if a drain is already running. */
+    schedule(scope: MemoryCaptureScope): void;
+    /** Settles once the running drain and its queued rerun finish; `undefined` when idle. */
+    pending(projectRoot: string): Promise<void> | undefined;
+    /** Settles once every project is idle, including drains scheduled while waiting. */
+    settle(): Promise<void>;
+}
+
+/** One drain per project root runs at a time; a rerun uses the latest scope. A drain never rejects. */
+export function createMemoryCaptureDrain(
+    client: Pick<RustModeModuleClient, "call">,
+    execute: NativeCaptureExecutor,
+    hooks: MemoryCaptureDrainHooks,
+): MemoryCaptureDrain {
+    interface Running {
+        done: Promise<void>;
+        rerun?: MemoryCaptureScope;
+    }
+    const running = new Map<string, Running>();
+    function notify(report: () => void): void {
+        try {
+            report();
+        } catch {
+            // A failing hook must not stop the queued rerun.
+        }
+    }
+    async function drain(entry: Running, first: MemoryCaptureScope): Promise<void> {
+        let scope = first;
+        try {
+            for (;;) {
+                let result: MemoryCaptureFlushResult | undefined;
+                try {
+                    result = await flushMemoryCapture(client, scope, execute);
+                } catch (error) {
+                    notify(() => hooks.onFailed(scope, error));
+                }
+                if (result !== undefined) notify(() => hooks.onSettled(scope, result));
+                const next = entry.rerun;
+                entry.rerun = undefined;
+                if (!next) return;
+                scope = next;
+            }
+        } finally {
+            running.delete(first.projectRoot);
+        }
+    }
+    return {
+        schedule(scope) {
+            const current = running.get(scope.projectRoot);
+            if (current) {
+                current.rerun = scope;
+                return;
+            }
+            const entry: Running = { done: Promise.resolve() };
+            running.set(scope.projectRoot, entry);
+            entry.done = drain(entry, scope);
+        },
+        pending(projectRoot) {
+            return running.get(projectRoot)?.done;
+        },
+        async settle() {
+            while (running.size > 0)
+                await Promise.all([...running.values()].map((entry) => entry.done));
+        },
+    };
 }
 
 /** The cache saves repeat uploads only. Daemon receipts, not this cache, own

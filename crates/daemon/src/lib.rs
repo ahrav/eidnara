@@ -2947,6 +2947,7 @@ pub struct HandlerCore {
     producer_factory: Arc<dyn HistorySummarizerProducerFactory>,
     native_capture: Arc<Mutex<memory_capture::NativeCaptureState>>,
     capture_commit_gate: Arc<Mutex<()>>,
+    capture_memo: Mutex<memory_capture::CaptureCheckpointMemo>,
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
     #[cfg(test)]
@@ -3881,6 +3882,7 @@ impl Handler {
             producer_factory,
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
+            capture_memo: Mutex::new(memory_capture::CaptureCheckpointMemo::default()),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
             #[cfg(test)]
@@ -4377,6 +4379,7 @@ impl Handler {
             producer_factory: factory,
             native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
             capture_commit_gate: Arc::new(Mutex::new(())),
+            capture_memo: Mutex::new(memory_capture::CaptureCheckpointMemo::default()),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             fixed_config: Some(config),
@@ -4943,6 +4946,10 @@ impl HandlerCore {
             .expect("boundary token cache mutex")
             .remove(session);
         tail_hygiene::hygiene_memos().remove_session(session);
+        self.capture_memo
+            .lock()
+            .expect("capture memo mutex")
+            .remove_session(session);
         self.prompt_surface_epochs
             .lock()
             .expect("prompt surface epoch mutex")
@@ -6784,7 +6791,7 @@ impl HandlerCore {
         }
     }
 
-    fn handle_session_delete_value(
+    async fn handle_session_delete_value(
         &self,
         channel: RouteHandle,
         request: &Value,
@@ -6798,38 +6805,42 @@ impl HandlerCore {
             Some(store) => store,
             None => return store_unavailable_error(),
         };
-        // Session notes live under the notes authority project, where `eidnara_note` wrote them.
-        let note_project_path = match Self::authority_project_path(
-            &store,
-            &binding.project_root.to_string_lossy(),
-            "notes",
-        ) {
-            Ok(project) => project,
-            Err(outcome) => return outcome,
+        let gate = Arc::clone(&self.capture_commit_gate);
+        let project_root = binding.project_root.to_string_lossy().into_owned();
+        let deleted = {
+            let session_id = session_id.clone();
+            kernel_routes::blocking(move || {
+                // Session notes live under the notes authority project, where `eidnara_note` wrote them.
+                let note_project_path =
+                    Self::authority_project_path(&store, &project_root, "notes")?;
+                // Session deletion must not overlap capture publication; kernel
+                // commits hold `capture_commit_gate` on a blocking thread.
+                let _capture_gate = gate.lock().expect("capture publication mutex");
+                store
+                    .delete_session(&session_id, &note_project_path)
+                    .map_err(|error| PreparedOutcome::Error {
+                        code: "store_write_failed".to_string(),
+                        message: error.to_string(),
+                    })
+            })
+            .await
         };
-        let _capture_gate = self
-            .capture_commit_gate
+        let deleted_rows = match deleted {
+            Ok(Ok(deleted_rows)) => deleted_rows,
+            Ok(Err(outcome)) => return outcome,
+            Err(_) => return store_unavailable_error(),
+        };
+        self.cancel_history_summarizer_work(&session_id);
+        self.wrapup_sessions
             .lock()
-            .expect("capture publication mutex");
-        match store.delete_session(&session_id, &note_project_path) {
-            Ok(deleted_rows) => {
-                self.cancel_history_summarizer_work(&session_id);
-                self.wrapup_sessions
-                    .lock()
-                    .expect("wrapup sessions mutex")
-                    .remove(&session_id);
-                self.recomp_sessions
-                    .lock()
-                    .expect("recomp sessions mutex")
-                    .remove(&session_id);
-                self.purge_session_state(&session_id, "session_delete");
-                respond(json!({ "ok": true, "deleted_rows": deleted_rows }))
-            }
-            Err(error) => PreparedOutcome::Error {
-                code: "store_write_failed".to_string(),
-                message: error.to_string(),
-            },
-        }
+            .expect("wrapup sessions mutex")
+            .remove(&session_id);
+        self.recomp_sessions
+            .lock()
+            .expect("recomp sessions mutex")
+            .remove(&session_id);
+        self.purge_session_state(&session_id, "session_delete");
+        respond(json!({ "ok": true, "deleted_rows": deleted_rows }))
     }
 
     fn handle_session_status_value(
@@ -8817,6 +8828,9 @@ impl HandlerCore {
         let pass_load = store.load_meta(&parsed.session_id);
         let pass_state_load_ms = pass_state_load_started_at.elapsed().as_secs_f64() * 1_000.0;
         let pass_state = PassState::from(&pass_load);
+        // Tail-delta expansion prepends the reattached prefix; only this many
+        // trailing messages are the request's own.
+        let request_messages = parsed.messages.len();
         let native_delta_frontier = if parsed.tail_delta.is_some() {
             let delta_expand_started_at = Instant::now();
             let expanded = self.expand_transform_tail_delta(&mut parsed, pass_state);
@@ -8839,7 +8853,8 @@ impl HandlerCore {
             Err(outcome) => return outcome,
         };
         ticket.accept();
-        self.capture_transform_sources(Arc::clone(&store), &binding, &parsed);
+        self.capture_transform_sources(Arc::clone(&store), &binding, &parsed, request_messages)
+            .await;
         let intake = PassIntake {
             store,
             parsed,
@@ -13698,7 +13713,7 @@ impl HandlerCore {
                 "session.flush" => self.handle_session_flush_value(channel, &request),
                 "session.recomp" => self.handle_session_recomp_value(channel, &request),
                 "session.status" => self.handle_session_status_value(channel, &request),
-                "session.delete" => self.handle_session_delete_value(channel, &request),
+                "session.delete" => self.handle_session_delete_value(channel, &request).await,
                 "session.wrapup" => self.handle_session_wrapup_value(channel, &request).await,
                 "kernel.read" => self.handle_kernel_read(channel, request).await,
                 "kernel.commit" => self.handle_kernel_commit(channel, request).await,
@@ -22240,17 +22255,6 @@ mod tests {
             })
         }
 
-        async fn start_with_model_defaults(
-            &mut self,
-            session_id: &str,
-            system: &str,
-            prompt: &str,
-            model: &str,
-            _max_output_tokens: u32,
-        ) -> Result<RunHandle, HistorySummarizerProducerError> {
-            self.start(session_id, system, prompt, model).await
-        }
-
         async fn await_output(
             &mut self,
             _run_id: &str,
@@ -22658,10 +22662,12 @@ mod tests {
             matches!(handler.handle_native_capture_submit(test_route(7), &submit).await, PreparedOutcome::Error { ref code, .. } if code == "invalid_params")
         );
         submit["model"] = second["model"].clone();
-        let deleted = handler.handle_session_delete_value(
-            test_route(7),
-            &json!({"method":"session.delete","v":1,"session_id":"ses"}),
-        );
+        let deleted = handler
+            .handle_session_delete_value(
+                test_route(7),
+                &json!({"method":"session.delete","v":1,"session_id":"ses"}),
+            )
+            .await;
         assert!(!matches!(deleted, PreparedOutcome::Error { .. }));
         assert_eq!(
             tool_body(
@@ -22736,6 +22742,288 @@ mod tests {
                 completed: 0,
                 failed: 1
             }
+        );
+    }
+
+    fn capture_binding(project: &Path, harness: &str) -> SessionBinding {
+        SessionBinding {
+            config: DaemonConfig {
+                memory_auto_capture: true,
+                ..default_test_config()
+            },
+            ..binding_with_harness(project.to_str().unwrap(), harness, "ses")
+        }
+    }
+
+    fn capture_ingress(mid: &str, role: &str, text: &str, ordinal: u64) -> IngressMessage {
+        IngressMessage {
+            mid: mid.into(),
+            ordinal,
+            ck: WireMessage::from_parts(
+                role,
+                vec![WireBlock::bare(BlockKind::Text { text: text.into() })],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta {
+                    harness_id: Some(mid.into()),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+
+    fn capture_transform_request(messages: &[IngressMessage]) -> TransformRequest {
+        serde_json::from_value(json!({
+            "kind": "transform",
+            "base_revision": "test-base",
+            "v": 2,
+            "serializer_profile": "opencode-aisdk",
+            "session_id": "ses",
+            "render_config": "cfg0",
+            "messages": messages,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn transform_checkpoints_only_pi_delta_messages_and_never_twice() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let project_key = project.to_str().unwrap();
+        let messages = [
+            capture_ingress("m1", "user", "Use port 4321 for staging.", 1),
+            capture_ingress("m2", "assistant", "Staging now listens on 4321.", 2),
+        ];
+        let request = capture_transform_request(&messages);
+
+        let opencode = capture_binding(&project, "opencode");
+        assert_eq!(
+            handler
+                .capture_transform_sources(Arc::clone(&store), &opencode, &request, 2)
+                .await,
+            0,
+            "OpenCode text is checkpointed by its plugin, whose per-part synthetic markers the wire does not carry"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 0);
+
+        let pi = capture_binding(&project, "pi");
+        assert_eq!(
+            handler
+                .capture_transform_sources(Arc::clone(&store), &pi, &request, 1)
+                .await,
+            1,
+            "a tail delta checkpoints only the request's own messages"
+        );
+        let pending = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "m2");
+
+        assert_eq!(
+            handler
+                .capture_transform_sources(Arc::clone(&store), &pi, &request, 2)
+                .await,
+            1,
+            "a full sync reaches the store only for the fragment the memo has not seen"
+        );
+        assert_eq!(
+            handler
+                .capture_transform_sources(Arc::clone(&store), &pi, &request, 2)
+                .await,
+            0,
+            "a repeated conversation performs no store work"
+        );
+        assert_eq!(handler.capture_memo.lock().unwrap().session_len("ses"), 2);
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 2);
+
+        handler.purge_session_state("ses", "session_delete");
+        assert_eq!(handler.capture_memo.lock().unwrap().session_len("ses"), 0);
+        assert_eq!(
+            handler
+                .capture_transform_sources(Arc::clone(&store), &pi, &request, 2)
+                .await,
+            2,
+            "a purged memo replays through the store, which dedups by identity"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 2);
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn native_capture_accepts_a_maximal_wire_valid_plan() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let quotes: Vec<String> = (0..memory_capture::MAX_CAPTURE_MESSAGES)
+            .map(|index| {
+                let mut quote = format!("Fact {index:02}: ");
+                while quote.len() < memory_capture::MAX_CAPTURE_MEMORY_BYTES {
+                    quote.push_str("staging listens on port 4321 ");
+                }
+                quote.truncate(memory_capture::MAX_CAPTURE_MEMORY_BYTES);
+                quote
+            })
+            .collect();
+        let text = quotes.concat();
+        assert_eq!(text.len(), memory_capture::MAX_CAPTURE_INPUT_BYTES);
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":text}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let memories: Vec<Value> = quotes
+            .iter()
+            .enumerate()
+            .map(|(index, quote)| {
+                json!({"category":"CONFIG_VALUES","content":format!("Fact {index}."),"quote":quote})
+            })
+            .collect();
+        let output =
+            json!({"version":1,"decisions":[{"message_id":"source_1","memories":memories}]})
+                .to_string();
+        assert!(output.len() <= memory_capture::MAX_CAPTURE_OUTPUT_BYTES);
+        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        let status = store
+            .memory_capture_status(project.to_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            status,
+            memory_store::memory_capture::CaptureQueueStatus {
+                pending: 0,
+                prepared: 0,
+                completed: 1,
+                failed: 0
+            },
+            "a wire-valid output must never be refused by the store bound"
+        );
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(memories.rows.len(), memory_capture::MAX_CAPTURE_MESSAGES);
+    }
+
+    #[tokio::test]
+    async fn native_capture_store_refusal_of_a_plan_records_a_failure_instead_of_hot_retrying() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        // The configured model identifier is frozen into every plan.
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    model_chain: vec!["custom-native/password=hunter-two".into()],
+                    ..capture_binding(&project, "pi").config
+                },
+                ..capture_binding(&project, "pi")
+            },
+        );
+        let project_key = project.to_str().unwrap();
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request))["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        assert_eq!(work["model"], "custom-native/password=hunter-two");
+        let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[{"category":"CONFIG_VALUES","content":"Port 4321.","quote":"Use port 4321 for staging."}]}]}).to_string();
+        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        assert_eq!(
+            store.memory_capture_status(project_key).unwrap(),
+            memory_store::memory_capture::CaptureQueueStatus {
+                pending: 1,
+                prepared: 0,
+                completed: 0,
+                failed: 1
+            }
+        );
+        assert!(
+            store
+                .pending_memory_captures(project_key, "pi", now_ms())
+                .unwrap()
+                .is_empty(),
+            "a refused plan must back off instead of retrying at the head of the queue"
+        );
+        let later = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].attempts, 1);
+        assert_eq!(
+            later[0].failures, 1,
+            "a deterministic refusal consumes the model-failure allowance"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_delete_waits_for_the_capture_gate_off_the_runtime_worker() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), "ses"));
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let hold = Duration::from_millis(300);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(hold);
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        let delete = json!({ "method": "session.delete", "v": 1, "session_id": "ses" });
+        let (deleted, ticked_at) = tokio::join!(
+            handler.handle_session_delete_value(test_route(7), &delete),
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                started.elapsed()
+            }
+        );
+        let deleted_at = started.elapsed();
+        holder.join().unwrap();
+        assert_eq!(tool_body(deleted)["ok"], json!(true));
+        assert!(
+            deleted_at >= hold - Duration::from_millis(30),
+            "the delete must wait for the publication gate: {deleted_at:?}"
+        );
+        assert!(
+            ticked_at < deleted_at,
+            "the runtime worker must keep running other tasks while the delete waits: {ticked_at:?} vs {deleted_at:?}"
         );
     }
 
@@ -30314,10 +30602,14 @@ mod tests {
             "eidnara_note stores session notes under the authority project"
         );
 
-        let deleted = tool_body(handler.handle_session_delete_value(
-            test_route(7),
-            &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
-        ));
+        let deleted = tool_body(
+            handler
+                .handle_session_delete_value(
+                    test_route(7),
+                    &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
         assert_eq!(deleted["ok"], json!(true));
         assert!(
             store
@@ -30511,10 +30803,14 @@ mod tests {
                 .contains_key("ses")
         );
 
-        let deleted = tool_body(handler.handle_session_delete_value(
-            test_route(7),
-            &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
-        ));
+        let deleted = tool_body(
+            handler
+                .handle_session_delete_value(
+                    test_route(7),
+                    &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
         assert_eq!(deleted["ok"], json!(true), "{deleted}");
         assert!(
             !handler
@@ -37199,8 +37495,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn session_delete_clears_durable_state_for_the_bound_lineage() {
+    #[tokio::test]
+    async fn session_delete_clears_durable_state_for_the_bound_lineage() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, project) = handler_with_store(producer, default_test_config());
         let session_id = "ses-delete";
@@ -37277,10 +37573,14 @@ mod tests {
             .expect("transform snapshots mutex")
             .begin(session_id);
 
-        let deleted = tool_body(handler.handle_session_delete_value(
-            test_route(7),
-            &json!({ "method": "session.delete", "v": 1, "session_id": session_id }),
-        ));
+        let deleted = tool_body(
+            handler
+                .handle_session_delete_value(
+                    test_route(7),
+                    &json!({ "method": "session.delete", "v": 1, "session_id": session_id }),
+                )
+                .await,
+        );
         assert_eq!(deleted["ok"], json!(true));
         assert!(deleted["deleted_rows"].as_u64().unwrap() >= 2);
         assert!(!store.has_cache_state(session_id).unwrap());
@@ -39182,10 +39482,14 @@ mod tests {
                 .contains_key("ses")
         );
 
-        let deleted = tool_body(handler.handle_session_delete_value(
-            test_route(7),
-            &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
-        ));
+        let deleted = tool_body(
+            handler
+                .handle_session_delete_value(
+                    test_route(7),
+                    &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
         assert_eq!(deleted["ok"], json!(true), "{deleted}");
 
         // The producer never unblocks, so the only way the live entry can clear is the

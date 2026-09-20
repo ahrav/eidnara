@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { log } from "../../shared/logger";
 import { NativeCaptureError, type NativeCaptureExecutor } from "../../shared/memory-capture";
 import { normalizeSDKResponse } from "../../shared/normalize-sdk-response";
 import { withTimeout } from "../../shared/with-timeout";
@@ -10,9 +11,17 @@ import type { EidnaraDeps } from "./hook";
 
 const AGENT = "eidnara-memory-capture";
 const CLEANUP_MS = 10_000;
+const MAX_IN_FLIGHT = 16;
 const CAPTURE_PROJECTS = Symbol.for("eidnara.opencode.native-capture-projects.v1");
-const globals = globalThis as typeof globalThis & { [CAPTURE_PROJECTS]?: Set<string> };
+const CAPTURE_IN_FLIGHT = Symbol.for("eidnara.opencode.native-capture-in-flight.v1");
+const globals = globalThis as typeof globalThis & {
+    [CAPTURE_PROJECTS]?: Set<string>;
+    [CAPTURE_IN_FLIGHT]?: Set<string>;
+};
+/** Private project directories that exist on disk; hooks must not capture from them. */
 const captureProjects = (globals[CAPTURE_PROJECTS] ??= new Set<string>());
+/** Directories with a capture still running; the admission bound counts these alone. */
+const captureInFlight = (globals[CAPTURE_IN_FLIGHT] ??= new Set<string>());
 
 /** This process alone registers owned private projects; repository configuration
  * cannot grant itself this guard or suppress normal capture. */
@@ -24,6 +33,10 @@ export function isNativeCaptureProject(directory: string): boolean {
     }
 }
 
+function describeFailure(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
 /** A private project inherits native user-level providers/auth, never the source
  * repository's provider overrides. The only project config is authored here. */
 export function openCodeMemoryCaptureExecutor(
@@ -33,12 +46,14 @@ export function openCodeMemoryCaptureExecutor(
         const separator = work.model.indexOf("/");
         const providerID = work.model.slice(0, separator);
         const modelID = work.model.slice(separator + 1);
-        if (captureProjects.size >= 16) throw new NativeCaptureError("provider_unavailable");
+        if (captureInFlight.size >= MAX_IN_FLIGHT)
+            throw new NativeCaptureError("provider_unavailable");
         const directory = realpathSync(mkdtempSync(join(tmpdir(), "eidnara-capture-")));
         captureProjects.add(directory);
+        captureInFlight.add(directory);
         let session: string | undefined;
         let instanceStarted = false;
-        let clean = true;
+        const cleanupFailures: string[] = [];
         let answer: { model: string; text: string } | undefined;
         let failure: NativeCaptureError | undefined;
         const abortSession = async () => {
@@ -55,8 +70,8 @@ export function openCodeMemoryCaptureExecutor(
                 );
         };
         const abort = () => {
-            void abortSession().catch(() => {
-                clean = false;
+            void abortSession().catch((error) => {
+                log.warn("[eidnara] native memory capture abort failed", describeFailure(error));
             });
         };
         signal.addEventListener("abort", abort, { once: true });
@@ -208,8 +223,8 @@ export function openCodeMemoryCaptureExecutor(
                 throw new NativeCaptureError("output_limit");
             answer = { model: work.model, text };
         } catch (error) {
-            await abortSession().catch(() => {
-                clean = false;
+            await abortSession().catch((abortError) => {
+                cleanupFailures.push(`abort: ${describeFailure(abortError)}`);
             });
             failure =
                 error instanceof NativeCaptureError
@@ -218,8 +233,8 @@ export function openCodeMemoryCaptureExecutor(
         } finally {
             signal.removeEventListener("abort", abort);
             if (session)
-                await deleteChildSession(client, session, undefined, directory).catch(() => {
-                    clean = false;
+                await deleteChildSession(client, session, undefined, directory).catch((error) => {
+                    cleanupFailures.push(`delete: ${describeFailure(error)}`);
                 });
             // Dispose only this private instance; its watchers must stop before the directory goes away.
             if (instanceStarted)
@@ -227,20 +242,24 @@ export function openCodeMemoryCaptureExecutor(
                     Promise.resolve(client.instance.dispose({ query: { directory } } as never)),
                     CLEANUP_MS,
                     "capture instance cleanup timed out",
-                ).catch(() => {
-                    clean = false;
+                ).catch((error) => {
+                    cleanupFailures.push(`dispose: ${describeFailure(error)}`);
                 });
-            if (clean) {
-                try {
-                    rmSync(directory, { recursive: true, force: true });
-                    captureProjects.delete(directory);
-                } catch {
-                    clean = false;
-                }
+            captureInFlight.delete(directory);
+            // The guard outlives a directory that cannot be removed; `isNativeCaptureProject`
+            // resolves through `realpathSync`, so a removed directory needs no entry.
+            try {
+                rmSync(directory, { recursive: true, force: true });
+                captureProjects.delete(directory);
+            } catch (error) {
+                cleanupFailures.push(`remove: ${describeFailure(error)}`);
             }
+            // Cleanup failures never change the capture outcome; the answer is already final.
+            if (cleanupFailures.length > 0)
+                log.warn("[eidnara] native memory capture cleanup incomplete", cleanupFailures);
         }
         if (failure) throw failure;
-        if (!clean || !answer) throw new NativeCaptureError("model_failed");
+        if (!answer) throw new NativeCaptureError("model_failed");
         return answer;
     };
 }

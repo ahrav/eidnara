@@ -11,10 +11,12 @@ import {
 } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
-import { log } from "../../shared/logger";
+import { log, sessionLog } from "../../shared/logger";
 import {
+    CAPTURE_MAX_AGE_MS,
     createMemoryCaptureCheckpoint,
-    flushMemoryCapture,
+    createMemoryCaptureDrain,
+    type MemoryCaptureDrain,
     openCodeCaptureMessages,
 } from "../../shared/memory-capture";
 import { normalizeSDKResponse } from "../../shared/normalize-sdk-response";
@@ -220,6 +222,36 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const moduleClient = deps.rustModeModuleClient;
     const captureCheckpoint = createMemoryCaptureCheckpoint(moduleClient);
     const executeCapture = openCodeMemoryCaptureExecutor(deps.client);
+    const notifyCaptureIncomplete = () =>
+        deps.client.tui.showToast({
+            body: {
+                title: "Eidnara memory capture",
+                message:
+                    "Capture incomplete. Some facts are not confirmed saved. See Eidnara logs.",
+                variant: "warning",
+            },
+        });
+    const warnCaptureIncomplete = (): void => {
+        void withTimeout(
+            Promise.resolve(notifyCaptureIncomplete()),
+            HOST_SDK_READ_TIMEOUT_MS,
+            "capture notification timed out",
+        ).catch(() => undefined);
+    };
+    // Model batches run detached from the lifecycle hooks that schedule them, so a completed
+    // response and an idle event return before any extraction work.
+    const memoryCaptureDrain = createMemoryCaptureDrain(moduleClient, executeCapture, {
+        // `"pending"` leaves work for a later drain and is not a failure to report.
+        onSettled: () => undefined,
+        onFailed: (scope, error) => {
+            sessionLog.warn(scope.sessionId, "memory capture drain failed:", error);
+            warnCaptureIncomplete();
+        },
+    });
+    const liveModelKey = (sessionId: string): string | undefined => {
+        const model = resolveLiveModel(sessionId);
+        return model ? `${model.providerID}/${model.modelID}` : undefined;
+    };
     const pendingUserCaptures = new BoundedSessionMap<Promise<void>>(MAX_LIVE_USAGE_SESSIONS);
     const checkpointUser = (sessionId: string, output: unknown): void => {
         if (
@@ -282,9 +314,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         )
             return;
         try {
-            const model = resolveLiveModel(sessionId);
+            const model = liveModelKey(sessionId);
             if (!model) return;
             const projectRoot = await sessionDirectoryFor(sessionId);
+            const scope = { sessionId, projectRoot, model };
             const sourceMessages = normalizeSDKResponse(
                 await withTimeout(
                     Promise.resolve(
@@ -301,24 +334,17 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             );
             if (deletedSessions.has(sessionId)) return;
             await captureCheckpoint({
-                sessionId,
-                projectRoot,
-                model: `${model.providerID}/${model.modelID}`,
-                messages: openCodeCaptureMessages(sourceMessages),
+                ...scope,
+                messages: openCodeCaptureMessages(sourceMessages, {
+                    notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
+                }),
             });
-            await flushMemoryCapture(
-                moduleClient,
-                {
-                    sessionId,
-                    projectRoot,
-                    model: `${model.providerID}/${model.modelID}`,
-                },
-                executeCapture,
-            );
+            memoryCaptureDrain.schedule(scope);
         } catch (error) {
             log(
                 `memory capture checkpoint pending: ${error instanceof Error ? error.message : "unknown error"}`,
             );
+            warnCaptureIncomplete();
         }
     };
 
@@ -559,7 +585,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         "experimental.chat.messages.transform": messagesTransform,
         "experimental.chat.system.transform": systemPromptHash.handler,
         "experimental.text.complete": createTextCompleteHandler(
-            async (input, text) => {
+            // A completed part is not checkpointed: under the message id it would duplicate the
+            // joined message text with a different digest. The drain works on stored sources only.
+            async (input) => {
                 await pendingUserCaptures.get(input.sessionID)?.catch(() => undefined);
                 if (
                     deps.config.memory?.enabled === false ||
@@ -574,33 +602,11 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                     internalChildSessions.has(input.sessionID)
                 )
                     return;
-                const model = resolveLiveModel(input.sessionID);
+                const model = liveModelKey(input.sessionID);
                 if (!model) return;
-                await captureCheckpoint({
-                    sessionId: input.sessionID,
-                    projectRoot,
-                    model: `${model.providerID}/${model.modelID}`,
-                    messages: [{ id: input.messageID, role: "assistant", text }],
-                });
-                await flushMemoryCapture(
-                    moduleClient,
-                    {
-                        sessionId: input.sessionID,
-                        projectRoot,
-                        model: `${model.providerID}/${model.modelID}`,
-                    },
-                    executeCapture,
-                );
+                memoryCaptureDrain.schedule({ sessionId: input.sessionID, projectRoot, model });
             },
-            () =>
-                deps.client.tui.showToast({
-                    body: {
-                        title: "Eidnara memory capture",
-                        message:
-                            "Capture incomplete. Some facts are not confirmed saved. See Eidnara logs.",
-                        variant: "warning",
-                    },
-                }),
+            notifyCaptureIncomplete,
         ),
         "chat.message": createChatMessageHook({
             checkpointUser,
@@ -644,6 +650,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const hooksWithBackends = hooks as typeof hooks & {
         rustToolBackends: RustToolBackends;
         resolveSessionDirectory: typeof sessionDirectoryFor;
+        memoryCaptureDrain: MemoryCaptureDrain;
     };
     Object.defineProperty(hooksWithBackends, "rustToolBackends", {
         value: rustToolBackends,
@@ -651,6 +658,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     });
     Object.defineProperty(hooksWithBackends, "resolveSessionDirectory", {
         value: projectRootForLiveSession,
+        enumerable: false,
+    });
+    Object.defineProperty(hooksWithBackends, "memoryCaptureDrain", {
+        value: memoryCaptureDrain,
         enumerable: false,
     });
     return hooksWithBackends;

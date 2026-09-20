@@ -8,13 +8,13 @@
 mod native;
 pub(crate) use native::NativeCaptureState;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use host_runtime::RouteHandle;
-use memory_store::MemoryStore;
 use memory_store::memory_capture::{CaptureEnqueue, CaptureJob, CaptureSource};
+use memory_store::{MemoryStore, MemoryStoreError};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -406,58 +406,188 @@ fn valid_capture_model(model: &str) -> bool {
         })
 }
 
+const CAPTURE_MEMO_FRAGMENTS_PER_SESSION: usize = 4096;
+const CAPTURE_MEMO_SESSIONS: usize = 256;
+
+type FragmentDigest = [u8; 32];
+
+fn fragment_digest(id: &str, role: &str, text: &str) -> FragmentDigest {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for part in [id, role, text] {
+        hash.update((part.len() as u64).to_le_bytes());
+        hash.update(part.as_bytes());
+    }
+    hash.finalize().into()
+}
+
+#[derive(Default)]
+struct SessionCaptureMemo {
+    seen: HashSet<FragmentDigest>,
+    order: VecDeque<FragmentDigest>,
+}
+
+/// The memo suppresses replayed fragments already accepted by the store.
+/// Evicted digests replay if they reappear.
+#[derive(Default)]
+pub(crate) struct CaptureCheckpointMemo {
+    sessions: HashMap<String, SessionCaptureMemo>,
+    order: VecDeque<String>,
+}
+
+impl CaptureCheckpointMemo {
+    fn contains(&self, session: &str, digest: &FragmentDigest) -> bool {
+        self.sessions
+            .get(session)
+            .is_some_and(|memo| memo.seen.contains(digest))
+    }
+
+    fn insert(&mut self, session: &str, digest: FragmentDigest) {
+        if !self.sessions.contains_key(session) {
+            while self.sessions.len() >= CAPTURE_MEMO_SESSIONS {
+                match self.order.pop_front() {
+                    Some(evicted) => {
+                        self.sessions.remove(&evicted);
+                    }
+                    None => break,
+                }
+            }
+            self.order.push_back(session.to_owned());
+        }
+        let memo = self.sessions.entry(session.to_owned()).or_default();
+        if !memo.seen.insert(digest) {
+            return;
+        }
+        memo.order.push_back(digest);
+        while memo.order.len() > CAPTURE_MEMO_FRAGMENTS_PER_SESSION {
+            if let Some(evicted) = memo.order.pop_front() {
+                memo.seen.remove(&evicted);
+            }
+        }
+    }
+
+    pub(crate) fn remove_session(&mut self, session: &str) {
+        if self.sessions.remove(session).is_some() {
+            self.order.retain(|kept| kept != session);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_len(&self, session: &str) -> usize {
+        self.sessions.get(session).map_or(0, |memo| memo.seen.len())
+    }
+}
+
+struct PendingFragment {
+    id: String,
+    role: String,
+    text: String,
+    digest: FragmentDigest,
+}
+
 impl HandlerCore {
     /// Checkpoints admitted raw text before any transform can fold it away.
     /// Reasoning/tool blocks and synthetic summaries never enter extraction.
-    pub(super) fn capture_transform_sources(
+    ///
+    /// Only the request's own `delta_messages` (the array tail after tail-delta
+    /// expansion) are considered. Memo-seen fragments skip the store; redaction
+    /// and store transactions run on the blocking pool.
+    ///
+    /// Only `pi` sources are taken from the transform. Pi joins text blocks with
+    /// `\n` exactly as `native_capture_fragments` does and marks synthetic text
+    /// per message. OpenCode marks synthetic text per part (`@file` contents,
+    /// reminders) and that flag is not carried on the wire, so only the OpenCode
+    /// plugin's own derivation is authoritative there; a daemon copy would
+    /// enqueue different text for the same message id and store scaffolding as
+    /// user statements.
+    ///
+    /// Returns the number of fragments handed to the store.
+    pub(super) async fn capture_transform_sources(
         &self,
         store: Arc<MemoryStore>,
         binding: &SessionBinding,
         request: &crate::transform::TransformRequest,
-    ) {
+        delta_messages: usize,
+    ) -> usize {
         if request.is_subagent
             || !binding.config.memory_enabled
             || !binding.config.auto_promote
             || !binding.config.memory_auto_capture
-            || !matches!(binding.harness.as_str(), "opencode" | "pi")
+            || binding.harness != "pi"
         {
-            return;
+            return 0;
         }
-        let project = binding.project_root.to_string_lossy();
-        for message in request.messages.iter() {
-            if !matches!(message.ck.role.as_str(), "user" | "assistant")
-                || message.ck.meta.synthetic
-                || message.ck.meta.summary
-                || message.ck.meta.errored
-            {
-                continue;
-            }
-            if native_capture_fragments(message, |id, text| {
-                if text.trim().is_empty() {
-                    return Ok(());
+        let start = request.messages.len().saturating_sub(delta_messages);
+        let mut fragments = Vec::new();
+        {
+            let memo = self.capture_memo.lock().expect("capture memo mutex");
+            for message in &request.messages[start..] {
+                if !matches!(message.ck.role.as_str(), "user" | "assistant")
+                    || message.ck.meta.synthetic
+                    || message.ck.meta.summary
+                    || message.ck.meta.errored
+                {
+                    continue;
                 }
+                let role = message.ck.role.as_str();
+                let _ = native_capture_fragments(message, |id, text| {
+                    if text.trim().is_empty() {
+                        return Ok(());
+                    }
+                    let digest = fragment_digest(id, role, text);
+                    if !memo.contains(&binding.session, &digest) {
+                        fragments.push(PendingFragment {
+                            id: id.to_owned(),
+                            role: role.to_owned(),
+                            text: text.to_owned(),
+                            digest,
+                        });
+                    }
+                    Ok(())
+                });
+            }
+        }
+        if fragments.is_empty() {
+            return 0;
+        }
+        let project = binding.project_root.to_string_lossy().into_owned();
+        let harness = binding.harness.clone();
+        let session = binding.session.clone();
+        let outcome = kernel_routes::blocking(move || {
+            let mut accepted = Vec::with_capacity(fragments.len());
+            let mut enqueued = 0;
+            for fragment in fragments {
+                enqueued += 1;
                 match store.enqueue_memory_capture(
                     CaptureSource {
                         project: &project,
-                        harness: &binding.harness,
-                        session_id: &binding.session,
-                        message_id: id,
-                        role: &message.ck.role,
-                        text,
+                        harness: &harness,
+                        session_id: &session,
+                        message_id: &fragment.id,
+                        role: &fragment.role,
+                        text: &fragment.text,
                     },
                     now_ms(),
                 ) {
-                    Ok(CaptureEnqueue::Accepted { .. }) => Ok(()),
-                    _ => Err("checkpoint_refused"),
+                    Ok(CaptureEnqueue::Accepted { .. }) => accepted.push(fragment.digest),
+                    _ => {
+                        eprintln!("daemon: memory capture source checkpoint refused");
+                        // Earlier sources remain durable; a native harness drains them when connected.
+                        break;
+                    }
                 }
-            })
-            .is_err()
-            {
-                eprintln!("daemon: memory capture source checkpoint refused");
-                // Earlier sources remain durable; a native harness drains them when connected.
-                return;
             }
+            (enqueued, accepted)
+        })
+        .await;
+        let Ok((enqueued, accepted)) = outcome else {
+            return 0;
+        };
+        let mut memo = self.capture_memo.lock().expect("capture memo mutex");
+        for digest in accepted {
+            memo.insert(&binding.session, digest);
         }
+        enqueued
     }
 
     /// The route owns project/session identity. The payload supplies completed
@@ -683,10 +813,16 @@ impl CaptureWork {
         .map_err(|_| "kernel_unavailable")?
     }
 
+    /// Transport, provider, store, and kernel outcomes say nothing about the
+    /// model's answer, so they leave the model-failure allowance untouched.
     fn failed(&self, jobs: &[CaptureJob], code: &str, retry_at: i64) -> Result<(), &'static str> {
         if self.cancel.is_cancelled() {
             return Ok(());
         }
+        let model_failure = !matches!(
+            code,
+            "transport_unknown" | "provider_unavailable" | "store_failed" | "kernel_unavailable"
+        );
         for job in jobs {
             self.store
                 .fail_memory_capture(
@@ -694,7 +830,8 @@ impl CaptureWork {
                     &job.job_id,
                     code,
                     retry_at,
-                    code != "transport_unknown" && code != "provider_unavailable",
+                    model_failure,
+                    now_ms(),
                 )
                 .map_err(|_| "store_failed")?;
         }

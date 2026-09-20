@@ -800,10 +800,14 @@ submitting work remains reserved until its handler finishes or is cancelled.
 A stale reply cannot remove or publish against a successor reservation.
 Leases are process-local; source jobs and frozen plans are durable.
 
-Other `next` states are `ready`, `pending`, `disabled`, `store_failed`, and
-`unavailable`. `ready` means the project has no pending sources. It does not
-count saved memories. Retry backoff, exhausted failures, another claimant,
-missing model selection, or unavailable preparation can produce `pending`.
+Other `next` states are `ready`, `pending`, `stale`, `disabled`,
+`store_failed`, and `unavailable`. `ready` means the project has no pending
+sources. It does not count saved memories. Retry backoff, exhausted failures,
+another claimant, missing model selection, or unavailable preparation can
+produce `pending`. A lease that expired or was replaced while its work was
+being prepared produces `stale`. Clients treat `pending` and `stale` as work
+left for a later drain, not as failures; a bound in a `work` response above
+the documented ceiling is refused by releasing the lease with `cancelled`.
 
 The harness executes without tools using its native model/auth manager.
 OAuth refresh tokens and provider credentials are never capture API fields.
@@ -813,7 +817,9 @@ model override, inheriting user-level providers rather than the source
 repository's provider overrides. Only process-registered private projects skip
 Eidnara startup, preventing recursive extraction. Caller-text config
 substitution tokens are escaped. Private sessions and instances are cleaned up
-before their directories are removed; unconfirmed cleanup retains the guard.
+before their directories are removed. A produced proposal is submitted even
+when that cleanup fails; a private directory that cannot be removed keeps its
+recursion guard, and the admission slot is released either way.
 
 The harness submits either bounded `output` with matching `model`, or one
 content-free `error`: `cancelled`, `provider_unavailable`, `model_failed`, or
@@ -845,19 +851,29 @@ lifetime. Cancellation and unavailable native auth do not consume that
 allowance. Dispatch counts survive restart and drive exponential retry delay
 from one second to 128 seconds. A new store owner resets failures only for
 unfinished, unprepared sources while preserving dispatch counts and deadlines.
-The native drain processes at most 32 batches per invocation. No model work
-runs in the daemon after a harness exits; unfinished sources await a later
-connected harness, and an abandoned lease may first need to expire.
+A store refusal of a frozen plan is a recorded model/output failure of that
+source alone; other sources in the batch still commit. Dispatches are capped
+at nine per source across owners: a model/output failure on or after the ninth
+dispatch abandons the source. An abandoned source keeps its replay identity
+and its last error, releases its text, no longer counts toward the pending
+quota or the `pending` status count, is never returned as work, and is not
+revived by a new store owner. The native drain processes at most 32 batches
+per invocation. No model work runs in the daemon after a harness exits;
+unfinished sources await a later connected harness, and an abandoned lease may
+first need to expire.
 
 `memory.capture.status` returns `available` with project-level `pending`,
 `prepared`, `completed`, and `failed` source counts, or `store_failed`.
-Completed sources may contain zero facts. `memory.auto_capture` is user-only
-and defaults to true. It, `memory.enabled`, and `memory.auto_promote` must all
+Abandoned sources count as `failed`, not `pending`. Completed sources may
+contain zero facts. `memory.auto_capture` is user-only and defaults to true.
+It, `memory.enabled`, and `memory.auto_promote` must all
 permit capture. Captured facts remain labeled model inference for explicit
 search, not human approval or automatic-context eligibility. Session deletion
 fences publication and removes queued sources; committed memories remain
-project-owned. Pi exposes unconfirmed capture in its status line; OpenCode
-warns on final-text failure. Notification failure never discards the answer.
+project-owned. Lifecycle hooks store sources and return; the drain that runs
+model work continues after them. Pi's status line shows pending or unconfirmed
+capture; OpenCode warns only when a checkpoint or drain fails. Notification
+failure never discards the answer.
 
 ## 8. Host and handler lifecycle
 

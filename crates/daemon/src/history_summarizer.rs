@@ -1200,18 +1200,6 @@ pub trait HistorySummarizerProducerDriver: Send {
     ) -> Result<RunHandle, HistorySummarizerProducerError> {
         self.start(session_id, system, prompt, model).await
     }
-    async fn start_with_model_defaults(
-        &mut self,
-        _session_id: &str,
-        _system: &str,
-        _prompt: &str,
-        _model: &str,
-        _max_output_tokens: u32,
-    ) -> Result<RunHandle, HistorySummarizerProducerError> {
-        Err(HistorySummarizerProducerError::Protocol(
-            "producer does not support model-native generation".into(),
-        ))
-    }
     async fn await_output(
         &mut self,
         run_id: &str,
@@ -1289,25 +1277,6 @@ impl HistorySummarizerProducerDriver for HistorySummarizerProducer {
             model,
             max_output_tokens,
             temperature,
-        )
-        .await
-    }
-
-    async fn start_with_model_defaults(
-        &mut self,
-        session_id: &str,
-        system: &str,
-        prompt: &str,
-        model: &str,
-        max_output_tokens: u32,
-    ) -> Result<RunHandle, HistorySummarizerProducerError> {
-        HistorySummarizerProducer::start_with_model_defaults(
-            self,
-            session_id,
-            system,
-            prompt,
-            model,
-            max_output_tokens,
         )
         .await
     }

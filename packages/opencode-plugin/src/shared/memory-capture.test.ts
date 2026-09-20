@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+    CAPTURE_MAX_AGE_MS,
     type CaptureMessage,
     captureFragments,
     createMemoryCaptureCheckpoint,
@@ -135,5 +136,98 @@ describe("capture native source adapters", () => {
             { id: "a", role: "assistant", text: "A decision" },
         ]);
         expect(messages).toEqual(before);
+    });
+
+    it("skips Pi entries older than notBefore and keeps undated ones", () => {
+        const entries = [
+            {
+                type: "message",
+                id: "old",
+                timestamp: "2026-09-18T12:00:00.000Z",
+                message: { role: "user", content: "Stale fact" },
+            },
+            {
+                type: "message",
+                id: "recent",
+                timestamp: "2026-09-20T12:00:00.000Z",
+                message: { role: "user", content: "Fresh fact" },
+            },
+            {
+                type: "message",
+                id: "message-time",
+                message: { role: "user", content: "Older by message clock", timestamp: 1 },
+            },
+            {
+                type: "message",
+                id: "entry-wins",
+                timestamp: "2026-09-20T12:00:00.000Z",
+                message: { role: "user", content: "Entry clock wins", timestamp: 1 },
+            },
+            {
+                type: "message",
+                id: "garbled",
+                timestamp: "not a date",
+                message: { role: "user", content: "Age unknown" },
+            },
+            { type: "message", id: "undated", message: { role: "user", content: "Undated" } },
+        ];
+        const notBefore = Date.parse("2026-09-19T00:00:00.000Z");
+        expect([...piCaptureMessages(entries, { notBefore })].map((part) => part.id)).toEqual([
+            "recent",
+            "entry-wins",
+            "garbled",
+            "undated",
+        ]);
+        expect([...piCaptureMessages(entries)].map((part) => part.id)).toEqual([
+            "old",
+            "recent",
+            "message-time",
+            "entry-wins",
+            "garbled",
+            "undated",
+        ]);
+        expect([...piCaptureMessages(entries, {})].map((part) => part.id)).toHaveLength(6);
+    });
+
+    it("skips OpenCode messages older than notBefore and keeps undated ones", () => {
+        const notBefore = Date.parse("2026-09-19T00:00:00.000Z");
+        const messages = [
+            {
+                info: { id: "old", role: "user", time: { created: notBefore - 1 } },
+                parts: [{ type: "text", text: "Stale fact" }],
+            },
+            {
+                info: { id: "boundary", role: "user", time: { created: notBefore } },
+                parts: [{ type: "text", text: "At the boundary" }],
+            },
+            {
+                info: { id: "snake", role: "user", time_created: notBefore - 1 },
+                parts: [{ type: "text", text: "Stale via time_created" }],
+            },
+            {
+                info: { id: "camel", role: "user", timeCreated: notBefore + 1 },
+                parts: [{ type: "text", text: "Fresh via timeCreated" }],
+            },
+            {
+                info: { id: "assistant", role: "assistant", time: { completed: notBefore - 1 } },
+                parts: [{ type: "text", text: "Completed but undated creation" }],
+            },
+            {
+                info: { id: "undated", role: "user", time: { created: "yesterday" } },
+                parts: [{ type: "text", text: "Undated" }],
+            },
+        ];
+        expect(
+            [...openCodeCaptureMessages(messages, { notBefore })].map((part) => part.id),
+        ).toEqual(["boundary", "camel", "assistant", "undated"]);
+        expect([...openCodeCaptureMessages(messages)].map((part) => part.id)).toEqual([
+            "old",
+            "boundary",
+            "snake",
+            "camel",
+            "assistant",
+            "undated",
+        ]);
+        expect(CAPTURE_MAX_AGE_MS).toBe(48 * 60 * 60 * 1000);
     });
 });

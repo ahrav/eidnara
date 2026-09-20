@@ -23,6 +23,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_history_summarizer_side_channel_outbox_due"),
     ("index", "idx_history_summarizer_side_channel_outbox_order"),
     ("index", "idx_memory_capture_pending"),
+    ("index", "idx_memory_capture_project"),
     ("index", "idx_memory_capture_session_project"),
     ("index", "idx_memory_classifier_attempts_project_dispatched"),
     ("index", "idx_memory_reviewer_frozen_selections_deadline"),

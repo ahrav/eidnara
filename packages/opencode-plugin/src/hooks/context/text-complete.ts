@@ -6,19 +6,15 @@ type CompletedText = { sessionID: string; messageID: string; partID: string };
 
 /** The final-text hook is awaited by OpenCode, unlike idle event subscribers. */
 export function createTextCompleteHandler(
-    checkpoint?: (input: CompletedText, text: string) => Promise<void>,
+    capture?: (input: CompletedText, text: string) => Promise<void>,
     notifyPending?: () => Promise<unknown>,
 ) {
     return async (input: CompletedText, output: { text: string }): Promise<void> => {
         output.text = stripPersistedAssistantText(output.text);
         try {
-            if (output.text.trim()) await checkpoint?.(input, output.text);
+            if (output.text.trim()) await capture?.(input, output.text);
         } catch (error) {
-            sessionLog.warn(
-                input.sessionID,
-                "memory capture final-text checkpoint pending:",
-                error,
-            );
+            sessionLog.warn(input.sessionID, "memory capture final-text capture pending:", error);
             try {
                 if (notifyPending)
                     await withTimeout(

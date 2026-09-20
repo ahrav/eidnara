@@ -813,24 +813,9 @@ impl HistorySummarizerProducer {
             prompt,
             model,
             max_output_tokens,
-            Some(temperature),
+            temperature,
         )
         .await
-    }
-
-    /// Generation revision 2 preserves provider-native decoding while retaining
-    /// the explicit output-token ceiling. Some reasoning models forbid a
-    /// caller-selected temperature.
-    pub async fn start_with_model_defaults(
-        &mut self,
-        session_id: &str,
-        system: &str,
-        prompt: &str,
-        model: &str,
-        max_output_tokens: u32,
-    ) -> Result<RunHandle, HistorySummarizerProducerError> {
-        self.start_with_options(session_id, system, prompt, model, max_output_tokens, None)
-            .await
     }
 
     async fn start_with_options(
@@ -840,7 +825,7 @@ impl HistorySummarizerProducer {
         prompt: &str,
         model: &str,
         max_output_tokens: u32,
-        temperature: Option<f64>,
+        temperature: f64,
     ) -> Result<RunHandle, HistorySummarizerProducerError> {
         // Route admission does not observe cancellation, so check before opening a route.
         // `NotSent` is valid here because no frame has been queued.
@@ -868,13 +853,10 @@ impl HistorySummarizerProducer {
             json!({ "provider": provider, "model": model_name }),
         );
         params.insert("tools".into(), json!([]));
-        let generation = match temperature {
-            Some(temperature) => {
-                json!({"max_output_tokens":max_output_tokens,"temperature":temperature})
-            }
-            None => json!({"revision":2,"max_output_tokens":max_output_tokens}),
-        };
-        params.insert("generation".into(), generation);
+        params.insert(
+            "generation".into(),
+            json!({"max_output_tokens":max_output_tokens,"temperature":temperature}),
+        );
         if !system.is_empty() {
             params.insert("system".into(), json!(system));
         }

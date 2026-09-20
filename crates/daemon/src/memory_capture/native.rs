@@ -292,6 +292,7 @@ impl HandlerCore {
                             retry_at
                         },
                         matches!(error, "model_failed" | "output_limit"),
+                        now_ms(),
                     )
                     .is_err()
                 {
@@ -300,6 +301,8 @@ impl HandlerCore {
             }
             return respond(json!({"state":"pending"}));
         }
+        // An unrecorded store error would leave these jobs immediately eligible again.
+        let jobs = plan.jobs.clone();
         match work
             .accept_native_output(plan, output.unwrap_or_default(), retry_at)
             .await
@@ -307,6 +310,9 @@ impl HandlerCore {
             Ok(()) => respond(json!({"state":"processed"})),
             Err(code) => {
                 eprintln!("daemon: native memory capture submission failed: {code}");
+                if work.failed(&jobs, "store_failed", retry_at).is_err() {
+                    return respond(json!({"state":"store_failed"}));
+                }
                 respond(json!({"state":"pending"}))
             }
         }
@@ -341,6 +347,7 @@ impl CaptureWork {
                                 "kernel_write_failed",
                                 now_ms().saturating_add(5000),
                                 false,
+                                now_ms(),
                             )
                             .map_err(|_| "store_failed")?;
                     }
@@ -453,11 +460,20 @@ impl CaptureWork {
                 memories,
             };
             let frozen = serde_json::to_string(&output).map_err(|_| "output_encoding_failed")?;
-            if let Some(frozen) = self
-                .store
-                .prepare_memory_capture(&job.project, &job.job_id, &frozen)
-                .map_err(|_| "store_failed")?
-            {
+            let prepared =
+                match self
+                    .store
+                    .prepare_memory_capture(&job.project, &job.job_id, &frozen)
+                {
+                    Ok(prepared) => prepared,
+                    Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_)) => {
+                        eprintln!("daemon: native memory capture plan refused by the store");
+                        self.failed(std::slice::from_ref(&job), "extraction_failed", retry_at)?;
+                        continue;
+                    }
+                    Err(_) => return Err("store_failed"),
+                };
+            if let Some(frozen) = prepared {
                 let id = job.job_id.clone();
                 let project = job.project.clone();
                 job.prepared = Some(frozen.clone());
@@ -474,6 +490,7 @@ impl CaptureWork {
                                 "kernel_write_failed",
                                 now_ms().saturating_add(5000),
                                 false,
+                                now_ms(),
                             )
                             .map_err(|_| "store_failed")?;
                     }
