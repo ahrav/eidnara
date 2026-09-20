@@ -435,6 +435,24 @@ describe("eidnara hook", () => {
             expect(client.tui.showToast).toHaveBeenCalledTimes(1);
         });
 
+        it("keeps the warning latched across a pending drain between two failing ones", async () => {
+            useTempDataHome("capture-pending-latch-");
+            const nextStates = ["store_failed", "pending", "store_failed"];
+            const fake = createFakeModuleClient(({ method }) => ({
+                state: method === "memory.capture.next" ? nextStates.shift() : "accepted",
+            }));
+            const { hook, client } = createCaptureHook(fake, [
+                assistantMessage("native-answer", [{ type: "text", text: "A decision." }]),
+            ]);
+            const idle = { event: { type: "session.idle", properties: { sessionID: SESSION } } };
+            for (let turn = 0; turn < 3; turn++) {
+                await hook.event(idle);
+                await hook.memoryCaptureDrain.settle();
+            }
+            expect(nextStates).toHaveLength(0);
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
         it("checkpoints and drains without a model hint when the live model is unknown", async () => {
             useTempDataHome("capture-unknown-model-");
             const fake = createFakeModuleClient(({ method }) => ({

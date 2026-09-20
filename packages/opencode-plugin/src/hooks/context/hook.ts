@@ -233,8 +233,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 variant: "warning",
             },
         });
-    /** One warning per outage: the toast repeats only after a drain settles again. A checkpoint
-     * alone cannot re-arm it, or a persistent model outage would warn on every turn. */
+    /** One warning per outage: the toast repeats only after a drain ends with no work left. A
+     * checkpoint alone or a `pending` drain (retry backoff, another claimant) cannot re-arm it,
+     * or a persistent model outage would warn on every eligible retry. */
     let captureWarningShown = false;
     const warnCaptureIncomplete = (): void => {
         if (captureWarningShown) return;
@@ -252,8 +253,9 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     // returns before any extraction work. One drain per completed turn sees the user's message
     // and the answer together.
     const memoryCaptureDrain = createMemoryCaptureDrain(moduleClient, executeCapture, {
-        // `"pending"` leaves work for a later drain and is not a failure to report.
-        onSettled: captureRecovered,
+        onSettled: (_scope, result) => {
+            if (result !== "pending") captureRecovered();
+        },
         onFailed: (scope, error) => {
             sessionLog.warn(scope.sessionId, "memory capture drain failed:", error);
             warnCaptureIncomplete();
