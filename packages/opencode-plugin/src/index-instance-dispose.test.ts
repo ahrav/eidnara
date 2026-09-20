@@ -29,9 +29,8 @@ function fakeClient() {
 
 async function dispose(hooks: Record<string, unknown>, directory: string): Promise<void> {
     const event = hooks.event as (input: { event: unknown }) => Promise<void>;
+    // The disposal event settles only after capture has stopped and the transport is gone.
     await event({ event: { type: "server.instance.disposed", properties: { directory } } });
-    // Teardown quiesces memory capture before it disconnects; give that chain a few turns.
-    for (let turn = 0; turn < 20; turn++) await Bun.sleep(0);
 }
 
 describe("daemon transport teardown on instance disposal", () => {

@@ -235,7 +235,8 @@ async function evictProject(client: EidnaraDeps["client"], project: PrivateProje
     const failures: string[] = [];
     if (project.started)
         await withTimeout(
-            Promise.resolve(
+            // `.then` keeps a synchronous throw from a disposed SDK client inside this catch.
+            Promise.resolve().then(() =>
                 client.instance.dispose({ query: { directory: project.directory } } as never),
             ),
             CLEANUP_MS,

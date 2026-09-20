@@ -211,11 +211,16 @@ const server: Plugin = async (ctx) => {
                 } catch {
                     // best-effort
                 }
+                log(
+                    "[eidnara] instance disposed — stopped RPC server; stopping capture and disconnecting the daemon transport",
+                );
                 // Every reload builds a new client, so the old one is torn down here; otherwise its socket, channel poller, route handles, and ring mappings stay cached for the process lifetime.
                 // A capture drain still running would redial that transport on its next daemon call
                 // and prepare fresh private projects nobody disposes, and a user checkpoint still
-                // resolving its directory would do the same, so capture stops first.
-                void (eidnara?.closeMemoryCapture() ?? Promise.resolve())
+                // resolving its directory would do the same, so capture stops first. The disposal
+                // event settles only when this chain does, so the replacement instance never sees
+                // this one's projects retired under it.
+                return (eidnara?.closeMemoryCapture() ?? Promise.resolve())
                     .catch((error) => {
                         log(`[eidnara] native capture drain stop failed: ${error}`);
                     })
@@ -227,9 +232,6 @@ const server: Plugin = async (ctx) => {
                     .catch((error) => {
                         log(`[eidnara] native capture project cleanup failed: ${error}`);
                     });
-                log(
-                    "[eidnara] instance disposed — stopped RPC server; stopping capture and disconnecting the daemon transport",
-                );
             },
         }),
         // SAFETY: the wrapper matches the hook's runtime call shape; only its declared input type is narrower than the SDK's.

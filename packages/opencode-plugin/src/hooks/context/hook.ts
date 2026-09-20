@@ -298,7 +298,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 ]),
             ];
             if (messages.length === 0) return;
+            // Checkpoints for one session run in order, so the newest promise covers every earlier one.
+            const previous = pendingUserCaptures.get(sessionId);
             const pending = (async () => {
+                await previous?.catch(() => undefined);
                 const projectRoot = await sessionDirectoryFor(sessionId);
                 if (captureClosed || excludedFromCapture(sessionId)) return;
                 const model = liveModelBySession.get(sessionId);

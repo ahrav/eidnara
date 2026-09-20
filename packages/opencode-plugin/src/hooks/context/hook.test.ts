@@ -663,6 +663,40 @@ describe("eidnara hook", () => {
             expect(fake.calls).toHaveLength(0);
         });
 
+        it("closing capture waits for every outstanding user checkpoint, not only the latest", async () => {
+            useTempDataHome("capture-close-overlapping-user-");
+            const first = Promise.withResolvers<unknown>();
+            let checkpoints = 0;
+            const fake = createFakeModuleClient(({ method }) => {
+                if (method !== "memory.capture") return { state: "ready" };
+                checkpoints += 1;
+                return checkpoints === 1 ? first.promise : { state: "accepted" };
+            });
+            const client = createClientMock(undefined, "/project");
+            const hook = requireHook(
+                createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
+            );
+            for (const id of ["native-user-1", "native-user-2"]) {
+                await hook["chat.message"](
+                    { sessionID: SESSION, model: { providerID: "provider", modelID: "model" } },
+                    {
+                        message: { id, role: "user", sessionID: SESSION },
+                        parts: [{ type: "text", text: `Fact ${id}.` }],
+                    },
+                );
+            }
+            for (let turn = 0; turn < 5; turn++) await Bun.sleep(0);
+            let closed = false;
+            const closing = hook.closeMemoryCapture().then(() => {
+                closed = true;
+            });
+            for (let turn = 0; turn < 5; turn++) await Bun.sleep(0);
+            // The first checkpoint is still waiting on the daemon; close must not settle before it.
+            expect(closed).toBe(false);
+            first.resolve({ state: "accepted" });
+            await closing;
+        });
+
         it("does not capture when OpenCode ignores project configuration", async () => {
             useTempDataHome("capture-project-config-disabled-");
             const saved = process.env.OPENCODE_DISABLE_PROJECT_CONFIG;

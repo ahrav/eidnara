@@ -38,6 +38,8 @@ interface Harness {
 function harness(overrides: {
     delete?: (directory: string) => Promise<void>;
     dispose?: (directory: string) => Promise<void>;
+    /** `instance.dispose` throws synchronously, as a disposed SDK client does. */
+    disposeThrowsSync?: boolean;
     onCreate?: (directory: string) => void;
     /** The private session create rejects with this error. */
     createError?: Error;
@@ -142,10 +144,11 @@ function harness(overrides: {
             },
         },
         instance: {
-            dispose: async (input: { query: { directory: string } }) => {
+            dispose: (input: { query: { directory: string } }) => {
                 disposed.push(input.query.directory);
                 cleanup.push("dispose");
-                await overrides.dispose?.(input.query.directory);
+                if (overrides.disposeThrowsSync) throw new Error("client disposed");
+                return overrides.dispose?.(input.query.directory) ?? Promise.resolve();
             },
         },
     };
@@ -256,6 +259,28 @@ describe("OpenCode native memory capture executor", () => {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
         expect(h.disposed).toHaveLength(1);
         expect(new Set(h.directories).size).toBe(5);
+    });
+
+    it("keeps a produced answer and settles disposal when instance.dispose throws synchronously", async () => {
+        const gate = Promise.withResolvers<void>();
+        const h = harness({ disposeThrowsSync: true, answerGate: gate.promise });
+        lastClient = h.client;
+        const warn = spyOn(logger.log, "warn");
+        try {
+            const executor = openCodeMemoryCaptureExecutor(h.client as never);
+            const busy = executor({ ...work, system: "sync-throw" }, new AbortController().signal);
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            const retiring = disposeNativeCaptureProjects(h.client as never);
+            gate.resolve();
+            // The retired project is evicted inside the executor's `finally`; the answer survives.
+            await expect(busy).resolves.toEqual({ model: "custom/m", text: '{"ok":true}' });
+            await expect(retiring).resolves.toBeUndefined();
+            expect(JSON.stringify(warn.mock.calls)).toContain("client disposed");
+            for (const directory of h.directories)
+                rmSync(directory, { recursive: true, force: true });
+        } finally {
+            warn.mockRestore();
+        }
     });
 
     it("keeps the directory and recursion guard of a project whose instance cannot be disposed", async () => {
