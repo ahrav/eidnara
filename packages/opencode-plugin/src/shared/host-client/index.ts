@@ -28,6 +28,15 @@ export {
     SocketClosedError,
     SocketTimeoutError,
 } from "./errors";
+export {
+    exactCount,
+    exactI64,
+    exactU64,
+    formatExactInteger,
+    parseExactJson,
+    rawJsonInteger,
+    type WireInteger,
+} from "./exact-json";
 export { ReceiveLease, type ReceiveReleaseOutcome } from "./frame-channel";
 export {
     evictProcessHostClient,

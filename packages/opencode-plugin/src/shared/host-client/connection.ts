@@ -19,6 +19,7 @@
 
 import { armExpiryTimer, type Deadline } from "./deadline";
 import { HostCallError, SocketClosedError, SocketTimeoutError } from "./errors";
+import { parseExactJson } from "./exact-json";
 import {
     ByteBudget,
     bytesFrameBody,
@@ -154,11 +155,18 @@ export interface RequestParams {
      * first item.
      */
     maxStreamItems?: number;
-    responseMode?: "json" | "binary";
+    responseMode?: ResponseMode;
     binary?: boolean;
     priority?: Priority;
     admissionClass?: AdmissionClass;
 }
+
+/**
+ * How a request's JSON or binary bodies are materialized. `json` decodes with `JSON.parse`;
+ * `exact_json` decodes with `parseExactJson`, so integer lexemes past the safe range arrive as
+ * `bigint` or refuse the body; `binary` keeps the body in its lease.
+ */
+export type ResponseMode = "json" | "exact_json" | "binary";
 
 /** Caller results and cleanup tickets settle independently. */
 export interface AbortHandle {
@@ -276,7 +284,7 @@ interface PendingEntry {
     corr: bigint;
     mode: PendingMode;
     maxStreamItems: number;
-    responseMode: "json" | "binary";
+    responseMode: ResponseMode;
     writeInvoked: boolean;
     callerSettled: boolean;
     sawStream: boolean;
@@ -932,7 +940,7 @@ export class ConnectionGeneration {
      * rather than the generic retirement code.
      */
     private dispatchError(header: EnvelopeHeader, lease: ReceiveLease): void {
-        const body = this.consumeJson(lease);
+        const body = this.consumeJson(lease, false);
         if (!isCanonicalErrorBody(body)) {
             const entry = this.pending.get(pendingKey(header.channel, header.epoch, header.corr));
             const violation = new Error("host sent a malformed Error body");
@@ -1023,7 +1031,7 @@ export class ConnectionGeneration {
             }
             const body = flagsBinary(header.flags)
                 ? this.ownedStreamCopy(lease)
-                : this.consumeJson(lease);
+                : this.consumeJson(lease, entry.responseMode === "exact_json");
             if (body === null) return;
             entry.streamItems.push(body);
             entry.heldBytes += body.byteLength;
@@ -1066,7 +1074,7 @@ export class ConnectionGeneration {
                 this.finishEntry(entry);
                 return;
             }
-            const body = this.consumeBody(header, lease);
+            const body = this.consumeBody(entry, header, lease);
             if (body === null) {
                 this.settleCallerReject(
                     entry,
@@ -1122,8 +1130,14 @@ export class ConnectionGeneration {
      * the caller releases it; a JSON body is decoded and the lease released. `null` means the
      * quota refused the body, which was released unread.
      */
-    private consumeBody(header: EnvelopeHeader, lease: ReceiveLease): RequestReceiveBody | null {
-        return flagsBinary(header.flags) ? this.retainBinary(lease) : this.consumeJson(lease);
+    private consumeBody(
+        entry: PendingEntry,
+        header: EnvelopeHeader,
+        lease: ReceiveLease,
+    ): RequestReceiveBody | null {
+        return flagsBinary(header.flags)
+            ? this.retainBinary(lease)
+            : this.consumeJson(lease, entry.responseMode === "exact_json");
     }
 
     /**
@@ -1164,7 +1178,8 @@ export class ConnectionGeneration {
         });
     }
 
-    private consumeJson(lease: ReceiveLease): JsonReceiveBody {
+    /** `exact` selects `parseExactJson`; an `Error` body is always decoded plainly, since the canonical `ErrorBody` carries no integer a double cannot hold. */
+    private consumeJson(lease: ReceiveLease, exact: boolean): JsonReceiveBody {
         const byteLength = lease.byteLength;
         let text: string | null = null;
         let value: unknown;
@@ -1177,7 +1192,7 @@ export class ConnectionGeneration {
             }
             text += decoder.decode();
             try {
-                value = JSON.parse(text);
+                value = exact ? parseExactJson(text) : JSON.parse(text);
                 valid = true;
             } catch {
                 value = undefined;

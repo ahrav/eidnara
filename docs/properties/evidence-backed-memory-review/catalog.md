@@ -35,7 +35,7 @@ Every slug the seven residual tickets own. Slugs the specification assigns to ot
 | `unknown-dispatch-does-not-authorize-resend` | #727 | yes |
 | `uncited-owner-lineage-remains-read-authority` | #727 | yes |
 | `observer-route-does-not-change-background-rosters` | #728 | yes |
-| `status-sanitizer-preserves-inclusive-integer-domain` | #729 | not yet |
+| `status-sanitizer-preserves-inclusive-integer-domain` | #729 | yes |
 | `completed-outcome-pages-have-live-keyset-semantics` | #730 | not yet |
 | `shared-path-fixture-reaches-selected-readable-proposal` | #730 | not yet |
 | `reference-only-cli-outcomes-preserve-meaning` | #730 | not yet |
@@ -171,6 +171,21 @@ Required faults and enabling state: MODULE authority on the root with the start-
 Confidence: high - [evidence](evidence/observer-route-does-not-change-background-rosters.md). Verified the four views by equality against the dormant and the scheduled snapshots, the Ready job's state after two passes over an empty view, and byte-equal wire answers through a `cli` route
 Existing check: `crates/daemon/src/lib.rs::tests::an_observational_binding_reads_its_project_and_takes_no_part_in_background_work`, `crates/daemon/tests/memory_reviewer_worker.rs::a_pass_over_a_view_without_the_project_leaves_its_ready_job_unclaimed`, `crates/daemon/tests/memory_reviewer_wire.rs::an_observational_route_reads_the_same_outcomes_as_an_ordinary_route`
 Impact: Opening the review command on a dormant project would enroll it in the worker and run its Ready jobs, or replace a live harness's schedule with the observer's configuration
+Open questions: None.
+
+### status-sanitizer-preserves-inclusive-integer-domain
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `packages/opencode-plugin/src/shared/host-client/client.test.ts` sends raw wire tokens at the signed and unsigned extrema and around 2^53 through an exact-integer routed response and a `host.status` response over the fake daemon, and a default routed response carrying a `transform` recipe with a 2^53+1 token inside an inserted message value; `connection.test.ts` covers stream items under both modes; `exact-json.test.ts` covers the reviver, the withheld-lexeme refusal, and the domain validators
+Guarantee: An exactly decoded body never presents a rounded integer as exact: a safe integer arrives as a `number`, any other integer lexeme arrives as a `bigint` with its exact value or refuses the body, so adjacent unequal wire integers never compare equal after decoding. `host.status` and a routed `request` under `exactIntegers` decode exactly; every other body decodes as `JSON.parse` does, so a module payload forwarded to OpenCode never carries a `bigint`. The count domain admits `9007199254740992` and refuses `9007199254740993`, negative, fractional, null, and absent values, each without touching its siblings; `u64` and `i64` fields follow their own bounds and return a `bigint` for any in-range value outside the safe range.
+Check: `always` - `consumeJson` is the only JSON decode on the receive path; it calls `parseExactJson` when the pending request's response mode is `exact_json` and `JSON.parse` otherwise; the reviver splits on `Number.isSafeInteger` for every number and refuses an integer-valued unsafe double whose lexeme the runtime withholds; asserted on every decoded body of each mode
+Fault/timing angle: none; a pure decoding property
+Required faults and enabling state: response bodies written as raw text with chosen integer tokens; a `host.status` body carrying a counter of 2^53+1 beside a valid counter; a default routed recipe body carrying 2^53+1 inside an inserted value; a `JSON.parse` that hands the reviver no source text
+Confidence: high - [evidence](evidence/status-sanitizer-preserves-inclusive-integer-domain.md). Verified under Bun 1.3.14 through the test suite and under Node 24.18 by direct import; both report `bigint` for 2^53+1 and `number` for 2^53 on the exact path
+Existing check: `client.test.ts::integer lexemes a double cannot reproduce arrive exact through exact-integer routed and control responses`, `a default routed response decodes as JSON.parse does, so module payloads forwarded to OpenCode never carry a bigint`, `routeOpen omits the ambient consumer identity only when asked, for that bind alone`; `connection.test.ts::stream items decode exactly only under the exact_json response mode`; `exact-json.test.ts`
+Impact: A counter or generation past 2^53 would display a neighboring value as exact, and two different receipts or revisions could render identically; a `bigint` reaching a module payload would make the `transform` recipe refuse it as malformed, or, past that check, OpenCode's `JSON.stringify` throw
 Open questions: None.
 
 ## Relationship map

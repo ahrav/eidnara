@@ -74,6 +74,23 @@ reviews found and how each finding was dispositioned.
 | The empty-view worker construction repeated `worker_for` | refinement | fixed: `worker_with_projects` serves both |
 | `values()` consumers in bind and unbind remain unfiltered | bias | kept: session-liveness and note-capability decisions are route-local and must see observers; the security check found no read an observer gains or any scheduling an ordinary route escapes |
 
+## Exact integers at the client seam
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The number-or-bigint split compared `String(value)` with the lexeme, which keys on shortest-digit printing rather than exactness: 2^60 became a `bigint` and 10^20 stayed a `number`, contradicting the twenty-digit refusal | gap | fixed: the split is `Number.isSafeInteger`; every lexeme outside the safe range is a `bigint` or refused, and the tests pin 2^60 and 10^20 |
+| `module-wire.ts` declared its own `I64_MIN` and `U64_MAX` | refinement | fixed: imported from `exact-json` |
+| Exports with no caller outside tests | refinement | fixed: `exactIntegerWithin`, `isWireInteger`, and the count and i64 bounds are module-private |
+| The bigint-to-number branch in `exactIntegerWithin` was unreachable from the reviver | refinement | fixed: removed |
+| No routed body with a lexeme past 64 bits reached a caller as `invalid_response_body` | gap | fixed: asserted with the diagnostics checked for the token |
+| A reviver walks the value recursively, so nesting a few thousand levels deep fails as invalid JSON where the plain parse accepted it | bias | kept: the daemon's serializer nests no deeper than 128; recorded in `existing-checks.md` |
+| The observer bind in the identity test changes `session`, so the separate cache slot for `consumerIdentity: null` under an identical identity is not shown | bias | kept: `routeOpen` does not cache; the slot question belongs to managed `call`, which does not take the option |
+| Every integer lexeme could become a `bigint`, as the decision's wording admits | bias | kept: converting only lexemes outside the safe range preserves every existing consumer's values; recorded on the evidence page |
+| Decoding every body exactly made the `transform` recipe refuse as `malformed` whenever an inserted message value carried an integer past 2^53, and the failure was sticky for that session; the values are handed to OpenCode, whose `JSON.stringify` rejects a `bigint` | gap | fixed: exact decoding is a per-request response mode; `hostStatus` and `request(..., { exactIntegers: true })` select it and every other body decodes as `JSON.parse` does; asserted at the host client and on the stream path |
+| `exactU64` and `exactI64` returned an unsafe integer-valued `number` unchanged, so `formatExactInteger(exactU64(2 ** 60))` printed `1152921504606847000` as exact | gap | fixed: a `number` is a wire integer only when it is a safe integer, so an unsafe double is refused; only a `bigint`, which only an integer lexeme produces, carries a value outside the safe range; pinned with 2^60 |
+| A decimal or exponent spelling that evaluates to an unsafe integer (`9007199254740993e0`, `9007199254740993.0`) decoded as the rounded double 2^53, which `exactCount` then accepted as the exact boundary; `-0` passed every domain although serde reads it, like those spellings, as `f64` | gap | fixed: the same safe-integer rule refuses the rounded double, and `-0` is excluded by `Object.is`; pinned in `exact-json.test.ts` and the routed body in `client.test.ts` |
+| The reviver returned the rounded double when `JSON.parse` handed it no source text, so a runtime below the engine floor would pass 2^53+1 through `exactCount` as 2^53 | gap | fixed: an integer-valued unsafe double with no lexeme refuses the body; pinned by wrapping `JSON.parse` |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner

@@ -60,6 +60,16 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
 | `a_pass_over_a_view_without_the_project_leaves_its_ready_job_unclaimed` | `crates/daemon/tests/memory_reviewer_worker.rs` | gate open, Ready job, two passes over a hand-built empty view: no claim, no receipt, zero connections; a view naming the project runs it on the next pass | unaudited |
 | `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route` | `crates/daemon/tests/memory_reviewer_wire.rs` | `review.list`, `review.read`, a malformed identity, and an unknown field answer byte-equal through a `cli` route and the ordinary route | unaudited |
 
+## Exact integers at the client seam
+
+| Check | Location | Covers | Status |
+| --- | --- | --- | --- |
+| `integer lexemes a double cannot reproduce arrive exact through exact-integer routed and control responses` | `packages/opencode-plugin/src/shared/host-client/client.test.ts` | raw tokens at the extrema and around 2^53 through `request` under `exactIntegers` and through `hostStatus`; count, u64, and i64 domains on the decoded values; a 21-digit lexeme refused with no token in diagnostics | unaudited |
+| `a default routed response decodes as JSON.parse does, so module payloads forwarded to OpenCode never carry a bigint` | same | a `transform` recipe whose inserted message value carries 2^53+1 and a nanosecond timestamp decodes to rounded numbers and survives `JSON.stringify`; a 21-digit lexeme decodes as `1e20` | unaudited |
+| `routeOpen omits the ambient consumer identity only when asked, for that bind alone` | same | the ambient pair is sent by default, omitted with `consumerIdentity: null`, and sent again on the next default bind; the environment is unchanged | unaudited |
+| `stream items decode exactly only under the exact_json response mode` | `packages/opencode-plugin/src/shared/host-client/connection.test.ts` | the same stream item is a rounded `number` under the default mode and a `bigint` under `exact_json` | unaudited |
+| `exact-json.test.ts` | `packages/opencode-plugin/src/shared/host-client/` | the reviver on every value shape, the width bound, refusal when `JSON.parse` withholds the lexeme, the three domains including an unsafe integer-valued double, human and raw JSON output | unaudited |
+
 ## Suspiciously quiet areas
 
 - No test exercises class tightening (a decision reclassified `Sensitive`
@@ -75,6 +85,15 @@ Status is `unaudited` for all of them: adequacy belongs to a separate review.
   read from code.
 - No test reopens either store between the Kernel envelope and the sweep; the
   durable rows are read through the same handles that wrote them.
+- No test decodes a maximum-size response body full of twenty-digit tokens;
+  the width bound is read from code.
+- A reviver makes `JSON.parse` walk the value recursively, so on the exact path
+  nesting a few thousand levels deep fails as invalid JSON where the plain
+  parse accepts it; the daemon's serializer nests no deeper than 128, and no
+  test pins the bound.
+- No test drives a real `transform` pass end to end with a message value past
+  2^53; the default-mode decode is asserted at the host client, and the recipe
+  consumer's rejection of a `bigint` is read from `validateJsonValue`.
 - No test drives observer open, `module_projects`, and a worker pass in one
   process; the view and the pass are exercised in two tests.
 - No test records a `temporary_capture` member and adopts it; the member
