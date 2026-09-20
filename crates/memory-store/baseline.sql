@@ -16,6 +16,37 @@ CREATE TABLE cache_state (
             meta         TEXT NOT NULL
         , last_activity_at INTEGER NOT NULL DEFAULT 0);
 
+-- Automatic capture keeps input until a kernel receipt is confirmed. Completed
+-- identities remain replayable; only their source and prepared-output bytes go.
+-- `abandoned_at_ms` is terminal: the row keeps its identity and last error but
+-- releases its text and leaves every pending selection and quota count.
+CREATE TABLE memory_capture_jobs (
+    job_id TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    harness TEXT NOT NULL CHECK (length(harness) > 0),
+    session_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+    text TEXT NOT NULL,
+    prepared_json TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    failures INTEGER NOT NULL DEFAULT 0,
+    paused_until_ms INTEGER NOT NULL DEFAULT 0,
+    retry_at_ms INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    commit_seq INTEGER,
+    abandoned_at_ms INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    CHECK (commit_seq IS NULL OR (text='' AND prepared_json IS NULL)),
+    CHECK (abandoned_at_ms IS NULL OR (commit_seq IS NULL AND text='' AND prepared_json IS NULL AND last_error IS NOT NULL))
+);
+CREATE INDEX idx_memory_capture_pending ON memory_capture_jobs(project,harness,created_at_ms)
+    WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL;
+CREATE INDEX idx_memory_capture_session_project ON memory_capture_jobs(session_id,project);
+-- Covers the project status aggregate, whose predicate columns are indexed by
+-- expression so the row (and its prepared payload) is never read.
+CREATE INDEX idx_memory_capture_project ON memory_capture_jobs(project,commit_seq,abandoned_at_ms,last_error,prepared_json IS NOT NULL);
+
 CREATE TABLE history_segments (
             session_id        TEXT NOT NULL,
             sequence          INTEGER NOT NULL,

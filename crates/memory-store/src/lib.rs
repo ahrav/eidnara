@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod memory_capture;
 pub mod memory_classifier_ledger;
 pub mod memory_reviewer_jobs;
 pub mod memory_reviewer_ledger;
@@ -3395,6 +3396,7 @@ pub enum DurableWriteFamily {
     KernelConsumerControl,
     RedactionReceipts,
     MemoryReviewerJobs,
+    MemoryCapture,
 }
 
 impl DurableWriteFamily {
@@ -3424,6 +3426,7 @@ impl DurableWriteFamily {
         Self::KernelConsumerControl,
         Self::RedactionReceipts,
         Self::MemoryReviewerJobs,
+        Self::MemoryCapture,
     ];
 
     pub const fn owner_kind(self) -> &'static str {
@@ -3451,6 +3454,7 @@ impl DurableWriteFamily {
             Self::KernelConsumerControl => "kernel_consumer_control",
             Self::RedactionReceipts => "redaction_receipts",
             Self::MemoryReviewerJobs => "memory_reviewer_jobs",
+            Self::MemoryCapture => "memory_capture",
         }
     }
 }
@@ -3468,6 +3472,12 @@ pub struct DurableWriteRegistration {
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-support"))]
 pub const DURABLE_WRITE_REGISTRY: &[DurableWriteRegistration] = &[
+    DurableWriteRegistration {
+        family: DurableWriteFamily::MemoryCapture,
+        policy: DurableFieldPolicy::Mixed,
+        preparation: "identity rejection and prepared source content",
+        test: "memory_capture::tests::capture_redacts_sources_and_refuses_secret_outputs_and_identities",
+    },
     DurableWriteRegistration {
         family: DurableWriteFamily::CacheState,
         policy: DurableFieldPolicy::Mixed,
@@ -5681,6 +5691,9 @@ pub struct MemoryStore {
     /// lock serializes scopes so one request cannot lend its authority identity to another.
     facade_authority_scope: Arc<Mutex<Option<FacadeAuthorityScope>>>,
     facade_mutation_lock: Mutex<()>,
+    /// Caller-clock instant at or after which the next capture enqueue prunes expired
+    /// terminal identities; starts at zero so the first enqueue after open prunes.
+    pub(crate) memory_capture_prune_due_ms: std::sync::atomic::AtomicI64,
     #[cfg(any(test, feature = "test-support"))]
     abandon_history_summarizer_hook: AbandonHistorySummarizerHook,
     #[cfg(any(test, feature = "test-support"))]
@@ -6132,6 +6145,7 @@ impl MemoryStore {
             note_caller_project,
             facade_authority_scope,
             facade_mutation_lock: Mutex::new(()),
+            memory_capture_prune_due_ms: std::sync::atomic::AtomicI64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             abandon_history_summarizer_hook: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(any(test, feature = "test-support"))]
@@ -6161,6 +6175,7 @@ impl MemoryStore {
         };
         store.prune_transform_session_roots()?;
         store.ensure_memory_reviewer_store_identity(current_time_ms())?;
+        store.resume_memory_capture_after_open()?;
         Ok(store)
     }
 
@@ -6829,6 +6844,7 @@ impl MemoryStore {
                 )?;
             }
             retire_active_scan_scope(tx, "session", session_id)?;
+            crate::memory_capture::retire_capture_scans_for_session(tx, session_id)?;
             let tables = {
                 // Backend infrastructure tables belong to the store crate; the callback scope
                 // refuses to touch them and they hold no session rows.
@@ -18364,6 +18380,11 @@ mod tests {
             "history_summarizer_side_channel_outbox",
             "INSERT INTO history_summarizer_side_channel_outbox(session_id, firing_seq, kind, source_start, source_end, item_index, payload_json, created_at_ms)
              VALUES (?1, 1, 'event', 1, 2, 0, '{}', 1)",
+        ),
+        (
+            "memory_capture_jobs",
+            "INSERT INTO memory_capture_jobs(job_id, project, harness, session_id, message_id, role, text, created_at_ms)
+             VALUES (?1 || '-capture', '/project', 'pi', ?1, 'native-1', 'user', 'pending fact', 1)",
         ),
         (
             "note_deliveries",

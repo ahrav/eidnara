@@ -389,6 +389,12 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
     }
 
     const memory = projectRaw.memory;
+    if (isPlainObject(memory) && "auto_capture" in memory) {
+        delete memory.auto_capture;
+        warnings.push(
+            "Ignoring memory.auto_capture from project config (security: unattended conversation capture requires user-level configuration).",
+        );
+    }
     if (isPlainObject(memory) && "injection_budget_tokens" in memory) {
         delete memory.injection_budget_tokens;
         warnings.push(
