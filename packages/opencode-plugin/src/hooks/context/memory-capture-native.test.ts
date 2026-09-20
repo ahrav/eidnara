@@ -29,6 +29,10 @@ function harness(overrides: {
     delete?: (directory: string) => Promise<void>;
     dispose?: (directory: string) => Promise<void>;
     onCreate?: (directory: string) => void;
+    /** OpenCode's unified finish reason for the private session's answer. */
+    finish?: string;
+    /** Settles before the private session's answer is returned. */
+    answerGate?: Promise<void>;
 }): Harness {
     const directories: string[] = [];
     const disposed: string[] = [];
@@ -57,6 +61,8 @@ function harness(overrides: {
                 expect(isNativeCaptureProject(directory)).toBe(true);
                 expect(isNativeCaptureProject(process.cwd())).toBe(false);
                 expect(existsSync(join(directory, ".git"))).toBe(true);
+                // A `.opencode` directory would make OpenCode install `@opencode-ai/plugin` into it.
+                expect(existsSync(join(directory, ".opencode"))).toBe(false);
                 expect(input.body).toMatchObject({
                     title: "eidnara-memory-capture",
                     permission: [{ permission: "*", pattern: "*", action: "deny" }],
@@ -72,9 +78,14 @@ function harness(overrides: {
                 expect(input.body.model).toEqual({ providerID: "custom", modelID: "m" });
                 expect(input.body.system).toBeUndefined();
                 expect(input.body.parts).toEqual([{ type: "text", text: work.prompt }]);
+                await overrides.answerGate;
                 return {
                     data: {
-                        info: { modelID: "m", providerID: "custom", finish: "stop" },
+                        info: {
+                            modelID: "m",
+                            providerID: "custom",
+                            finish: overrides.finish ?? "stop",
+                        },
                         parts: [
                             { type: "reasoning", text: "private" },
                             { type: "text", text: '{"ok":true}' },
@@ -134,6 +145,54 @@ describe("OpenCode native memory capture executor", () => {
         expect(directory).toBeDefined();
         expect(existsSync(directory as string)).toBe(true);
         expect(isNativeCaptureProject(directory as string)).toBe(true);
+    });
+
+    it.each([
+        ["stop", "accepted"],
+        ["other", "accepted"],
+        ["unknown", "accepted"],
+        ["length", "output_limit"],
+        ["tool-calls", "model_failed"],
+        ["content-filter", "model_failed"],
+        ["error", "model_failed"],
+    ] as const)("maps finish reason %s to %s", async (finish, outcome) => {
+        const h = harness({ finish });
+        lastClient = h.client;
+        const attempt = openCodeMemoryCaptureExecutor(h.client as never)(
+            work,
+            new AbortController().signal,
+        );
+        if (outcome === "accepted") {
+            expect(await attempt).toEqual({ model: "custom/m", text: '{"ok":true}' });
+        } else {
+            await expect(attempt).rejects.toThrow(`Native memory capture: ${outcome}`);
+        }
+    });
+
+    it("disposes idle projects at once and a busy project after its capture finishes", async () => {
+        const gate = Promise.withResolvers<void>();
+        const h = harness({ answerGate: gate.promise });
+        lastClient = h.client;
+        const executor = openCodeMemoryCaptureExecutor(h.client as never);
+        const signal = new AbortController().signal;
+        const busy = executor(work, signal);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        const [directory] = h.directories;
+        expect(directory).toBeDefined();
+        const disposeAll = disposeNativeCaptureProjects(h.client as never);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        // The running capture still owns its directory and session.
+        expect(h.disposed).toEqual([]);
+        expect(existsSync(directory as string)).toBe(true);
+        gate.resolve();
+        await busy;
+        await disposeAll;
+        expect(h.disposed).toEqual([directory]);
+        expect(existsSync(directory as string)).toBe(false);
+        expect(isNativeCaptureProject(directory as string)).toBe(false);
+        // A retired project is never reused.
+        await executor(work, signal);
+        expect(new Set(h.directories).size).toBe(2);
     });
 
     it("reuses one warm private project per model and system prompt across captures", async () => {
