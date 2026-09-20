@@ -11,7 +11,7 @@ import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 /** Kernel `MAX_REVIEW_TEXT_BYTES`: the longest text a staged proposal carries. */
 const MAX_TEXT_BYTES = 32 * 1024;
 /** Kernel `MAX_REVIEW_IDENTITY_BYTES`: the longest identifier a staged proposal carries. */
-const MAX_IDENTITY_BYTES = 512;
+export const MAX_IDENTITY_BYTES = 512;
 /** Kernel `MAX_REVIEW_REFERENCES`: the bound on support and contradictions together. */
 const MAX_REFERENCES = 256;
 const MAX_LIMITATIONS = 16;

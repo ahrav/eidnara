@@ -247,6 +247,17 @@ describe("review list", () => {
         expect(long.recorded.stdout[0]).toContain(`--project ${deep}/real --after`);
     });
 
+    test("a root that printable rendering would alter is never offered as a runnable command", async () => {
+        const page = { kind: "page", items: [], next: HEX_B };
+        for (const root of ["/two  spaces", "/tab\tbed", "/new\nline", "/esc\u001b[2K"]) {
+            const { deps, recorded } = harness({ respond: () => page });
+            expect(await runReviewCommand(["list", "--project", root], deps)).toBe(0);
+            const text = recorded.stdout[0];
+            expect(text).toContain(`Next page: rerun this command with --after ${HEX_B}`);
+            expect(text).not.toContain("eidnara review list --project");
+        }
+    });
+
     test("an exact-full page yields a cursor whose follow-up may be empty, and nothing walks it automatically", async () => {
         const pages = new Map<string | null, unknown>([
             [
@@ -485,6 +496,25 @@ describe("review list vocabulary", () => {
 });
 
 describe("review show", () => {
+    test("a bounded identifier longer than a display line is rendered whole", async () => {
+        const candidate = `c${"x".repeat(510)}`;
+        const evidence = `e${"y".repeat(510)}`;
+        const { deps, recorded } = harness({
+            respond: () => {
+                const body = selectedBody();
+                const proposal = body.proposal as Record<string, unknown>;
+                proposal.target = { kind: "staged_candidate", candidate_id: candidate };
+                proposal.support = [{ evidence_id: evidence }];
+                return body;
+            },
+        });
+        expect(await runReviewCommand(["show", HEX], deps)).toBe(0);
+        const text = recorded.stdout[0];
+        expect(text).toContain(`Target: staged candidate ${candidate}`);
+        expect(text).toContain(`  ${evidence}`);
+        expect(text).not.toContain("...");
+    });
+
     test("issues exactly one read and renders every field with inert text and exact integers", async () => {
         const { deps, recorded } = harness({ respond: selectedBody });
         expect(await runReviewCommand(["show", HEX], deps)).toBe(0);

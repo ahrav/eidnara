@@ -15,6 +15,7 @@ import {
     decodeSelected,
     integerText,
     isHex64,
+    MAX_IDENTITY_BYTES,
     MAX_PAGE_ITEMS,
     type Proposal,
     type READ_TERMINALS,
@@ -193,9 +194,9 @@ function referenceLines(label: string, references: Reference[]): string[] {
         `${label}:`,
         ...references.map((reference) => {
             const span = reference.span
-                ? ` [${printableLine(reference.span.alias, 64)} ${integerText(reference.span.start)}..${integerText(reference.span.end)}]`
+                ? ` [${printableLine(reference.span.alias, MAX_IDENTITY_BYTES)} ${integerText(reference.span.start)}..${integerText(reference.span.end)}]`
                 : "";
-            return `  ${printableLine(reference.evidence_id, MAX_LINE)}${span}`;
+            return `  ${printableLine(reference.evidence_id, MAX_IDENTITY_BYTES)}${span}`;
         }),
     ];
 }
@@ -203,8 +204,8 @@ function referenceLines(label: string, references: Reference[]): string[] {
 function proposalLines(proposal: Proposal): string[] {
     const target =
         proposal.target.kind === "staged_candidate"
-            ? `staged candidate ${printableLine(proposal.target.candidate_id, MAX_LINE)}`
-            : `memory ${printableLine(proposal.target.object_id, MAX_LINE)} revision ${integerText(proposal.target.source_revision)} known as of ${integerText(proposal.target.known_as_of)} commit token ${integerText(proposal.target.commit_token)}`;
+            ? `staged candidate ${printableLine(proposal.target.candidate_id, MAX_IDENTITY_BYTES)}`
+            : `memory ${printableLine(proposal.target.object_id, MAX_IDENTITY_BYTES)} revision ${integerText(proposal.target.source_revision)} known as of ${integerText(proposal.target.known_as_of)} commit token ${integerText(proposal.target.commit_token)}`;
     const lines = [`Action: ${proposal.action}`, `Target: ${target}`];
     if (proposal.new_text !== undefined) lines.push("Text:", printableBlock(proposal.new_text));
     lines.push(...referenceLines("Support", proposal.support));
@@ -216,7 +217,7 @@ function proposalLines(proposal: Proposal): string[] {
     );
     lines.push(`Uncertainty: ${proposal.uncertainty}`);
     lines.push(
-        `Manifest: ${printableLine(proposal.manifest.manifest_id, MAX_LINE)} ${proposal.manifest.digest}`,
+        `Manifest: ${printableLine(proposal.manifest.manifest_id, MAX_IDENTITY_BYTES)} ${proposal.manifest.digest}`,
     );
     return lines;
 }
@@ -230,8 +231,11 @@ const MAX_PATH_LINE = 4096;
 
 /** The command reruns the same walk from any directory: the root is explicit and a non-default page size is repeated. */
 function nextPageCommand(projectRoot: string, limit: number, next: string): string {
-    const flat = printableLine(projectRoot, MAX_PATH_LINE);
-    const project = SHELL_PLAIN.test(flat) ? flat : shellQuote(flat);
+    // A root that printable rendering would alter cannot be quoted back into a command that reaches the same directory.
+    if (printableLine(projectRoot, MAX_PATH_LINE) !== projectRoot) {
+        return `rerun this command with --after ${next}`;
+    }
+    const project = SHELL_PLAIN.test(projectRoot) ? projectRoot : shellQuote(projectRoot);
     const size = limit === DEFAULT_LIMIT ? "" : ` --limit ${limit}`;
     return `eidnara review list --project ${project}${size} --after ${next}`;
 }
@@ -402,7 +406,7 @@ async function render(
         text: [
             `Project: ${printableLine(projectRoot, MAX_LINE)}`,
             `Causal identity: ${selected.causal_identity}`,
-            `Reference: ${printableLine(selected.reference.database_incarnation_id, MAX_LINE)} ${printableLine(selected.reference.candidate_id, MAX_LINE)} ${selected.reference.payload_digest}`,
+            `Reference: ${printableLine(selected.reference.database_incarnation_id, MAX_IDENTITY_BYTES)} ${printableLine(selected.reference.candidate_id, MAX_IDENTITY_BYTES)} ${selected.reference.payload_digest}`,
             ...proposalLines(selected.proposal),
             `Review expires at: ${integerText(selected.review_expires_at)} ms`,
             "Reference only: this proposal is not applied, and viewing it changes nothing.",
