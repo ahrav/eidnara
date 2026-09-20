@@ -303,6 +303,23 @@ describe("eval-core fences", () => {
         ).toEqual(["a.rs:2: use shm_transport::Frame;", "a.rs:3: let l = lease::Lease::new();"]);
     });
 
+    test("rejects renaming a product crate, by extern crate or a use group", () => {
+        expect(
+            forbiddenCoreSources(
+                {
+                    "a.rs": [
+                        "#[cfg(test)]",
+                        "extern crate kernel as k;",
+                        "use {serde::Serialize, storage as st};",
+                        "let s = k::Surface::AutoInject;",
+                        "",
+                    ].join("\n"),
+                },
+                crates,
+            ),
+        ).toEqual(["a.rs:2: extern crate kernel as k;", "a.rs:3: use {serde::Serialize, storage as st};"]);
+    });
+
     test("refuses to pass on an empty source set", () => {
         expect(forbiddenCoreSources({}, crates)).toEqual([
             "crates/eval-core/src: no source files scanned",

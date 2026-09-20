@@ -14,10 +14,10 @@ export const EVAL_CORE_DEPENDENCIES: ReadonlySet<string> = new Set([
  * Paths a sans-I/O core must not name: every other workspace crate outside its
  * closed dependency set, the external effect crates below, and the std effect
  * modules, whether written as a full path (`std::fs::read`) or as a member of a
- * brace-grouped `use std::{...}` list. Rebinding the `std` root is refused
- * outright: renaming it (`std as s`, `std::{self as s}`) or globbing it
- * (`use std::*`, `use std::{.., *}`) would let `s::fs` or bare `fs` escape the
- * textual scan.
+ * brace-grouped `use std::{...}` list. Rebinding a root is refused outright:
+ * renaming it (`std as s`, `std::{self as s}`, `extern crate kernel as k`) or
+ * globbing std (`use std::*`, `use std::{.., *}`) would let `s::fs`, `k::X`, or
+ * bare `fs` escape the textual scan.
  */
 const STD_EFFECT_MODULES = "fs|path|process|time|net|env|io";
 const EXTERNAL_EFFECT_CRATES = ["rusqlite", "tokio"];
@@ -37,6 +37,7 @@ function forbiddenCoreSource(crates: readonly string[]): RegExp {
         [
             `\\b(${product})::`,
             `\\buse (${product})\\b`,
+            `\\b(${product}) as\\b`,
             `\\bstd::(${STD_EFFECT_MODULES})\\b`,
             `\\bstd::\\{[^;]*(?:[{,]\\s*|::)(${STD_EFFECT_MODULES})\\b`,
             `\\bstd as\\b`,

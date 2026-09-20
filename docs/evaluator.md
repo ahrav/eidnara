@@ -346,8 +346,8 @@ closed dependency set, and no path into another workspace crate, `rusqlite`,
 `tokio`, or a `std` effect module in the core's source; the crate list comes
 from `cargo metadata`, so a new workspace crate is fenced without editing the
 script. Paths are caught whether written as a full path or inside a brace-grouped
-`use std::{...}`; renaming or globbing the `std` root is refused so no alias
-or bare name can hide an effect path). The source scan runs from the `cargo metadata` workspace
+`use std::{...}`; renaming a crate root or globbing `std` is refused so no
+alias or bare name can hide an effect path). The source scan runs from the `cargo metadata` workspace
 root and fails when it matches no files, so it cannot pass vacuously.
 
 ## Bitemporal reducer
