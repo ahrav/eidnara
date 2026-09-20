@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use context_core::canonical_json::{ContractError, is_lower_hex, protocol_digest};
+use context_core::canonical_json::{
+    ContractError, canonical_json_encode, is_lower_hex, protocol_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -192,6 +194,7 @@ pub enum ManifestError {
     GeneratorVersionMismatch,
     ClaimBoundaryMismatch,
     ResidueIncomplete { field: String },
+    ResidueContradiction { type_name: String, field: String },
     SampleOrderNotAPermutation,
     MalformedDigest { field: String },
     MalformedDecimal { field: String, value: String },
@@ -266,6 +269,13 @@ pub fn parse_manifest(value: &Value) -> Result<Manifest, ManifestError> {
 
 impl Manifest {
     pub fn validate(&self) -> Result<(), ManifestError> {
+        if self.schema != MANIFEST_SCHEMA {
+            return Err(ManifestError::SchemaMismatch {
+                found: self.schema.clone(),
+            });
+        }
+        // Digestible on both runtimes: no integer may leave the canonical safe range.
+        canonical_json_encode(&self.to_value())?;
         let derived = eval_run_id(&self.run_identity)?;
         if derived != self.eval_run_id {
             return Err(ManifestError::RunIdMismatch {
@@ -282,6 +292,18 @@ impl Manifest {
         for entry in Self::field_schema().residue() {
             if !self.residue.contains(&entry) {
                 return Err(ManifestError::ResidueIncomplete { field: entry.field });
+            }
+        }
+        // Residue lists only non-`Keep` rules, one per `(type_name, field)`.
+        let mut classified = BTreeSet::new();
+        for entry in &self.residue {
+            if entry.rule == Rule::Keep
+                || !classified.insert((entry.type_name.as_str(), entry.field.as_str()))
+            {
+                return Err(ManifestError::ResidueContradiction {
+                    type_name: entry.type_name.clone(),
+                    field: entry.field.clone(),
+                });
             }
         }
         let ids: BTreeSet<&str> = self.sample_ids.iter().map(String::as_str).collect();

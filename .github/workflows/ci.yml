@@ -111,6 +111,8 @@ jobs:
             ts:
               - *workflow
               - 'packages/**'
+              # Root `tsconfig.json` and `bun test ./scripts` cover the scripts.
+              - 'scripts/**'
               - 'package.json'
               - 'bun.lock'
               - 'tsconfig.json'

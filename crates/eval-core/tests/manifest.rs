@@ -451,6 +451,65 @@ fn manifest_consistency_refusals_name_their_cause() {
 }
 
 #[test]
+fn residue_declarations_are_non_keep_and_one_rule_per_field() {
+    let kept = ResidueEntry {
+        type_name: "attempt".to_string(),
+        field: "pid".to_string(),
+        rule: Rule::Keep,
+    };
+    let mut keep = manifest();
+    keep.residue.insert(kept.clone());
+    assert_eq!(
+        parse_manifest(&keep.to_value()),
+        Err(ManifestError::ResidueContradiction {
+            type_name: "attempt".to_string(),
+            field: "pid".to_string(),
+        })
+    );
+    let mut twice = manifest();
+    twice.residue.insert(ResidueEntry {
+        type_name: OBSERVATION_TYPE.to_string(),
+        field: "run_id".to_string(),
+        rule: Rule::Presence,
+    });
+    assert_eq!(
+        parse_manifest(&twice.to_value()),
+        Err(ManifestError::ResidueContradiction {
+            type_name: OBSERVATION_TYPE.to_string(),
+            field: "run_id".to_string(),
+        })
+    );
+}
+
+#[test]
+fn validate_refuses_what_parse_and_digest_refuse() {
+    let mut schema = manifest();
+    schema.schema = "eval-manifest/v2".to_string();
+    assert_eq!(
+        schema.validate(),
+        Err(ManifestError::SchemaMismatch {
+            found: "eval-manifest/v2".to_string()
+        })
+    );
+    let mut epoch = manifest();
+    epoch.sample_epoch = 1 << 53;
+    assert!(matches!(
+        parse_manifest(&epoch.to_value()),
+        Err(ManifestError::NotCanonical(_))
+    ));
+    assert!(matches!(
+        epoch.validate(),
+        Err(ManifestError::NotCanonical(_))
+    ));
+    let mut stamp = manifest();
+    stamp.start_ms = i64::MAX;
+    assert!(matches!(
+        parse_manifest(&stamp.to_value()),
+        Err(ManifestError::NotCanonical(_))
+    ));
+}
+
+#[test]
 fn attestation_is_a_tagged_value() {
     let mut signed = manifest();
     signed.attestation = Attestation::Signed {
@@ -612,6 +671,23 @@ fn presence_and_relative_rules_hide_incarnation_values_but_not_their_structure()
         run(["a", "a", "b"], [Some(1), None, None]),
         "presence differs"
     );
+}
+
+#[test]
+fn a_refused_observation_leaves_relative_numbering_unchanged() {
+    let schema =
+        || ObservationSchema::new("pair", [("a", Rule::Relative), ("b", Rule::Relative)]).unwrap();
+    let mut refused = SemanticTrace::new([schema()]).unwrap();
+    assert!(matches!(
+        refused.record("pair", &json!({"a": "x", "b": 0.5})),
+        Err(ResidueError::NotCanonical(_))
+    ));
+    refused
+        .record("pair", &json!({"a": "y", "b": "ok"}))
+        .unwrap();
+    let mut clean = SemanticTrace::new([schema()]).unwrap();
+    clean.record("pair", &json!({"a": "y", "b": "ok"})).unwrap();
+    assert_eq!(refused.digest().unwrap(), clean.digest().unwrap());
 }
 
 #[test]

@@ -20,8 +20,6 @@ export interface CargoMetadata {
     packages: MetadataPackage[];
 }
 
-type FeatureTable = Record<string, string[]>;
-
 /** A feature or `pkg/feature` entry that turns on test-support, with the feature that holds it. */
 interface TestSupportHit {
     /** The feature in whose table the hit sits (or the hit itself when `entry` is null). */
@@ -37,36 +35,64 @@ function tableName(dep: MetadataDependency): string {
     return dep.target ? `target.${dep.target}.${table}` : table;
 }
 
+/** A reached feature: bare for the scanned package, `pkg/feature` for another local package. */
+interface Reached {
+    name: string;
+    /** The requested feature whose closure reached it. */
+    root: string;
+    entries: string[];
+}
+
+/** Splits `pkg/feature` and `pkg?/feature`; null for a same-package entry. */
+function forwarded(entry: string): [string, string] | null {
+    const slash = entry.indexOf("/");
+    if (slash < 0) return null;
+    return [entry.slice(0, slash).replace(/\?$/, ""), entry.slice(slash + 1)];
+}
+
 /**
- * Feature names reachable from `roots` through one package's feature table, each
- * mapped to the root that reached it first. `dep:x` entries name the optional
- * dependency `x`, whose implicit feature shares its name; `pkg/feature` entries
- * belong to another package's table and stop here.
+ * Features reachable from `roots` through `pkg`'s feature table and, via
+ * `other/feature` entries, through other local packages' tables. `dep:x`
+ * entries name the optional dependency `x`, whose implicit feature shares its
+ * name. A `pkg/test-support` entry is a hit on its own and is not followed.
  */
-function featureClosure(features: FeatureTable, roots: string[]): Map<string, string> {
-    const reached = new Map<string, string>();
-    const pending: [string, string][] = roots.map((root) => [root, root]);
+function featureClosure(
+    local: Map<string, MetadataPackage>,
+    pkg: string,
+    roots: string[],
+): Reached[] {
+    const reached = new Map<string, Reached>();
+    const pending: [string, string, string][] = roots.map((root) => [pkg, root, root]);
     while (pending.length > 0) {
-        const [feature, root] = pending.pop() as [string, string];
-        if (reached.has(feature) || !(feature in features)) continue;
-        reached.set(feature, root);
-        for (const entry of features[feature] ?? []) {
-            if (!entry.includes("/")) pending.push([entry.replace(/^dep:/, ""), root]);
+        const [owner, feature, root] = pending.pop() as [string, string, string];
+        const table = local.get(owner)?.features ?? {};
+        const key = `${owner}/${feature}`;
+        if (reached.has(key) || !(feature in table)) continue;
+        const entries = table[feature] ?? [];
+        reached.set(key, { name: owner === pkg ? feature : key, root, entries });
+        for (const entry of entries) {
+            const other = forwarded(entry);
+            if (other === null) pending.push([owner, entry.replace(/^dep:/, ""), root]);
+            else if (!entry.endsWith("/test-support")) pending.push([...other, root]);
         }
     }
-    return reached;
+    return [...reached.values()];
 }
 
 /**
  * Every way the closure of `roots` turns on test-support: a reached feature named
  * `*test-support`, or a reached feature whose table forwards `pkg/test-support`.
  */
-function testSupportReach(features: FeatureTable, roots: string[]): TestSupportHit[] {
+function testSupportReach(
+    local: Map<string, MetadataPackage>,
+    pkg: string,
+    roots: string[],
+): TestSupportHit[] {
     const hits: TestSupportHit[] = [];
-    for (const [feature, root] of featureClosure(features, roots)) {
-        if (feature.endsWith("test-support")) hits.push({ feature, root, entry: null });
-        for (const entry of features[feature] ?? []) {
-            if (entry.endsWith("/test-support")) hits.push({ feature, root, entry });
+    for (const { name, root, entries } of featureClosure(local, pkg, roots)) {
+        if (name.endsWith("test-support")) hits.push({ feature: name, root, entry: null });
+        for (const entry of entries) {
+            if (entry.endsWith("/test-support")) hits.push({ feature: name, root, entry });
         }
     }
     return hits;
@@ -90,10 +116,10 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
             if (DEV_ONLY_PACKAGES.has(dep.name)) {
                 findings.add(`${table} depends on dev-only package ${dep.name}`);
             }
-            // A requested feature can forward to test-support under another name;
-            // the target's own `default` is reported once below, on the target.
-            const target = local.get(dep.name);
-            for (const hit of testSupportReach(target?.features ?? {}, requested)) {
+            // A requested feature can forward to test-support under another name,
+            // in the target or in a local package it forwards to; the target's
+            // own `default` is reported once below, on the target.
+            for (const hit of testSupportReach(local, dep.name, requested)) {
                 if (hit.entry !== null) {
                     findings.add(`${edge} reaches ${hit.entry} through ${hit.feature}`);
                 } else if (hit.feature !== hit.root) {
@@ -101,7 +127,7 @@ export function forbiddenDependencyEdges(metadata: CargoMetadata): string[] {
                 }
             }
         }
-        for (const hit of testSupportReach(pkg.features ?? {}, ["default"])) {
+        for (const hit of testSupportReach(local, pkg.name, ["default"])) {
             findings.add(
                 hit.entry === null
                     ? `${pkg.name} [features] default enables ${hit.feature}`

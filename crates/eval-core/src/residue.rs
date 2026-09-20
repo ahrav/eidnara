@@ -144,15 +144,24 @@ impl ObservationSchema {
                 field: field.to_string(),
             });
         }
+        // Every fallible step runs before the first mutation, so a refused
+        // observation leaves `relative` exactly as it found it.
         let mut reduced = Map::new();
+        let mut renumber = Vec::new();
         for (field, value) in fields {
-            let kept = match self.rules[field] {
-                Rule::Keep => value.clone(),
-                Rule::Drop => continue,
-                Rule::Presence => Value::Bool(!value.is_null()),
-                Rule::Relative => relative.renumber(&self.type_name, field, value)?,
+            match self.rules[field] {
+                Rule::Keep => reduced.insert(field.clone(), value.clone()),
+                Rule::Drop => None,
+                Rule::Presence => reduced.insert(field.clone(), Value::Bool(!value.is_null())),
+                Rule::Relative => {
+                    renumber.push((field, canonical_json_encode(value)?));
+                    None
+                }
             };
-            reduced.insert(field.clone(), kept);
+        }
+        for (field, key) in renumber {
+            let index = relative.renumber(&self.type_name, field, key);
+            reduced.insert(field.clone(), Value::from(index));
         }
         Ok(Value::Object(reduced))
     }
@@ -173,19 +182,14 @@ pub(crate) struct RelativeDomains {
 }
 
 impl RelativeDomains {
-    fn renumber(
-        &mut self,
-        type_name: &str,
-        field: &str,
-        value: &Value,
-    ) -> Result<Value, ResidueError> {
+    /// `key` is the canonical encoding of the observed value.
+    fn renumber(&mut self, type_name: &str, field: &str, key: String) -> u64 {
         let domain = self
             .seen
             .entry((type_name.to_string(), field.to_string()))
             .or_default();
         let next = domain.len() as u64 + 1;
-        let index = *domain.entry(canonical_json_encode(value)?).or_insert(next);
-        Ok(Value::from(index))
+        *domain.entry(key).or_insert(next)
     }
 }
 

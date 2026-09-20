@@ -30,11 +30,15 @@ sub-record.
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
 validates. Refusals are typed: `MissingField(name)`, `UnknownField(name)`,
 `SchemaMismatch`, `RunIdMismatch`, `GeneratorVersionMismatch`,
-`ClaimBoundaryMismatch`, `ResidueIncomplete`, `SampleOrderNotAPermutation`,
-`MalformedDigest`, `MalformedDecimal`. `Manifest::validate` is public so a
-manifest built in code can be checked before it is written. Adding a field to
-`Manifest` without bumping the schema fails the closure test, and the fixture
-digests in `tests/manifest.rs` are frozen so an encoding change is reviewed.
+`ClaimBoundaryMismatch`, `ResidueIncomplete`, `ResidueContradiction` (a `Keep`
+entry or two rules for one field), `SampleOrderNotAPermutation`,
+`MalformedDigest`, `MalformedDecimal`, `NotCanonical` (an integer outside the
+canonical safe range). `Manifest::validate` is public so a manifest built in
+code can be checked before it is written; it applies every check above except
+the key-set closure, so a manifest it accepts also parses and digests. Adding a
+field to `Manifest` without bumping the schema fails the closure test, and the
+fixture digests in `tests/manifest.rs` are frozen so an encoding change is
+reviewed.
 
 The 24 required fields, sorted:
 
@@ -98,7 +102,8 @@ is refused; it names no build. Empty version strings and a malformed
 
 `SemanticTrace::record` refuses an observation whose field set differs from
 its schema (`UnclassifiedField`, `MissingField`), so classification is total;
-registering one type twice is refused (`DuplicateType`).
+registering one type twice is refused (`DuplicateType`). A refused observation
+leaves the trace and its `Relative` numbering unchanged.
 `CLOCK_FIELD_KEEP_ALLOWLIST` (`now_ms`, `observed_at_ms`, `valid_time_ms`)
 names the only clock-named fields a schema may keep; any other clock-named
 field under `Keep` is refused at schema construction, as is any field named
