@@ -169,6 +169,36 @@ describe("native capture exchange", () => {
         expect(submitted).toEqual([
             expect.objectContaining({ lease: work.lease, error: "cancelled" }),
         ]);
+
+        // A close that lands while `next` is in flight must not start model work.
+        const late = new AbortController();
+        const next = Promise.withResolvers<unknown>();
+        const lateSubmitted: Array<Record<string, unknown>> = [];
+        let ran = false;
+        const lateFlush = flushMemoryCapture(
+            {
+                call: async ({ body }) => {
+                    const request = body as Record<string, unknown>;
+                    if (request.method === "memory.capture.next") return next.promise;
+                    lateSubmitted.push(request);
+                    return { state: "pending" };
+                },
+            },
+            scope,
+            async () => {
+                ran = true;
+                throw new Error("must not run");
+            },
+            late.signal,
+        );
+        await tick();
+        late.abort();
+        next.resolve(work);
+        await expect(lateFlush).rejects.toThrow("cancelled");
+        expect(ran).toBe(false);
+        expect(lateSubmitted).toEqual([
+            expect.objectContaining({ lease: work.lease, error: "cancelled" }),
+        ]);
     });
 
     it("still fails loudly on daemon store failures and malformed replies", async () => {

@@ -329,6 +329,11 @@ export async function flushMemoryCapture(
             if (reserved !== undefined) await release(reserved, "cancelled");
             throw error;
         }
+        // A close that landed while `next` was in flight must not start model work.
+        if (signal?.aborted) {
+            await release(lease, "cancelled");
+            throw new NativeCaptureError("cancelled");
+        }
         const controller = new AbortController();
         const cancel = () => controller.abort();
         signal?.addEventListener("abort", cancel, { once: true });
@@ -529,6 +534,8 @@ export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient,
                 if (acknowledged.get(key) === digest) continue;
                 const size = Buffer.byteLength(fragment.text);
                 if (batch.length >= BATCH_MESSAGES || bytes + size > BATCH_BYTES) await send();
+                // The daemon's `disabled` is terminal for this checkpoint; later batches would repeat it.
+                if (disabled) return "disabled";
                 batch.push(fragment);
                 batchKeys.push([key, digest]);
                 bytes += size;
