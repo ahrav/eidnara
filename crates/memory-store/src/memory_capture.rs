@@ -3,11 +3,18 @@
 //! frozen before the kernel commit, so recovery repeats identical operations.
 //! Completed rows retain their replay identity but release source/output bytes.
 //! Abandoned rows retain replay identity but are excluded from queue and quota counts.
+//! Both are pruned once [`CAPTURE_REPLAY_RETENTION_MS`] has passed since enqueue.
+
+use std::sync::atomic::Ordering;
 
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
+use storage::GuardedConn;
 
-use crate::{DurableWriteFamily, MemoryStore, MemoryStoreError, PreparedWrite, WriteDisposition};
+use crate::{
+    DurableWriteFamily, MemoryStore, MemoryStoreError, PreparedWrite, WriteDisposition,
+    retire_active_scan_domain_owner,
+};
 
 pub const MAX_CAPTURE_SOURCE_BYTES: usize = 64 * 1024;
 pub const MAX_CAPTURE_PREPARED_BYTES: usize = 512 * 1024;
@@ -16,11 +23,22 @@ pub const MAX_PENDING_CAPTURE_PER_PROJECT: i64 = 1024;
 pub const MAX_PENDING_CAPTURE_TOTAL: i64 = 8192;
 pub const MAX_CAPTURE_FAILURES: u32 = 3;
 pub const MAX_CAPTURE_ATTEMPTS: u32 = 9;
+/// Mirrors `kernel::source_identity::HARNESSES`; a daemon test pins the two equal.
+pub const CAPTURE_HARNESSES: [&str; 2] = ["opencode", "pi"];
+/// A source that exhausts [`MAX_CAPTURE_FAILURES`] remains paused for this
+/// duration, then becomes dispatchable with a fresh failure allowance.
+/// Reopening the store clears the pause early.
+pub const CAPTURE_FAILURE_PAUSE_MS: i64 = 6 * 60 * 60 * 1000;
+/// How long a completed or abandoned source keeps its replay identity, measured
+/// from its first enqueue. Pending sources are retained until they finish.
+pub const CAPTURE_REPLAY_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// Enqueue prunes expired identities at most this often, in the caller's clock.
+const CAPTURE_PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 /// `pending` excludes abandoned jobs; they still count as failed.
 const STATUS_SQL: &str = "SELECT COALESCE(SUM(commit_seq IS NULL AND abandoned_at_ms IS NULL),0),COALESCE(SUM(prepared_json IS NOT NULL),0),COALESCE(SUM(commit_seq IS NOT NULL),0),COALESCE(SUM(commit_seq IS NULL AND last_error IS NOT NULL),0) FROM memory_capture_jobs WHERE project=?1";
 /// Index order is `(project,harness,created_at_ms,rowid)`, so the ORDER BY needs no sorter.
-const PENDING_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND retry_at_ms<=?3 AND (prepared_json IS NOT NULL OR failures<?4) ORDER BY created_at_ms,rowid LIMIT 32";
+const PENDING_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND retry_at_ms<=?3 AND (prepared_json IS NOT NULL OR paused_until_ms<=?3) ORDER BY created_at_ms,rowid LIMIT 32";
 /// Without statistics the planner prefers the covering project index, which
 /// holds every completed row; the partial index holds only the pending ones.
 const PENDING_COUNTS_SQL: &str = "SELECT COALESCE(SUM(project=?1),0),COUNT(*) FROM memory_capture_jobs INDEXED BY idx_memory_capture_pending WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL";
@@ -32,6 +50,13 @@ fn pending_capture_counts(
     conn.query_row(PENDING_COUNTS_SQL, [project], |row| {
         Ok((row.get(0)?, row.get(1)?))
     })
+}
+
+fn prune_terminal_captures(tx: &GuardedConn<'_>, now_ms: i64) -> rusqlite::Result<usize> {
+    tx.execute(
+        "DELETE FROM memory_capture_jobs WHERE (commit_seq IS NOT NULL OR abandoned_at_ms IS NOT NULL) AND created_at_ms<?1",
+        [now_ms.saturating_sub(CAPTURE_REPLAY_RETENTION_MS)],
+    )
 }
 
 /// One native completed text message, scoped by the host's route.
@@ -111,13 +136,43 @@ fn prepared_write(project: &str, job: &str) -> Result<PreparedWrite, MemoryStore
     Ok(write)
 }
 
+/// The scan audit vouches for text the row holds; a terminal write or a row
+/// deletion removes that text, so the audit is removed with it.
+fn retire_capture_scans(tx: &GuardedConn<'_>, project: &str, job: &str) -> rusqlite::Result<()> {
+    retire_active_scan_domain_owner(
+        tx,
+        "project",
+        project,
+        DurableWriteFamily::MemoryCapture.owner_kind(),
+        job,
+    )
+}
+
+/// Capture rows own audits under `project`; retire them before the session
+/// sweep deletes their rows, since that sweep retires only the `session` scope.
+pub(crate) fn retire_capture_scans_for_session(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+) -> rusqlite::Result<()> {
+    let jobs = {
+        let mut statement = tx
+            .prepare_cached("SELECT project,job_id FROM memory_capture_jobs WHERE session_id=?1")?;
+        statement
+            .query_map([session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (project, job) in &jobs {
+        retire_capture_scans(tx, project, job)?;
+    }
+    Ok(())
+}
+
 impl MemoryStore {
-    /// A new writer may have repaired credentials or runtime configuration.
-    /// Keep dispatch counts and retry deadlines, but give pending sources a
-    /// fresh failure allowance. Prepared commits never need another model call.
     pub(crate) fn resume_memory_capture_after_open(&self) -> Result<(), MemoryStoreError> {
         PreparedWrite::new(DurableWriteFamily::MemoryCapture).execute(&self.inner, |tx| {
-            tx.tx().execute("UPDATE memory_capture_jobs SET failures=0 WHERE commit_seq IS NULL AND prepared_json IS NULL AND abandoned_at_ms IS NULL AND failures>0", [])?;
+            tx.tx().execute("UPDATE memory_capture_jobs SET failures=0,paused_until_ms=0 WHERE commit_seq IS NULL AND prepared_json IS NULL AND abandoned_at_ms IS NULL AND (failures>0 OR paused_until_ms>0)", [])?;
             Ok(WriteDisposition::Applied(()))
         })
     }
@@ -129,7 +184,7 @@ impl MemoryStore {
         source: CaptureSource<'_>,
         now_ms: i64,
     ) -> Result<CaptureEnqueue, MemoryStoreError> {
-        if !matches!(source.harness, "opencode" | "pi")
+        if !CAPTURE_HARNESSES.contains(&source.harness)
             || !matches!(source.role, "user" | "assistant")
             || source.text.trim().is_empty()
             || source.text.len() > MAX_CAPTURE_SOURCE_BYTES
@@ -156,8 +211,21 @@ impl MemoryStore {
         let job = job_id(&source, &text);
         write.domain_owner("project", source.project, job.as_str());
         write.identity("job_id", &job)?;
+        // The gate advances before the write so a failed transaction skips one
+        // interval instead of retrying the prune on every enqueue.
+        let prune_due = self.memory_capture_prune_due_ms.load(Ordering::Relaxed);
+        let prune = now_ms >= prune_due;
+        if prune {
+            self.memory_capture_prune_due_ms.store(
+                now_ms.saturating_add(CAPTURE_PRUNE_INTERVAL_MS),
+                Ordering::Relaxed,
+            );
+        }
         write.execute(&self.inner, |tx| {
             let tx = tx.tx();
+            if prune {
+                prune_terminal_captures(tx, now_ms)?;
+            }
             let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM memory_capture_jobs WHERE job_id=?1)", [&job], |row| row.get(0))?;
             if exists {
                 return Ok(WriteDisposition::Replay(CaptureEnqueue::Accepted { job_id: job.clone(), replayed: true }));
@@ -188,23 +256,20 @@ impl MemoryStore {
         self.inner
             .with_conn(|conn| {
                 let mut statement = conn.prepare_cached(PENDING_SQL)?;
-                let rows = statement.query_map(
-                    params![project, harness, now_ms, MAX_CAPTURE_FAILURES],
-                    |row| {
-                        Ok(CaptureJob {
-                            job_id: row.get(0)?,
-                            project: row.get(1)?,
-                            harness: row.get(2)?,
-                            session_id: row.get(3)?,
-                            message_id: row.get(4)?,
-                            role: row.get(5)?,
-                            text: row.get(6)?,
-                            prepared: row.get(7)?,
-                            attempts: row.get(8)?,
-                            failures: row.get(9)?,
-                        })
-                    },
-                )?;
+                let rows = statement.query_map(params![project, harness, now_ms], |row| {
+                    Ok(CaptureJob {
+                        job_id: row.get(0)?,
+                        project: row.get(1)?,
+                        harness: row.get(2)?,
+                        session_id: row.get(3)?,
+                        message_id: row.get(4)?,
+                        role: row.get(5)?,
+                        text: row.get(6)?,
+                        prepared: row.get(7)?,
+                        attempts: row.get(8)?,
+                        failures: row.get(9)?,
+                    })
+                })?;
                 let mut jobs = Vec::new();
                 let mut bytes = 0;
                 let mut retained_bytes = 0;
@@ -300,7 +365,11 @@ impl MemoryStore {
             ));
         }
         prepared_write(project, job)?.execute(&self.inner, |tx| {
-            let changed = tx.tx().execute("UPDATE memory_capture_jobs SET commit_seq=?3,text='',prepared_json=NULL,last_error=NULL WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND prepared_json IS NOT NULL",params![project,job,commit_seq])?;
+            let tx = tx.tx();
+            let changed = tx.execute("UPDATE memory_capture_jobs SET commit_seq=?3,text='',prepared_json=NULL,last_error=NULL WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND prepared_json IS NOT NULL",params![project,job,commit_seq])?;
+            if changed == 1 {
+                retire_capture_scans(tx, project, job)?;
+            }
             Ok(WriteDisposition::Applied(changed == 1))
         })
     }
@@ -327,9 +396,24 @@ impl MemoryStore {
             let tx = tx.tx();
             tx.execute("UPDATE memory_capture_jobs SET last_error=?3,retry_at_ms=?4,failures=failures+?5 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL",params![project,job,code,retry_at_ms, i64::from(model_failure)])?;
             if model_failure {
-                tx.execute("UPDATE memory_capture_jobs SET abandoned_at_ms=?3,text='' WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL AND attempts>=?4",params![project,job,now_ms,MAX_CAPTURE_ATTEMPTS])?;
+                let abandoned = tx.execute("UPDATE memory_capture_jobs SET abandoned_at_ms=?3,text='' WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL AND attempts>=?4",params![project,job,now_ms,MAX_CAPTURE_ATTEMPTS])?;
+                if abandoned == 1 {
+                    retire_capture_scans(tx, project, job)?;
+                }
+                // Reaching the failure limit pauses the job for a bounded window
+                // rather than until the next open, so a long-lived writer recovers.
+                tx.execute("UPDATE memory_capture_jobs SET failures=0,paused_until_ms=?3 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL AND failures>=?4",params![project,job,now_ms.saturating_add(CAPTURE_FAILURE_PAUSE_MS),MAX_CAPTURE_FAILURES])?;
             }
             Ok(WriteDisposition::Applied(()))
+        })
+    }
+
+    pub fn prune_terminal_memory_captures(&self, now_ms: i64) -> Result<usize, MemoryStoreError> {
+        PreparedWrite::new(DurableWriteFamily::MemoryCapture).execute(&self.inner, |tx| {
+            Ok(WriteDisposition::Applied(prune_terminal_captures(
+                tx.tx(),
+                now_ms,
+            )?))
         })
     }
 
@@ -466,6 +550,12 @@ mod tests {
         let mut bad = source("Keep this.");
         bad.message_id = "password=hunter-two";
         assert!(store.enqueue_memory_capture(bad, 1).is_err());
+        let mut unknown_harness = source("Keep this.");
+        unknown_harness.harness = "module";
+        assert!(
+            store.enqueue_memory_capture(unknown_harness, 1).is_err(),
+            "only the harnesses in CAPTURE_HARNESSES may enqueue sources"
+        );
         assert!(
             store
                 .pending_memory_captures("/other", "pi", 1)
@@ -542,6 +632,50 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].attempts, MAX_CAPTURE_FAILURES);
         assert_eq!(pending[0].failures, 0);
+    }
+
+    #[test]
+    fn confirmed_failures_pause_work_for_a_bounded_window_without_a_new_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let id = accepted(
+            store
+                .enqueue_memory_capture(source("Keep this project fact."), 0)
+                .unwrap(),
+        );
+        for _ in 0..MAX_CAPTURE_FAILURES {
+            store
+                .begin_memory_capture_attempt("/project", &id, 0)
+                .unwrap();
+            store
+                .fail_memory_capture("/project", &id, "extraction_failed", 0, true, 1_000)
+                .unwrap();
+        }
+        assert!(
+            store
+                .pending_memory_captures("/project", "pi", 1_000 + CAPTURE_FAILURE_PAUSE_MS - 1)
+                .unwrap()
+                .is_empty(),
+            "the exhausted allowance pauses the source for the whole window"
+        );
+        assert_eq!(
+            store.memory_capture_status("/project").unwrap().pending,
+            1,
+            "a paused source still occupies its queue slot"
+        );
+        let resumed = store
+            .pending_memory_captures("/project", "pi", 1_000 + CAPTURE_FAILURE_PAUSE_MS)
+            .unwrap();
+        assert_eq!(
+            resumed.len(),
+            1,
+            "the pause lifts on its own once the window passes"
+        );
+        assert_eq!(resumed[0].attempts, MAX_CAPTURE_FAILURES);
+        assert_eq!(
+            resumed[0].failures, 0,
+            "a lifted pause grants a fresh failure allowance"
+        );
     }
 
     #[test]
@@ -710,7 +844,7 @@ mod tests {
                 .any(|step| step.contains("SCAN memory_capture_jobs")),
             "{status:?}"
         );
-        let pending = plan(PENDING_SQL, &["", "pi", "0", "3"]);
+        let pending = plan(PENDING_SQL, &["", "pi", "0"]);
         assert_eq!(
             pending,
             [
@@ -723,6 +857,118 @@ mod tests {
             counts,
             ["SCAN memory_capture_jobs USING INDEX idx_memory_capture_pending"],
             "quota counts must read only pending rows, not every completed one"
+        );
+    }
+
+    #[test]
+    fn terminal_sources_are_pruned_after_the_replay_retention_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let completed = accepted(
+            store
+                .enqueue_memory_capture(source("Keep this project fact."), 1)
+                .unwrap(),
+        );
+        store
+            .begin_memory_capture_attempt("/project", &completed, 0)
+            .unwrap();
+        store
+            .prepare_memory_capture("/project", &completed, "[]")
+            .unwrap();
+        assert!(
+            store
+                .complete_memory_capture("/project", &completed, 7)
+                .unwrap()
+        );
+        let mut still_pending = source("Another project fact.");
+        still_pending.message_id = "native-2";
+        accepted(store.enqueue_memory_capture(still_pending, 1).unwrap());
+
+        assert_eq!(
+            store
+                .prune_terminal_memory_captures(1 + CAPTURE_REPLAY_RETENTION_MS)
+                .unwrap(),
+            0,
+            "a completed source keeps its replay identity for the whole window"
+        );
+        assert_eq!(
+            store
+                .enqueue_memory_capture(
+                    source("Keep this project fact."),
+                    1 + CAPTURE_REPLAY_RETENTION_MS
+                )
+                .unwrap(),
+            CaptureEnqueue::Accepted {
+                job_id: completed.clone(),
+                replayed: true
+            }
+        );
+        assert_eq!(
+            store
+                .prune_terminal_memory_captures(2 + CAPTURE_REPLAY_RETENTION_MS)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.memory_capture_status("/project").unwrap(),
+            CaptureQueueStatus {
+                pending: 1,
+                prepared: 0,
+                completed: 0,
+                failed: 0
+            },
+            "pending sources are never pruned, whatever their age"
+        );
+        assert_eq!(
+            store
+                .enqueue_memory_capture(
+                    source("Keep this project fact."),
+                    3 + CAPTURE_REPLAY_RETENTION_MS
+                )
+                .unwrap(),
+            CaptureEnqueue::Accepted {
+                job_id: completed,
+                replayed: false
+            },
+            "a pruned identity is captured again"
+        );
+    }
+
+    #[test]
+    fn enqueue_prunes_expired_terminal_sources_without_a_scheduler() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let completed = accepted(
+            store
+                .enqueue_memory_capture(source("Keep this project fact."), 1)
+                .unwrap(),
+        );
+        store
+            .begin_memory_capture_attempt("/project", &completed, 0)
+            .unwrap();
+        store
+            .prepare_memory_capture("/project", &completed, "[]")
+            .unwrap();
+        assert!(
+            store
+                .complete_memory_capture("/project", &completed, 7)
+                .unwrap()
+        );
+        assert_eq!(
+            store.memory_capture_status("/project").unwrap().completed,
+            1
+        );
+        let mut later = source("A later project fact.");
+        later.message_id = "native-2";
+        accepted(
+            store
+                .enqueue_memory_capture(later, 2 + CAPTURE_REPLAY_RETENTION_MS)
+                .unwrap(),
+        );
+        assert_eq!(
+            store.memory_capture_status("/project").unwrap().completed,
+            0,
+            "an enqueue past the window prunes the expired identity on its own"
         );
     }
 
