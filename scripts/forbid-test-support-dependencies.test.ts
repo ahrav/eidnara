@@ -265,6 +265,27 @@ describe("eval-core fences", () => {
         ).toEqual(["wrapped.rs:1: use std::{"]);
     });
 
+    test("rejects renaming the std root, which would hide effect paths", () => {
+        expect(
+            forbiddenCoreSources({
+                "alias.rs": [
+                    "use std as standard;",
+                    "use ::std as s;",
+                    "use std::{self as st, fmt};",
+                    "extern crate std as core_std;",
+                    "let bytes = standard::fs::read(\"x\");",
+                    "use std::collections::HashMap as Map;",
+                    "",
+                ].join("\n"),
+            }),
+        ).toEqual([
+            "alias.rs:1: use std as standard;",
+            "alias.rs:2: use ::std as s;",
+            "alias.rs:3: use std::{self as st, fmt};",
+            "alias.rs:4: extern crate std as core_std;",
+        ]);
+    });
+
     test("refuses to pass on an empty source set", () => {
         expect(forbiddenCoreSources({})).toEqual([
             "crates/eval-core/src: no source files scanned",
