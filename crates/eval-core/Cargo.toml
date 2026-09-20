@@ -1,0 +1,19 @@
+[package]
+name = "eval-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Long-horizon evaluator core: the run manifest contract, run identity, nondeterminism residue rules, and the surface census pins. Sans-I/O; values in, values out."
+
+# The dependency set is closed. A product crate (kernel, daemon, retrieval,
+# storage, memory-store, host-runtime), rusqlite, or tokio must not appear here;
+# `scripts/forbid-test-support-dependencies.ts` keeps this crate out of every
+# normal and build dependency table in the workspace.
+[dependencies]
+context-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }

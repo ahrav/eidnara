@@ -15,7 +15,7 @@ use daemon::packing::AccountingProfile;
 use host_runtime::model_execution::backend::ContextCapabilities;
 use host_runtime::{BindOutcome, CompositeComponent, RouteHandle, RouteIdentity};
 use serde_json::{Value, json};
-use support::kernel_daemon::{KernelDaemon, SESSION, StartOptions};
+use support::kernel_daemon::{KernelDaemon, SESSION, StartOptions, envelope};
 
 const OCC_A: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const OCC_B: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -55,19 +55,6 @@ fn context(revision: &str, representation: &str, span_end: u64) -> Value {
         ],
         "selection": [OCC_A, OCC_B],
     })
-}
-
-fn envelope(method: &str, project: &Path, body: Value) -> Value {
-    let mut request = json!({
-        "method": method,
-        "v": 1,
-        "session_id": SESSION,
-        "project_root": project.to_str().unwrap(),
-    });
-    for (key, value) in body.as_object().unwrap() {
-        request[key] = value.clone();
-    }
-    request
 }
 
 fn prepare(project: &Path, ctx: Value, action: &str, edit_bytes: u64) -> Value {

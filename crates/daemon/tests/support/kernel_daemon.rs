@@ -19,6 +19,20 @@ use storage::StorageDescriptor;
 pub const SESSION: &str = "stage1-session";
 pub const DOMAIN: &str = "stage1-domain";
 
+/// A `retrieval.*` or `memory_reviewer.*` request envelope for `SESSION` at `project`.
+pub fn envelope(method: &str, project: &Path, body: Value) -> Value {
+    let mut request = json!({
+        "method": method,
+        "v": 1,
+        "session_id": SESSION,
+        "project_root": project.to_str().unwrap(),
+    });
+    for (key, value) in body.as_object().unwrap() {
+        request[key] = value.clone();
+    }
+    request
+}
+
 pub struct StartOptions {
     pub data: Option<tempfile::TempDir>,
     pub project_config: Option<Value>,
@@ -207,6 +221,19 @@ impl KernelDaemon {
 
     pub async fn call(&self, request: Value) -> Value {
         self.call_on(self.route, request).await
+    }
+
+    /// The `terminal` label of a route's typed refusal or terminal answer.
+    pub async fn terminal(&self, request: Value) -> String {
+        match self.outcome(request).await {
+            PreparedOutcome::Response(output) => {
+                let value = output.json_for_test().unwrap().clone();
+                assert_eq!(value["kind"], "terminal", "{value}");
+                value["terminal"].as_str().unwrap().to_string()
+            }
+            PreparedOutcome::Error { code, message } => panic!("{code}: {message}"),
+            PreparedOutcome::Streamed => panic!("streamed"),
+        }
     }
 
     pub async fn call_on(&self, route: RouteHandle, request: Value) -> Value {
