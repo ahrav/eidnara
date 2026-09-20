@@ -724,6 +724,7 @@ fn host_environment_and_incarnation_fields_are_never_kept() {
         "writer_pid",
         "process_id",
         "parent_process_id",
+        "ppid",
         "database_incarnation_id",
     ] {
         assert!(is_never_kept(field), "{field}");

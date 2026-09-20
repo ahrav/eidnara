@@ -182,6 +182,21 @@ describe("forbiddenDependencyEdges", () => {
         expect(forbiddenDependencyEdges(metadata)).toEqual([]);
     });
 
+    test("reports a suffixed test-support feature forwarded to a registry package", () => {
+        const metadata = workspace([dep({ name: "serde" })]);
+        metadata.packages[0]!.features = {
+            fixtures: ["serde/integration-test-support"],
+        };
+        metadata.packages.push({
+            name: "cli",
+            source: null,
+            dependencies: [dep({ name: "daemon", features: ["fixtures"] })],
+        });
+        expect(forbiddenDependencyEdges(metadata)).toEqual([
+            "cli [dependencies] daemon reaches serde/integration-test-support through fixtures",
+        ]);
+    });
+
     test("resolves edge features only against local packages", () => {
         const metadata = workspace([dep({ name: "serde", features: ["derive"] })]);
         metadata.packages[1]!.features = { derive: ["serde_derive/test-support"] };

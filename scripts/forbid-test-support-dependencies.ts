@@ -52,6 +52,11 @@ function forwarded(entry: string): [string, string] | null {
     return [entry.slice(0, slash).replace(/\?$/, ""), entry.slice(slash + 1)];
 }
 
+/** A `pkg/feature` entry whose feature is test-support under any prefix. */
+function forwardsTestSupport(entry: string): boolean {
+    return forwarded(entry)?.[1].endsWith("test-support") ?? false;
+}
+
 /** The package `owner`'s feature entries call `alias`: its rename, else the name itself. */
 function dependencyPackage(local: Map<string, MetadataPackage>, owner: string, alias: string) {
     const dep = local.get(owner)?.dependencies.find((d) => (d.rename ?? d.name) === alias);
@@ -63,7 +68,7 @@ function dependencyPackage(local: Map<string, MetadataPackage>, owner: string, a
  * `other/feature` entries, through other local packages' tables. `dep:x`
  * enables the optional dependency `x` and suppresses its implicit feature, so it
  * is not a feature node; the dependency's own requested features are scanned on
- * its edge. A `pkg/test-support` entry is a hit on its own and is not followed.
+ * its edge. A `pkg/*test-support` entry is a hit on its own and is not followed.
  */
 function featureClosure(
     local: Map<string, MetadataPackage>,
@@ -83,7 +88,7 @@ function featureClosure(
             if (entry.startsWith("dep:")) continue;
             const other = forwarded(entry);
             if (other === null) pending.push([owner, entry, root]);
-            else if (!entry.endsWith("/test-support")) {
+            else if (!forwardsTestSupport(entry)) {
                 pending.push([dependencyPackage(local, owner, other[0]), other[1], root]);
             }
         }
@@ -93,7 +98,7 @@ function featureClosure(
 
 /**
  * Every way the closure of `roots` turns on test-support: a reached feature named
- * `*test-support`, or a reached feature whose table forwards `pkg/test-support`.
+ * `*test-support`, or a reached feature whose table forwards `pkg/*test-support`.
  */
 function testSupportReach(
     local: Map<string, MetadataPackage>,
@@ -104,7 +109,7 @@ function testSupportReach(
     for (const { name, root, entries } of featureClosure(local, pkg, roots)) {
         if (name.endsWith("test-support")) hits.push({ feature: name, root, entry: null });
         for (const entry of entries) {
-            if (entry.endsWith("/test-support")) hits.push({ feature: name, root, entry });
+            if (forwardsTestSupport(entry)) hits.push({ feature: name, root, entry });
         }
     }
     return hits;

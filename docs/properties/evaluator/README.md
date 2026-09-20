@@ -130,7 +130,7 @@ Placement fences (`scripts/forbid-test-support-dependencies.ts`, run in the
   target package, directly or through a forwarding alias in the target's
   feature table or in a local package that table forwards to, and no local
   package's `default` feature enables its own
-  `test-support` or reaches a `*/test-support` entry.
+  `test-support` or reaches a `*/*test-support` entry.
 
 ## Gaps recorded here
 
