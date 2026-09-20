@@ -17,7 +17,7 @@ use memory_store::memory_reviewer_jobs::{
 };
 use memory_store::memory_reviewer_ledger::{
     AbstainReason, AttemptMarker, DispatchOutcome, MemoryReviewerAttemptTerminal,
-    MemoryReviewerBeginOutcome, MemoryReviewerReceipt, ReceiptCompletion,
+    MemoryReviewerBeginOutcome, MemoryReviewerReceipt, ReceiptCompletion, ResponseUsage,
 };
 
 pub const PROJECT: &str = "git:proj";
@@ -294,6 +294,7 @@ pub fn publish(
             &claim.claim_id,
             attempt_index,
             MemoryReviewerAttemptTerminal::Complete,
+            ResponseUsage::NONE,
             now,
         )
         .unwrap();

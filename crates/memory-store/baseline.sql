@@ -585,9 +585,15 @@ CREATE TABLE memory_reviewer_attempts (
             committed_at_ms INTEGER NOT NULL,
             terminal_kind TEXT CHECK (terminal_kind IN ('complete', 'failed', 'cancelled', 'unknown', 'not_dispatched')),
             terminal_at_ms INTEGER,
+            -- Provider response bytes this attempt consumed, written once with its terminal: the raw body the
+            -- transport delivered and the assistant text the decoder measured. NULL under a terminal means
+            -- the consumption is unknown and the attempt counts as having spent the whole per-job ceiling.
+            raw_response_bytes INTEGER CHECK (raw_response_bytes IS NULL OR raw_response_bytes BETWEEN 0 AND 1048576),
+            decoded_text_bytes INTEGER CHECK (decoded_text_bytes IS NULL OR decoded_text_bytes BETWEEN 0 AND 65536),
             PRIMARY KEY (project, causal_identity, generation, attempt_index),
             FOREIGN KEY (project, causal_identity) REFERENCES memory_reviewer_receipts(project, causal_identity),
-            CHECK ((terminal_kind IS NULL) = (terminal_at_ms IS NULL))
+            CHECK ((terminal_kind IS NULL) = (terminal_at_ms IS NULL)),
+            CHECK (terminal_kind IS NOT NULL OR (raw_response_bytes IS NULL AND decoded_text_bytes IS NULL))
         );
 
 CREATE TRIGGER memory_reviewer_receipts_no_delete BEFORE DELETE ON memory_reviewer_receipts
@@ -613,6 +619,14 @@ BEFORE UPDATE OF generation, attempt_index, body_digest, request_bytes, provider
     credential_id, policy_union_digest, attempt_deadline_ms, committed_at_ms
 ON memory_reviewer_attempts
 BEGIN SELECT RAISE(ABORT, 'a memory_reviewer attempt marker is written once'); END;
+
+-- A terminal and the response usage recorded beside it are written once; a second write
+-- can neither move a consumed attempt back to in flight nor revise what it consumed.
+CREATE TRIGGER memory_reviewer_attempts_terminal_immutable
+BEFORE UPDATE OF terminal_kind, terminal_at_ms, raw_response_bytes, decoded_text_bytes
+ON memory_reviewer_attempts
+WHEN OLD.terminal_kind IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'a memory_reviewer attempt terminal and its response usage are written once'); END;
 
 CREATE TRIGGER memory_reviewer_attempts_reject_secret_insert BEFORE INSERT ON memory_reviewer_attempts
 BEGIN

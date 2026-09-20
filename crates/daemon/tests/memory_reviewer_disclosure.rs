@@ -970,6 +970,182 @@ async fn provider_failure_and_a_mismatched_model_end_the_attempt_without_a_secon
     assert_eq!(fixture.attempts().len(), allowance);
 }
 
+/// The decoded-text ceiling is the job's across attempts: a 40 KiB answer completes and records its text, the next 40 KiB answer is refused before its text is allocated because only 24 KiB remain, the refusal records the whole remainder as consumed, and the attempt after that is refused by the ledger as exhaustion before any marker is charged or connection opened.
+#[tokio::test]
+async fn responses_consume_the_jobs_text_ceiling_across_attempts_and_exhaustion_sends_nothing() {
+    let fixture = Fixture::open();
+    let (broker, turn) = fixture.broker();
+    let prepared = fixture.prepared(&broker, turn);
+    let now = fixture.now + 3;
+    let clock = move || now;
+    let fresh = CancellationToken::new();
+    let long_answer = || {
+        let text = "t".repeat(40 * 1024);
+        move |_: &support::tls_peer::Observed| {
+            json_response(
+                "200 OK",
+                &message(&text).replace(r#""model":"claude""#, &format!(r#""model":"{MODEL}""#)),
+                "",
+            )
+        }
+    };
+    let mut peer = Peer::start().await;
+    let server = peer.serve(no_wait(), long_answer());
+    let disclosed = attempt(
+        &fixture,
+        &peer,
+        &broker,
+        &prepared,
+        Some(&fixture.approval()),
+        &clock,
+        &fresh,
+    )
+    .await
+    .unwrap();
+    server.await.unwrap();
+    assert_eq!(disclosed.text.text.len(), 40 * 1024);
+    let attempts = fixture.attempts();
+    assert_eq!(attempts[0].response.decoded_text_bytes, Some(40 * 1024));
+    assert_eq!(
+        attempts[0].response.raw_response_bytes,
+        Some(u64::try_from(disclosed.text.accounting.transport_bytes).unwrap())
+    );
+    // The second answer is legal alone and refused against the 24 KiB the job has left.
+    let mut peer = Peer::start().await;
+    let server = peer.serve(no_wait(), long_answer());
+    let refusal = attempt(
+        &fixture,
+        &peer,
+        &broker,
+        &prepared,
+        Some(&fixture.approval()),
+        &clock,
+        &fresh,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        refusal,
+        DisclosureRefusal::Send {
+            attempt_index: Some(1),
+            error: SendError::Decode(daemon::memory_reviewer::model_response::DecodeError::Text),
+            sent: true,
+        }
+    );
+    server.await.unwrap();
+    let attempts = fixture.attempts();
+    assert_eq!(
+        attempts[1].terminal.map(|(terminal, _)| terminal),
+        Some(MemoryReviewerAttemptTerminal::Failed)
+    );
+    assert_eq!(attempts[1].response.decoded_text_bytes, Some(24 * 1024));
+    assert!(
+        attempts[1]
+            .response
+            .raw_response_bytes
+            .is_some_and(|bytes| bytes > 40 * 1024)
+    );
+    // Known exhaustion: the handshake carries no request byte, the ledger refuses the marker, and nothing is sent.
+    let mut peer = Peer::start().await;
+    let server = peer.serve(no_wait(), long_answer());
+    assert_eq!(
+        attempt(
+            &fixture,
+            &peer,
+            &broker,
+            &prepared,
+            Some(&fixture.approval()),
+            &clock,
+            &fresh,
+        )
+        .await
+        .unwrap_err(),
+        DisclosureRefusal::Ledger(MemoryReviewerLedgerRefusal::AttemptsExhausted)
+    );
+    assert!(
+        server.await.unwrap().head.is_empty(),
+        "a refused attempt sends nothing"
+    );
+    assert_eq!(fixture.attempts().len(), 2);
+}
+
+/// A cancellation while the response is being read records the bytes read so far, never nothing and never a fresh allowance; a provider error body records the bytes it delivered.
+#[tokio::test]
+async fn cancelled_and_failed_responses_record_the_bytes_they_consumed() {
+    let fixture = Fixture::open();
+    let (broker, turn) = fixture.broker();
+    let prepared = fixture.prepared(&broker, turn);
+    let now = fixture.now + 3;
+    let clock = move || now;
+    let mut peer = Peer::start().await;
+    let error_body = r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#;
+    let server = peer.serve(no_wait(), move |_| {
+        json_response("529 Overloaded", error_body, "")
+    });
+    attempt(
+        &fixture,
+        &peer,
+        &broker,
+        &prepared,
+        Some(&fixture.approval()),
+        &clock,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    server.await.unwrap();
+    let attempts = fixture.attempts();
+    assert_eq!(
+        attempts[0].response,
+        memory_store::memory_reviewer_ledger::ResponseUsage {
+            raw_response_bytes: Some(u64::try_from(error_body.len()).unwrap()),
+            decoded_text_bytes: Some(0),
+        }
+    );
+    // A peer that sends the head and part of the body, then stalls: the run is cancelled mid-read and the attempt records exactly the body bytes it had read.
+    let mut peer = Peer::start().await;
+    let response = json_response("200 OK", &message("late"), "");
+    let body_len = message("late").len();
+    let split = response.len() - 8;
+    peer.stall = Some((split, Duration::from_secs(5)));
+    let server = peer.serve(no_wait(), move |_| response);
+    let cancel = CancellationToken::new();
+    let approval = fixture.approval();
+    let run = attempt(
+        &fixture,
+        &peer,
+        &broker,
+        &prepared,
+        Some(&approval),
+        &clock,
+        &cancel,
+    );
+    // The marker commits before the request is handed off; the peer answers the request at once and stalls after the first half, so a cancellation a moment after the marker lands mid-body.
+    let cancelling = async {
+        while fixture.attempts().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        cancel.cancel();
+    };
+    let (outcome, ()) = tokio::join!(run, cancelling);
+    assert_eq!(outcome.unwrap_err(), DisclosureRefusal::Cancelled);
+    server.abort();
+    let attempts = fixture.attempts();
+    assert_eq!(
+        attempts[1].terminal.map(|(terminal, _)| terminal),
+        Some(MemoryReviewerAttemptTerminal::Cancelled)
+    );
+    assert_eq!(
+        attempts[1].response,
+        memory_store::memory_reviewer_ledger::ResponseUsage {
+            raw_response_bytes: Some(u64::try_from(body_len - 8).unwrap()),
+            decoded_text_bytes: Some(0),
+        },
+        "a cancelled read records the bytes it had consumed"
+    );
+}
+
 #[tokio::test]
 async fn the_network_wait_begins_only_after_both_owners_release() {
     let fixture = Fixture::open();
@@ -1341,6 +1517,26 @@ async fn a_failed_attempt_whose_terminal_cannot_be_recorded_reports_it() {
         ),
         "an unterminated attempt is reported as unknown, not as its provider failure: {refusal:?}"
     );
+    // The unterminated attempt counts as the whole response ceiling: with the clock caught up, the next attempt is refused as exhaustion before any marker is charged, and the peer sees no request.
+    let caught_up = move || now + 1;
+    let mut peer = Peer::start().await;
+    let server = peer.serve(no_wait(), |_| answer(MODEL));
+    assert_eq!(
+        attempt(
+            &fixture,
+            &peer,
+            &broker,
+            &prepared,
+            Some(&fixture.approval()),
+            &caught_up,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err(),
+        DisclosureRefusal::Ledger(MemoryReviewerLedgerRefusal::AttemptsExhausted)
+    );
+    assert!(server.await.unwrap().head.is_empty());
+    assert_eq!(fixture.attempts().len(), 1);
 }
 
 #[test]

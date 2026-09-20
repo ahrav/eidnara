@@ -44,9 +44,9 @@ Every slug the seven residual tickets own. Slugs the specification assigns to ot
 | `review-cli-preserves-shared-kernel-refusal-shapes` | #730 | yes |
 | `status-freshness-never-defaults-unknown-to-zero` | #730 | yes |
 | `status-counts-preserve-overlapping-ledger-populations` | #730 | yes |
-| `provider-response-budget-is-cumulative-per-job` | #731 | not yet |
-| `attempt-ledger-preserves-cross-generation-ceilings` | #731 | not yet |
-| `guarded-request-handoff-precedes-network-polling` | #731 | not yet |
+| `provider-response-budget-is-cumulative-per-job` | #731 | yes |
+| `attempt-ledger-preserves-cross-generation-ceilings` | #731 | yes |
+| `guarded-request-handoff-precedes-network-polling` | #731 | yes |
 
 ## Records
 
@@ -309,6 +309,51 @@ Existing check: `packages/cli/src/commands/review.test.ts`::`review status`
 Impact: A total or ratio over overlapping populations would misstate the store's work
 Open questions: None.
 
+### provider-response-budget-is-cumulative-per-job
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_coordinator.rs` runs two 600 KiB responses through the real coordinator, disclosure, collector, and ledger over local TLS; `crates/daemon/tests/memory_reviewer_disclosure.rs` runs two 40 KiB texts through the decoder the same way; `crates/daemon/tests/memory_reviewer_model_request.rs` drives the collector and decoder under explicit remainders
+Guarantee: Raw response bytes and decoded text bytes are charged against what the job has left of its 1 MiB and 64 KiB ceilings, chunk by chunk before retention and length by length before allocation; a response that crosses a remainder is refused there with the remainder recorded as consumed, and a job with nothing left is refused before a marker is charged or a request byte sent.
+Check: `always` - the ledger computes the remainder in the marker transaction and refuses at zero; the collector and decoder charge against the handed remainder; asserted on every dispatch and every response
+Fault/timing angle: a response legal alone arriving after earlier responses consumed most of the job
+Required faults and enabling state: padded bodies of 600 KiB; 40 KiB texts; explicit remainders at the collector
+Confidence: high - [evidence](evidence/provider-response-budget-is-cumulative-per-job.md). Verified the recorded usage on each row, the refusal at the crossing chunk and the crossing text, and that the exhausted round sent no request
+Existing check: `memory_reviewer_coordinator::responses_consume_the_jobs_raw_ceiling_across_attempts_and_exhaustion_sends_nothing_more`; `memory_reviewer_disclosure::responses_consume_the_jobs_text_ceiling_across_attempts_and_exhaustion_sends_nothing`; `memory_reviewer_model_request::responses_are_charged_against_the_jobs_remaining_allowance_and_refusals_record_known_consumption`
+Impact: Four individually bounded responses could deliver 4 MiB and 256 KiB to one job
+Open questions: None.
+
+### attempt-ledger-preserves-cross-generation-ceilings
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/memory-store/tests/memory_reviewer_ledger.rs` records usage on completed and failed attempts, takes the receipt over with an attempt left unterminated, and asserts the successor is refused; `crates/daemon/tests/memory_reviewer_disclosure.rs` records the usage of a provider error body and a cancelled read
+Guarantee: Every attempt row records its response usage in the same statement as its terminal, once; a `not_dispatched` attempt records zero; an unterminated, `unknown`, or byte-less attempt counts as the whole ceiling; the remainder is summed over every generation of the job, so takeover and reopen never reset it and a failed terminal write never grants headroom.
+Check: `always` - the schema forbids bytes on an in-flight row and rewrites of a recorded terminal; the allowance query treats missing evidence as full consumption; asserted on every commit
+Fault/timing angle: crash before the terminal write; takeover after a lost run; reopen
+Required faults and enabling state: an unterminated attempt at takeover; an `unknown` terminal with bytes; a `failed` terminal without bytes; direct SQL against the columns
+Confidence: high - [evidence](evidence/attempt-ledger-preserves-cross-generation-ceilings.md). Verified the recorded usage after reopen, the successor's refusal, the schema refusals, and the ceiling-exact boundary
+Existing check: `memory_reviewer_ledger::response_usage_accumulates_across_attempts_and_generations_and_exhaustion_refuses_before_a_marker_is_charged`, `response_usage_columns_are_bounded_and_written_once_at_the_schema`, `markers_commit_before_handoff_and_every_committed_attempt_stays_consumed`; `memory_reviewer_disclosure::cancelled_and_failed_responses_record_the_bytes_they_consumed`
+Impact: A restart or takeover would hand a successor fresh ceilings for a job that already spent them
+Open questions: None.
+
+### guarded-request-handoff-precedes-network-polling
+
+Type: safety
+Reachability: default-production
+Status: active
+Exercised: yes - `crates/daemon/tests/memory_reviewer_disclosure.rs` asserts the network wait begins only after both store owners release and that a marker commit failure prevents the handoff; the usage is written once at terminalization with no store owner held across the read
+Guarantee: The remainder is read and the marker committed inside one ledger transaction before the request is handed to the connection; no store owner is held while the response is polled; the consumption is held in memory and written once with the terminal, so response accounting cannot fail before the send and a failed terminal write leaves the row unterminated and fully consumed.
+Check: `always` - `dispatch_memory_reviewer_attempt` returns the allowance with the handoff and releases the store before `complete` is polled; `finish` runs after the response; asserted by the existing ownership tests on every dispatch
+Fault/timing angle: a store lock held across a slow provider; a terminal write that fails after the response
+Required faults and enabling state: a peer that waits for the store release before answering; a ledger that refuses the terminal
+Confidence: high - [evidence](evidence/guarded-request-handoff-precedes-network-polling.md). Verified against the existing ownership and terminal-refusal tests, which the usage parameter did not change
+Existing check: `memory_reviewer_disclosure::the_network_wait_begins_only_after_both_owners_release`, `a_failed_attempt_whose_terminal_cannot_be_recorded_reports_it`, `nothing_is_sent_without_approval_under_cancellation_or_when_the_marker_cannot_commit`
+Impact: A slow provider would hold the Memory Store, or a per-chunk write would turn every response into a write storm
+Open questions: None.
+
 ## Relationship map
 
 `canonical-resolution-refuses-changed-owner-and-target` is the safety half of
@@ -334,6 +379,14 @@ The eight review-command records share one consumer: `review-cli-owns-one-replay
 connection every other record's request travels on, `review-cli-validates-byte-exact-inert-payloads` and
 `status-sanitizer-preserves-inclusive-integer-domain` are the same decoding discipline at two layers, and
 `observer-route-does-not-change-background-rosters` is what the command's `cli` harness relies on.
+
+The three response-budget records are one mechanism seen from three places:
+the ceilings (`provider-response-budget-is-cumulative-per-job`), the durable
+row they are summed from (`attempt-ledger-preserves-cross-generation-ceilings`),
+and the ordering that keeps the sum honest without holding a store across the
+network (`guarded-request-handoff-precedes-network-polling`).
+`unknown-dispatch-does-not-authorize-resend` is the same conservatism for
+attempts: missing evidence is consumption, never headroom.
 
 `observer-route-does-not-change-background-rosters` sits upstream of every
 worker record: the participating view decides which projects the worker sees

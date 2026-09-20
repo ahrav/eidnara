@@ -107,6 +107,20 @@ reviews found and how each finding was dispositioned.
 | `--json` output passes C1 and bidi characters through `JSON.stringify`'s escaping | bias | kept: JSON output is machine output; the README says so and text output strips them |
 | Production size is about 770 lines against a 500 target | bias | kept: the closed vocabularies and the field-by-field decoder are the substance; the ticket's hard maximum is 1,000 and the status command shares the connection and decoding with list and show |
 
+## Cumulative response budgets
+
+| Finding | Class | Disposition |
+| --- | --- | --- |
+| The frame-count refusal recorded one chunk less than the byte-overflow refusal | gap | fixed: it records the whole remaining bound like every overflow; tested |
+| A daemon `ResponseAllowance` mirrored the ledger's field for field with a conversion at the seam | refinement | fixed: the ledger type is the one type; the sender clamps to its own constants |
+| `ResponseUsage::UNKNOWN` duplicated `Default` | refinement | fixed |
+| No test cancelled mid-body, no test asserted the bytes read before a timeout, no accounting on compressed and undecodable refusals, no exhaustion after an unterminated row, no nonzero usage across reopen | gap | fixed: added at the disclosure, sender, and ledger seams |
+| The ledger's usage bounds check repeats the schema `CHECK` as a typed refusal | bias | kept: the typed `InvalidRequest` is the contract the caller sees; production callers cannot exceed it |
+| Two const assertions pin the sender's constants to the ledger's | bias | kept: the sender's constants are the wire document's per-response bounds; the assertion states the coupling where it is relied on |
+| The raw budget is clamped in the sender and the text budget only in the decoder | bias | kept: each bound is clamped where it is enforced; `decode_message_within` is the public entry point that owns the text contract |
+| The ledger tests that committed successive markers without terminals now close each attempt first | refinement | fixed: matches what a live run does; the unterminated case is exercised on purpose in the new tests |
+| No timing or memory measurement of the padded-response path | bias | kept: the byte counts the tests assert are the resource evidence; no latency or quality threshold is claimed, per the ticket |
+
 ## Gaps queued
 
 - A production-class positive witness cannot be constructed until an owner
