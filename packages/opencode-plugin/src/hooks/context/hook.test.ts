@@ -545,6 +545,44 @@ describe("eidnara hook", () => {
             expect(client.tui.showToast).toHaveBeenCalledTimes(1);
         });
 
+        it("latches the warning per project, so another project's recovery does not re-arm it", async () => {
+            useTempDataHome("capture-latch-per-project-");
+            const fake = createFakeModuleClient(({ method, projectRoot }) => ({
+                state:
+                    method === "memory.capture.next"
+                        ? projectRoot === "/a"
+                            ? "store_failed"
+                            : "ready"
+                        : "accepted",
+            }));
+            const client = createClientMock();
+            client.session.get = mock(async (input: { path: { id: string } }) => ({
+                data: { directory: input.path.id === "session-a" ? "/a" : "/b" },
+            })) as never;
+            client.session.messages = mock(async () => ({
+                data: [assistantMessage("native-answer", [{ type: "text", text: "A decision." }])],
+            })) as never;
+            const liveSessionState = createLiveSessionState();
+            for (const id of ["session-a", "session-b"])
+                liveSessionState.liveModelBySession.set(id, {
+                    providerID: "provider",
+                    modelID: "model",
+                });
+            const hook = requireHook(
+                createEidnaraHook(
+                    createDeps({ client, liveSessionState, rustModeModuleClient: fake.client }),
+                ),
+            );
+            for (const sessionID of ["session-a", "session-b", "session-a"]) {
+                await hook.event({ event: { type: "session.idle", properties: { sessionID } } });
+                await hook.memoryCaptureDrain.settle();
+            }
+            expect(fake.calls.filter((call) => call.method === "memory.capture.next")).toHaveLength(
+                3,
+            );
+            expect(client.tui.showToast).toHaveBeenCalledTimes(1);
+        });
+
         it("checkpoints and drains without a model hint when the live model is unknown", async () => {
             useTempDataHome("capture-unknown-model-");
             const fake = createFakeModuleClient(({ method }) => ({

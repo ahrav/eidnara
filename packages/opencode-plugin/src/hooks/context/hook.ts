@@ -234,13 +234,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                 variant: "warning",
             },
         });
-    /** One warning per outage: the toast repeats only after a drain ends with no work left. A
-     * checkpoint alone or a `pending` drain (retry backoff, another claimant) cannot re-arm it,
-     * or a persistent model outage would warn on every eligible retry. */
-    let captureWarningShown = false;
-    const warnCaptureIncomplete = (): void => {
-        if (captureWarningShown) return;
-        captureWarningShown = true;
+    /** One warning per project outage: the toast repeats only after that project's drain ends
+     * with no work left. A checkpoint alone, a `pending` drain (retry backoff, another claimant),
+     * or another project's recovery cannot re-arm it, or a persistent model outage would warn on
+     * every eligible retry. */
+    const captureWarned = new Set<string>();
+    const warnCaptureIncomplete = (projectRoot: string): void => {
+        if (captureWarned.has(projectRoot)) return;
+        captureWarned.add(projectRoot);
         // `.then` turns a synchronous throw from a disposed client into a rejection this swallows.
         void withTimeout(
             Promise.resolve().then(notifyCaptureIncomplete),
@@ -248,19 +249,16 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             "capture notification timed out",
         ).catch(() => undefined);
     };
-    const captureRecovered = (): void => {
-        captureWarningShown = false;
-    };
     // Model batches run detached from the idle checkpoint that schedules them, so the idle event
     // returns before any extraction work. One drain per completed turn sees the user's message
     // and the answer together.
     const memoryCaptureDrain = createMemoryCaptureDrain(moduleClient, executeCapture, {
-        onSettled: (_scope, result) => {
-            if (result !== "pending") captureRecovered();
+        onSettled: (scope, result) => {
+            if (result !== "pending") captureWarned.delete(scope.projectRoot);
         },
         onFailed: (scope, error) => {
             sessionLog.warn(scope.sessionId, "memory capture drain failed:", error);
-            warnCaptureIncomplete();
+            warnCaptureIncomplete(scope.projectRoot);
         },
     });
     const liveModelKey = (sessionId: string): string | undefined => {
@@ -375,7 +373,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             log(
                 `memory capture checkpoint pending: ${error instanceof Error ? error.message : "unknown error"}`,
             );
-            warnCaptureIncomplete();
+            warnCaptureIncomplete(scope?.projectRoot ?? deps.directory);
         } finally {
             // Draining is what frees a full queue, so a refused checkpoint must not skip it.
             if (scope) memoryCaptureDrain.schedule(scope);
