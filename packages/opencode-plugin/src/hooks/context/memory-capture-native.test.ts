@@ -31,6 +31,8 @@ function harness(overrides: {
     onCreate?: (directory: string) => void;
     /** OpenCode's unified finish reason for the private session's answer. */
     finish?: string;
+    /** OpenCode's recorded failure on the private session's answer. */
+    error?: unknown;
     /** Settles before the private session's answer is returned. */
     answerGate?: Promise<void>;
 }): Harness {
@@ -85,6 +87,7 @@ function harness(overrides: {
                             modelID: "m",
                             providerID: "custom",
                             finish: overrides.finish ?? "stop",
+                            ...(overrides.error === undefined ? {} : { error: overrides.error }),
                         },
                         parts: [
                             { type: "reasoning", text: "private" },
@@ -167,6 +170,37 @@ describe("OpenCode native memory capture executor", () => {
         } else {
             await expect(attempt).rejects.toThrow(`Native memory capture: ${outcome}`);
         }
+    });
+
+    it.each([
+        [
+            { name: "ProviderAuthError", data: { providerID: "custom", message: "no key" } },
+            "provider_unavailable",
+        ],
+        [
+            { name: "APIError", data: { message: "503", statusCode: 503, isRetryable: true } },
+            "provider_unavailable",
+        ],
+        [
+            { name: "APIError", data: { message: "reset", isRetryable: true } },
+            "provider_unavailable",
+        ],
+        [
+            { name: "APIError", data: { message: "401", statusCode: 401, isRetryable: false } },
+            "provider_unavailable",
+        ],
+        [
+            { name: "APIError", data: { message: "400", statusCode: 400, isRetryable: false } },
+            "model_failed",
+        ],
+        [{ name: "ContextOverflowError", data: { message: "too long" } }, "model_failed"],
+        [{ name: "UnknownError", data: { message: "boom" } }, "model_failed"],
+    ] as const)("maps recorded error %j to %s", async (error, outcome) => {
+        const h = harness({ error });
+        lastClient = h.client;
+        await expect(
+            openCodeMemoryCaptureExecutor(h.client as never)(work, new AbortController().signal),
+        ).rejects.toThrow(`Native memory capture: ${outcome}`);
     });
 
     it("disposes idle projects at once and a busy project after its capture finishes", async () => {

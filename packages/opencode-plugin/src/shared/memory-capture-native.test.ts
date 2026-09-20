@@ -88,6 +88,16 @@ describe("native capture exchange", () => {
         expect(calls[1]).toMatchObject({ method: "memory.capture.submit", error: "model_failed" });
     });
 
+    it("reports a submission the daemon refused as disabled, not as unfinished work", async () => {
+        const replies = [work, { state: "disabled" }];
+        await expect(
+            flushMemoryCapture({ call: async () => replies.shift() }, scope, async (request) => ({
+                model: request.model,
+                text: "{}",
+            })),
+        ).resolves.toBe("disabled");
+    });
+
     it("still fails loudly on daemon store failures and malformed replies", async () => {
         for (const state of ["store_failed", "unavailable", "something_secret"]) {
             await expect(

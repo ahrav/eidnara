@@ -346,6 +346,7 @@ export async function flushMemoryCapture(
         });
         const receipt = stateOf(submitted);
         if (receipt === "processed") continue;
+        if (receipt === "disabled") return "disabled";
         if (receipt === "pending" || receipt === "stale") return "pending";
         throw unfinished();
     }
