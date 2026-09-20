@@ -278,15 +278,29 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
     };
     let mut occurrences = BTreeSet::new();
     let mut repository: Option<&str> = None;
-    let messages_named = |entity_id: &str, id: &str| {
-        log.events
-            .iter()
-            .filter(|e| {
-                e.entity_id == entity_id
-                    && matches!(&e.payload, Payload::Message { message_id, .. } if message_id == id)
-            })
-            .count()
-    };
+    // One pass indexes the log so the walk below does keyed lookups: events by
+    // id, message counts by (session, message_id), and tool spans by
+    // (session, parent message_id).
+    let mut by_id: BTreeMap<&EventId, &Event> = BTreeMap::new();
+    let mut messages_named: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    let mut spans_under: BTreeMap<(&str, &str), Vec<&Event>> = BTreeMap::new();
+    for event in &log.events {
+        by_id.insert(&event.id, event);
+        match &event.payload {
+            Payload::Message { message_id, .. } => {
+                *messages_named
+                    .entry((event.entity_id.as_str(), message_id))
+                    .or_default() += 1;
+            }
+            Payload::ToolSpan { message_id, .. } => spans_under
+                .entry((event.entity_id.as_str(), message_id))
+                .or_default()
+                .push(event),
+            _ => {}
+        }
+    }
+    let messages_named =
+        |entity_id: &str, id: &str| messages_named.get(&(entity_id, id)).copied().unwrap_or(0);
     for event in &log.events {
         match &event.payload {
             Payload::Message {
@@ -305,17 +319,17 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                 };
                 let mut parts = vec![json!({"type": "text", "text": text})];
                 let mut expected = vec![m.text_unit(config)?];
-                let spans = log.events.iter().filter_map(|span| match &span.payload {
-                    Payload::ToolSpan {
-                        message_id: parent,
-                        call_id,
-                        output,
-                    } if span.entity_id == event.entity_id && parent == message_id => {
-                        Some((span, call_id, output))
-                    }
-                    _ => None,
-                });
-                for (span, call_id, output) in spans {
+                let spans = spans_under
+                    .get(&(event.entity_id.as_str(), message_id))
+                    .into_iter()
+                    .flatten();
+                for &span in spans {
+                    let Payload::ToolSpan {
+                        call_id, output, ..
+                    } = &span.payload
+                    else {
+                        unreachable!("spans_under holds only tool spans");
+                    };
                     if span.observation_time_ms != event.observation_time_ms {
                         return Err(RenderError::ToolSpanObservationDiffers(span.id.clone()));
                     }
@@ -328,10 +342,9 @@ pub fn render(log: &EventLog, config: &RenderConfig) -> Result<Rendering, Render
                     .push(m.rendered(parts, expected, &mut occurrences)?);
             }
             Payload::Correction { target, text } => {
-                let original = log
-                    .events
-                    .iter()
-                    .find(|e| e.id == *target)
+                let original = by_id
+                    .get(target)
+                    .copied()
                     .ok_or_else(|| RenderError::CorrectionTargetMissing(target.clone()))?;
                 let Payload::Message {
                     message_id, role, ..
