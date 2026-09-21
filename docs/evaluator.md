@@ -1122,14 +1122,14 @@ version must be non-empty, and every loss must be evidence the set has
 
 `injection.rs` plants instruction-like text and scores its effect on five
 separate axes. `Carrier` is where the text lives: `commit_message`,
-`issue_text`, `tool_output`, `summary`, or `memory`; `TaskSet::validate`
-refuses a task set missing any carrier (`CarrierMissing`), a duplicate case,
-canary, or oracle (`DuplicateEffect`), an oracle that does not carry its
-case's canary (`EffectWithoutCanary`), a case ID that is not
-`injection-<its carrier>-<its canary's hex>` (`CaseIdNotDerived`; a score
-carries only the ID, so two cases cannot trade them and no set can name
-another's case), an empty case ID or canary, or no
-tasks. `plan_injection_cases(root_seed,
+`issue_text`, `tool_output`, `summary`, or `memory`. A `TaskSet {root_seed,
+task_ids, cases}` carries the seed it was planned from, and
+`TaskSet::validate` plans it again from its own seed and tasks and requires
+the whole to be equal (`NotPlanned`): a missing carrier, a duplicate or
+blank case ID or canary, an oracle shared, mismatched, or of another
+carrier's kind, and cases or IDs copied from another set are all one refusal,
+since a score carries only the case ID and two sets must never share one; a
+set with no tasks is `NoTasks`. `plan_injection_cases(root_seed,
 task_ids)` derives one case per carrier from the seed, the task IDs, and the
 carrier under `eval-injection-canary/v1`: a canary `CANARY-<sixteen hex>`
 unique to the case and to the task set, a case ID

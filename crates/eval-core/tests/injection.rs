@@ -88,34 +88,20 @@ fn every_generated_task_set_plants_a_case_in_every_carrier() {
         "the memory oracle is the stored content, not a row id the writer derives"
     );
 
-    let mutations: Vec<(&str, Mutate<TaskSet>, InjectionError)> = vec![
+    // A set read back is the one the planner yields from its own seed and
+    // tasks, whole; anything else is not a planned set, whatever changed.
+    let mutations: Vec<(&str, Mutate<TaskSet>)> = vec![
         (
             "no memory carrier",
             Box::new(|s| s.cases.retain(|c| c.carrier != Carrier::Memory)),
-            InjectionError::CarrierMissing {
-                carrier: Carrier::Memory,
-            },
         ),
         (
             "two cases with one canary",
             Box::new(|s| s.cases[1].canary = s.cases[0].canary.clone()),
-            InjectionError::DuplicateCanary {
-                canary: case(Carrier::CommitMessage).canary,
-            },
-        ),
-        (
-            "two cases with one id",
-            Box::new(|s| s.cases[1].id = s.cases[0].id.clone()),
-            InjectionError::DuplicateCase {
-                id: case(Carrier::CommitMessage).id,
-            },
         ),
         (
             "two cases with one oracle",
             Box::new(|s| s.cases[1].prohibited_effect = s.cases[0].prohibited_effect.clone()),
-            InjectionError::DuplicateEffect {
-                id: case(Carrier::IssueText).id,
-            },
         ),
         (
             "an oracle that does not name its canary",
@@ -125,22 +111,14 @@ fn every_generated_task_set_plants_a_case_in_every_carrier() {
                     argument: "rm -rf .".to_string(),
                 }
             }),
-            InjectionError::EffectWithoutCanary {
-                id: case(Carrier::Summary).id,
-            },
         ),
         (
-            "a same-carrier id copied from another task set",
+            "a carrier given another carrier's kind of oracle",
             Box::new(|s| {
-                s.cases[0].id = plan_injection_cases(SEED ^ 1, &task_ids()).cases[0]
-                    .id
-                    .clone()
+                s.cases[0].prohibited_effect = SideEffect::MemoryWriteBack {
+                    summary: s.cases[0].canary.clone(),
+                }
             }),
-            InjectionError::CaseIdNotDerived {
-                id: plan_injection_cases(SEED ^ 1, &task_ids()).cases[0]
-                    .id
-                    .clone(),
-            },
         ),
         (
             "two cases with their ids swapped",
@@ -149,33 +127,40 @@ fn every_generated_task_set_plants_a_case_in_every_carrier() {
                 s.cases[0].id = b;
                 s.cases[1].id = a;
             }),
-            InjectionError::CaseIdNotDerived {
-                id: case(Carrier::IssueText).id,
-            },
         ),
         (
-            "an empty canary",
-            Box::new(|s| s.cases[2].canary.clear()),
-            InjectionError::EmptyCanary {
-                id: case(Carrier::ToolOutput).id,
-            },
+            "an id copied from another task set",
+            Box::new(|s| {
+                s.cases[0].id = plan_injection_cases(SEED ^ 1, &task_ids()).cases[0]
+                    .id
+                    .clone()
+            }),
         ),
         (
-            "an empty case id",
-            Box::new(|s| s.cases[2].id.clear()),
-            InjectionError::EmptyCaseId,
+            "another set's cases over these tasks",
+            Box::new(|s| s.cases = plan_injection_cases(SEED ^ 1, &task_ids()).cases),
         ),
-        (
-            "no tasks",
-            Box::new(|s| s.task_ids.clear()),
-            InjectionError::NoTasks,
-        ),
+        ("another seed", Box::new(|s| s.root_seed ^= 1)),
+        ("an empty canary", Box::new(|s| s.cases[2].canary.clear())),
+        ("an empty case id", Box::new(|s| s.cases[2].id.clear())),
     ];
-    for (name, mutate, expected) in mutations {
+    for (name, mutate) in mutations {
         let mut mutated = set.clone();
         mutate(&mut mutated);
-        assert_eq!(mutated.validate(), Err(expected), "{name}");
+        assert_eq!(
+            mutated.validate(),
+            Err(InjectionError::NotPlanned),
+            "{name}"
+        );
     }
+    let mut no_tasks = set.clone();
+    no_tasks.task_ids.clear();
+    assert_eq!(no_tasks.validate(), Err(InjectionError::NoTasks));
+    // The wire form round-trips and validates; the seed rides as a decimal.
+    let value = serde_json::to_value(&set).unwrap();
+    assert!(value["root_seed"].is_string());
+    let read_back: TaskSet = serde_json::from_value(value).unwrap();
+    read_back.validate().unwrap();
     // A case without an oracle does not parse; there is no scoring it.
     assert!(
         serde_json::from_value::<InjectionCase>(json!({

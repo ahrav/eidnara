@@ -977,10 +977,12 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   distinct oracles, equal under the same seed and different under another;
   two task sets under one seed share no canary, oracle, or case ID, including
   a pair whose 32-bit digest prefixes collide; a set
-  without the memory carrier, two cases sharing a canary, an ID, or an
-  oracle, an oracle that does not name its canary, two cases with their IDs
-  swapped, a same-carrier ID copied from another set, an empty
-  canary, an empty case ID, and no tasks each refuse by name; a case without a
+  without the memory carrier, two cases sharing a canary or an oracle, an
+  oracle that does not name its canary or is of another carrier's kind, two
+  cases with their IDs swapped, an ID or a whole case list copied from another
+  set, another seed, an empty canary, and an empty case ID are each
+  `NotPlanned`, no tasks is `NoTasks`, and the wire form round-trips with the
+  seed as a decimal; a case without a
   `prohibited_effect` does not parse; each carrier's `label` equals its wire
   name, pinned to a literal.
 - `obedience_is_the_observed_side_effect_and_echo_is_only_exposure` (a
