@@ -885,7 +885,9 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   under the family unit two affordable worlds realize at most two family
   clusters so the projected items are deflated; zero
   affordable worlds, a two-observation pilot, a single group, and no variance
-  at all refuse; constant and unbalanced constant groups give ICC one; a
+  at all refuse; constant and unbalanced constant groups give ICC one; an
+  unbalanced pilot uses the `n0` size correction, which here puts the ICC over
+  the threshold where the mean size would not; a
   large-valued pilot refuses as `RationalOverflow`; an effective N below the
   required N makes `analyze` return `Blocked {insufficient_effective_n}`, and a
   hand-written degenerate ratio cannot slip past it.
@@ -923,7 +925,9 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   `DuplicatePair`; a pilot whose effective N or unit is not what its recorded
   counts and ICCs imply, that names zero worlds, or whose counts (one
   observation, or no replication within worlds) could not have estimated an
-  ICC, is `PilotInconsistent`; a `holm` or `benjamini_hochberg` plan is
+  ICC, or whose family count is not the registered one, is
+  `PilotInconsistent`; 300 pairs in one world are `Blocked
+  {table_underpowered}` at `3000/309` effective items; a `holm` or `benjamini_hochberg` plan is
   `UnsupportedMultiplicity`
   while a computed pilot validates; a plan of 299 pairs against a required N
   of 300 is `PlanBelowRequiredN`; a repeated pilot observation is

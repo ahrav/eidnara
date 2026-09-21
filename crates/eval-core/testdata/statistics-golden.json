@@ -12977,16 +12977,16 @@
       "expected": {
         "clustering_unit": "family",
         "effective_n_at_max": {
-          "denominator": 148121,
-          "numerator": 310872
+          "denominator": 246691,
+          "numerator": 516790
         },
         "icc_family": {
-          "denominator": 51812,
+          "denominator": 51679,
           "numerator": 48487
         },
         "icc_world_seed": {
-          "denominator": 27211,
-          "numerator": 27086
+          "denominator": 13603,
+          "numerator": 13543
         },
         "n_families": 2,
         "n_worlds": 4
@@ -13083,12 +13083,12 @@
       "expected": {
         "clustering_unit": "family",
         "effective_n_at_max": {
-          "denominator": 25,
-          "numerator": 28
+          "denominator": 37,
+          "numerator": 41
         },
         "icc_family": {
-          "denominator": 14,
-          "numerator": 11
+          "denominator": 41,
+          "numerator": 33
         },
         "icc_world_seed": {
           "denominator": 1,
@@ -22752,7 +22752,7 @@
   "provenance": {
     "generator": "crates/eval-core/gen/gen-statistics-golden.ts",
     "generator_version": "statistics-reference-ts-v1",
-    "input_sha256": "ba3f9323ecd8c3ae1f45b1f0b04f2500066bf1ca2165e7ea604ce0a8029d117f"
+    "input_sha256": "1ca037b4c6f82f81683a3e7fa34bb5be850edee7b79d78bfa1121f8e3d1e783e"
   },
   "schema": 1
 }
