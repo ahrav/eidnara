@@ -89,10 +89,23 @@ describe("memory capture checkpoint", () => {
                 return response;
             },
         });
-        await expect(capture({ ...scope, messages: [message] })).resolves.toBeUndefined();
+        await expect(capture({ ...scope, messages: [message] })).resolves.toBe("disabled");
         response = { state: "accepted" };
-        await capture({ ...scope, messages: [message] });
+        await expect(capture({ ...scope, messages: [message] })).resolves.toBe("accepted");
         expect(calls).toHaveLength(2);
+    });
+    it("stops batching after the first disabled reply", async () => {
+        const calls: unknown[] = [];
+        const capture = createMemoryCaptureCheckpoint({
+            call: async (args) => {
+                calls.push(args.body);
+                return { state: "disabled" };
+            },
+        });
+        const large = { ...message, text: "abc\u{1F980}\n".repeat(20000) };
+        expect(Buffer.byteLength(large.text)).toBeGreaterThan(64 * 1024);
+        await expect(capture({ ...scope, messages: [large] })).resolves.toBe("disabled");
+        expect(calls).toHaveLength(1);
     });
 });
 

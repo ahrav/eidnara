@@ -797,8 +797,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     pi.on("session_shutdown", async (event, ctx) => {
         // The transport disconnects below, so no drain starts here.
         await checkpointMemory(ctx);
-        // Closing drains prevents in-flight work from redialing the disconnected transport.
-        for (const capture of captureByProject.values()) capture.drain.close();
+        // Closing cancels the batch in flight and releases its lease on the still-connected
+        // transport; the disconnect below waits for that, so nothing redials afterwards.
+        await Promise.all([...captureByProject.values()].map((capture) => capture.drain.close()));
         // Long-lived Pi processes can reinitialize the extension after `session_shutdown`, so the handler clears per-session state.
         try {
             const sessionId = sessionIdFromContext(ctx);

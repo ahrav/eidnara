@@ -124,6 +124,83 @@ describe("native capture exchange", () => {
         expect(calls[1]).toMatchObject({ method: "memory.capture.submit", output: "{}" });
     });
 
+    it("stops between batches and cancels in-flight work when its signal aborts", async () => {
+        const aborted = new AbortController();
+        aborted.abort();
+        const calls: unknown[] = [];
+        await expect(
+            flushMemoryCapture(
+                {
+                    call: async ({ body }) => {
+                        calls.push(body);
+                        return work;
+                    },
+                },
+                scope,
+                noExecutor,
+                aborted.signal,
+            ),
+        ).resolves.toBe("pending");
+        expect(calls).toEqual([]);
+
+        const live = new AbortController();
+        const submitted: Array<Record<string, unknown>> = [];
+        const replies = [work];
+        const flushing = flushMemoryCapture(
+            {
+                call: async ({ body }) => {
+                    const request = body as Record<string, unknown>;
+                    if (request.method === "memory.capture.submit") submitted.push(request);
+                    return replies.shift() ?? { state: "pending" };
+                },
+            },
+            scope,
+            (_work, signal) =>
+                new Promise((_resolve, reject) => {
+                    signal.addEventListener("abort", () =>
+                        reject(new NativeCaptureError("cancelled")),
+                    );
+                }),
+            live.signal,
+        );
+        await tick();
+        live.abort();
+        await expect(flushing).rejects.toThrow("cancelled");
+        expect(submitted).toEqual([
+            expect.objectContaining({ lease: work.lease, error: "cancelled" }),
+        ]);
+
+        // A close that lands while `next` is in flight must not start model work.
+        const late = new AbortController();
+        const next = Promise.withResolvers<unknown>();
+        const lateSubmitted: Array<Record<string, unknown>> = [];
+        let ran = false;
+        const lateFlush = flushMemoryCapture(
+            {
+                call: async ({ body }) => {
+                    const request = body as Record<string, unknown>;
+                    if (request.method === "memory.capture.next") return next.promise;
+                    lateSubmitted.push(request);
+                    return { state: "pending" };
+                },
+            },
+            scope,
+            async () => {
+                ran = true;
+                throw new Error("must not run");
+            },
+            late.signal,
+        );
+        await tick();
+        late.abort();
+        next.resolve(work);
+        await expect(lateFlush).rejects.toThrow("cancelled");
+        expect(ran).toBe(false);
+        expect(lateSubmitted).toEqual([
+            expect.objectContaining({ lease: work.lease, error: "cancelled" }),
+        ]);
+    });
+
     it("still fails loudly on daemon store failures and malformed replies", async () => {
         for (const state of ["store_failed", "unavailable", "something_secret"]) {
             await expect(
@@ -427,69 +504,30 @@ describe("memory capture drain", () => {
         expect(failed).toHaveLength(1);
     });
 
-    it("close() drops queued reruns and makes no daemon call after a pending reply lands", async () => {
+    it("close cancels the running drain, waits for it, and refuses later schedules", async () => {
         const daemon = controlledDaemon();
-        const executed: unknown[] = [];
-        const notified: string[] = [];
-        const drain = createMemoryCaptureDrain(
-            daemon.client,
-            async (request) => {
-                executed.push(request);
-                return { model: request.model, text: "{}" };
-            },
-            {
-                onSettled: (_scope, result) => notified.push(result),
-                onFailed: () => notified.push("failed"),
-            },
-        );
-        drain.schedule(scope);
-        drain.schedule({ ...scope, sessionId: "rerun" });
-        await tick();
-        expect(daemon.drained).toEqual(["/project"]);
-        drain.close();
-        daemon.waiting.shift()?.resolve(work);
-        await drain.settle();
-        expect(daemon.drained).toEqual(["/project"]);
-        expect(executed).toEqual([]);
-        expect(notified).toEqual([]);
+        const settled: string[] = [];
+        const failed: unknown[] = [];
+        const drain = createMemoryCaptureDrain(daemon.client, noExecutor, {
+            onSettled: (_scope, result) => settled.push(result),
+            onFailed: (_scope, error) => failed.push(error),
+        });
         drain.schedule(scope);
         await tick();
         expect(daemon.drained).toEqual(["/project"]);
+        let closed = false;
+        const closing = drain.close().then(() => {
+            closed = true;
+        });
+        await tick();
+        expect(closed).toBe(false);
+        daemon.waiting.shift()?.resolve({ state: "ready" });
+        await closing;
         expect(drain.pending("/project")).toBeUndefined();
-    });
-
-    it("close() aborts a running executor and skips the lease release", async () => {
-        const calls: string[] = [];
-        let aborted = false;
-        const drain = createMemoryCaptureDrain(
-            {
-                call: async ({ method }) => {
-                    calls.push(method);
-                    return work;
-                },
-            },
-            (_request, signal) =>
-                new Promise((_resolve, reject) => {
-                    signal.addEventListener("abort", () => {
-                        aborted = true;
-                        reject(new NativeCaptureError("cancelled"));
-                    });
-                }),
-            {
-                onSettled: () => {
-                    throw new Error("must not settle");
-                },
-                onFailed: () => {
-                    throw new Error("must not report");
-                },
-            },
-        );
-        drain.schedule(scope);
+        drain.schedule({ ...scope, projectRoot: "/other" });
         await tick();
-        expect(calls).toEqual(["memory.capture.next"]);
-        drain.close();
-        await drain.settle();
-        expect(aborted).toBe(true);
-        expect(calls).toEqual(["memory.capture.next"]);
+        expect(daemon.drained).toEqual(["/project"]);
+        expect(settled).toEqual([]);
+        expect(failed).toEqual([]);
     });
 });

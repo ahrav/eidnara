@@ -340,11 +340,15 @@ describe("Pi daemon transport across runtime teardown", () => {
 
     it("stops an in-flight capture drain on session_shutdown so nothing dials the disconnected transport", async () => {
         const next = Promise.withResolvers<unknown>();
-        const afterDisconnect: string[] = [];
+        const calls: Array<{ method: string; afterDisconnect: boolean; error?: unknown }> = [];
         let disconnected = false;
         const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
             async (input) => {
-                if (disconnected) afterDisconnect.push(input.method);
+                calls.push({
+                    method: input.method,
+                    afterDisconnect: disconnected,
+                    error: (input.body as { error?: unknown } | undefined)?.error,
+                });
                 if (input.method === "memory.capture.next") return next.promise;
                 return { state: "accepted" };
             },
@@ -360,9 +364,11 @@ describe("Pi daemon transport across runtime teardown", () => {
             const setStatus = mock(() => undefined);
             const ctx = captureContext({ model: { provider: "openai", id: "test" }, setStatus });
             await agentEnd({}, ctx);
-            await shutdown({ reason: "reload" }, ctx);
-            expect(disconnect).toHaveBeenCalledTimes(1);
-            // The daemon answers the drain's pending exchange only after the runtime is gone.
+            const closing = shutdown({ reason: "reload" }, ctx);
+            // Shutdown waits for the drain to stop, so the daemon's late reply lands while the
+            // transport is still connected; the returned lease is released, never executed.
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            expect(disconnect).not.toHaveBeenCalled();
             next.resolve({
                 state: "work",
                 lease: "a".repeat(32),
@@ -373,8 +379,15 @@ describe("Pi daemon transport across runtime teardown", () => {
                 max_output_bytes: 131072,
                 max_duration_ms: 90000,
             });
+            await closing;
+            expect(disconnect).toHaveBeenCalledTimes(1);
             await __test.settleMemoryCapture();
-            expect(afterDisconnect).toEqual([]);
+            expect(calls.filter((entry) => entry.afterDisconnect)).toEqual([]);
+            expect(
+                calls
+                    .filter((entry) => entry.method === "memory.capture.submit")
+                    .map((e) => e.error),
+            ).toEqual(["cancelled"]);
             expect(setStatus).not.toHaveBeenCalledWith(
                 "eidnara-capture",
                 "Memory capture: unconfirmed",

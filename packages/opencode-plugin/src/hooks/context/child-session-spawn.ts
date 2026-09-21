@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { normalizeSDKResponse } from "../../shared/normalize-sdk-response";
 import { HOST_SDK_READ_TIMEOUT_MS, TimeoutError, withTimeout } from "../../shared/with-timeout";
 
@@ -58,6 +59,10 @@ export async function createChildSession(args: ChildSessionSpawnArgs): Promise<u
         if (error instanceof TimeoutError) {
             void creating
                 .then((response) => {
+                    // A delete under a directory that has since been removed would make OpenCode
+                    // bootstrap an instance there; the row in the disposed instance is inert.
+                    if (args.directory !== undefined && !existsSync(args.directory))
+                        return undefined;
                     const created = normalizeSDKResponse(response, null as { id?: string } | null, {
                         preferResponseOnMissingData: true,
                     });

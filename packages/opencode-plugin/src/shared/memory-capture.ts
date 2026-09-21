@@ -290,13 +290,15 @@ function flushOutcome(state: string | undefined): MemoryCaptureFlushResult | "wo
 
 /** Native auth/model execution stays in the harness. Only bounded proposals go
  * back to the daemon; its confirmed receipts, not model success, finish capture. */
+/** Native auth/model execution stays in the harness. Only bounded proposals go
+ * back to the daemon; its confirmed receipts, not model success, finish capture.
+ * An aborted `signal` stops before the next batch and cancels the batch in flight. */
 export async function flushMemoryCapture(
     client: Pick<RustModeModuleClient, "call">,
     input: { sessionId: string; projectRoot: string; model?: string },
     execute: NativeCaptureExecutor,
-    options: { signal?: AbortSignal } = {},
+    signal?: AbortSignal,
 ): Promise<MemoryCaptureFlushResult> {
-    const { signal } = options;
     const call = (
         method: "memory.capture.next" | "memory.capture.submit",
         extra: Record<string, unknown> = {},
@@ -316,19 +318,15 @@ export async function flushMemoryCapture(
         });
     const unfinished = () =>
         new Error("Memory capture has unfinished work; durable facts are not yet confirmed saved.");
-    const cancelled = () => new NativeCaptureError("cancelled");
     // Losing this notification leaves an expiring lease, not a successful capture.
-    // An aborted flush makes no daemon call at all; the daemon expires the held lease.
     const release = (lease: string, code: NativeCaptureError["code"]) =>
-        signal?.aborted
-            ? Promise.resolve()
-            : withTimeout(
-                  call("memory.capture.submit", { lease, error: code }),
-                  HOST_SDK_READ_TIMEOUT_MS,
-                  "capture failure notification timed out",
-              ).catch(() => undefined);
+        withTimeout(
+            call("memory.capture.submit", { lease, error: code }),
+            HOST_SDK_READ_TIMEOUT_MS,
+            "capture failure notification timed out",
+        ).catch(() => undefined);
     for (let batch = 0; batch < FLUSH_MAX_BATCHES; batch++) {
-        if (signal?.aborted) throw cancelled();
+        if (signal?.aborted) return "pending";
         const response = await call("memory.capture.next", { model: input.model });
         const outcome = flushOutcome(stateOf(response));
         if (outcome === "failed") throw unfinished();
@@ -343,10 +341,14 @@ export async function flushMemoryCapture(
             if (reserved !== undefined) await release(reserved, "cancelled");
             throw error;
         }
-        if (signal?.aborted) throw cancelled();
+        // A close that landed while `next` was in flight must not start model work.
+        if (signal?.aborted) {
+            await release(lease, "cancelled");
+            throw new NativeCaptureError("cancelled");
+        }
         const controller = new AbortController();
-        const abort = () => controller.abort();
-        signal?.addEventListener("abort", abort, { once: true });
+        const cancel = () => controller.abort();
+        signal?.addEventListener("abort", cancel, { once: true });
         let result: { model: string; text: string };
         try {
             result = await withTimeout(
@@ -360,13 +362,17 @@ export async function flushMemoryCapture(
                 throw new NativeCaptureError("output_limit");
         } catch (error) {
             controller.abort();
-            const code = error instanceof NativeCaptureError ? error.code : "model_failed";
+            // A close outranks whatever the interrupted executor reported.
+            const code = signal?.aborted
+                ? "cancelled"
+                : error instanceof NativeCaptureError
+                  ? error.code
+                  : "model_failed";
             await release(lease, code);
             throw new NativeCaptureError(code);
         } finally {
-            signal?.removeEventListener("abort", abort);
+            signal?.removeEventListener("abort", cancel);
         }
-        if (signal?.aborted) throw cancelled();
         const submitted = await call("memory.capture.submit", {
             lease,
             model: result.model,
@@ -401,8 +407,9 @@ export interface MemoryCaptureDrain {
     pending(projectRoot: string): Promise<void> | undefined;
     /** Settles once every project is idle, including drains scheduled while waiting. */
     settle(): Promise<void>;
-    /** Called by the owner before it disconnects `client`; a closed drain makes no further daemon call. */
-    close(): void;
+    /** Cancels the batch in flight, refuses later schedules, and settles once every drain has
+     * stopped. Hooks are not notified for drains a close interrupted. */
+    close(): Promise<void>;
 }
 
 /** One drain per project root runs at a time; a rerun uses the latest scope. A drain never rejects. */
@@ -414,11 +421,11 @@ export function createMemoryCaptureDrain(
     interface Running {
         done: Promise<void>;
         rerun?: MemoryCaptureScope;
-        controller: AbortController;
     }
     const running = new Map<string, Running>();
-    let closed = false;
+    const closing = new AbortController();
     function notify(report: () => void): void {
+        if (closing.signal.aborted) return;
         try {
             report();
         } catch {
@@ -430,18 +437,12 @@ export function createMemoryCaptureDrain(
         try {
             for (;;) {
                 let result: MemoryCaptureFlushResult | undefined;
-                let failure: unknown;
                 try {
-                    result = await flushMemoryCapture(client, scope, execute, {
-                        signal: entry.controller.signal,
-                    });
+                    result = await flushMemoryCapture(client, scope, execute, closing.signal);
                 } catch (error) {
-                    failure = error;
+                    notify(() => hooks.onFailed(scope, error));
                 }
-                // A closed drain has no owner left to report to.
-                if (closed) return;
                 if (result !== undefined) notify(() => hooks.onSettled(scope, result));
-                else notify(() => hooks.onFailed(scope, failure));
                 const next = entry.rerun;
                 entry.rerun = undefined;
                 if (!next) return;
@@ -453,13 +454,13 @@ export function createMemoryCaptureDrain(
     }
     return {
         schedule(scope) {
-            if (closed) return;
+            if (closing.signal.aborted) return;
             const current = running.get(scope.projectRoot);
             if (current) {
                 current.rerun = scope;
                 return;
             }
-            const entry: Running = { done: Promise.resolve(), controller: new AbortController() };
+            const entry: Running = { done: Promise.resolve() };
             running.set(scope.projectRoot, entry);
             entry.done = drain(entry, scope);
         },
@@ -470,18 +471,16 @@ export function createMemoryCaptureDrain(
             while (running.size > 0)
                 await Promise.all([...running.values()].map((entry) => entry.done));
         },
-        close() {
-            closed = true;
-            for (const entry of running.values()) {
-                entry.rerun = undefined;
-                entry.controller.abort();
-            }
+        async close() {
+            closing.abort();
+            await this.settle();
         },
     };
 }
 
 /** The cache saves repeat uploads only. Daemon receipts, not this cache, own
- * durability and replay. Failures leave entries unacknowledged for next time. */
+ * durability and replay. Failures leave entries unacknowledged for next time.
+ * `"disabled"` means the daemon wrote nothing; callers must not treat the input as offered. */
 export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient, "call">) {
     const acknowledged = new Map<string, string>();
     return async (input: {
@@ -489,7 +488,8 @@ export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient,
         projectRoot: string;
         model?: string;
         messages: Iterable<CaptureMessage>;
-    }): Promise<void> => {
+    }): Promise<"accepted" | "disabled"> => {
+        let disabled = false;
         const prefix = `${input.projectRoot}\0${input.sessionId}\0`;
         let batch: CaptureMessage[] = [];
         let batchKeys: Array<[string, string]> = [];
@@ -513,6 +513,7 @@ export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient,
             // The daemon may be disabled while this hook's config still permits capture; it wrote
             // nothing, so nothing is acknowledged and nothing failed.
             if (state === "disabled") {
+                disabled = true;
                 batch = [];
                 batchKeys = [];
                 bytes = 0;
@@ -545,11 +546,14 @@ export function createMemoryCaptureCheckpoint(client: Pick<RustModeModuleClient,
                 if (acknowledged.get(key) === digest) continue;
                 const size = Buffer.byteLength(fragment.text);
                 if (batch.length >= BATCH_MESSAGES || bytes + size > BATCH_BYTES) await send();
+                // The daemon's `disabled` is terminal for this checkpoint; later batches would repeat it.
+                if (disabled) return "disabled";
                 batch.push(fragment);
                 batchKeys.push([key, digest]);
                 bytes += size;
             }
         }
         await send();
+        return disabled ? "disabled" : "accepted";
     };
 }
