@@ -10071,6 +10071,2912 @@
       "expected": {
         "clustering_unit": "family",
         "effective_n_at_max": {
+          "denominator": 1293,
+          "numerator": 2596
+        },
+        "icc_family": {
+          "denominator": 2596,
+          "numerator": 2581
+        },
+        "icc_world_seed": {
+          "denominator": 39643,
+          "numerator": 39286
+        },
+        "n_families": 6,
+        "n_worlds": 120
+      },
+      "id": "pilot-family-effect-fewer-affordable-worlds-than-families",
+      "input": {
+        "max_affordable_worlds": 2,
+        "observations": [
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 0
+            },
+            "task": "t0",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 0
+            },
+            "task": "t1",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 0
+            },
+            "task": "t2",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 1
+            },
+            "task": "t0",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 1
+            },
+            "task": "t1",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 1
+            },
+            "task": "t2",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 2
+            },
+            "task": "t0",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 2
+            },
+            "task": "t1",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 2
+            },
+            "task": "t2",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 3
+            },
+            "task": "t0",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 3
+            },
+            "task": "t1",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 3
+            },
+            "task": "t2",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 4
+            },
+            "task": "t0",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 4
+            },
+            "task": "t1",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 4
+            },
+            "task": "t2",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 5
+            },
+            "task": "t0",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 5
+            },
+            "task": "t1",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 5
+            },
+            "task": "t2",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 6
+            },
+            "task": "t0",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 6
+            },
+            "task": "t1",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 6
+            },
+            "task": "t2",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 7
+            },
+            "task": "t0",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 7
+            },
+            "task": "t1",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 7
+            },
+            "task": "t2",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 8
+            },
+            "task": "t0",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 8
+            },
+            "task": "t1",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 8
+            },
+            "task": "t2",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 9
+            },
+            "task": "t0",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 9
+            },
+            "task": "t1",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 9
+            },
+            "task": "t2",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 10
+            },
+            "task": "t0",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 10
+            },
+            "task": "t1",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 10
+            },
+            "task": "t2",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 11
+            },
+            "task": "t0",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 11
+            },
+            "task": "t1",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 11
+            },
+            "task": "t2",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 12
+            },
+            "task": "t0",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 12
+            },
+            "task": "t1",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 12
+            },
+            "task": "t2",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 13
+            },
+            "task": "t0",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 13
+            },
+            "task": "t1",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 13
+            },
+            "task": "t2",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 14
+            },
+            "task": "t0",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 14
+            },
+            "task": "t1",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 14
+            },
+            "task": "t2",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 15
+            },
+            "task": "t0",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 15
+            },
+            "task": "t1",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 15
+            },
+            "task": "t2",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 16
+            },
+            "task": "t0",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 16
+            },
+            "task": "t1",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 16
+            },
+            "task": "t2",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 17
+            },
+            "task": "t0",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 17
+            },
+            "task": "t1",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 17
+            },
+            "task": "t2",
+            "value": 0
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 18
+            },
+            "task": "t0",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 18
+            },
+            "task": "t1",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 18
+            },
+            "task": "t2",
+            "value": 2
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 19
+            },
+            "task": "t0",
+            "value": 3
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 19
+            },
+            "task": "t1",
+            "value": 1
+          },
+          {
+            "cluster": {
+              "family": "cargo",
+              "world_seed": 19
+            },
+            "task": "t2",
+            "value": 4
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 0
+            },
+            "task": "t0",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 0
+            },
+            "task": "t1",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 0
+            },
+            "task": "t2",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 1
+            },
+            "task": "t0",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 1
+            },
+            "task": "t1",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 1
+            },
+            "task": "t2",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 2
+            },
+            "task": "t0",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 2
+            },
+            "task": "t1",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 2
+            },
+            "task": "t2",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 3
+            },
+            "task": "t0",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 3
+            },
+            "task": "t1",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 3
+            },
+            "task": "t2",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 4
+            },
+            "task": "t0",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 4
+            },
+            "task": "t1",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 4
+            },
+            "task": "t2",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 5
+            },
+            "task": "t0",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 5
+            },
+            "task": "t1",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 5
+            },
+            "task": "t2",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 6
+            },
+            "task": "t0",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 6
+            },
+            "task": "t1",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 6
+            },
+            "task": "t2",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 7
+            },
+            "task": "t0",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 7
+            },
+            "task": "t1",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 7
+            },
+            "task": "t2",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 8
+            },
+            "task": "t0",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 8
+            },
+            "task": "t1",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 8
+            },
+            "task": "t2",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 9
+            },
+            "task": "t0",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 9
+            },
+            "task": "t1",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 9
+            },
+            "task": "t2",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 10
+            },
+            "task": "t0",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 10
+            },
+            "task": "t1",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 10
+            },
+            "task": "t2",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 11
+            },
+            "task": "t0",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 11
+            },
+            "task": "t1",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 11
+            },
+            "task": "t2",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 12
+            },
+            "task": "t0",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 12
+            },
+            "task": "t1",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 12
+            },
+            "task": "t2",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 13
+            },
+            "task": "t0",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 13
+            },
+            "task": "t1",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 13
+            },
+            "task": "t2",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 14
+            },
+            "task": "t0",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 14
+            },
+            "task": "t1",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 14
+            },
+            "task": "t2",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 15
+            },
+            "task": "t0",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 15
+            },
+            "task": "t1",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 15
+            },
+            "task": "t2",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 16
+            },
+            "task": "t0",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 16
+            },
+            "task": "t1",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 16
+            },
+            "task": "t2",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 17
+            },
+            "task": "t0",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 17
+            },
+            "task": "t1",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 17
+            },
+            "task": "t2",
+            "value": 11
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 18
+            },
+            "task": "t0",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 18
+            },
+            "task": "t1",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 18
+            },
+            "task": "t2",
+            "value": 13
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 19
+            },
+            "task": "t0",
+            "value": 14
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 19
+            },
+            "task": "t1",
+            "value": 12
+          },
+          {
+            "cluster": {
+              "family": "tokio",
+              "world_seed": 19
+            },
+            "task": "t2",
+            "value": 10
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 0
+            },
+            "task": "t0",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 0
+            },
+            "task": "t1",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 0
+            },
+            "task": "t2",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 1
+            },
+            "task": "t0",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 1
+            },
+            "task": "t1",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 1
+            },
+            "task": "t2",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 2
+            },
+            "task": "t0",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 2
+            },
+            "task": "t1",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 2
+            },
+            "task": "t2",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 3
+            },
+            "task": "t0",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 3
+            },
+            "task": "t1",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 3
+            },
+            "task": "t2",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 4
+            },
+            "task": "t0",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 4
+            },
+            "task": "t1",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 4
+            },
+            "task": "t2",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 5
+            },
+            "task": "t0",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 5
+            },
+            "task": "t1",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 5
+            },
+            "task": "t2",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 6
+            },
+            "task": "t0",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 6
+            },
+            "task": "t1",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 6
+            },
+            "task": "t2",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 7
+            },
+            "task": "t0",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 7
+            },
+            "task": "t1",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 7
+            },
+            "task": "t2",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 8
+            },
+            "task": "t0",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 8
+            },
+            "task": "t1",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 8
+            },
+            "task": "t2",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 9
+            },
+            "task": "t0",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 9
+            },
+            "task": "t1",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 9
+            },
+            "task": "t2",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 10
+            },
+            "task": "t0",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 10
+            },
+            "task": "t1",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 10
+            },
+            "task": "t2",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 11
+            },
+            "task": "t0",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 11
+            },
+            "task": "t1",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 11
+            },
+            "task": "t2",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 12
+            },
+            "task": "t0",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 12
+            },
+            "task": "t1",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 12
+            },
+            "task": "t2",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 13
+            },
+            "task": "t0",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 13
+            },
+            "task": "t1",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 13
+            },
+            "task": "t2",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 14
+            },
+            "task": "t0",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 14
+            },
+            "task": "t1",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 14
+            },
+            "task": "t2",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 15
+            },
+            "task": "t0",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 15
+            },
+            "task": "t1",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 15
+            },
+            "task": "t2",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 16
+            },
+            "task": "t0",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 16
+            },
+            "task": "t1",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 16
+            },
+            "task": "t2",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 17
+            },
+            "task": "t0",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 17
+            },
+            "task": "t1",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 17
+            },
+            "task": "t2",
+            "value": 22
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 18
+            },
+            "task": "t0",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 18
+            },
+            "task": "t1",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 18
+            },
+            "task": "t2",
+            "value": 24
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 19
+            },
+            "task": "t0",
+            "value": 20
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 19
+            },
+            "task": "t1",
+            "value": 23
+          },
+          {
+            "cluster": {
+              "family": "django",
+              "world_seed": 19
+            },
+            "task": "t2",
+            "value": 21
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 0
+            },
+            "task": "t0",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 0
+            },
+            "task": "t1",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 0
+            },
+            "task": "t2",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 1
+            },
+            "task": "t0",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 1
+            },
+            "task": "t1",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 1
+            },
+            "task": "t2",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 2
+            },
+            "task": "t0",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 2
+            },
+            "task": "t1",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 2
+            },
+            "task": "t2",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 3
+            },
+            "task": "t0",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 3
+            },
+            "task": "t1",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 3
+            },
+            "task": "t2",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 4
+            },
+            "task": "t0",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 4
+            },
+            "task": "t1",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 4
+            },
+            "task": "t2",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 5
+            },
+            "task": "t0",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 5
+            },
+            "task": "t1",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 5
+            },
+            "task": "t2",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 6
+            },
+            "task": "t0",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 6
+            },
+            "task": "t1",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 6
+            },
+            "task": "t2",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 7
+            },
+            "task": "t0",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 7
+            },
+            "task": "t1",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 7
+            },
+            "task": "t2",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 8
+            },
+            "task": "t0",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 8
+            },
+            "task": "t1",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 8
+            },
+            "task": "t2",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 9
+            },
+            "task": "t0",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 9
+            },
+            "task": "t1",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 9
+            },
+            "task": "t2",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 10
+            },
+            "task": "t0",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 10
+            },
+            "task": "t1",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 10
+            },
+            "task": "t2",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 11
+            },
+            "task": "t0",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 11
+            },
+            "task": "t1",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 11
+            },
+            "task": "t2",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 12
+            },
+            "task": "t0",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 12
+            },
+            "task": "t1",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 12
+            },
+            "task": "t2",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 13
+            },
+            "task": "t0",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 13
+            },
+            "task": "t1",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 13
+            },
+            "task": "t2",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 14
+            },
+            "task": "t0",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 14
+            },
+            "task": "t1",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 14
+            },
+            "task": "t2",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 15
+            },
+            "task": "t0",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 15
+            },
+            "task": "t1",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 15
+            },
+            "task": "t2",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 16
+            },
+            "task": "t0",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 16
+            },
+            "task": "t1",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 16
+            },
+            "task": "t2",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 17
+            },
+            "task": "t0",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 17
+            },
+            "task": "t1",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 17
+            },
+            "task": "t2",
+            "value": 33
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 18
+            },
+            "task": "t0",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 18
+            },
+            "task": "t1",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 18
+            },
+            "task": "t2",
+            "value": 30
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 19
+            },
+            "task": "t0",
+            "value": 31
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 19
+            },
+            "task": "t1",
+            "value": 34
+          },
+          {
+            "cluster": {
+              "family": "git",
+              "world_seed": 19
+            },
+            "task": "t2",
+            "value": 32
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 0
+            },
+            "task": "t0",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 0
+            },
+            "task": "t1",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 0
+            },
+            "task": "t2",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 1
+            },
+            "task": "t0",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 1
+            },
+            "task": "t1",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 1
+            },
+            "task": "t2",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 2
+            },
+            "task": "t0",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 2
+            },
+            "task": "t1",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 2
+            },
+            "task": "t2",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 3
+            },
+            "task": "t0",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 3
+            },
+            "task": "t1",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 3
+            },
+            "task": "t2",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 4
+            },
+            "task": "t0",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 4
+            },
+            "task": "t1",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 4
+            },
+            "task": "t2",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 5
+            },
+            "task": "t0",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 5
+            },
+            "task": "t1",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 5
+            },
+            "task": "t2",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 6
+            },
+            "task": "t0",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 6
+            },
+            "task": "t1",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 6
+            },
+            "task": "t2",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 7
+            },
+            "task": "t0",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 7
+            },
+            "task": "t1",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 7
+            },
+            "task": "t2",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 8
+            },
+            "task": "t0",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 8
+            },
+            "task": "t1",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 8
+            },
+            "task": "t2",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 9
+            },
+            "task": "t0",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 9
+            },
+            "task": "t1",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 9
+            },
+            "task": "t2",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 10
+            },
+            "task": "t0",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 10
+            },
+            "task": "t1",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 10
+            },
+            "task": "t2",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 11
+            },
+            "task": "t0",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 11
+            },
+            "task": "t1",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 11
+            },
+            "task": "t2",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 12
+            },
+            "task": "t0",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 12
+            },
+            "task": "t1",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 12
+            },
+            "task": "t2",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 13
+            },
+            "task": "t0",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 13
+            },
+            "task": "t1",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 13
+            },
+            "task": "t2",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 14
+            },
+            "task": "t0",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 14
+            },
+            "task": "t1",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 14
+            },
+            "task": "t2",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 15
+            },
+            "task": "t0",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 15
+            },
+            "task": "t1",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 15
+            },
+            "task": "t2",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 16
+            },
+            "task": "t0",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 16
+            },
+            "task": "t1",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 16
+            },
+            "task": "t2",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 17
+            },
+            "task": "t0",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 17
+            },
+            "task": "t1",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 17
+            },
+            "task": "t2",
+            "value": 44
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 18
+            },
+            "task": "t0",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 18
+            },
+            "task": "t1",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 18
+            },
+            "task": "t2",
+            "value": 41
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 19
+            },
+            "task": "t0",
+            "value": 42
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 19
+            },
+            "task": "t1",
+            "value": 40
+          },
+          {
+            "cluster": {
+              "family": "docs",
+              "world_seed": 19
+            },
+            "task": "t2",
+            "value": 43
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 0
+            },
+            "task": "t0",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 0
+            },
+            "task": "t1",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 0
+            },
+            "task": "t2",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 1
+            },
+            "task": "t0",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 1
+            },
+            "task": "t1",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 1
+            },
+            "task": "t2",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 2
+            },
+            "task": "t0",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 2
+            },
+            "task": "t1",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 2
+            },
+            "task": "t2",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 3
+            },
+            "task": "t0",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 3
+            },
+            "task": "t1",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 3
+            },
+            "task": "t2",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 4
+            },
+            "task": "t0",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 4
+            },
+            "task": "t1",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 4
+            },
+            "task": "t2",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 5
+            },
+            "task": "t0",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 5
+            },
+            "task": "t1",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 5
+            },
+            "task": "t2",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 6
+            },
+            "task": "t0",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 6
+            },
+            "task": "t1",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 6
+            },
+            "task": "t2",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 7
+            },
+            "task": "t0",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 7
+            },
+            "task": "t1",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 7
+            },
+            "task": "t2",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 8
+            },
+            "task": "t0",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 8
+            },
+            "task": "t1",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 8
+            },
+            "task": "t2",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 9
+            },
+            "task": "t0",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 9
+            },
+            "task": "t1",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 9
+            },
+            "task": "t2",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 10
+            },
+            "task": "t0",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 10
+            },
+            "task": "t1",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 10
+            },
+            "task": "t2",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 11
+            },
+            "task": "t0",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 11
+            },
+            "task": "t1",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 11
+            },
+            "task": "t2",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 12
+            },
+            "task": "t0",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 12
+            },
+            "task": "t1",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 12
+            },
+            "task": "t2",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 13
+            },
+            "task": "t0",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 13
+            },
+            "task": "t1",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 13
+            },
+            "task": "t2",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 14
+            },
+            "task": "t0",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 14
+            },
+            "task": "t1",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 14
+            },
+            "task": "t2",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 15
+            },
+            "task": "t0",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 15
+            },
+            "task": "t1",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 15
+            },
+            "task": "t2",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 16
+            },
+            "task": "t0",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 16
+            },
+            "task": "t1",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 16
+            },
+            "task": "t2",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 17
+            },
+            "task": "t0",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 17
+            },
+            "task": "t1",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 17
+            },
+            "task": "t2",
+            "value": 50
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 18
+            },
+            "task": "t0",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 18
+            },
+            "task": "t1",
+            "value": 54
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 18
+            },
+            "task": "t2",
+            "value": 52
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 19
+            },
+            "task": "t0",
+            "value": 53
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 19
+            },
+            "task": "t1",
+            "value": 51
+          },
+          {
+            "cluster": {
+              "family": "tests",
+              "world_seed": 19
+            },
+            "task": "t2",
+            "value": 54
+          }
+        ]
+      },
+      "kind": "icc_pilot"
+    },
+    {
+      "expected": {
+        "clustering_unit": "family",
+        "effective_n_at_max": {
           "denominator": 148121,
           "numerator": 310872
         },
@@ -10177,8 +13083,8 @@
       "expected": {
         "clustering_unit": "family",
         "effective_n_at_max": {
-          "denominator": 1,
-          "numerator": 2
+          "denominator": 25,
+          "numerator": 28
         },
         "icc_family": {
           "denominator": 14,
@@ -19846,7 +22752,7 @@
   "provenance": {
     "generator": "crates/eval-core/gen/gen-statistics-golden.ts",
     "generator_version": "statistics-reference-ts-v1",
-    "input_sha256": "7cf3e606c4b8d3469eff914939155ee4a5946c6e80ec13957444ca8111e6de67"
+    "input_sha256": "ba3f9323ecd8c3ae1f45b1f0b04f2500066bf1ca2165e7ea604ce0a8029d117f"
   },
   "schema": 1
 }

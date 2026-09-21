@@ -394,11 +394,13 @@ impl IccPilot {
     /// The unit and effective N the recorded counts and ICCs imply, so a
     /// frozen pilot can be checked against its own evidence.
     fn projection(&self) -> Result<(ClusteringUnit, Ratio), StatisticsError> {
+        // Each affordable world lies in one family, so the campaign can realize
+        // at most that many family clusters, however many the pilot sampled.
         let (clustering_unit, icc, clusters_at_max) = if self.icc_family > ICC_THRESHOLD {
             (
                 ClusteringUnit::Family,
                 self.icc_family,
-                i128::from(self.n_families),
+                i128::from(self.n_families.min(self.max_affordable_worlds)),
             )
         } else {
             (
@@ -445,7 +447,13 @@ pub struct AnalysisFamily {
 }
 
 impl AnalysisFamily {
+    /// Every structural check plus canonical-JSON eligibility, so a family that
+    /// validates can always be frozen.
     pub fn validate(&self) -> Result<(), StatisticsError> {
+        self.digest().map(drop)
+    }
+
+    fn check_fields(&self) -> Result<(), StatisticsError> {
         if self.schema != ANALYSIS_FAMILY_SCHEMA {
             return Err(StatisticsError::SchemaMismatch {
                 found: self.schema.clone(),
@@ -499,7 +507,7 @@ impl AnalysisFamily {
     }
 
     pub fn digest(&self) -> Result<String, StatisticsError> {
-        self.validate()?;
+        self.check_fields()?;
         Ok(protocol_digest(
             ANALYSIS_FAMILY_DIGEST_PROTOCOL,
             &serde_json::to_value(self).expect("serializes"),
@@ -871,23 +879,24 @@ pub fn arm_miss_asymmetry(
     rates[0].max(rates[1]).checked_sub(rates[0].min(rates[1]))
 }
 
-/// Analyzes a completed pair table under the frozen family. The order is the
-/// contract: the freeze check, then the pilot's block, then the arm-miss
-/// asymmetry block, then the table's conformance to the frozen plan (its size
-/// is the frozen pair count, every pair is in a frozen task family, and no
-/// pair id repeats), and
-/// only then the gates, so a blocked campaign computes none.
+/// Analyzes a completed pair table under the family the manifest froze. The
+/// order is the contract: the freeze check, then the pilot's block, then the
+/// arm-miss asymmetry block over the manifest's own arm rates, then the
+/// table's conformance to the frozen plan (its size is the frozen pair count,
+/// every pair is in a frozen task family, and no pair id repeats), and only
+/// then the gates, so a blocked campaign computes none.
 pub fn analyze(
-    frozen: &FrozenFamily,
+    manifest: &Manifest,
     family: &AnalysisFamily,
     pairs: &[PairOutcome],
-    arm_rates: &BTreeMap<String, ArmRates>,
 ) -> Result<Analysis, StatisticsError> {
+    let frozen = FrozenFamily::from_manifest(manifest)?;
     frozen.check(family)?;
     if let Some(blocked) = family.is_blocked() {
         return Ok(Analysis::Blocked(blocked));
     }
     let rates = family.profile.rates()?;
+    let arm_rates = &manifest.arm_rates;
     let asymmetry = arm_miss_asymmetry(arm_rates)?;
     if asymmetry > rates.miss_asymmetry_bound {
         return Ok(Analysis::Blocked(BlockedReason::ArmMissAsymmetry {
@@ -919,7 +928,7 @@ pub fn analyze(
     }
     let counts = PairCounts::of(pairs);
     Ok(Analysis::Report(Box::new(PairedReport {
-        analysis_family_digest: frozen.analysis_family_digest.clone(),
+        analysis_family_digest: frozen.analysis_family_digest,
         gates: Gates::of(&counts, &rates)?,
         counts,
         interval: cluster_bootstrap_interval(

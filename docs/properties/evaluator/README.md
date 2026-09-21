@@ -853,10 +853,11 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
 - `the_frozen_reference_agrees_on_every_golden_case`
   (`mtr-three-gates-signed-history-effect`,
   `mtr-world-clustered-intervals-after-icc-pilot`): the TypeScript reference's
-  thirteen cases (five pair tables with gate verdicts, including censored arms,
-  a failing noninferiority gate, and one at the margin; five ICC pilots with
+  fourteen cases (five pair tables with gate verdicts, including censored arms,
+  a failing noninferiority gate, and one at the margin; six ICC pilots with
   and without a family effect, with fewer affordable worlds than the pilot
-  had, unbalanced, and internally constant; three cluster bootstraps by family
+  had (with and without a family effect, so the family-cluster cap is
+  exercised), unbalanced, and internally constant; three cluster bootstraps by family
   and by world over 300 pairs, one at the minimum 40 replicates where the
   `1/40` order statistic is the smallest replicate) equal the Rust counts, rates, gates, ICC,
   clustering unit, effective N, and interval bounds exactly; the golden's
@@ -880,7 +881,9 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
 - `the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpowered`
   (`mtr-world-clustered-intervals-after-icc-pilot`): a family effect selects
   the family unit; a flat pilot whose tasks agree within each world has world
-  ICC one and counts each world once; fewer affordable worlds shrink N; zero
+  ICC one and counts each world once; fewer affordable worlds shrink N, and
+  under the family unit two affordable worlds realize at most two family
+  clusters so the projected items are deflated; zero
   affordable worlds, a two-observation pilot, a single group, and no variance
   at all refuse; constant and unbalanced constant groups give ICC one; a
   large-valued pilot refuses as `RationalOverflow`; an effective N below the
