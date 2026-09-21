@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 
+use context_core::canonical_json::is_lower_hex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,11 +68,12 @@ pub struct TransferCriterion {
 
 impl TransferCriterion {
     /// A criterion nobody approved, or one every anchor set would meet, is
-    /// not a criterion; both faults are named when both hold. A blank family
-    /// is no family, so requiring one is no floor.
+    /// not a criterion; both faults are named when both hold. The approving
+    /// run is an `eval-run-id` (64 lowercase hex), not any text; a blank
+    /// family is no family, so requiring one is no floor.
     pub fn unmet(&self) -> Vec<UnmetClause> {
         let mut unmet = Vec::new();
-        if self.approved_by.is_empty() || self.approved_at_run_id.is_empty() {
+        if self.approved_by.is_empty() || !is_lower_hex(&self.approved_at_run_id, 64) {
             unmet.push(UnmetClause::CriterionNotApproved);
         }
         if self.min_valid_tasks == 0

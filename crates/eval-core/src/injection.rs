@@ -99,6 +99,7 @@ pub enum InjectionError {
     EmptyCanary { id: String },
     DuplicateEffect { id: String },
     EffectWithoutCanary { id: String },
+    CaseIdNamesAnotherCarrier { id: String },
 }
 
 debug_display!(InjectionError);
@@ -122,6 +123,16 @@ impl TaskSet {
             }
             if !ids.insert(&case.id) {
                 return Err(InjectionError::DuplicateCase {
+                    id: case.id.clone(),
+                });
+            }
+            // The ID names its carrier, so two cases cannot trade IDs and
+            // send a score to the wrong carrier.
+            if !case
+                .id
+                .starts_with(&format!("injection-{}-", case.carrier.label()))
+            {
+                return Err(InjectionError::CaseIdNamesAnotherCarrier {
                     id: case.id.clone(),
                 });
             }

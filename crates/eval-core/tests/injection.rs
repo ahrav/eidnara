@@ -130,6 +130,17 @@ fn every_generated_task_set_plants_a_case_in_every_carrier() {
             },
         ),
         (
+            "two cases with their ids swapped",
+            Box::new(|s| {
+                let (a, b) = (s.cases[0].id.clone(), s.cases[1].id.clone());
+                s.cases[0].id = b;
+                s.cases[1].id = a;
+            }),
+            InjectionError::CaseIdNamesAnotherCarrier {
+                id: case(Carrier::IssueText).id,
+            },
+        ),
+        (
             "an empty canary",
             Box::new(|s| s.cases[2].canary.clear()),
             InjectionError::EmptyCanary {
@@ -904,6 +915,10 @@ fn generated_worlds_carry_phase_1_claims_and_the_pilot_never_derives_transfer() 
     let mut nameless = criterion();
     nameless.required_families.insert(String::new());
     assert_eq!(nameless.validate(), Err(CriterionHasNoFloor));
+    // The approving run is a run: a 64-hex `eval-run-id`, not any text.
+    let mut unrun = criterion();
+    unrun.approved_at_run_id = "x".into();
+    assert_eq!(unrun.validate(), Err(CriterionNotApproved));
     let mut blank_rule = criterion();
     blank_rule.min_valid_tasks = 1;
     blank_rule.required_families = [String::new()].into();

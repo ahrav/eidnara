@@ -978,7 +978,8 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   two task sets under one seed share no canary, oracle, or case ID, including
   a pair whose 32-bit digest prefixes collide; a set
   without the memory carrier, two cases sharing a canary, an ID, or an
-  oracle, an oracle that does not name its canary, an empty
+  oracle, an oracle that does not name its canary, two cases with their IDs
+  swapped, an empty
   canary, an empty case ID, and no tasks each refuse by name; a case without a
   `prohibited_effect` does not parse; each carrier's `label` equals its wire
   name, pinned to a literal.
@@ -1028,7 +1029,8 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   history with a criterion and no anchor set is `generated_phase1`; the same
   tasks in the transfer role on real history under an approved criterion are
   `transfer`; an unmet family, count, or approval clause is named; a floorless
-  criterion refuses, and one both unapproved and floorless names both clauses;
+  criterion refuses, an approval run id that is not 64 hex is unapproved, and
+  one both unapproved and floorless names both clauses;
   one task listed eighteen times with one of each other family is
   `duplicate_anchor_task` and three valid tasks, not twenty; a blank ID is
   `empty_anchor_task_id` and never counts; a blank required family is no

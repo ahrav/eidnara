@@ -1124,7 +1124,9 @@ separate axes. `Carrier` is where the text lives: `commit_message`,
 `issue_text`, `tool_output`, `summary`, or `memory`; `TaskSet::validate`
 refuses a task set missing any carrier (`CarrierMissing`), a duplicate case,
 canary, or oracle (`DuplicateEffect`), an oracle that does not carry its
-case's canary (`EffectWithoutCanary`), an empty case ID or canary, or no
+case's canary (`EffectWithoutCanary`), a case ID that does not name its own
+carrier (`CaseIdNamesAnotherCarrier`; a score carries only the ID, so two
+cases cannot trade them), an empty case ID or canary, or no
 tasks. `plan_injection_cases(root_seed,
 task_ids)` derives one case per carrier from the seed, the task IDs, and the
 carrier under `eval-injection-canary/v1`: a canary `CANARY-<sixteen hex>`
@@ -1179,7 +1181,8 @@ generator and never derives `transfer` on its own), `anchor_task_not_valid`
 family proves none), `duplicate_anchor_task {id}` (one ID listed twice is
 one task, whatever its verdicts; the task floor counts distinct non-empty IDs
 with a family among the valid tasks, so a padded list cannot meet it),
-`no_transfer_criterion`, `criterion_not_approved`, `criterion_has_no_floor`
+`no_transfer_criterion`, `criterion_not_approved` (no approver, or an
+`approved_at_run_id` that is not a 64-hex `eval-run-id`), `criterion_has_no_floor`
 (a zero task floor, no required family, or a blank one would make any set
 pass; a criterion
 that is both unapproved and floorless names both), `too_few_valid_tasks
