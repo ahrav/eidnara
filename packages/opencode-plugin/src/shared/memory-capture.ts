@@ -277,8 +277,6 @@ function flushOutcome(state: string | undefined): MemoryCaptureFlushResult | "wo
 }
 
 /** Native auth/model execution stays in the harness. Only bounded proposals go
- * back to the daemon; its confirmed receipts, not model success, finish capture. */
-/** Native auth/model execution stays in the harness. Only bounded proposals go
  * back to the daemon; its confirmed receipts, not model success, finish capture.
  * An aborted `signal` stops before the next batch and cancels the batch in flight. */
 export async function flushMemoryCapture(
