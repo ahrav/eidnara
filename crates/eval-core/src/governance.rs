@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::event::EventId;
-use crate::pairs::PairSet;
+use crate::pairs::{PairError, PairSet};
 
 /// A descriptor. The runner executes the production component it names;
 /// nothing here models what that component does to a history.
@@ -63,6 +63,8 @@ pub struct GovernanceArms {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArmError {
+    /// The pair set itself is not one the compiler could have produced.
+    PairSet(PairError),
     EmptyControlRun,
     /// The arms describe tasks or evidence the pair set does not have.
     PairSetMismatch {
@@ -89,8 +91,9 @@ pub enum ArmError {
 debug_display!(ArmError);
 
 impl GovernanceArms {
-    /// Checks the arms against the pair set they govern.
+    /// Checks the pair set, then the arms against it.
     pub fn validate(&self, set: &PairSet) -> Result<(), ArmError> {
+        set.validate().map_err(ArmError::PairSet)?;
         if self.control_run_id.is_empty() {
             return Err(ArmError::EmptyControlRun);
         }

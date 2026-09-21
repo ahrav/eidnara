@@ -67,13 +67,17 @@ pub struct TransferCriterion {
 
 impl TransferCriterion {
     /// A criterion nobody approved, or one every anchor set would meet, is
-    /// not a criterion; both faults are named when both hold.
+    /// not a criterion; both faults are named when both hold. A blank family
+    /// is no family, so requiring one is no floor.
     pub fn unmet(&self) -> Vec<UnmetClause> {
         let mut unmet = Vec::new();
         if self.approved_by.is_empty() || self.approved_at_run_id.is_empty() {
             unmet.push(UnmetClause::CriterionNotApproved);
         }
-        if self.min_valid_tasks == 0 || self.required_families.is_empty() {
+        if self.min_valid_tasks == 0
+            || self.required_families.is_empty()
+            || self.required_families.contains("")
+        {
             unmet.push(UnmetClause::CriterionHasNoFloor);
         }
         unmet
@@ -93,6 +97,8 @@ pub enum UnmetClause {
     AnchorSetIsPilot,
     AnchorTaskNotValid,
     EmptyAnchorTaskId,
+    /// A task from no named family proves no family and is not a task.
+    EmptyAnchorTaskFamily,
     /// One ID listed twice is one task, whatever its verdicts.
     DuplicateAnchorTask {
         id: String,
@@ -137,13 +143,15 @@ pub fn derive_claim_class(
         .into_iter()
         .flat_map(|set| set.tasks.iter())
         .partition(|task| task.verdict == AnchorVerdict::Valid);
-    // The floor counts tasks, not list entries: a repeated or blank ID is
-    // one task or none, so a padded list cannot meet it.
+    // The floor counts tasks, not list entries: a repeated, blank, or
+    // family-less ID is one task or none, so a padded list cannot meet it.
     let valid: Vec<&AnchorTask> = {
         let mut seen = BTreeSet::new();
         valid
             .into_iter()
-            .filter(|task| !task.id.is_empty() && seen.insert(task.id.as_str()))
+            .filter(|task| {
+                !task.id.is_empty() && !task.family.is_empty() && seen.insert(task.id.as_str())
+            })
             .collect()
     };
     match anchor_set {
@@ -157,6 +165,9 @@ pub fn derive_claim_class(
             }
             if set.tasks.iter().any(|task| task.id.is_empty()) {
                 unmet.push(UnmetClause::EmptyAnchorTaskId);
+            }
+            if set.tasks.iter().any(|task| task.family.is_empty()) {
+                unmet.push(UnmetClause::EmptyAnchorTaskFamily);
             }
             let mut ids = BTreeSet::new();
             let mut duplicates = BTreeSet::new();

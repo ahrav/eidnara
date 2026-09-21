@@ -830,7 +830,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   exclusions, multiplicity, margin, floor, threshold, seed, pilot) is
   `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
   below 300, fewer than 40 replicates, an empty endpoint list, and an unknown
-  field refuse; a manifest without a recorded digest is `FamilyNotRecorded`.
+  field refuse; a version-1 document is `SchemaMismatch`, not a shape error; a
+  manifest without a recorded digest is `FamilyNotRecorded`.
 - `the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpowered`
   (`mtr-world-clustered-intervals-after-icc-pilot`): a family effect selects
   the family unit; a flat pilot whose tasks agree within each world has world
@@ -974,8 +975,10 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   (`mtr-injection-cases-present-and-scored-per-stage`): the seeded plan
   yields five cases, one per carrier, with five distinct canaries and five
   distinct oracles, equal under the same seed and different under another;
-  two task sets under one seed share no canary, oracle, or case ID; a set
-  without the memory carrier, two cases sharing a canary or an ID, an empty
+  two task sets under one seed share no canary, oracle, or case ID, including
+  a pair whose 32-bit digest prefixes collide; a set
+  without the memory carrier, two cases sharing a canary, an ID, or an
+  oracle, an oracle that does not name its canary, an empty
   canary, an empty case ID, and no tasks each refuse by name; a case without a
   `prohibited_effect` does not parse; each carrier's `label` equals its wire
   name, pinned to a literal.
@@ -1005,7 +1008,8 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   (`xc-history-policy-arms-share-truth`): arms derived from a compiled pair
   set validate and each descriptor's production component is a file in the
   workspace containing the named symbol; a pruned arm records a lost
-  evidence ID without dropping the task; an added or dropped task, a changed
+  evidence ID without dropping the task; a tampered pair set refuses before
+  the arms are read; an added or dropped task, a changed
   truth ID, an empty control run, an empty policy version, a missing raw or
   pruned arm, a raw arm claiming a loss, and a loss outside the evidence each
   refuse by name; the arms are keyed by policy, and an arm carrying a history
@@ -1021,12 +1025,15 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   criterion refuses, and one both unapproved and floorless names both clauses;
   one task listed eighteen times with one of each other family is
   `duplicate_anchor_task` and three valid tasks, not twenty; a blank ID is
-  `empty_anchor_task_id` and never counts; a duplicate among skipped tasks is
+  `empty_anchor_task_id` and never counts; a blank required family is no
+  floor, and a blank task family is `empty_anchor_task_family` and never
+  counts; a duplicate among skipped tasks is
   still named; a residue task is skipped and fails the set; a pilot with a
   residue task names both clauses.
 - `the_frozen_family_owns_the_transfer_criterion`
   (`crates/eval-core/tests/statistics.rs`): a family without a criterion pins
-  every report to phase 1; a family with one derives `transfer` for a set that
+  every report to phase 1; a criterion added after the freeze is
+  `FamilyChangedAfterResults`, not a class; a family with one derives `transfer` for a set that
   meets it; a floorless criterion fails `validate`; the criterion moves the
   family digest.
 

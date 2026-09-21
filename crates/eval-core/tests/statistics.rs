@@ -412,6 +412,16 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
         no_repeats.validate(),
         Err(StatisticsError::EmptyFamilyField)
     );
+    // A version-1 document is reported by its schema, not by the field it lacks.
+    let mut v1 = value.clone();
+    v1["schema"] = json!("eval-analysis-family/v1");
+    v1.as_object_mut().unwrap().remove("transfer_criterion");
+    assert_eq!(
+        parse_analysis_family(&v1),
+        Err(StatisticsError::SchemaMismatch {
+            found: "eval-analysis-family/v1".to_string()
+        })
+    );
     let mut extra = value;
     extra["interval_tolerance"] = json!("0");
     assert!(matches!(
@@ -801,9 +811,11 @@ fn the_frozen_family_owns_the_transfer_criterion() {
             .collect(),
     };
     let family = family();
+    let frozen = FrozenFamily::freeze(&family).unwrap();
     assert_eq!(
         family
-            .claim_class(WorldProvenance::RealHistory, Some(&anchors))
+            .claim_class(&frozen, WorldProvenance::RealHistory, Some(&anchors))
+            .unwrap()
             .unmet,
         vec![UnmetClause::NoTransferCriterion],
         "a family without a criterion pins every report to phase 1"
@@ -819,9 +831,20 @@ fn the_frozen_family_owns_the_transfer_criterion() {
             .collect(),
     });
     ruled.validate().unwrap();
+    // A criterion added after the freeze derives nothing: the claim API is
+    // bound to the recorded digest, not to whatever family a caller holds.
+    assert_eq!(
+        ruled.claim_class(&frozen, WorldProvenance::RealHistory, Some(&anchors)),
+        Err(StatisticsError::FamilyChangedAfterResults {
+            recorded: frozen.analysis_family_digest.clone(),
+            found: ruled.digest().unwrap(),
+        })
+    );
+    let refrozen = FrozenFamily::freeze(&ruled).unwrap();
     assert_eq!(
         ruled
-            .claim_class(WorldProvenance::RealHistory, Some(&anchors))
+            .claim_class(&refrozen, WorldProvenance::RealHistory, Some(&anchors))
+            .unwrap()
             .class,
         ClaimClass::Transfer
     );

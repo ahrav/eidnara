@@ -454,13 +454,20 @@ impl AnalysisFamily {
     }
 
     /// The class a report under this family may claim, read against the
-    /// family's own criterion so none can be supplied out of band.
+    /// family's own criterion so none can be supplied out of band, and only
+    /// after the freeze check, so an edited family derives nothing.
     pub fn claim_class(
         &self,
+        frozen: &FrozenFamily,
         provenance: WorldProvenance,
         anchor_set: Option<&AnchorSet>,
-    ) -> ClaimDerivation {
-        derive_claim_class(provenance, anchor_set, self.transfer_criterion.as_ref())
+    ) -> Result<ClaimDerivation, StatisticsError> {
+        frozen.check(self)?;
+        Ok(derive_claim_class(
+            provenance,
+            anchor_set,
+            self.transfer_criterion.as_ref(),
+        ))
     }
 
     pub fn digest(&self) -> Result<String, StatisticsError> {
