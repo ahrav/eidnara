@@ -6,12 +6,12 @@ use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
 use eval_core::{
-    ArmKind, BaselineFailure, BaselineVerdict, Coverage, Destination, EvaluatedSurface, EventId,
-    EventLog, LogError, MAX_VALID_TIME_MS, Mode, NATURAL_FRESH_ENTITY_TAG, PAIRING_POLICY_VERSION,
-    Pair, PairError, PairSet, PairSetInput, Query, RECENCY_BASELINE_VERSION, RepositorySpec,
-    Sensitivity, ServedClass, SessionSpec, StopCondition, Suite, Task, TaskRole, Verdict,
-    Visibility, WorldConfig, check_recency_baseline, compile_pair_set, recency_bound, reduce,
-    serialize_spec,
+    ArmKind, BaselineFailure, BaselineVerdict, CausalEdge, Coverage, Destination, EvaluatedSurface,
+    EventId, EventLog, LogError, MAX_VALID_TIME_MS, Mode, NATURAL_FRESH_ENTITY_TAG,
+    PAIRING_POLICY_VERSION, Pair, PairError, PairSet, PairSetInput, Query,
+    RECENCY_BASELINE_VERSION, RepositorySpec, Sensitivity, ServedClass, SessionSpec, StopCondition,
+    Suite, Task, TaskRole, Verdict, Visibility, WorldConfig, check_recency_baseline,
+    compile_pair_set, recency_bound, reduce, serialize_spec,
 };
 use serde_json::{Value, json};
 use support::{WORLD_EPOCH_MS as EPOCH_MS, WORLD_SEED as SEED, world_config as config};
@@ -143,8 +143,9 @@ fn ids(log: &EventLog) -> Vec<&str> {
     log.events.iter().map(|e| e.id.0.as_str()).collect()
 }
 
-fn versioned(pair: &Pair) -> Vec<EventId> {
-    pair.recency_window.clone()
+/// The versioned baseline: the set's stored window, whichever pair is asked.
+fn versioned(set: &PairSet) -> impl Fn(&Pair) -> Vec<EventId> + '_ {
+    move |_| set.recency_window.clone()
 }
 
 #[test]
@@ -181,7 +182,7 @@ fn a_pair_set_carries_a_falsification_pair_and_a_natural_fresh_control() {
             .iter()
             .all(|i| i.0.contains(NATURAL_FRESH_ENTITY_TAG))
     );
-    let fresh_truth = reduce(&falsifier.fresh, &fixture(), &falsifier.fresh_query).unwrap();
+    let fresh_truth = reduce(&falsifier.fresh, &fixture(), &set.fresh_query).unwrap();
     assert!(
         fresh_truth
             .required
@@ -189,7 +190,7 @@ fn a_pair_set_carries_a_falsification_pair_and_a_natural_fresh_control() {
     );
     assert!(control.iter().any(|i| fresh_truth.required.contains(i)));
     assert!(
-        falsifier.fresh_query.scope.len() > falsifier.task.query.scope.len(),
+        set.fresh_query.scope.len() > falsifier.task.query.scope.len(),
         "the control's entities join the scope"
     );
     falsifier.fresh.validate(64).unwrap();
@@ -211,7 +212,7 @@ fn a_pair_set_carries_a_falsification_pair_and_a_natural_fresh_control() {
     );
     mid.fresh_minimal.validate(64).unwrap();
     assert_eq!(
-        falsifier.recency_window,
+        set.recency_window,
         vec![
             id("repository:repository-0:11"),
             id("repository:repository-0:10"),
@@ -225,7 +226,7 @@ fn a_pair_set_carries_a_falsification_pair_and_a_natural_fresh_control() {
     );
     let round: PairSet = serde_json::from_value(serde_json::to_value(&set).unwrap()).unwrap();
     assert_eq!(round, set);
-    round.validate().unwrap();
+    round.validate(&fixture()).unwrap();
 }
 
 #[test]
@@ -253,7 +254,7 @@ fn the_window_breaks_equal_times_by_linearization_order() {
     );
     assert_eq!(
         set.unwrap_err(),
-        PairError::MixedCuts { task: "tie".into() }
+        PairError::MixedQueries { task: "tie".into() }
     );
     let mut tasks = vec![
         task(
@@ -280,11 +281,11 @@ fn the_window_breaks_equal_times_by_linearization_order() {
         .collect();
     assert_eq!(shared_time.len(), 4);
     assert_eq!(
-        set.pairs[1].recency_window,
+        set.recency_window,
         vec![id("session:session-0:6"), id("repository:repository-0:8")]
     );
     assert!(matches!(
-        check_recency_baseline(&set, versioned).unwrap(),
+        check_recency_baseline(&set, &fixture(), versioned(&set)).unwrap(),
         BaselineVerdict::Established { .. }
     ));
 }
@@ -302,7 +303,7 @@ fn the_recency_baseline_misses_every_falsifier_or_blocks_suite_b() {
         .record("wm_baseline_ran_on_falsification_pair")
         .unwrap();
     let BaselineVerdict::Established { contrast } =
-        check_recency_baseline(&set, versioned).unwrap()
+        check_recency_baseline(&set, &fixture(), versioned(&set)).unwrap()
     else {
         panic!("contrast established");
     };
@@ -322,7 +323,7 @@ fn the_recency_baseline_misses_every_falsifier_or_blocks_suite_b() {
     let short = compile(EvaluatedSurface::Surface1, None, &tasks()).unwrap();
     assert_eq!(short.recency_bound, 100);
     assert_eq!(
-        check_recency_baseline(&short, versioned).unwrap(),
+        check_recency_baseline(&short, &fixture(), versioned(&short)).unwrap(),
         BaselineVerdict::Blocked {
             condition: StopCondition::B,
             failure: BaselineFailure::DeliveredFalsifier {
@@ -353,13 +354,13 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     let set = compile(EvaluatedSurface::QueryRoute, k(3), &tasks()).unwrap();
     let control = &set.pairs[1];
     assert_eq!(control.task.role, TaskRole::PositiveControl);
-    assert!(!control.recency_window.is_empty());
+    assert!(!set.recency_window.is_empty());
     let mut coverage = Coverage::default();
     coverage
         .record("wm_baseline_ran_on_positive_control_pair")
         .unwrap();
     assert!(matches!(
-        check_recency_baseline(&set, versioned).unwrap(),
+        check_recency_baseline(&set, &fixture(), versioned(&set)).unwrap(),
         BaselineVerdict::Established { .. }
     ));
 
@@ -367,7 +368,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     // by the versioned baseline itself, from compiler output alone.
     let narrow = compile(EvaluatedSurface::QueryRoute, k(1), &tasks()).unwrap();
     assert!(matches!(
-        check_recency_baseline(&narrow, versioned).unwrap(),
+        check_recency_baseline(&narrow, &fixture(), versioned(&narrow)).unwrap(),
         BaselineVerdict::Established { .. }
     ));
     let mut tasks = tasks();
@@ -378,7 +379,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     );
     let missed = compile(EvaluatedSurface::QueryRoute, k(1), &tasks).unwrap();
     assert_eq!(
-        check_recency_baseline(&missed, versioned).unwrap(),
+        check_recency_baseline(&missed, &fixture(), versioned(&missed)).unwrap(),
         BaselineVerdict::Blocked {
             condition: StopCondition::B,
             failure: BaselineFailure::MissedPositiveControl {
@@ -390,7 +391,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     // The negative control: an always-empty baseline misses every falsifier
     // for free, and both classes empty is a refusal, never a pass.
     assert_eq!(
-        check_recency_baseline(&set, |_| vec![]).unwrap(),
+        check_recency_baseline(&set, &fixture(), |_| vec![]).unwrap(),
         BaselineVerdict::Blocked {
             condition: StopCondition::B,
             failure: BaselineFailure::Vacuous,
@@ -398,7 +399,7 @@ fn the_recency_baseline_delivers_a_positive_control_or_is_vacuous() {
     );
     // Vacuity is judged before the falsifiers, so an empty baseline never
     // reads as "missed positive control" either.
-    let verdict = check_recency_baseline(&missed, |_| vec![]).unwrap();
+    let verdict = check_recency_baseline(&missed, &fixture(), |_| vec![]).unwrap();
     assert_eq!(
         serde_json::to_value(&verdict).unwrap(),
         json!({"kind": "blocked", "condition": "b", "failure": {"kind": "vacuous"}})
@@ -461,9 +462,9 @@ fn a_long_aged_history_pushes_the_falsifier_out_of_the_surface_1_window() {
         &tasks,
     )
     .unwrap();
-    assert_eq!(set.pairs[0].recency_window.len(), 100);
+    assert_eq!(set.recency_window.len(), 100);
     let BaselineVerdict::Established { contrast } =
-        check_recency_baseline(&set, versioned).unwrap()
+        check_recency_baseline(&set, &fixture(), versioned(&set)).unwrap()
     else {
         panic!("the epoch commit is outside a hundred more recent units");
     };
@@ -651,7 +652,7 @@ fn pair_validation_refuses_what_would_make_the_controls_vacuous() {
                 tasks[2].query.observation_time_ms = EPOCH_MS + 20_000;
                 compile(EvaluatedSurface::QueryRoute, k(3), &tasks)
             }),
-            PairError::MixedCuts {
+            PairError::MixedQueries {
                 task: "mid-message".to_string(),
             },
         ),
@@ -769,6 +770,47 @@ fn pair_validation_refuses_what_would_make_the_controls_vacuous() {
                 target: id("repository:repository-0:0"),
             }),
         ),
+        (
+            "a natural-fresh history with a causal edge to an event it does not hold",
+            Box::new(|| {
+                let mut dangling = fresh.clone();
+                dangling.causal_edges.push(CausalEdge {
+                    from: fresh.events[0].id.clone(),
+                    to: id("session:session-9:0"),
+                });
+                compile_with(EvaluatedSurface::QueryRoute, k(3), &aged, &dangling, &base)
+            }),
+            PairError::Log(LogError::DanglingEdge {
+                edge: CausalEdge {
+                    from: fresh.events[0].id.clone(),
+                    to: id("session:session-9:0"),
+                },
+            }),
+        ),
+        (
+            "a control that narrows the scope to its own entity",
+            Box::new(|| {
+                // Under the shared scope the last session-0 message is behind a
+                // window of one; alone in its scope it is the window.
+                let mut tasks = vec![
+                    task(
+                        "early-commit",
+                        TaskRole::Falsification,
+                        &["repository:repository-0:0"],
+                    ),
+                    task(
+                        "own-scope",
+                        TaskRole::PositiveControl,
+                        &["session:session-0:10"],
+                    ),
+                ];
+                tasks[1].query.scope = BTreeSet::from(["session-0".to_string()]);
+                compile(EvaluatedSurface::QueryRoute, k(1), &tasks)
+            }),
+            PairError::MixedQueries {
+                task: "own-scope".to_string(),
+            },
+        ),
     ];
     for (name, run, expected) in cases {
         assert_eq!(run().unwrap_err(), expected, "{name}");
@@ -802,11 +844,7 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
         ),
         (
             "a window wider than the bound",
-            Box::new(|s| {
-                s.pairs[1]
-                    .recency_window
-                    .push(id("repository:repository-0:8"))
-            }),
+            Box::new(|s| s.recency_window.push(id("repository:repository-0:8"))),
             PairError::Tampered {
                 field: "recency_window",
             },
@@ -823,17 +861,107 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
                 task: "mid-message".to_string(),
             },
         ),
+        (
+            "the median moved",
+            Box::new(|s| s.aged_median_ms = 0),
+            PairError::Tampered {
+                field: "aged_median_ms",
+            },
+        ),
+        (
+            "a duplicate task",
+            Box::new(|s| s.pairs[2].task.id = "early-commit".to_string()),
+            PairError::DuplicateTask {
+                task: "early-commit".to_string(),
+            },
+        ),
+        (
+            "a task at its own cut",
+            Box::new(|s| s.pairs[2].task.query.valid_time_ms = EPOCH_MS + 3_000),
+            PairError::MixedQueries {
+                task: "mid-message".to_string(),
+            },
+        ),
+        (
+            "evidence the aged history lacks",
+            Box::new(|s| s.pairs[2].task.evidence = BTreeSet::from([id("session:session-9:0")])),
+            PairError::EvidenceNotRequired {
+                task: "mid-message".to_string(),
+                id: id("session:session-9:0"),
+                verdict: None,
+            },
+        ),
+        (
+            "a falsifier's evidence moved late",
+            Box::new(|s| {
+                s.pairs[0].task.evidence = BTreeSet::from([id("repository:repository-0:11")])
+            }),
+            PairError::TruthNotEarly {
+                task: "early-commit".to_string(),
+                id: id("repository:repository-0:11"),
+                valid_time_ms: EPOCH_MS + 15_000,
+                median_ms: EPOCH_MS + 5_000,
+            },
+        ),
+        (
+            "a window naming an event the aged history lacks",
+            Box::new(|s| s.recency_window[0] = id("session:session-9:0")),
+            PairError::Tampered {
+                field: "recency_window",
+            },
+        ),
+        (
+            "a window out of order",
+            Box::new(|s| s.recency_window.reverse()),
+            PairError::Tampered {
+                field: "recency_window",
+            },
+        ),
+        (
+            "a window narrowed",
+            Box::new(|s| s.recency_window.truncate(1)),
+            PairError::Tampered {
+                field: "recency_window",
+            },
+        ),
     ];
     for (name, mutate, expected) in mutations {
         let mut tampered = set.clone();
         mutate(&mut tampered);
-        assert_eq!(tampered.validate(), Err(expected.clone()), "{name}");
         assert_eq!(
-            check_recency_baseline(&tampered, versioned),
+            tampered.validate(&fixture()),
+            Err(expected.clone()),
+            "{name}"
+        );
+        assert_eq!(
+            check_recency_baseline(&tampered, &fixture(), versioned(&tampered)),
             Err(expected),
             "{name}: the check refuses before judging"
         );
     }
+}
+
+#[test]
+fn a_window_edited_on_the_wire_cannot_manufacture_an_established_contrast() {
+    // Surface 1's window of 100 holds every eligible unit of the 34-event
+    // aged history, the epoch commit included, so the verdict is blocked.
+    let set = compile(EvaluatedSurface::Surface1, None, &tasks()).unwrap();
+    assert!(matches!(
+        check_recency_baseline(&set, &fixture(), versioned(&set)).unwrap(),
+        BaselineVerdict::Blocked { .. }
+    ));
+    // A window without the epoch commit misses the falsifier and delivers the
+    // control; `check_recency_baseline` must reject the edited set.
+    let mut edited: PairSet = serde_json::from_value(serde_json::to_value(&set).unwrap()).unwrap();
+    edited
+        .recency_window
+        .retain(|i| *i != id("repository:repository-0:0"));
+    assert_eq!(
+        check_recency_baseline(&edited, &fixture(), versioned(&edited)),
+        Err(PairError::Tampered {
+            field: "recency_window",
+        })
+    );
 }
 
 #[test]
@@ -943,5 +1071,15 @@ fn an_independent_history_moves_onto_its_own_entities_with_every_reference() {
         LogError::InvalidEntityTag {
             tag: "a:b".to_string()
         }
+    );
+    let mut dangling = aged();
+    let edge = CausalEdge {
+        from: dangling.events[0].id.clone(),
+        to: id("session:session-9:0"),
+    };
+    dangling.causal_edges.push(edge.clone());
+    assert_eq!(
+        dangling.on_distinct_entities("other").unwrap_err(),
+        LogError::DanglingEdge { edge }
     );
 }

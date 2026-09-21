@@ -907,7 +907,7 @@ Pairs (`crates/eval-core/tests/pairs.rs`):
   (`wm-pair-set-falsification-and-natural-fresh`): a thirty-four-event aged
   world compiles three pairs; the fresh arm holds exactly the independent
   history's units, none of them an aged ID, and the reducer requires at least
-  one of them under the pair's widened scope beside the truth; the ceiling for
+  one of them under the set's widened scope beside the truth; the ceiling for
   the epoch commit is that commit alone and for a citing message is the
   message, the commit, and the commit's parent; the window is the three most
   recent eligible units, most recent first; the set round-trips through JSON
@@ -915,7 +915,7 @@ Pairs (`crates/eval-core/tests/pairs.rs`):
   asserting the earliest time precedes the median.
 - `the_window_breaks_equal_times_by_linearization_order`: four eligible units
   at one valid time under a window of two yield the two latest in
-  linearization order; a task at another cut is `MixedCuts`.
+  linearization order; a task at another cut is `MixedQueries`.
 - `the_recency_baseline_misses_every_falsifier_or_blocks_suite_b`
   (`wm-recency-baseline-fails-falsification`): with `k = 3` the contrast is
   established (one falsifier missed, one control delivered, three distinct
@@ -943,20 +943,32 @@ Pairs (`crates/eval-core/tests/pairs.rs`):
   saw, tasks at two cuts, no tasks, a set without a falsifier or a positive
   control, a duplicate task, empty evidence, an aged history whose earliest
   time is its median, a natural-fresh history moved a thousand seconds past
-  the cut, and a natural-fresh history naming an event it does not hold each
-  refuse by name.
+  the cut, a natural-fresh history whose payload names an event it does not
+  hold, a natural-fresh history with a causal edge to an event it does not
+  hold (`DanglingEdge`, refused rather than aborting the compiler), and a
+  positive control that narrows the scope to its own entity (`MixedQueries`;
+  alone in its scope the control would be the whole window) each refuse by
+  name.
 - `a_set_read_back_must_be_one_the_compiler_could_have_produced`: another
   policy version, surface 1 under a bound of three, a zero bound, a window
-  wider than the bound, a relabelled positive control, and emptied evidence
-  each refuse from `PairSet::validate` and from `check_recency_baseline`
-  before any judgement.
+  wider than the bound, a relabelled positive control, emptied evidence, a
+  moved median, a duplicate task, a task at its own cut, evidence the aged
+  history lacks, a falsifier's evidence moved late (`TruthNotEarly` from the
+  wire), a window naming an event the aged history lacks, a window out of
+  order, and a narrowed window each refuse from `PairSet::validate` and from
+  `check_recency_baseline` before any judgement.
+- `a_window_edited_on_the_wire_cannot_manufacture_an_established_contrast`:
+  a surface-1 set whose window delivers the falsifier is `Blocked`; the same
+  set re-read with the epoch commit removed from its window is refused as
+  `Tampered {recency_window}` rather than judged `Established`.
 - `every_surface_resolves_its_recency_bound_or_refuses`: surface 1 pins 100
   and refuses 50; the other four surfaces refuse an undeclared bound and
   accept a declared one.
 - `an_independent_history_moves_onto_its_own_entities_with_every_reference`:
   under three seeds the moved history equals the re-derivation on every ID,
   edge, and payload target with content unchanged, validates alone and joined
-  with the original, and a tag holding `:` refuses.
+  with the original; a tag holding `:` refuses, and a causal edge to an event
+  the history does not hold is `DanglingEdge`.
 
 Manifest (`crates/eval-core/tests/manifest.rs`):
 
