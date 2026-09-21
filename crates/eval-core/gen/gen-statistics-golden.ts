@@ -124,11 +124,16 @@ function groupBy(observations: readonly Observation[], key: (o: Observation) => 
 const clusterKey = (family: string, seed: number) => `${family}\u0000${seed}`;
 // Families compare by UTF-8 bytes, the order Rust's `String` uses; JS `<` compares UTF-16 code
 // units, which disagrees for supplementary characters against private-use ones.
+// The seed follows the last NUL, so a family name that itself contains NUL splits correctly.
+function splitKey(key: string): [string, string] {
+  const at = key.lastIndexOf("\u0000");
+  return [key.slice(0, at), key.slice(at + 1)];
+}
 function compareKeys(left: string, right: string): number {
-  const [lf, ls] = left.split("\u0000");
-  const [rf, rs] = right.split("\u0000");
-  if (lf !== rf) return Buffer.compare(Buffer.from(lf ?? "", "utf8"), Buffer.from(rf ?? "", "utf8"));
-  return Number(ls ?? 0) - Number(rs ?? 0);
+  const [lf, ls] = splitKey(left);
+  const [rf, rs] = splitKey(right);
+  if (lf !== rf) return Buffer.compare(Buffer.from(lf, "utf8"), Buffer.from(rf, "utf8"));
+  return Number(ls) - Number(rs);
 }
 // The design effect is clamped at one, so deflation only ever shrinks N.
 function pilot(observations: readonly Observation[], maxAffordableWorlds: number) {
