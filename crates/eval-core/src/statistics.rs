@@ -151,7 +151,7 @@ impl PartialOrd for Ratio {
     }
 }
 
-fn gcd(mut a: u128, mut b: u128) -> u128 {
+pub(crate) fn gcd(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
         (a, b) = (b, a % b);
     }

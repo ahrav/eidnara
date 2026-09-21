@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::statistics::{ArmResult, CensorReason, ClusteringUnit, Ratio, StatisticsError};
+use crate::statistics::{ArmResult, CensorReason, ClusteringUnit, Ratio, StatisticsError, gcd};
 
 /// The smallest sample a p99 may be quoted from: the third-largest of 299
 /// observations sits at the 99th percentile rank.
@@ -212,9 +212,13 @@ fn choose(n: u64, k: u64) -> Result<u128, StatisticsError> {
     }
     // C(n, k) = C(n, n - k); the shorter walk stays clear of the central coefficients.
     let k = k.min(n - k);
+    // C(n, i + 1) = C(n, i) * (n - i) / (i + 1). Dividing before multiplying keeps every
+    // intermediate at most the coefficient it produces: after g = gcd(C(n, i), i + 1) leaves
+    // the accumulator, the rest of i + 1 is coprime to it and so divides n - i.
     (0..k).try_fold(1u128, |acc, i| {
-        acc.checked_mul(u128::from(n - i))
-            .map(|product| product / u128::from(i + 1))
+        let g = gcd(acc, u128::from(i + 1));
+        (acc / g)
+            .checked_mul(u128::from(n - i) / (u128::from(i + 1) / g))
             .ok_or(StatisticsError::RationalOverflow)
     })
 }

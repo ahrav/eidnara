@@ -369,7 +369,7 @@ fn pass_k_bounds_resolve_censoring_both_ways_and_are_indeterminate_when_all_are_
     );
     // A binomial past the safe range refuses rather than wraps; one that reduces stays exact.
     assert_eq!(
-        pass_k(&[Pass; 130], 65).err(),
+        pass_k(&[Pass; 200], 100).err(),
         Some(StatisticsError::RationalOverflow)
     );
     // C(130,129)/C(130,129) is 1; the central coefficients on the way there are not visited.
@@ -378,6 +378,17 @@ fn pass_k_bounds_resolve_censoring_both_ways_and_are_indeterminate_when_all_are_
         PassKBounds::Bounds {
             censored_as_fail: Ratio::ONE,
             censored_excluded: Ratio::ONE,
+        }
+    );
+    // C(125,61)/C(126,61) = 65/126: the coefficients fit, so the walk must not overflow on the
+    // way to them.
+    let mut one_fail = vec![Pass; 126];
+    one_fail[0] = Fail;
+    assert_eq!(
+        pass_k(&one_fail, 61).unwrap().pass_k,
+        PassKBounds::Bounds {
+            censored_as_fail: ratio(65, 126),
+            censored_excluded: ratio(65, 126),
         }
     );
     let mut nearly = vec![Pass; 100];
