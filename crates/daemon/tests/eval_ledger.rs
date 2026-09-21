@@ -886,6 +886,39 @@ fn run(name: &str) {
 }
 
 #[test]
+fn a_response_refusal_discards_revalidation_so_fusion_is_unjoinable() {
+    block_on(async {
+        let fixture = Fixture::build().await;
+        let healthy = plain(&fixture, &limits(), QUERY);
+        let rule = exact_rows(&healthy)[0].clone();
+        for reason in ["response_bytes", "response_measure"] {
+            let mut ledger = ChainLedger::default();
+            observe_lanes(&mut ledger, view(&healthy), &mut Incarnations::default());
+            observe_refusal(&mut ledger, &QueryFailure::Unavailable(reason));
+            assert_eq!(
+                ledger.presence(ChainStage::Eligibility, &rule),
+                Some(Presence::Reached)
+            );
+            assert_eq!(
+                ledger.presence(ChainStage::Fusion, &rule),
+                None,
+                "{reason}: the refusal discarded the revalidation report"
+            );
+            assert_eq!(
+                ledger.verdict(
+                    &required(&rule, ChainStage::Exact),
+                    &BTreeSet::new(),
+                    ChainStage::Selection
+                ),
+                StageVerdict::Indeterminate,
+                "{reason}: a loss at revalidation or at the response cap cannot be placed"
+            );
+        }
+        fixture.daemon.shutdown().await;
+    });
+}
+
+#[test]
 fn packing_requests_are_the_entries_selection_kept() {
     block_on(async {
         let fixture = Fixture::build().await;

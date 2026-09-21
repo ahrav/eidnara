@@ -629,10 +629,13 @@ classifies to its stage.
   packer's kernel judgement are not returned by the route or the packer, so
   their observations carry no incarnation token; the fold's incarnation guard
   covers the exact admission and revalidation reports.
-- A `select` refusal discards the revalidation report, so a moved or failed
-  revalidation folds as `Unjoinable` at fusion from the refusal reason rather
-  than from the report itself; the shell matches the reasons `fused_union`,
-  `response_bytes`, and `response_measure` as wire literals.
+- A `select` refusal discards the revalidation report, so every refusal after
+  the union bound, including `response_bytes` and `response_measure`, folds
+  as `Unjoinable` at fusion from the refusal reason rather than from the
+  report itself; a loss at revalidation or at the response cap cannot be
+  placed, and a revalidation incarnation the refusal dropped cannot be
+  counted (`a_response_refusal_discards_revalidation_so_fusion_is_unjoinable`).
+  The shell matches the reason `fused_union` as a wire literal.
 - Cross-restart fold comparison is shown against the persisted
   `database_incarnation_id` of one store; no daemon restart runs in the
   suite.

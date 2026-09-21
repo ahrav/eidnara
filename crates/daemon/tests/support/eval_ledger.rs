@@ -212,15 +212,12 @@ pub fn observe_outcome(
 }
 
 /// A refusal after admission. The union bound is fusion ending the request
-/// with nothing; the response bounds are selection ending it with nothing;
-/// every other refusal (a moved or failed revalidation, a deadline, a
-/// cancellation) discards what fusion produced, so fusion is unjoinable.
+/// with nothing before revalidation ran; every other refusal, including the
+/// response bounds, discards the revalidation report and its incarnation, so
+/// what fusion kept and under which store is unknown and fusion is unjoinable.
 pub fn observe_refusal(ledger: &mut ChainLedger, failure: &QueryFailure) {
     let observation = match failure {
         QueryFailure::Unavailable("fused_union") => candidates(ChainStage::Fusion, None, []),
-        QueryFailure::Unavailable("response_bytes" | "response_measure") => {
-            candidates(ChainStage::Selection, None, [])
-        }
         QueryFailure::Unavailable(_)
         | QueryFailure::Terminal(_)
         | QueryFailure::InvalidQuery(_) => Observation::unjoinable(ChainStage::Fusion, 0, None),

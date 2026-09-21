@@ -570,9 +570,11 @@ verdicts plus the lexical and dense rankings (those lanes judge inside
 retrieval), or `Unjoinable` when the exact admission is `Moved` or
 `KernelError` or a lexical or dense lane ended unavailable; `Fusion` is every
 entry revalidation judged; `Selection` is the entries the response carries.
-A refusal after admission is an empty output at fusion (`fused_union`) or at
-selection (`response_bytes`, `response_measure`); every other refusal
-discards what fusion produced and is `Unjoinable` at fusion. `Packing` is the
+A refusal after admission is an empty output at fusion when the union bound
+(`fused_union`) ends the request before revalidation; every other refusal,
+including the response bounds (`response_bytes`, `response_measure`),
+discards the revalidation report and its incarnation, so fusion is
+`Unjoinable`. `Packing` is the
 required items plus every member of every `Charged::Range` in the closed
 ledger, joined through the admitted group the range labels; a packer refusal
 at a bound (`Required`, `OptionalBound`, `Accounting`, `CloseOverBudget`) is
