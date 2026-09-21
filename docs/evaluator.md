@@ -1157,9 +1157,13 @@ every failing `UnmetClause` named in declaration order: `generated_world`
 (the twenty-task pilot exists to populate the pilot and calibrate the
 generator and never derives `transfer` on its own), `anchor_task_not_valid`
 (a `residue` or `cutoff_invalid` task, also listed in `skipped`),
+`empty_anchor_task_id`, `duplicate_anchor_task {id}` (one ID listed twice is
+one task, whatever its verdicts; the task floor counts distinct non-empty IDs
+among the valid tasks, so a padded list cannot meet it),
 `no_transfer_criterion`, `criterion_not_approved`, `criterion_has_no_floor`
-(a zero task floor or no required family would make any set pass),
-`too_few_valid_tasks {required, valid}`, and `family_missing {family}`. The
+(a zero task floor or no required family would make any set pass; a criterion
+that is both unapproved and floorless names both), `too_few_valid_tasks
+{required, valid}`, and `family_missing {family}`. The
 `TransferCriterion {approved_by, approved_at_run_id, min_valid_tasks,
 required_families}` lives on the analysis family, so it is frozen and part of
 `analysis_family_digest`; `AnalysisFamily::validate` refuses an unapproved or
@@ -1185,11 +1189,14 @@ daemon suite owns the markers whose tests it holds: `eval_ingestion.rs` the
 `ing_` markers, `eval_ledger.rs` the `ldg_` markers, and
 `eval_surface_ledger.rs` the `sls_` markers, and `eval_cassette.rs` the `rid_`
 markers (the reviewer peer's marker is `rid_` too, because the suite owns the
-prefix even though the record is `sls-memory-reviewer-model-calls-cassette-or-excluded`). Each suite checks that
+prefix even though the record is `sls-memory-reviewer-model-calls-cassette-or-excluded`), and
+`crates/eval-core/tests/injection.rs` the `mtr_` markers. Each suite checks that
 every marker it owns names one of its scenarios and runs its completeness
 proof on every pass: all scenarios once, then `Coverage::complete` over its
-own prefix. A whole-registry proof would need one run to reach both suites'
-preconditions and does not exist yet.
+own prefix. The injection suite also runs each scenario alone and requires its
+fired set to equal the markers the registry attributes to it, so a scenario
+cannot record another's marker to complete the suite. A whole-registry proof
+would need one run to reach every suite's preconditions and does not exist yet.
 
 ## Ingestion shell
 

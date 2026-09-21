@@ -116,7 +116,7 @@ pub const MARKERS: [Marker; 27] = [
     },
     Marker {
         name: "mtr_second_session_read_memory",
-        test: "crates/eval-core/tests/injection.rs::obedience_is_the_observed_side_effect_and_echo_is_only_exposure",
+        test: "crates/eval-core/tests/injection.rs::a_canary_written_into_memory_surfaces_in_a_later_session_that_read_it",
     },
 ];
 
