@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use eval_core::{
     ArmRates, Attestation, BinaryDigest, BuildRecord, ClaimBoundary, ComponentVersions,
     Construction, Cut, CutOutcome, CutReceipt, ExecutionMode, Ingestion, MANIFEST_SCHEMA, Manifest,
-    ObservationSchema, Reachability, RepositorySpec, ResourceLimits, Rule, RunIdentity, RunStatus,
-    SemanticTrace, SessionSpec, TokenizerProfile, WorldConfig, eval_run_id,
+    MemoryReviewerModelCalls, ObservationSchema, Reachability, RepositorySpec, ResourceLimits,
+    Rule, RunIdentity, RunStatus, SemanticTrace, SessionSpec, TokenizerProfile, WorldConfig,
+    eval_run_id,
 };
 use serde_json::json;
 
@@ -159,6 +160,7 @@ pub fn manifest_for(identity: RunIdentity, trace: &SemanticTrace) -> Manifest {
         execution_mode: ExecutionMode::Generate,
         failure_class_table_digest: eval_core::FAILURE_CLASS_TABLE_DIGEST.to_string(),
         ingestion: Ingestion::AdapterIngestedNoProductionCaller,
+        memory_reviewer_model_calls: MemoryReviewerModelCalls::Excluded,
         reachability: Reachability::DefaultProduction,
         claim_boundary: ClaimBoundary::pinned(),
         component_versions: ComponentVersions {

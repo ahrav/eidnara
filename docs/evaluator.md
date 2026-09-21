@@ -4,8 +4,8 @@
 evaluator: the run manifest, run identity, residue rules, the surface census
 pins, the generated world model (keyed draws, the choice tape, the event log,
 and the step drive), the eligibility spec, the bitemporal reducer, the
-occurrence identity rule, the fixture renderer, the stage ledger, and the
-coverage-marker registry. It is sans-I/O. Every function takes values and returns values;
+occurrence identity rule, the fixture renderer, the stage ledger, the
+coverage-marker registry, and the model-I/O cassette. It is sans-I/O. Every function takes values and returns values;
 the runner shell owns processes, stores, clocks, temp roots, and the build
 sub-record.
 
@@ -27,7 +27,7 @@ sub-record.
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
 
-## Manifest `eval-manifest/v4`
+## Manifest `eval-manifest/v5`
 
 `parse_manifest` reads a JSON object, compares its key set against
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
@@ -45,7 +45,7 @@ field to `Manifest` without bumping the schema fails the closure test, and the
 fixture digests in `tests/manifest.rs` are frozen so an encoding change is
 reviewed.
 
-The 27 required fields, sorted:
+The 28 required fields, sorted:
 
 | Field | Content |
 | --- | --- |
@@ -63,25 +63,28 @@ The 27 required fields, sorted:
 | `execution_mode` | `generate`, `replay_tape`, or `enumerate`: how the world was driven. |
 | `failure_class_table_digest` | The `eidnara-failure-class-table-v1` digest of the pinned truth table; refused unless it equals `FAILURE_CLASS_TABLE_DIGEST`. |
 | `ingestion` | `adapter-ingested, production caller: none` or `direct-database, non-aged`; the latter with a `replay` construction is refused (`DirectDatabaseAged`). |
+| `memory_reviewer_model_calls` | `cassette` (replayed through the keyed TLS peer) or `excluded` (the reviewer worker is not spawned); MemoryReviewer traffic bypasses `LlmExecutionBackend`, so silence is refused as a missing field. |
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `residue` | Every non-`Keep` field with its rule, including the manifest's own. |
 | `result_digest`, `witness_digest` | Lowercase hex SHA-256. |
 | `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
-| `schema` | `eval-manifest/v4`. |
+| `schema` | `eval-manifest/v5`. |
 | `status` | `completed`, `incomplete`, `refused`, or `blocked`. |
 | `tokenizer_profile` | Name, revision, digest. |
 
 `Manifest::digest` re-parses the manifest, applies the manifest's own residue
 rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
-is `Keep`), and hashes with protocol `eval-manifest-digest/v4`. Version 2
+is `Keep`), and hashes with protocol `eval-manifest-digest/v5`. Version 2
 added `execution_mode` (the reducer differential runs under `enumerate`);
 version 3 added `ingestion`, because no ingestion entry point has a production
 caller and every manifest must say so; version 4 added `failure_class_table_digest`,
-so a report names the failure-class table its classes come from. The digest is
-a function of every kept field, not of the run identity alone: two processes
-that record the same identity and the same kept contents produce the same digest
+so a report names the failure-class table its classes come from;
+version 5 added `memory_reviewer_model_calls`, because reviewer model traffic
+is either replayed or excluded, never silently live. The digest is a function
+of every kept field, not of the run identity alone: two processes that record the same
+identity and the same kept contents produce the same digest
 (`two_process_same_identity_yields_equal_manifest_and_trace_digests`), and two
 runs that share an identity but differ in `status`, `sample_order`,
 `result_digest`, or any other kept field do not.
@@ -700,6 +703,143 @@ row against `classify`):
 `FAILURE_CLASS_TABLE_DIGEST` pins its `eidnara-failure-class-table-v1` digest;
 the manifest carries and checks it.
 
+## Cassette `eval-cassette/v1`
+
+Model I/O is strict-miss replay keyed by a canonical request digest over a
+closed, pinned field allowlist. One schema version carries two covered-field
+lists, both pinned in `eval-core` and named together by
+`COVERED_FIELDS_VERSION` (`eval-cassette-covered/v1`):
+
+- `OPENCODE_COVERED_FIELDS` is authoritative for agent-loop replay: `path`,
+  `body.model`, `body.messages`, `body.system`, `body.tools`,
+  `body.tool_choice`, `body.max_tokens`, `body.temperature`, `body.stream`,
+  `headers.anthropic-version`, `headers.anthropic-beta`. The list was fixed by
+  recording OpenCode 1.18.31 against the mock through `@ai-sdk/anthropic`: the
+  body carries exactly `model`, `max_tokens`, `messages`, `system` (an array of
+  text blocks), `tools` (`name`, `description`, `input_schema`), `tool_choice`
+  (`{"type": "auto"}`), and `stream: true`; `temperature` is absent unless
+  configured; tool results travel as `tool_result` blocks inside user messages,
+  so the tool-result stream and the plugin's `eidnara_search` notes are request
+  content and inside the digest. The headers are `anthropic-version:
+  2023-06-01`, `x-api-key`, `user-agent` (versioned), `x-session-id`,
+  `x-session-affinity`, `content-length`, `host`, and connection headers; no
+  `anthropic-beta` header is sent by default. Every observed body field is
+  covered, so a body field outside the list is `UnknownRequestField` rather than
+  silently ignored: a provider upgrade that adds a field fails loudly instead of
+  replaying the wrong answer. The system text embeds the working directory,
+  today's date, and the user's instruction files, so a cassette is bound to the
+  environment and day that recorded it.
+- The volatile rule removes, before digesting, every `cache_control` marker
+  (breakpoints move between turns) and rewrites each `cch=<nonce>;` billing
+  nonce whose nonce is a run of alphanumerics, `_`, or `-` to `cch=<NONCE>;`;
+  any other `cch=` text stays as written. OpenCode 1.18.31 emits no `cch=`
+  nonce; the rule stays pinned for the versions that do. A mock-side
+  `cache_control` move or nonce change replays; any other byte in a covered
+  field misses. A fractional `temperature` is projected through
+  `canonical_decimal_f64` to its exact decimal text, as the backend record is.
+- `OPENCODE_HEADER_ALLOWLIST` (`anthropic-beta`, `anthropic-version`) is the
+  only header set a cassette retains; `x-api-key`, `authorization`,
+  `user-agent`, `x-session-id`, `host`, and `content-length` never reach the
+  projection, the digest, or the file.
+- `BACKEND_COVERED_FIELDS` covers the daemon's `BackendRequest`: `prompt`,
+  `system`, `provider`, `model`, `max_output_tokens`, `temperature`, `harness`.
+  `run_id` (a per-incarnation counter) and `session` (a per-run identity that
+  would miss on every replay) are dropped; a turn replayed under another
+  session therefore hits, which the daemon suite pins. `temperature` travels as
+  the exact decimal `f64::to_string` produces (`canonical_decimal_f64`, finite
+  and non-negative), so `0.7` and `0.70` share one digest and `0.7` and `0.8`
+  do not; a hand-written `0.70` is refused.
+
+`request_digest` is `protocol_digest("eval-cassette-request/v1", projection)`
+over canonical JSON. The file is `{schema, namespace, covered_fields_version,
+declarations, provenance {generator_version, input_sha256}, cases}`;
+`input_sha256` is the `eval-cassette-file/v1` digest over every field but
+`provenance`, including the declarations and every recorded frame, recomputed
+on read, so an edited frame or declaration is `ProvenanceMismatch`; each
+entry's stored digest is also recomputed from its stored request
+(`EntryDigestMismatch`). `Cassette::replay` refuses a schema, generator,
+covered-field-version, namespace, provenance, or entry-digest mismatch before
+any request is served; `lookup` and `record` under another namespace are
+`WrongNamespace`, so equal digests in another world variant never answer.
+Every `CassetteError` names its wire `kind()`.
+
+Each entry carries its `Boundary` (`opencode` or `backend`), and a lookup
+answers only from entries of its own boundary. A lookup consumes the first
+unconsumed entry whose digest equals the request's; equal digests replay in
+recorded order, so concurrent agent-loop requests (OpenCode's title request
+racing the main turn) replay in whatever order they arrive. A request with no
+matching unconsumed entry is `Lookup::Miss(CassetteMiss {turn, class,
+request_digest, nearest_recorded})`: `turn` counts lookups so far, `class` is
+`ToolResultDrift` when only `tool_result` block contents differ from the
+nearest unconsumed entry and `ModelRequestChanged` otherwise, and
+`nearest_recorded` is that entry's digest (the last entry of the boundary once
+every entry is consumed). The miss is the cassette's terminal: every later
+lookup returns the same miss and `misses()` is one. `unconsumed()` after a run
+reports entries the run never requested.
+
+Responses are opaque to the core: the OpenCode boundary records `{status,
+content_type, frames, aborted}` with the exact SSE frames the mock served
+(message ids, usage, stop reasons, and provider error bodies included; an
+aborted recording ends before `message_stop`), and the backend boundary records
+`{events, terminal}`. Replay serves the recording byte for byte and never
+regenerates a frame.
+
+`Cassette::record` scans the covered request projection and the response
+through `context_core::redaction::Redactor` in one full-text pass, so no match
+can straddle a window edge, before the entry exists anywhere. A finding is
+`RedactionRefused(location, SecretDetected)`; text past the scanner's 512 KiB
+input cap is `RedactionRefused(location, InputLimit)`. A refused entry is never
+substituted with a placeholder and never persisted, and the refusal latches:
+`to_file` returns the refusal, so a recording that refused one exchange has no
+file form and a partial cassette can never pass for a complete one.
+
+### Rust oracle and the TypeScript mock
+
+`crates/daemon/examples/eval_runner.rs` (feature `eval-runner`, an example so
+it reaches the `eval-core` dev-dependency without a normal edge) serves
+`cassette-oracle` over line-delimited JSON: `open {mode, namespace, path}`,
+`lookup {namespace, request}`, `record {namespace, request, response}`, and
+`close`. Requests arrive as `{path, headers, body_text}`; Rust parses the body,
+so a malformed body is `MalformedBody` rather than a lookup of `{}`. Every
+digest is computed in Rust. Refusals are `{error: {kind, detail}}` where
+`kind` is the Rust error's wire name and `detail` carries only the oracle's own
+values (a path, a namespace, a digest), never request content. The path must
+be absolute with no `..` component; a second `open` is `AlreadyOpen`; a line
+over 4 MiB is `LineTooLong`. `close` writes a recording write-then-rename
+through a freshly created owner-only `.json.tmp` sibling and writes nothing for
+a replay or a refused recording.
+
+### `LlmExecutionBackend` and MemoryReviewer
+
+`crates/daemon/tests/support/eval_cassette.rs` holds `CassetteBackend`, the
+evaluator-owned `LlmExecutionBackend` impl. Recording wraps the real backend,
+tees the events its sink accepted, and records `{events, terminal}` under the
+`BackendRecord` projection through a serde mirror of the host types (which
+carry no serde because their `Debug` redacts); replay emits the recorded events
+until the sink closes and returns the recorded terminal, and a miss is
+`BackendTerminal::Failed` with `provider_code: "cassette_miss"` and a message
+naming the turn, class, and nearest digest. An unencodable request is
+`cassette_request`; a recording the scanner refuses is `redaction_refused` and
+leaves the backend with no file. `refusals()` counts every miss terminal
+served, including the repeats after the first miss latched. The cassette
+header's `declarations` carry what the real backend declared per harness
+(`unavailable_reason`, `context_capabilities`), and the replaying backend
+answers all three trait methods from them, so `BackendDeclarations::new`
+latches the same capabilities from a cassette as from the real backend.
+`record_of` destructures `BackendRequest` exhaustively: a new field fails to
+compile until it is classified as covered or dropped.
+
+MemoryReviewer sends through its own TLS sender, not the trait. `serve_keyed`
+on the test peer answers strictly from entries keyed by `ReviewerKey {body_digest,
+provider, model, credential_id}`: the SHA-256 of the request body (what
+`prepare_body` puts in the attempt marker), the
+`{host}/v1/messages@{anthropic-version}` identity the production sender
+reports, the body's `model`, and the credential id the peer is configured with
+(the header carries only the secret). A key with no entry is an HTTP 409
+`cassette_miss` and a `SendError::Status(409)` at the sender, and every later
+request on that peer is refused too. A run that spawns no reviewer worker
+declares `memory_reviewer_model_calls: excluded` in its manifest instead.
+
 ## Coverage markers
 
 `MARKERS` is the evaluator-owned registry: constant, globally unique names,
@@ -711,7 +851,9 @@ starts with `suite` fired, and `EmptySuite` when the prefix selects no marker
 (an empty prefix names the whole registry). Each
 daemon suite owns the markers whose tests it holds: `eval_ingestion.rs` the
 `ing_` markers, `eval_ledger.rs` the `ldg_` markers, and
-`eval_surface_ledger.rs` the `sls_` markers. Each suite checks that
+`eval_surface_ledger.rs` the `sls_` markers, and `eval_cassette.rs` the `rid_`
+markers (the reviewer peer's marker is `rid_` too, because the suite owns the
+prefix even though the record is `sls-memory-reviewer-model-calls-cassette-or-excluded`). Each suite checks that
 every marker it owns names one of its scenarios and runs its completeness
 proof on every pass: all scenarios once, then `Coverage::complete` over its
 own prefix. A whole-registry proof would need one run to reach both suites'

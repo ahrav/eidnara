@@ -10,15 +10,15 @@ they would distort reachability summaries.
 Records enter this directory when their checks are re-verified at the
 then-current HEAD, in the METHOD field order from [`../METHOD.md`](../METHOD.md).
 Until then, this file lists the executed checks the Phase 0 regression net,
-the Phase 1 world model, and the Phase 2 stage ledger provide, so a reader can
-find them by test name.
+the Phase 1 world model, the Phase 2 stage ledger, and the Phase 3 cassette
+provide, so a reader can find them by test name.
 
 ## Phase 0 executed checks
 
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v4` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v5` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -670,7 +670,120 @@ through `Surface1Stage: Stage` over `SURFACE1_STAGES`):
   `every_surface_marker_fires_across_the_scenarios` are this suite's registry
   check and completeness proof over the `sls_` prefix.
 
+## Phase 3 executed checks: strict cassette replay and redaction
+
+Cassette core (`crates/eval-core/tests/cassette.rs`):
+
+- `covered_field_lists_are_sorted_pinned_and_closed_over_the_observed_body`
+  (`rid-opencode-provider-cassette-strict-miss`,
+  `rid-cassette-strict-miss-typed-error`): both covered-field lists are pinned
+  and sorted, the header allowlist is a subset of the covered headers, the raw
+  body of a representative 1.18.31 request (plus the optional `temperature`)
+  equals the covered body set exactly, the projection keeps only the two
+  allowlisted headers, its digest is frozen so an encoding change is reviewed,
+  and a body carrying an unlisted field is `UnknownRequestField`.
+- `one_byte_in_any_covered_field_misses_at_the_turn_and_terminates_the_cassette`
+  (`rid-opencode-provider-cassette-strict-miss`): one byte changed in each of
+  the eleven OpenCode covered fields, after one consumed entry, is exactly one
+  `CassetteMiss` naming turn 1, `ModelRequestChanged`, and the nearest recorded
+  digest; the unchanged request is refused with the same terminal afterwards
+  and `misses()` stays at one. `only_a_tool_result_change_is_tool_result_drift`
+  names the other class. `a_fractional_temperature_digests_exactly` shows
+  `0.7` persisted as `"0.7"`, `0.70` replaying, and `0.8` differing.
+- `volatile_and_uncovered_changes_replay`: a moved `cache_control` marker and
+  a changed or removed `x-api-key`, `user-agent`, `authorization`, or
+  `x-session-id` header replay. `only_a_terminated_nonce_is_normalized` is the
+  nonce table: `cch=<nonce>;` forms digest equal across nonces; an
+  unterminated `cch=`, a URL query `cch=`, an empty nonce, and a changed tail
+  all digest differently, so normalization never drops text.
+- `equal_digests_replay_in_recorded_order_and_distinct_ones_in_any_order`:
+  the concurrency case, with `unconsumed()` reaching zero and a miss past the
+  recording naming the last entry.
+  `the_nearest_entry_is_the_first_unconsumed_one_of_the_same_boundary`
+  discriminates the nearest rule from `first` and `last`, shows a miss consumes
+  nothing, and shows a backend lookup never answers from OpenCode entries.
+- `namespaces_bind_the_cassette_and_equal_digests_elsewhere_refuse`
+  (`rid-cassette-world-namespaced-no-cross-replay`): replay under another
+  namespace is `NamespaceMismatch` before any request; a lookup or record under
+  another namespace is `WrongNamespace`; recording into a replay is
+  `RecordOnReplay` and a lookup on a recording is `LookupOnRecord`.
+- `provenance_schema_and_version_pins_are_recomputed_on_read`
+  (`rid-shared-cassette-schema-verified-provenance`): one edited frame or one
+  edited declaration is `ProvenanceMismatch`; a re-signed declaration edit loads
+  and is visible; a re-signed request edit is `EntryDigestMismatch`; a schema,
+  generator, or covered-field version change and an unknown field each refuse.
+- `planted_secrets_and_unscannable_frames_are_refused_and_the_cassette_never_persists`
+  (`xc-captured-provider-requests-redacted-before-persistence`): after one
+  admitted entry, an `sk-ant-` token in a user message, an AWS key in a tool
+  result, and a secret in a response frame are `RedactionRefused(location,
+  SecretDetected)`, and a body one byte past `MAX_REDACTABLE_BYTES` is
+  `RedactionRefused(Request, InputLimit)`; the refused entry never exists and
+  `to_file` returns the refusal, so the one admitted entry is not persisted
+  either. `a_malformed_body_is_refused_rather_than_digested_as_empty` keeps
+  `{}` out of the digest.
+- `backend_records_cover_the_pinned_fields_with_exact_temperatures`
+  (`rid-cassette-strict-miss-typed-error`): the `BackendRecord` projection's
+  field set equals `BACKEND_COVERED_FIELDS`; `0.7` and `0.70` digest equal,
+  `0.8` differs; `NaN`, infinity, `-0.0`, a negative value, and a hand-written
+  `0.70` refuse. `every_error_names_its_wire_kind` pins fifteen distinct kinds.
+
+Manifest (`crates/eval-core/tests/manifest.rs`,
+`sls-memory-reviewer-model-calls-cassette-or-excluded`): the
+`memory_reviewer_model_calls` field is required (`MissingField` when absent),
+enters the digest, and takes only `cassette` or `excluded`.
+
+Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
+
+- `replay_preserves_the_transcript_and_the_declarations`
+  (`rid-rust-cassette-backend-impl-preserves-declarations`, marker
+  `rid_capabilities_read_during_cassette_run`): two recorded requests, one a
+  provider error with a retry hint, replay with equal events and terminals
+  while the real backend is never called; `BackendDeclarations::new` reads the
+  same declaration from the cassette as from the real backend for both
+  harnesses; an edited header is `ProvenanceMismatch` until re-signed, and
+  re-signed defaults latch differently.
+- `one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not`
+  (`rid-cassette-strict-miss-typed-error`, marker
+  `rid_rust_cassette_miss_constructed`): after one consumed entry, each of the
+  seven covered fields flipped is `Failed` with `provider_code: cassette_miss`,
+  a message naming turn 1 and `ModelRequestChanged`, the typed terminal
+  carrying the offered digest and the second entry as nearest, and no emitted
+  event; the other recorded request is refused afterwards. `run_id`, `session`,
+  and `0.7` written as `0.70` each replay alone.
+- `a_regenerated_frame_or_another_namespace_refuses_before_any_request`
+  (marker `rid_cassette_namespace_refused`): an edited recorded event is
+  `ProvenanceMismatch`; another namespace is `NamespaceMismatch` at load; a
+  `NaN` temperature is a `cassette_request` terminal and a canary prompt is a
+  `redaction_refused` terminal that leaves the recorder with no file.
+- `memory_reviewer_replays_through_the_keyed_peer`
+  (`sls-memory-reviewer-model-calls-cassette-or-excluded`, marker
+  `rid_reviewer_cassette_miss_reached`): the key recovered from one recorded
+  request equals the production sender's `provider_identity()` and credential
+  id, the request's model, and the SHA-256 of `MessagesRequest::body`'s bytes;
+  the same body replays through `serve_keyed`; a changed body, model, or
+  credential each miss with a 409 the sender reports as
+  `SendError::Status(409)`, after which the recorded body is refused too; an
+  entry keyed to another host misses.
+- `every_cassette_marker_fires_across_the_scenarios` is the completeness
+  proof over this suite's markers.
+
 ## Gaps recorded here
+
+- The OpenCode cassette is bound to the environment that recorded it: the
+  system prompt embeds the working directory, today's date, and the user's
+  instruction files, so record and replay must share a checkout, a day, and a
+  home. The e2e test records and replays on one OpenCode instance.
+- OpenCode 1.18.31 emits no `cch=` billing nonce and no `anthropic-beta`
+  header against the mock; both rules are pinned from the cache oracle and the
+  parent specification rather than from an observed frame.
+- Recording is against the mock's scripted responses; no recording against a
+  live provider exists, so the redaction gate has been exercised on planted
+  canaries only.
+- The keyed reviewer peer holds its entries in memory; reviewer traffic is not
+  yet persisted in the cassette file, and `memory_reviewer_model_calls` is a
+  manifest declaration no runner enforces yet.
+- The Rust oracle protocol has no Rust-side test; its consumer is the
+  TypeScript MockProvider cassette mode.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries
