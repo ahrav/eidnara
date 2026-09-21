@@ -40927,6 +40927,81 @@ mod tests {
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
     }
 
+    /// The first run of an emergency pass decides the tail's hint and commits
+    /// it; the inline firing lands and the pass reruns; the rerun finds the
+    /// decision already made. The pass reports its decision, not the rerun's
+    /// skip.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_emergency_rerun_keeps_the_pass_hint_decision() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let segment = |sequence: i64, phrase: &str| StoredHistorySegment {
+            sequence,
+            start_message: sequence,
+            end_message: sequence,
+            start_message_id: format!("m{sequence}#0"),
+            end_message_id: format!("m{sequence}#0"),
+            title: format!("C{sequence}"),
+            content: phrase.to_string(),
+            p1: Some(phrase.to_string()),
+            importance: 50,
+            ..Default::default()
+        };
+        store
+            .replace_history_segments(
+                "ses",
+                &[
+                    segment(1, "allocator budget quorum"),
+                    segment(2, "barrier fence latch"),
+                    segment(3, "cursor digest envelope"),
+                ],
+            )
+            .unwrap();
+        let mut messages = big_messages();
+        messages.push(ck(
+            "tail",
+            81,
+            "what did we decide about the cursor digest envelope",
+        ));
+        // Auto-search is recorded on the native-serving path, as the harness
+        // drives it.
+        let native: Vec<Value> = messages
+            .iter()
+            .map(|message| {
+                let text = match message.ck.content()[0].kind() {
+                    wire::BlockKind::Text { text } => text.clone(),
+                    other => unreachable!("{other:?}"),
+                };
+                json!({
+                    "info": {"id": message.mid, "sessionID": "ses", "role": "user",
+                             "time": {"created": 1_000 + message.ordinal}},
+                    "parts": [{"type": "text", "text": text}]
+                })
+            })
+            .collect();
+        let mut request = request_with_usage(messages, 48_000, 50_000);
+        request["serializer_profile"] = json!("opencode-aisdk");
+        request["serve_native"] = json!(true);
+        request["native_messages"] = json!(native);
+        request["full_array_fingerprint"] = json!("rerun-fp");
+        request["auto_search_enabled"] = json!(true);
+        request["auto_search_score_threshold"] = json!(0.3);
+        request["auto_search_min_prompt_chars"] = json!(20);
+
+        let response = call_transform_request(&handler, request).await;
+
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        match handler.user_hint_outcome_for_test() {
+            Some(transform::UserHintPass::Decided(decided)) => {
+                assert_eq!(decided.block_id, "tail#0");
+                assert_eq!(decided.trace.selected, vec![3]);
+            }
+            other => panic!("the pass's decision stands after the rerun: {other:?}"),
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn handler_emergency_busy_waits_for_the_active_run_and_then_refolds() {
         let producer = Arc::new(ProducerState::default());
