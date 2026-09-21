@@ -23,6 +23,8 @@ pub const MAX_PENDING_CAPTURE_PER_PROJECT: i64 = 1024;
 pub const MAX_PENDING_CAPTURE_TOTAL: i64 = 8192;
 pub const MAX_CAPTURE_FAILURES: u32 = 3;
 pub const MAX_CAPTURE_ATTEMPTS: u32 = 9;
+/// One drain batch: the `LIMIT` of `pending_memory_captures`.
+const MAX_CAPTURE_BATCH_JOBS: usize = 32;
 /// Mirrors `kernel::source_identity::HARNESSES`; a daemon test pins the two equal.
 pub const CAPTURE_HARNESSES: [&str; 2] = ["opencode", "pi"];
 /// A source that exhausts [`MAX_CAPTURE_FAILURES`] remains paused for this
@@ -326,6 +328,43 @@ impl MemoryStore {
         prepared_write(project, job, job)?.execute(&self.inner, |tx| {
             let changed = tx.tx().execute("UPDATE memory_capture_jobs SET attempts=attempts+1,retry_at_ms=?3 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL", params![project,job,retry_at_ms])?;
             Ok(WriteDisposition::Applied(changed == 1))
+        })
+    }
+
+    /// Records one dispatch for a whole batch, or none: a source swept or
+    /// prepared since the queue was read leaves every other member untouched.
+    /// Each `(job_id, retry_at_ms)` pair sets that job's own retry deadline.
+    pub fn begin_memory_capture_attempts(
+        &self,
+        project: &str,
+        jobs: &[(&str, i64)],
+    ) -> Result<bool, MemoryStoreError> {
+        if jobs.is_empty() || jobs.len() > MAX_CAPTURE_BATCH_JOBS {
+            return Err(MemoryStoreError::Serde(
+                "memory capture batch must hold 1..=32 jobs".into(),
+            ));
+        }
+        let mut write = PreparedWrite::new(DurableWriteFamily::MemoryCapture);
+        for (job, _) in jobs {
+            write.domain_owner("project", project, *job);
+        }
+        write.existing_identity("project", project)?;
+        for (job, _) in jobs {
+            write.existing_identity("job_id", job)?;
+        }
+        write.skip_audit_when_only_clean_identities();
+        write.execute(&self.inner, |tx| {
+            let tx = tx.tx();
+            for (job, _) in jobs {
+                let eligible: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM memory_capture_jobs WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL)", params![project,job], |row| row.get(0))?;
+                if !eligible {
+                    return Ok(WriteDisposition::Replay(false));
+                }
+            }
+            for (job, retry_at_ms) in jobs {
+                tx.execute("UPDATE memory_capture_jobs SET attempts=attempts+1,retry_at_ms=?3 WHERE project=?1 AND job_id=?2", params![project,job,retry_at_ms])?;
+            }
+            Ok(WriteDisposition::Applied(true))
         })
     }
 

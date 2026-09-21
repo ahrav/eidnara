@@ -37,6 +37,7 @@ pub mod injection;
 pub mod kernel_routes;
 pub mod m0_compose;
 pub(crate) mod m1_compose;
+pub mod memory_capture;
 pub(crate) mod memory_classifier_scheduler;
 pub(crate) mod memory_render;
 pub mod memory_reviewer;
@@ -2299,7 +2300,8 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
     + kernel_routes::eligibility::CACHE_BUDGET_BYTES
-    + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES;
+    + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES
+    + memory_capture::RETAINED_BYTES_BOUND;
 
 #[derive(Debug, Clone)]
 struct NativeDeltaFrontier {
@@ -2943,6 +2945,9 @@ pub struct HandlerCore {
     cancel: CancellationToken,
     tasks: TaskTracker,
     producer_factory: Arc<dyn HistorySummarizerProducerFactory>,
+    native_capture: Arc<Mutex<memory_capture::NativeCaptureState>>,
+    capture_commit_gate: Arc<Mutex<()>>,
+    capture_memo: Arc<Mutex<memory_capture::CaptureCheckpointMemo>>,
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
     #[cfg(test)]
@@ -3875,6 +3880,9 @@ impl Handler {
                 Arc::clone(&kernel),
             )),
             producer_factory,
+            native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
+            capture_commit_gate: Arc::new(Mutex::new(())),
+            capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
             #[cfg(test)]
@@ -4369,6 +4377,9 @@ impl Handler {
                 Arc::clone(&kernel),
             )),
             producer_factory: factory,
+            native_capture: Arc::new(Mutex::new(memory_capture::NativeCaptureState::default())),
+            capture_commit_gate: Arc::new(Mutex::new(())),
+            capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             fixed_config: Some(config),
@@ -4935,6 +4946,15 @@ impl HandlerCore {
             .expect("boundary token cache mutex")
             .remove(session);
         tail_hygiene::hygiene_memos().remove_session(session);
+        // A route can close right after its last transform, before that
+        // transform's detached checkpoint has run. Only deletion retires the
+        // memo; a closed session's admitted text still awaits a later harness.
+        if trigger == "session_delete" {
+            self.capture_memo
+                .lock()
+                .expect("capture memo mutex")
+                .remove_session(session);
+        }
         self.prompt_surface_epochs
             .lock()
             .expect("prompt surface epoch mutex")
@@ -6542,10 +6562,20 @@ impl HandlerCore {
         request: &Value,
         operation: &str,
     ) -> Result<(String, SessionBinding), PreparedOutcome> {
-        if request.get("v").and_then(Value::as_u64) != Some(1) {
+        self.management_binding_version(channel, request, operation, 1)
+    }
+
+    fn management_binding_version(
+        &self,
+        channel: RouteHandle,
+        request: &Value,
+        operation: &str,
+        version: u64,
+    ) -> Result<(String, SessionBinding), PreparedOutcome> {
+        if request.get("v").and_then(Value::as_u64) != Some(version) {
             return Err(PreparedOutcome::Error {
                 code: "bad_request".to_string(),
-                message: format!("{operation} requires v=1"),
+                message: format!("{operation} requires v={version}"),
             });
         }
         let Some(session_id) = request.get("session_id").and_then(Value::as_str) else {
@@ -6766,8 +6796,8 @@ impl HandlerCore {
         }
     }
 
-    fn handle_session_delete_value(
-        &self,
+    async fn handle_session_delete_value(
+        self: &Arc<Self>,
         channel: RouteHandle,
         request: &Value,
     ) -> PreparedOutcome {
@@ -6780,33 +6810,52 @@ impl HandlerCore {
             Some(store) => store,
             None => return store_unavailable_error(),
         };
-        // Session notes live under the notes authority project, where `eidnara_note` wrote them.
-        let note_project_path = match Self::authority_project_path(
-            &store,
-            &binding.project_root.to_string_lossy(),
-            "notes",
-        ) {
-            Ok(project) => project,
-            Err(outcome) => return outcome,
-        };
-        match store.delete_session(&session_id, &note_project_path) {
-            Ok(deleted_rows) => {
-                self.cancel_history_summarizer_work(&session_id);
-                self.wrapup_sessions
+        let core = Arc::clone(self);
+        let project_root = binding.project_root.to_string_lossy().into_owned();
+        // The whole deletion, durable rows and in-memory state, is one piece of
+        // blocking work: a request future dropped mid-delete must not leave
+        // caches serving the deleted conversation.
+        let deleted = kernel_routes::blocking(move || {
+            // Session notes live under the notes authority project, where `eidnara_note` wrote them.
+            let note_project_path = Self::authority_project_path(&store, &project_root, "notes")?;
+            let deleted = {
+                // Session deletion must not overlap capture publication or
+                // checkpointing; both hold `capture_commit_gate` on a blocking
+                // thread. Purging the memo here retires any checkpoint admitted
+                // before this delete but not yet run.
+                let _capture_gate = core
+                    .capture_commit_gate
                     .lock()
-                    .expect("wrapup sessions mutex")
-                    .remove(&session_id);
-                self.recomp_sessions
+                    .expect("capture publication mutex");
+                let deleted = store
+                    .delete_session(&session_id, &note_project_path)
+                    .map_err(|error| PreparedOutcome::Error {
+                        code: "store_write_failed".to_string(),
+                        message: error.to_string(),
+                    })?;
+                core.capture_memo
                     .lock()
-                    .expect("recomp sessions mutex")
-                    .remove(&session_id);
-                self.purge_session_state(&session_id, "session_delete");
-                respond(json!({ "ok": true, "deleted_rows": deleted_rows }))
-            }
-            Err(error) => PreparedOutcome::Error {
-                code: "store_write_failed".to_string(),
-                message: error.to_string(),
-            },
+                    .expect("capture memo mutex")
+                    .remove_session(&session_id);
+                deleted
+            };
+            core.cancel_history_summarizer_work(&session_id);
+            core.wrapup_sessions
+                .lock()
+                .expect("wrapup sessions mutex")
+                .remove(&session_id);
+            core.recomp_sessions
+                .lock()
+                .expect("recomp sessions mutex")
+                .remove(&session_id);
+            core.purge_session_state(&session_id, "session_delete");
+            Ok(deleted)
+        })
+        .await;
+        match deleted {
+            Ok(Ok(deleted_rows)) => respond(json!({ "ok": true, "deleted_rows": deleted_rows })),
+            Ok(Err(outcome)) => outcome,
+            Err(_) => store_unavailable_error(),
         }
     }
 
@@ -8795,6 +8844,9 @@ impl HandlerCore {
         let pass_load = store.load_meta(&parsed.session_id);
         let pass_state_load_ms = pass_state_load_started_at.elapsed().as_secs_f64() * 1_000.0;
         let pass_state = PassState::from(&pass_load);
+        // Tail-delta expansion prepends the reattached prefix; only this many
+        // trailing messages are the request's own.
+        let request_messages = parsed.messages.len();
         let native_delta_frontier = if parsed.tail_delta.is_some() {
             let delta_expand_started_at = Instant::now();
             let expanded = self.expand_transform_tail_delta(&mut parsed, pass_state);
@@ -8817,6 +8869,19 @@ impl HandlerCore {
             Err(outcome) => return outcome,
         };
         ticket.accept();
+        // The reply does not wait on the checkpoint's store writes; the memo
+        // learns a fragment only once the store accepted it, so a checkpoint
+        // that never runs replays on the next sync. A drain answers `pending`
+        // for this project until the checkpoint has run.
+        if let Some(checkpoint) = self.capture_checkpoint(
+            Arc::clone(&store),
+            &binding,
+            &parsed,
+            request_messages,
+            entry.meter.reserve(),
+        ) {
+            self.spawn_tracked_task(checkpoint.run());
+        }
         let intake = PassIntake {
             store,
             parsed,
@@ -13631,6 +13696,12 @@ impl HandlerCore {
                 "mirror.pull" => self.handle_mirror_pull_value(&request),
                 "guidance.get" => self.handle_guidance_value(channel, &request),
                 "manifest.get" => self.handle_prompt_surface_manifest_value(channel, &request),
+                "memory.capture.next" => self.handle_native_capture_next(channel, &request).await,
+                "memory.capture.submit" => {
+                    self.handle_native_capture_submit(channel, &request).await
+                }
+                "memory.capture" => self.handle_memory_capture(channel, &request).await,
+                "memory.capture.status" => self.handle_memory_capture_status(channel, &request),
                 "memory_classifier.run_task" => {
                     self.handle_memory_classifier_run_task(channel, &request)
                         .await
@@ -13669,7 +13740,12 @@ impl HandlerCore {
                 "session.flush" => self.handle_session_flush_value(channel, &request),
                 "session.recomp" => self.handle_session_recomp_value(channel, &request),
                 "session.status" => self.handle_session_status_value(channel, &request),
-                "session.delete" => self.handle_session_delete_value(channel, &request),
+                "session.delete" => {
+                    entry
+                        .core
+                        .handle_session_delete_value(channel, &request)
+                        .await
+                }
                 "session.wrapup" => self.handle_session_wrapup_value(channel, &request).await,
                 "kernel.read" => self.handle_kernel_read(channel, request).await,
                 "kernel.commit" => self.handle_kernel_commit(channel, request).await,
@@ -22385,6 +22461,1666 @@ mod tests {
         (handler, store, dir, project)
     }
 
+    #[tokio::test]
+    async fn automatic_capture_routes_reject_foreign_or_malformed_scope_before_work() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        for method in [
+            "memory.capture",
+            "memory.capture.next",
+            "memory.capture.submit",
+            "memory.capture.status",
+        ] {
+            for (field, value) in [
+                ("project_root", json!("/another-project")),
+                ("project_root", Value::Null),
+                ("project_root", json!(17)),
+                ("project_root", json!(".")),
+                ("unexpected", json!(true)),
+            ] {
+                let mut request = json!({"method":method,"v":2,"session_id":"ses"});
+                request[field] = value;
+                let outcome = match method {
+                    "memory.capture" => {
+                        handler.handle_memory_capture(test_route(7), &request).await
+                    }
+                    "memory.capture.next" => {
+                        handler
+                            .handle_native_capture_next(test_route(7), &request)
+                            .await
+                    }
+                    "memory.capture.submit" => {
+                        handler
+                            .handle_native_capture_submit(test_route(7), &request)
+                            .await
+                    }
+                    _ => handler.handle_memory_capture_status(test_route(7), &request),
+                };
+                assert!(
+                    matches!(outcome, PreparedOutcome::Error { ref code, .. } if code == "invalid_params"),
+                    "{method}: {outcome:?}"
+                );
+            }
+        }
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store
+                .memory_capture_status(&capture_key(&project))
+                .unwrap()
+                .pending,
+            0
+        );
+        let status = handler.handle_memory_capture_status(
+            test_route(7),
+            &json!({
+                "method":"memory.capture.status","v":2,"session_id":"ses","project_root":project,
+            }),
+        );
+        assert_eq!(tool_body(status)["state"], "available");
+    }
+
+    #[tokio::test]
+    async fn automatic_capture_commits_once_and_is_explicitly_retrievable() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    memory_auto_capture: true,
+                    ..default_test_config()
+                },
+                ..binding_with_harness(project.to_str().unwrap(), "pi", "ses")
+            },
+        );
+
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","model":"test/model","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging. Now fix the test."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        assert_eq!(
+            state.starts.load(Ordering::SeqCst),
+            0,
+            "checkpoint must not run a daemon model"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        let output = json!({"version":1,"decisions":prompt["messages"].as_array().unwrap().iter().map(|message| json!({
+            "message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":"Production uses port 4321.","quote":"Use port 4321 for staging."}]
+        })).collect::<Vec<_>>()});
+        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "stale"
+        );
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "ready"
+        );
+        let status = store.memory_capture_status(&capture_key(&project)).unwrap();
+        assert_eq!(status.completed, 1);
+        assert_eq!(status.pending, 0);
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(
+            memories.rows.len(),
+            1,
+            "captured facts must be retrievable, not merely stored"
+        );
+        assert_eq!(
+            memories.rows[0].visibility,
+            kernel::SurfaceVisibility::Labeled
+        );
+        assert_eq!(
+            memories.decisions.values().next().unwrap().payload.summary,
+            "User stated: Use port 4321 for staging.",
+            "store the attributed source quotation, not the extractor's broadened environment"
+        );
+        let injected = canonical_memory::read_project_memory(
+            &handler.kernel,
+            &kernel_routes::ProjectBinding::new(&project),
+            now_ms(),
+            4000.0,
+        );
+        assert!(
+            injected.rows().is_empty(),
+            "extraction must not promote model inference into trusted automatic context"
+        );
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store
+                .memory_capture_status(&capture_key(&project))
+                .unwrap()
+                .completed,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn native_capture_leases_expire_and_never_publish_stale_or_deleted_sources() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    memory_auto_capture: true,
+                    ..default_test_config()
+                },
+                ..binding_with_harness(project.to_str().unwrap(), "pi", "ses")
+            },
+        );
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let first = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(first["state"], "work");
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "pending"
+        );
+        handler
+            .native_capture
+            .lock()
+            .unwrap()
+            .expire_ready_for_test();
+        // By the time a 180 s lease has lapsed, the issued dispatch's retry
+        // deadline (at most 128 s) has passed too; the clock does not run here.
+        store
+            .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+            .unwrap();
+        let second = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(second["state"], "work");
+        assert_ne!(first["lease"], second["lease"]);
+        let text = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[{"category":"CONFIG_VALUES","content":"Port 4321.","quote":"Use port 4321 for staging."}]}]}).to_string();
+        let mut submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":first["lease"],"model":first["model"],"output":text});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submit)
+                    .await
+            )["state"],
+            "stale"
+        );
+        submit["lease"] = second["lease"].clone();
+        submit["model"] = json!("different/model");
+        assert!(
+            matches!(handler.handle_native_capture_submit(test_route(7), &submit).await, PreparedOutcome::Error { ref code, .. } if code == "invalid_params")
+        );
+        submit["model"] = second["model"].clone();
+        let deleted = handler
+            .core
+            .handle_session_delete_value(
+                test_route(7),
+                &json!({"method":"session.delete","v":1,"session_id":"ses"}),
+            )
+            .await;
+        assert!(!matches!(deleted, PreparedOutcome::Error { .. }));
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submit)
+                    .await
+            )["state"],
+            "processed"
+        );
+        assert_eq!(
+            store
+                .memory_capture_status(&capture_key(&project))
+                .unwrap()
+                .completed,
+            0
+        );
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert!(memories.rows.is_empty());
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn automatic_capture_rejection_stays_pending_not_successful_empty_memory() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(state, default_test_config()).await;
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    memory_auto_capture: true,
+                    ..default_test_config()
+                },
+                ..binding_with_harness(project.to_str().unwrap(), "pi", "ses")
+            },
+        );
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","model":"test/model","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        let next =
+            json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"test/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        let submitted = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":"invalid response"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submitted)
+                    .await
+            )["state"],
+            "processed"
+        );
+        assert_eq!(
+            store.memory_capture_status(&capture_key(&project)).unwrap(),
+            memory_store::memory_capture::CaptureQueueStatus {
+                pending: 1,
+                prepared: 0,
+                completed: 0,
+                failed: 1
+            }
+        );
+    }
+
+    /// The store key capture uses for a project: the kernel binding's digest.
+    fn capture_key(project: &Path) -> String {
+        kernel_routes::ProjectBinding::new(project)
+            .digest()
+            .to_owned()
+    }
+
+    fn capture_binding(project: &Path, harness: &str) -> SessionBinding {
+        SessionBinding {
+            config: DaemonConfig {
+                memory_auto_capture: true,
+                ..default_test_config()
+            },
+            ..binding_with_harness(project.to_str().unwrap(), harness, "ses")
+        }
+    }
+
+    fn capture_ingress(mid: &str, role: &str, text: &str, ordinal: u64) -> IngressMessage {
+        IngressMessage {
+            mid: mid.into(),
+            ordinal,
+            ck: WireMessage::from_parts(
+                role,
+                vec![WireBlock::bare(BlockKind::Text { text: text.into() })],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta {
+                    harness_id: Some(mid.into()),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+
+    fn capture_transform_request(messages: &[IngressMessage]) -> TransformRequest {
+        serde_json::from_value(json!({
+            "kind": "transform",
+            "base_revision": "test-base",
+            "v": 2,
+            "serializer_profile": "opencode-aisdk",
+            "session_id": "ses",
+            "render_config": "cfg0",
+            "messages": messages,
+        }))
+        .unwrap()
+    }
+
+    impl HandlerCore {
+        async fn checkpoint_transform_sources(
+            &self,
+            store: Arc<MemoryStore>,
+            binding: &SessionBinding,
+            request: &TransformRequest,
+            delta_messages: usize,
+        ) -> usize {
+            let reserve = metered_decode::unbounded_reserve();
+            match self.capture_checkpoint(store, binding, request, delta_messages, &reserve) {
+                Some(checkpoint) => checkpoint.run().await,
+                None => 0,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_the_scratch_pool_cannot_hold_is_deferred_not_copied() {
+        struct Short;
+        impl metered_decode::ResidentReserve for Short {
+            fn try_reserve(&self, _bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+                None
+            }
+            fn capacity(&self) -> usize {
+                0
+            }
+        }
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let project_key = &capture_key(&project);
+        let pi = capture_binding(&project, "pi");
+        let messages = [capture_ingress(
+            "m1",
+            "user",
+            "Use port 4321 for staging.",
+            1,
+        )];
+        let request = capture_transform_request(&messages);
+        assert!(
+            handler
+                .capture_checkpoint(Arc::clone(&store), &pi, &request, 1, &Short)
+                .is_none(),
+            "fragments are charged before they are copied"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 0);
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 1)
+                .await,
+            1,
+            "the deferred fragment replays once the pool admits it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_that_loses_the_race_to_session_delete_requeues_nothing() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let project_key = &capture_key(&project);
+        let pi = capture_binding(&project, "pi");
+        handler.bind_route(test_route(7), pi.clone());
+        let messages = [capture_ingress(
+            "m1",
+            "user",
+            "Use port 4321 for staging.",
+            1,
+        )];
+        let request = capture_transform_request(&messages);
+        let checkpoint = handler
+            .capture_checkpoint(
+                Arc::clone(&store),
+                &pi,
+                &request,
+                1,
+                &metered_decode::unbounded_reserve(),
+            )
+            .expect("an unseen fragment needs the store");
+        let deleted = handler
+            .core
+            .handle_session_delete_value(
+                test_route(7),
+                &json!({"method":"session.delete","v":1,"session_id":"ses"}),
+            )
+            .await;
+        assert_eq!(tool_body(deleted)["ok"], json!(true));
+        assert_eq!(
+            checkpoint.run().await,
+            0,
+            "a checkpoint admitted before the delete must not recreate a swept source"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 0);
+        assert_eq!(handler.capture_memo.lock().unwrap().session_len("ses"), 0);
+    }
+
+    #[tokio::test]
+    async fn route_teardown_keeps_an_admitted_checkpoint_alive() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let project_key = &capture_key(&project);
+        let pi = capture_binding(&project, "pi");
+        let messages = [capture_ingress(
+            "m1",
+            "user",
+            "Use port 4321 for staging.",
+            1,
+        )];
+        let request = capture_transform_request(&messages);
+        let checkpoint = handler
+            .capture_checkpoint(
+                Arc::clone(&store),
+                &pi,
+                &request,
+                1,
+                &metered_decode::unbounded_reserve(),
+            )
+            .expect("an unseen fragment needs the store");
+        // The harness exits right after its last transform; nothing will sync again.
+        handler.purge_session_state("ses", "route_teardown");
+        assert_eq!(
+            checkpoint.run().await,
+            1,
+            "completed conversation text awaits a later harness instead of being dropped"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 1);
+    }
+
+    #[tokio::test]
+    async fn a_source_swept_during_preparation_leaves_the_rest_of_the_batch_issued() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        let project_key = &capture_key(&project);
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        handler.bind_route(
+            test_route(8),
+            SessionBinding {
+                session: "ses2".into(),
+                ..capture_binding(&project, "pi")
+            },
+        );
+        for (route, session, id, text) in [
+            (7, "ses", "frozen", "Frozen plan at the head."),
+            (7, "ses", "native-user-1", "Use port 4321 for staging."),
+            (8, "ses2", "native-user-2", "Production listens on 8080."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":session,"messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(
+                    handler
+                        .handle_memory_capture(test_route(route), &request)
+                        .await
+                )["state"],
+                "accepted"
+            );
+        }
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let frozen = jobs.iter().find(|job| job.message_id == "frozen").unwrap();
+        store
+            .prepare_memory_capture(
+                project_key,
+                &frozen.job_id,
+                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                    .to_string(),
+            )
+            .unwrap();
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        // The claim has read its queue and is publishing the frozen head when
+        // the second session is swept out from under it.
+        let (work, ()) = tokio::join!(
+            handler.handle_native_capture_next(test_route(7), &next),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                store
+                    .delete_session("ses2", project.to_str().unwrap())
+                    .unwrap();
+            }
+        );
+        holder.join().unwrap();
+        assert_eq!(
+            tool_body(work)["state"],
+            "pending",
+            "a batch missing a member is not issued"
+        );
+        let survivor = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.message_id == "native-user-1")
+            .unwrap();
+        assert_eq!(
+            survivor.attempts, 0,
+            "no dispatch is recorded for a batch that was never issued"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work", "{work}");
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        assert_eq!(prompt["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_submission_backs_its_sources_off_like_any_dispatch() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"error":"cancelled"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submit)
+                    .await
+            )["state"],
+            "pending"
+        );
+        let job = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(job.attempts, 1);
+        assert_eq!(
+            job.failures, 0,
+            "cancellation does not consume the allowance"
+        );
+        assert!(
+            store
+                .pending_memory_captures(project_key, "pi", now_ms())
+                .unwrap()
+                .is_empty(),
+            "a cancelled dispatch still backs off, so a tight claim/cancel loop cannot form"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_charges_each_fragments_fixed_overhead_not_only_its_text() {
+        struct Counting(std::sync::atomic::AtomicUsize);
+        impl metered_decode::ResidentReserve for Counting {
+            fn try_reserve(&self, bytes: usize) -> Option<host_runtime::wire::ByteCharge> {
+                self.0.fetch_add(bytes, Ordering::Relaxed);
+                Some(host_runtime::wire::ByteCharge::none())
+            }
+            fn capacity(&self) -> usize {
+                usize::MAX
+            }
+        }
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let pi = capture_binding(&project, "pi");
+        let count = 512;
+        let messages: Vec<IngressMessage> = (0..count)
+            .map(|index| capture_ingress(&format!("m{index}"), "user", "x", index as u64 + 1))
+            .collect();
+        let request = capture_transform_request(&messages);
+        let reserve = Counting(std::sync::atomic::AtomicUsize::new(0));
+        let checkpoint = handler
+            .capture_checkpoint(Arc::clone(&store), &pi, &request, count, &reserve)
+            .expect("unseen fragments need the store");
+        let charged = reserve.0.load(Ordering::Relaxed);
+        let floor = count * (std::mem::size_of::<String>() * 3 + 32);
+        assert!(
+            charged >= floor,
+            "tiny fragments must still pay their headers and digest: charged {charged} < {floor}"
+        );
+        drop(checkpoint);
+    }
+
+    #[tokio::test]
+    async fn a_claim_that_outlives_its_reservation_records_no_dispatch() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        for (id, text) in [
+            ("frozen", "Frozen plan at the head."),
+            ("native-user-1", "Use port 4321 for staging."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+        }
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let frozen = jobs.iter().find(|job| job.message_id == "frozen").unwrap();
+        store
+            .prepare_memory_capture(
+                project_key,
+                &frozen.job_id,
+                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                    .to_string(),
+            )
+            .unwrap();
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        // The reservation lapses while preparation is still publishing the head.
+        let (outcome, ()) = tokio::join!(
+            handler.handle_native_capture_next(test_route(7), &next),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                handler.native_capture.lock().unwrap().expire_all_for_test();
+            }
+        );
+        holder.join().unwrap();
+        assert_eq!(tool_body(outcome)["state"], "stale");
+        let unprepared = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.message_id == "native-user-1")
+            .unwrap();
+        assert_eq!(
+            unprepared.attempts, 0,
+            "a lapsed reservation issues no work and records no dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn issued_work_carries_its_retry_deadline_across_a_lost_lease() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "work"
+        );
+        // A restart forgets the lease; the durable row alone must carry the backoff.
+        assert!(
+            store
+                .pending_memory_captures(project_key, "pi", now_ms())
+                .unwrap()
+                .is_empty(),
+            "an issued dispatch is not immediately reclaimable once its lease is lost"
+        );
+        // The first dispatch backs off by the protocol's initial one second,
+        // the same deadline a submission for it would record.
+        let job = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_500)
+            .unwrap()
+            .pop()
+            .expect("the first dispatch is eligible again after one second");
+        assert_eq!(job.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_session_delete_still_purges_in_memory_state() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        // Session work state that only the post-delete cleanup clears.
+        handler
+            .recomp_sessions
+            .lock()
+            .unwrap()
+            .insert("ses".to_string());
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let delete = json!({"method":"session.delete","v":1,"session_id":"ses"});
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(100),
+            handler
+                .core
+                .handle_session_delete_value(test_route(7), &delete),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the request is dropped while the sweep waits on the gate"
+        );
+        holder.join().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !handler.recomp_sessions.lock().unwrap().contains("ses"),
+            "the in-memory purge belongs to the durable deletion, not to the request future"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_drain_reports_pending_while_an_admitted_checkpoint_has_not_enqueued() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        let pi = capture_binding(&project, "pi");
+        handler.bind_route(test_route(7), pi.clone());
+        let messages = [capture_ingress(
+            "m1",
+            "user",
+            "Use port 4321 for staging.",
+            1,
+        )];
+        let request = capture_transform_request(&messages);
+        let checkpoint = handler
+            .capture_checkpoint(
+                Arc::clone(&store),
+                &pi,
+                &request,
+                1,
+                &metered_decode::unbounded_reserve(),
+            )
+            .expect("an unseen fragment needs the store");
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "pending",
+            "admitted checkpoint text is not yet durable, so the drain is not done"
+        );
+        assert_eq!(checkpoint.run().await, 1);
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "work"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claim_whose_request_was_dropped_records_no_dispatch() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        for (id, text) in [
+            ("native-user-1", "Use port 4321 for staging."),
+            ("native-user-2", "Production listens on 8080."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+        }
+        // A frozen plan at the head publishes during the claim and waits on the gate.
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let frozen = jobs
+            .iter()
+            .find(|job| job.message_id == "native-user-1")
+            .unwrap();
+        store
+            .prepare_memory_capture(
+                project_key,
+                &frozen.job_id,
+                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                    .to_string(),
+            )
+            .unwrap();
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(100),
+            handler.handle_native_capture_next(test_route(7), &next),
+        )
+        .await;
+        assert!(dropped.is_err(), "the request is dropped mid-claim");
+        holder.join().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            handler.native_capture.lock().unwrap().reserved_for_test(),
+            0
+        );
+        let unprepared = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.message_id == "native-user-2")
+            .unwrap();
+        assert_eq!(
+            unprepared.attempts, 0,
+            "work that was never issued is not a dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_keys_keep_distinct_non_utf8_roots_apart() {
+        use std::os::unix::ffi::OsStrExt;
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, dir, _project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let roots: Vec<PathBuf> = [b"proj-\xff".as_slice(), b"proj-\xfe".as_slice()]
+            .into_iter()
+            .map(|name| {
+                let root = dir.path().join(std::ffi::OsStr::from_bytes(name));
+                std::fs::create_dir_all(&root).unwrap();
+                root
+            })
+            .collect();
+        assert_eq!(
+            roots[0].to_string_lossy(),
+            roots[1].to_string_lossy(),
+            "the two roots are indistinguishable once rendered lossily"
+        );
+        for (index, root) in roots.iter().enumerate() {
+            handler.bind_route(
+                test_route(7 + index as u16),
+                SessionBinding {
+                    project_root: root.clone(),
+                    kernel_project: kernel_routes::ProjectBinding::new(root),
+                    ..capture_binding(dir.path(), "pi")
+                },
+            );
+        }
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(8), &source).await)["state"],
+            "project_mismatch",
+            "a session captured under one root cannot be copied into a root that only renders the same"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uppercase_lease_token_is_a_malformed_envelope_not_stale_work() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":"0123456789ABCDEF0123456789ABCDEF","error":"cancelled"});
+        assert!(
+            matches!(handler.handle_native_capture_submit(test_route(7), &submit).await, PreparedOutcome::Error { ref code, .. } if code == "invalid_params"),
+            "the wire contract requires 32 lowercase hexadecimal characters"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_capture_checkpoints_serialize_with_session_delete_off_the_worker() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        // Warm the store's first-write costs so the timing below measures the gate.
+        let warmup = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[
+            {"id":"u0","role":"user","text":"Warm up the capture store."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &warmup).await)["state"],
+            "accepted"
+        );
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let hold = Duration::from_millis(300);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(hold);
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[
+            {"id":"u1","role":"user","text":"Use port 4321 for staging."},
+            {"id":"u2","role":"user","text":"Production listens on 8080."}]});
+        let (accepted, ticked_at) = tokio::join!(
+            handler.handle_memory_capture(test_route(7), &request),
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                started.elapsed()
+            }
+        );
+        let accepted_at = started.elapsed();
+        holder.join().unwrap();
+        assert_eq!(tool_body(accepted)["state"], "accepted");
+        assert!(
+            accepted_at >= hold - Duration::from_millis(30),
+            "an explicit checkpoint must take the deletion gate: {accepted_at:?}"
+        );
+        assert!(
+            ticked_at < accepted_at,
+            "the runtime worker must keep running while the checkpoint waits: {ticked_at:?} vs {accepted_at:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_submission_keeps_its_reservation_until_its_work_finishes() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let text =
+            json!({"version":1,"decisions":[{"message_id":"source_1","memories":[]}]}).to_string();
+        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":text});
+        // Publication waits on the gate, so the blocking settle outlives a
+        // request future dropped while it runs.
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(100),
+            handler.handle_native_capture_submit(test_route(7), &submit),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the submission is dropped mid-settle");
+        assert_eq!(
+            handler.native_capture.lock().unwrap().reserved_for_test(),
+            1,
+            "a cancelled submission stays reserved while its blocking work can still publish"
+        );
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "pending",
+            "a successor cannot claim the same sources underneath the running settle"
+        );
+        holder.join().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            handler.native_capture.lock().unwrap().reserved_for_test(),
+            0
+        );
+        assert_eq!(
+            store.memory_capture_status(project_key).unwrap().completed,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_failure_during_preparation_is_reported_not_queued() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        store
+            .execute_tag_sql_for_test(
+                "CREATE TRIGGER capture_attempt_fault BEFORE UPDATE ON memory_capture_jobs
+                 BEGIN SELECT RAISE(ABORT, 'injected capture attempt fault'); END;",
+            )
+            .unwrap();
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "store_failed",
+            "a durable-store failure is not ordinary queued work"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_keys_follow_the_canonical_project_root() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let link = dir.path().join("project-link");
+        std::os::unix::fs::symlink(&project, &link).unwrap();
+        let canonical = canonical_root(&project);
+        handler.bind_route(test_route(7), capture_binding(&link, "pi"));
+        handler.bind_route(test_route(8), capture_binding(&canonical, "pi"));
+        let source = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"u1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &source).await)["state"],
+            "accepted"
+        );
+        let replay = tool_body(handler.handle_memory_capture(test_route(8), &source).await);
+        assert_eq!(
+            replay["state"], "accepted",
+            "a symlinked spelling of the bound root is the same project: {replay}"
+        );
+        let status = json!({"method":"memory.capture.status","v":2,"session_id":"ses"});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture_status(test_route(8), &status))["pending"],
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batch_failure_backs_off_each_source_by_its_own_dispatch_count() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        for (id, text) in [
+            ("native-user-1", "Use port 4321 for staging."),
+            ("native-user-2", "Production listens on 8080."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+        }
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let veteran = jobs
+            .iter()
+            .find(|job| job.message_id == "native-user-1")
+            .unwrap();
+        // Six interrupted dispatches and no model failures: still batchable.
+        for _ in 0..6 {
+            assert!(
+                store
+                    .begin_memory_capture_attempt(project_key, &veteran.job_id, now_ms())
+                    .unwrap()
+            );
+        }
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work", "{work}");
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        assert_eq!(prompt["messages"].as_array().unwrap().len(), 2);
+        let submit = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"error":"model_failed"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submit)
+                    .await
+            )["state"],
+            "pending"
+        );
+        // The fresh source is on its second dispatch (2 s); the veteran on its seventh (128 s).
+        let soon = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 10_000)
+            .unwrap();
+        assert_eq!(
+            soon.iter()
+                .map(|job| job.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["native-user-2"],
+            "each source backs off by its own dispatch count"
+        );
+    }
+
+    #[tokio::test]
+    async fn transform_checkpoints_only_pi_delta_messages_and_never_twice() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        let project_key = &capture_key(&project);
+        let messages = [
+            capture_ingress("m1", "user", "Use port 4321 for staging.", 1),
+            capture_ingress("m2", "assistant", "Staging now listens on 4321.", 2),
+        ];
+        let request = capture_transform_request(&messages);
+
+        let opencode = capture_binding(&project, "opencode");
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &opencode, &request, 2)
+                .await,
+            0,
+            "OpenCode text is checkpointed by its plugin, whose per-part synthetic markers the wire does not carry"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 0);
+
+        let pi = capture_binding(&project, "pi");
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 1)
+                .await,
+            1,
+            "a tail delta checkpoints only the request's own messages"
+        );
+        let pending = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "m2");
+
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 2)
+                .await,
+            1,
+            "a full sync reaches the store only for the fragment the memo has not seen"
+        );
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 2)
+                .await,
+            0,
+            "a repeated conversation performs no store work"
+        );
+        assert_eq!(handler.capture_memo.lock().unwrap().session_len("ses"), 2);
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 2);
+
+        handler.purge_session_state("ses", "session_delete");
+        assert_eq!(handler.capture_memo.lock().unwrap().session_len("ses"), 0);
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, 2)
+                .await,
+            2,
+            "a purged memo replays through the store, which dedups by identity"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 2);
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn native_capture_accepts_a_maximal_wire_valid_plan() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let quotes: Vec<String> = (0..memory_capture::MAX_CAPTURE_MESSAGES)
+            .map(|index| {
+                let mut quote = format!("Fact {index:02}: ");
+                while quote.len() < memory_capture::MAX_CAPTURE_MEMORY_BYTES {
+                    quote.push_str("staging listens on port 4321 ");
+                }
+                quote.truncate(memory_capture::MAX_CAPTURE_MEMORY_BYTES);
+                quote
+            })
+            .collect();
+        let text = quotes.concat();
+        assert_eq!(text.len(), memory_capture::MAX_CAPTURE_INPUT_BYTES);
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":text}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let memories: Vec<Value> = quotes
+            .iter()
+            .enumerate()
+            .map(|(index, quote)| {
+                json!({"category":"CONFIG_VALUES","content":format!("Fact {index}."),"quote":quote})
+            })
+            .collect();
+        let output =
+            json!({"version":1,"decisions":[{"message_id":"source_1","memories":memories}]})
+                .to_string();
+        assert!(output.len() <= memory_capture::MAX_CAPTURE_OUTPUT_BYTES);
+        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        let status = store.memory_capture_status(&capture_key(&project)).unwrap();
+        assert_eq!(
+            status,
+            memory_store::memory_capture::CaptureQueueStatus {
+                pending: 0,
+                prepared: 0,
+                completed: 1,
+                failed: 0
+            },
+            "a wire-valid output must never be refused by the store bound"
+        );
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(memories.rows.len(), memory_capture::MAX_CAPTURE_MESSAGES);
+    }
+
+    #[tokio::test]
+    async fn native_capture_store_refusal_of_a_plan_records_a_failure_instead_of_hot_retrying() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        // The configured model identifier is frozen into every plan.
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    model_chain: vec!["custom-native/password=hunter-two".into()],
+                    ..capture_binding(&project, "pi").config
+                },
+                ..capture_binding(&project, "pi")
+            },
+        );
+        let project_key = &capture_key(&project);
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        assert_eq!(work["model"], "custom-native/password=hunter-two");
+        let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[{"category":"CONFIG_VALUES","content":"Port 4321.","quote":"Use port 4321 for staging."}]}]}).to_string();
+        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        assert_eq!(
+            store.memory_capture_status(project_key).unwrap(),
+            memory_store::memory_capture::CaptureQueueStatus {
+                pending: 1,
+                prepared: 0,
+                completed: 0,
+                failed: 1
+            }
+        );
+        assert!(
+            store
+                .pending_memory_captures(project_key, "pi", now_ms())
+                .unwrap()
+                .is_empty(),
+            "a refused plan must back off instead of retrying at the head of the queue"
+        );
+        let later = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].attempts, 1);
+        assert_eq!(
+            later[0].failures, 1,
+            "a deterministic refusal consumes the model-failure allowance"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_source_keeps_its_own_fallback_sequence_beside_a_failed_one() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        let mut pi = capture_binding(&project, "pi");
+        pi.config.model_chain = vec!["chain/a".into(), "chain/b".into(), "chain/c".into()];
+        handler.bind_route(test_route(7), pi);
+        let project_key = &capture_key(&project);
+        for (id, text) in [
+            ("native-user-1", "Use port 4321 for staging."),
+            ("native-user-2", "Production listens on 8080."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+        }
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let failed = jobs
+            .iter()
+            .find(|job| job.message_id == "native-user-2")
+            .unwrap();
+        for _ in 0..2 {
+            store
+                .fail_memory_capture(
+                    project_key,
+                    &failed.job_id,
+                    "model_failed",
+                    now_ms(),
+                    true,
+                    now_ms(),
+                )
+                .unwrap();
+        }
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work", "{work}");
+        assert_eq!(
+            work["model"], "chain/a",
+            "a source with no failures starts on the primary model, whatever shares its queue"
+        );
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            prompt["messages"].as_array().unwrap().len(),
+            1,
+            "the twice-failed source waits for its own fallback batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn issued_work_keeps_its_full_lease_however_long_preparation_waited() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        for (id, text) in [
+            ("native-user-1", "Use port 4321 for staging."),
+            ("native-user-2", "Production listens on 8080."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+        }
+        // A frozen plan at the queue head publishes during preparation, and
+        // publication waits on the commit gate.
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let frozen = jobs
+            .iter()
+            .find(|job| job.message_id == "native-user-1")
+            .unwrap();
+        store
+            .prepare_memory_capture(
+                project_key,
+                &frozen.job_id,
+                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                    .to_string(),
+            )
+            .unwrap();
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let hold = Duration::from_millis(500);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(hold);
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        holder.join().unwrap();
+        assert_eq!(work["state"], "work", "{work}");
+        let remaining = handler
+            .native_capture
+            .lock()
+            .unwrap()
+            .shortest_ready_lease_for_test()
+            .unwrap();
+        assert!(
+            remaining >= memory_capture::LEASE_DURATION - Duration::from_millis(200),
+            "the advertised execution window must fit inside the lease: {remaining:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_delete_waits_for_the_capture_gate_off_the_runtime_worker() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&state), default_test_config());
+        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), "ses"));
+        let gate = Arc::clone(&handler.capture_commit_gate);
+        let hold = Duration::from_millis(300);
+        let holder = std::thread::spawn(move || {
+            let _held = gate.lock().unwrap();
+            std::thread::sleep(hold);
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        let delete = json!({ "method": "session.delete", "v": 1, "session_id": "ses" });
+        let (deleted, ticked_at) = tokio::join!(
+            handler
+                .core
+                .handle_session_delete_value(test_route(7), &delete),
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                started.elapsed()
+            }
+        );
+        let deleted_at = started.elapsed();
+        holder.join().unwrap();
+        assert_eq!(tool_body(deleted)["ok"], json!(true));
+        assert!(
+            deleted_at >= hold - Duration::from_millis(30),
+            "the delete must wait for the publication gate: {deleted_at:?}"
+        );
+        assert!(
+            ticked_at < deleted_at,
+            "the runtime worker must keep running other tasks while the delete waits: {ticked_at:?} vs {deleted_at:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_that_can_never_fit_a_prompt_fails_instead_of_stalling_the_drain() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let project_key = &capture_key(&project);
+        // Each control character escapes to six JSON bytes, so this source alone
+        // renders past the native prompt ceiling however much else is dropped.
+        let oversized = "\u{1}".repeat(memory_capture::MAX_CAPTURE_INPUT_BYTES);
+        for (id, text) in [
+            ("native-user-1", oversized.as_str()),
+            ("native-user-2", "Use port 4321 for staging."),
+        ] {
+            let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":id,"role":"user","text":text}]});
+            assert_eq!(
+                tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+                "accepted"
+            );
+        }
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_next(test_route(7), &next)
+                    .await
+            )["state"],
+            "pending",
+            "an unfittable head source is a recorded failure, not work"
+        );
+        let jobs = store
+            .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
+            .unwrap();
+        let head = jobs
+            .iter()
+            .find(|job| job.message_id == "native-user-1")
+            .expect("the unfittable source keeps its identity");
+        assert_eq!(head.attempts, 1, "the refused dispatch is recorded");
+        assert_eq!(
+            head.failures, 1,
+            "a source that can never be prepared consumes its failure allowance"
+        );
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(
+            work["state"], "work",
+            "the queue must advance past it: {work}"
+        );
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        assert_eq!(prompt["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(prompt["messages"][0]["text"], "Use port 4321 for staging.");
+        assert_eq!(state.starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn two_facts_citing_one_clause_publish_one_attributed_memory() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let request = json!({"method":"memory.capture","v":2,"session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":"Use port 4321 for staging."}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","v":2,"session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[
+            {"category":"CONFIG_VALUES","content":"Staging uses port 4321.","quote":"Use port 4321 for staging."},
+            {"category":"CONFIG_VALUES","content":"The staging port is 4321.","quote":"Use port 4321 for staging."}
+        ]}]})
+        .to_string();
+        let submission = json!({"method":"memory.capture.submit","v":2,"session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        assert_eq!(
+            store
+                .memory_capture_status(&capture_key(&project))
+                .unwrap()
+                .completed,
+            1
+        );
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(
+            memories.rows.len(),
+            1,
+            "identical attributed quotations must not publish as separate memories"
+        );
+        assert_eq!(
+            memories.decisions.values().next().unwrap().payload.summary,
+            "User stated: Use port 4321 for staging."
+        );
+    }
+
     #[test]
     fn claude_code_config_controls_fill_request_without_changing_default_request_bytes() {
         let value = json!({
@@ -22509,6 +24245,7 @@ mod tests {
             execute_threshold_percentage: 65.0,
             compaction_enabled: true,
             memory_enabled: true,
+            memory_auto_capture: false,
             auto_search: crate::config::AutoSearchConfig::default(),
             terse_text_compression: crate::config::TerseTextCompressionConfig::default(),
             auto_promote: true,
@@ -29959,10 +31696,15 @@ mod tests {
             "eidnara_note stores session notes under the authority project"
         );
 
-        let deleted = tool_body(handler.handle_session_delete_value(
-            test_route(7),
-            &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
-        ));
+        let deleted = tool_body(
+            handler
+                .core
+                .handle_session_delete_value(
+                    test_route(7),
+                    &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
         assert_eq!(deleted["ok"], json!(true));
         assert!(
             store
@@ -30156,10 +31898,15 @@ mod tests {
                 .contains_key("ses")
         );
 
-        let deleted = tool_body(handler.handle_session_delete_value(
-            test_route(7),
-            &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
-        ));
+        let deleted = tool_body(
+            handler
+                .core
+                .handle_session_delete_value(
+                    test_route(7),
+                    &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
         assert_eq!(deleted["ok"], json!(true), "{deleted}");
         assert!(
             !handler
@@ -36844,8 +38591,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn session_delete_clears_durable_state_for_the_bound_lineage() {
+    #[tokio::test]
+    async fn session_delete_clears_durable_state_for_the_bound_lineage() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, project) = handler_with_store(producer, default_test_config());
         let session_id = "ses-delete";
@@ -36922,10 +38669,15 @@ mod tests {
             .expect("transform snapshots mutex")
             .begin(session_id);
 
-        let deleted = tool_body(handler.handle_session_delete_value(
-            test_route(7),
-            &json!({ "method": "session.delete", "v": 1, "session_id": session_id }),
-        ));
+        let deleted = tool_body(
+            handler
+                .core
+                .handle_session_delete_value(
+                    test_route(7),
+                    &json!({ "method": "session.delete", "v": 1, "session_id": session_id }),
+                )
+                .await,
+        );
         assert_eq!(deleted["ok"], json!(true));
         assert!(deleted["deleted_rows"].as_u64().unwrap() >= 2);
         assert!(!store.has_cache_state(session_id).unwrap());
@@ -38827,10 +40579,15 @@ mod tests {
                 .contains_key("ses")
         );
 
-        let deleted = tool_body(handler.handle_session_delete_value(
-            test_route(7),
-            &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
-        ));
+        let deleted = tool_body(
+            handler
+                .core
+                .handle_session_delete_value(
+                    test_route(7),
+                    &json!({ "method": "session.delete", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
         assert_eq!(deleted["ok"], json!(true), "{deleted}");
 
         // The producer never unblocks, so the only way the live entry can clear is the
