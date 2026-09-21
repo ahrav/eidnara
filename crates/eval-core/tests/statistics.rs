@@ -1114,6 +1114,22 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             required_n_for_margin: 300
         })
     );
+    // The bound is over whole pairs: 301 pairs over 150 worlds is one world of
+    // three and 149 of two, not 150 worlds of 301/150, so under a world ICC of
+    // one it supports 90601/605 items, short of 150.
+    let mut uneven = family.clone();
+    uneven.stopping_rule = StoppingRule::FixedN { pairs: 301 };
+    uneven.icc_pilot.icc_world_seed = Ratio::ONE;
+    uneven.icc_pilot.max_affordable_worlds = 150;
+    uneven.icc_pilot.effective_n_at_max = ratio(150, 1);
+    uneven.icc_pilot.required_n_for_margin = 150;
+    assert_eq!(
+        uneven.validate(),
+        Err(StatisticsError::PlanBelowRequiredN {
+            attainable: ratio(90_601, 605),
+            required_n_for_margin: 150
+        })
+    );
     // Nor can 300 pairs over at most 150 worlds: the best table has two pairs per
     // world, and under a world ICC of 1/10 that is 3000/11 effective items.
     let mut crowded = family.clone();

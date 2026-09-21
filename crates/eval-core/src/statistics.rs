@@ -609,17 +609,23 @@ impl AnalysisFamily {
         if draws > MAX_BOOTSTRAP_DRAWS {
             return Err(StatisticsError::TooManyDraws(draws));
         }
-        // The best table the plan permits spreads its pairs evenly over the most
-        // clusters it can have at each level; if even that falls short of the
-        // required N, the plan can only ever block, so it is refused now.
+        // The best table the plan permits spreads its pairs as evenly as whole
+        // pairs allow over the most clusters it can have at each level, and is
+        // deflated exactly as a completed table would be; if even that falls
+        // short of the required N, the plan can only ever block, so it is
+        // refused now.
         let n = Ratio::try_new(i128::from(pairs), 1)?;
         let mut attainable = n;
         for (clusters, icc) in [
             (clusters.min(pilot.n_families), pilot.icc_family),
             (clusters, pilot.icc_world_seed),
         ] {
-            let mean_cluster = n.checked_div(Ratio::try_new(i128::from(clusters), 1)?)?;
-            attainable = attainable.min(deflate(n, mean_cluster, icc)?);
+            let (pairs, clusters) = (i128::from(pairs), i128::from(clusters));
+            let (quotient, remainder) = (pairs / clusters, pairs % clusters);
+            let sum_of_squares =
+                remainder * (quotient + 1).pow(2) + (clusters - remainder) * quotient.pow(2);
+            let weighted_mean = Ratio::try_new(sum_of_squares, pairs)?;
+            attainable = attainable.min(deflate(n, weighted_mean, icc)?);
         }
         if attainable < Ratio::try_new(i128::from(pilot.required_n_for_margin), 1)? {
             return Err(StatisticsError::PlanBelowRequiredN {

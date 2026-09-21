@@ -961,7 +961,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   while a computed pilot validates; a plan of 299 pairs against a required N
   of 300 is `PlanBelowRequiredN` (attainable 299), as is one of 300 pairs
   over at most 150 worlds under a world ICC of `1/10` (attainable
-  `3000/11`); a repeated pilot observation is
+  `3000/11`) and one of 301 pairs over 150 worlds under a world ICC of one
+  (attainable `90601/605`, the whole-pair allocation, not 150); a repeated pilot observation is
   `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
   hand-built counts with `b + c > n`, `b + aged_pass > n`, `c > aged_pass`,
   `aged_censored + aged_pass > n`, `fresh_censored + c > b + aged_pass`, a

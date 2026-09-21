@@ -954,8 +954,9 @@ family-unit projection spreads items over exactly those families)
 (`PilotInconsistent`; a projection that leaves the safe range is reported as
 `RationalOverflow`), so a hand-written pilot cannot inflate its way past the
 block, and refuses a plan whose pair count is zero (`NoPairs`) or whose best
-attainable table (the pairs spread evenly over the most clusters the plan
-permits at each level, deflated by that level's ICC) falls short of the
+attainable table (the pairs spread as evenly as whole pairs allow over the
+most clusters the plan permits at each level, deflated by that level's ICC
+with the same size-weighted mean a completed table gets) falls short of the
 pilot's `required_n_for_margin` (`PlanBelowRequiredN {attainable, ..}`), since
 such a plan can only ever block after the campaign has run. `FrozenFamily::freeze` digests it
 (`eval-analysis-family-digest/v1`); the manifest records that digest as
