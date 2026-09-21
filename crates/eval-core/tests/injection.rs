@@ -11,10 +11,10 @@ use eval_core::{
     AnchorRole, AnchorSet, AnchorTask, AnchorVerdict, ArmError, ArmRecord, AxisValue, Carrier,
     ClaimClass, Coverage, CoverageError, Destination, EvaluatedSurface, EventId, GovernanceArms,
     HistoryPolicy, InjectionCase, InjectionError, InjectionObservation, InjectionScore,
-    LaterSession, MARKERS, MAX_VALID_TIME_MS, Mode, PairError, PairSet, PairSetInput, Query,
-    RepositorySpec, Sensitivity, ServedClass, SessionSpec, SideEffect, Task, TaskRole, TaskSet,
-    TransferCriterion, UnmetClause, Visibility, WorldConfig, WorldProvenance, compile_pair_set,
-    derive_claim_class, plan_injection_cases, score_injection, serialize_spec,
+    LaterSession, MARKERS, MAX_VALID_TIME_MS, Mode, PairSet, PairSetInput, Query, RepositorySpec,
+    Sensitivity, ServedClass, SessionSpec, SideEffect, Task, TaskRole, TaskSet, TransferCriterion,
+    UnmetClause, Visibility, WorldConfig, WorldProvenance, compile_pair_set, derive_claim_class,
+    plan_injection_cases, score_injection, serialize_spec,
 };
 use serde_json::json;
 use support::{WORLD_EPOCH_MS as EPOCH_MS, WORLD_SEED as SEED, world_config as config};
@@ -515,15 +515,6 @@ fn history_policy_arms_are_held_to_the_pair_set_they_govern() {
         .absent_evidence = [lost.clone()].into();
     lossy.validate(&set).unwrap();
     assert_eq!(lossy.task_ids.len(), 2, "the denominator did not shrink");
-    // The pair set is checked before the arms are held to it.
-    let mut tampered = set.clone();
-    tampered.pairing_policy_version = "eval-pairing/v0".to_string();
-    assert_eq!(
-        arms.validate(&tampered),
-        Err(ArmError::PairSet(PairError::Tampered {
-            field: "pairing_policy_version"
-        }))
-    );
 
     let mutations: Vec<(&str, Mutate<GovernanceArms>, ArmError)> = vec![
         (

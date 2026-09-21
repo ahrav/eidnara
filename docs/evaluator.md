@@ -1105,8 +1105,7 @@ the arms by policy, so no two arms can disagree and no policy appears twice;
 each `ArmRecord` owns only its `policy_version` and its `absent_evidence`, the
 evidence the policy removed, kept so the task stays in the arm and records a
 loss instead of shrinking the denominator. `validate(&PairSet)` holds the
-record to the pair set it governs, after `PairSet::validate` has accepted the
-set itself (`PairSet(PairError)`): the task and evidence sets must equal the
+record to the pair set it governs: the task and evidence sets must equal the
 set's (`PairSetMismatch {field}`), every policy must have an arm
 (`MissingArm`), the raw arm must claim no loss (`RawArmLostEvidence`), every
 version must be non-empty, and every loss must be evidence the set has

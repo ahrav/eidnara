@@ -1008,8 +1008,7 @@ Injection, arms, and claims (`crates/eval-core/tests/injection.rs`):
   (`xc-history-policy-arms-share-truth`): arms derived from a compiled pair
   set validate and each descriptor's production component is a file in the
   workspace containing the named symbol; a pruned arm records a lost
-  evidence ID without dropping the task; a tampered pair set refuses before
-  the arms are read; an added or dropped task, a changed
+  evidence ID without dropping the task; an added or dropped task, a changed
   truth ID, an empty control run, an empty policy version, a missing raw or
   pruned arm, a raw arm claiming a loss, and a loss outside the evidence each
   refuse by name; the arms are keyed by policy, and an arm carrying a history
