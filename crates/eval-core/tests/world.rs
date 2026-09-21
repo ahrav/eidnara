@@ -992,6 +992,7 @@ fn declared_events_equals_the_emitted_count_across_spec_shapes() {
                             epoch_ms: EPOCH_MS,
                             tick_ms: 250,
                             max_events_per_log: 64,
+                            planted: Vec::new(),
                         };
                         let world = generate_all(SEED, &config, Mode::Generate).unwrap();
                         assert_eq!(world.log.events.len() as u64, config.declared_events());

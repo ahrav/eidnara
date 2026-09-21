@@ -53,6 +53,7 @@ fn natural_fresh() -> EventLog {
         epoch_ms: EPOCH_MS,
         tick_ms: 1_000,
         max_events_per_log: 64,
+        planted: Vec::new(),
     };
     eval_core::generate_all(SEED ^ 0xABCD, &short, Mode::Generate)
         .unwrap()
@@ -437,6 +438,7 @@ fn a_long_aged_history_pushes_the_falsifier_out_of_the_surface_1_window() {
         epoch_ms: EPOCH_MS,
         tick_ms: 1_000,
         max_events_per_log: 256,
+        planted: Vec::new(),
     };
     let aged = eval_core::generate_all(SEED, &big, Mode::Generate)
         .unwrap()

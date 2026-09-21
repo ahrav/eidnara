@@ -1159,6 +1159,13 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   sample in run order, the frozen family's digest, and the recency baseline,
   says `replay` and `transform-route, turn by turn`, and is refused when
   relabelled `direct-database, non-aged`.
+- `a_canary_is_planted_only_into_the_text_its_carrier_emits`
+  (`crates/eval-core/tests/injection.rs`): planted canaries appear at the end
+  of the message text, tool-span output, and commit message they name and
+  nowhere else, add no event, and change the tape identity; the issue and
+  memory carriers, a slot without a tool span, a slot past the entity, an
+  unknown entity, a carrier on the wrong entity kind, and an empty canary are
+  refused as `InvalidField("planted")`.
 - `the_eval_runner_example_publishes_the_s0_campaign`
   (`mtr-runner-shell-example-gated-and-bounded`): the built `eval_runner`
   example runs the S0 campaign from its command line with every input given,
@@ -1222,14 +1229,15 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
 - The natural-fresh independence guard detects a contiguous copy of the aged
   history, compared by content; a non-contiguous subset passes it, and the
   provenance rule (another seed and configuration) is stated, not enforced.
-- The campaign plans the five injection cases for its task set and reports
-  each scored as a surface-1 run observes it: the generator plants no carrier
-  in a world yet, so every case is `not_reached` on ingestion, retrieval,
-  packing, and exposure, and `not_measurable` on obedience because surface 1
-  has no mediation boundary. Planting carriers into generated commits,
-  issues, tool output, summaries, and memories is a generator change, and
-  the adapter from a stage-ledger reduction to an `AxisValue` is not written;
-  `packed` reads `not_reached` on every live surface.
+- The campaign plants the summary carrier's canary into the aged history
+  and scores its case from the daemon's own segments and the host's own
+  selection (`ingested: yes`, `retrieved: no` at S0); the tool-output and
+  commit carriers are plantable by the generator but the campaign's
+  one-session world has no tool span and no commit, and the generated world
+  has no issue or memory payload, so those four cases read `not_reached`.
+  Packing, exposure, and obedience are `not_reached` or `not_measurable` on
+  surface 1; the adapter from a stage-ledger reduction to an `AxisValue` is
+  not written, and `packed` reads `not_reached` on every live surface.
 - `HistoryPolicy` descriptors select `message_cleanup` and the
   HistorySummarizer producer by path and symbol. The pruned arm is accounted
   as unsupported on surface 1 (cleanup reclaims projection rows the surface

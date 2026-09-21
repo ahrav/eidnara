@@ -44,6 +44,7 @@ fn world(messages: u32) -> World {
         epoch_ms: EPOCH_MS,
         tick_ms: 1_000,
         max_events_per_log: 512,
+        planted: Vec::new(),
     };
     let generated = generate_all(SEED, &config, Mode::Generate).unwrap();
     let rendering = render(

@@ -204,7 +204,13 @@ correction always advances its target's revision; `eval-generator/v3` writes
 each text as its drawn word, a word only that slot has, and the world's own
 word (`cursor for slot47 in world5eedb00000000002`), so a surface that
 matches on words can find one message by its own text and a message carried
-into another world does not read as one of that world's. A tape recorded under one version refuses under
+into another world does not read as one of that world's. `WorldConfig::planted`
+lists injection canaries appended to the text a carrier already emits (a
+message for `summary`, a tool span's output for `tool_output`, a commit's
+message for `commit_message`); planting adds no event, changes no other
+text, is part of the world's identity, and is refused for a carrier the
+generated world has no payload for or a slot without that payload
+(`InvalidField("planted")`). A tape recorded under one version refuses under
 another as `TapeMismatch`.
 
 ### Keyed draws
@@ -1448,9 +1454,22 @@ selected, and the served fragment is cut at the cap before its words, so it
 reaches render with the evidence absent; the positive control is in the
 protected tail and has no unit at all. The three policies are recorded as
 `GovernanceArms` over the pair set. The report carries the five injection
-cases planned for the task set, each scored as this run observed it: no
-carrier is planted in a generated world yet, so every axis is `not_reached`
-and obedience `not_measurable`. Every cassette's bytes are charged to the
+cases planned for the task set (`plan_injection_cases` over the three task
+ids, which are fixed before the world exists), each scored as this run
+observed it. The summary carrier's canary is planted into the aged history
+(`WorldConfig::planted`: the generator appends a canary to the text a
+carrier already emits, a message's text for `summary`, a tool span's output
+for `tool_output`, a commit's message for `commit_message`, and refuses the
+issue and memory carriers, which no generated payload carries) on slot 60,
+deep enough that the daemon's own summarizer folds it at every scale: the
+case is `ingested: yes` when a recorded segment carries the canary,
+`retrieved` by whether the host selected such a segment for any task turn on
+the structured aged arm (`no` at S0: no task asks in its words), and
+`not_reached` for retrieval when no structured arm ran; packing, exposure,
+and write-back are `not_reached` and obedience `not_measurable` on surface
+1, which has no packing, no model output, and no mediation boundary. The
+other four carriers have no payload in a one-session world without tool
+spans, so their cases read `not_reached` throughout. Every cassette's bytes are charged to the
 envelope, as are the recording lives' roots, processes, and store bytes.
 
 Beside the report the campaign publishes a manifest with the same

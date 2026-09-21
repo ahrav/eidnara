@@ -7,6 +7,7 @@ use serde_json::json;
 use crate::event::{
     CausalEdge, Event, EventId, EventLog, LogError, MAX_VALID_TIME_MS, Payload, StreamLabel,
 };
+use crate::injection::Carrier;
 use crate::stream::{ChoiceKind, Chooser, RANDOM_SCHEMA_VERSION, ReplayRefusal, Tape};
 
 /// Version 2 removed the zero time gap; version 3 gave every text a word of
@@ -62,6 +63,25 @@ pub struct WorldConfig {
     #[serde(with = "crate::decimal")]
     pub tick_ms: i64,
     pub max_events_per_log: u32,
+    /// Injection canaries planted into the text a carrier already emits; an
+    /// empty list plants nothing and leaves the world as it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planted: Vec<Planted>,
+}
+
+/// One injection canary planted into the text of one payload: a message's
+/// text for the `summary` carrier (the summarizer folds it into a segment),
+/// a tool span's output for `tool_output`, a commit's message for
+/// `commit_message`. `entity` names the actor (`session-0`, `repository-0`)
+/// and `slot` its `k`-th mutation. The generated world has no issue and no
+/// memory payload, so those carriers cannot be planted and are refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Planted {
+    pub carrier: Carrier,
+    pub entity: String,
+    pub slot: u32,
+    pub canary: String,
 }
 
 /// `*_every` of `n` fires on every `n`-th slot; `0` never fires. Corrections and
@@ -193,6 +213,29 @@ impl WorldConfig {
         ];
         if let Some((field, _)) = invalid.into_iter().find(|(_, invalid)| *invalid) {
             return Err(WorldError::InvalidField(field));
+        }
+        for planted in &self.planted {
+            let session = self
+                .sessions
+                .iter()
+                .enumerate()
+                .find(|(index, _)| format!("session-{index}") == planted.entity);
+            let repository = self
+                .repositories
+                .iter()
+                .enumerate()
+                .find(|(index, _)| format!("repository-{index}") == planted.entity);
+            let plantable = match (planted.carrier, session, repository) {
+                (Carrier::Summary, Some((_, spec)), None) => planted.slot < spec.messages,
+                (Carrier::ToolOutput, Some((_, spec)), None) => {
+                    planted.slot < spec.messages && fires(spec.tool_span_every, planted.slot)
+                }
+                (Carrier::CommitMessage, None, Some((_, spec))) => planted.slot < spec.commits,
+                _ => false,
+            };
+            if planted.canary.is_empty() || !plantable {
+                return Err(WorldError::InvalidField("planted"));
+            }
         }
         let max = self.max_events_per_log;
         let events = self.declared_events();
@@ -434,11 +477,24 @@ impl Generator {
         id
     }
 
+    /// The canary planted on this slot for `carrier`, appended to the text
+    /// the carrier emits.
+    fn planted(&self, slot: &Slot, carrier: Carrier, text: String) -> String {
+        self.config
+            .planted
+            .iter()
+            .filter(|planted| {
+                planted.carrier == carrier && planted.entity == slot.actor && planted.slot == slot.k
+            })
+            .fold(text, |text, planted| format!("{text} {}", planted.canary))
+    }
+
     fn message_slot(&mut self, slot: Slot) -> Result<(), WorldError> {
         let spec = self.config.sessions[slot.spec].clone();
         let k = slot.k;
         let observation = self.open(&slot, spec.events_at(k))?;
         let text = self.text(&slot)?;
+        let text = self.planted(&slot, Carrier::Summary, text);
         let earlier = self.entities[slot.entity].messages.clone();
         let commits = self.commits.clone();
         let cites = match commits.is_empty() {
@@ -461,6 +517,7 @@ impl Generator {
         let message = self.emit(&slot, observation, payload, &predecessors);
         if fires(spec.tool_span_every, k) {
             let output = self.text(&slot)?;
+            let output = self.planted(&slot, Carrier::ToolOutput, output);
             let payload = Payload::ToolSpan {
                 call_id: format!("{message_id}-call0"),
                 message_id,
@@ -498,6 +555,7 @@ impl Generator {
         let k = slot.k;
         let observation = self.open(&slot, spec.events_at(k))?;
         let message = self.text(&slot)?;
+        let message = self.planted(&slot, Carrier::CommitMessage, message);
         let oid_key = json!({"repository": slot.actor, "seq": k});
         let oid = protocol_digest(OID_PROTOCOL, &oid_key).expect("oid key is canonical")[..40]
             .to_string();
