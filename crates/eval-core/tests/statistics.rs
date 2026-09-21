@@ -1320,10 +1320,27 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             Some(StatisticsError::RunNotCompleted(status))
         );
     }
+    // A required N of zero is no power target; the plan is refused before it freezes.
+    let mut no_target = family.clone();
+    no_target.icc_pilot.required_n_for_margin = 0;
+    assert_eq!(
+        no_target.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
+    // The standalone bootstrap refuses repeated pair ids like `analyze` does.
+    let mut two_worlds = copies.clone();
+    for pair in &mut two_worlds[150..] {
+        pair.cluster.world_seed = 1;
+    }
+    assert_eq!(
+        cluster_bootstrap_interval(&two_worlds, ClusteringUnit::WorldSeed, 300, 7, 40).err(),
+        Some(StatisticsError::DuplicatePair {
+            pair_id: "cargo-0".to_string()
+        })
+    );
     // A plan of zero pairs computes no gate and is refused before it freezes.
     let mut empty_plan = family.clone();
     empty_plan.stopping_rule = StoppingRule::FixedN { pairs: 0 };
-    empty_plan.icc_pilot.required_n_for_margin = 0;
     assert_eq!(empty_plan.validate(), Err(StatisticsError::NoPairs));
     // The rate helpers refuse counts past the safe range instead of panicking.
     assert_eq!(

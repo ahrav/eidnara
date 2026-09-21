@@ -942,7 +942,8 @@ ICCs and refuses a pilot that disagrees with its own evidence, whose
 counts the ICC could not have been estimated from (fewer than two families,
 fewer worlds than families, or no replication within worlds), whose ICCs
 differ when every family holds exactly one world (the two partitions then
-coincide), whose ICC at either level exceeds one, or whose recorded `families` (the distinct, sorted
+coincide), whose ICC at either level exceeds one, whose `required_n_for_margin`
+is zero (no power target), or whose recorded `families` (the distinct, sorted
 families it sampled) are not the registered families (the pilot sampled the
 registered population, so its ICCs describe the campaign's clusters and the
 family-unit projection spreads items over exactly those families)
@@ -1036,8 +1037,8 @@ the manifest's `result_digest` is `PairsNotManifestResult` (so rows cannot
 be relabeled or re-scored behind the recorded ids), more distinct worlds than the pilot's
 `max_affordable_worlds` is `WorldsExceedAffordable`, and a world seed past
 canonical JSON's safe integer is `WorldSeedOutOfRange`, as it is from
-`cluster_bootstrap_interval`, whose own draw seed is likewise
-`BootstrapSeedOutOfRange`), then the table's own
+`cluster_bootstrap_interval`, which also refuses a repeated pair id and whose
+own draw seed is likewise `BootstrapSeedOutOfRange`), then the table's own
 power (the pair count deflated by the pilot's design effect at the clusters
 the table actually spans, with the size-weighted mean cluster
 `sum(m_i^2) / n` so unequal clusters are not read as equal ones, under the

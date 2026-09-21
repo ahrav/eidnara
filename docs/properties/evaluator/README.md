@@ -939,7 +939,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   `WorldsExceedAffordable`; a world seed of `2^53 + 1` is
   `WorldSeedOutOfRange` from `analyze`, `run_icc_pilot`, and
   `cluster_bootstrap_interval`, whose draw seed of `2^53` is
-  `BootstrapSeedOutOfRange`; an `incomplete`, `refused`, or `blocked` manifest
+  `BootstrapSeedOutOfRange` and which refuses 300 copies of one pair over two
+  worlds as `DuplicatePair`; a required N of zero is `PilotInconsistent`; an `incomplete`, `refused`, or `blocked` manifest
   is `RunNotCompleted`; a manifest with the wrong schema or a `sample_order`
   that is not a permutation is `InvalidManifest`; a two-family, two-world
   pilot recording different family and world ICCs is `PilotInconsistent`;

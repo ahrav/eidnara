@@ -286,6 +286,21 @@ impl ClusterKey {
     }
 }
 
+/// The distinct pair ids of a table, or the first id that repeats: a copy of a
+/// pair is not another pair, at any entry that counts them.
+fn distinct_pair_ids(pairs: &[PairOutcome]) -> Result<BTreeSet<&str>, StatisticsError> {
+    let mut seen = BTreeSet::new();
+    match pairs
+        .iter()
+        .find(|pair| !seen.insert(pair.pair_id.as_str()))
+    {
+        Some(repeat) => Err(StatisticsError::DuplicatePair {
+            pair_id: repeat.pair_id.clone(),
+        }),
+        None => Ok(seen),
+    }
+}
+
 /// A world seed past canonical JSON's safe integer would not survive the
 /// TypeScript reference or a canonical record, so it is refused at the entry
 /// rather than merged with its neighbor.
@@ -546,9 +561,11 @@ impl AnalysisFamily {
         // ones `intraclass_correlation` could have estimated both ICCs from: two
         // or more families, at least as many worlds, and replication within
         // worlds; when every family holds exactly one world the two partitions
-        // coincide and their ICCs must agree.
+        // coincide and their ICCs must agree. A required N of zero is no power
+        // target at all, so it is refused too.
         let pilot = &self.icc_pilot;
         if pilot.max_affordable_worlds == 0
+            || pilot.required_n_for_margin == 0
             || pilot.icc_family > Ratio::ONE
             || pilot.icc_world_seed > Ratio::ONE
             || pilot.n_families < 2
@@ -861,6 +878,7 @@ pub fn cluster_bootstrap_interval(
 ) -> Result<IntervalOutcome, StatisticsError> {
     let threshold = threshold.max(ITEM_COUNT_THRESHOLD);
     check_seeds(pairs.iter().map(|pair| &pair.cluster))?;
+    distinct_pair_ids(pairs)?;
     // The draw key carries the seed as a decimal the reference must reproduce.
     if u128::from(seed) > MAX_SAFE {
         return Err(StatisticsError::BootstrapSeedOutOfRange(seed));
@@ -1037,23 +1055,15 @@ pub fn analyze(
             family: pair.cluster.family.clone(),
         });
     }
-    let mut seen = BTreeSet::new();
-    if let Some(repeat) = pairs.iter().find(|pair| !seen.insert(&pair.pair_id)) {
-        return Err(StatisticsError::DuplicatePair {
-            pair_id: repeat.pair_id.clone(),
-        });
-    }
+    let seen = distinct_pair_ids(pairs)?;
     // The manifest's samples are the pairs; a table of other pairs, however
     // many, is not this campaign's.
     let samples: BTreeSet<&str> = manifest.sample_ids.iter().map(String::as_str).collect();
-    if seen.len() != samples.len() || !seen.iter().all(|id| samples.contains(id.as_str())) {
+    if seen != samples {
         return Err(StatisticsError::PairsNotManifestSamples {
             pairs: seen.len(),
             samples: samples.len(),
-            first_unrecorded: seen
-                .iter()
-                .find(|id| !samples.contains(id.as_str()))
-                .map(|id| id.to_string()),
+            first_unrecorded: seen.difference(&samples).next().map(|id| id.to_string()),
         });
     }
     // The manifest's `result_digest` is the digest of the completed table, so
