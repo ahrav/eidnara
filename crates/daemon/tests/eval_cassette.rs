@@ -467,6 +467,31 @@ fn memory_reviewer_replays_through_the_keyed_peer_scenario(coverage: &mut Covera
             SendError::Status(409)
         ));
         assert_eq!(served.await.unwrap().len(), 3);
+        // The peer waits `idle` for each next call, so reviewer calls spaced by
+        // a campaign's other work are served when the window is raised.
+        for (idle, served_count) in [(Duration::from_millis(50), 1), (Duration::from_secs(5), 2)] {
+            let mut peer = Peer::start().await;
+            peer.idle = idle;
+            let sender = peer.sender_with_credential("cred-7");
+            let served = serve_keyed(
+                &mut peer,
+                2,
+                vec![
+                    (key.clone(), text_response("one")),
+                    (key.clone(), text_response("two")),
+                ],
+                "cred-7",
+            );
+            assert_eq!(send(&sender, &prompt).await.unwrap(), "one");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let second = send(&sender, &prompt).await;
+            assert_eq!(
+                second.is_ok(),
+                served_count == 2,
+                "idle {idle:?}: {second:?}"
+            );
+            assert_eq!(served.await.unwrap().len(), served_count, "idle {idle:?}");
+        }
         // The provider identity is the dialled host, so another host misses too.
         let mut relocated = key.clone();
         relocated.provider = "api.anthropic.com/v1/messages@2023-06-01".to_string();

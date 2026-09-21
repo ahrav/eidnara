@@ -875,7 +875,9 @@ provider, model, credential_id}`: the SHA-256 of the request body (what
 `{host}/v1/messages@{anthropic-version}` identity the production sender
 reports, the body's `model`, and the credential id the peer is configured with
 (the header carries only the secret). Each entry answers one request, and
-equal keys (independent jobs can send one body) answer in recorded order. A
+equal keys (independent jobs can send one body) answer in recorded order; the
+peer waits `Peer::idle` (five seconds by default) for each next call, which a
+run whose reviewer calls are far apart raises to its own deadline. A
 key with no unconsumed entry is an HTTP 409
 `cassette_miss` and a `SendError::Status(409)` at the sender, and every later
 request on that peer is refused too. A run that spawns no reviewer worker

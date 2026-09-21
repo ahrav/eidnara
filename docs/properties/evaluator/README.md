@@ -776,8 +776,9 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   id, the request's model, and the SHA-256 of `MessagesRequest::body`'s bytes;
   the same body replays once through `serve_keyed` and misses when sent
   again, each entry answering one request, and two entries under one key
-  answer in recorded order before the third request misses; a changed body,
-  model, or
+  answer in recorded order before the third request misses; a second call
+  after the peer's `idle` window is not served and is once the window is
+  raised; a changed body, model, or
   credential each miss with a 409 the sender reports as
   `SendError::Status(409)`, after which the recorded body is refused too; an
   entry keyed to another host misses.
