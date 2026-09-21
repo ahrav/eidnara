@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use context_core::canonical_json::ContractError;
 use context_core::redaction::RedactionErrorKind;
 use eval_core::{
     BACKEND_COVERED_FIELDS, BackendRecord, Boundary, CASSETTE_GENERATOR_VERSION, CASSETTE_SCHEMA,
@@ -292,6 +293,15 @@ fn a_fractional_temperature_digests_exactly() {
         request_digest(&hotter.covered().unwrap()).unwrap(),
         request_digest(&warm.covered().unwrap()).unwrap()
     );
+    // A temperature that is not a JSON number is refused, not digested as text.
+    for written in [json!("0.7"), json!(null), json!([0.7])] {
+        let mut odd = opencode_request();
+        odd.body["temperature"] = written.clone();
+        assert!(
+            matches!(odd.covered(), Err(CassetteError::TemperatureNotDecimal(_))),
+            "{written}"
+        );
+    }
 }
 
 #[test]
@@ -403,6 +413,17 @@ fn only_a_terminated_nonce_is_normalized() {
         opencode_request().covered().unwrap()["body"]["system"][0]["text"],
         json!("You are opencode.")
     );
+    // The billing header lives in the system blocks; the same text in a user
+    // message is model-visible content and digests as written.
+    let message_digest = |text: &str| {
+        let mut request = opencode_request();
+        request.body["messages"][0]["content"][0]["text"] = json!(text);
+        request_digest(&request.covered().unwrap()).unwrap()
+    };
+    assert_ne!(
+        message_digest("a cch=1111; b"),
+        message_digest("a cch=2222; b")
+    );
 }
 
 #[test]
@@ -436,6 +457,12 @@ fn namespaces_bind_the_cassette_and_equal_digests_elsewhere_refuse() {
     assert!(matches!(
         recording.record(OTHER_NAMESPACE, Boundary::Opencode, json!({}), json!({})),
         Err(CassetteError::WrongNamespace { .. })
+    ));
+    // An exchange offered under another namespace is missing from this
+    // recording, so it has no file form either.
+    assert!(matches!(
+        recording.to_file().err(),
+        Some(CassetteError::WrongNamespace { .. })
     ));
     assert_eq!(
         recording
@@ -475,10 +502,14 @@ fn provenance_schema_and_version_pins_are_recomputed_on_read() {
     );
     let mut schema = file.clone();
     schema["schema"] = json!("eval-cassette/v2");
-    assert!(matches!(
-        Cassette::replay(&schema, NAMESPACE),
-        Err(CassetteError::SchemaMismatch { .. })
-    ));
+    // A later schema's new field reports the version, not a shape refusal.
+    schema["later"] = json!(1);
+    assert_eq!(
+        Cassette::replay(&schema, NAMESPACE).err(),
+        Some(CassetteError::SchemaMismatch {
+            found: "eval-cassette/v2".to_string()
+        })
+    );
     let mut generator = file.clone();
     generator["provenance"]["generator_version"] = json!("eval-cassette-ts-v1");
     assert!(matches!(
@@ -520,7 +551,23 @@ fn planted_secrets_and_unscannable_frames_are_refused_and_the_cassette_never_per
             )
             .unwrap_err();
         assert_eq!(cassette.cases().len(), 1, "a refused entry never exists");
-        // One admitted entry does not make a partial cassette persistable.
+        // One admitted entry does not make a partial cassette persistable, and
+        // a later refusal does not replace the first one reported.
+        assert_eq!(cassette.to_file().err(), Some(error.clone()));
+        let mut oversized = opencode_request();
+        oversized.body["messages"][0]["content"][0]["text"] =
+            json!("x".repeat(context_core::redaction::MAX_REDACTABLE_BYTES + 1));
+        assert_eq!(
+            cassette
+                .record(
+                    NAMESPACE,
+                    Boundary::Opencode,
+                    oversized.covered().unwrap(),
+                    frames(),
+                )
+                .unwrap_err(),
+            CassetteError::RedactionRefused(Location::Request, RedactionErrorKind::InputLimit)
+        );
         assert_eq!(cassette.to_file().err(), Some(error.clone()));
         error
     };
@@ -552,6 +599,23 @@ fn planted_secrets_and_unscannable_frames_are_refused_and_the_cassette_never_per
     );
     let text = serde_json::to_string(&recorded(&[opencode_request()])).unwrap();
     assert!(!text.contains("AKIA") && !text.contains("sk-ant-"));
+}
+
+#[test]
+fn a_request_the_boundary_could_not_project_refuses_the_file_too() {
+    let mut cassette = Cassette::recording(NAMESPACE, Value::Null).unwrap();
+    cassette
+        .record(
+            NAMESPACE,
+            Boundary::Opencode,
+            opencode_request().covered().unwrap(),
+            frames(),
+        )
+        .unwrap();
+    let error = CassetteError::UnknownRequestField("metadata".to_string());
+    assert_eq!(cassette.refuse(error.clone()), error);
+    assert_eq!(cassette.cases().len(), 1);
+    assert_eq!(cassette.to_file().err(), Some(error));
 }
 
 #[test]
@@ -619,43 +683,108 @@ fn backend_records_cover_the_pinned_fields_with_exact_temperatures() {
     );
 }
 
+/// Stands in for request-derived content in an error payload.
+const CANARY: &str = "CANARY-request-content";
+
+fn request_shaped_errors() -> Vec<CassetteError> {
+    vec![
+        CassetteError::Shape(format!("invalid type: {CANARY}")),
+        CassetteError::MalformedBody,
+        CassetteError::UnknownRequestField(CANARY.to_string()),
+        CassetteError::TemperatureNotDecimal(CANARY.to_string()),
+        CassetteError::NotCanonical(ContractError::NotCanonical(format!(
+            "number {CANARY} is not a safe integer"
+        ))),
+    ]
+}
+
+/// Each error paired with the oracle-owned values its detail must show.
+fn oracle_owned_errors() -> Vec<(CassetteError, Vec<&'static str>)> {
+    vec![
+        (
+            CassetteError::SchemaMismatch {
+                found: "eval-cassette/v9".to_string(),
+            },
+            vec!["eval-cassette/v9"],
+        ),
+        (
+            CassetteError::GeneratorVersionMismatch {
+                found: "eval-cassette-ts-v1".to_string(),
+            },
+            vec!["eval-cassette-ts-v1"],
+        ),
+        (
+            CassetteError::CoveredFieldsMismatch {
+                found: "eval-cassette-covered/v0".to_string(),
+            },
+            vec!["eval-cassette-covered/v0"],
+        ),
+        (
+            CassetteError::NamespaceMismatch {
+                recorded: NAMESPACE.to_string(),
+                expected: OTHER_NAMESPACE.to_string(),
+            },
+            vec![NAMESPACE, OTHER_NAMESPACE],
+        ),
+        (
+            CassetteError::WrongNamespace {
+                recorded: NAMESPACE.to_string(),
+                offered: OTHER_NAMESPACE.to_string(),
+            },
+            vec![NAMESPACE, OTHER_NAMESPACE],
+        ),
+        (
+            CassetteError::ProvenanceMismatch {
+                recorded: "aa".repeat(32),
+                computed: FIXTURE_REQUEST_DIGEST.to_string(),
+            },
+            vec![FIXTURE_REQUEST_DIGEST],
+        ),
+        (CassetteError::EntryDigestMismatch { index: 7 }, vec!["7"]),
+        (
+            CassetteError::RedactionRefused(Location::Response, RedactionErrorKind::InputLimit),
+            vec!["Response", "InputLimit"],
+        ),
+        (
+            CassetteError::ScannerUnavailable(RedactionErrorKind::Construction),
+            vec!["Construction"],
+        ),
+        (CassetteError::RecordOnReplay, vec![]),
+        (CassetteError::LookupOnRecord, vec![]),
+    ]
+}
+
 #[test]
 fn every_error_names_its_wire_kind() {
-    let kinds: BTreeSet<&str> = [
-        CassetteError::SchemaMismatch {
-            found: String::new(),
-        },
-        CassetteError::GeneratorVersionMismatch {
-            found: String::new(),
-        },
-        CassetteError::CoveredFieldsMismatch {
-            found: String::new(),
-        },
-        CassetteError::NamespaceMismatch {
-            recorded: String::new(),
-            expected: String::new(),
-        },
-        CassetteError::WrongNamespace {
-            recorded: String::new(),
-            offered: String::new(),
-        },
-        CassetteError::ProvenanceMismatch {
-            recorded: String::new(),
-            computed: String::new(),
-        },
-        CassetteError::EntryDigestMismatch { index: 0 },
-        CassetteError::Shape(String::new()),
-        CassetteError::MalformedBody,
-        CassetteError::UnknownRequestField(String::new()),
-        CassetteError::TemperatureNotDecimal(String::new()),
-        CassetteError::RedactionRefused(Location::Request, RedactionErrorKind::SecretDetected),
-        CassetteError::ScannerUnavailable(RedactionErrorKind::Construction),
-        CassetteError::RecordOnReplay,
-        CassetteError::LookupOnRecord,
-    ]
-    .iter()
-    .map(CassetteError::kind)
-    .collect();
-    assert_eq!(kinds.len(), 15, "kinds are distinct");
+    let kinds: BTreeSet<&str> = request_shaped_errors()
+        .iter()
+        .chain(oracle_owned_errors().iter().map(|(error, _)| error))
+        .map(CassetteError::kind)
+        .collect();
+    assert_eq!(kinds.len(), 16, "kinds are distinct");
     assert!(kinds.contains("RedactionRefused"));
+    assert!(kinds.contains("NotCanonical"));
+}
+
+#[test]
+fn no_wire_detail_carries_request_content() {
+    for error in request_shaped_errors() {
+        assert_eq!(error.detail(), "", "{}: detail must be empty", error.kind());
+        assert!(
+            error.to_string().contains(CANARY) || error == CassetteError::MalformedBody,
+            "{}: the fixture carries the canary through Display",
+            error.kind()
+        );
+    }
+    for (error, visible) in oracle_owned_errors() {
+        let detail = error.detail();
+        assert!(!detail.contains(CANARY), "{}: {detail}", error.kind());
+        for value in visible {
+            assert!(
+                detail.contains(value),
+                "{}: detail {detail:?} lacks {value:?}",
+                error.kind()
+            );
+        }
+    }
 }

@@ -3,7 +3,6 @@
 //! covered fields, and the reviewer's attempt-marker tuple (body digest,
 //! provider identity, model, credential id).
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -167,8 +166,32 @@ impl From<&BackendTerminal> for WireTerminal {
     }
 }
 
+/// Every `FinishReason`; the `match` fails to compile when the host adds a
+/// variant, so the decode list cannot drift behind `as_wire_str`.
+pub fn finish_reasons() -> [FinishReason; 2] {
+    [FinishReason::Completed, FinishReason::Length].map(|reason| match reason {
+        FinishReason::Completed | FinishReason::Length => reason,
+    })
+}
+
+/// Every `ErrorClass`, guarded the same way as [`finish_reasons`].
+pub fn error_classes() -> [ErrorClass; 4] {
+    [
+        ErrorClass::Transient,
+        ErrorClass::Permanent,
+        ErrorClass::AuthRequired,
+        ErrorClass::ContextOverflow,
+    ]
+    .map(|class| match class {
+        ErrorClass::Transient
+        | ErrorClass::Permanent
+        | ErrorClass::AuthRequired
+        | ErrorClass::ContextOverflow => class,
+    })
+}
+
 fn finish_reason(text: &str) -> Option<FinishReason> {
-    [FinishReason::Completed, FinishReason::Length]
+    finish_reasons()
         .into_iter()
         .find(|reason| reason.as_wire_str() == text)
 }
@@ -199,15 +222,10 @@ impl TryFrom<WireError> for BackendError {
     type Error = String;
 
     fn try_from(error: WireError) -> Result<Self, String> {
-        let class = [
-            ErrorClass::Transient,
-            ErrorClass::Permanent,
-            ErrorClass::AuthRequired,
-            ErrorClass::ContextOverflow,
-        ]
-        .into_iter()
-        .find(|class| class.as_wire_str() == error.class)
-        .ok_or(error.class)?;
+        let class = error_classes()
+            .into_iter()
+            .find(|class| class.as_wire_str() == error.class)
+            .ok_or(error.class)?;
         Ok(Self {
             class,
             message: error.message,
@@ -300,6 +318,11 @@ impl CassetteBackend {
 
     pub fn terminal(&self) -> Option<CassetteMiss> {
         self.cassette.lock().unwrap().terminal().cloned()
+    }
+
+    /// Recorded entries no request has consumed; a faithful replay leaves none.
+    pub fn unconsumed(&self) -> usize {
+        self.cassette.lock().unwrap().unconsumed()
     }
 
     fn refused(code: &str, detail: impl std::fmt::Display) -> BackendTerminal {
@@ -410,7 +433,11 @@ impl LlmExecutionBackend for CassetteBackend {
     ) -> BackendFuture {
         let covered = match record_of(&request).and_then(|record| record.covered()) {
             Ok(covered) => covered,
-            Err(error) => return Box::pin(async move { Self::refused("cassette_request", error) }),
+            Err(error) => {
+                // The exchange this request stands for can be in no file.
+                let error = self.cassette.lock().unwrap().refuse(error);
+                return Box::pin(async move { Self::refused("cassette_request", error) });
+            }
         };
         match &self.inner {
             Some(inner) => self.record_through(inner, covered, request, events, cancel),
@@ -478,22 +505,25 @@ impl ReviewerKey {
     }
 }
 
-/// Serves `turns` reviewer connections strictly from `entries`. A request
-/// whose key has no entry is answered with a typed `cassette_miss` refusal,
-/// and every later request is refused too, so the run stops at the first miss
-/// as it does at the other two boundaries.
+/// Serves `turns` reviewer connections strictly from `entries`, each entry
+/// answering one request; equal keys answer in recorded order, as equal
+/// digests do in the core. A request whose key has no unconsumed entry is
+/// answered with a typed `cassette_miss` refusal, and every later request is
+/// refused too, so the run stops at the first miss as it does at the other two
+/// boundaries.
 pub fn serve_keyed(
     peer: &mut Peer,
     turns: usize,
-    entries: BTreeMap<ReviewerKey, Vec<u8>>,
+    mut entries: Vec<(ReviewerKey, Vec<u8>)>,
     credential_id: &str,
 ) -> tokio::task::JoinHandle<Vec<Observed>> {
     let credential_id = credential_id.to_string();
     let mut missed = false;
     peer.serve_each(turns, move |request| {
         let key = ReviewerKey::of(request, &credential_id);
-        match entries.get(&key) {
-            Some(response) if !missed => response.clone(),
+        let recorded = entries.iter().position(|(recorded, _)| *recorded == key);
+        match recorded {
+            Some(index) if !missed => entries.remove(index).1,
             _ => {
                 missed = true;
                 let body = json!({"type": "error", "error": {"type": "cassette_miss", "body_digest": key.body_digest}});

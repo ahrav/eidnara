@@ -8,6 +8,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { attachStrictJsonlReader } from "../pi-runner/rpc-client";
 import { waitForChildExit } from "../process-exit";
+import { EVAL_RUNNER } from "../rust-runner/daemon-examples";
 import { buildDaemonExample } from "../rust-runner/hermetic-host";
 
 export type CassetteMode = "record" | "replay";
@@ -62,9 +63,15 @@ export class CassetteRefused extends Error {
 
 const CALL_TIMEOUT_MS = 30_000;
 
+/** A process that answers each stdin line with one reply line, as `eval_runner cassette-oracle` does. */
+export interface OracleCommand {
+    binary: string;
+    args: string[];
+}
+
 type Reply = { ok: Record<string, unknown> } | { error: { kind: string; detail: string } };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -111,14 +118,13 @@ export class CassetteOracle {
         child.stdin?.once("error", fail("stdin"));
     }
 
-    static async start(): Promise<CassetteOracle> {
-        const binary = await buildDaemonExample({
-            example: "eval_runner",
-            feature: "eval-runner",
-            prebuiltEnv: "EIDNARA_E2E_EVAL_RUNNER_BIN",
-        });
+    static async start(options: { command?: OracleCommand } = {}): Promise<CassetteOracle> {
+        const command = options.command ?? {
+            binary: await buildDaemonExample(EVAL_RUNNER),
+            args: ["cassette-oracle"],
+        };
         // stderr is inherited, never captured: a child diagnostic must not travel into an Error.
-        const child = spawn(binary, ["cassette-oracle"], { stdio: ["pipe", "pipe", "inherit"] });
+        const child = spawn(command.binary, command.args, { stdio: ["pipe", "pipe", "inherit"] });
         return new CassetteOracle(child);
     }
 
@@ -131,6 +137,7 @@ export class CassetteOracle {
         const ok = await this.call({ op: "lookup", namespace, request });
         if (isRecord(ok.hit)) {
             const hit = section(ok, "hit", { request_digest: isText, response: isRecord });
+            // SAFETY: `section` threw unless every `CassetteHit` field passed its runtime check.
             return { hit: hit as unknown as CassetteHit };
         }
         const miss = section(ok, "miss", {
@@ -139,6 +146,7 @@ export class CassetteOracle {
             request_digest: isText,
             nearest_recorded: isTextOrNull,
         });
+        // SAFETY: `section` threw unless every `CassetteMiss` field passed its runtime check.
         return { miss: miss as unknown as CassetteMiss };
     }
 
@@ -165,6 +173,7 @@ export class CassetteOracle {
             unconsumed: isCount,
             input_sha256: isTextOrNull,
         });
+        // SAFETY: `section` threw unless every `CloseReport` field passed its runtime check.
         return close as unknown as CloseReport;
     }
 
@@ -181,11 +190,16 @@ export class CassetteOracle {
 
     private onLine(line: string): void {
         const next = this.pending.shift();
+        // `next` left the queue above, so `failAll` alone would leave its promise pending forever.
+        const fail = (error: Error) => {
+            next?.fail(error);
+            this.failAll(error);
+        };
         let parsed: unknown;
         try {
             parsed = JSON.parse(line);
         } catch (error) {
-            this.failAll(new Error(`cassette oracle reply unreadable: ${String(error)}`));
+            fail(new Error(`cassette oracle reply unreadable: ${String(error)}`));
             return;
         }
         const error = isRecord(parsed) ? parsed.error : undefined;
@@ -196,7 +210,7 @@ export class CassetteOracle {
         } else if (isRecord(error) && isText(error.kind) && isText(error.detail)) {
             next.settle({ error: { kind: error.kind as string, detail: error.detail as string } });
         } else {
-            this.failAll(new Error("cassette oracle reply is neither ok nor error"));
+            fail(new Error("cassette oracle reply is neither ok nor error"));
         }
     }
 

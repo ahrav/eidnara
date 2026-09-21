@@ -115,6 +115,116 @@ describe("MockProvider cassette mode", () => {
         expect(mock.scriptedSelectionCount()).toBe(1);
     });
 
+    test("a delayed record-mode response is admitted by the cassette that accepted the request", async () => {
+        const accepted = new FakeOracle([]);
+        const later = new FakeOracle([]);
+        const { mock, baseURL } = await started({
+            oracle: accepted,
+            mode: "record",
+            namespace: NAMESPACE,
+        });
+        mock.setDefault({ text: "slow", usage: USAGE, delayMs: 80 });
+        const pending = post(baseURL, request);
+        await Bun.sleep(20);
+        // The binding changes while the request sleeps; the in-flight exchange stays with `accepted`.
+        mock.useCassette({ oracle: later, mode: "record", namespace: NAMESPACE });
+        const response = await pending;
+        expect(response.status).toBe(200);
+        expect(accepted.recorded).toHaveLength(1);
+        expect(later.recorded).toHaveLength(0);
+    });
+
+    test("a completion that lands after reset() writes no miss or refusal into the reset logs", async () => {
+        const inner = new FakeOracle([]);
+        const slow: CassetteSession["oracle"] = {
+            lookup: async (namespace, request) => {
+                await Bun.sleep(80);
+                return inner.lookup(namespace, request);
+            },
+            record: (namespace, request, response) => inner.record(namespace, request, response),
+        };
+        const { mock, baseURL } = await started({
+            oracle: slow,
+            mode: "replay",
+            namespace: NAMESPACE,
+        });
+        const missed = post(baseURL, request);
+        await Bun.sleep(20);
+        mock.reset();
+        expect((await missed).status).toBe(400);
+        expect(mock.cassetteMissLog()).toEqual([]);
+
+        mock.useCassette({ oracle: slow, mode: "replay", namespace: NAMESPACE });
+        inner.refuse = new CassetteRefused("WrongNamespace", "");
+        const refused = post(baseURL, request);
+        await Bun.sleep(20);
+        mock.reset();
+        expect((await refused).status).toBe(400);
+        expect(mock.cassetteRefusalLog()).toEqual([]);
+    });
+
+    test("concurrent identical requests are recorded in capture order, not completion order", async () => {
+        const oracle = new FakeOracle([]);
+        const { mock, baseURL } = await started({ oracle, mode: "record", namespace: NAMESPACE });
+        mock.enqueue({ text: "first", usage: USAGE, delayMs: 80 });
+        mock.enqueue({ text: "second", usage: USAGE });
+        const first = post(baseURL, request, false);
+        await Bun.sleep(10);
+        const second = post(baseURL, request, false);
+        expect((await first).status).toBe(200);
+        expect((await second).status).toBe(200);
+        const texts = oracle.recorded.map(
+            ({ response }) => JSON.parse(response.frames[0]).content[0].text,
+        );
+        expect(texts).toEqual(["first", "second"]);
+    });
+
+    test("useCassette() starts a new log generation, so a pending lookup's miss stays with the old binding", async () => {
+        const inner = new FakeOracle([]);
+        const slow: CassetteSession["oracle"] = {
+            lookup: async (namespace, request) => {
+                await Bun.sleep(80);
+                return inner.lookup(namespace, request);
+            },
+            record: (namespace, request, response) => inner.record(namespace, request, response),
+        };
+        const { mock, baseURL } = await started({
+            oracle: slow,
+            mode: "replay",
+            namespace: NAMESPACE,
+        });
+        const missed = post(baseURL, request);
+        await Bun.sleep(20);
+        mock.useCassette({ oracle: new FakeOracle([]), mode: "replay", namespace: NAMESPACE });
+        expect((await missed).status).toBe(400);
+        expect(mock.cassetteMissLog()).toEqual([]);
+    });
+
+    test("a JSON body that is not an object is scripted as an empty object and reaches the oracle as text", async () => {
+        const oracle = new FakeOracle([]);
+        const { mock, baseURL } = await started({ oracle, mode: "record", namespace: NAMESPACE });
+        mock.setDefault({ text: "ok", usage: USAGE });
+        const response = await post(baseURL, "null");
+        expect(response.status).toBe(200);
+        expect(oracle.recorded[0]?.request.body_text).toBe("null");
+        expect(mock.lastRequest()?.body).toEqual({});
+    });
+
+    test("a mock misconfiguration in record mode is served as a 500 and never recorded", async () => {
+        const oracle = new FakeOracle([]);
+        const { mock, baseURL } = await started({ oracle, mode: "record", namespace: NAMESPACE });
+        // Neither `usage` nor `error`: a script bug, not a provider behavior worth a cassette case.
+        mock.setDefault({ text: "no usage" });
+        const response = await post(baseURL, request);
+        expect(response.status).toBe(500);
+        expect(await response.json()).toEqual({
+            type: "error",
+            error: { type: "mock_error", message: "MockResponse requires `usage` or `error`" },
+        });
+        expect(oracle.recorded).toHaveLength(0);
+        expect(mock.cassetteRefusalLog()).toEqual([]);
+    });
+
     test("a recording refusal serves only the refusal kind and persists nothing", async () => {
         const oracle = new FakeOracle([]);
         oracle.refuse = new CassetteRefused("RedactionRefused", "(Request, SecretDetected)");

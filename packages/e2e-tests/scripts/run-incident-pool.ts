@@ -196,8 +196,8 @@ async function main(): Promise<number> {
         console.error(
             `[incident-pool] rust prerequisites unresolved: ${prereqs.missing.join("; ")}`,
         );
-    } else if (prereqs.fixtureBin) {
-        process.env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN = prereqs.fixtureBin;
+    } else {
+        for (const [name, path] of Object.entries(prereqs.binaries)) process.env[name] = path;
     }
     try {
         const reports: IncidentPoolReport[] = [];
