@@ -5691,6 +5691,9 @@ pub struct MemoryStore {
     /// lock serializes scopes so one request cannot lend its authority identity to another.
     facade_authority_scope: Arc<Mutex<Option<FacadeAuthorityScope>>>,
     facade_mutation_lock: Mutex<()>,
+    /// Caller-clock instant at or after which the next capture enqueue prunes expired
+    /// terminal identities; starts at zero so the first enqueue after open prunes.
+    pub(crate) memory_capture_prune_due_ms: std::sync::atomic::AtomicI64,
     #[cfg(any(test, feature = "test-support"))]
     abandon_history_summarizer_hook: AbandonHistorySummarizerHook,
     #[cfg(any(test, feature = "test-support"))]
@@ -6142,6 +6145,7 @@ impl MemoryStore {
             note_caller_project,
             facade_authority_scope,
             facade_mutation_lock: Mutex::new(()),
+            memory_capture_prune_due_ms: std::sync::atomic::AtomicI64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             abandon_history_summarizer_hook: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(any(test, feature = "test-support"))]
@@ -6840,6 +6844,7 @@ impl MemoryStore {
                 )?;
             }
             retire_active_scan_scope(tx, "session", session_id)?;
+            crate::memory_capture::retire_capture_scans_for_session(tx, session_id)?;
             let tables = {
                 // Backend infrastructure tables belong to the store crate; the callback scope
                 // refuses to touch them and they hold no session rows.

@@ -19,7 +19,7 @@ use kernel::{
     AdmissionEvent, AdmissionRequest, ArtifactDestination, ArtifactIngestRequest, CommitIntent,
     Dimension, DomainSpec, EligibilityBinding, EventKind, ExportWindow, KernelStore, ProjectScope,
     ProviderEgress, RepositoryProvenance, ScopeSpec, ScopeTermSpec, Sensitivity, SourceClass,
-    SourceDescriptorRequest, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
+    SourceDescriptorRequest, SourceHold, SourceHoldAdmission, SourceHoldBinding, SourceHoldBounds,
     SourcePageBounds, SourceRow, TaintClass,
 };
 use retrieval::batch::{
@@ -484,22 +484,22 @@ impl Corpus {
         }
     }
 
-    pub fn export(&self) -> Vec<SourceRow> {
-        let binding = self.binding();
-        let hold = self
-            .kernel
+    pub fn capture_hold(&self) -> SourceHold {
+        self.kernel
             .capture_source_hold(
-                &binding,
+                &self.binding(),
                 SourceHoldBounds {
                     max_descriptor_rows: NonZeroUsize::new(256).unwrap(),
-                    admission: SourceHoldAdmission {
-                        max_references: NonZeroUsize::new(64).unwrap(),
-                        max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
-                    },
+                    admission: hold_admission(),
                     expiry_ms: NonZeroU64::new((20 * DAY_MS) as u64).unwrap(),
                 },
             )
-            .unwrap();
+            .unwrap()
+    }
+
+    /// Every snapshot row under `hold`, across pages.
+    pub fn export_under(&self, hold: &SourceHold) -> Vec<SourceRow> {
+        let binding = self.binding();
         let mut rows = Vec::new();
         let mut cursor = None;
         loop {
@@ -511,28 +511,52 @@ impl Corpus {
                     hold.captured_at,
                     ExportWindow::Snapshot,
                     cursor.as_ref(),
-                    SourcePageBounds {
-                        max_rows: NonZeroUsize::new(64).unwrap(),
-                        max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
-                        max_decoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
-                        max_row_bytes: NonZeroU64::new(1 << 16).unwrap(),
-                    },
+                    source_page_bounds(),
                 )
                 .unwrap();
             rows.extend(page.rows);
             match page.next {
                 Some(next) => cursor = Some(next),
-                None => break,
+                None => return rows,
             }
         }
+    }
+
+    pub fn export(&self) -> Vec<SourceRow> {
+        let hold = self.capture_hold();
+        let rows = self.export_under(&hold);
         self.kernel
-            .release_source_hold(&binding, &hold.hold_id, hold.captured_at)
+            .release_source_hold(&self.binding(), &hold.hold_id, hold.captured_at)
             .unwrap();
         rows
     }
 
     pub fn bootstrap(&self, data_home: &Path) -> (SearchProjection, Vec<SourceRow>) {
         let rows = self.export();
+        let hold_id = "0123456789abcdef0123456789abcdef";
+        let snapshot = self.tip();
+        (self.project(data_home, &rows, hold_id, snapshot), rows)
+    }
+
+    /// `bootstrap` under a real hold the caller keeps, so a catch-up consumer
+    /// can continue from the snapshot it acknowledges.
+    pub fn bootstrap_with_hold(
+        &self,
+        data_home: &Path,
+    ) -> (SearchProjection, SourceHold, Vec<SourceRow>) {
+        let hold = self.capture_hold();
+        let rows = self.export_under(&hold);
+        let projection = self.project(data_home, &rows, &hold.hold_id, hold.snapshot);
+        (projection, hold, rows)
+    }
+
+    fn project(
+        &self,
+        data_home: &Path,
+        rows: &[SourceRow],
+        hold_id: &str,
+        snapshot: i64,
+    ) -> SearchProjection {
         let projection = SearchProjection::open(data_home).unwrap();
         let kernel_incarnation_id = kernel_incarnation_id(data_home);
         projection
@@ -542,14 +566,13 @@ impl Corpus {
                 Ok(())
             })
             .unwrap();
-        let identities = row_identities(&rows);
-        let snapshot = self.tip();
+        let identities = row_identities(rows);
         let batch = batch_from_rows(
-            &rows,
+            rows,
             &identities,
             MutationIdentity {
                 kernel_incarnation_id,
-                hold_id: "0123456789abcdef0123456789abcdef".to_string(),
+                hold_id: hold_id.to_string(),
                 snapshot_commit_seq: snapshot,
                 through_commit_seq: snapshot,
             },
@@ -557,7 +580,23 @@ impl Corpus {
         )
         .unwrap();
         projection.apply_batch(&batch, batch_bounds(), 2).unwrap();
-        (projection, rows)
+        projection
+    }
+}
+
+pub fn hold_admission() -> SourceHoldAdmission {
+    SourceHoldAdmission {
+        max_references: NonZeroUsize::new(64).unwrap(),
+        max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+    }
+}
+
+pub fn source_page_bounds() -> SourcePageBounds {
+    SourcePageBounds {
+        max_rows: NonZeroUsize::new(64).unwrap(),
+        max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        max_decoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
+        max_row_bytes: NonZeroU64::new(1 << 16).unwrap(),
     }
 }
 

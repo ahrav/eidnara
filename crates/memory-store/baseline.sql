@@ -23,7 +23,7 @@ CREATE TABLE cache_state (
 CREATE TABLE memory_capture_jobs (
     job_id TEXT PRIMARY KEY,
     project TEXT NOT NULL,
-    harness TEXT NOT NULL CHECK (harness IN ('opencode','pi')),
+    harness TEXT NOT NULL CHECK (length(harness) > 0),
     session_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('user','assistant')),
@@ -31,6 +31,7 @@ CREATE TABLE memory_capture_jobs (
     prepared_json TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     failures INTEGER NOT NULL DEFAULT 0,
+    paused_until_ms INTEGER NOT NULL DEFAULT 0,
     retry_at_ms INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     commit_seq INTEGER,
@@ -39,7 +40,7 @@ CREATE TABLE memory_capture_jobs (
     CHECK (commit_seq IS NULL OR (text='' AND prepared_json IS NULL)),
     CHECK (abandoned_at_ms IS NULL OR (commit_seq IS NULL AND text='' AND prepared_json IS NULL AND last_error IS NOT NULL))
 );
-CREATE INDEX idx_memory_capture_pending ON memory_capture_jobs(project,harness,created_at_ms,job_id)
+CREATE INDEX idx_memory_capture_pending ON memory_capture_jobs(project,harness,created_at_ms)
     WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL;
 CREATE INDEX idx_memory_capture_session_project ON memory_capture_jobs(session_id,project);
 -- Covers the project status aggregate, whose predicate columns are indexed by

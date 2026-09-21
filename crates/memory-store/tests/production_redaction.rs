@@ -12,6 +12,7 @@ mod scan_audit;
 
 use cache_stability::{CoreState, DurabilityClass, FrozenUnit};
 use context_core::redaction::RedactionErrorKind;
+use memory_store::memory_capture::{CaptureEnqueue, CaptureSource, MAX_CAPTURE_ATTEMPTS};
 use memory_store::{
     AuthoritySeedRow, DURABLE_WRITE_REGISTRY, FacadeMutationOutcome, LineageAnchor,
     LineageConstituent, LineageDescentDisposition, LineageDescentRequest, MemoryStore,
@@ -241,6 +242,184 @@ fn active_scan_audit_expires_with_its_session_note_owner() {
             owner_copies: 5,
             detections: 1,
         }
+    );
+}
+
+fn capture_source(message_id: &'static str) -> CaptureSource<'static> {
+    CaptureSource {
+        project: "/project",
+        harness: "pi",
+        session_id: "session",
+        message_id,
+        role: "user",
+        text: "password=retained-secret. Use staging port 4321.",
+    }
+}
+
+fn accepted_capture(result: CaptureEnqueue) -> String {
+    match result {
+        CaptureEnqueue::Accepted { job_id, .. } => job_id,
+        other => panic!("capture source refused: {other:?}"),
+    }
+}
+
+#[test]
+fn active_scan_audit_expires_with_its_capture_source_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-capture-scan-retention");
+    let store = MemoryStore::open(&descriptor).unwrap();
+
+    let completed = accepted_capture(
+        store
+            .enqueue_memory_capture(capture_source("native-1"), 1)
+            .unwrap(),
+    );
+    assert_ne!(scan_audit_counts(temp.path()), ScanAuditCounts::EMPTY);
+    assert!(
+        store
+            .begin_memory_capture_attempt("/project", &completed, 0)
+            .unwrap()
+    );
+    store
+        .prepare_memory_capture("/project", &completed, "[]")
+        .unwrap();
+    assert!(
+        store
+            .complete_memory_capture("/project", &completed, 7)
+            .unwrap()
+    );
+    assert_eq!(
+        scan_audit_counts(temp.path()),
+        ScanAuditCounts::EMPTY,
+        "a completed source releases its text and the scan audit of that text"
+    );
+
+    let abandoned = accepted_capture(
+        store
+            .enqueue_memory_capture(capture_source("native-2"), 2)
+            .unwrap(),
+    );
+    assert_ne!(scan_audit_counts(temp.path()), ScanAuditCounts::EMPTY);
+    for _ in 0..MAX_CAPTURE_ATTEMPTS {
+        store
+            .begin_memory_capture_attempt("/project", &abandoned, 0)
+            .unwrap();
+        store
+            .fail_memory_capture("/project", &abandoned, "extraction_failed", 0, true, 50)
+            .unwrap();
+    }
+    assert_eq!(
+        store.memory_capture_status("/project").unwrap().pending,
+        0,
+        "the source must be abandoned before its audit is checked"
+    );
+    assert_eq!(
+        scan_audit_counts(temp.path()),
+        ScanAuditCounts::EMPTY,
+        "an abandoned source releases its text and the scan audit of that text"
+    );
+
+    accepted_capture(
+        store
+            .enqueue_memory_capture(capture_source("native-3"), 3)
+            .unwrap(),
+    );
+    assert_ne!(scan_audit_counts(temp.path()), ScanAuditCounts::EMPTY);
+    store.delete_session("session", "/project").unwrap();
+    assert_eq!(
+        scan_audit_counts(temp.path()),
+        ScanAuditCounts::EMPTY,
+        "deleting the session removes the capture rows and their scan audit together"
+    );
+}
+
+#[test]
+fn reconciliation_retry_retires_the_frozen_output_audit_and_keeps_the_source_audit() {
+    let temp = tempfile::tempdir().unwrap();
+    let descriptor =
+        MemoryStore::test_descriptor(temp.path(), "production-capture-reconciliation-audit");
+    let store = MemoryStore::open(&descriptor).unwrap();
+
+    let job = accepted_capture(
+        store
+            .enqueue_memory_capture(capture_source("native-1"), 1)
+            .unwrap(),
+    );
+    let source_audit = scan_audit_counts(temp.path());
+    assert_ne!(source_audit, ScanAuditCounts::EMPTY);
+
+    for _ in 0..3 {
+        assert!(
+            store
+                .begin_memory_capture_attempt("/project", &job, 0)
+                .unwrap()
+        );
+        store
+            .prepare_memory_capture("/project", &job, "[]")
+            .unwrap();
+        assert_ne!(
+            scan_audit_counts(temp.path()),
+            source_audit,
+            "frozen output records its own audit"
+        );
+        store
+            .retry_memory_capture_reconciliation("/project", &job, "[]")
+            .unwrap();
+        assert_eq!(
+            scan_audit_counts(temp.path()),
+            source_audit,
+            "clearing the frozen output retires its audit and keeps the source audit"
+        );
+    }
+
+    store
+        .prepare_memory_capture("/project", &job, "[]")
+        .unwrap();
+    assert!(store.complete_memory_capture("/project", &job, 7).unwrap());
+    assert_eq!(scan_audit_counts(temp.path()), ScanAuditCounts::EMPTY);
+}
+
+#[test]
+fn prepare_that_loses_a_terminal_race_records_no_frozen_output_audit() {
+    let temp = tempfile::tempdir().unwrap();
+    let descriptor =
+        MemoryStore::test_descriptor(temp.path(), "production-capture-prepare-race-audit");
+    let store = Arc::new(MemoryStore::open(&descriptor).unwrap());
+
+    let job = accepted_capture(
+        store
+            .enqueue_memory_capture(capture_source("native-1"), 1)
+            .unwrap(),
+    );
+    assert!(
+        store
+            .begin_memory_capture_attempt("/project", &job, 0)
+            .unwrap()
+    );
+    let before = scan_audit_counts(temp.path());
+
+    // Hold SQLite's write lock so the prepare's preliminary read sees a pending
+    // row, then its fenced write waits behind a deletion of that row.
+    let mut blocker = Connection::open(temp.path().join("memory.sqlite")).unwrap();
+    let deletion = blocker
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    deletion
+        .execute("DELETE FROM memory_capture_jobs WHERE job_id=?1", [&job])
+        .unwrap();
+    let worker = {
+        let store = Arc::clone(&store);
+        let job = job.clone();
+        std::thread::spawn(move || store.prepare_memory_capture("/project", &job, "[]"))
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    deletion.commit().unwrap();
+    assert_eq!(worker.join().unwrap().unwrap(), None);
+
+    assert_eq!(
+        scan_audit_counts(temp.path()),
+        before,
+        "output that was never stored must not leave an audit behind"
     );
 }
 

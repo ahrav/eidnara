@@ -3,8 +3,9 @@
 
 use super::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-const LEASE_DURATION: Duration = Duration::from_secs(180);
+pub(crate) const LEASE_DURATION: Duration = Duration::from_secs(180);
 const MAX_NATIVE_PROMPT_BYTES: usize = 240 * 1024;
 
 type LeaseKey = (String, String);
@@ -22,6 +23,25 @@ impl NativeCaptureState {
                 lease.expires = Instant::now();
             }
         }
+    }
+
+    pub(crate) fn expire_all_for_test(&mut self) {
+        for lease in self.leases.values_mut() {
+            lease.expires = Instant::now();
+        }
+    }
+
+    pub(crate) fn reserved_for_test(&self) -> usize {
+        self.leases.len()
+    }
+
+    /// The shortest time a lease holding issued work has left.
+    pub(crate) fn shortest_ready_lease_for_test(&self) -> Option<Duration> {
+        self.leases
+            .values()
+            .filter(|lease| lease.plan.is_some())
+            .map(|lease| lease.expires.saturating_duration_since(Instant::now()))
+            .min()
     }
 }
 
@@ -62,12 +82,6 @@ impl Drop for LeaseGuard {
     }
 }
 
-fn enabled(binding: &SessionBinding) -> bool {
-    binding.config.memory_enabled
-        && binding.config.auto_promote
-        && binding.config.memory_auto_capture
-}
-
 fn messages_for(jobs: &[CaptureJob]) -> Vec<CaptureMessage> {
     jobs.iter()
         .enumerate()
@@ -81,6 +95,22 @@ fn messages_for(jobs: &[CaptureJob]) -> Vec<CaptureMessage> {
             text: job.text.clone(),
         })
         .collect()
+}
+
+/// Dropped with a request future; the blocking claim reads it before it
+/// records a dispatch, so a request nobody is waiting on issues no work.
+struct DeliveryWatch(Arc<AtomicBool>);
+
+impl Drop for DeliveryWatch {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// What one blocking-pool claim produced: a plan to lease, or the final reply.
+enum NextStep {
+    Work(NativePlan, String),
+    Done(PreparedOutcome),
 }
 
 impl HandlerCore {
@@ -111,8 +141,19 @@ impl HandlerCore {
             Ok(bound) => bound,
             Err(error) => return error,
         };
-        if !enabled(&binding) {
+        if !capture_enabled(&binding) {
             return respond(json!({"state":"disabled"}));
+        }
+        // Text a transform admitted but has not yet stored is not drained
+        // work yet, and the drain is not done either.
+        if self
+            .capture_memo
+            .lock()
+            .expect("capture memo mutex")
+            .outstanding(&capture_project(&binding))
+            > 0
+        {
+            return respond(json!({"state":"pending"}));
         }
         let primary = match request.get("model") {
             None => None,
@@ -122,8 +163,7 @@ impl HandlerCore {
         let Some(store) = self.store() else {
             return store_unavailable_error();
         };
-        let project = binding.project_root.to_string_lossy().into_owned();
-        let key = (project.clone(), binding.harness.clone());
+        let key = (capture_project(&binding), binding.harness.clone());
         let mut nonce = [0_u8; 16];
         if getrandom::getrandom(&mut nonce).is_err() {
             return respond(json!({"state":"unavailable"}));
@@ -150,46 +190,85 @@ impl HandlerCore {
                 },
             );
         }
-        let mut guard = LeaseGuard {
+        let guard = LeaseGuard {
             state: Arc::clone(&self.native_capture),
             key,
             token: token.clone(),
             retained: false,
         };
-        let work = self.native_capture_work(Arc::clone(&store), binding);
-        let result = work.next_native_plan(primary.as_deref()).await;
-        match result {
-            Ok(Some((plan, prompt))) => {
-                let response = json!({"state":"work", "lease":token, "model":plan.model,
-                    "system":CAPTURE_SYSTEM_PROMPT,"prompt":prompt,
-                    "max_output_tokens":8192,"max_output_bytes":MAX_CAPTURE_OUTPUT_BYTES,"max_duration_ms":90_000});
-                let mut state = self
-                    .native_capture
-                    .lock()
-                    .expect("native capture leases mutex");
-                let Some(lease) = state
-                    .leases
-                    .get_mut(&guard.key)
-                    .filter(|lease| lease.token == token && lease.expires > Instant::now())
-                else {
-                    return respond(json!({"state":"stale"}));
-                };
-                lease.plan = Some(plan);
-                guard.retained = true;
-                respond(response)
+        let work = self.native_capture_work(store, binding);
+        let wanted = Arc::new(AtomicBool::new(true));
+        let _watch = DeliveryWatch(Arc::clone(&wanted));
+        let state = Arc::clone(&self.native_capture);
+        // The guard travels with the blocking work: a request future dropped
+        // mid-claim keeps the reservation until that work has finished, and
+        // the dispatch is recorded only once the work is issued.
+        kernel_routes::blocking(move || {
+            let mut guard = guard;
+            let (plan, prompt) = match work.claim(primary.as_deref()) {
+                NextStep::Work(plan, prompt) => (plan, prompt),
+                NextStep::Done(outcome) => return outcome,
+            };
+            if !wanted.load(Ordering::Acquire) {
+                return respond(json!({"state":"pending"}));
             }
-            Ok(None) => match store.memory_capture_status(&project) {
-                Ok(status) => respond(
-                    json!({"state":if status.pending == 0 { "ready" } else { "pending" },
-                    "pending":status.pending,"failed":status.failed,"completed":status.completed}),
-                ),
-                Err(_) => respond(json!({"state":"store_failed"})),
-            },
-            Err(code) => {
-                eprintln!("daemon: native memory capture preparation failed: {code}");
-                respond(json!({"state":"pending"}))
+            // A reservation that lapsed during preparation issues nothing, so
+            // it records nothing either.
+            if !state
+                .lock()
+                .expect("native capture leases mutex")
+                .leases
+                .get(&guard.key)
+                .is_some_and(|lease| lease.token == guard.token && lease.expires > Instant::now())
+            {
+                return respond(json!({"state":"stale"}));
             }
-        }
+            // One dispatch for the whole batch or none: a source swept since
+            // the queue was read leaves the others' counts untouched.
+            // Issued work carries its own retry deadline, so a lease lost to a
+            // restart is retried after the dispatch backoff, not at once.
+            let now = now_ms();
+            let jobs: Vec<(&str, i64)> = plan
+                .jobs
+                .iter()
+                .map(|job| {
+                    (
+                        job.job_id.as_str(),
+                        now.saturating_add(capture_retry_delay_ms(job.attempts)),
+                    )
+                })
+                .collect();
+            match work
+                .store
+                .begin_memory_capture_attempts(&work.project(), &jobs)
+            {
+                Ok(true) => {}
+                Ok(false) => return respond(json!({"state":"pending"})),
+                Err(_) => return respond(json!({"state":"store_failed"})),
+            }
+            let response = json!({"state":"work", "lease":guard.token, "model":plan.model,
+                "system":CAPTURE_SYSTEM_PROMPT,"prompt":prompt,
+                "max_output_tokens":8192,"max_output_bytes":MAX_CAPTURE_OUTPUT_BYTES,"max_duration_ms":90_000});
+            let mut state = state.lock().expect("native capture leases mutex");
+            let Some(lease) = state
+                .leases
+                .get_mut(&guard.key)
+                .filter(|lease| lease.token == guard.token && lease.expires > Instant::now())
+            else {
+                return respond(json!({"state":"stale"}));
+            };
+            // The lease clock starts when work is issued, so the advertised
+            // execution window fits however long preparation waited.
+            lease.expires = Instant::now() + LEASE_DURATION;
+            lease.plan = Some(plan);
+            guard.retained = true;
+            respond(response)
+        })
+        .await
+        .unwrap_or_else(|_| {
+            eprintln!("daemon: native memory capture preparation failed: pool_unavailable");
+            respond(json!({"state":"pending"}))
+        })
     }
 
     /// Accepts only a matching, unexpired lease from the same project, harness,
@@ -212,7 +291,10 @@ impl HandlerCore {
             .get("lease")
             .and_then(Value::as_str)
             .filter(|token| {
-                token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+                token.len() == 32
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             })
         else {
             return invalid_params_error("native capture requires a lease token");
@@ -237,10 +319,7 @@ impl HandlerCore {
                 "native capture requires bounded output or a recognized error",
             );
         }
-        let key = (
-            binding.project_root.to_string_lossy().into_owned(),
-            binding.harness.clone(),
-        );
+        let key = (capture_project(&binding), binding.harness.clone());
         let plan = {
             let mut state = self
                 .native_capture
@@ -263,36 +342,114 @@ impl HandlerCore {
             };
             plan
         };
-        let _guard = LeaseGuard {
+        let guard = LeaseGuard {
             state: Arc::clone(&self.native_capture),
             key,
             token: token.into(),
             retained: false,
         };
-        if !enabled(&binding) {
+        if !capture_enabled(&binding) {
             return respond(json!({"state":"disabled"}));
         }
         let Some(store) = self.store() else {
             return store_unavailable_error();
         };
         let work = self.native_capture_work(store, binding);
-        let attempt = plan.jobs.iter().map(|job| job.attempts).max().unwrap_or(0);
-        let retry_at = now_ms().saturating_add(capture_retry_delay_ms(attempt));
+        let output = output.map(str::to_owned);
+        let error = error.map(str::to_owned);
+        // A stale reply cannot publish against a successor: the reservation
+        // outlives a dropped request future for as long as this work runs.
+        match kernel_routes::blocking(move || {
+            let _guard = guard;
+            work.settle(plan, output.as_deref(), error.as_deref())
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            // Nothing was recorded, so the jobs stay eligible for a later drain.
+            Err(_) => respond(json!({"state":"store_failed"})),
+        }
+    }
+}
+
+/// Memories of one source sharing a category and quotation freeze as one.
+/// A replacement target survives the collapse so the correction it carries
+/// is not lost; one quotation superseding two memories keeps one entry per
+/// target, since a decision supersedes exactly one predecessor.
+pub(super) fn collapse_quotations(
+    attribution: &str,
+    proposed: Vec<CapturedMemory>,
+) -> Vec<CapturedMemory> {
+    let mut memories: Vec<CapturedMemory> = Vec::new();
+    for mut memory in proposed {
+        memory.content = format!("{attribution}: {}", memory.quote);
+        match memories.iter_mut().find(|kept| {
+            kept.category == memory.category
+                && kept.content == memory.content
+                && (kept.replaces.is_none()
+                    || memory.replaces.is_none()
+                    || kept.replaces == memory.replaces)
+        }) {
+            Some(kept) => {
+                if kept.replaces.is_none()
+                    && (kept.duplicate_of.is_none() || memory.replaces.is_some())
+                {
+                    kept.replaces = memory.replaces;
+                    kept.duplicate_of = memory.duplicate_of;
+                }
+            }
+            None => memories.push(memory),
+        }
+    }
+    memories
+}
+
+impl CaptureWork {
+    fn project(&self) -> String {
+        capture_project(&self.binding)
+    }
+
+    fn claim(&self, primary: Option<&str>) -> NextStep {
+        match self.next_native_plan(primary) {
+            Ok(Some((plan, prompt))) => NextStep::Work(plan, prompt),
+            Ok(None) => NextStep::Done(match self.store.memory_capture_status(&self.project()) {
+                Ok(status) => respond(
+                    json!({"state":if status.pending == 0 { "ready" } else { "pending" },
+                        "pending":status.pending,"failed":status.failed,"completed":status.completed}),
+                ),
+                Err(_) => respond(json!({"state":"store_failed"})),
+            }),
+            Err(code) => {
+                eprintln!("daemon: native memory capture preparation failed: {code}");
+                NextStep::Done(respond(json!({"state": if code == "store_failed" {
+                    "store_failed"
+                } else {
+                    "pending"
+                }})))
+            }
+        }
+    }
+
+    fn settle(
+        &self,
+        plan: NativePlan,
+        output: Option<&str>,
+        error: Option<&str>,
+    ) -> PreparedOutcome {
+        let now = now_ms();
         if let Some(error) = error {
             for job in &plan.jobs {
-                if work
+                if self
                     .store
                     .fail_memory_capture(
                         &job.project,
                         &job.job_id,
                         error,
-                        if error == "cancelled" {
-                            now_ms()
-                        } else {
-                            retry_at
-                        },
+                        // Every dispatch backs off, cancellation included, so a
+                        // claim/cancel loop cannot spin the store.
+                        now.saturating_add(capture_retry_delay_ms(job.attempts)),
                         matches!(error, "model_failed" | "output_limit"),
-                        now_ms(),
+                        now,
                     )
                     .is_err()
                 {
@@ -303,28 +460,23 @@ impl HandlerCore {
         }
         // An unrecorded store error would leave these jobs immediately eligible again.
         let jobs = plan.jobs.clone();
-        match work
-            .accept_native_output(plan, output.unwrap_or_default(), retry_at)
-            .await
-        {
+        match self.accept_native_output(plan, output.unwrap_or_default(), now) {
             Ok(()) => respond(json!({"state":"processed"})),
             Err(code) => {
                 eprintln!("daemon: native memory capture submission failed: {code}");
-                if work.failed(&jobs, "store_failed", retry_at).is_err() {
+                if self.failed(&jobs, "store_failed", now).is_err() {
                     return respond(json!({"state":"store_failed"}));
                 }
                 respond(json!({"state":"pending"}))
             }
         }
     }
-}
 
-impl CaptureWork {
-    async fn next_native_plan(
+    fn next_native_plan(
         &self,
         primary: Option<&str>,
     ) -> Result<Option<(NativePlan, String)>, &'static str> {
-        let project = self.binding.project_root.to_string_lossy();
+        let project = self.project();
         let jobs = self
             .store
             .pending_memory_captures(&project, &self.binding.harness, now_ms())
@@ -332,26 +484,7 @@ impl CaptureWork {
         let mut unprepared = Vec::new();
         for job in jobs {
             if job.prepared.is_some() {
-                let id = job.job_id.clone();
-                let frozen = job.prepared.clone().unwrap_or_default();
-                if let Err(code) = self.publish(job).await {
-                    if code == "reconciliation_conflict" {
-                        self.store
-                            .retry_memory_capture_reconciliation(&project, &id, &frozen)
-                            .map_err(|_| "store_failed")?;
-                    } else {
-                        self.store
-                            .fail_memory_capture(
-                                &project,
-                                &id,
-                                "kernel_write_failed",
-                                now_ms().saturating_add(5000),
-                                false,
-                                now_ms(),
-                            )
-                            .map_err(|_| "store_failed")?;
-                    }
-                }
+                self.publish_or_recover(&job)?;
             } else {
                 unprepared.push(job);
             }
@@ -367,35 +500,40 @@ impl CaptureWork {
         if models.is_empty() {
             return Ok(None);
         }
-        let failures = unprepared.iter().map(|job| job.failures).max().unwrap_or(0);
+        // Fallback stage follows failures; a batch shares one model, so it
+        // holds only sources at the head's stage. The rest wait for the next
+        // drain call rather than skipping their own primary attempt.
+        let failures = unprepared[0].failures;
+        unprepared.retain(|job| job.failures == failures);
         let model = models[failures as usize % models.len()].clone();
         if !valid_capture_model(&model) {
             return Err("invalid_model_configuration");
         }
         let mut messages = messages_for(&unprepared);
-        let mut existing = self.existing_memories(&messages).await?;
+        let mut existing = self.existing_memories(&messages)?;
         let prompt = loop {
             let prompt = render_capture_prompt_with_existing(&messages, &existing)?;
             if prompt.len() <= MAX_NATIVE_PROMPT_BYTES {
                 break prompt;
             }
             if existing.pop().is_none() {
-                if unprepared.len() <= 1 {
+                if let [job] = unprepared.as_mut_slice() {
+                    // Alone and still too large, this source can never be
+                    // prepared. Recording the dispatch and a model failure
+                    // moves it off the queue head on the same allowance any
+                    // other unusable source consumes, instead of re-selecting
+                    // it forever ahead of every later source.
+                    self.store
+                        .begin_memory_capture_attempt(&job.project, &job.job_id, now_ms())
+                        .map_err(|_| "store_failed")?;
+                    job.attempts += 1;
+                    self.failed(std::slice::from_ref(job), "source_too_large", now_ms())?;
                     return Err("source_too_large");
                 }
                 unprepared.pop();
                 messages = messages_for(&unprepared);
             }
         };
-        for job in &unprepared {
-            if !self
-                .store
-                .begin_memory_capture_attempt(&job.project, &job.job_id, now_ms())
-                .map_err(|_| "store_failed")?
-            {
-                return Ok(None);
-            }
-        }
         Ok(Some((
             NativePlan {
                 jobs: unprepared,
@@ -407,17 +545,17 @@ impl CaptureWork {
         )))
     }
 
-    async fn accept_native_output(
+    fn accept_native_output(
         &self,
         plan: NativePlan,
         output: &str,
-        retry_at: i64,
+        now: i64,
     ) -> Result<(), &'static str> {
         let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing) {
             Ok(decisions) => decisions,
             Err(reason) => {
                 eprintln!("daemon: native memory capture output rejected: {reason}");
-                return self.failed(&plan.jobs, "extraction_failed", retry_at);
+                return self.failed(&plan.jobs, "extraction_failed", now);
             }
         };
         for (mut job, decision) in plan.jobs.into_iter().zip(decisions) {
@@ -425,33 +563,29 @@ impl CaptureWork {
                 Ok(decision) => decision,
                 Err(reason) => {
                     eprintln!("daemon: native memory capture source rejected: {reason}");
-                    self.failed(std::slice::from_ref(&job), "extraction_failed", retry_at)?;
+                    self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
                     continue;
                 }
             };
+            let attribution = if job.role == "user" {
+                "User stated"
+            } else {
+                "Assistant reported"
+            };
+            // The stored text is the attributed quotation, so two facts citing
+            // one clause collapse here; the parse-time check saw the model's
+            // paraphrases, which can differ.
+            let memories = collapse_quotations(attribution, decision.memories);
             let existing = plan
                 .existing
                 .iter()
                 .filter(|previous| {
-                    decision.memories.iter().any(|memory| {
+                    memories.iter().any(|memory| {
                         memory.replaces.as_deref() == Some(&previous.id)
                             || memory.duplicate_of.as_deref() == Some(&previous.id)
                     })
                 })
                 .cloned()
-                .collect();
-            let memories = decision
-                .memories
-                .into_iter()
-                .map(|mut memory| {
-                    let attribution = if job.role == "user" {
-                        "User stated"
-                    } else {
-                        "Assistant reported"
-                    };
-                    memory.content = format!("{attribution}: {}", memory.quote);
-                    memory
-                })
                 .collect();
             let output = PreparedCapture {
                 version: CAPTURE_SCHEMA_VERSION,
@@ -468,33 +602,14 @@ impl CaptureWork {
                     Ok(prepared) => prepared,
                     Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_)) => {
                         eprintln!("daemon: native memory capture plan refused by the store");
-                        self.failed(std::slice::from_ref(&job), "extraction_failed", retry_at)?;
+                        self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
                         continue;
                     }
                     Err(_) => return Err("store_failed"),
                 };
             if let Some(frozen) = prepared {
-                let id = job.job_id.clone();
-                let project = job.project.clone();
-                job.prepared = Some(frozen.clone());
-                if let Err(code) = self.publish(job).await {
-                    if code == "reconciliation_conflict" {
-                        self.store
-                            .retry_memory_capture_reconciliation(&project, &id, &frozen)
-                            .map_err(|_| "store_failed")?;
-                    } else {
-                        self.store
-                            .fail_memory_capture(
-                                &project,
-                                &id,
-                                "kernel_write_failed",
-                                now_ms().saturating_add(5000),
-                                false,
-                                now_ms(),
-                            )
-                            .map_err(|_| "store_failed")?;
-                    }
-                }
+                job.prepared = Some(frozen);
+                self.publish_or_recover(&job)?;
             }
         }
         Ok(())
