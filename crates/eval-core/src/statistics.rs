@@ -282,6 +282,19 @@ impl ClusterKey {
     }
 }
 
+/// A world seed past canonical JSON's safe integer would not survive the
+/// TypeScript reference or a canonical record, so it is refused at the entry
+/// rather than merged with its neighbor.
+fn check_seeds<'a>(keys: impl Iterator<Item = &'a ClusterKey>) -> Result<(), StatisticsError> {
+    match keys
+        .map(|key| key.world_seed)
+        .find(|seed| u128::from(*seed) > MAX_SAFE)
+    {
+        Some(world_seed) => Err(StatisticsError::WorldSeedOutOfRange(world_seed)),
+        None => Ok(()),
+    }
+}
+
 /// One pilot observation: a paired score for one task in one world.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -375,6 +388,7 @@ pub fn run_icc_pilot(
     if max_affordable_worlds == 0 {
         return Err(StatisticsError::NoAffordableWorlds);
     }
+    check_seeds(observations.iter().map(|o| &o.cluster))?;
     let mut seen = BTreeSet::new();
     if let Some(repeat) = observations
         .iter()
@@ -536,6 +550,9 @@ impl AnalysisFamily {
         // Deflation only shrinks, so a table smaller than the required N cannot
         // reach it whatever the affordable worlds could have held.
         let StoppingRule::FixedN { pairs } = self.stopping_rule;
+        if pairs == 0 {
+            return Err(StatisticsError::NoPairs);
+        }
         if pairs < pilot.required_n_for_margin {
             return Err(StatisticsError::PlanBelowRequiredN {
                 pairs,
@@ -679,21 +696,21 @@ impl PairCounts {
         self.aged_censored += other.aged_censored;
     }
 
-    fn over_n(&self, numerator: i64) -> Ratio {
-        Ratio::new(numerator, self.n.max(1))
+    fn over_n(&self, numerator: i128) -> Result<Ratio, StatisticsError> {
+        Ratio::try_new(numerator, i128::from(self.n.max(1)))
     }
 
     /// `(b - c) / n`, signed: negative means the aged arm did better.
-    pub fn quality_loss(&self) -> Ratio {
-        self.over_n(self.b as i64 - self.c as i64)
+    pub fn quality_loss(&self) -> Result<Ratio, StatisticsError> {
+        self.over_n(i128::from(self.b) - i128::from(self.c))
     }
 
-    pub fn harm(&self) -> Ratio {
-        self.over_n(self.b as i64)
+    pub fn harm(&self) -> Result<Ratio, StatisticsError> {
+        self.over_n(i128::from(self.b))
     }
 
-    pub fn aged_pass_rate(&self) -> Ratio {
-        self.over_n(self.aged_pass as i64)
+    pub fn aged_pass_rate(&self) -> Result<Ratio, StatisticsError> {
+        self.over_n(i128::from(self.aged_pass))
     }
 }
 
@@ -743,9 +760,9 @@ impl Gates {
             return Err(StatisticsError::InconsistentCounts);
         }
         let (quality_loss, harm, floor) = (
-            counts.quality_loss(),
-            counts.harm(),
-            counts.aged_pass_rate(),
+            counts.quality_loss()?,
+            counts.harm()?,
+            counts.aged_pass_rate()?,
         );
         Ok(Self {
             quality_loss: GateVerdict {
@@ -852,7 +869,7 @@ pub fn cluster_bootstrap_interval(
         for draw in 0..n_clusters {
             resample.absorb(cells[bootstrap_draw(seed, replicate, draw, n_clusters)]);
         }
-        statistics.push(resample.quality_loss());
+        statistics.push(resample.quality_loss()?);
     }
     statistics.sort();
     let replicates = replicates as usize;
@@ -942,6 +959,7 @@ pub fn analyze(
 ) -> Result<Analysis, StatisticsError> {
     let frozen = FrozenFamily::from_manifest(manifest)?;
     frozen.check(family)?;
+    check_seeds(pairs.iter().map(|pair| &pair.cluster))?;
     if let Some(blocked) = family.is_blocked() {
         return Ok(Analysis::Blocked(blocked));
     }
@@ -976,28 +994,53 @@ pub fn analyze(
             pair_id: repeat.pair_id.clone(),
         });
     }
-    // The plan's power claim was a projection; the table that arrived may span
-    // fewer clusters than projected, so its own deflated size is checked too.
+    // The manifest's samples are the pairs; a table of other pairs, however
+    // many, is not this campaign's.
+    let samples: BTreeSet<&str> = manifest.sample_ids.iter().map(String::as_str).collect();
+    if seen.len() != samples.len() || !seen.iter().all(|id| samples.contains(id.as_str())) {
+        return Err(StatisticsError::PairsNotManifestSamples {
+            pairs: seen.len(),
+            samples: samples.len(),
+            first_unrecorded: seen
+                .iter()
+                .find(|id| !samples.contains(id.as_str()))
+                .map(|id| id.to_string()),
+        });
+    }
+    // The plan's power claim was justified at `max_affordable_worlds`; a table
+    // over more worlds than that is not the registered campaign.
     let pilot = &family.icc_pilot;
-    let n_clusters = pairs
+    let worlds = pairs
         .iter()
-        .map(|pair| pair.cluster.at(pilot.clustering_unit))
+        .map(|pair| &pair.cluster)
         .collect::<BTreeSet<_>>()
         .len();
+    if worlds > pilot.max_affordable_worlds as usize {
+        return Err(StatisticsError::WorldsExceedAffordable {
+            worlds,
+            max_affordable_worlds: pilot.max_affordable_worlds,
+        });
+    }
+    // The plan's power claim was a projection; the table that arrived may span
+    // fewer or unequal clusters, so its own deflated size is checked with the
+    // size-weighted mean cluster `sum(m_i^2) / n`.
+    let mut sizes: BTreeMap<ClusterKey, i128> = BTreeMap::new();
+    for pair in pairs {
+        *sizes
+            .entry(pair.cluster.at(pilot.clustering_unit))
+            .or_default() += 1;
+    }
     let icc = match pilot.clustering_unit {
         ClusteringUnit::Family => pilot.icc_family,
         ClusteringUnit::WorldSeed => pilot.icc_world_seed,
     };
     let n = Ratio::try_new(pairs.len() as i128, 1)?;
-    let effective_n = deflate(
-        n,
-        n.checked_div(Ratio::try_new(n_clusters as i128, 1)?)?,
-        icc,
-    )?;
+    let weighted_mean = Ratio::try_new(sizes.values().map(|m| m * m).sum(), pairs.len() as i128)?;
+    let effective_n = deflate(n, weighted_mean, icc)?;
     if effective_n < Ratio::try_new(i128::from(pilot.required_n_for_margin), 1)? {
         return Ok(Analysis::Blocked(BlockedReason::TableUnderpowered {
             effective_n,
-            n_clusters: n_clusters as u32,
+            n_clusters: sizes.len() as u32,
             required_n_for_margin: pilot.required_n_for_margin,
         }));
     }
@@ -1069,6 +1112,16 @@ pub enum StatisticsError {
         pair_id: String,
         family: String,
     },
+    PairsNotManifestSamples {
+        pairs: usize,
+        samples: usize,
+        first_unrecorded: Option<String>,
+    },
+    WorldsExceedAffordable {
+        worlds: usize,
+        max_affordable_worlds: u32,
+    },
+    WorldSeedOutOfRange(u64),
     DuplicatePair {
         pair_id: String,
     },

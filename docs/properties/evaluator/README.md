@@ -928,7 +928,14 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   ICC, whose family count is not the registered one, or whose ICC exceeds one,
   is `PilotInconsistent`, while a negative ICC projects the same undeflated N
   as zero; 300 pairs in one world are `Blocked
-  {table_underpowered}` at `3000/309` effective items; a `holm` or `benjamini_hochberg` plan is
+  {table_underpowered}` at `3000/309` effective items, and a 299/1 split over
+  two worlds at `450000/46051` (the size-weighted mean, not two clusters of
+  150); a pair id outside the manifest's `sample_ids` is
+  `PairsNotManifestSamples`; 300 worlds over a 150-world plan is
+  `WorldsExceedAffordable`; a world seed of `2^53 + 1` is
+  `WorldSeedOutOfRange` from `analyze` and from `run_icc_pilot`; a zero-pair
+  plan is `NoPairs`; the rate helpers return `RationalOverflow` for counts
+  past the safe range instead of panicking; a `holm` or `benjamini_hochberg` plan is
   `UnsupportedMultiplicity`
   while a computed pilot validates; a plan of 299 pairs against a required N
   of 300 is `PlanBelowRequiredN`; a repeated pilot observation is

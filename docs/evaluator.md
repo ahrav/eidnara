@@ -940,9 +940,9 @@ fewer worlds than families, or no replication within worlds), whose ICC at
 either level exceeds one, or whose family count is not the registered family count (the pilot sampled the registered
 population, so the family-unit projection spreads items over exactly those
 families) (`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
-block, and refuses a plan whose pair count is below the pilot's
-`required_n_for_margin` (`PlanBelowRequiredN`), since deflation only shrinks
-N. `FrozenFamily::freeze` digests it
+block, and refuses a plan whose pair count is zero (`NoPairs`) or below the
+pilot's `required_n_for_margin` (`PlanBelowRequiredN`), since deflation only
+shrinks N. `FrozenFamily::freeze` digests it
 (`eval-analysis-family-digest/v1`); the manifest records that digest as
 `analysis_family_digest` before the first outcome, and `FrozenFamily::check`
 refuses a family whose digest differs as
@@ -1016,8 +1016,13 @@ evidence that never passes) against `miss_asymmetry_bound`, which blocks as
 `arm_miss_asymmetry` with no gates computed; then the table's conformance to
 the plan (a size other than the frozen pair count is `PairCountMismatch`, a
 pair outside the frozen families is `PairOutsideFamilies`, a repeated pair id
-is `DuplicatePair`), then the table's own power (the pair count deflated by
-the pilot's design effect at the clusters the table actually spans, under the
+is `DuplicatePair`, a pair-id set other than the manifest's `sample_ids` is
+`PairsNotManifestSamples`, more distinct worlds than the pilot's
+`max_affordable_worlds` is `WorldsExceedAffordable`, and a world seed past
+canonical JSON's safe integer is `WorldSeedOutOfRange`), then the table's own
+power (the pair count deflated by the pilot's design effect at the clusters
+the table actually spans, with the size-weighted mean cluster
+`sum(m_i^2) / n` so unequal clusters are not read as equal ones, under the
 pilot's unit and ICC; short of `required_n_for_margin` it is `Blocked {reason:
 table_underpowered}` with the effective N and cluster count); only then does it build
 `PairedReport {analysis_family_digest, counts, gates, interval, arm_rates}`.
