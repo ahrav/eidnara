@@ -959,9 +959,12 @@ Pairs (`crates/eval-core/tests/pairs.rs`):
   wire), a window naming an event the aged history lacks, a window out of
   order, a narrowed window, a widened query with its scope cleared or its
   cut moved, a fresh arm or ceiling missing its evidence
-  (`EvidenceNotRequiredOnArm`), and a fresh arm with the control emptied out
-  (`NaturalFreshInert`) each refuse from `PairSet::validate` and from
-  `check_recency_baseline` before any judgement.
+  (`EvidenceNotRequiredOnArm`), one competitor dropped from one pair's fresh
+  arm (`Tampered {fresh}`), the control emptied out of every fresh arm
+  (`EmptyNaturalFresh`), and a relabelled slice of the aged history carried
+  as every pair's control (`NaturalFreshCopiedFromAged`) each refuse from
+  `PairSet::validate` and from `check_recency_baseline` before any
+  judgement.
 - `a_window_edited_on_the_wire_cannot_manufacture_an_established_contrast`:
   a surface-1 set whose window delivers the falsifier is `Blocked`; the same
   set re-read with the epoch commit removed from its window is refused as

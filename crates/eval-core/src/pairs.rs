@@ -191,7 +191,8 @@ pub enum PairError {
     NoPositiveControl,
     /// A deserialized set whose recorded version, bound, median, window, or
     /// widened query disagrees with a recomputation from the set's own
-    /// aged history and fresh arms.
+    /// aged history and fresh arms, or whose pairs do not carry one common
+    /// independent history (`fresh`).
     Tampered {
         field: &'static str,
     },
@@ -320,11 +321,30 @@ fn check_falsifier(task: &Task, aged: &EventLog, median: i64) -> Result<(), Pair
     Ok(())
 }
 
-fn content(log: &EventLog) -> Vec<(i64, u32, Payload)> {
-    log.events
-        .iter()
+fn content<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<(i64, u32, Payload)> {
+    events
+        .into_iter()
         .map(|e| (e.valid_time_ms, e.local_seq, e.payload.content()))
         .collect()
+}
+
+/// Refuses an independent history whose events, compared by content, are a
+/// contiguous run of the aged ones; an empty one has nothing to compete.
+fn independent<'a>(
+    aged: &EventLog,
+    fresh: impl IntoIterator<Item = &'a Event>,
+) -> Result<(), PairError> {
+    let fresh = content(fresh);
+    if fresh.is_empty() {
+        return Err(PairError::EmptyNaturalFresh);
+    }
+    if let Some(at) = content(&aged.events)
+        .windows(fresh.len())
+        .position(|window| window == fresh.as_slice())
+    {
+        return Err(PairError::NaturalFreshCopiedFromAged { at });
+    }
+    Ok(())
 }
 
 /// The aged history's upper-median valid time. Refuses an empty history and
@@ -397,20 +417,11 @@ fn admit(input: &PairSetInput<'_>, max_events: u32) -> Result<(u32, i64), PairEr
     if input.aged.events.is_empty() {
         return Err(PairError::EmptyAged);
     }
-    if input.natural_fresh.events.is_empty() {
-        return Err(PairError::EmptyNaturalFresh);
-    }
     input
         .natural_fresh
         .validate(max_events as usize)
         .map_err(PairError::Log)?;
-    let (aged, fresh) = (content(input.aged), content(input.natural_fresh));
-    if let Some(at) = aged
-        .windows(fresh.len())
-        .position(|window| window == fresh.as_slice())
-    {
-        return Err(PairError::NaturalFreshCopiedFromAged { at });
-    }
+    independent(input.aged, &input.natural_fresh.events)?;
     Ok((bound, aged_median(input.aged)?))
 }
 
@@ -545,12 +556,13 @@ impl PairSet {
     /// surface's bound, one query across the tasks, both control classes,
     /// evidence the reducer requires on the aged arm, early and unsuperseded
     /// falsification truths, the median and window recomputed from `aged`
-    /// under `fixture`, the widened query recomputed from the fresh arms'
-    /// units the aged history lacks, and both fresh arms re-judged under the
-    /// reducer: evidence required, shared verdicts equal, control competing.
-    /// The fresh arms are the runner's inputs and are re-judged, not
-    /// re-derived.
-    pub fn validate(&self, fixture: &Value) -> Result<(), PairError> {
+    /// under `fixture`, one independent history common to every pair's fresh
+    /// arm (its units the aged history lacks) that is not a copy of the aged
+    /// one, the widened query recomputed from that history, and both fresh
+    /// arms re-judged under the reducer: evidence required, shared verdicts
+    /// equal, control competing. The fresh arms are the runner's inputs and
+    /// are re-judged, not re-derived.
+    pub fn validate<'a>(&'a self, fixture: &Value) -> Result<(), PairError> {
         if self.pairing_policy_version != PAIRING_POLICY_VERSION {
             return Err(PairError::Tampered {
                 field: "pairing_policy_version",
@@ -580,12 +592,19 @@ impl PairSet {
             });
         }
         let aged_ids = ids_of(&self.aged);
-        let independent = self
-            .pairs
-            .iter()
-            .flat_map(|pair| &pair.fresh.events)
-            .filter(|e| !aged_ids.contains(&e.id));
-        if self.fresh_query != widen(query, independent) {
+        let non_aged = |pair: &'a Pair| -> Vec<&'a Event> {
+            pair.fresh
+                .events
+                .iter()
+                .filter(|e| !aged_ids.contains(&e.id))
+                .collect()
+        };
+        let common = self.pairs.first().map(non_aged).unwrap_or_default();
+        if self.pairs.iter().any(|pair| non_aged(pair) != common) {
+            return Err(PairError::Tampered { field: "fresh" });
+        }
+        independent(&self.aged, common.iter().copied())?;
+        if self.fresh_query != widen(query, common.iter().copied()) {
             return Err(PairError::Tampered {
                 field: "fresh_query",
             });

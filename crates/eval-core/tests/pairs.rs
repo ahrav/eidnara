@@ -8,9 +8,9 @@ use std::num::NonZeroU32;
 use eval_core::{
     ArmKind, Baseline, BaselineFailure, BaselineVerdict, CausalEdge, Coverage, Destination,
     EvaluatedSurface, EventId, EventLog, LogError, MAX_VALID_TIME_MS, Mode,
-    NATURAL_FRESH_ENTITY_TAG, PAIRING_POLICY_VERSION, PairError, PairSet, PairSetInput, Query,
-    RECENCY_BASELINE_VERSION, RepositorySpec, Sensitivity, ServedClass, SessionSpec, StopCondition,
-    Suite, Task, TaskRole, Verdict, Visibility, WorldConfig, check_recency_baseline,
+    NATURAL_FRESH_ENTITY_TAG, PAIRING_POLICY_VERSION, Pair, PairError, PairSet, PairSetInput,
+    Query, RECENCY_BASELINE_VERSION, RepositorySpec, Sensitivity, ServedClass, SessionSpec,
+    StopCondition, Suite, Task, TaskRole, Verdict, Visibility, WorldConfig, check_recency_baseline,
     compile_pair_set, recency_bound, reduce, serialize_spec,
 };
 use serde_json::{Value, json};
@@ -141,6 +141,18 @@ fn compile(
 
 fn ids(log: &EventLog) -> Vec<&str> {
     log.events.iter().map(|e| e.id.0.as_str()).collect()
+}
+
+/// The fresh arm's units on the control's entities: the independent history.
+fn independent_of(pair: &Pair) -> Vec<&eval_core::Event> {
+    pair.fresh
+        .events
+        .iter()
+        .filter(|e| {
+            e.entity_id
+                .ends_with(&format!("~{NATURAL_FRESH_ENTITY_TAG}"))
+        })
+        .collect()
 }
 
 #[test]
@@ -913,11 +925,49 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
             },
         ),
         (
-            "the control emptied out of a fresh arm",
-            Box::new(|s| s.pairs[2].fresh = s.pairs[2].fresh_minimal.clone()),
-            PairError::NaturalFreshInert {
-                task: "mid-message".to_string(),
-            },
+            "one competitor dropped from one pair's fresh arm",
+            Box::new(|s| {
+                // The other pairs still hold it; the set no longer carries one
+                // independent history.
+                let competitor = independent_of(&s.pairs[0])[1].id.clone();
+                s.pairs[0].fresh = s.pairs[0].fresh.without(&competitor);
+            }),
+            PairError::Tampered { field: "fresh" },
+        ),
+        (
+            "the control emptied out of every fresh arm",
+            Box::new(|s| {
+                for pair in &mut s.pairs {
+                    pair.fresh = pair.fresh_minimal.clone();
+                }
+            }),
+            PairError::EmptyNaturalFresh,
+        ),
+        (
+            "a relabelled slice of the aged history as every pair's control",
+            Box::new(|s| {
+                let slice = EventLog {
+                    events: s.aged.events[6..11].to_vec(),
+                    causal_edges: vec![],
+                    ..s.aged.clone()
+                }
+                .on_distinct_entities(NATURAL_FRESH_ENTITY_TAG)
+                .unwrap();
+                for pair in &mut s.pairs {
+                    let mut events = pair.fresh_minimal.events.clone();
+                    events.extend(slice.events.iter().cloned());
+                    events.sort_by(|a, b| a.key().cmp(&b.key()));
+                    pair.fresh = EventLog {
+                        events,
+                        ..pair.fresh_minimal.clone()
+                    };
+                }
+                s.fresh_query.scope = s.pairs[0].task.query.scope.clone();
+                s.fresh_query
+                    .scope
+                    .extend(slice.events.iter().map(|e| e.entity_id.clone()));
+            }),
+            PairError::NaturalFreshCopiedFromAged { at: 6 },
         ),
         (
             "the positive control relabelled",

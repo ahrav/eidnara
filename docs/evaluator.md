@@ -1067,9 +1067,12 @@ public on the wire, so `PairSet::validate(fixture)` re-checks a set read back
 against its own aged history: the policy version, the surface's bound, one
 query across the tasks, both control classes, evidence the reducer requires
 on the aged arm, early and unsuperseded falsification truths, the median
-and the window recomputed from `aged` under `fixture`, and the widened query
-recomputed from the fresh arms' units the aged history lacks (`Tampered
-{field}` names `aged_median_ms`, `recency_window`, or `fresh_query` when the
+and the window recomputed from `aged` under `fixture`, one independent
+history common to every pair's fresh arm (its units the aged history lacks;
+`Tampered {fresh}` when the pairs disagree, and the compile-time
+`NaturalFreshCopiedFromAged` and `EmptyNaturalFresh` checks run on it
+again), the widened query recomputed from that history (`Tampered {field}`
+names `aged_median_ms`, `recency_window`, or `fresh_query` when the
 recorded value differs), and both fresh arms re-judged under the reducer:
 evidence required on each (`EvidenceNotRequiredOnArm`), shared verdicts
 equal (`SharedVerdictDisagreement`), and the control competing
