@@ -693,9 +693,10 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
 - `volatile_and_uncovered_changes_replay`: a moved `cache_control` marker and
   a changed or removed `x-api-key`, `user-agent`, `authorization`, or
   `x-session-id` header replay. `only_a_terminated_nonce_is_normalized` is the
-  nonce table: `cch=<nonce>;` forms digest equal across nonces; an
-  unterminated `cch=`, a URL query `cch=`, an empty nonce, and a changed tail
-  all digest differently, so normalization never drops text.
+  nonce table: `cch=<nonce>;` forms in system text digest equal across
+  nonces; an unterminated `cch=`, a URL query `cch=`, an empty nonce, a changed
+  tail, and the same form in a user message all digest differently, so
+  normalization never drops text and never reaches model-visible content.
 - `equal_digests_replay_in_recorded_order_and_distinct_ones_in_any_order`:
   the concurrency case, with `unconsumed()` reaching zero and a miss past the
   recording naming the last entry.
@@ -719,7 +720,9 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   SecretDetected)`, and a body one byte past `MAX_REDACTABLE_BYTES` is
   `RedactionRefused(Request, InputLimit)`; the refused entry never exists and
   `to_file` returns the refusal, so the one admitted entry is not persisted
-  either. `a_malformed_body_is_refused_rather_than_digested_as_empty` keeps
+  either. `a_request_the_boundary_could_not_project_refuses_the_file_too`
+  shows `Cassette::refuse` latching the same way for a request no entry was
+  built from. `a_malformed_body_is_refused_rather_than_digested_as_empty` keeps
   `{}` out of the digest.
 - `backend_records_cover_the_pinned_fields_with_exact_temperatures`
   (`rid-cassette-strict-miss-typed-error`): the `BackendRecord` projection's
@@ -744,7 +747,8 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   (`rid-rust-cassette-backend-impl-preserves-declarations`, marker
   `rid_capabilities_read_during_cassette_run`): two recorded requests, one a
   provider error with a retry hint, replay with equal events and terminals
-  while the real backend is never called; `BackendDeclarations::new` reads the
+  while the real backend is never called and `unconsumed()` falls from two to
+  zero; `BackendDeclarations::new` reads the
   same declaration from the cassette as from the real backend for both
   harnesses; an edited header is `ProvenanceMismatch` until re-signed, and
   re-signed defaults latch differently.
@@ -760,13 +764,14 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   (marker `rid_cassette_namespace_refused`): an edited recorded event is
   `ProvenanceMismatch`; another namespace is `NamespaceMismatch` at load; a
   `NaN` temperature is a `cassette_request` terminal and a canary prompt is a
-  `redaction_refused` terminal that leaves the recorder with no file.
+  `redaction_refused` terminal; each leaves the recorder with no file.
 - `memory_reviewer_replays_through_the_keyed_peer`
   (`sls-memory-reviewer-model-calls-cassette-or-excluded`, marker
   `rid_reviewer_cassette_miss_reached`): the key recovered from one recorded
   request equals the production sender's `provider_identity()` and credential
   id, the request's model, and the SHA-256 of `MessagesRequest::body`'s bytes;
-  the same body replays through `serve_keyed`; a changed body, model, or
+  the same body replays once through `serve_keyed` and misses when sent
+  again, each entry answering one request; a changed body, model, or
   credential each miss with a 409 the sender reports as
   `SendError::Status(409)`, after which the recorded body is refused too; an
   entry keyed to another host misses.

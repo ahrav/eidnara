@@ -188,10 +188,10 @@ impl Oracle {
                 request,
                 response,
             } => {
-                let covered = covered(request)?;
-                let entry =
-                    self.cassette()?
-                        .record(&namespace, Boundary::Opencode, covered, response)?;
+                let cassette = self.cassette()?;
+                // A request that cannot be projected leaves the recording with no file form.
+                let covered = covered(request).map_err(|error| cassette.refuse(error))?;
+                let entry = cassette.record(&namespace, Boundary::Opencode, covered, response)?;
                 Ok(Reply::Record {
                     request_digest: entry.request_digest.clone(),
                 })

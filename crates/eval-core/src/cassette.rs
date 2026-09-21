@@ -434,6 +434,17 @@ impl Cassette {
         Ok(self.cases.last().expect("pushed"))
     }
 
+    /// Latches `error` as a recording's refusal for an exchange the boundary
+    /// could not even project (an unknown field, an unencodable number), so
+    /// the exchange missing from the cassette leaves it without a file form
+    /// exactly as a refused entry does. A replay is unchanged.
+    pub fn refuse(&mut self, error: CassetteError) -> CassetteError {
+        if self.redactor.is_some() {
+            self.refused = Some(error.clone());
+        }
+        error
+    }
+
     /// Strict lookup: a hit consumes the first unconsumed entry of `boundary`
     /// with an equal digest; a miss becomes the cassette's terminal.
     pub fn lookup(
@@ -552,7 +563,7 @@ impl OpenCodeRequest {
             }
             let value = match (name.as_str(), value.as_f64()) {
                 ("temperature", Some(number)) => Value::String(canonical_decimal_f64(number)?),
-                _ => strip_volatile(value),
+                _ => strip_volatile(value, name == "system"),
             };
             body.insert(name.clone(), value);
         }
@@ -575,19 +586,28 @@ impl BackendRecord {
     }
 }
 
-/// Removes every `cache_control` member and normalizes the `cch=<nonce>;`
-/// billing nonce in string values.
-fn strip_volatile(value: &Value) -> Value {
+/// Removes every `cache_control` member and, in the `system` blocks where the
+/// provider's billing header lives (`billing`), normalizes the `cch=<nonce>;`
+/// nonce in string values; the same text anywhere else is model-visible
+/// content and stays as written.
+fn strip_volatile(value: &Value, billing: bool) -> Value {
     match value {
         Value::Object(members) => Value::Object(
             members
                 .iter()
                 .filter(|(key, _)| key.as_str() != "cache_control")
-                .map(|(key, member)| (key.clone(), strip_volatile(member)))
+                .map(|(key, member)| (key.clone(), strip_volatile(member, billing)))
                 .collect(),
         ),
-        Value::Array(items) => Value::Array(items.iter().map(strip_volatile).collect()),
-        Value::String(text) if text.contains("cch=") => Value::String(normalize_nonce(text)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| strip_volatile(item, billing))
+                .collect(),
+        ),
+        Value::String(text) if billing && text.contains("cch=") => {
+            Value::String(normalize_nonce(text))
+        }
         other => other.clone(),
     }
 }

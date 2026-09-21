@@ -730,13 +730,17 @@ lists, both pinned in `eval-core` and named together by
   today's date, and the user's instruction files, so a cassette is bound to the
   environment and day that recorded it.
 - The volatile rule removes, before digesting, every `cache_control` marker
-  (breakpoints move between turns) and rewrites each `cch=<nonce>;` billing
-  nonce whose nonce is a run of alphanumerics, `_`, or `-` to `cch=<NONCE>;`;
-  any other `cch=` text stays as written. OpenCode 1.18.31 emits no `cch=`
-  nonce; the rule stays pinned for the versions that do. A mock-side
-  `cache_control` move or nonce change replays; any other byte in a covered
-  field misses. A fractional `temperature` is projected through
-  `canonical_decimal_f64` to its exact decimal text, as the backend record is.
+  (breakpoints move between turns) and, in `body.system` text only, where the
+  provider's billing header lives, rewrites each `cch=<nonce>;` billing nonce
+  whose nonce is a run of alphanumerics, `_`, or `-` to `cch=<NONCE>;`; any
+  other `cch=` text, and the same text in a message or tool result, stays as
+  written. OpenCode 1.18.31 emits no `cch=` nonce; the rule stays pinned for
+  the versions that do. A mock-side `cache_control` move or nonce change
+  replays; any other byte in a covered field misses. A fractional
+  `temperature` is projected through `canonical_decimal_f64` to its exact
+  decimal text, as the backend record is; any other fractional number in the
+  body (none is observed from OpenCode 1.18.31) is `NotCanonical`, refused at
+  record and replay alike rather than digested.
 - `OPENCODE_HEADER_ALLOWLIST` (`anthropic-beta`, `anthropic-version`) is the
   only header set a cassette retains; `x-api-key`, `authorization`,
   `user-agent`, `x-session-id`, `host`, and `content-length` never reach the
@@ -791,7 +795,10 @@ can straddle a window edge, before the entry exists anywhere. A finding is
 input cap is `RedactionRefused(location, InputLimit)`. A refused entry is never
 substituted with a placeholder and never persisted, and the refusal latches:
 `to_file` returns the refusal, so a recording that refused one exchange has no
-file form and a partial cassette can never pass for a complete one.
+file form and a partial cassette can never pass for a complete one. A request
+the boundary could not even project (`UnknownRequestField`, an unencodable
+number) latches the same way through `Cassette::refuse`, because the exchange
+it stands for is missing from the cassette just as a refused entry is.
 
 ### Rust oracle and the TypeScript mock
 
@@ -811,7 +818,8 @@ number, or a serde message that can quote its input. The path must
 be absolute with no `..` component; a second `open` is `AlreadyOpen`; a line
 over 4 MiB is `LineTooLong`. `close` writes a recording write-then-rename
 through a freshly created owner-only `.json.tmp` sibling and writes nothing for
-a replay or a refused recording.
+a replay or a refused recording, including one whose `record` could not project
+a request.
 
 ### `LlmExecutionBackend` and MemoryReviewer
 
@@ -823,9 +831,11 @@ carry no serde because their `Debug` redacts); replay emits the recorded events
 until the sink closes and returns the recorded terminal, and a miss is
 `BackendTerminal::Failed` with `provider_code: "cassette_miss"` and a message
 naming the turn, class, and nearest digest. An unencodable request is
-`cassette_request`; a recording the scanner refuses is `redaction_refused` and
-leaves the backend with no file. `refusals()` counts every miss terminal
-served, including the repeats after the first miss latched. The cassette
+`cassette_request` and, while recording, latches so the backend has no file; a
+recording the scanner refuses is `redaction_refused` and leaves the backend
+with no file either. `refusals()` counts every miss terminal
+served, including the repeats after the first miss latched, and `unconsumed()`
+reports the recorded entries the run never requested. The cassette
 header's `declarations` carry what the real backend declared per harness
 (`unavailable_reason`, `context_capabilities`), and the replaying backend
 answers all three trait methods from them, so `BackendDeclarations::new`
@@ -843,7 +853,8 @@ provider, model, credential_id}`: the SHA-256 of the request body (what
 `prepare_body` puts in the attempt marker), the
 `{host}/v1/messages@{anthropic-version}` identity the production sender
 reports, the body's `model`, and the credential id the peer is configured with
-(the header carries only the secret). A key with no entry is an HTTP 409
+(the header carries only the secret). Each entry answers one request. A key
+with no unconsumed entry is an HTTP 409
 `cassette_miss` and a `SendError::Status(409)` at the sender, and every later
 request on that peer is refused too. A run that spawns no reviewer worker
 declares `memory_reviewer_model_calls: excluded` in its manifest instead.

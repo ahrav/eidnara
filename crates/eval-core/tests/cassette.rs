@@ -404,6 +404,17 @@ fn only_a_terminated_nonce_is_normalized() {
         opencode_request().covered().unwrap()["body"]["system"][0]["text"],
         json!("You are opencode.")
     );
+    // The billing header lives in the system blocks; the same text in a user
+    // message is model-visible content and digests as written.
+    let message_digest = |text: &str| {
+        let mut request = opencode_request();
+        request.body["messages"][0]["content"][0]["text"] = json!(text);
+        request_digest(&request.covered().unwrap()).unwrap()
+    };
+    assert_ne!(
+        message_digest("a cch=1111; b"),
+        message_digest("a cch=2222; b")
+    );
 }
 
 #[test]
@@ -553,6 +564,23 @@ fn planted_secrets_and_unscannable_frames_are_refused_and_the_cassette_never_per
     );
     let text = serde_json::to_string(&recorded(&[opencode_request()])).unwrap();
     assert!(!text.contains("AKIA") && !text.contains("sk-ant-"));
+}
+
+#[test]
+fn a_request_the_boundary_could_not_project_refuses_the_file_too() {
+    let mut cassette = Cassette::recording(NAMESPACE, Value::Null).unwrap();
+    cassette
+        .record(
+            NAMESPACE,
+            Boundary::Opencode,
+            opencode_request().covered().unwrap(),
+            frames(),
+        )
+        .unwrap();
+    let error = CassetteError::UnknownRequestField("metadata".to_string());
+    assert_eq!(cassette.refuse(error.clone()), error);
+    assert_eq!(cassette.cases().len(), 1);
+    assert_eq!(cassette.to_file().err(), Some(error));
 }
 
 #[test]

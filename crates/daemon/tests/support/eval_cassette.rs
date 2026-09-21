@@ -169,14 +169,14 @@ impl From<&BackendTerminal> for WireTerminal {
 
 /// Every `FinishReason`; the `match` fails to compile when the host adds a
 /// variant, so the decode list cannot drift behind `as_wire_str`.
-fn finish_reasons() -> [FinishReason; 2] {
+pub fn finish_reasons() -> [FinishReason; 2] {
     [FinishReason::Completed, FinishReason::Length].map(|reason| match reason {
         FinishReason::Completed | FinishReason::Length => reason,
     })
 }
 
 /// Every `ErrorClass`, guarded the same way as [`finish_reasons`].
-fn error_classes() -> [ErrorClass; 4] {
+pub fn error_classes() -> [ErrorClass; 4] {
     [
         ErrorClass::Transient,
         ErrorClass::Permanent,
@@ -321,6 +321,11 @@ impl CassetteBackend {
         self.cassette.lock().unwrap().terminal().cloned()
     }
 
+    /// Recorded entries no request has consumed; a faithful replay leaves none.
+    pub fn unconsumed(&self) -> usize {
+        self.cassette.lock().unwrap().unconsumed()
+    }
+
     fn refused(code: &str, detail: impl std::fmt::Display) -> BackendTerminal {
         BackendTerminal::Failed(BackendError {
             class: ErrorClass::Permanent,
@@ -429,7 +434,11 @@ impl LlmExecutionBackend for CassetteBackend {
     ) -> BackendFuture {
         let covered = match record_of(&request).and_then(|record| record.covered()) {
             Ok(covered) => covered,
-            Err(error) => return Box::pin(async move { Self::refused("cassette_request", error) }),
+            Err(error) => {
+                // The exchange this request stands for can be in no file.
+                let error = self.cassette.lock().unwrap().refuse(error);
+                return Box::pin(async move { Self::refused("cassette_request", error) });
+            }
         };
         match &self.inner {
             Some(inner) => self.record_through(inner, covered, request, events, cancel),
@@ -497,22 +506,23 @@ impl ReviewerKey {
     }
 }
 
-/// Serves `turns` reviewer connections strictly from `entries`. A request
-/// whose key has no entry is answered with a typed `cassette_miss` refusal,
-/// and every later request is refused too, so the run stops at the first miss
-/// as it does at the other two boundaries.
+/// Serves `turns` reviewer connections strictly from `entries`, each entry
+/// answering one request. A request whose key has no unconsumed entry is
+/// answered with a typed `cassette_miss` refusal, and every later request is
+/// refused too, so the run stops at the first miss as it does at the other two
+/// boundaries.
 pub fn serve_keyed(
     peer: &mut Peer,
     turns: usize,
-    entries: BTreeMap<ReviewerKey, Vec<u8>>,
+    mut entries: BTreeMap<ReviewerKey, Vec<u8>>,
     credential_id: &str,
 ) -> tokio::task::JoinHandle<Vec<Observed>> {
     let credential_id = credential_id.to_string();
     let mut missed = false;
     peer.serve_each(turns, move |request| {
         let key = ReviewerKey::of(request, &credential_id);
-        match entries.get(&key) {
-            Some(response) if !missed => response.clone(),
+        match entries.remove(&key) {
+            Some(response) if !missed => response,
             _ => {
                 missed = true;
                 let body = json!({"type": "error", "error": {"type": "cassette_miss", "body_digest": key.body_digest}});

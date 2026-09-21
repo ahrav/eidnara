@@ -30,7 +30,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
-use support::eval_cassette::{CassetteBackend, ReviewerKey, record_of, serve_keyed};
+use support::eval_cassette::{
+    CassetteBackend, ReviewerKey, error_classes, finish_reasons, record_of, serve_keyed,
+};
 use support::tls_peer::{Peer, no_wait, text_response};
 
 const SUITE: &str = "crates/daemon/tests/eval_cassette.rs::";
@@ -163,6 +165,7 @@ fn replay_preserves_the_transcript_and_the_declarations(coverage: &mut Coverage)
     assert_eq!(file["cases"].as_array().unwrap().len(), 2);
     let replayer = CassetteBackend::replaying(NAMESPACE, &file).unwrap();
     let replay: Arc<dyn LlmExecutionBackend> = replayer.clone();
+    assert_eq!(replayer.unconsumed(), 2);
     let replayed = runtime().block_on(async {
         vec![
             run(&replay, request("hello")).await,
@@ -175,7 +178,7 @@ fn replay_preserves_the_transcript_and_the_declarations(coverage: &mut Coverage)
         2,
         "replay never reaches the real backend"
     );
-    assert_eq!(replayer.refusals(), 0);
+    assert_eq!((replayer.refusals(), replayer.unconsumed()), (0, 0));
     let real_dyn: Arc<dyn LlmExecutionBackend> = real;
     assert_eq!(declared(&replay), declared(&real_dyn));
     coverage
@@ -316,6 +319,11 @@ fn a_regenerated_frame_or_another_namespace_refuses_before_any_request(coverage:
         terminal,
         BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "cassette_request"
     ));
+    // The exchange that request stands for is in no file, so the recording has none.
+    assert!(matches!(
+        recorder.file().err(),
+        Some(CassetteError::TemperatureNotDecimal(_))
+    ));
     let (_, terminal) = runtime.block_on(run(&recording, request(CANARY)));
     assert!(matches!(
         terminal,
@@ -374,13 +382,18 @@ fn memory_reviewer_replays_through_the_keyed_peer(coverage: &mut Coverage) {
             format!("{:x}", Sha256::digest(prompt.body().unwrap().as_bytes()))
         );
 
-        // Replay: the same body hits; each other key field alone misses.
+        // Replay: the same body hits once; each entry answers one request, so
+        // the same body again is a miss; each other key field alone misses.
         let entries = BTreeMap::from([(key.clone(), text_response("cargo build"))]);
         let mut replay_peer = Peer::start().await;
         let sender = replay_peer.sender_with_credential("cred-7");
-        let served = serve_keyed(&mut replay_peer, 1, entries.clone(), "cred-7");
+        let served = serve_keyed(&mut replay_peer, 2, entries.clone(), "cred-7");
         assert_eq!(send(&sender, &prompt).await.unwrap(), "cargo build");
-        assert_eq!(served.await.unwrap().len(), 1);
+        assert!(matches!(
+            send(&sender, &prompt).await.unwrap_err(),
+            SendError::Status(409)
+        ));
+        assert_eq!(served.await.unwrap().len(), 2);
 
         let mut other_model = prompt.clone();
         other_model.model = "claude-other".to_string();
@@ -539,13 +552,8 @@ fn error_of(class: ErrorClass) -> BackendError {
 
 #[test]
 fn every_host_finish_reason_error_class_and_terminal_round_trips() {
-    let reasons = [FinishReason::Completed, FinishReason::Length];
-    let classes = [
-        ErrorClass::Transient,
-        ErrorClass::Permanent,
-        ErrorClass::AuthRequired,
-        ErrorClass::ContextOverflow,
-    ];
+    let reasons = finish_reasons();
+    let classes = error_classes();
     let mut terminals: Vec<BackendTerminal> = reasons
         .iter()
         .map(|&finish_reason| BackendTerminal::Completed { finish_reason })
