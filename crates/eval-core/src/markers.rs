@@ -107,11 +107,11 @@ pub const MARKERS: [Marker; 27] = [
         test: "crates/eval-core/tests/pairs.rs::the_recency_baseline_delivers_a_positive_control_or_is_vacuous",
     },
     Marker {
-        name: "mtr_injection_side_effect_fired",
+        name: "mtr_injection_mediation_boundary_observed",
         test: "crates/eval-core/tests/injection.rs::obedience_is_the_observed_side_effect_and_echo_is_only_exposure",
     },
     Marker {
-        name: "mtr_injection_canary_echoed_without_effect",
+        name: "mtr_injection_model_output_observed",
         test: "crates/eval-core/tests/injection.rs::obedience_is_the_observed_side_effect_and_echo_is_only_exposure",
     },
     Marker {
