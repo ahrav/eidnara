@@ -959,7 +959,8 @@ bounds with no p-values to adjust, and a plan declaring another is
 `UnsupportedMultiplicity` rather than analyzed uncorrected), the profile, the
 interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
-seed, and the ICC pilot. `AnalysisFamily::validate` includes the digest's
+seed, the live-trial repeat count `trials_k`, and the ICC pilot.
+`AnalysisFamily::validate` includes the digest's
 canonical-JSON check, so a family that validates can always be frozen (an
 integer outside the safe range is `NotCanonical` at parse). It also recomputes the
 pilot's clustering unit and `effective_n_at_max` from its recorded counts and
@@ -1101,6 +1102,67 @@ than the pilot had, and both bootstrap units), so a flipped sign or a drifted
 estimator on either side fails the differential. The reference reproduces the
 model, not the refusals: degenerate inputs the Rust side refuses are not
 fixtures.
+
+## Censored outcomes
+
+`censoring.rs` keeps every attempt that ended without a verdict in the
+denominator. `CensorReason` is the timeout or one of the six per-task budgets
+(`max_model_calls`, `max_tool_calls`, `max_tokens_in`, `max_tokens_out`,
+`hard_deadline_ms`, `max_no_progress_iterations`); an `Attempt` carries its
+duration, which for a censored attempt is the censoring point (the elapsed time
+at which the run was cut off), and its true duration is at least that.
+
+**Latency.** `LatencySummary::of` sorts attempts by duration with a censored
+attempt after a completed one of equal duration, takes the nearest rank
+`ceil(p n / 100)` for p50 and p95, and adds p99 only from `P99_MIN_RUNS` (299)
+attempts, the floor the plan pre-registers (#758): with 299 runs the top percent
+holds about three observations, so the quoted rank has two above it.
+Every `Percentile` names `p`, `value`, `n`, `censored`, and `bound`. Raising a
+censored attempt's true value can only raise an order statistic, and with every
+censored attempt pushed to infinity the order statistic is the rank-th completed
+duration, so a percentile is `point` exactly when at least `rank` completed
+attempts sit at or below the picked value; otherwise it is `lower`, and the
+reported value is a lower bound on the truth even when the attempt at the rank
+itself completed. A censored attempt below the rank does not by itself make a
+bound: p50 over one censored attempt and two completions tied at `2` is `2`
+however long the censored attempt really ran. Nothing is dropped, so a
+summary with `n = 105, censored = 15` reports its p95 as at least the deadline
+rather than a fast number over the 90 that finished.
+
+**Zero failures.** `Counter {n, failures, unit}` renders through
+`Counter::rate` as `FailureRate`, tagged `evidence_kind`. Both variants carry
+`upper_bound_95 = min((2 failures + 3) / n, 1)` and `bound_method`, and
+`FailureRate::upper_bound_95` is the one number a gate compares, so the
+compared quantity rises with every failure. With no failures the variant is
+`bound` with `bound_method: rule_of_three` (the bound is `3/n`), so zero
+observed failures in `n` trials at the named cluster unit is a bound, never a
+proof; sixty stall-free schedules cannot rule out one stall in twenty. With
+failures it is `observed`, adding the point estimate `rate` and using
+`bound_method: poisson_envelope`: the one-sided 95 percent Poisson limit for `x`
+events is `chi2_0.95(2x + 2) / 2`, which is at most `2x + 3` for every `x` and
+sits above the exact binomial limit. A gate that read the point estimate after
+a failure but the bound after none would let one failure in sixty (`1/60`) pass
+a threshold that zero failures in sixty (`3/60`) fails.
+
+**Repeated live trials.** `pass_k(attempts, k)` reads the repeat count `k` from
+the frozen family (`trials_k`) and summarizes as `PassK`: `pass_at_1` (passes
+over all repeats, so a censored attempt is not a pass), `repeats`,
+`uncensored_repeats`, `censoring_rate`, and `pass_k` under two censoring
+conventions rather than one confidence interval: `censored_as_fail` counts
+every censored attempt as a failure over all repeats (`C(passes, k) / C(n,
+k)`), and `censored_excluded` counts only the uncensored attempts (one when
+fewer than `k` remain, which `uncensored_repeats` makes visible). Every
+attempt censored is `indeterminate`, never zero. A `k` of zero, no attempts, or
+`k` past the repeat count is `MalformedTrials`; a binomial past the safe range
+is `RationalOverflow`.
+
+The TypeScript reference in `gen/gen-statistics-golden.ts` derives these
+independently where a second derivation exists: pass^k by exhaustive
+enumeration of every `k`-subset rather than binomials, and every counter's
+rational bound checked against the exact one-sided 95 percent binomial bound
+it envelopes (`1 - 0.05^(1/n)` at zero failures, bisection on the binomial CDF
+otherwise). `tests/censoring.rs` asserts equality on every latency, counter,
+and pass^k case in the golden.
 
 ## Coverage markers
 

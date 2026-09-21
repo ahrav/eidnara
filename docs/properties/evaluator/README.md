@@ -999,6 +999,46 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
 - `crates/eval-core/tests/manifest.rs` pins `analysis_family_digest` as a
   required manifest field (schema v6) that enters the digest.
 
+## Phase 3 executed checks: censored outcomes
+
+Censoring (`crates/eval-core/tests/censoring.rs`):
+
+- `the_frozen_reference_agrees_on_every_censored_case`
+  (`mtr-timeouts-right-censored-percentiles-carry-n`,
+  `mtr-zero-failures-reported-as-three-over-n`): the TypeScript reference's
+  sixteen latency, counter, and pass^k cases equal the Rust summaries exactly;
+  its pass^k is an exhaustive subset enumeration and every counter's rational
+  bound is checked against the exact one-sided binomial bound it envelopes.
+- `timeouts_stay_in_every_denominator_and_percentiles_carry_their_counts`: 100
+  completions and 5 timeouts report `n = 105, censored = 5` with two point
+  percentiles and no p99; 15 timeouts put the 95th rank in the censored tail, a
+  lower bound at the deadline; a censored attempt below the rank makes a later
+  completion a lower bound too, unless enough completions tie at the picked
+  value to fix it, and a completion below every censored attempt
+  is a point; a censored attempt sorts after a completed one of equal duration
+  on either input order; a single censored attempt is a lower bound; 299
+  completions carry a p99 and 298 do not; each of the seven censoring reasons
+  parses to its own variant and stays in the distribution at its censoring
+  point; an unknown attempt field refuses.
+- `zero_failures_is_a_bound_never_a_proof`: `0/400` renders as
+  `upper_bound_95 = 3/400` with `bound_method: rule_of_three`,
+  `evidence_kind: bound`, `n`, and `unit`; `0/20` as `3/20`; `0/60` as `1/20`;
+  `0/2` caps at one; an observed rate renders as `observed` and carries its own
+  `upper_bound_95` (`3/60` as `3/20`, `1/60` as `1/12`, `1/2` capped at one)
+  with `bound_method: poisson_envelope`; `upper_bound_95` strictly increases
+  from zero to five failures in sixty, so one failure never reads below zero
+  failures against a `1/30` gate; an empty or overfull counter refuses with
+  its counts; a bound never renders a `rate` or a `proven` field.
+- `pass_k_bounds_resolve_censoring_both_ways_and_are_indeterminate_when_all_are_censored`
+  (`rid-live-runs-labeled-nondeterministic-pass-k`): five clean attempts give
+  `pass@1 = 4/5` and `2/5` under both conventions; a fail and a censored
+  attempt give `1/10` censored-as-fail and `1/4` censored-excluded; one
+  uncensored attempt under `k = 3` gives `0` and a vacuous `1` with
+  `uncensored_repeats = 1`; every attempt censored is `indeterminate` with
+  `pass@1 = 0` and censoring rate one; a zero `k`, no attempts, or `k` past the
+  repeat count refuse with their counts; a binomial past the safe range refuses
+  and one that reduces stays exact.
+
 ## Gaps recorded here
 
 - The OpenCode cassette is bound to the environment that recorded it: the

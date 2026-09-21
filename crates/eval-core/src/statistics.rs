@@ -158,7 +158,7 @@ impl PartialOrd for Ratio {
     }
 }
 
-fn gcd(mut a: u128, mut b: u128) -> u128 {
+pub(crate) fn gcd(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
         (a, b) = (b, a % b);
     }
@@ -552,6 +552,8 @@ pub struct AnalysisFamily {
     pub item_count_threshold: u32,
     pub bootstrap_replicates: u32,
     pub bootstrap_seed: u64,
+    /// The repeat count `k` every live trial's pass^k is read at.
+    pub trials_k: u32,
     pub icc_pilot: IccPilot,
 }
 
@@ -581,7 +583,7 @@ impl AnalysisFamily {
                 self.bootstrap_replicates,
             ));
         }
-        if self.endpoints.is_empty() || self.families.is_empty() {
+        if self.endpoints.is_empty() || self.families.is_empty() || self.trials_k == 0 {
             return Err(StatisticsError::EmptyFamilyField);
         }
         // The report always carries the three gates, so the frozen declaration
@@ -1291,6 +1293,14 @@ pub enum StatisticsError {
         declared: Vec<String>,
     },
     UnsupportedMultiplicity(MultiplicityCorrection),
+    MalformedCounter {
+        n: u64,
+        failures: u64,
+    },
+    MalformedTrials {
+        k: u32,
+        repeats: u32,
+    },
     ZeroDenominator,
     RationalOverflow,
     NotCanonical(ContractError),
