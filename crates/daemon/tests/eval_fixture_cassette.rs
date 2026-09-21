@@ -15,7 +15,7 @@ use daemon::history_summarizer_evaluation::{
 use eval_core::{CASSETTE_SCHEMA, Cassette};
 use host_runtime::{RequestOptions, ResponseStream, TargetKind};
 use serde_json::{Value, json};
-use support::direct_host::{BUDGET, FixtureProcess, request_json, send_body};
+use support::direct_host::{BUDGET, Backend, FixtureProcess, Launch, request_json, send_body};
 
 const NAMESPACE: &str = "eval-run:fixture-cassette:1";
 
@@ -88,8 +88,12 @@ fn the_fixture_records_its_backend_and_replays_it_strictly() {
     // Record: the controlled backend answers, and the exchange is written at
     // shutdown.
     let record_root = tempfile::tempdir().unwrap();
-    let recorder =
-        FixtureProcess::start_recording(record_root.path().to_path_buf(), &cassette, NAMESPACE);
+    let recorder = Launch::at(record_root.path().to_path_buf())
+        .backend(Backend::Record {
+            file: cassette.clone(),
+            namespace: NAMESPACE.to_string(),
+        })
+        .start();
     let recorded = runtime.block_on(run(&recorder, "recorded-session", "what did we decide"));
     assert_eq!(
         unit_types(&recorded),
@@ -114,8 +118,12 @@ fn the_fixture_records_its_backend_and_replays_it_strictly() {
     // Replay: a second process answers from the file alone; the controlled
     // backend's counters stay at zero.
     let replay_root = tempfile::tempdir().unwrap();
-    let replayer =
-        FixtureProcess::start_replaying(replay_root.path().to_path_buf(), &cassette, NAMESPACE);
+    let replayer = Launch::at(replay_root.path().to_path_buf())
+        .backend(Backend::Replay {
+            file: cassette.clone(),
+            namespace: NAMESPACE.to_string(),
+        })
+        .start();
     let replayed = runtime.block_on(run(&replayer, "replayed-session", "what did we decide"));
     assert_eq!(
         unit_types(&replayed),

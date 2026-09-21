@@ -10,13 +10,8 @@ mod support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 
-use daemon::history_summarizer_evaluation::{
-    ChunkLine, HistorySummarizerChunk, ValidateOptions, stored_history_segment,
-    validate_history_summarizer_output,
-};
 use daemon::transform::UserHintPass;
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, Approval, ArmKind, ArmRates, ArmRecord,
@@ -37,15 +32,10 @@ use eval_core::{
     Visibility, WorldConfig, WorldProvenance, analyze, check_recency_baseline, compile_pair_set,
     eval_run_id, generate_all, parse_manifest, parse_report, render, serialize_spec,
 };
-use host_runtime::CancellationToken;
-use host_runtime::model_execution::backend::{
-    BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ContextCapabilities, EventSink,
-    FinishReason, Harness, LlmExecutionBackend, OPENCODE_CONTEXT_CAPABILITIES, SinkStatus,
-};
-use memory_store::StoredHistorySegment;
+use memory_store::{MemoryStore, StoredHistorySegment};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use support::direct_host::{FixtureProcess, fixture_binary};
-use support::eval_cassette::CassetteBackend;
+use support::direct_host::{Backend, FixtureProcess, Launch, fixture_binary};
 use support::eval_surface::{
     EPOCH_MS, Knobs, SurfaceLedger, World, block_on, mid, observe_rendered, pass, seed_store,
     segment, text,
@@ -205,6 +195,31 @@ struct Arm {
     segments: Vec<StoredHistorySegment>,
     /// The messages each segment covers, by sequence.
     covered: BTreeMap<i64, Vec<EventId>>,
+    /// The phrase a served fragment must carry to have delivered a message:
+    /// the marker the shell wrote into its raw segment, or the message's own
+    /// words once the summarizer folded it.
+    truth: fn(&RenderedMessage) -> String,
+}
+
+/// Whether `served` carries `phrase` as whole words: `cursor 4` is not served
+/// by a fragment saying `cursor 47`.
+fn carries(served: &str, phrase: &str) -> bool {
+    served.match_indices(phrase).any(|(at, _)| {
+        let before = served[..at].chars().next_back();
+        let after = served[at + phrase.len()..].chars().next();
+        !before.is_some_and(|c| c.is_ascii_alphanumeric())
+            && !after.is_some_and(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+/// The marker a raw segment carries for its message.
+fn raw_truth(message: &RenderedMessage) -> String {
+    format!("note{}", marker(mid(message)))
+}
+
+/// The message's own words, as the summarizer's segment keeps them.
+fn own_words(message: &RenderedMessage) -> String {
+    text(message).to_string()
 }
 
 /// The marker only this message's summary has: its native message id with
@@ -280,192 +295,167 @@ fn arm(log: &EventLog) -> Arm {
         },
         segments,
         covered: events.into_iter().map(|(k, v)| (k, vec![v])).collect(),
+        truth: raw_truth,
     }
 }
 
-/// Messages per summarizer segment on the structured arm.
+/// Messages per summarizer segment: the fixture's scripted summarizer folds
+/// this many presented lines into one `history_segment`.
 const CHUNK: usize = 5;
 const SUMMARIZER_NAMESPACE: &str = "eval-run:campaign:summarizer";
+/// Context pressure the harness reports so the daemon's own summarizer fires
+/// on the pass: current input tokens and the model's limit, inside the
+/// emergency band where the firing runs before the pass settles.
+const SUMMARIZER_USAGE: (u64, u64) = (39_000, 40_000);
+/// The prompt the arm-building pass carries; long enough for the hint gate,
+/// and asking for nothing a segment would serve.
+const BUILD_PROMPT: &str = "summarize the session so far";
 
-/// The chunk the summarizer is asked to cover: every message of the arm, one
-/// anchorable line per message, as the producer would build it.
-fn chunk_of(messages: &[RenderedMessage]) -> HistorySummarizerChunk {
-    let n = messages.len() as u64;
-    HistorySummarizerChunk {
-        start_index: 1,
-        end_index: n,
-        lines: messages
-            .iter()
-            .enumerate()
-            .map(|(index, message)| ChunkLine {
-                ordinal: index as u64 + 1,
-                message_id: format!("{}#0", mid(message)),
-                anchorable: true,
-            })
-            .collect(),
-        aliases: Default::default(),
-        present_ordinals: (1..=n).collect(),
-        tool_only_ranges: Vec::new(),
-        completed_tool_arcs: Vec::new(),
-    }
-}
-
-/// The transcript the summarizer request carries: one line per message.
-fn transcript(messages: &[RenderedMessage]) -> String {
-    messages
-        .iter()
-        .enumerate()
-        .map(|(index, message)| format!("{}|{}|{}", index + 1, mid(message), text(message)))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn summarizer_request(messages: &[RenderedMessage]) -> BackendRequest {
-    BackendRequest {
-        prompt: transcript(messages),
-        system: Some("Summarize the history into history_segments.".to_string()),
-        provider: "anthropic".to_string(),
-        model: "claude".to_string(),
-        max_output_tokens: 32_000,
-        temperature: Some(0.1),
-        harness: Harness::OpenCode,
-        session: SESSION.to_string(),
-        run_id: "model_execution-eval-campaign-1".to_string(),
-    }
-}
-
-/// The provider whose answers the cassette records: a summarizer that covers
-/// each run of `CHUNK` messages with one segment whose text keeps every
-/// message's summary, in the output document the real validator reads.
-struct ScriptedSummarizer;
-
-impl LlmExecutionBackend for ScriptedSummarizer {
-    fn execute(
-        &self,
-        request: BackendRequest,
-        events: EventSink,
-        _: CancellationToken,
-    ) -> BackendFuture {
-        Box::pin(async move {
-            let lines: Vec<(u64, String, String)> = request
-                .prompt
-                .lines()
-                .map(|line| {
-                    let mut parts = line.splitn(3, '|');
-                    let ordinal = parts.next().unwrap().parse().unwrap();
-                    let mid = parts.next().unwrap().to_string();
-                    let text = parts.next().unwrap().to_string();
-                    (ordinal, mid, text)
-                })
-                .collect();
-            let mut body = String::new();
-            for group in lines.chunks(CHUNK) {
-                let (start, _, _) = &group[0];
-                let (end, _, _) = &group[group.len() - 1];
-                let summaries: Vec<String> = group
-                    .iter()
-                    .map(|(_, mid, text)| summary_text(text, mid))
-                    .collect();
-                let joined = summaries.join("; ");
-                body.push_str(&format!(
-                    r#"<history_segment start="{start}" end="{end}" title="decisions {start} to {end}" episode_type="feature" importance="50"><p1>{joined}</p1><p2>{joined}</p2><p3>decisions {start} to {end}</p3><p4 /></history_segment>"#
-                ));
+/// The user config tier the fixture's daemon reads the summarizer's model
+/// chain from; the keys live only in that tier.
+fn summarizer_config_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("eidnara");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("eidnara.jsonc"),
+        serde_json::to_vec_pretty(&json!({
+            "history_summarizer": {
+                "model": "fixture/summarizer",
+                "context_limit_tokens": SUMMARIZER_USAGE.1,
             }
-            let next = lines.len() + 1;
-            events.emit(BackendEvent::AssistantText {
-                text: format!(
-                    "<output><history_segments>{body}</history_segments><meta><unprocessed_from>{next}</unprocessed_from></meta></output>"
-                ),
-                finish_reason: Some(FinishReason::Completed),
-            });
-            BackendTerminal::Completed {
-                finish_reason: FinishReason::Completed,
-            }
-        })
-    }
-
-    fn unavailable_reason(&self, _: Harness) -> Option<&'static str> {
-        None
-    }
-
-    fn context_capabilities(&self, _: Harness) -> ContextCapabilities {
-        OPENCODE_CONTEXT_CAPABILITIES
-    }
-}
-
-/// Runs one summarizer request through a backend and returns its text.
-fn summarize_through(backend: &Arc<dyn LlmExecutionBackend>, request: BackendRequest) -> String {
-    let seen = Arc::new(std::sync::Mutex::new(String::new()));
-    let sink = {
-        let seen = seen.clone();
-        EventSink::new(Arc::new(move |event| {
-            if let BackendEvent::AssistantText { text, .. } = event {
-                seen.lock().unwrap().push_str(&text);
-            }
-            SinkStatus::Accepted
         }))
+        .unwrap(),
+    )
+    .unwrap();
+    home
+}
+
+/// The fields of a stored segment the two summarizer runs must agree on:
+/// everything but the clock the daemon stamped it with.
+fn segment_shape(segment: &StoredHistorySegment) -> (i64, i64, i64, &str, &str, &str, &str) {
+    (
+        segment.sequence,
+        segment.start_message,
+        segment.end_message,
+        &segment.start_message_id,
+        &segment.end_message_id,
+        &segment.title,
+        &segment.content,
+    )
+}
+
+/// Runs the arm-building pass through one fixture whose model backend is
+/// `backend`, with the daemon inside it configured to summarize, and returns
+/// the history segments the daemon's own summarizer published to the store.
+fn summarize_in_host(
+    world: &World,
+    backend: Backend,
+    envelope: &mut Envelope,
+    held: &mut Held,
+    started: Instant,
+) -> (Vec<StoredHistorySegment>, Value) {
+    let home = summarizer_config_home();
+    let root = occupy(held, envelope);
+    let fixture = Launch::at(root.path().to_path_buf())
+        .backend(backend.clone())
+        .config_home(home.path())
+        .start();
+    held.processes += 1;
+    envelope
+        .observe(Resource::Processes, held.processes)
+        .unwrap();
+    let knobs = Knobs {
+        usage: Some(SUMMARIZER_USAGE),
+        ..Knobs::default()
     };
-    let terminal = block_on(backend.execute(request, sink, CancellationToken::new()));
-    assert!(
-        matches!(terminal, BackendTerminal::Completed { .. }),
-        "{terminal:?}"
+    let pass = block_on(pass(&fixture, world, BUILD_PROMPT, &knobs));
+    let diagnostics = pass.response["history_summarizer"].clone();
+    let counters = fixture.counters(11);
+    fixture.shutdown();
+    held.processes -= 1;
+    let descriptor = daemon::managed_store_descriptor(root.path()).unwrap();
+    let store = MemoryStore::open(&descriptor).unwrap();
+    let segments = store.load_history_segments(&world.session).unwrap();
+    drop(store);
+    vacate(root, held, envelope, started);
+    // The firing is the daemon's decision; when it fired, the fixture's backend
+    // answered it exactly once on record and never on replay.
+    let fired = diagnostics["fired"] == json!(true);
+    assert_eq!(
+        diagnostics["last_failure"],
+        Value::Null,
+        "the summarizer did not fail: {diagnostics}"
     );
-    seen.lock().unwrap().clone()
+    let expected_calls = match (&backend, fired) {
+        (Backend::Record { .. }, true) => 1,
+        _ => 0,
+    };
+    assert_eq!(
+        counters["started"],
+        json!(expected_calls),
+        "backend calls under {backend:?} with fired={fired}: {counters}"
+    );
+    assert_eq!(fired, !segments.is_empty(), "{diagnostics}");
+    (segments, diagnostics)
 }
 
 /// The structured arm: the raw arm's history with its segments replaced by
-/// the summarizer's, produced from a cassette replayed strictly and validated
-/// by the summarizer's own validator. Returns the arm and the cassette file.
-fn structured(raw: &Arm) -> (Arm, serde_json::Value) {
-    let recording = CassetteBackend::recording(SUMMARIZER_NAMESPACE, Arc::new(ScriptedSummarizer));
-    let recorded: Arc<dyn LlmExecutionBackend> = recording.clone();
-    let answer = summarize_through(&recorded, summarizer_request(&raw.world.messages));
-    let file = recording.file().unwrap();
-    let replaying = CassetteBackend::replaying(SUMMARIZER_NAMESPACE, &file).unwrap();
-    let replayed: Arc<dyn LlmExecutionBackend> = replaying.clone();
-    let output = summarize_through(&replayed, summarizer_request(&raw.world.messages));
-    assert_eq!(output, answer, "the replay serves the recorded frame");
-    assert_eq!(replaying.terminal(), None, "the replay hit its one frame");
-    // A one-byte change in the transcript is a strict miss, never an answer.
-    let mut edited = summarizer_request(&raw.world.messages);
-    edited.prompt.push('.');
-    let strict = CassetteBackend::replaying(SUMMARIZER_NAMESPACE, &file).unwrap();
-    let strict_backend: Arc<dyn LlmExecutionBackend> = strict.clone();
-    let miss = block_on(strict_backend.execute(
-        edited,
-        EventSink::new(Arc::new(|_| SinkStatus::Accepted)),
-        CancellationToken::new(),
-    ));
-    assert!(matches!(miss, BackendTerminal::Failed(_)), "{miss:?}");
-    assert!(strict.terminal().is_some(), "the miss latched");
-
-    let chunk = chunk_of(&raw.world.messages);
-    let options = ValidateOptions {
-        sequence_offset: 1,
-        ..ValidateOptions::default()
-    };
-    let validated = validate_history_summarizer_output(&output, &chunk, &[], options)
-        .unwrap_or_else(|error| panic!("the summarizer's own validator: {error:?}"));
-    // The validator keeps the newest segment out so the tail stays raw, as the
-    // producer would leave it; the messages from `unprocessed_from` on keep
-    // their raw segments.
-    assert!(validated.discarded_last, "the newest segment is held back");
-    let covered_through = validated.unprocessed_from - 1;
-    let mut segments: Vec<StoredHistorySegment> = validated
-        .history_segments
-        .iter()
-        .map(|segment| stored_history_segment(segment, 0, &BTreeMap::new()))
-        .collect();
-    assert_eq!(segments.first().map(|s| s.sequence), Some(1));
-    assert_eq!(
-        segments.iter().map(|s| s.end_message).max(),
-        Some(covered_through as i64)
+/// what the daemon's own summarizer published for it, produced through the
+/// fixture with its backend recorded into a cassette, then reproduced by a
+/// second fixture replaying that cassette strictly. Messages the summarizer
+/// left in the protected tail keep their raw segments. Returns the arm, the
+/// cassette file, and whether the summarizer fired at all: it leaves a short
+/// history untouched.
+fn structured(
+    raw: &Arm,
+    cassettes: &Path,
+    envelope: &mut Envelope,
+    held: &mut Held,
+    started: Instant,
+) -> (Arm, Value, bool) {
+    let file = cassettes.join(format!("{}.cassette.json", raw.world.session));
+    let (recorded, _) = summarize_in_host(
+        &raw.world,
+        Backend::Record {
+            file: file.clone(),
+            namespace: SUMMARIZER_NAMESPACE.to_string(),
+        },
+        envelope,
+        held,
+        started,
     );
+    let cassette: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let (replayed, diagnostics) = summarize_in_host(
+        &raw.world,
+        Backend::Replay {
+            file,
+            namespace: SUMMARIZER_NAMESPACE.to_string(),
+        },
+        envelope,
+        held,
+        started,
+    );
+    assert_eq!(
+        replayed.iter().map(segment_shape).collect::<Vec<_>>(),
+        recorded.iter().map(segment_shape).collect::<Vec<_>>(),
+        "the replay publishes what the recording did: {diagnostics}"
+    );
+    let fired = !replayed.is_empty();
+    let mut segments = replayed;
+    for segment in &segments {
+        assert_eq!(
+            segment.end_message - segment.start_message + 1,
+            CHUNK as i64,
+            "the fixture folds {CHUNK} presented lines into one segment: {segment:?}"
+        );
+    }
+    let covered_through = segments.iter().map(|s| s.end_message).max().unwrap_or(0);
     let next_sequence = segments.iter().map(|s| s.sequence).max().unwrap_or(0) + 1;
     for (offset, raw_segment) in raw
         .segments
         .iter()
-        .filter(|s| s.end_message > covered_through as i64)
+        .filter(|s| s.end_message > covered_through)
         .enumerate()
     {
         segments.push(StoredHistorySegment {
@@ -473,12 +463,6 @@ fn structured(raw: &Arm) -> (Arm, serde_json::Value) {
             ..raw_segment.clone()
         });
     }
-    let messages = raw.world.messages.len();
-    assert_eq!(
-        segments.len(),
-        messages.div_ceil(CHUNK) - 1 + (messages - covered_through as usize),
-        "every summarized run but the newest, then the raw tail"
-    );
     // A segment covers every message from its start to its end.
     let events: BTreeMap<i64, Vec<EventId>> = segments
         .iter()
@@ -497,8 +481,10 @@ fn structured(raw: &Arm) -> (Arm, serde_json::Value) {
             },
             segments,
             covered: events,
+            truth: own_words,
         },
-        file,
+        cassette,
+        fired,
     )
 }
 
@@ -542,6 +528,30 @@ struct Held {
     processes: u64,
 }
 
+/// A root of its own for one fixture, charged to the envelope while held.
+fn occupy(held: &mut Held, envelope: &mut Envelope) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    held.roots += 1;
+    envelope.observe(Resource::TempRoots, held.roots).unwrap();
+    root
+}
+
+/// Releases a root after its fixture exited: the store's bytes are charged as
+/// they peaked, then the root goes, and the run's elapsed time is read.
+fn vacate(root: tempfile::TempDir, held: &mut Held, envelope: &mut Envelope, started: Instant) {
+    envelope
+        .observe(Resource::StoreBytes, root_bytes(root.path()))
+        .unwrap();
+    drop(root);
+    held.roots -= 1;
+    envelope
+        .observe(
+            Resource::ElapsedMs,
+            u64::try_from(started.elapsed().as_millis()).unwrap(),
+        )
+        .unwrap();
+}
+
 struct ArmRun {
     result: ArmResult,
     verdict: StageVerdict<Surface1Stage>,
@@ -562,9 +572,7 @@ fn run_arm(
 ) -> ArmRun {
     assert_eq!(task.evidence.len(), 1, "one truth per task on surface 1");
     let evidence = task.evidence.iter().next().unwrap();
-    let root = tempfile::tempdir().unwrap();
-    held.roots += 1;
-    envelope.observe(Resource::TempRoots, held.roots).unwrap();
+    let root = occupy(held, envelope);
     seed_store(root.path(), &arm.world.session, &arm.segments);
     let fixture = FixtureProcess::start_at(root.path().to_path_buf());
     held.processes += 1;
@@ -584,18 +592,8 @@ fn run_arm(
     let counters = fixture.counters(7);
     assert_eq!(counters["started"], 0, "surface 1 makes no model call");
     fixture.shutdown();
-    envelope
-        .observe(Resource::StoreBytes, root_bytes(root.path()))
-        .unwrap();
     held.processes -= 1;
-    drop(root);
-    held.roots -= 1;
-    envelope
-        .observe(
-            Resource::ElapsedMs,
-            u64::try_from(started.elapsed().as_millis()).unwrap(),
-        )
-        .unwrap();
+    vacate(root, held, envelope, started);
     // A segment stands for the evidence at every stage while it covers it;
     // the served fragment must still carry the evidence's own marker, or the
     // segment reached render with the evidence absent.
@@ -618,7 +616,7 @@ fn run_arm(
             .iter()
             .find(|m| m.event_id == *id)
             .expect("a covered message is rendered");
-        hint_text.contains(&format!("note{}", marker(mid(message))))
+        carries(&hint_text, &(arm.truth)(message))
     };
     let mut ledger = SurfaceLedger::default();
     observe_rendered(
@@ -781,7 +779,15 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
 
     let aged_arm = arm(&set.aged);
     assert_eq!(aged_arm.segments.len(), aged_messages as usize);
-    let (aged_structured, cassette) = structured(&aged_arm);
+    let cassettes = tempfile::tempdir().unwrap();
+    let (aged_structured, cassette, aged_fired) = structured(
+        &aged_arm,
+        cassettes.path(),
+        &mut envelope,
+        &mut held,
+        started,
+    );
+    assert!(aged_fired, "the aged history is long enough to summarize");
     let mut cassette_bytes = serde_json::to_vec(&cassette).unwrap().len() as u64;
     envelope
         .observe(Resource::CassetteBytes, cassette_bytes)
@@ -813,7 +819,16 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
             &mut held,
             started,
         );
-        let (fresh_structured, fresh_cassette) = structured(&fresh_arm);
+        let (fresh_structured, fresh_cassette, fresh_fired) = structured(
+            &fresh_arm,
+            cassettes.path(),
+            &mut envelope,
+            &mut held,
+            started,
+        );
+        // Twelve messages sit inside the tail the summarizer protects, so the
+        // short control's structured arm is its raw history.
+        assert!(!fresh_fired, "the summarizer leaves the short control raw");
         cassette_bytes += serde_json::to_vec(&fresh_cassette).unwrap().len() as u64;
         envelope
             .observe(Resource::CassetteBytes, cassette_bytes)
@@ -918,45 +933,66 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
         assert_eq!(verdicts[&(name, "fresh")], StageVerdict::Clean, "{name}");
     }
 
-    // Under the summarizer's segments the aged history is a fifth as many
-    // units, so surface 1's window reaches the early message; but the served
-    // fragment is capped, so a truth folded past the cap of its segment is
-    // lost at render on both arms, while a truth at the head of its segment
-    // or left raw in the tail is delivered.
+    // The daemon's own summarizer folds the aged history's older messages five
+    // to a segment and leaves the protected tail raw. Its segments keep the
+    // messages' words and nothing else; the task is asked in the words of the
+    // raw segment, whose marker only the shell wrote, so a folded truth shares
+    // one token with the hint and is refused at the match filter, a folded
+    // truth older than the window is lost there first, and a truth still raw
+    // in the tail is delivered. The short control sits inside the protected
+    // tail, so its structured arm is its raw history and delivers every truth.
     let structured_by_task: BTreeMap<&str, &PairOutcome> = structured_outcomes
         .iter()
         .map(|o| (o.pair_id.as_str(), o))
         .collect();
-    let expected = [
-        (
-            "early-message",
-            (ArmResult::Fail, ArmResult::Fail),
-            StageVerdict::FirstLoss(Surface1Stage::Render),
-        ),
-        (
-            "recent-message",
-            (ArmResult::Pass, ArmResult::Pass),
-            StageVerdict::Clean,
-        ),
-        (
-            "last-message",
-            (ArmResult::Pass, ArmResult::Pass),
-            StageVerdict::Clean,
-        ),
-    ];
-    for (name, results, aged_verdict) in expected {
+    let units = aged_structured.segments.len() as u32;
+    for pair in &set.pairs {
+        let name = pair.task.id.as_str();
+        let evidence = pair.task.evidence.iter().next().unwrap();
+        let (sequence, covered) = aged_structured
+            .covered
+            .iter()
+            .find(|(_, ids)| ids.contains(evidence))
+            .unwrap();
+        let sequence = u32::try_from(*sequence).unwrap();
+        let (aged_result, aged_verdict) = if sequence + window <= units {
+            (
+                ArmResult::Fail,
+                StageVerdict::FirstLoss(Surface1Stage::CandidateWindow),
+            )
+        } else if covered.len() > 1 {
+            (
+                ArmResult::Fail,
+                StageVerdict::FirstLoss(Surface1Stage::MatchFilter),
+            )
+        } else {
+            (ArmResult::Pass, StageVerdict::Clean)
+        };
         assert_eq!(
             (
                 structured_by_task[name].aged,
                 structured_by_task[name].fresh
             ),
-            results,
+            (aged_result, ArmResult::Pass),
             "{name} structured"
         );
         assert_eq!(
             verdicts[&(name, "aged/structured")],
             aged_verdict,
             "{name} structured"
+        );
+        assert_eq!(
+            verdicts[&(name, "fresh/structured")],
+            StageVerdict::Clean,
+            "{name} structured"
+        );
+    }
+    // At S0 the early truth is inside the window and folded; a longer history
+    // pushes it out of the window first.
+    if aged_messages == AGED_MESSAGES {
+        assert_eq!(
+            verdicts[&("early-message", "aged/structured")],
+            StageVerdict::FirstLoss(Surface1Stage::MatchFilter)
         );
     }
     let arms = GovernanceArms {
@@ -985,7 +1021,7 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
             (
                 HistoryPolicy::Structured,
                 ArmRecord {
-                    policy_version: format!("history_summarizer_validate/chunk-{CHUNK}"),
+                    policy_version: format!("history_summarizer/fixture-summarizer/chunk-{CHUNK}"),
                     absent_evidence: BTreeSet::new(),
                 },
             ),

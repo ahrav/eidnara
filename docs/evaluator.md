@@ -1335,29 +1335,37 @@ sample ledger and runs nothing, and a budget that is set but not a number is
 refused. S0 stays in the default shards.
 
 **Structured arm.** Each raw arm also runs as a structured arm whose
-segments are the HistorySummarizer's. The summarizer request (one transcript
-line per message) goes to a scripted provider that answers in the
-summarizer's output document, one `history_segment` per run of five messages
-whose text keeps every message's summary; the exchange is recorded into a
-Rust cassette under the campaign namespace, then replayed strictly for the
-arm (a one-byte change to the transcript is a latched miss, never an answer;
-the replayed text equals the recorded one), and the replayed text is
-validated by `validate_history_summarizer_output`, the summarizer's own
-validator, over the chunk the producer would build; the validated segments
-become stored rows through the publication path's own mapping
-(`daemon::history_summarizer_evaluation`, `test-support` only). The validator
-keeps the newest segment out so the tail stays raw, as the producer does;
-the messages from `unprocessed_from` on keep their raw segments. A selected
+segments are what the daemon's own HistorySummarizer published for it. The
+arm is built through the fixture: the daemon inside it is configured to
+summarize (`/history_summarizer/model` and `/history_summarizer/context_limit_tokens`
+in a user config tier the fixture is started under, `Launch::config_home`),
+the arm's messages go through one transform pass that reports context
+pressure inside the emergency band (`Knobs::usage`), and the daemon's trigger,
+producer, and publication path run inside the fixture process against the
+fixture's model backend, which stands in for a summarizer provider: it
+answers a prompt carrying `<new_messages>` in the summarizer's `<output>`
+document, one `history_segment` per run of five presented lines whose text is
+the lines' own words. The pass settles after the firing, so the segments are
+read from the store once the fixture has exited. The build runs twice: once
+with the fixture's backend recorded into a cassette under the campaign
+namespace, written at shutdown, and once in a second fixture replaying that
+cassette strictly, whose backend counters stay at zero; the two runs must
+publish the same segments, and the replayed ones are the arm's. Messages the
+summarizer left in its protected tail keep their raw segments. The
+summarizer fires only when the history reaches past the tail it protects, so
+the twelve-message control's structured arm is its raw history. A selected
 segment stands for every message it covers at every stage up to render; at
-render the served fragment must carry the message's own marker, or the
-segment reached render with the evidence absent
-(`observe_rendered`). At S0 the structured arms show what the raw arms
-cannot: the early truth is inside the window (a fifth as many units) and its
-segment is selected, but the served fragment is capped, so a truth folded past
-the cap of its segment is lost at render on both arms, while a truth at the
-head of its segment or left raw in the tail is delivered. The three policies
-are recorded as `GovernanceArms` over the pair set. Every cassette's bytes
-are charged to the envelope.
+render the served fragment must carry the message's truth as whole words
+(`carries`): the shell's marker on a raw segment, the message's own words on
+a summarized one. At S0 the structured aged arm shows what the summarizer
+does to the surface: its segments keep the messages' words and nothing else,
+the task is asked in the words of the raw segment whose marker only the shell
+wrote, so a folded truth shares one token with the hint and is refused at the
+match filter, while the truth still raw in the tail is delivered; at S1 the
+folded early truth is older than the window and lost there first. The three
+policies are recorded as `GovernanceArms` over the pair set. Every cassette's
+bytes are charged to the envelope, as are the build fixtures' roots,
+processes, and store bytes.
 
 Beside the report the campaign publishes a manifest with the same
 write-then-rename, parses it back, and checks its digest. Its identity is
@@ -1389,40 +1397,28 @@ stay at zero. The fixture includes `tests/support/eval_cassette.rs` by path,
 so it and the tests read one schema. `crates/daemon/tests/eval_fixture_cassette.rs`
 records one exchange through the real ModelExecution route in one fixture
 process and replays it in a second, and checks the miss, the latch, and the
-namespace refusal. This is the seam the summarizer's own firing needs to run
-under replay inside the fixture; that firing is not yet driven by the
-campaign.
+namespace refusal; `the_fixture_answers_a_summarizer_prompt_in_the_validators_document`
+sends a summarizer-shaped prompt through the same route and the daemon's own
+validator accepts the answer. This is the seam the campaign's structured arm
+runs the summarizer's own firing under.
+
+What the in-host summarizer path needs, as established: without
+context-pressure numbers the boundary protects the whole history and nothing
+is eligible; with `usage` at 39,000 of 40,000 tokens the pass is in the
+emergency band, the trigger fires `force_band`, and the firing runs before the
+pass settles. The session's meta row is written whole on every commit and is
+bounded at 512 KiB of durable text; at 1,000 short messages the meta is about
+475 KiB before the firing and the fired state's selected identities push it
+past the bound, so the firing fails with `InputLimit` and publishes nothing
+(a 1,600-message session is refused as durable text at the transform itself).
+S0 and S1 sit well under that; a campaign at a larger scale on the structured
+arm would meet it.
 
 Not composed yet: the aged arm built by `step()` and lifecycle replay through
 ingestion rather than seeded segments, which is what would let the manifest
-say `replay`; the summarizer's own producer and publication path inside the
-fixture (the structured arm reaches the validator with a replayed answer, not
-`publish_validated_chunk` with its reservation state); the `eval_runner`
-example still serves the cassette oracle only; and the write-then-rename
-publisher is the test's own, since no shipped publisher exists.
-
-What the in-host summarizer path needs, as established so far: the model
-chain (`/history_summarizer/model`) and `/history_summarizer/context_limit_tokens`
-are user-tier-only keys, read from `$XDG_CONFIG_HOME/eidnara/eidnara.jsonc`,
-so the fixture is started with that variable (`FixtureProcess::start_at_with_env`).
-Without context-pressure numbers the boundary protects the whole history and
-nothing is eligible; with `usage {current_total_input_tokens,
-context_limit_tokens}` on the transform request (`Knobs::usage`) near the
-limit, the trigger fires `force_band` over a 1,000-message session (14,817
-eligible tokens against a 15,000 bar; a session of 1,600 messages is refused
-as durable text past 512 KiB). The fixture now stands in for a summarizer
-provider: a prompt carrying `<new_messages>` with `[start-end] R: part / part`
-lines (alias markers `«sN»` stripped) is answered in the summarizer's
-`<output>` document, one segment per five lines, and
-`the_fixture_answers_a_summarizer_prompt_in_the_validators_document` proves
-the daemon's own validator accepts it. Still open: the fired firing did not
-reach the fixture's backend in a probe (counters at zero, no failure
-recorded, no publication), so the producer's connection from the daemon to
-the host's ModelExecution route inside the fixture process is the next thing
-to trace. The
-structured arm's chunk, transcript, and request are the test's own model of
-what the producer builds; only the validator and the stored-row mapping are
-production code.
+say `replay`; the `eval_runner` example still serves the cassette oracle
+only; and the write-then-rename publisher is the test's own, since no shipped
+publisher exists.
 
 ## Coverage markers
 

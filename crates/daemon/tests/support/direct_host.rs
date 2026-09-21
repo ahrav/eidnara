@@ -61,6 +61,74 @@ pub fn fixture_binary() -> PathBuf {
     binary
 }
 
+/// How the fixture's model backend is served: its own controlled backend, that
+/// backend recorded into a cassette written at shutdown, or a cassette replayed
+/// strictly with the controlled backend never consulted.
+#[derive(Debug, Clone)]
+pub enum Backend {
+    Record { file: PathBuf, namespace: String },
+    Replay { file: PathBuf, namespace: String },
+}
+
+/// One fixture launch: the state root it serves, how its model backend is
+/// served, and the environment the daemon inside reads its user config tier
+/// from.
+#[derive(Debug, Clone)]
+pub struct Launch {
+    root: PathBuf,
+    backend: Option<Backend>,
+    env: Vec<(String, String)>,
+}
+
+impl Launch {
+    pub fn at(root: PathBuf) -> Self {
+        Self {
+            root,
+            backend: None,
+            env: Vec::new(),
+        }
+    }
+
+    pub fn backend(mut self, backend: Backend) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
+    /// The daemon reads `/history_summarizer/*` keys from the user tier under
+    /// `XDG_CONFIG_HOME`; this points that at `config_home`.
+    pub fn config_home(mut self, config_home: &Path) -> Self {
+        self.env.push((
+            "XDG_CONFIG_HOME".to_string(),
+            config_home.display().to_string(),
+        ));
+        self
+    }
+
+    pub fn start(self) -> FixtureProcess {
+        let args: Vec<String> = match &self.backend {
+            None => Vec::new(),
+            Some(Backend::Record { file, namespace }) => vec![
+                "--cassette-record".to_string(),
+                file.display().to_string(),
+                "--cassette-namespace".to_string(),
+                namespace.clone(),
+            ],
+            Some(Backend::Replay { file, namespace }) => vec![
+                "--cassette-replay".to_string(),
+                file.display().to_string(),
+                "--cassette-namespace".to_string(),
+                namespace.clone(),
+            ],
+        };
+        let env: Vec<(&str, &str)> = self
+            .env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        FixtureProcess::start_at_inner_env(self.root, None, &args, &env)
+    }
+}
+
 /// `FixtureProcess` owns one direct-host fixture process and its captured output streams.
 pub struct FixtureProcess {
     child: Option<Child>,
@@ -84,37 +152,7 @@ impl FixtureProcess {
     }
 
     pub fn start_at(root: PathBuf) -> Self {
-        Self::start_at_inner(root, None, &[])
-    }
-
-    /// Starts the fixture with its model backend recorded into `cassette`,
-    /// written at shutdown.
-    pub fn start_recording(root: PathBuf, cassette: &Path, namespace: &str) -> Self {
-        let args = [
-            "--cassette-record".to_string(),
-            cassette.display().to_string(),
-            "--cassette-namespace".to_string(),
-            namespace.to_string(),
-        ];
-        Self::start_at_inner(root, None, &args)
-    }
-
-    /// Starts the fixture with its model backend replaced by `cassette`,
-    /// replayed strictly; the controlled backend is never consulted.
-    pub fn start_replaying(root: PathBuf, cassette: &Path, namespace: &str) -> Self {
-        let args = [
-            "--cassette-replay".to_string(),
-            cassette.display().to_string(),
-            "--cassette-namespace".to_string(),
-            namespace.to_string(),
-        ];
-        Self::start_at_inner(root, None, &args)
-    }
-
-    /// Starts the fixture with `env` set in its environment, for the user
-    /// config tier the daemon reads from `XDG_CONFIG_HOME`.
-    pub fn start_at_with_env(root: PathBuf, env: &[(&str, &str)]) -> Self {
-        Self::start_at_inner_env(root, None, &[], env)
+        Launch::at(root).start()
     }
 
     fn start_at_inner(

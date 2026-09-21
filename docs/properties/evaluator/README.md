@@ -1098,7 +1098,7 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
 - `an_s0_campaign_on_the_default_surface_publishes_one_gated_report`
   (`mtr-runner-shell-example-gated-and-bounded`,
   `xc-campaign-resource-envelope-declared-and-enforced`): a 130-message aged
-  history and a five-message control compile into three pairs whose baseline
+  history and a twelve-message control compile into three pairs whose baseline
   contrast is established at the profile's surface-1 window; each of the six
   arms runs through its own fixture process in its own root with the backend
   counters at zero model calls; the falsifier is lost at the candidate window
@@ -1106,17 +1106,18 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   delivered on both; the analysis over three pairs reports `b = 1` and fails
   the paired gates at the fixture's margins; six samples are accounted for;
   the established claims follow from the verdicts; every pruned arm is
-  declared and ends `unsupported {policy_not_on_surface}`; every structured
-  arm runs on the summarizer's segments, produced from a cassette replayed
-  strictly (the replay equals the recording; an edited transcript is a
-  latched miss) and validated by the summarizer's own validator; the early
-  truth is folded past its segment's served fragment and lost at render on
-  both arms, the in-window truth at the head of its segment and the raw tail
-  truth are delivered; the three policies validate as `GovernanceArms` over
-  the pair set; eighteen samples are accounted for and twelve attempted; the report validates, is published
+  declared and ends `unsupported {policy_not_on_surface}`; the structured
+  aged arm runs on the segments the daemon's own summarizer published inside
+  the fixture under context pressure, built once with the fixture's backend
+  recorded and once under strict replay of that recording with the backend
+  at zero calls, the two publishing the same segments; the two folded truths
+  are refused at the match filter, the raw tail truth is delivered; the
+  control sits inside the protected tail, so its structured arm is its raw
+  history and delivers every truth; the three policies validate as
+  `GovernanceArms` over the pair set; eighteen samples are accounted for and twelve attempted; the report validates, is published
   write-then-rename with the file and directory synced, and parses back
   equal; the published peaks show the stores, the elapsed time, the artifact,
-  one process, one root, and the summarizer cassettes' bytes; a manifest is
+  one process, one root, and the summarizer cassette's bytes; a manifest is
   published the same way, parses back to the same digest, names the checkout,
   toolchain, host triple, and fixture binary, carries every sample in run
   order, the frozen family's digest, and the recency baseline, says `bulk`
@@ -1177,9 +1178,11 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
 - `HistoryPolicy` descriptors select `message_cleanup` and the
   HistorySummarizer producer by path and symbol. The pruned arm is accounted
   as unsupported on surface 1 (cleanup reclaims projection rows the surface
-  never reads). The structured arm reaches the summarizer's validator with a
-  cassette-replayed answer from a scripted provider, not the producer and
-  `publish_validated_chunk`; no live summarizer traffic has been recorded.
+  never reads). The structured arm's segments are published by the daemon's
+  own summarizer firing inside the fixture (trigger, producer, validator,
+  and `publish_validated_chunk`), against the fixture's backend standing in
+  for a summarizer provider, recorded into a cassette and reproduced under
+  strict replay; no live provider's summarizer traffic has been recorded.
 - The campaign's arms are seeded as history segments written straight into
   each store, so its manifest says `bulk` and `direct-database, non-aged`;
   an aged arm built by `step()` and lifecycle replay through ingestion does
@@ -1190,8 +1193,10 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   oracle only.
 - Surface 1 makes no model call (the fixture's counters read zero), so the
   surface boundary's cassette holds no frame; the summarizer boundary's
-  cassette holds one recorded frame per arm, replayed strictly with one
-  probed miss, from a scripted provider rather than a live one.
+  cassette holds the one frame the aged arm's firing recorded, replayed
+  strictly by a second fixture whose counters stay at zero, from the
+  fixture's scripted provider rather than a live one; the control's history
+  sits inside the tail the summarizer protects, so its cassette holds none.
 - The campaign runs its arms one after another in one process; parallel
   campaigns on a shared checkout have not been run, so
   `xc-parallel-campaigns-isolated-on-shared-checkout` is exercised only for
