@@ -730,9 +730,10 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   `{}` out of the digest.
 - `backend_records_cover_the_pinned_fields_with_exact_temperatures`
   (`rid-cassette-strict-miss-typed-error`): the `BackendRecord` projection's
-  field set equals `BACKEND_COVERED_FIELDS`; `0.7` and `0.70` digest equal,
-  `0.8` differs; `NaN`, infinity, `-0.0`, a negative value, and a hand-written
-  `0.70` refuse. `every_error_names_its_wire_kind` pins seventeen distinct kinds,
+  field set equals `BACKEND_COVERED_FIELDS`; the request values `0.7` and
+  `0.70` digest equal, `0.8` differs; `NaN`, infinity, `-0.0`, and a negative
+  value refuse in `canonical_decimal_f64`, and a record whose `temperature`
+  string was hand-edited to `0.70` refuses in `covered()`. `every_error_names_its_wire_kind` pins seventeen distinct kinds,
   and `no_wire_detail_carries_request_content` pins `CassetteError::detail`:
   a request-shaped variant (`Shape`, `MalformedBody`, `UnknownRequestField`,
   `TemperatureNotDecimal`, `NotCanonical`) built around a canary payload

@@ -752,8 +752,10 @@ lists, both pinned in `eval-core` and named together by
   would miss on every replay) are dropped; a turn replayed under another
   session therefore hits, which the daemon suite pins. `temperature` travels as
   the exact decimal `f64::to_string` produces (`canonical_decimal_f64`, finite
-  and non-negative), so `0.7` and `0.70` share one digest and `0.7` and `0.8`
-  do not; a hand-written `0.70` is refused.
+  and non-negative), so the request values `0.7` and `0.70` (one `f64`) share
+  one digest and `0.7` and `0.8` do not. A `BackendRecord.temperature` string
+  written as `0.70` rather than produced by `canonical_decimal_f64` (a
+  hand-edited record, not a request) is refused by `covered()`.
 
 `request_digest` is `protocol_digest("eval-cassette-request/v1", projection)`
 over canonical JSON. The file is `{schema, namespace, covered_fields_version,
