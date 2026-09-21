@@ -14,6 +14,7 @@
   "include": [
     "crates/tokenizer/gen/*.ts",
     "crates/daemon/gen/*.ts",
+    "crates/eval-core/gen/*.ts",
     "scripts/*.ts"
   ]
 }

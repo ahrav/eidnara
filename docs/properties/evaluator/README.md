@@ -18,7 +18,7 @@ provide, so a reader can find them by test name.
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v5` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v6` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -803,6 +803,66 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   hands a malformed body to the oracle as text, and turns any oracle failure,
   typed or not, into a 400 with no message text; `reset()` unbinds.
 
+## Phase 3 executed checks: frozen statistics
+
+Statistics core (`crates/eval-core/tests/statistics.rs`):
+
+- `the_frozen_reference_agrees_on_every_golden_case`
+  (`mtr-three-gates-signed-history-effect`,
+  `mtr-world-clustered-intervals-after-icc-pilot`): the TypeScript reference's
+  twelve cases (five pair tables with gate verdicts, including censored arms,
+  a failing noninferiority gate, and one at the margin; five ICC pilots with
+  and without a family effect, with fewer affordable worlds than the pilot
+  had, unbalanced, and internally constant; two cluster bootstraps by family
+  and by world over 300 pairs) equal the Rust counts, rates, gates, ICC,
+  clustering unit, effective N, and interval bounds exactly; the golden's
+  `input_sha256` is recomputed over the whole case array first.
+- `ratios_are_exact_normalized_and_refuse_overflow`: reduction, decimal
+  parsing, the four checked operations, a zero divisor, a difference past the
+  safe range and a component at `2^53` refusing as `RationalOverflow`, and a
+  wire ratio normalizing on deserialization while a zero denominator refuses.
+- `every_profile_input_is_required_and_bounded`: each of the five profile
+  fields and each of the four liveness bounds is required; a rate above one or
+  a non-canonical decimal refuses.
+- `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
+  (`mtr-analysis-family-frozen-before-results`): the frozen digest accepts the
+  unchanged family; an edit to any of nine components (endpoints, families,
+  exclusions, multiplicity, margin, floor, threshold, seed, pilot) is
+  `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
+  below 300, fewer than 40 replicates, an empty endpoint list, and an unknown
+  field refuse; a manifest without a recorded digest is `FamilyNotRecorded`.
+- `the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpowered`
+  (`mtr-world-clustered-intervals-after-icc-pilot`): a family effect selects
+  the family unit; a flat pilot whose tasks agree within each world has world
+  ICC one and counts each world once; fewer affordable worlds shrink N; zero
+  affordable worlds, a two-observation pilot, a single group, and no variance
+  at all refuse; constant and unbalanced constant groups give ICC one; a
+  large-valued pilot refuses as `RationalOverflow`; an effective N below the
+  required N makes `analyze` return `Blocked {insufficient_effective_n}`, and a
+  hand-written degenerate ratio cannot slip past it.
+- `the_three_gates_are_separate_signed_and_bound_by_the_profile`
+  (`mtr-three-gates-signed-history-effect`): `b = 3, c = 5, n = 20` passes
+  noninferiority with `-1/10` while failing harm at `3/20`; `b = c = 4` passes
+  noninferiority at zero while failing harm and the floor; `1/4` fails
+  noninferiority; exact-margin and exact-floor statistics pass; every bound
+  equals the profile's rate; censored arms count as described above.
+- `intervals_name_their_unit_and_counts_and_are_withheld_below_the_floor`:
+  the interval names unit, method, cluster count, item count, and replicates
+  with pinned bounds; 299 items withhold it as `item_count_below_threshold`
+  and a caller cannot lower the threshold or the replicate count; one cluster
+  withholds it as `fewer_than_two_clusters`; the same seed reproduces the same
+  bounds and another seed moves them.
+- `arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained`:
+  a miss-rate gap of `2/25` against a `1/20` bound is `Blocked
+  {arm_miss_asymmetry}`; zero or one arm is `TooFewArms`; within the bound,
+  the report carries the frozen digest, the counts, the per-arm miss and
+  refusal rates, and exactly three gate fields.
+- `no_judge_type_reaches_the_gates`
+  (`mtr-judge-output-never-feeds-control-or-floor`): the statistics source
+  names no judge, so no judge verdict type can be an input to a gate.
+- `crates/eval-core/tests/manifest.rs` pins `analysis_family_digest` as a
+  required manifest field (schema v6) that enters the digest.
+
 ## Gaps recorded here
 
 - The OpenCode cassette is bound to the environment that recorded it: the
@@ -821,6 +881,12 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
 - The Rust oracle protocol has no Rust-side test; the rust-only e2e suite
   exercises it through the real binary, and the default `bun test` lane sees
   only the in-memory double.
+- No approved campaign profile exists: the margins, harm bound, floor,
+  miss-asymmetry bound, and liveness bounds are maintainer inputs that the
+  code refuses to default, so no empirical Suite B or D acceptance can be
+  claimed until one is pre-registered.
+- The interval method is the percentile cluster bootstrap only; a
+  cluster-robust analytic interval is not implemented.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries

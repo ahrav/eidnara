@@ -27,7 +27,7 @@ sub-record.
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
 
-## Manifest `eval-manifest/v5`
+## Manifest `eval-manifest/v6`
 
 `parse_manifest` reads a JSON object, compares its key set against
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
@@ -45,10 +45,11 @@ field to `Manifest` without bumping the schema fails the closure test, and the
 fixture digests in `tests/manifest.rs` are frozen so an encoding change is
 reviewed.
 
-The 28 required fields, sorted:
+The 29 required fields, sorted:
 
 | Field | Content |
 | --- | --- |
+| `analysis_family_digest` | The `eval-analysis-family-digest/v1` digest of the frozen analysis family a paired campaign is read under, recorded before its first outcome; `null` for a run that reports no paired statistics. |
 | `arm_rates` | Per-arm miss and refusal rates as exact decimal strings. |
 | `attestation` | Tagged: `{"kind": "none"}` or `{"kind": "signed", ...}`. |
 | `claim_boundary` | The `claim-boundary/v1` block with the four exclusions. |
@@ -70,19 +71,21 @@ The 28 required fields, sorted:
 | `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
-| `schema` | `eval-manifest/v5`. |
+| `schema` | `eval-manifest/v6`. |
 | `status` | `completed`, `incomplete`, `refused`, or `blocked`. |
 | `tokenizer_profile` | Name, revision, digest. |
 
 `Manifest::digest` re-parses the manifest, applies the manifest's own residue
 rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
-is `Keep`), and hashes with protocol `eval-manifest-digest/v5`. Version 2
+is `Keep`), and hashes with protocol `eval-manifest-digest/v6`. Version 2
 added `execution_mode` (the reducer differential runs under `enumerate`);
 version 3 added `ingestion`, because no ingestion entry point has a production
 caller and every manifest must say so; version 4 added `failure_class_table_digest`,
 so a report names the failure-class table its classes come from;
 version 5 added `memory_reviewer_model_calls`, because reviewer model traffic
-is either replayed or excluded, never silently live. The digest is a function
+is either replayed or excluded, never silently live;
+version 6 added `analysis_family_digest`, so a paired report can prove it was
+read under the family frozen before its first outcome. The digest is a function
 of every kept field, not of the run identity alone: two processes that record the same
 identity and the same kept contents produce the same digest
 (`two_process_same_identity_yields_equal_manifest_and_trace_digests`), and two
@@ -860,6 +863,109 @@ reports, the body's `model`, and the credential id the peer is configured with
 `cassette_miss` and a `SendError::Status(409)` at the sender, and every later
 request on that peer is refused too. A run that spawns no reviewer worker
 declares `memory_reviewer_model_calls: excluded` in its manifest instead.
+
+## Paired statistics
+
+`statistics.rs` computes the paired history effect over oracle verdicts as
+exact rationals: `Ratio {numerator, denominator}` in lowest terms with both
+components inside canonical JSON's safe integer range, so the two runtimes
+that implement it serialize the same bytes and no fraction is ever a float.
+Construction and deserialization normalize (a zero denominator or an
+unreduced wire form never reaches a comparison), and every operation is
+checked in 128-bit arithmetic: a statistic that would leave the safe range is
+`RationalOverflow`, never a wrapped value. Nothing in the module names a
+judge: `ArmResult` is `pass`, `fail`, or `censored(reason)` from the task
+oracle, and the gates take nothing else.
+
+**Campaign profile.** `CampaignProfile` is the maintainer's pre-registered
+input: `noninferiority_margin`, `harm_bound`, `floor_threshold`,
+`miss_asymmetry_bound` (canonical decimals in `[0, 1]`) and the four
+`liveness_bounds` (`catch_up_episodes`, `embedding_passes`,
+`materialization_episodes`, `reviewer_coordinator_passes`). Every field is
+required; `parse_campaign_profile` refuses a missing one, and nothing derives a
+value from the outcomes it gates. The margins are experimental values, not
+product targets. The code and its refusal tests land without values; an
+empirical acceptance needs an approved profile.
+
+**Analysis family.** `AnalysisFamily` (`eval-analysis-family/v1`) fixes
+everything a result depends on: endpoints, task families, exclusions, the
+stopping rule (`fixed_n`), the multiplicity correction (`none`, `holm`,
+`benjamini_hochberg`), the profile, the interval method (`cluster_bootstrap`),
+the item-count threshold (at least 300), the bootstrap replicate count and
+seed, and the ICC pilot. `FrozenFamily::freeze` digests it
+(`eval-analysis-family-digest/v1`); the manifest records that digest as
+`analysis_family_digest` before the first outcome, and `FrozenFamily::check`
+refuses a family whose digest differs as
+`FamilyChangedAfterResults {recorded, found}`, so a post-hoc edit to any
+component is a typed refusal rather than a quiet re-analysis.
+
+**ICC pilot.** A `ClusterKey` is a task family and a world seed; the
+`family` clustering unit groups by family and the `world_seed` unit by the
+world itself (family and seed together), and the pilot and the bootstrap use
+the same partition. `run_icc_pilot` groups pilot observations (one paired
+score per task per world) at both levels, computes the one-way ANOVA
+intraclass correlation at each (`intraclass_correlation`, exact, with `m0` the
+arithmetic mean group size; groups that are each internally constant give
+exactly one), and picks the highest level whose ICC exceeds `1/20`
+(`ICC_THRESHOLD`), with the world as the finest fallback. It carries the item
+count the maximum affordable world count would yield, deflated by the design
+effect `1 + (m - 1) ICC` of the selected unit, as `effective_n_at_max`; the
+effect is clamped at one, so deflation only ever shrinks N, and a zero
+affordable world count is refused. A family whose `effective_n_at_max` is
+below the maintainer's `required_n_for_margin` makes `analyze` return
+`Blocked {reason: insufficient_effective_n}` and no report object.
+
+**Three gates.** `PairCounts::of` counts `n`, `b` (fresh pass, aged not pass),
+`c` (fresh fail, aged pass), `aged_pass`, and the censored arms. Censoring is
+resolved so it can only make a gate harder: a censored arm never counts as a
+pass, a censored aged arm counts as a loss in `b`, and a censored fresh arm
+counts as neither pass nor fail. `Gates::of` takes the profile's parsed
+`ProfileRates` and evaluates `quality_loss = (b - c) / n` against the
+noninferiority margin (signed: a negative value means the aged arm did better
+and passes), `harm = b / n` against the harm bound, and the aged pass rate
+against the floor, as three independent verdicts whose bounds come from the
+profile and never from the counts; the report has no collapsed effect field.
+
+**World-clustered interval.** `cluster_bootstrap_interval` sums `b - c` and
+`n` per cluster (the pilot's unit), resamples clusters with replacement
+`replicates` times, computes `quality_loss` as the ratio of resampled sums,
+and reports the `1/40` and `39/40` order statistics as `lower` and `upper`,
+with `unit`, `method`, `n_clusters`, `n_items`, and `replicates`. Clusters
+are ordered by key, and the draw is the first 64 bits of the
+`eval-cluster-bootstrap/v1` digest over `{seed, replicate, draw}` reduced by
+the cluster count, so the interval is a pure function of the seed on either
+runtime. The function itself never goes below `ITEM_COUNT_THRESHOLD` items or
+`MIN_BOOTSTRAP_REPLICATES` replicates, whatever a caller asks. Below the
+threshold no interval of any method is emitted; the report carries
+`IntervalOutcome::Withheld {reason: item_count_below_threshold}` (or
+`fewer_than_two_clusters`) instead of a `computed` interval.
+
+**Report.** `analyze(frozen, family, pairs, arm_rates)` checks the freeze
+(`FrozenFamily::from_manifest` reads the manifest's recorded digest; a
+manifest without one is `FamilyNotRecorded`), then the pilot's block, then the
+per-arm cassette-miss asymmetry (the gap between the highest and lowest
+`arm_rates.*.miss_rate`; fewer than two arms is `TooFewArms`, missing evidence
+that never passes) against `miss_asymmetry_bound`, which blocks as
+`arm_miss_asymmetry` with no gates computed; only then does it build
+`PairedReport {analysis_family_digest, counts, gates, interval, arm_rates}`.
+Per-arm miss and refusal rates travel with the report, so unsupported evidence
+is visible beside every gate.
+
+**Frozen reference.** `crates/eval-core/gen/gen-statistics-golden.ts` is an
+independently written TypeScript implementation of the same quantities in
+BigInt rationals, including the three gate verdicts against a fixture profile;
+`bun crates/eval-core/gen/gen-statistics-golden.ts` writes
+`crates/eval-core/testdata/statistics-golden.json` with
+`provenance {generator_version, input_sha256}`, where `input_sha256` is the
+SHA-256 of the pretty-printed, key-sorted case array, expectations included.
+`tests/statistics.rs` recomputes that digest, so a hand-edited expectation is
+caught, and asserts the Rust counts, rates, gate verdicts, ICC, clustering
+unit, effective N, and bootstrap bounds equal the reference exactly on every
+case (balanced and unbalanced pilots, constant worlds, fewer affordable worlds
+than the pilot had, and both bootstrap units), so a flipped sign or a drifted
+estimator on either side fails the differential. The reference reproduces the
+model, not the refusals: degenerate inputs the Rust side refuses are not
+fixtures.
 
 ## Coverage markers
 

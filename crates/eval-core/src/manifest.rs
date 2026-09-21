@@ -11,11 +11,12 @@ use crate::census::{Construction, Reachability};
 use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
 
-pub const MANIFEST_SCHEMA: &str = "eval-manifest/v5";
-pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v5";
+pub const MANIFEST_SCHEMA: &str = "eval-manifest/v6";
+pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v6";
 
 /// Sorted; a field added to [`Manifest`] without a schema version bump fails the closure test.
-pub const REQUIRED_FIELDS: [&str; 28] = [
+pub const REQUIRED_FIELDS: [&str; 29] = [
+    "analysis_family_digest",
     "arm_rates",
     "attestation",
     "claim_boundary",
@@ -62,6 +63,10 @@ pub const CLAIM_BOUNDARY_EXCLUSIONS: [&str; 4] = [
 pub struct Manifest {
     pub schema: String,
     pub eval_run_id: String,
+    /// The frozen analysis family a paired campaign's results are read under,
+    /// recorded before the first outcome; `None` for a run that reports no
+    /// paired statistics.
+    pub analysis_family_digest: Option<String>,
     pub run_identity: RunIdentity,
     pub start_ms: i64,
     pub end_ms: i64,
@@ -387,6 +392,9 @@ impl Manifest {
         }
         for (index, prior) in self.retry_lineage.iter().enumerate() {
             digests.push((format!("retry_lineage[{index}]"), prior));
+        }
+        if let Some(digest) = &self.analysis_family_digest {
+            digests.push(("analysis_family_digest".to_string(), digest));
         }
         for (field, digest) in digests {
             if !is_lower_hex(digest, 64) {
