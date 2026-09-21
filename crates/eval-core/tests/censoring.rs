@@ -362,6 +362,14 @@ fn pass_k_bounds_resolve_censoring_both_ways_and_are_indeterminate_when_all_are_
         pass_k(&[Pass; 130], 65).err(),
         Some(StatisticsError::RationalOverflow)
     );
+    // C(130,129)/C(130,129) is 1; the central coefficients on the way there are not visited.
+    assert_eq!(
+        pass_k(&[Pass; 130], 129).unwrap().pass_k,
+        PassKBounds::Bounds {
+            censored_as_fail: Ratio::ONE,
+            censored_excluded: Ratio::ONE,
+        }
+    );
     let mut nearly = vec![Pass; 100];
     nearly[0] = Fail;
     assert_eq!(

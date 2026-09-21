@@ -201,6 +201,8 @@ fn choose(n: u64, k: u64) -> Result<u128, StatisticsError> {
     if k > n {
         return Ok(0);
     }
+    // C(n, k) = C(n, n - k); the shorter walk stays clear of the central coefficients.
+    let k = k.min(n - k);
     (0..k).try_fold(1u128, |acc, i| {
         acc.checked_mul(u128::from(n - i))
             .map(|product| product / u128::from(i + 1))
