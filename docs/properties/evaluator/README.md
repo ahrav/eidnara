@@ -731,7 +731,7 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   (`rid-cassette-strict-miss-typed-error`): the `BackendRecord` projection's
   field set equals `BACKEND_COVERED_FIELDS`; `0.7` and `0.70` digest equal,
   `0.8` differs; `NaN`, infinity, `-0.0`, a negative value, and a hand-written
-  `0.70` refuse. `every_error_names_its_wire_kind` pins sixteen distinct kinds,
+  `0.70` refuse. `every_error_names_its_wire_kind` pins seventeen distinct kinds,
   and `no_wire_detail_carries_request_content` pins `CassetteError::detail`:
   a request-shaped variant (`Shape`, `MalformedBody`, `UnknownRequestField`,
   `TemperatureNotDecimal`, `NotCanonical`) built around a canary payload
@@ -783,6 +783,10 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   entry keyed to another host misses.
 - `every_cassette_marker_fires_across_the_scenarios` is the completeness
   proof over this suite's markers.
+- `a_dropped_future_or_a_closed_sink_refuses_the_recording`: a backend future
+  dropped before its terminal, and a run whose sink answers `Closed`, each
+  leave the recorder refusing `IncompleteExchange`; the closed-sink call
+  returns a `cassette_refused` terminal.
 - `every_host_finish_reason_error_class_and_terminal_round_trips`: both
   `FinishReason` values, all four `ErrorClass` values under `Failed` and
   `FailedUnresolved`, and an absent event finish reason each record and replay

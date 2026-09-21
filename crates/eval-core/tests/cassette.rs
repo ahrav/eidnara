@@ -749,6 +749,7 @@ fn oracle_owned_errors() -> Vec<(CassetteError, Vec<&'static str>)> {
             CassetteError::ScannerUnavailable(RedactionErrorKind::Construction),
             vec!["Construction"],
         ),
+        (CassetteError::IncompleteExchange, vec![]),
         (CassetteError::RecordOnReplay, vec![]),
         (CassetteError::LookupOnRecord, vec![]),
     ]
@@ -761,7 +762,7 @@ fn every_error_names_its_wire_kind() {
         .chain(oracle_owned_errors().iter().map(|(error, _)| error))
         .map(CassetteError::kind)
         .collect();
-    assert_eq!(kinds.len(), 16, "kinds are distinct");
+    assert_eq!(kinds.len(), 17, "kinds are distinct");
     assert!(kinds.contains("RedactionRefused"));
     assert!(kinds.contains("NotCanonical"));
 }

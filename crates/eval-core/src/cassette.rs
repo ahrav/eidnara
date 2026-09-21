@@ -137,7 +137,9 @@ pub struct CassetteMiss {
 /// stored digest is not the digest of its stored request; `RedactionRefused`
 /// names a secret, or content the scanner cannot finish, in `location`, and
 /// the entry is refused whole rather than placeholder-substituted, after which
-/// the cassette refuses to persist.
+/// the cassette refuses to persist; `IncompleteExchange` is a recording whose
+/// boundary lost an exchange (a future dropped before its terminal, an event
+/// the sink refused), which likewise has no file form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CassetteError {
     SchemaMismatch { found: String },
@@ -153,6 +155,7 @@ pub enum CassetteError {
     TemperatureNotDecimal(String),
     RedactionRefused(Location, RedactionErrorKind),
     ScannerUnavailable(RedactionErrorKind),
+    IncompleteExchange,
     RecordOnReplay,
     LookupOnRecord,
     NotCanonical(ContractError),
@@ -178,6 +181,7 @@ impl CassetteError {
             Self::TemperatureNotDecimal(_) => "TemperatureNotDecimal",
             Self::RedactionRefused(..) => "RedactionRefused",
             Self::ScannerUnavailable(_) => "ScannerUnavailable",
+            Self::IncompleteExchange => "IncompleteExchange",
             Self::RecordOnReplay => "RecordOnReplay",
             Self::LookupOnRecord => "LookupOnRecord",
             Self::NotCanonical(_) => "NotCanonical",
@@ -198,6 +202,7 @@ impl CassetteError {
             | Self::EntryDigestMismatch { .. }
             | Self::RedactionRefused(..)
             | Self::ScannerUnavailable(_)
+            | Self::IncompleteExchange
             | Self::RecordOnReplay
             | Self::LookupOnRecord => self.to_string(),
             Self::Shape(_)

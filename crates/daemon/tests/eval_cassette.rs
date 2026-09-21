@@ -625,3 +625,43 @@ fn every_host_finish_reason_error_class_and_terminal_round_trips() {
         assert_eq!(replayed, recorded, "{label}");
     }
 }
+
+/// An exchange the recording cannot reproduce refuses it: a future dropped
+/// before its terminal (a panic or a cancelled task) and a sink that closed on
+/// an event both leave the recorder with no file.
+#[test]
+fn a_dropped_future_or_a_closed_sink_refuses_the_recording() {
+    let real = Arc::new(Scripted {
+        calls: AtomicUsize::new(0),
+    });
+    let recorder = CassetteBackend::recording(NAMESPACE, real.clone());
+    let recording: Arc<dyn LlmExecutionBackend> = recorder.clone();
+    let runtime = runtime();
+    runtime.block_on(run(&recording, request("hello")));
+    assert!(recorder.file().is_ok());
+    let accepting = EventSink::new(Arc::new(|_| SinkStatus::Accepted));
+    drop(recording.execute(request("dropped"), accepting, CancellationToken::new()));
+    assert_eq!(
+        recorder.file().err(),
+        Some(CassetteError::IncompleteExchange),
+        "an exchange without a terminal is in no file"
+    );
+
+    let real = Arc::new(Scripted {
+        calls: AtomicUsize::new(0),
+    });
+    let recorder = CassetteBackend::recording(NAMESPACE, real);
+    let recording: Arc<dyn LlmExecutionBackend> = recorder.clone();
+    let closed = EventSink::new(Arc::new(|_| SinkStatus::Closed));
+    let terminal =
+        runtime.block_on(recording.execute(request("hello"), closed, CancellationToken::new()));
+    assert!(matches!(
+        terminal,
+        BackendTerminal::Failed(BackendError { provider_code: Some(code), .. }) if code == "cassette_refused"
+    ));
+    assert_eq!(
+        recorder.file().err(),
+        Some(CassetteError::IncompleteExchange),
+        "an event the sink refused is in no file"
+    );
+}

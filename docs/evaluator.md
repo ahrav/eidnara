@@ -800,9 +800,9 @@ substituted with a placeholder and never persisted, and the refusal latches:
 has no file form and a partial cassette can never pass for a complete one.
 Every `record` failure latches the same way (a `WrongNamespace` offer, an
 undigestable request), and so does a request the boundary could not even
-project (`UnknownRequestField`, an unencodable number) through
-`Cassette::refuse`, because the exchange it stands for is missing from the
-cassette just as a refused entry is.
+project (`UnknownRequestField`, an unencodable number) or an exchange it lost
+(`IncompleteExchange`) through `Cassette::refuse`, because the exchange it
+stands for is missing from the cassette just as a refused entry is.
 
 ### Rust oracle and the TypeScript mock
 
@@ -841,7 +841,11 @@ until the sink closes and returns the recorded terminal, and a miss is
 naming the turn, class, and nearest digest. An unencodable request is
 `cassette_request` and, while recording, latches so the backend has no file; a
 recording the scanner refuses is `redaction_refused` and leaves the backend
-with no file either. `refusals()` counts every miss terminal
+with no file either. So does an exchange the recording cannot reproduce
+(`IncompleteExchange`, a `cassette_refused` terminal): a wrapped future dropped
+before its terminal (a panic, a cancelled task), or an event the run's sink
+answered `Closed` (the supervisor's cap or a prior terminal owns the run's
+outcome, and the refused event is not in the recording). `refusals()` counts every miss terminal
 served, including the repeats after the first miss latched, and `unconsumed()`
 reports the recorded entries the run never requested. The cassette
 header's `declarations` carry what the real backend declared per harness

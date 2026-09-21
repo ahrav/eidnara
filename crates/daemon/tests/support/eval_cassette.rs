@@ -3,7 +3,7 @@
 //! covered fields, and the reviewer's attempt-marker tuple (body digest,
 //! provider identity, model, credential id).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use eval_core::{
@@ -343,12 +343,15 @@ impl CassetteBackend {
         cancel: CancellationToken,
     ) -> BackendFuture {
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let closed = Arc::new(AtomicBool::new(false));
         let tee = {
             let seen = seen.clone();
+            let closed = closed.clone();
             EventSink::new(Arc::new(move |event: BackendEvent| {
                 let status = events.emit(event.clone());
-                if status == SinkStatus::Accepted {
-                    seen.lock().unwrap().push(WireEvent::from(&event));
+                match status {
+                    SinkStatus::Accepted => seen.lock().unwrap().push(WireEvent::from(&event)),
+                    SinkStatus::Closed => closed.store(true, Ordering::SeqCst),
                 }
                 status
             }))
@@ -356,18 +359,25 @@ impl CassetteBackend {
         let inner = inner.execute(request, tee, cancel);
         let cassette = self.cassette.clone();
         let namespace = self.namespace.clone();
+        // Armed here, not inside the future, so a future dropped unpolled
+        // still refuses the recording.
+        let mut uncommitted = Uncommitted(Some(cassette.clone()));
         Box::pin(async move {
             let terminal = inner.await;
+            let mut cassette = cassette.lock().unwrap();
+            uncommitted.disarm();
+            if closed.load(Ordering::SeqCst) {
+                // The run's terminal is the supervisor's, not this one, and
+                // the refused event is missing: the exchange cannot be replayed.
+                let error = cassette.refuse(CassetteError::IncompleteExchange);
+                return Self::refused("cassette_refused", error);
+            }
             let exchange = WireExchange {
                 events: seen.lock().unwrap().clone(),
                 terminal: WireTerminal::from(&terminal),
             };
             let response = serde_json::to_value(exchange).unwrap();
-            match cassette
-                .lock()
-                .unwrap()
-                .record(&namespace, Boundary::Backend, covered, response)
-            {
+            match cassette.record(&namespace, Boundary::Backend, covered, response) {
                 Ok(_) => terminal,
                 Err(error) => Self::refused("redaction_refused", error),
             }
@@ -421,6 +431,26 @@ impl CassetteBackend {
                 Err(unknown) => Self::refused("cassette_refused", unknown),
             }
         })
+    }
+}
+
+/// Refuses the recording when dropped still armed: an exchange whose future
+/// panicked or was dropped before `record` ran is in no file.
+struct Uncommitted(Option<Arc<Mutex<Cassette>>>);
+
+impl Uncommitted {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Uncommitted {
+    fn drop(&mut self) {
+        if let Some(cassette) = self.0.take()
+            && let Ok(mut cassette) = cassette.lock()
+        {
+            cassette.refuse(CassetteError::IncompleteExchange);
+        }
     }
 }
 
