@@ -23,6 +23,43 @@ const AGED_MESSAGES: u32 = 130;
 const S0_ELAPSED_BOUND_MS: u64 = 1_200_000;
 const S1_AGED_MESSAGES: u32 = 400;
 
+/// The budget the scale's environment variable grants, which becomes the
+/// profile's elapsed bound so the envelope refuses the first reading past it.
+/// Without one the campaign is disabled at its scale, which is the
+/// closed-vocabulary terminal the sample ledger records, and `None` says so;
+/// a budget that is set but not a number is refused rather than read as
+/// absent.
+fn budget(scale: Scale) -> Option<u64> {
+    let variable = scale.budget_env();
+    match std::env::var(variable) {
+        Err(_) => {
+            let record = SampleRecord {
+                id: format!(
+                    "{}-surface1-raw",
+                    serde_json::to_value(scale).unwrap().as_str().unwrap()
+                ),
+                task: "campaign".to_string(),
+                arm: ArmKind::Aged,
+                policy: HistoryPolicy::Raw,
+                cut: Cut::EndOfRun,
+                lineage: vec![],
+                terminal: Terminal::Disabled(DisabledReason::ScaleNotBudgeted { scale }),
+            };
+            let ledger = SampleLedger {
+                epoch: 1,
+                order: vec![record.id.clone()],
+                samples: BTreeMap::from([(record.id.clone(), record)]),
+            };
+            assert_eq!(ledger.rates().unwrap().disabled, Ratio::ONE);
+            None
+        }
+        Ok(text) => Some(
+            text.parse::<u64>()
+                .unwrap_or_else(|e| panic!("{variable}={text:?} is not a millisecond budget: {e}")),
+        ),
+    }
+}
+
 fn approval() -> Approval {
     Approval {
         approved_by: "test-approval".to_string(),
@@ -293,10 +330,19 @@ fn an_unapproved_profile_runs_no_campaign() {
     assert_eq!(std::fs::read_dir(publish.path()).unwrap().count(), 0);
 }
 
+/// An S0 campaign driven through the daemon's lifecycle takes longer than the
+/// rest of the daemon's suite, so under the parent's nextest regression policy
+/// it runs only where `EIDNARA_EVAL_S0_BUDGET_MS` grants it a budget: its own
+/// CI job, or a developer who asks for it.
 #[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
 fn an_s0_campaign_on_the_default_surface_publishes_one_gated_report() {
-    let run = campaign(Scale::S0, AGED_MESSAGES, S0_ELAPSED_BOUND_MS);
+    let Some(budget_ms) = budget(Scale::S0) else {
+        return;
+    };
+    let run = campaign(Scale::S0, AGED_MESSAGES, budget_ms);
     let report = &run.report;
+    assert!(report.envelope.peaks.elapsed_ms <= budget_ms);
     assert_eq!(report.profile.name, "s0-surface1-raw");
     assert_eq!(
         report.claims.established,
@@ -341,7 +387,11 @@ fn an_s0_campaign_on_the_default_surface_publishes_one_gated_report() {
 /// report and manifest into the directory it is given and answers with one
 /// JSON line naming them, and the published manifest parses.
 #[test]
+#[ignore = "S0 runs under an explicit budget: set EIDNARA_EVAL_S0_BUDGET_MS and run with --ignored"]
 fn the_eval_runner_example_publishes_the_s0_campaign() {
+    let Some(budget_ms) = budget(Scale::S0) else {
+        return;
+    };
     let binary = example_binary("eval_runner", "eval-runner");
     let publish = tempfile::tempdir().unwrap();
     let output = std::process::Command::new(&binary)
@@ -352,7 +402,7 @@ fn the_eval_runner_example_publishes_the_s0_campaign() {
             "--aged-messages",
             &AGED_MESSAGES.to_string(),
             "--elapsed-bound-ms",
-            &S0_ELAPSED_BOUND_MS.to_string(),
+            &budget_ms.to_string(),
             "--approved-by",
             "test-approval",
             "--approval-run-id",
@@ -401,38 +451,13 @@ fn the_eval_runner_example_publishes_the_s0_campaign() {
 }
 
 /// Runs a longer history only when `EIDNARA_EVAL_S1_BUDGET_MS` grants a
-/// budget. Without one the campaign is disabled at its scale, which is the
-/// closed-vocabulary terminal the sample ledger records; a budget that is set
-/// but not a number is refused rather than read as absent.
+/// budget.
 #[test]
 #[ignore = "S1 runs under an explicit budget: set EIDNARA_EVAL_S1_BUDGET_MS and run with --ignored"]
 fn an_s1_campaign_runs_only_under_its_budget() {
-    let variable = Scale::S1.budget_env().unwrap();
-    let budget_ms = match std::env::var(variable) {
-        Err(_) => {
-            let record = SampleRecord {
-                id: "s1-surface1-raw".to_string(),
-                task: "campaign".to_string(),
-                arm: ArmKind::Aged,
-                policy: HistoryPolicy::Raw,
-                cut: Cut::EndOfRun,
-                lineage: vec![],
-                terminal: Terminal::Disabled(DisabledReason::ScaleNotBudgeted { scale: Scale::S1 }),
-            };
-            let ledger = SampleLedger {
-                epoch: 1,
-                order: vec![record.id.clone()],
-                samples: BTreeMap::from([(record.id.clone(), record)]),
-            };
-            assert_eq!(ledger.rates().unwrap().disabled, Ratio::ONE);
-            return;
-        }
-        Ok(text) => text
-            .parse::<u64>()
-            .unwrap_or_else(|e| panic!("{variable}={text:?} is not a millisecond budget: {e}")),
+    let Some(budget_ms) = budget(Scale::S1) else {
+        return;
     };
-    // The budget is the profile's elapsed bound, so an overrun is refused by
-    // the envelope at the reading that crosses it.
     let run = campaign(Scale::S1, S1_AGED_MESSAGES, budget_ms);
     let report = &run.report;
     assert!(report.envelope.peaks.elapsed_ms <= budget_ms);

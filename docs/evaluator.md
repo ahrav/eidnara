@@ -1187,10 +1187,10 @@ generator drew says nothing about real repositories.
 `campaign.rs` holds what a campaign pins before its first sample and how it
 accounts for every sample afterwards.
 
-**Run profile.** `RunProfile` (`eval-run-profile/v1`) names a `scale` (`s0`
-runs in the default test shards; `s1` and `s2` run only when
-`EIDNARA_EVAL_S1_BUDGET_MS` or `EIDNARA_EVAL_S2_BUDGET_MS` grants a budget and
-are ignored otherwise), the finite `worlds`, `tasks_per_world`, and
+**Run profile.** `RunProfile` (`eval-run-profile/v1`) names a `scale` (`s0`,
+`s1`, and `s2`, each run only when `EIDNARA_EVAL_S0_BUDGET_MS`,
+`EIDNARA_EVAL_S1_BUDGET_MS`, or `EIDNARA_EVAL_S2_BUDGET_MS` grants a budget
+and ignored otherwise), the finite `worlds`, `tasks_per_world`, and
 `max_events_per_log`, the six per-task `TaskBudgets` (`max_model_calls`,
 `max_tool_calls`, `max_tokens_in`, `max_tokens_out`, `hard_deadline_ms`,
 `max_no_progress_iterations`), the resource `envelope` (`ResourceLimits`), three
@@ -1388,13 +1388,17 @@ report so the published peaks include the publication; the run finishes
 inside its bounds. Surface 1's task turn makes no model call, which the
 backend counters show.
 
-`an_s1_campaign_runs_only_under_its_budget` is `#[ignore]`d and runs a
-400-message history only when `EIDNARA_EVAL_S1_BUDGET_MS` grants a budget,
-which becomes the profile's elapsed bound so the envelope refuses the first
-reading past it;
-without one it records the `disabled {scale_not_budgeted}` terminal in a
-sample ledger and runs nothing, and a budget that is set but not a number is
-refused. S0 stays in the default shards. What S1 found: over 400 turns the
+Every campaign test is `#[ignore]`d and runs only when its scale's
+environment variable grants a budget, which becomes the profile's elapsed
+bound so the envelope refuses the first reading past it; without one it
+records the `disabled {scale_not_budgeted}` terminal in a sample ledger and
+runs nothing, and a budget that is set but not a number is refused. This is
+the parent's nextest regression policy applied: the daemon's suite runs in
+about 28 seconds without the campaign binary and about 79 with it, because
+an S0 campaign drives sixteen fixture lives of 130 harness turns each, so the
+S0 campaign runs in its own CI job (`eval-campaign`, under
+`EIDNARA_EVAL_S0_BUDGET_MS`) rather than in the default shards, and S1 runs
+where a developer grants `EIDNARA_EVAL_S1_BUDGET_MS`. What S1 found: over 400 turns the
 daemon's summarizer fires more often, and one of its prompts draws a
 calibration example from the daemon's own seed corpus
 (`crates/daemon/testdata/reference-seeds.json`, the Stripe idempotency

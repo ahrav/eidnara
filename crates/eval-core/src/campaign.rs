@@ -18,9 +18,10 @@ use crate::statistics::{CampaignProfile, CensorReason, Ratio, StatisticsError};
 pub const RUN_PROFILE_SCHEMA: &str = "eval-run-profile/v1";
 pub const RUN_PROFILE_DIGEST_PROTOCOL: &str = "eval-run-profile-digest/v1";
 
-/// `S0` runs in the default test shards; `S1` and `S2` run only when the
-/// named environment variable grants them a budget, and are ignored
-/// otherwise.
+/// Every scale runs only when the named environment variable grants it a
+/// budget, and is ignored otherwise: an S0 campaign driven through the
+/// daemon's lifecycle takes longer than the rest of the daemon's suite, so
+/// under the nextest regression policy it runs in its own budgeted job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scale {
@@ -30,11 +31,11 @@ pub enum Scale {
 }
 
 impl Scale {
-    pub fn budget_env(self) -> Option<&'static str> {
+    pub fn budget_env(self) -> &'static str {
         match self {
-            Self::S0 => None,
-            Self::S1 => Some("EIDNARA_EVAL_S1_BUDGET_MS"),
-            Self::S2 => Some("EIDNARA_EVAL_S2_BUDGET_MS"),
+            Self::S0 => "EIDNARA_EVAL_S0_BUDGET_MS",
+            Self::S1 => "EIDNARA_EVAL_S1_BUDGET_MS",
+            Self::S2 => "EIDNARA_EVAL_S2_BUDGET_MS",
         }
     }
 }
