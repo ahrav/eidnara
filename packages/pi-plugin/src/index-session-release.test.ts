@@ -395,6 +395,30 @@ describe("Pi daemon transport across runtime teardown", () => {
         }
     });
 
+    it("keeps the unconfirmed status through a later disabled checkpoint", async () => {
+        let state = "store_failed";
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => ({ state: input.method === "memory.capture" ? state : "disabled" }),
+        );
+        try {
+            const { agentEnd } = await agentEndHandler();
+            const setStatus = mock(() => undefined);
+            const ctx = captureContext({ model: { provider: "openai", id: "test" }, setStatus });
+            await agentEnd({}, ctx);
+            await __test.settleMemoryCapture();
+            // A disabled daemon stored nothing either; the refused entries are still unconfirmed.
+            state = "disabled";
+            await agentEnd({}, ctx);
+            await __test.settleMemoryCapture();
+            expect(setStatus).toHaveBeenLastCalledWith(
+                "eidnara-capture",
+                "Memory capture: unconfirmed",
+            );
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("drains after a checkpoint the daemon refused, so a full queue can make progress", async () => {
         const methods: string[] = [];
         const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(

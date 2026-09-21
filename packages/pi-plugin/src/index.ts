@@ -708,11 +708,13 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
                     notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
                 }),
             });
-            // A disabled daemon wrote nothing; those entries stay ahead of the stored leaf.
+            // A disabled daemon wrote nothing; those entries stay ahead of the stored leaf and a
+            // refused earlier checkpoint stays unconfirmed.
             const leaf = branch.at(-1);
-            if (accepted === "accepted" && leaf)
-                checkpointedLeafBySession.set(scope.sessionId, leaf.id);
-            unconfirmedCheckpoints.delete(scope.projectRoot);
+            if (accepted === "accepted") {
+                if (leaf) checkpointedLeafBySession.set(scope.sessionId, leaf.id);
+                unconfirmedCheckpoints.delete(scope.projectRoot);
+            }
         } catch (error) {
             warn("memory capture checkpoint pending:", error);
             if (scope) unconfirmedCheckpoints.add(scope.projectRoot);
