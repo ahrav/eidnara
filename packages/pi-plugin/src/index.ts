@@ -616,10 +616,11 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // Session entries are immutable and append-only, so a branch that still ends in the last
     // stored leaf only has new entries after it. A branch switch that dropped that leaf rescans.
     const checkpointedLeafBySession = new Map<string, string>();
-    // A fork inherits the parent's branch under a new session id. The parent already offered
-    // those entries, possibly under another project, so the fork starts past the fork point.
-    pi.on("session_start", async (event, ctx) => {
-        if (event.reason !== "fork") return;
+    // A runtime offers only entries appended while it runs. Whatever a session brings to
+    // `session_start` was offered by the runtime that produced it, possibly under another
+    // project; a fork inherits it under a new session id. Re-sending it would only cost the
+    // completed turn a redundant upload the daemon replays as a no-op.
+    pi.on("session_start", async (_event, ctx) => {
         const sessionId = ctx.sessionManager.getSessionId();
         const leaf = ctx.sessionManager.getBranch().at(-1);
         if (sessionId && leaf) checkpointedLeafBySession.set(sessionId, leaf.id);

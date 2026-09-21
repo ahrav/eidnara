@@ -295,7 +295,12 @@ describe("Pi daemon transport across runtime teardown", () => {
         }
     });
 
-    it("offers a fork only the entries appended after the fork point", async () => {
+    it.each([
+        "fork",
+        "resume",
+        "reload",
+        "startup",
+    ])("offers a session that starts with a branch only the entries appended afterwards (%s)", async (reason) => {
         const bodies: Array<{ messages: Array<{ id: string }> }> = [];
         const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
             async (input) => {
@@ -312,11 +317,11 @@ describe("Pi daemon transport across runtime teardown", () => {
         try {
             const { agentEnd, registrations } = await agentEndHandler();
             const sessionStart = registrations.handlers.get("session_start") as SessionHandler;
-            // The fork inherits the parent's branch under a new session id; the parent already
-            // offered those entries, possibly under another project.
+            // The runtime that produced these entries already offered them, possibly under
+            // another project; a fork inherits them under a new session id.
             const branch = [entry("one"), entry("two")];
             const ctx = captureContext({ model: { provider: "openai", id: "test" }, branch });
-            await sessionStart({ reason: "fork" }, ctx);
+            await sessionStart({ reason }, ctx);
             branch.push(entry("three"));
             await agentEnd({}, ctx);
             await __test.settleMemoryCapture();
