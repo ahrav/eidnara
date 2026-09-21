@@ -10,7 +10,7 @@ use context_core::canonical_json::{ContractError, protocol_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::manifest::{ArmRates, Manifest, RunStatus, is_canonical_decimal};
+use crate::manifest::{ArmRates, Manifest, ManifestError, RunStatus, is_canonical_decimal};
 
 pub const ANALYSIS_FAMILY_SCHEMA: &str = "eval-analysis-family/v1";
 /// The gates a report carries; a frozen family declares exactly these.
@@ -97,8 +97,9 @@ impl Ratio {
         })
     }
 
-    /// `new` for small literals that cannot overflow.
-    pub fn new(numerator: i64, denominator: u64) -> Self {
+    /// `new` for in-crate literals that cannot overflow; callers outside the
+    /// crate go through the fallible `try_new`.
+    pub(crate) fn new(numerator: i64, denominator: u64) -> Self {
         Self::try_new(i128::from(numerator), i128::from(denominator)).expect("small literal")
     }
 
@@ -186,7 +187,7 @@ pub struct LivenessBounds {
 /// constructs one, so every bound a gate sees has passed that check:
 ///
 /// ```compile_fail
-/// let one = eval_core::Ratio::new(1, 1);
+/// let one = eval_core::Ratio::ONE;
 /// let _ = eval_core::ProfileRates { noninferiority_margin: one, harm_bound: one, floor_threshold: one, miss_asymmetry_bound: one };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,7 +542,8 @@ impl AnalysisFamily {
         // `run_icc_pilot`, so it cannot carry a gate. The counts must also be
         // ones `intraclass_correlation` could have estimated both ICCs from: two
         // or more families, at least as many worlds, and replication within
-        // worlds.
+        // worlds; when every family holds exactly one world the two partitions
+        // coincide and their ICCs must agree.
         let pilot = &self.icc_pilot;
         if pilot.max_affordable_worlds == 0
             || pilot.icc_family > Ratio::ONE
@@ -549,6 +551,7 @@ impl AnalysisFamily {
             || pilot.n_families < 2
             || pilot.n_worlds < pilot.n_families
             || pilot.n_items <= pilot.n_worlds
+            || (pilot.n_worlds == pilot.n_families && pilot.icc_family != pilot.icc_world_seed)
             || pilot.projection().ok() != Some((pilot.clustering_unit, pilot.effective_n_at_max))
         {
             return Err(StatisticsError::PilotInconsistent);
@@ -973,7 +976,9 @@ pub fn analyze(
     family: &AnalysisFamily,
     pairs: &[PairOutcome],
 ) -> Result<Analysis, StatisticsError> {
-    // Only a completed run's outcomes are evidence; the manifest says which.
+    // The manifest is the run's authoritative record: it must be a valid one,
+    // and only a completed run's outcomes are evidence.
+    manifest.validate()?;
     if manifest.status != RunStatus::Completed {
         return Err(StatisticsError::RunNotCompleted(manifest.status));
     }
@@ -1146,6 +1151,7 @@ pub enum StatisticsError {
     WorldSeedOutOfRange(u64),
     BootstrapSeedOutOfRange(u64),
     RunNotCompleted(RunStatus),
+    InvalidManifest(ManifestError),
     DuplicatePair {
         pair_id: String,
     },
@@ -1169,5 +1175,11 @@ debug_display!(StatisticsError);
 impl From<ContractError> for StatisticsError {
     fn from(error: ContractError) -> Self {
         Self::NotCanonical(error)
+    }
+}
+
+impl From<ManifestError> for StatisticsError {
+    fn from(error: ManifestError) -> Self {
+        Self::InvalidManifest(error)
     }
 }

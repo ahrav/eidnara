@@ -939,7 +939,10 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   `WorldSeedOutOfRange` from `analyze`, `run_icc_pilot`, and
   `cluster_bootstrap_interval`, whose draw seed of `2^53` is
   `BootstrapSeedOutOfRange`; an `incomplete`, `refused`, or `blocked` manifest
-  is `RunNotCompleted`; an underpowered plan blocks before a bad seed in its
+  is `RunNotCompleted`; a manifest with the wrong schema or a `sample_order`
+  that is not a permutation is `InvalidManifest`; a two-family, two-world
+  pilot recording different family and world ICCs is `PilotInconsistent`;
+  `Ratio::try_new(1, 0)` and `(i64::MAX, 1)` are typed refusals; an underpowered plan blocks before a bad seed in its
   table is read; a zero-pair
   plan is `NoPairs`; the rate helpers return `RationalOverflow` for counts
   past the safe range instead of panicking; a `holm` or `benjamini_hochberg` plan is

@@ -899,7 +899,9 @@ declares `memory_reviewer_model_calls: excluded` in its manifest instead.
 ## Paired statistics
 
 `statistics.rs` computes the paired history effect over oracle verdicts as
-exact rationals: `Ratio {numerator, denominator}` in lowest terms with both
+exact rationals: `Ratio {numerator, denominator}` (constructed only through the fallible
+`Ratio::try_new`, so a zero denominator or an unsafe component is a typed
+refusal) in lowest terms with both
 components inside canonical JSON's safe integer range, so the two runtimes
 that implement it serialize the same bytes and no fraction is ever a float.
 Construction and deserialization normalize (a zero denominator or an
@@ -938,8 +940,9 @@ integer outside the safe range is `NotCanonical` at parse). It also recomputes t
 pilot's clustering unit and `effective_n_at_max` from its recorded counts and
 ICCs and refuses a pilot that disagrees with its own evidence, whose
 counts the ICC could not have been estimated from (fewer than two families,
-fewer worlds than families, or no replication within worlds), whose ICC at
-either level exceeds one, or whose recorded `families` (the distinct, sorted
+fewer worlds than families, or no replication within worlds), whose ICCs
+differ when every family holds exactly one world (the two partitions then
+coincide), whose ICC at either level exceeds one, or whose recorded `families` (the distinct, sorted
 families it sampled) are not the registered families (the pilot sampled the
 registered population, so its ICCs describe the campaign's clusters and the
 family-unit projection spreads items over exactly those families)
@@ -1011,7 +1014,9 @@ report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 
 **Report.** `analyze(manifest, family, pairs)` reads the frozen digest and the
 arm rates from the same manifest, so neither can be substituted beside it. It
-requires the run to have completed (any other `status` is `RunNotCompleted`);
+requires the manifest to validate (`InvalidManifest` wraps the
+`ManifestError`) and the run to have completed (any other `status` is
+`RunNotCompleted`);
 the freeze check and the two pre-outcome blocks below read no pair. It
 checks the freeze (`FrozenFamily::from_manifest` reads the recorded digest; a
 manifest without one is `FamilyNotRecorded`), then the pilot's block, then the

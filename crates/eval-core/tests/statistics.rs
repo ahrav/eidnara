@@ -7,9 +7,10 @@ use eval_core::{
     CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, GATE_ENDPOINTS, Gates,
     ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome,
     IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES, Manifest,
-    MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, Ratio, RunStatus,
-    StatisticsError, StoppingRule, analyze, arm_miss_asymmetry, cluster_bootstrap_interval,
-    intraclass_correlation, parse_analysis_family, parse_campaign_profile, run_icc_pilot,
+    ManifestError, MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, Ratio,
+    RunStatus, StatisticsError, StoppingRule, analyze, arm_miss_asymmetry,
+    cluster_bootstrap_interval, intraclass_correlation, parse_analysis_family,
+    parse_campaign_profile, run_icc_pilot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -20,7 +21,7 @@ const FAMILIES: [&str; 6] = ["cargo", "tokio", "django", "git", "docs", "tests"]
 type Edit = (&'static str, Box<dyn Fn(&mut AnalysisFamily)>);
 
 fn ratio(numerator: i64, denominator: u64) -> Ratio {
-    Ratio::new(numerator, denominator)
+    Ratio::try_new(i128::from(numerator), i128::from(denominator)).unwrap()
 }
 
 fn profile() -> CampaignProfile {
@@ -986,7 +987,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     // Three hundred copies of one pair are not three hundred pairs.
     let copies: Vec<PairOutcome> = std::iter::repeat_n(pairs[0].clone(), 300).collect();
     assert_eq!(
-        analyze(&recorded(&frozen, rates.clone(), &copies), &family, &copies).err(),
+        analyze(&recorded(&frozen, rates.clone(), &pairs), &family, &copies).err(),
         Some(StatisticsError::DuplicatePair {
             pair_id: "cargo-0".to_string()
         })
@@ -1030,6 +1031,37 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     assert_eq!(
         unreplicated.validate(),
         Err(StatisticsError::PilotInconsistent)
+    );
+    // When every family holds exactly one world the two partitions coincide, so
+    // a pilot recording different ICCs for them did not come from the estimator.
+    let mut coinciding = family.clone();
+    coinciding.families = vec!["a".into(), "b".into()];
+    coinciding.icc_pilot = IccPilot {
+        families: vec!["a".into(), "b".into()],
+        n_items: 300,
+        n_families: 2,
+        n_worlds: 2,
+        icc_family: ratio(1, 20),
+        icc_world_seed: Ratio::ZERO,
+        max_affordable_worlds: 2,
+        effective_n_at_max: ratio(300, 1),
+        ..family.icc_pilot.clone()
+    };
+    assert_eq!(
+        coinciding.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
+    coinciding.icc_pilot.icc_family = Ratio::ZERO;
+    assert_eq!(coinciding.validate(), Ok(()), "equal ICCs are consistent");
+    // The public constructor is fallible: a zero denominator or an unsafe
+    // component is a typed refusal, never a panic.
+    assert_eq!(
+        Ratio::try_new(1, 0).err(),
+        Some(StatisticsError::ZeroDenominator)
+    );
+    assert_eq!(
+        Ratio::try_new(i128::from(i64::MAX), 1).err(),
+        Some(StatisticsError::RationalOverflow)
     );
     // An ICC above one is outside the estimator's range; a negative one is
     // clamped to zero by the projection, so it can never raise effective N.
@@ -1218,6 +1250,21 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         cluster_bootstrap_interval(&pairs, ClusteringUnit::WorldSeed, 300, 1 << 53, 40).err(),
         Some(StatisticsError::BootstrapSeedOutOfRange(1 << 53))
     );
+    // The manifest must be a valid record before anything is read from it.
+    let mut wrong_schema = recorded(&frozen, rates.clone(), &pairs);
+    wrong_schema.schema = "eval-manifest/v1".to_string();
+    assert!(matches!(
+        analyze(&wrong_schema, &family, &pairs),
+        Err(StatisticsError::InvalidManifest(
+            ManifestError::SchemaMismatch { .. }
+        ))
+    ));
+    let mut unordered = recorded(&frozen, rates.clone(), &pairs);
+    unordered.sample_order.pop();
+    assert!(matches!(
+        analyze(&unordered, &family, &pairs),
+        Err(StatisticsError::InvalidManifest(_))
+    ));
     // Only a completed run's outcomes are evidence.
     for status in [
         RunStatus::Incomplete,
@@ -1267,16 +1314,22 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let mut refusing = arm_rates("0", "0");
     refusing.get_mut("aged").unwrap().refusal_rate = "2".to_string();
     assert_eq!(
-        analyze(
-            &recorded(&frozen, refusing.clone(), &pairs),
-            &family,
-            &pairs
-        )
-        .err(),
+        arm_miss_asymmetry(&refusing).err(),
         Some(StatisticsError::RateOutOfRange {
             field: "arm_rates.refusal_rate"
         })
     );
+    // Through `analyze` the manifest's own validation refuses it first.
+    assert!(matches!(
+        analyze(
+            &recorded(&frozen, refusing.clone(), &pairs),
+            &family,
+            &pairs
+        ),
+        Err(StatisticsError::InvalidManifest(
+            ManifestError::RateOutOfRange { .. }
+        ))
+    ));
     // Hand-built counts that no pair table produces are refused before any rate.
     let profile_rates = profile().rates().unwrap();
     for counts in [
