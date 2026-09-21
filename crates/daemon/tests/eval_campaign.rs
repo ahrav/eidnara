@@ -382,7 +382,28 @@ fn an_s0_campaign_on_the_default_surface_publishes_one_gated_report() {
     let Some(budget_ms) = budget(Scale::S0) else {
         return;
     };
-    let run = campaign(Scale::S0, AGED_MESSAGES, budget_ms);
+    // Two campaigns of one identity run at once from one checkout, each on
+    // its own roots, cassette directory, and publish directory; they must
+    // agree on the run identity, the result digest, the manifest digest, and
+    // everything the report says, and differ only in their measurements.
+    let (run, twin) = std::thread::scope(|scope| {
+        let twin = scope.spawn(|| campaign(Scale::S0, AGED_MESSAGES, budget_ms));
+        let run = campaign(Scale::S0, AGED_MESSAGES, budget_ms);
+        (run, twin.join().unwrap())
+    });
+    assert_eq!(run.report.eval_run_id, twin.report.eval_run_id);
+    assert_eq!(run.manifest.result_digest, twin.manifest.result_digest);
+    assert_eq!(
+        run.manifest.digest().unwrap(),
+        twin.manifest.digest().unwrap(),
+        "the manifest digest carries no clock"
+    );
+    assert_eq!(run.report.samples, twin.report.samples);
+    assert_eq!(run.report.outcome, twin.report.outcome);
+    assert_eq!(run.report.claims, twin.report.claims);
+    assert_eq!(run.report.injection, twin.report.injection);
+    assert_eq!(run.report.envelope.bounds, twin.report.envelope.bounds);
+    assert_eq!(run.verdicts, twin.verdicts);
     let report = &run.report;
     assert!(report.envelope.peaks.elapsed_ms <= budget_ms);
     assert_eq!(report.profile.name, "s0-surface1-raw");

@@ -1496,7 +1496,10 @@ write-then-rename, parses it back, and checks its digest. Its identity is
 this checkout and toolchain (the commit, whether the tree is dirty, the
 lockfile digest, the rustc version, the fixture binary's digest), its config is
 the profile, its scenario the surface and tasks, its samples the ledger's in
-the order they ran, its result digest the report's bytes, its witness digest
+the order they ran, its result digest the report less its envelope peaks
+under `eval-suite-b-report-result/v1` (the peaks are a measurement, and a
+clock must not reach a digest, so two runs of one identity agree on the
+manifest digest), its witness digest
 the pair set, and it carries the frozen family's digest and the recency
 baseline's version and window. Its `construction` is `replay` and its
 `ingestion` is `transform-route, turn by turn`: every arm was lived through

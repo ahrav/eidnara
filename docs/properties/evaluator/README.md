@@ -1159,7 +1159,11 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   the checkout, toolchain, host triple, and fixture binary, carries every
   sample in run order, the frozen family's digest, and the recency baseline,
   says `replay` and `transform-route, turn by turn`, and is refused when
-  relabelled `direct-database, non-aged`.
+  relabelled `direct-database, non-aged`; the manifest's result digest is the
+  report less its envelope peaks, so a second campaign of the same identity
+  run at the same time agrees with the first on run identity, result digest,
+  manifest digest, samples, outcomes, claims, injection scores, and every
+  arm's verdict, and differs only in its measurements.
 - `a_canary_is_planted_only_into_the_text_its_carrier_emits`
   (`crates/eval-core/tests/injection.rs`): planted canaries appear at the end
   of the message text, tool-span output, and commit message they name and
@@ -1277,10 +1281,14 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   strictly by every arm run with no controlled backend, from the fixture's
   scripted provider rather than a live one; the control never reaches the
   summarizer's pressure, so its cassette holds none.
-- The campaign runs its arms one after another in one process; parallel
-  campaigns on a shared checkout have not been run, so
-  `xc-parallel-campaigns-isolated-on-shared-checkout` is exercised only for
-  the per-arm disjoint roots.
+- Two campaigns of one identity run at once in one process from one checkout
+  on disjoint roots, cassette directories, and publish directories and agree
+  on identity, result digest, manifest digest, samples, outcomes, claims,
+  injection, and verdicts, which exercises
+  `xc-parallel-campaigns-isolated-on-shared-checkout` within one process;
+  two processes are compared only through the `eval_runner` example, whose
+  build record differs by the `eval-runner` feature, so their run identities
+  are not expected to agree.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries

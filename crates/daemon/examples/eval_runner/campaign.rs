@@ -1381,6 +1381,22 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     })
 }
 
+/// The protocol the manifest's `result_digest` is taken under.
+pub const RESULT_DIGEST_PROTOCOL: &str = "eval-suite-b-report-result/v1";
+
+/// The digest the manifest names the report by: the published report with
+/// its envelope peaks removed, since the peaks are a measurement and a clock
+/// must not reach a digest. Two runs of one identity agree on it.
+pub fn result_digest(report_bytes: &[u8]) -> String {
+    let mut value: Value = serde_json::from_slice(report_bytes).expect("the report is JSON");
+    value["envelope"]
+        .as_object_mut()
+        .expect("the report carries its envelope")
+        .remove("peaks");
+    context_core::canonical_json::protocol_digest(RESULT_DIGEST_PROTOCOL, &value)
+        .expect("the report is canonical")
+}
+
 /// The report's file name under the publish directory.
 pub const REPORT_FILE: &str = "suite-b-report.json";
 /// The manifest's file name under the publish directory.
@@ -1538,7 +1554,7 @@ fn manifest(
         sample_order: report.samples.order.clone(),
         sample_epoch: report.samples.epoch,
         retry_lineage: Vec::new(),
-        result_digest: sha256_hex(report_bytes),
+        result_digest: result_digest(report_bytes),
         witness_digest: context_core::canonical_json::protocol_digest(
             "eval-campaign-witness/v1",
             &set_value,
