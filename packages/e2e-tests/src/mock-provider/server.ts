@@ -118,8 +118,9 @@ export class MockProvider {
     private matchers: RequestMatcher[] = [];
     private defaultHitCount = 0;
     private cassette: CassetteSession | null = null;
-    private cassetteMisses: CassetteMiss[] = [];
-    private cassetteRefusals: CassetteRefused[] = [];
+    /** Miss and refusal logs of the current binding; `reset()` replaces the object, so a completion
+     * from an earlier generation writes into the discarded one. */
+    private cassetteLogs: CassetteLogs = { misses: [], refusals: [] };
     private scriptedSelections = 0;
 
     async start(options: MockServerOptions = {}): Promise<{ port: number; baseURL: string }> {
@@ -179,8 +180,7 @@ export class MockProvider {
         this.defaultHitCount = 0;
         this.scriptedSelections = 0;
         this.cassette = null;
-        this.cassetteMisses = [];
-        this.cassetteRefusals = [];
+        this.cassetteLogs = { misses: [], refusals: [] };
     }
 
     /** Counts `/messages` requests that fell through matchers and the queue to `defaultResponse`. */
@@ -195,12 +195,12 @@ export class MockProvider {
 
     /** Every typed miss the replay produced; strict replay makes this empty or one entry. */
     cassetteMissLog(): CassetteMiss[] {
-        return [...this.cassetteMisses];
+        return [...this.cassetteLogs.misses];
     }
 
     /** Every oracle refusal, recording or replay; a refused exchange was never persisted. */
     cassetteRefusalLog(): CassetteRefused[] {
-        return [...this.cassetteRefusals];
+        return [...this.cassetteLogs.refusals];
     }
 
     /** How many requests entered the scripted-selection block; a whole replay run leaves it at zero. */
@@ -259,11 +259,13 @@ export class MockProvider {
                 headers,
                 body_text: bodyText,
             };
-            // The binding at capture owns this exchange; a `reset()` or `useCassette()` during a
-            // scripted delay must not serve it unadmitted or record it into the next cassette.
+            // The binding and its logs at capture own this exchange; a `reset()` or `useCassette()`
+            // during a scripted delay or a pending oracle call must not serve it unadmitted, record
+            // it into the next cassette, or log its miss or refusal into the next run.
             const session = this.cassette;
+            const logs = this.cassetteLogs;
             if (session?.mode === "replay") {
-                return this.replay(session, oracleRequest, captured);
+                return this.replay(session, oracleRequest, captured, logs);
             }
 
             this.scriptedSelections += 1;
@@ -311,7 +313,7 @@ export class MockProvider {
                 try {
                     await session.oracle.record(session.namespace, oracleRequest, produced);
                 } catch (error) {
-                    return this.refuse("redaction_refused", error);
+                    return refuse("redaction_refused", error, logs);
                 }
             }
             return serve(produced);
@@ -327,16 +329,17 @@ export class MockProvider {
         session: CassetteSession,
         request: OracleRequest,
         captured: CapturedRequest,
+        logs: CassetteLogs,
     ): Promise<Response> {
         let outcome: Awaited<ReturnType<CassetteOracle["lookup"]>>;
         try {
             outcome = await session.oracle.lookup(session.namespace, request);
         } catch (error) {
-            return this.refuse("cassette_refused", error);
+            return refuse("cassette_refused", error, logs);
         }
         captured.responseCompletedAt = Date.now();
         if ("miss" in outcome) {
-            this.cassetteMisses.push(outcome.miss);
+            logs.misses.push(outcome.miss);
             return new Response(errorBody("cassette_miss", { ...outcome.miss }), {
                 status: 400,
                 headers: JSON_HEADERS,
@@ -344,21 +347,26 @@ export class MockProvider {
         }
         return serve(outcome.hit.response);
     }
+}
 
-    /**
-     * Every oracle failure becomes a typed 400 naming only the refusal kind: a `CassetteRefused`
-     * keeps its Rust kind, anything else (a dead child, an unreadable reply) is `OracleUnavailable`.
-     * No message text is served, because an unexpected error may quote what it was handling.
-     */
-    private refuse(type: string, error: unknown): Response {
-        const refused =
-            error instanceof CassetteRefused ? error : new CassetteRefused("OracleUnavailable", "");
-        this.cassetteRefusals.push(refused);
-        return new Response(errorBody(type, { kind: refused.kind }), {
-            status: 400,
-            headers: JSON_HEADERS,
-        });
-    }
+interface CassetteLogs {
+    misses: CassetteMiss[];
+    refusals: CassetteRefused[];
+}
+
+/**
+ * Every oracle failure becomes a typed 400 naming only the refusal kind: a `CassetteRefused`
+ * keeps its Rust kind, anything else (a dead child, an unreadable reply) is `OracleUnavailable`.
+ * No message text is served, because an unexpected error may quote what it was handling.
+ */
+function refuse(type: string, error: unknown, logs: CassetteLogs): Response {
+    const refused =
+        error instanceof CassetteRefused ? error : new CassetteRefused("OracleUnavailable", "");
+    logs.refusals.push(refused);
+    return new Response(errorBody(type, { kind: refused.kind }), {
+        status: 400,
+        headers: JSON_HEADERS,
+    });
 }
 
 /** A `MockResponse` that names an outcome: a provider error or an assistant message with usage. */

@@ -134,6 +134,35 @@ describe("MockProvider cassette mode", () => {
         expect(later.recorded).toHaveLength(0);
     });
 
+    test("a completion that lands after reset() writes no miss or refusal into the reset logs", async () => {
+        const inner = new FakeOracle([]);
+        const slow: CassetteSession["oracle"] = {
+            lookup: async (namespace, request) => {
+                await Bun.sleep(80);
+                return inner.lookup(namespace, request);
+            },
+            record: (namespace, request, response) => inner.record(namespace, request, response),
+        };
+        const { mock, baseURL } = await started({
+            oracle: slow,
+            mode: "replay",
+            namespace: NAMESPACE,
+        });
+        const missed = post(baseURL, request);
+        await Bun.sleep(20);
+        mock.reset();
+        expect((await missed).status).toBe(400);
+        expect(mock.cassetteMissLog()).toEqual([]);
+
+        mock.useCassette({ oracle: slow, mode: "replay", namespace: NAMESPACE });
+        inner.refuse = new CassetteRefused("WrongNamespace", "");
+        const refused = post(baseURL, request);
+        await Bun.sleep(20);
+        mock.reset();
+        expect((await refused).status).toBe(400);
+        expect(mock.cassetteRefusalLog()).toEqual([]);
+    });
+
     test("a JSON body that is not an object is scripted as an empty object and reaches the oracle as text", async () => {
         const oracle = new FakeOracle([]);
         const { mock, baseURL } = await started({ oracle, mode: "record", namespace: NAMESPACE });
