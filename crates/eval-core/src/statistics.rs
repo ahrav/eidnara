@@ -292,8 +292,9 @@ pub struct PilotObservation {
 }
 
 /// One-way ANOVA intraclass correlation over groups of equal or unequal size:
-/// `(MSB - MSW) / (MSB + (m0 - 1) MSW)` with `m0` the arithmetic mean group
-/// size, exact. Fewer than two groups, or no replication anywhere, is
+/// `(MSB - MSW) / (MSB + (n0 - 1) MSW)` with `n0 = (N - sum(n_i^2) / N) / (k - 1)`,
+/// the unequal-group size correction (equal to the group size when balanced),
+/// exact. Fewer than two groups, or no replication anywhere, is
 /// `PilotTooSmall`; groups that are each internally constant give exactly one.
 pub fn intraclass_correlation(groups: &[Vec<i64>]) -> Result<Ratio, StatisticsError> {
     let k = groups.len() as i128;
@@ -321,8 +322,10 @@ pub fn intraclass_correlation(groups: &[Vec<i64>]) -> Result<Ratio, StatisticsEr
     }
     let msb = ss_between.checked_div(Ratio::try_new(k - 1, 1)?)?;
     let msw = ss_within.checked_div(Ratio::try_new(n - k, 1)?)?;
-    let m0_minus_1 = Ratio::try_new(n - k, k)?;
-    let denominator = msb.checked_add(m0_minus_1.checked_mul(msw)?)?;
+    let sum_of_squares: i128 = groups.iter().map(|g| (g.len() as i128).pow(2)).sum();
+    let n0_minus_1 =
+        Ratio::try_new(n * n - sum_of_squares, n * (k - 1))?.checked_sub(Ratio::ONE)?;
+    let denominator = msb.checked_add(n0_minus_1.checked_mul(msw)?)?;
     if denominator == Ratio::ZERO {
         return Err(StatisticsError::PilotTooSmall);
     }
@@ -424,15 +427,21 @@ impl IccPilot {
             i128::from(self.n_worlds),
         )?;
         let mean_cluster = items_at_max.checked_div(Ratio::try_new(clusters_at_max, 1)?)?;
-        let design_effect = Ratio::ONE
-            .checked_add(
-                mean_cluster
-                    .checked_sub(Ratio::ONE)?
-                    .checked_mul(icc.max(Ratio::ZERO))?,
-            )?
-            .max(Ratio::ONE);
-        Ok((clustering_unit, items_at_max.checked_div(design_effect)?))
+        Ok((clustering_unit, deflate(items_at_max, mean_cluster, icc)?))
     }
+}
+
+/// `items` deflated by the design effect `1 + (m - 1) ICC` of clusters of mean
+/// size `m`; the effect is never below one, so deflation only ever shrinks N.
+fn deflate(items: Ratio, mean_cluster: Ratio, icc: Ratio) -> Result<Ratio, StatisticsError> {
+    let design_effect = Ratio::ONE
+        .checked_add(
+            mean_cluster
+                .checked_sub(Ratio::ONE)?
+                .checked_mul(icc.max(Ratio::ZERO))?,
+        )?
+        .max(Ratio::ONE);
+    items.checked_div(design_effect)
 }
 
 /// The frozen analysis family: everything a result depends on, fixed before
@@ -491,6 +500,15 @@ impl AnalysisFamily {
             return Err(StatisticsError::UnsupportedEndpoints {
                 declared: self.endpoints.clone(),
             });
+        }
+        // The pilot sampled the registered population: its family count is the
+        // registered family count, so the family-unit projection cannot spread
+        // items over families the campaign never runs.
+        let registered: BTreeSet<&str> = self.families.iter().map(String::as_str).collect();
+        if registered.len() != self.families.len()
+            || registered.len() != self.icc_pilot.n_families as usize
+        {
+            return Err(StatisticsError::PilotInconsistent);
         }
         self.profile.rates()?;
         // The pilot's unit and effective N are functions of its recorded counts
@@ -852,6 +870,13 @@ pub enum BlockedReason {
         effective_n_at_max: Ratio,
         required_n_for_margin: u32,
     },
+    /// The completed table, deflated by the pilot's design effect at the
+    /// clusters it actually spans, falls short of the required N.
+    TableUnderpowered {
+        effective_n: Ratio,
+        n_clusters: u32,
+        required_n_for_margin: u32,
+    },
     ArmMissAsymmetry {
         asymmetry: Ratio,
         bound: Ratio,
@@ -946,6 +971,31 @@ pub fn analyze(
         return Err(StatisticsError::DuplicatePair {
             pair_id: repeat.pair_id.clone(),
         });
+    }
+    // The plan's power claim was a projection; the table that arrived may span
+    // fewer clusters than projected, so its own deflated size is checked too.
+    let pilot = &family.icc_pilot;
+    let n_clusters = pairs
+        .iter()
+        .map(|pair| pair.cluster.at(pilot.clustering_unit))
+        .collect::<BTreeSet<_>>()
+        .len();
+    let icc = match pilot.clustering_unit {
+        ClusteringUnit::Family => pilot.icc_family,
+        ClusteringUnit::WorldSeed => pilot.icc_world_seed,
+    };
+    let n = Ratio::try_new(pairs.len() as i128, 1)?;
+    let effective_n = deflate(
+        n,
+        n.checked_div(Ratio::try_new(n_clusters as i128, 1)?)?,
+        icc,
+    )?;
+    if effective_n < Ratio::try_new(i128::from(pilot.required_n_for_margin), 1)? {
+        return Ok(Analysis::Blocked(BlockedReason::TableUnderpowered {
+            effective_n,
+            n_clusters: n_clusters as u32,
+            required_n_for_margin: pilot.required_n_for_margin,
+        }));
     }
     let counts = PairCounts::of(pairs);
     Ok(Analysis::Report(Box::new(PairedReport {

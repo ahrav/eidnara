@@ -934,10 +934,12 @@ seed, and the ICC pilot. `AnalysisFamily::validate` includes the digest's
 canonical-JSON check, so a family that validates can always be frozen (an
 integer outside the safe range is `NotCanonical` at parse). It also recomputes the
 pilot's clustering unit and `effective_n_at_max` from its recorded counts and
-ICCs and refuses a pilot that disagrees with its own evidence, or whose
+ICCs and refuses a pilot that disagrees with its own evidence, whose
 counts the ICC could not have been estimated from (fewer than two families,
-fewer worlds than families, or no replication within worlds)
-(`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
+fewer worlds than families, or no replication within worlds), or whose family
+count is not the registered family count (the pilot sampled the registered
+population, so the family-unit projection spreads items over exactly those
+families) (`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
 block, and refuses a plan whose pair count is below the pilot's
 `required_n_for_margin` (`PlanBelowRequiredN`), since deflation only shrinks
 N. `FrozenFamily::freeze` digests it
@@ -952,8 +954,9 @@ component is a typed refusal rather than a quiet re-analysis.
 world itself (family and seed together), and the pilot and the bootstrap use
 the same partition. `run_icc_pilot` groups pilot observations (one paired
 score per task per world) at both levels, computes the one-way ANOVA
-intraclass correlation at each (`intraclass_correlation`, exact, with `m0` the
-arithmetic mean group size; groups that are each internally constant give
+intraclass correlation at each (`intraclass_correlation`, exact, with the
+unequal-group size correction `n0 = (N - sum(n_i^2) / N) / (k - 1)` in the
+denominator, the group size when balanced; groups that are each internally constant give
 exactly one), and picks the highest level whose ICC exceeds `1/20`
 (`ICC_THRESHOLD`), with the world as the finest fallback. It carries the item
 count the maximum affordable world count would yield, deflated by the design
@@ -1013,7 +1016,10 @@ evidence that never passes) against `miss_asymmetry_bound`, which blocks as
 `arm_miss_asymmetry` with no gates computed; then the table's conformance to
 the plan (a size other than the frozen pair count is `PairCountMismatch`, a
 pair outside the frozen families is `PairOutsideFamilies`, a repeated pair id
-is `DuplicatePair`); only then does it build
+is `DuplicatePair`), then the table's own power (the pair count deflated by
+the pilot's design effect at the clusters the table actually spans, under the
+pilot's unit and ICC; short of `required_n_for_margin` it is `Blocked {reason:
+table_underpowered}` with the effective N and cluster count); only then does it build
 `PairedReport {analysis_family_digest, counts, gates, interval, arm_rates}`.
 Per-arm miss and refusal rates travel with the report, so unsupported evidence
 is visible beside every gate.

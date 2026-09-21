@@ -100,8 +100,10 @@ function icc(groups: readonly (readonly number[])[]): Ratio {
   }
   const msb = div(ssb, whole(k - 1n));
   const msw = div(ssw, whole(n - k));
-  const m0 = ratio(n, k);
-  return div(sub(msb, msw), add(msb, mul(sub(m0, whole(1)), msw)));
+  // The unequal-group size correction n0 = (N - sum(n_i^2) / N) / (k - 1); the group size when balanced.
+  const sumOfSquares = groups.reduce((s, g) => s + BigInt(g.length) ** 2n, 0n);
+  const n0 = ratio(n * n - sumOfSquares, n * (k - 1n));
+  return div(sub(msb, msw), add(msb, mul(sub(n0, whole(1)), msw)));
 }
 
 interface Observation {

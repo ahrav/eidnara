@@ -335,10 +335,7 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
 
     let edits: Vec<Edit> = vec![
         ("endpoints", Box::new(|f| f.endpoints.reverse())),
-        (
-            "families",
-            Box::new(|f| f.families.pop().map(drop).unwrap()),
-        ),
+        ("families", Box::new(|f| f.families[0] = "rails".into())),
         (
             "exclusions",
             Box::new(|f| f.exclusions.push("drop timed-out fresh runs".into())),
@@ -532,12 +529,20 @@ fn the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpow
         Ratio::ONE,
         "unbalanced constant groups"
     );
+    // Unequal groups use n0 = (N - sum(n_i^2) / N) / (k - 1), not the mean size:
+    // here the mean would put the ICC under the threshold and flip the unit.
+    assert_eq!(
+        intraclass_correlation(&[vec![0], vec![0, 2], vec![0, 2, 2, 2, 3]]).unwrap(),
+        ratio(71, 1227)
+    );
+    assert!(ratio(71, 1227) > ICC_THRESHOLD && ratio(213, 4565) < ICC_THRESHOLD);
     assert_eq!(
         intraclass_correlation(&[vec![1 << 40, 1], vec![1 << 41, 2]]).err(),
         Some(StatisticsError::RationalOverflow)
     );
 
     let mut underpowered = family();
+    underpowered.families = vec!["a".into(), "b".into(), "c".into()];
     underpowered.icc_pilot = pilot.clone();
     let frozen = FrozenFamily::freeze(&underpowered).unwrap();
     assert_eq!(
@@ -1022,8 +1027,41 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         observation("tokio", 1, "b", 9),
     ];
     let mut honest = family.clone();
+    honest.families = vec!["cargo".into(), "tokio".into()];
     honest.icc_pilot = run_icc_pilot("p", &honest_observations, 4, 1).unwrap();
     assert_eq!(honest.validate(), Ok(()), "a computed pilot validates");
+    // The pilot sampled the registered population, so its family count is the
+    // registered one; a one-family plan cannot carry a six-family projection.
+    let mut narrowed = family.clone();
+    narrowed.families = vec!["cargo".into()];
+    assert_eq!(narrowed.validate(), Err(StatisticsError::PilotInconsistent));
+    let mut repeated_family = family.clone();
+    repeated_family.families.push("cargo".into());
+    assert_eq!(
+        repeated_family.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
+    // The completed table is deflated at the clusters it spans: 300 pairs in one
+    // world under a world ICC of 1/10 are fewer than ten effective items.
+    let one_world: Vec<PairOutcome> = (0..300)
+        .map(|i| {
+            pair(
+                &format!("w{i}"),
+                "cargo",
+                0,
+                ArmResult::Pass,
+                ArmResult::Pass,
+            )
+        })
+        .collect();
+    assert_eq!(
+        analyze(&recorded(&frozen, rates.clone()), &family, &one_world).unwrap(),
+        Analysis::Blocked(BlockedReason::TableUnderpowered {
+            effective_n: ratio(3000, 309),
+            n_clusters: 1,
+            required_n_for_margin: 300
+        })
+    );
     // One score per task per world: a repeated observation is not another item.
     let mut repeated = honest_observations.to_vec();
     repeated.push(observation("tokio", 1, "b", 9));
