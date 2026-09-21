@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 
 use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmRates, ArmResult, BlockedReason,
-    CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, Gates, ICC_THRESHOLD,
-    ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome, IntervalWithheld,
-    LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES, MultiplicityCorrection,
-    PairCounts, PairOutcome, PilotObservation, Ratio, StatisticsError, StoppingRule, analyze,
-    arm_miss_asymmetry, cluster_bootstrap_interval, intraclass_correlation, parse_analysis_family,
-    parse_campaign_profile, run_icc_pilot,
+    CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, GATE_ENDPOINTS, Gates,
+    ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome,
+    IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES,
+    MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, Ratio, StatisticsError,
+    StoppingRule, analyze, arm_miss_asymmetry, cluster_bootstrap_interval, intraclass_correlation,
+    parse_analysis_family, parse_campaign_profile, run_icc_pilot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -58,7 +58,7 @@ fn pilot(required: u32) -> IccPilot {
 fn family() -> AnalysisFamily {
     AnalysisFamily {
         schema: ANALYSIS_FAMILY_SCHEMA.to_string(),
-        endpoints: vec!["quality_loss".into(), "harm".into(), "floor".into()],
+        endpoints: GATE_ENDPOINTS.iter().map(|gate| gate.to_string()).collect(),
         families: FAMILIES.iter().map(|family| family.to_string()).collect(),
         exclusions: vec![],
         stopping_rule: StoppingRule::FixedN { pairs: 300 },
@@ -329,10 +329,7 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
     assert_eq!(parse_analysis_family(&value).unwrap(), family);
 
     let edits: Vec<Edit> = vec![
-        (
-            "endpoints",
-            Box::new(|f| f.endpoints.push("residual".into())),
-        ),
+        ("endpoints", Box::new(|f| f.endpoints.reverse())),
         (
             "families",
             Box::new(|f| f.families.pop().map(drop).unwrap()),
@@ -408,6 +405,22 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
     let mut empty = family.clone();
     empty.endpoints.clear();
     assert_eq!(empty.validate(), Err(StatisticsError::EmptyFamilyField));
+    // The report always carries the three gates, so the frozen endpoint list
+    // names exactly those: a subset, an unknown endpoint, or a repeat is refused.
+    for declared in [
+        vec!["harm"],
+        vec!["quality_loss", "harm", "floor", "residual"],
+        vec!["quality_loss", "harm", "floor", "harm"],
+    ] {
+        let mut edited = family.clone();
+        edited.endpoints = declared.iter().map(|gate| gate.to_string()).collect();
+        assert_eq!(
+            edited.validate(),
+            Err(StatisticsError::UnsupportedEndpoints {
+                declared: edited.endpoints.clone()
+            })
+        );
+    }
     let mut no_repeats = family.clone();
     no_repeats.trials_k = 0;
     assert_eq!(
@@ -806,14 +819,32 @@ fn arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained
     );
     assert_eq!(
         arm_miss_asymmetry(&BTreeMap::new()).err(),
-        Some(StatisticsError::TooFewArms(0))
+        Some(StatisticsError::ArmsNotPaired { found: vec![] })
     );
     let mut one_arm = arm_rates("0.9", "0");
     one_arm.remove("aged");
     assert_eq!(
         arm_miss_asymmetry(&one_arm).err(),
-        Some(StatisticsError::TooFewArms(1))
+        Some(StatisticsError::ArmsNotPaired {
+            found: vec!["fresh".to_string()]
+        })
     );
+    // Two rates under other names are not the pair's arms, however equal they are.
+    let mut renamed = arm_rates("0", "0");
+    let control = renamed.remove("aged").unwrap();
+    renamed.insert("control".to_string(), control);
+    assert_eq!(
+        arm_miss_asymmetry(&renamed).err(),
+        Some(StatisticsError::ArmsNotPaired {
+            found: vec!["control".to_string(), "fresh".to_string()]
+        })
+    );
+    let mut third = arm_rates("0", "0");
+    third.insert("control".to_string(), third["aged"].clone());
+    assert!(matches!(
+        arm_miss_asymmetry(&third),
+        Err(StatisticsError::ArmsNotPaired { .. })
+    ));
     let family = family();
     let frozen = FrozenFamily::freeze(&family).unwrap();
     let pairs = pairs_at_threshold();
@@ -824,10 +855,10 @@ fn arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained
             bound: ratio(1, 20),
         })
     );
-    assert_eq!(
-        analyze(&frozen, &family, &pairs, &one_arm).err(),
-        Some(StatisticsError::TooFewArms(1))
-    );
+    assert!(matches!(
+        analyze(&frozen, &family, &pairs, &renamed),
+        Err(StatisticsError::ArmsNotPaired { .. })
+    ));
     let Analysis::Report(report) =
         analyze(&frozen, &family, &pairs, &arm_rates("0.05", "0")).unwrap()
     else {

@@ -874,7 +874,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   exclusions, stopping rule, multiplicity, margin, floor, threshold, seed, pilot) is
   `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
   below 300, fewer than 40 or more than 10,000 replicates, an empty endpoint
-  list, and an unknown field refuse; a manifest without a recorded digest is
+  list, an endpoint list that is not exactly the three gates
+  (`UnsupportedEndpoints`), and an unknown field refuse; a manifest without a recorded digest is
   `FamilyNotRecorded`.
 - `the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpowered`
   (`mtr-world-clustered-intervals-after-icc-pilot`): a family effect selects
@@ -908,7 +909,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   the same bounds and another seed moves them.
 - `arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained`:
   a miss-rate gap of `2/25` against a `1/20` bound is `Blocked
-  {arm_miss_asymmetry}`; zero or one arm is `TooFewArms`; within the bound,
+  {arm_miss_asymmetry}`; zero arms, one arm, a renamed arm, or a third arm is
+  `ArmsNotPaired`; within the bound,
   the report carries the frozen digest, the counts, the per-arm miss and
   refusal rates, and exactly three gate fields.
 - `the_pair_table_and_the_pilot_must_match_the_frozen_plan`
