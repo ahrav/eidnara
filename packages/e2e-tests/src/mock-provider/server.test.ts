@@ -115,6 +115,21 @@ describe("MockProvider cassette mode", () => {
         expect(mock.scriptedSelectionCount()).toBe(1);
     });
 
+    test("a mock misconfiguration in record mode is served as a 500 and never recorded", async () => {
+        const oracle = new FakeOracle([]);
+        const { mock, baseURL } = await started({ oracle, mode: "record", namespace: NAMESPACE });
+        // Neither `usage` nor `error`: a script bug, not a provider behavior worth a cassette case.
+        mock.setDefault({ text: "no usage" });
+        const response = await post(baseURL, request);
+        expect(response.status).toBe(500);
+        expect(await response.json()).toEqual({
+            type: "error",
+            error: { type: "mock_error", message: "MockResponse requires `usage` or `error`" },
+        });
+        expect(oracle.recorded).toHaveLength(0);
+        expect(mock.cassetteRefusalLog()).toEqual([]);
+    });
+
     test("a recording refusal serves only the refusal kind and persists nothing", async () => {
         const oracle = new FakeOracle([]);
         oracle.refuse = new CassetteRefused("RedactionRefused", "(Request, SecretDetected)");

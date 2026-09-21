@@ -285,6 +285,15 @@ export class MockProvider {
                     { status: 500, headers: JSON_HEADERS },
                 );
             }
+            // A script bug, like an empty queue, is the mock's own failure: served, never recorded.
+            if (!isProducible(scripted)) {
+                return new Response(
+                    errorBody("mock_error", {
+                        message: "MockResponse requires `usage` or `error`",
+                    }),
+                    { status: 500, headers: JSON_HEADERS },
+                );
+            }
 
             if (scripted.delayMs && scripted.delayMs > 0) {
                 await Bun.sleep(scripted.delayMs);
@@ -350,8 +359,17 @@ export class MockProvider {
     }
 }
 
+/** A `MockResponse` that names an outcome: a provider error or an assistant message with usage. */
+type Producible =
+    | (MockResponse & { error: NonNullable<MockResponse["error"]> })
+    | (MockResponse & { error?: undefined; usage: MockUsage });
+
+function isProducible(scripted: MockResponse): scripted is Producible {
+    return scripted.error !== undefined || scripted.usage !== undefined;
+}
+
 /** Builds the exact response the script describes, as status, content type, and frames. */
-function produce(scripted: MockResponse, body: Record<string, unknown>): RecordedResponse {
+function produce(scripted: Producible, body: Record<string, unknown>): RecordedResponse {
     const single = (status: number, text: string): RecordedResponse => ({
         status,
         content_type: "application/json",
@@ -367,12 +385,6 @@ function produce(scripted: MockResponse, body: Record<string, unknown>): Recorde
         );
     }
     const usage = scripted.usage;
-    if (!usage) {
-        return single(
-            500,
-            errorBody("mock_error", { message: "MockResponse requires `usage` or `error`" }),
-        );
-    }
     const content = scripted.content ?? [{ type: "text", text: scripted.text ?? "OK" }];
     const respModel =
         scripted.model ?? (typeof body.model === "string" ? body.model : "mock-model");
