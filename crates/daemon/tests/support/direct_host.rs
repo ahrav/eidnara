@@ -80,17 +80,46 @@ impl FixtureProcess {
 
     pub fn start_in(root: tempfile::TempDir) -> Self {
         let path = root.path().to_path_buf();
-        Self::start_at_inner(path, Some(root))
+        Self::start_at_inner(path, Some(root), &[])
     }
 
     pub fn start_at(root: PathBuf) -> Self {
-        Self::start_at_inner(root, None)
+        Self::start_at_inner(root, None, &[])
     }
 
-    fn start_at_inner(root: PathBuf, root_owner: Option<tempfile::TempDir>) -> Self {
+    /// Starts the fixture with its model backend recorded into `cassette`,
+    /// written at shutdown.
+    pub fn start_recording(root: PathBuf, cassette: &Path, namespace: &str) -> Self {
+        let args = [
+            "--cassette-record".to_string(),
+            cassette.display().to_string(),
+            "--cassette-namespace".to_string(),
+            namespace.to_string(),
+        ];
+        Self::start_at_inner(root, None, &args)
+    }
+
+    /// Starts the fixture with its model backend replaced by `cassette`,
+    /// replayed strictly; the controlled backend is never consulted.
+    pub fn start_replaying(root: PathBuf, cassette: &Path, namespace: &str) -> Self {
+        let args = [
+            "--cassette-replay".to_string(),
+            cassette.display().to_string(),
+            "--cassette-namespace".to_string(),
+            namespace.to_string(),
+        ];
+        Self::start_at_inner(root, None, &args)
+    }
+
+    fn start_at_inner(
+        root: PathBuf,
+        root_owner: Option<tempfile::TempDir>,
+        extra: &[String],
+    ) -> Self {
         let mut child = Command::new(fixture_binary())
             .arg("--state-root")
             .arg(&root)
+            .args(extra)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

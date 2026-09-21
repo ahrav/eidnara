@@ -9,6 +9,8 @@ pub mod embedding_fixtures;
 pub mod eval_cassette;
 #[cfg(feature = "test-support")]
 pub mod eval_ledger;
+#[cfg(feature = "test-support")]
+pub mod eval_reviewer_peer;
 #[cfg(all(unix, feature = "test-support"))]
 pub mod eval_surface;
 pub mod flock;

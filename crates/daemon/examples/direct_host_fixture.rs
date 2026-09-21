@@ -6,6 +6,13 @@
 
 #![forbid(unsafe_code)]
 
+/// The evaluator's cassette over `LlmExecutionBackend`, shared with the
+/// integration tests by path so both sides read one schema.
+#[cfg(unix)]
+#[path = "../tests/support/eval_cassette.rs"]
+#[allow(dead_code)]
+mod eval_cassette;
+
 #[cfg(unix)]
 mod unix {
     use std::collections::VecDeque;
@@ -34,6 +41,8 @@ mod unix {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::oneshot;
+
+    use crate::eval_cassette::CassetteBackend;
 
     const CONTROL_FILE: &str = "direct-host-control.sock";
     const MAX_CONTROL_LINE: usize = 64 * 1024;
@@ -692,16 +701,57 @@ mod unix {
         }
     }
 
-    fn state_root_arg() -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+    /// The model backend the fixture serves: its own controlled backend, that
+    /// backend recorded into a cassette written at shutdown, or a cassette
+    /// replayed strictly with the controlled backend never consulted.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum CassetteMode {
+        Off,
+        Record { path: PathBuf, namespace: String },
+        Replay { path: PathBuf, namespace: String },
+    }
+
+    struct Args {
+        root: PathBuf,
+        cassette: CassetteMode,
+    }
+
+    const USAGE: &str = "usage: direct_host_fixture --state-root <path> \
+        [--cassette-record <file> | --cassette-replay <file>] [--cassette-namespace <ns>]";
+
+    fn parse_args() -> Result<Args, Box<dyn Error + Send + Sync>> {
         let mut args = std::env::args_os().skip(1);
-        match (args.next(), args.next(), args.next()) {
-            (Some(flag), Some(path), None) if flag == "--state-root" => Ok(path.into()),
-            _ => Err("usage: direct_host_fixture --state-root <path>".into()),
+        let (mut root, mut record, mut replay, mut namespace) = (None, None, None, None);
+        while let Some(flag) = args.next() {
+            let value = args.next().ok_or(USAGE)?;
+            match flag.to_str().ok_or(USAGE)? {
+                "--state-root" => root = Some(PathBuf::from(&value)),
+                "--cassette-record" => record = Some(PathBuf::from(&value)),
+                "--cassette-replay" => replay = Some(PathBuf::from(&value)),
+                "--cassette-namespace" => {
+                    namespace = Some(value.to_str().ok_or(USAGE)?.to_string())
+                }
+                _ => return Err(USAGE.into()),
+            }
         }
+        let root = root.ok_or(USAGE)?;
+        let cassette = match (record, replay, namespace) {
+            (None, None, None) => CassetteMode::Off,
+            (Some(path), None, Some(namespace)) => CassetteMode::Record { path, namespace },
+            (None, Some(path), Some(namespace)) => CassetteMode::Replay { path, namespace },
+            _ => return Err(USAGE.into()),
+        };
+        Ok(Args { root, cassette })
+    }
+
+    fn write_then_rename(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let staged = path.with_extension("staged");
+        std::fs::write(&staged, bytes)?;
+        std::fs::rename(&staged, path)
     }
 
     pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
-        let root = state_root_arg()?;
+        let Args { root, cassette } = parse_args()?;
         prepare_state_root(&root)?;
         let control_path = root.join(CONTROL_FILE);
         // The lifecycle transaction lock serializes the stale-check, unlink, and bind against another fixture starting on the same root, so two fixtures cannot both read a refused connection and replace each other's socket.
@@ -715,6 +765,23 @@ mod unix {
 
         let shutdown = CancellationToken::new();
         let backend = ControlledBackend::new(shutdown.clone());
+        let mut recording: Option<(Arc<CassetteBackend>, PathBuf)> = None;
+        let model_backend: Arc<dyn LlmExecutionBackend> = match &cassette {
+            CassetteMode::Off => Arc::clone(&backend) as Arc<dyn LlmExecutionBackend>,
+            CassetteMode::Record { path, namespace } => {
+                let recorder = CassetteBackend::recording(
+                    namespace,
+                    Arc::clone(&backend) as Arc<dyn LlmExecutionBackend>,
+                );
+                recording = Some((Arc::clone(&recorder), path.clone()));
+                recorder
+            }
+            CassetteMode::Replay { path, namespace } => {
+                let file: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+                CassetteBackend::replaying(namespace, &file)
+                    .map_err(|error| format!("cassette replay refused: {error:?}"))?
+            }
+        };
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
         let handler = daemon::Handler::new_with_connection_file(Some(publication.clone()));
@@ -742,7 +809,7 @@ mod unix {
             handler,
             local_embeddings,
             ModelExecutionComponent::new(
-                backend,
+                model_backend,
                 host_runtime::model_execution::subprocess::group_registry::StateRoot::resolve(
                     Some(&root),
                 )?,
@@ -794,6 +861,12 @@ mod unix {
 
         let host_result = host.await?;
         shutdown.cancel();
+        if let Some((recorder, path)) = recording {
+            let file = recorder
+                .file()
+                .map_err(|error| format!("cassette refused: {error:?}"))?;
+            write_then_rename(&path, &serde_json::to_vec_pretty(&file)?)?;
+        }
         signal_task.abort();
         let _ = signal_task.await;
         // The socket is unlinked while this listener is still bound, so a successor that connects in this window is accepted into the backlog and refuses to start rather than replacing the socket between the inode check and the unlink.

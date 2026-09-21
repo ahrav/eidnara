@@ -30,7 +30,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
-use support::eval_cassette::{CassetteBackend, ReviewerKey, record_of, serve_keyed};
+use support::eval_cassette::{CassetteBackend, record_of};
+use support::eval_reviewer_peer::{ReviewerKey, serve_keyed};
 use support::tls_peer::{Peer, no_wait, text_response};
 
 const SUITE: &str = "crates/daemon/tests/eval_cassette.rs::";

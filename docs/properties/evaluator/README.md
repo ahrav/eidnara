@@ -1121,6 +1121,15 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   toolchain, host triple, and fixture binary, carries every sample in run
   order, the frozen family's digest, and the recency baseline, says `bulk`
   and `direct-database, non-aged`, and is refused when relabelled `replay`.
+- `the_fixture_records_its_backend_and_replays_it_strictly`
+  (`crates/daemon/tests/eval_fixture_cassette.rs`,
+  `rid-cassette-strict-miss-typed-error`,
+  `rid-cassette-world-namespaced-no-cross-replay`): one exchange through the real
+  ModelExecution route is recorded by a fixture started in record mode and
+  written at shutdown under the campaign namespace; a second fixture in
+  replay mode answers it from the file with its controlled backend at zero
+  calls; a prompt one byte off is a `cassette_miss` and the miss latches; the
+  file under another namespace refuses to load.
 - `an_s1_campaign_runs_only_under_its_budget` (ignored): a 400-message
   history runs only under `EIDNARA_EVAL_S1_BUDGET_MS` and reports the same
   shape inside the budget; without the variable the run is recorded as

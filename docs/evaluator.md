@@ -1378,10 +1378,25 @@ arms ran with the never-attempted pruned arms declared last. The paired
 analysis in the report is over the raw arms; the structured outcomes are in
 the ledger and the governance record.
 
+**Fixture cassette.** The direct-host fixture's model backend can be
+recorded or replayed: `--cassette-record <file> --cassette-namespace <ns>`
+wraps its controlled backend in the Rust cassette and writes the file at
+shutdown (write-then-rename); `--cassette-replay <file>
+--cassette-namespace <ns>` replaces the backend with the cassette replayed
+strictly, so a request the recording never saw is a typed `cassette_miss`
+and every later request is refused, while the controlled backend's counters
+stay at zero. The fixture includes `tests/support/eval_cassette.rs` by path,
+so it and the tests read one schema. `crates/daemon/tests/eval_fixture_cassette.rs`
+records one exchange through the real ModelExecution route in one fixture
+process and replays it in a second, and checks the miss, the latch, and the
+namespace refusal. This is the seam the summarizer's own firing needs to run
+under replay inside the fixture; that firing is not yet driven by the
+campaign.
+
 Not composed yet: the aged arm built by `step()` and lifecycle replay through
 ingestion rather than seeded segments, which is what would let the manifest
-say `replay`; the summarizer's own producer and publication path (the
-structured arm reaches the validator with a replayed answer, not
+say `replay`; the summarizer's own producer and publication path inside the
+fixture (the structured arm reaches the validator with a replayed answer, not
 `publish_validated_chunk` with its reservation state); the `eval_runner`
 example still serves the cassette oracle only; and the write-then-rename
 publisher is the test's own, since no shipped publisher exists. The
