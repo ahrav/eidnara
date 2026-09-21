@@ -364,9 +364,12 @@ impl CassetteBackend {
             let seen = seen.clone();
             let closed = closed.clone();
             EventSink::new(Arc::new(move |event: BackendEvent| {
+                // Forward and record under one lock, so concurrent emitters
+                // record in the order the run's sink accepted.
+                let mut seen = seen.lock().unwrap();
                 let status = events.emit(event.clone());
                 match status {
-                    SinkStatus::Accepted => seen.lock().unwrap().push(WireEvent::from(&event)),
+                    SinkStatus::Accepted => seen.push(WireEvent::from(&event)),
                     SinkStatus::Closed => closed.store(true, Ordering::SeqCst),
                 }
                 status

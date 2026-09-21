@@ -697,7 +697,8 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
   nonce table: `cch=<nonce>;` forms in system text digest equal across
   nonces; an unterminated `cch=`, a URL query `cch=`, an empty nonce, a changed
   tail, and the same form in a user message all digest differently, so
-  normalization never drops text and never reaches model-visible content.
+  normalization never drops text and never reaches message content (system
+  text is in scope; see the gap below).
 - `equal_digests_replay_in_recorded_order_and_distinct_ones_in_any_order`:
   the concurrency case, with `unconsumed()` reaching zero and a miss past the
   recording naming the last entry.
