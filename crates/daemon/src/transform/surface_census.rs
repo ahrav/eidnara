@@ -29,7 +29,13 @@ fn seeded(dir: &std::path::Path, texts: &[&str]) -> MemoryStore {
 }
 
 fn search(s: &MemoryStore, query: &str) -> Result<Vec<MemorySearchResult>, TransformError> {
-    run_user_hint_lexical_search(s, SESSION, query, DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD)
+    run_user_hint_lexical_search(
+        s,
+        SESSION,
+        query,
+        DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD,
+        &mut UserHintTrace::default(),
+    )
 }
 
 fn sequences(results: &[MemorySearchResult]) -> Vec<i64> {

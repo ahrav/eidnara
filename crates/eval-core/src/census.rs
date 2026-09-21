@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::ledger::{Stage, StageKind};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Surface1Stage {
@@ -34,6 +36,18 @@ pub const SURFACE1_STAGES: [Surface1Stage; 13] = [
     Surface1Stage::OverlayApply,
     Surface1Stage::Attachment,
 ];
+
+/// Every surface-1 stage is a gate or a filter over the session's segments;
+/// the candidates enter at the tail, so a required occurrence's path is the
+/// whole list.
+impl Stage for Surface1Stage {
+    const ALL: &'static [Self] = &SURFACE1_STAGES;
+    const REACHABILITY: Reachability = Reachability::DefaultProduction;
+
+    fn kind(self) -> StageKind {
+        StageKind::Filter
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HintBounds {

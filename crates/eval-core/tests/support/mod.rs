@@ -157,6 +157,7 @@ pub fn manifest_for(identity: RunIdentity, trace: &SemanticTrace) -> Manifest {
         residue,
         construction: Construction::HandBuilt,
         execution_mode: ExecutionMode::Generate,
+        failure_class_table_digest: eval_core::FAILURE_CLASS_TABLE_DIGEST.to_string(),
         ingestion: Ingestion::AdapterIngestedNoProductionCaller,
         reachability: Reachability::DefaultProduction,
         claim_boundary: ClaimBoundary::pinned(),

@@ -5,9 +5,10 @@ use std::collections::BTreeSet;
 use context_core::canonical_json::{ContractError, canonical_json_encode};
 use eval_core::{
     ArmRates, Attestation, BinaryDigest, CLOCK_FIELD_KEEP_ALLOWLIST, ClaimBoundary, DROPPED_FIELDS,
-    IdentityError, MANIFEST_SCHEMA, Manifest, ManifestError, ObservationSchema, REQUIRED_FIELDS,
-    RUN_ID_PROTOCOL, ResidueEntry, ResidueError, Rule, RunIdentity, SemanticTrace, eval_run_id,
-    is_canonical_decimal, is_clock_named, is_never_kept, parse_manifest, zero_bytes_sha256,
+    IdentityError, MANIFEST_DIGEST_PROTOCOL, MANIFEST_SCHEMA, Manifest, ManifestError,
+    ObservationSchema, REQUIRED_FIELDS, RUN_ID_PROTOCOL, ResidueEntry, ResidueError, Rule,
+    RunIdentity, SemanticTrace, eval_run_id, is_canonical_decimal, is_clock_named, is_never_kept,
+    parse_manifest, zero_bytes_sha256,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -16,7 +17,7 @@ use support::{OBSERVATION_TYPE, build, identity, manifest, observation, observat
 /// Frozen so a field-set or encoding change forces a reviewed schema bump.
 const FIXTURE_RUN_ID: &str = "e9f412ed2ad627c5801959c2c459bbb764bf45443a7774d02ac74a97f41832c9";
 const FIXTURE_MANIFEST_DIGEST: &str =
-    "8e6787eccba4c2dac03d4d1df4ad9d80064b936c83426718e3fa10cfab3c6e81";
+    "0a9d9de8f725832e9f1db9f39a56107c4a9c7f4bae27737ca9f75f1e65c19d3d";
 
 #[test]
 fn required_fields_are_sorted_and_equal_the_struct_field_set() {
@@ -53,6 +54,50 @@ fn fixture_digests_are_frozen() {
     assert_eq!(manifest().digest().unwrap(), FIXTURE_MANIFEST_DIGEST);
 }
 
+/// `docs/evaluator.md` is a test input: its schema literal, digest protocol,
+/// field count, and version history must match the manifest constants.
+#[test]
+fn evaluator_document_agrees_with_the_manifest_constants() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/evaluator.md");
+    let doc = std::fs::read_to_string(&path).expect("read docs/evaluator.md");
+    let row = |needle: &str| {
+        assert!(doc.contains(needle), "evaluator document lacks `{needle}`");
+    };
+    row(&format!("## Manifest `{MANIFEST_SCHEMA}`"));
+    row(&format!("| `schema` | `{MANIFEST_SCHEMA}`. |"));
+    row(&format!(
+        "hashes with protocol `{MANIFEST_DIGEST_PROTOCOL}`"
+    ));
+    row(&format!(
+        "The {} required fields, sorted:",
+        REQUIRED_FIELDS.len()
+    ));
+    let version = MANIFEST_SCHEMA
+        .rsplit_once("/v")
+        .map(|(_, version)| version)
+        .expect("schema literal ends in a version");
+    assert_eq!(
+        MANIFEST_DIGEST_PROTOCOL.rsplit_once("/v").map(|(_, v)| v),
+        Some(version),
+        "schema and digest protocol share one version"
+    );
+    // Every `eval-manifest*` literal in the document names the current version.
+    for (offset, _) in doc.match_indices("`eval-manifest") {
+        let literal = doc[offset + 1..]
+            .split('`')
+            .next()
+            .expect("a backtick opens a literal");
+        let stated = literal
+            .rsplit_once("/v")
+            .map(|(_, version)| version)
+            .unwrap_or_else(|| panic!("`{literal}` names no version"));
+        assert_eq!(stated, version, "stale manifest literal `{literal}`");
+    }
+    row(&format!(
+        "version {version} added `failure_class_table_digest`"
+    ));
+}
+
 #[test]
 fn a_valid_manifest_parses_and_round_trips() {
     let manifest = manifest();
@@ -85,16 +130,16 @@ fn unknown_field_wrong_schema_and_non_object_are_refused() {
         parse_manifest(&extra),
         Err(ManifestError::UnknownField("extra".to_string()))
     );
-    let mut v2 = valid.clone();
-    v2["schema"] = json!("eval-manifest/v4");
+    let mut v5 = valid.clone();
+    v5["schema"] = json!("eval-manifest/v5");
     assert_eq!(
-        parse_manifest(&v2),
+        parse_manifest(&v5),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v4".to_string()
+            found: "eval-manifest/v5".to_string()
         })
     );
     assert_eq!(parse_manifest(&json!([])), Err(ManifestError::NotAnObject));
-    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v3");
+    assert_eq!(MANIFEST_SCHEMA, "eval-manifest/v4");
 }
 
 #[test]
@@ -205,7 +250,7 @@ fn every_kept_field_enters_the_digest_and_every_dropped_field_leaves_it() {
         ),
     ];
     let mut digests = BTreeSet::from([base.digest().unwrap()]);
-    let mut covered = BTreeSet::from(["schema", "claim_boundary"]);
+    let mut covered = BTreeSet::from(["schema", "claim_boundary", "failure_class_table_digest"]);
     for (field, mutate) in mutations {
         let mut mutated = base.clone();
         mutate(&mut mutated);
@@ -594,11 +639,19 @@ fn residue_declarations_are_non_keep_and_one_rule_per_field() {
 #[test]
 fn validate_refuses_what_parse_and_digest_refuse() {
     let mut schema = manifest();
-    schema.schema = "eval-manifest/v4".to_string();
+    schema.schema = "eval-manifest/v5".to_string();
     assert_eq!(
         schema.validate(),
         Err(ManifestError::SchemaMismatch {
-            found: "eval-manifest/v4".to_string()
+            found: "eval-manifest/v5".to_string()
+        })
+    );
+    let mut table = manifest();
+    table.failure_class_table_digest = "00".repeat(32);
+    assert_eq!(
+        table.validate(),
+        Err(ManifestError::FailureClassTableMismatch {
+            found: "00".repeat(32)
         })
     );
     let mut epoch = manifest();

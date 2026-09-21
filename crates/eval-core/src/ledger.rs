@@ -3,6 +3,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::census::Reachability;
+
 /// The kernel's eligibility batch size; a stage observation naming more
 /// candidates than one batch is refused at construction.
 pub const MAX_CANDIDATES_PER_STAGE_OBSERVATION: usize = 1024;
@@ -17,9 +19,12 @@ pub enum StageKind {
 }
 
 /// One ordered stage list. `ALL` is production order and a stage's position in
-/// it is the only ordinal the ledger uses.
+/// it is the only ordinal the ledger uses; `REACHABILITY` labels every verdict
+/// over the list, so a result about an activated component is never read as a
+/// product claim.
 pub trait Stage: Copy + Eq + fmt::Debug + 'static {
     const ALL: &'static [Self];
+    const REACHABILITY: Reachability;
     fn kind(self) -> StageKind;
 
     fn ordinal(self) -> usize {
@@ -57,6 +62,8 @@ pub const CHAIN_STAGES: [ChainStage; 7] = [
 
 impl Stage for ChainStage {
     const ALL: &'static [Self] = &CHAIN_STAGES;
+    /// The query route and the packer have no production caller.
+    const REACHABILITY: Reachability = Reachability::TestOnly;
 
     fn kind(self) -> StageKind {
         match self {
