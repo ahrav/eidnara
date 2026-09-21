@@ -256,16 +256,21 @@ impl TryFrom<WireTerminal> for BackendTerminal {
 /// capabilities from this backend reads what the real backend declared.
 pub struct CassetteBackend {
     namespace: String,
-    cassette: Arc<Mutex<Cassette>>,
+    recording: Arc<Mutex<Recording>>,
     inner: Option<Arc<dyn LlmExecutionBackend>>,
     declarations: Declarations,
     /// The declared reasons as `'static` strings, leaked once here so the
     /// trait's `&'static str` return needs no per-call allocation.
     reasons: [Option<&'static str>; 2],
     refusals: Arc<AtomicUsize>,
-    /// Exchanges between `execute` and `record`; `file()` refuses while any
-    /// is outstanding.
-    in_flight: Arc<AtomicUsize>,
+}
+
+/// The cassette with its exchanges still between `execute` and `record`,
+/// under one lock so `file()` never observes a count and a cassette state
+/// from different moments.
+struct Recording {
+    cassette: Cassette,
+    in_flight: usize,
 }
 
 impl CassetteBackend {
@@ -300,23 +305,25 @@ impl CassetteBackend {
         ];
         Arc::new(Self {
             namespace: namespace.to_string(),
-            cassette: Arc::new(Mutex::new(cassette)),
+            recording: Arc::new(Mutex::new(Recording {
+                cassette,
+                in_flight: 0,
+            })),
             inner,
             declarations,
             reasons,
             refusals: Arc::new(AtomicUsize::new(0)),
-            in_flight: Arc::new(AtomicUsize::new(0)),
         })
     }
 
     /// The persisted cassette after recording; a refused recording has none,
     /// and a recording with an exchange still in flight has none yet.
     pub fn file(&self) -> Result<Value, CassetteError> {
-        let cassette = self.cassette.lock().unwrap();
-        if self.in_flight.load(Ordering::SeqCst) > 0 {
+        let recording = self.recording.lock().unwrap();
+        if recording.in_flight > 0 {
             return Err(CassetteError::IncompleteExchange);
         }
-        Ok(serde_json::to_value(cassette.to_file()?).unwrap())
+        Ok(serde_json::to_value(recording.cassette.to_file()?).unwrap())
     }
 
     /// Requests answered with a `cassette_miss` terminal, including every one
@@ -326,12 +333,12 @@ impl CassetteBackend {
     }
 
     pub fn terminal(&self) -> Option<CassetteMiss> {
-        self.cassette.lock().unwrap().terminal().cloned()
+        self.recording.lock().unwrap().cassette.terminal().cloned()
     }
 
     /// Recorded entries no request has consumed; a faithful replay leaves none.
     pub fn unconsumed(&self) -> usize {
-        self.cassette.lock().unwrap().unconsumed()
+        self.recording.lock().unwrap().cassette.unconsumed()
     }
 
     fn refused(code: &str, detail: impl std::fmt::Display) -> BackendTerminal {
@@ -365,21 +372,21 @@ impl CassetteBackend {
                 status
             }))
         };
-        let cassette = self.cassette.clone();
+        let recording = self.recording.clone();
         let namespace = self.namespace.clone();
         // Armed before the wrapped backend runs, so an `execute` that panics
         // and a future dropped unpolled both refuse the recording.
-        let mut exchange = InFlight::new(cassette.clone(), self.in_flight.clone());
+        let mut exchange = InFlight::new(recording.clone());
         let inner = inner.execute(request, tee, cancel.clone());
         Box::pin(async move {
             let terminal = inner.await;
-            let mut cassette = cassette.lock().unwrap();
-            exchange.commit();
+            let mut recording = recording.lock().unwrap();
+            exchange.commit(&mut recording);
             if closed.load(Ordering::SeqCst) || cancel.is_cancelled() {
                 // The run's terminal is the supervisor's (a refused event, a
                 // cancellation), not this one, and a refused event is missing:
                 // the exchange cannot replay the run.
-                let error = cassette.refuse(CassetteError::IncompleteExchange);
+                let error = recording.cassette.refuse(CassetteError::IncompleteExchange);
                 return Self::refused("cassette_refused", error);
             }
             let exchange = WireExchange {
@@ -387,21 +394,35 @@ impl CassetteBackend {
                 terminal: WireTerminal::from(&terminal),
             };
             let response = serde_json::to_value(exchange).unwrap();
-            match cassette.record(&namespace, Boundary::Backend, covered, response) {
+            match recording
+                .cassette
+                .record(&namespace, Boundary::Backend, covered, response)
+            {
                 Ok(_) => terminal,
                 Err(error) => Self::refused("redaction_refused", error),
             }
         })
     }
 
-    fn replay_from(&self, covered: Value, events: EventSink) -> BackendFuture {
-        let cassette = self.cassette.clone();
+    fn replay_from(
+        &self,
+        covered: Value,
+        events: EventSink,
+        cancel: CancellationToken,
+    ) -> BackendFuture {
+        let recording = self.recording.clone();
         let namespace = self.namespace.clone();
         let refusals = self.refusals.clone();
         Box::pin(async move {
-            let outcome = cassette
+            if cancel.is_cancelled() {
+                // The run recorded only its cancellation; no exchange was seen,
+                // so none is consumed.
+                return Self::refused("cassette_refused", "run cancelled before lookup");
+            }
+            let outcome = recording
                 .lock()
                 .unwrap()
+                .cassette
                 .lookup(&namespace, Boundary::Backend, &covered)
                 .map(|found| match found {
                     Lookup::Hit(entry) => Ok(entry.response.clone()),
@@ -444,40 +465,39 @@ impl CassetteBackend {
     }
 }
 
-/// One exchange between `execute` and `record`, counted in `in_flight`.
-/// Dropped before `commit` (a panic, a dropped future), it refuses the
-/// recording: the exchange it stands for is in no file.
+/// One exchange between `execute` and `record`, counted in
+/// `Recording::in_flight`. Dropped before `commit` (a panic, a dropped
+/// future), it refuses the recording: the exchange it stands for is in no
+/// file. Every count change happens under the recording's lock.
 struct InFlight {
-    cassette: Arc<Mutex<Cassette>>,
-    pending: Arc<AtomicUsize>,
+    recording: Arc<Mutex<Recording>>,
     committed: bool,
 }
 
 impl InFlight {
-    fn new(cassette: Arc<Mutex<Cassette>>, pending: Arc<AtomicUsize>) -> Self {
-        pending.fetch_add(1, Ordering::SeqCst);
+    fn new(recording: Arc<Mutex<Recording>>) -> Self {
+        recording.lock().unwrap().in_flight += 1;
         Self {
-            cassette,
-            pending,
+            recording,
             committed: false,
         }
     }
 
-    /// Called with the cassette lock held, so `file()` never sees the count
-    /// drop before the entry is recorded.
-    fn commit(&mut self) {
+    /// Takes the caller's lock, so `file()` never sees the count drop before
+    /// the entry is recorded under the same lock.
+    fn commit(&mut self, recording: &mut Recording) {
         self.committed = true;
-        self.pending.fetch_sub(1, Ordering::SeqCst);
+        recording.in_flight -= 1;
     }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        if !self.committed {
-            self.pending.fetch_sub(1, Ordering::SeqCst);
-            if let Ok(mut cassette) = self.cassette.lock() {
-                cassette.refuse(CassetteError::IncompleteExchange);
-            }
+        if !self.committed
+            && let Ok(mut recording) = self.recording.lock()
+        {
+            recording.in_flight -= 1;
+            recording.cassette.refuse(CassetteError::IncompleteExchange);
         }
     }
 }
@@ -493,13 +513,13 @@ impl LlmExecutionBackend for CassetteBackend {
             Ok(covered) => covered,
             Err(error) => {
                 // The exchange this request stands for can be in no file.
-                let error = self.cassette.lock().unwrap().refuse(error);
+                let error = self.recording.lock().unwrap().cassette.refuse(error);
                 return Box::pin(async move { Self::refused("cassette_request", error) });
             }
         };
         match &self.inner {
             Some(inner) => self.record_through(inner, covered, request, events, cancel),
-            None => self.replay_from(covered, events),
+            None => self.replay_from(covered, events, cancel),
         }
     }
 

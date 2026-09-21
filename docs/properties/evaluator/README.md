@@ -788,7 +788,8 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   recorded; a future dropped before its terminal, an `execute` that panics
   before returning one, a run whose token was cancelled under the backend, and
   a run whose sink answers `Closed` each leave the recorder refusing
-  `IncompleteExchange`, the last two with a `cassette_refused` terminal.
+  `IncompleteExchange`, the last two with a `cassette_refused` terminal; a
+  replay under a cancelled token is `cassette_refused` and consumes nothing.
 - `every_host_finish_reason_error_class_and_terminal_round_trips`: both
   `FinishReason` values, all four `ErrorClass` values under `Failed` and
   `FailedUnresolved`, and an absent event finish reason each record and replay
@@ -822,6 +823,11 @@ tested as an example target):
 - Recording is against the mock's scripted responses; no recording against a
   live provider exists, so the redaction gate has been exercised on planted
   canaries only.
+- `CassetteBackend` refuses a recording when the run's cancellation token has
+  fired by the time the wrapped future returns. A cancellation that lands after
+  that return and before the supervisor commits its terminal is not observable
+  at the `LlmExecutionBackend` boundary; such a recording carries the backend's
+  terminal for a run the supervisor ended with cancellation.
 - The `cch=<nonce>;` rule applies to every string under `body.system`, so an
   instruction file that happens to contain that exact form would normalize
   too; the billing fragment's surrounding text is unobserved (1.18.31 emits

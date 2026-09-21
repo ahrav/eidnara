@@ -847,7 +847,14 @@ panics or a future dropped before its terminal, a run whose cancellation token
 fired under the backend, or an event the run's sink answered `Closed` (the
 supervisor's cap, cancellation, or a prior terminal owns the run's outcome, and
 a refused event is not in the recording). `file()` refuses with the same error
-while an exchange is still in flight, and succeeds once it has been recorded. `refusals()` counts every miss terminal
+while an exchange is still in flight, and succeeds once it has been recorded;
+the in-flight count and the cassette live under one lock, so publication
+never pairs a count and a cassette state from different moments. On replay, a
+run whose token is already cancelled consumes no entry: the run recorded only
+its cancellation. The cancellation check is the wrapper's snapshot at the
+moment the wrapped future returns; a cancellation that lands between that
+return and the supervisor's terminal arbitration is outside what this
+boundary can observe, and is a recorded gap. `refusals()` counts every miss terminal
 served, including the repeats after the first miss latched, and `unconsumed()`
 reports the recorded entries the run never requested. The cassette
 header's `declarations` carry what the real backend declared per harness
