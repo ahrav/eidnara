@@ -1399,7 +1399,20 @@ say `replay`; the summarizer's own producer and publication path inside the
 fixture (the structured arm reaches the validator with a replayed answer, not
 `publish_validated_chunk` with its reservation state); the `eval_runner`
 example still serves the cassette oracle only; and the write-then-rename
-publisher is the test's own, since no shipped publisher exists. The
+publisher is the test's own, since no shipped publisher exists.
+
+What the in-host summarizer path needs, as read from the code: the model
+chain (`/history_summarizer/model`) and `/history_summarizer/context_limit_tokens`
+are user-tier-only keys, read from `$XDG_CONFIG_HOME/eidnara/eidnara.jsonc`,
+so the fixture must be started with that variable pointing at a tier the
+test wrote. The trigger's budget floor is 5,000 tokens and the tail-size bar
+three times that, so a history must carry about 15,000 eligible tokens
+before `tail_size` fires without context-pressure numbers in the request;
+the chunk budget floor is 8,000 tokens. The presented input is one line per
+block, `[start-end] R: part / part`, with `«sN»` alias markers before cited
+parts, and the answer must be the summarizer's `<output>` document over
+those ordinals; a scripted summarizer in the fixture would have to speak
+that format for a recording to exist, since no live provider does. The
 structured arm's chunk, transcript, and request are the test's own model of
 what the producer builds; only the validator and the stored-row mapping are
 production code.
