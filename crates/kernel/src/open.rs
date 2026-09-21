@@ -196,6 +196,11 @@ impl fmt::Debug for KernelStore {
 #[must_use = "dropping the guard immediately closes the window before the change runs"]
 pub struct ClassificationChange<'a> {
     generation: &'a AtomicU64,
+    /// The test hook's window holds the writer lock like a production opener,
+    /// so no opener can move the generation while the window is open; the
+    /// guard drops after `Drop` restores an even generation.
+    #[cfg(feature = "test-support")]
+    _writer: Option<std::sync::MutexGuard<'a, Connection>>,
 }
 
 impl Drop for ClassificationChange<'_> {
@@ -486,17 +491,27 @@ impl KernelStore {
             .fetch_add(1, Ordering::SeqCst);
         ClassificationChange {
             generation: &self.classification_generation,
+            #[cfg(feature = "test-support")]
+            _writer: None,
         }
     }
 
     /// Holds the classification window open without changing any artifact, so
     /// every eligibility snapshot taken meanwhile has no reusable generation.
-    /// Production openers serialize through the writer lock; this hook does
-    /// not, so it refuses to open while another window is live, where a second
-    /// increment would read as a closed window. The check and the increment
-    /// are one atomic update, so two racing holders cannot both pass.
+    /// Every opener holds the writer lock, so this hook takes it too: a
+    /// production change waits behind the held window instead of overlapping
+    /// it. A second window from the holder's own thread would wait on itself,
+    /// so it is refused before the lock; the check and the increment are one
+    /// atomic update, so two racing holders cannot both pass.
     #[cfg(feature = "test-support")]
     pub fn hold_classification_change_for_test(&self) -> ClassificationChange<'_> {
+        assert!(
+            self.classification_generation
+                .load(Ordering::SeqCst)
+                .is_multiple_of(2),
+            "a classification window is already open"
+        );
+        let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
         self.classification_generation
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |generation| {
                 generation.is_multiple_of(2).then_some(generation + 1)
@@ -504,6 +519,7 @@ impl KernelStore {
             .expect("a classification window is already open");
         ClassificationChange {
             generation: &self.classification_generation,
+            _writer: Some(writer),
         }
     }
 

@@ -553,9 +553,11 @@ names the occurrences either packer phase read a row for; an optional request
 whose row is missing is excluded, not read.
 `KernelStore::hold_classification_change_for_test` (feature `test-support`)
 holds the classification window open so every eligibility snapshot taken
-meanwhile has no reusable generation; it refuses to open a second window,
-because production openers serialize through the writer lock and this hook
-does not. The `before_phase` closure is unchanged and is not a ledger channel.
+meanwhile has no reusable generation. It holds the writer lock like every
+production opener, so a classification change waits behind the window instead
+of closing it early, and it refuses to open a second window from the thread
+that already holds one. The `before_phase` closure is unchanged and is not a
+ledger channel.
 
 ### Ledger shell
 

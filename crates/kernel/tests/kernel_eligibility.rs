@@ -377,28 +377,84 @@ fn a_batch_never_mixes_snapshots_while_a_writer_flips_candidates_and_scopes() {
 }
 
 #[test]
-fn racing_test_holders_open_exactly_one_classification_window() {
+fn racing_test_holders_never_hold_the_window_together() {
     let fixture = fixture();
     let store = &fixture.store;
-    // Two holders that both pass the parity check would leave the generation
+    let project = ProjectScope::new(PROJECT_A).unwrap();
+    let candidates = [candidate("ok", 1)];
+    // Two holders that both passed the parity check would leave the generation
     // even while both guards live, so a snapshot taken then would look reusable.
-    for _ in 0..2_000 {
+    // A racing second holder is either refused or waits for the first to drop.
+    for _ in 0..200 {
         let barrier = std::sync::Barrier::new(2);
-        let open = || {
+        let hold = || {
             barrier.wait();
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                store.hold_classification_change_for_test()
+                let _window = store.hold_classification_change_for_test();
+                store
+                    .judge_eligibility(&project, ArtifactDestination::Remote, &candidates)
+                    .unwrap()
+                    .snapshot
+                    .classification_generation
             }))
             .ok()
         };
-        let (first, second) = thread::scope(|scope| {
-            let first = scope.spawn(open);
-            let second = scope.spawn(open);
-            (first.join().unwrap(), second.join().unwrap())
+        let outcomes = thread::scope(|scope| {
+            let first = scope.spawn(hold);
+            let second = scope.spawn(hold);
+            [first.join().unwrap(), second.join().unwrap()]
         });
+        let held: Vec<_> = outcomes.iter().flatten().collect();
+        assert!(!held.is_empty(), "one racing holder opens the window");
         assert!(
-            first.is_some() ^ second.is_some(),
-            "exactly one racing holder opens the window"
+            held.iter().all(|generation| generation.is_none()),
+            "a snapshot under a held window is never reusable: {outcomes:?}"
         );
     }
+    let closed = store
+        .judge_eligibility(&project, ArtifactDestination::Remote, &candidates)
+        .unwrap();
+    assert!(closed.snapshot.classification_generation.is_some());
+}
+
+#[test]
+fn a_production_opener_waits_for_the_held_test_window() {
+    let fixture = fixture();
+    let store = &fixture.store;
+    let project = ProjectScope::new(PROJECT_A).unwrap();
+    let normal = store
+        .ingest_artifact(artifact("normal", b"public bytes", Sensitivity::Normal))
+        .unwrap();
+    let candidates = [with_artifact(candidate("ok", 1), &normal.digest)];
+    let window = store.hold_classification_change_for_test();
+    let (done, finished) = std::sync::mpsc::channel();
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            // Tightening the stored classification opens a production window.
+            store
+                .ingest_artifact(artifact("normal", b"public bytes", Sensitivity::Sensitive))
+                .unwrap();
+            let _ = done.send(());
+        });
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_err(),
+            "the tightening waited behind the held window"
+        );
+        let batch = store
+            .judge_eligibility(&project, ArtifactDestination::Remote, &candidates)
+            .unwrap();
+        assert_eq!(
+            batch.snapshot.classification_generation, None,
+            "a snapshot under a held window is never reusable"
+        );
+        drop(window);
+        finished.recv().unwrap();
+    });
+    let after = store
+        .judge_eligibility(&project, ArtifactDestination::Remote, &candidates)
+        .unwrap();
+    assert_eq!(after.verdicts, [EligibilityVerdict::ProviderSensitive]);
+    assert!(after.snapshot.classification_generation.is_some());
 }
