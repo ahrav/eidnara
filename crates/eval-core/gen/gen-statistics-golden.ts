@@ -135,7 +135,8 @@ function pilot(observations: readonly Observation[], maxAffordableWorlds: number
   const threshold = ratio(1n, 20n);
   const family = cmp(iccFamily, threshold) > 0;
   const chosenIcc = family ? iccFamily : iccWorld;
-  const clusters = family ? byFamily.length : maxAffordableWorlds;
+  // Each affordable world lies in one family, so at most that many family clusters are realized.
+  const clusters = family ? Math.min(byFamily.length, maxAffordableWorlds) : maxAffordableWorlds;
   const itemsAtMax = mul(ratio(BigInt(observations.length), BigInt(byWorld.length)), whole(maxAffordableWorlds));
   const meanCluster = div(itemsAtMax, whole(clusters));
   const positiveIcc = cmp(chosenIcc, whole(0)) < 0 ? whole(0) : chosenIcc;
@@ -296,6 +297,7 @@ const cases = [
   pilotCase("pilot-no-family-effect", pilotFixture(false), 40),
   // Fewer affordable worlds than the pilot had: the clamp keeps effective N at the item count.
   pilotCase("pilot-fewer-affordable-worlds", pilotFixture(false), 2),
+  pilotCase("pilot-family-effect-fewer-affordable-worlds-than-families", pilotFixture(true), 2),
   pilotCase("pilot-unbalanced-worlds", unbalancedFixture, 3),
   pilotCase("pilot-constant-worlds", constantFixture, 1),
   {

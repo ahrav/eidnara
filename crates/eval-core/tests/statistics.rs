@@ -6,7 +6,7 @@ use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmRates, ArmResult, BlockedReason,
     CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, GATE_ENDPOINTS, Gates,
     ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome,
-    IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES,
+    IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES, Manifest,
     MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, Ratio, StatisticsError,
     StoppingRule, analyze, arm_miss_asymmetry, cluster_bootstrap_interval, intraclass_correlation,
     parse_analysis_family, parse_campaign_profile, run_icc_pilot,
@@ -107,6 +107,14 @@ fn arm_rates(fresh_miss: &str, aged_miss: &str) -> BTreeMap<String, ArmRates> {
     ])
 }
 
+/// A manifest that recorded `frozen` before its first outcome and carries `rates`.
+fn recorded(frozen: &FrozenFamily, rates: BTreeMap<String, ArmRates>) -> Manifest {
+    let mut manifest = support::manifest();
+    manifest.analysis_family_digest = Some(frozen.analysis_family_digest.clone());
+    manifest.arm_rates = rates;
+    manifest
+}
+
 /// Three hundred pairs over six families, mostly concordant.
 fn pairs_at_threshold() -> Vec<PairOutcome> {
     FAMILIES
@@ -159,7 +167,7 @@ fn the_frozen_reference_agrees_on_every_golden_case() {
         json!(format!("{:x}", Sha256::digest(canonical.as_bytes())))
     );
     let cases = golden["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 13);
+    assert_eq!(cases.len(), 14);
     let rates = profile().rates().unwrap();
     for case in cases {
         let id = case["id"].as_str().unwrap();
@@ -374,10 +382,9 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
     edited.exclusions.push("post hoc".into());
     assert!(matches!(
         analyze(
-            &frozen,
+            &recorded(&frozen, arm_rates("0", "0")),
             &edited,
             &pairs_at_threshold(),
-            &arm_rates("0", "0")
         ),
         Err(StatisticsError::FamilyChangedAfterResults { .. })
     ));
@@ -418,7 +425,7 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
             })
         );
     }
-    let mut extra = value;
+    let mut extra = value.clone();
     extra["interval_tolerance"] = json!("0");
     assert!(matches!(
         parse_analysis_family(&extra),
@@ -431,8 +438,20 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
         FrozenFamily::from_manifest(&manifest).err(),
         Some(StatisticsError::FamilyNotRecorded)
     );
+    assert_eq!(
+        analyze(&manifest, &family, &pairs_at_threshold()).err(),
+        Some(StatisticsError::FamilyNotRecorded)
+    );
     manifest.analysis_family_digest = Some(frozen.analysis_family_digest.clone());
     assert_eq!(FrozenFamily::from_manifest(&manifest).unwrap(), frozen);
+    // A family that validates can always be frozen: an integer outside the
+    // canonical-JSON safe range is refused at parse, not first at freeze.
+    let mut unsafe_seed = value.clone();
+    unsafe_seed["bootstrap_seed"] = json!(9007199254740992u64);
+    assert!(matches!(
+        parse_analysis_family(&unsafe_seed),
+        Err(StatisticsError::NotCanonical(_))
+    ));
 }
 
 #[test]
@@ -483,6 +502,12 @@ fn the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpow
         run_icc_pilot("p", &flat, 1, 20).unwrap().effective_n_at_max,
         Ratio::ONE
     );
+    // Each affordable world lies in one family, so two worlds realize at most two
+    // family clusters however many the pilot sampled: the four projected items
+    // are deflated, not spread over three clusters and left undeflated.
+    let two_worlds = run_icc_pilot("p", &observations, 2, 20).unwrap();
+    assert_eq!(two_worlds.clustering_unit, ClusteringUnit::Family);
+    assert!(two_worlds.effective_n_at_max < ratio(4, 1));
 
     assert_eq!(
         run_icc_pilot("p", &observations, 0, 20).err(),
@@ -521,10 +546,9 @@ fn the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpow
     let frozen = FrozenFamily::freeze(&underpowered).unwrap();
     assert_eq!(
         analyze(
-            &frozen,
+            &recorded(&frozen, arm_rates("0", "0")),
             &underpowered,
             &pairs_at_threshold(),
-            &arm_rates("0", "0")
         )
         .unwrap(),
         Analysis::Blocked(BlockedReason::InsufficientEffectiveN {
@@ -840,18 +864,23 @@ fn arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained
     let frozen = FrozenFamily::freeze(&family).unwrap();
     let pairs = pairs_at_threshold();
     assert_eq!(
-        analyze(&frozen, &family, &pairs, &arm_rates("0.1", "0.02")).unwrap(),
+        analyze(
+            &recorded(&frozen, arm_rates("0.1", "0.02")),
+            &family,
+            &pairs
+        )
+        .unwrap(),
         Analysis::Blocked(BlockedReason::ArmMissAsymmetry {
             asymmetry: ratio(2, 25),
             bound: ratio(1, 20),
         })
     );
     assert!(matches!(
-        analyze(&frozen, &family, &pairs, &renamed),
+        analyze(&recorded(&frozen, renamed.clone()), &family, &pairs),
         Err(StatisticsError::ArmsNotPaired { .. })
     ));
     let Analysis::Report(report) =
-        analyze(&frozen, &family, &pairs, &arm_rates("0.05", "0")).unwrap()
+        analyze(&recorded(&frozen, arm_rates("0.05", "0")), &family, &pairs).unwrap()
     else {
         panic!("at the bound reports");
     };
@@ -890,12 +919,12 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let pairs = pairs_at_threshold();
     let rates = arm_rates("0", "0");
     assert!(matches!(
-        analyze(&frozen, &family, &pairs, &rates).unwrap(),
+        analyze(&recorded(&frozen, rates.clone()), &family, &pairs).unwrap(),
         Analysis::Report(_)
     ));
     // One pair is not the frozen count, so no gate is computed from it.
     assert_eq!(
-        analyze(&frozen, &family, &pairs[..1], &rates).err(),
+        analyze(&recorded(&frozen, rates.clone()), &family, &pairs[..1]).err(),
         Some(StatisticsError::PairCountMismatch {
             expected: 300,
             found: 1
@@ -903,7 +932,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         "an early-stopped table reports no gates"
     );
     assert_eq!(
-        analyze(&frozen, &family, &pairs[..299], &rates).err(),
+        analyze(&recorded(&frozen, rates.clone()), &family, &pairs[..299]).err(),
         Some(StatisticsError::PairCountMismatch {
             expected: 300,
             found: 299
@@ -913,7 +942,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let mut foreign = pairs.clone();
     foreign[0].cluster.family = "rails".to_string();
     assert_eq!(
-        analyze(&frozen, &family, &foreign, &rates).err(),
+        analyze(&recorded(&frozen, rates.clone()), &family, &foreign).err(),
         Some(StatisticsError::PairOutsideFamilies {
             pair_id: "cargo-0".to_string(),
             family: "rails".to_string()
@@ -922,7 +951,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     // Three hundred copies of one pair are not three hundred pairs.
     let copies: Vec<PairOutcome> = std::iter::repeat_n(pairs[0].clone(), 300).collect();
     assert_eq!(
-        analyze(&frozen, &family, &copies, &rates).err(),
+        analyze(&recorded(&frozen, rates.clone()), &family, &copies).err(),
         Some(StatisticsError::DuplicatePair {
             pair_id: "cargo-0".to_string()
         })
@@ -983,7 +1012,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let mut refusing = arm_rates("0", "0");
     refusing.get_mut("aged").unwrap().refusal_rate = "2".to_string();
     assert_eq!(
-        analyze(&frozen, &family, &pairs, &refusing).err(),
+        analyze(&recorded(&frozen, refusing.clone()), &family, &pairs).err(),
         Some(StatisticsError::RateOutOfRange {
             field: "arm_rates.refusal_rate"
         })

@@ -926,7 +926,9 @@ after the fact, and the runner applies them when it assembles the table), the
 stopping rule (`fixed_n` with its pair count), the multiplicity correction (`none`, `holm`,
 `benjamini_hochberg`), the profile, the interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
-seed, and the ICC pilot. `AnalysisFamily::validate` also recomputes the
+seed, and the ICC pilot. `AnalysisFamily::validate` includes the digest's
+canonical-JSON check, so a family that validates can always be frozen (an
+integer outside the safe range is `NotCanonical` at parse). It also recomputes the
 pilot's clustering unit and `effective_n_at_max` from its recorded counts and
 ICCs and refuses a pilot that disagrees with its own evidence
 (`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
@@ -951,7 +953,9 @@ exactly one), and picks the highest level whose ICC exceeds `1/20`
 count the maximum affordable world count would yield, deflated by the design
 effect `1 + (m - 1) ICC` of the selected unit, as `effective_n_at_max`; the
 effect is clamped at one, so deflation only ever shrinks N, and a zero
-affordable world count is refused. Each `(world, task)` is one score, so a
+affordable world count is refused. Under the family unit the projected
+cluster count is the smaller of the pilot's family count and the affordable
+world count, since each affordable world lies in one family. Each `(world, task)` is one score, so a
 repeated observation is `DuplicateObservation` rather than another item. A
 family whose `effective_n_at_max` is
 below the maintainer's `required_n_for_margin` makes `analyze` return
@@ -992,11 +996,12 @@ replicate runs. Below the threshold no interval of any method is emitted; the
 report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 (or `fewer_than_two_clusters`) instead of a `computed` interval.
 
-**Report.** `analyze(frozen, family, pairs, arm_rates)` checks the freeze
-(`FrozenFamily::from_manifest` reads the manifest's recorded digest; a
+**Report.** `analyze(manifest, family, pairs)` reads the frozen digest and the
+arm rates from the same manifest, so neither can be substituted beside it. It
+checks the freeze (`FrozenFamily::from_manifest` reads the recorded digest; a
 manifest without one is `FamilyNotRecorded`), then the pilot's block, then the
-per-arm cassette-miss asymmetry (the gap between the `aged` and `fresh`
-arms' `miss_rate`, the two arms every pair has; both rates of both arms are
+per-arm cassette-miss asymmetry (the gap between the manifest's `aged` and
+`fresh` arms' `miss_rate`, the two arms every pair has; both rates of both arms are
 refused outside `[0, 1]`; any other arm set is `ArmsNotPaired`, missing
 evidence that never passes) against `miss_asymmetry_bound`, which blocks as
 `arm_miss_asymmetry` with no gates computed; then the table's conformance to
