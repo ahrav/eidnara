@@ -7,9 +7,9 @@ use eval_core::{
     CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, GATE_ENDPOINTS, Gates,
     ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome,
     IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES, Manifest,
-    MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, Ratio, StatisticsError,
-    StoppingRule, analyze, arm_miss_asymmetry, cluster_bootstrap_interval, intraclass_correlation,
-    parse_analysis_family, parse_campaign_profile, run_icc_pilot,
+    MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, Ratio, RunStatus,
+    StatisticsError, StoppingRule, analyze, arm_miss_asymmetry, cluster_bootstrap_interval,
+    intraclass_correlation, parse_analysis_family, parse_campaign_profile, run_icc_pilot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1179,6 +1179,29 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         .err(),
         Some(StatisticsError::WorldSeedOutOfRange(9_007_199_254_740_992))
     );
+    // The standalone bootstrap refuses the same unsafe seeds, in the pairs and
+    // in its own draw key.
+    assert_eq!(
+        cluster_bootstrap_interval(&wide, ClusteringUnit::WorldSeed, 300, 7, 40).err(),
+        Some(StatisticsError::WorldSeedOutOfRange(9_007_199_254_740_993))
+    );
+    assert_eq!(
+        cluster_bootstrap_interval(&pairs, ClusteringUnit::WorldSeed, 300, 1 << 53, 40).err(),
+        Some(StatisticsError::BootstrapSeedOutOfRange(1 << 53))
+    );
+    // Only a completed run's outcomes are evidence.
+    for status in [
+        RunStatus::Incomplete,
+        RunStatus::Refused,
+        RunStatus::Blocked,
+    ] {
+        let mut unfinished = recorded(&frozen, rates.clone(), &pairs);
+        unfinished.status = status;
+        assert_eq!(
+            analyze(&unfinished, &family, &pairs).err(),
+            Some(StatisticsError::RunNotCompleted(status))
+        );
+    }
     // A plan of zero pairs computes no gate and is refused before it freezes.
     let mut empty_plan = family.clone();
     empty_plan.stopping_rule = StoppingRule::FixedN { pairs: 0 };

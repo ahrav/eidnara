@@ -933,7 +933,10 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   150); a pair id outside the manifest's `sample_ids` is
   `PairsNotManifestSamples`; 300 worlds over a 150-world plan is
   `WorldsExceedAffordable`; a world seed of `2^53 + 1` is
-  `WorldSeedOutOfRange` from `analyze` and from `run_icc_pilot`; a zero-pair
+  `WorldSeedOutOfRange` from `analyze`, `run_icc_pilot`, and
+  `cluster_bootstrap_interval`, whose draw seed of `2^53` is
+  `BootstrapSeedOutOfRange`; an `incomplete`, `refused`, or `blocked` manifest
+  is `RunNotCompleted`; a zero-pair
   plan is `NoPairs`; the rate helpers return `RationalOverflow` for counts
   past the safe range instead of panicking; a `holm` or `benjamini_hochberg` plan is
   `UnsupportedMultiplicity`

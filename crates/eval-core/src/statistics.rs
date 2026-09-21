@@ -10,7 +10,7 @@ use context_core::canonical_json::{ContractError, protocol_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::manifest::{ArmRates, Manifest, is_canonical_decimal};
+use crate::manifest::{ArmRates, Manifest, RunStatus, is_canonical_decimal};
 
 pub const ANALYSIS_FAMILY_SCHEMA: &str = "eval-analysis-family/v1";
 /// The gates a report carries; a frozen family declares exactly these.
@@ -836,6 +836,11 @@ pub fn cluster_bootstrap_interval(
     replicates: u32,
 ) -> Result<IntervalOutcome, StatisticsError> {
     let threshold = threshold.max(ITEM_COUNT_THRESHOLD);
+    check_seeds(pairs.iter().map(|pair| &pair.cluster))?;
+    // The draw key carries the seed as a decimal the reference must reproduce.
+    if u128::from(seed) > MAX_SAFE {
+        return Err(StatisticsError::BootstrapSeedOutOfRange(seed));
+    }
     if replicates < MIN_BOOTSTRAP_REPLICATES {
         return Err(StatisticsError::TooFewReplicates(replicates));
     }
@@ -947,7 +952,7 @@ pub fn arm_miss_asymmetry(
 }
 
 /// Analyzes a completed pair table under the family the manifest froze. The
-/// order is the contract: the freeze check, then the pilot's block, then the
+/// order is the contract: the run must have completed, then the freeze check, then the pilot's block, then the
 /// arm-miss asymmetry block over the manifest's own arm rates, then the
 /// table's conformance to the frozen plan (its size is the frozen pair count,
 /// every pair is in a frozen task family, and no pair id repeats), and only
@@ -957,6 +962,10 @@ pub fn analyze(
     family: &AnalysisFamily,
     pairs: &[PairOutcome],
 ) -> Result<Analysis, StatisticsError> {
+    // Only a completed run's outcomes are evidence; the manifest says which.
+    if manifest.status != RunStatus::Completed {
+        return Err(StatisticsError::RunNotCompleted(manifest.status));
+    }
     let frozen = FrozenFamily::from_manifest(manifest)?;
     frozen.check(family)?;
     check_seeds(pairs.iter().map(|pair| &pair.cluster))?;
@@ -1122,6 +1131,8 @@ pub enum StatisticsError {
         max_affordable_worlds: u32,
     },
     WorldSeedOutOfRange(u64),
+    BootstrapSeedOutOfRange(u64),
+    RunNotCompleted(RunStatus),
     DuplicatePair {
         pair_id: String,
     },

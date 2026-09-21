@@ -1007,7 +1007,8 @@ report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 
 **Report.** `analyze(manifest, family, pairs)` reads the frozen digest and the
 arm rates from the same manifest, so neither can be substituted beside it. It
-checks the freeze (`FrozenFamily::from_manifest` reads the recorded digest; a
+requires the run to have completed (any other `status` is `RunNotCompleted`),
+then checks the freeze (`FrozenFamily::from_manifest` reads the recorded digest; a
 manifest without one is `FamilyNotRecorded`), then the pilot's block, then the
 per-arm cassette-miss asymmetry (the gap between the manifest's `aged` and
 `fresh` arms' `miss_rate`, the two arms every pair has; both rates of both arms are
@@ -1019,7 +1020,9 @@ pair outside the frozen families is `PairOutsideFamilies`, a repeated pair id
 is `DuplicatePair`, a pair-id set other than the manifest's `sample_ids` is
 `PairsNotManifestSamples`, more distinct worlds than the pilot's
 `max_affordable_worlds` is `WorldsExceedAffordable`, and a world seed past
-canonical JSON's safe integer is `WorldSeedOutOfRange`), then the table's own
+canonical JSON's safe integer is `WorldSeedOutOfRange`, as it is from
+`cluster_bootstrap_interval`, whose own draw seed is likewise
+`BootstrapSeedOutOfRange`), then the table's own
 power (the pair count deflated by the pilot's design effect at the clusters
 the table actually spans, with the size-weighted mean cluster
 `sum(m_i^2) / n` so unequal clusters are not read as equal ones, under the
