@@ -826,8 +826,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   a non-canonical decimal refuses.
 - `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
   (`mtr-analysis-family-frozen-before-results`): the frozen digest accepts the
-  unchanged family; an edit to any of nine components (endpoints, families,
-  exclusions, multiplicity, margin, floor, threshold, seed, pilot) is
+  unchanged family; an edit to any of ten components (endpoints, families,
+  exclusions, stopping rule, multiplicity, margin, floor, threshold, seed, pilot) is
   `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
   below 300, fewer than 40 or more than 10,000 replicates, an empty endpoint
   list, and an unknown field refuse; a manifest without a recorded digest is
@@ -867,6 +867,14 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   {arm_miss_asymmetry}`; zero or one arm is `TooFewArms`; within the bound,
   the report carries the frozen digest, the counts, the per-arm miss and
   refusal rates, and exactly three gate fields.
+- `the_pair_table_and_the_pilot_must_match_the_frozen_plan`
+  (`mtr-analysis-family-frozen-before-results`): a table of one or 299 pairs
+  against a frozen count of 300 is `PairCountMismatch`; a pair from a family
+  the plan did not freeze is `PairOutsideFamilies`; a pilot whose effective N
+  exceeds `n_items * max_affordable_worlds / n_worlds`, or names zero worlds,
+  is `PilotInconsistent` while a computed pilot validates; a miss rate of `2`
+  is `RateOutOfRange`; `i128::MIN` as either ratio component is
+  `RationalOverflow`, never a wrapped value.
 - `no_judge_type_reaches_the_gates`
   (`mtr-judge-output-never-feeds-control-or-floor`): the statistics source
   names no judge, so no judge verdict type can be an input to a gate.

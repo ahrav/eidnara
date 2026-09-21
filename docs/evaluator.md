@@ -889,10 +889,14 @@ empirical acceptance needs an approved profile.
 
 **Analysis family.** `AnalysisFamily` (`eval-analysis-family/v1`) fixes
 everything a result depends on: endpoints, task families, exclusions, the
-stopping rule (`fixed_n`), the multiplicity correction (`none`, `holm`,
+stopping rule (`fixed_n` with its pair count), the multiplicity correction (`none`, `holm`,
 `benjamini_hochberg`), the profile, the interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
-seed, the live-trial repeat count `trials_k`, and the ICC pilot. `FrozenFamily::freeze` digests it
+seed, the live-trial repeat count `trials_k`, and the ICC pilot.
+`AnalysisFamily::validate` also refuses a pilot whose
+`effective_n_at_max` exceeds `n_items * max_affordable_worlds / n_worlds`
+(`PilotInconsistent`), since deflation only shrinks N, so a hand-written pilot
+cannot inflate its way past the block. `FrozenFamily::freeze` digests it
 (`eval-analysis-family-digest/v1`); the manifest records that digest as
 `analysis_family_digest` before the first outcome, and `FrozenFamily::check`
 refuses a family whose digest differs as
@@ -953,9 +957,12 @@ report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 (`FrozenFamily::from_manifest` reads the manifest's recorded digest; a
 manifest without one is `FamilyNotRecorded`), then the pilot's block, then the
 per-arm cassette-miss asymmetry (the gap between the highest and lowest
-`arm_rates.*.miss_rate`; fewer than two arms is `TooFewArms`, missing evidence
+`arm_rates.*.miss_rate`, each refused outside `[0, 1]`; fewer than two arms is
+`TooFewArms`, missing evidence
 that never passes) against `miss_asymmetry_bound`, which blocks as
-`arm_miss_asymmetry` with no gates computed; only then does it build
+`arm_miss_asymmetry` with no gates computed; then the table's conformance to
+the plan (a size other than the frozen pair count is `PairCountMismatch`, a
+pair outside the frozen families is `PairOutsideFamilies`); only then does it build
 `PairedReport {analysis_family_digest, counts, gates, interval, arm_rates}`.
 Per-arm miss and refusal rates travel with the report, so unsupported evidence
 is visible beside every gate.
