@@ -289,9 +289,25 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         subagentSessions.has(sessionId) ||
         internalChildSessions.has(sessionId);
     /** A checkpoint already sending batches stops at the next one once its session is gone or
-     * capture has closed; a batch started after either would re-enqueue fenced text. */
-    const stopCheckpoint = (sessionId: string) => (): boolean =>
-        captureClosed || excludedFromCapture(sessionId);
+     * capture has closed; a batch started after either would re-enqueue fenced text. The mark is
+     * pinned per checkpoint because `deletedSessions` is bounded and can forget a deletion while
+     * a long checkpoint is still running. */
+    const checkpointMarks = new Map<string, Set<{ deleted: boolean }>>();
+    const guardCheckpoint = (sessionId: string) => {
+        const mark = { deleted: excludedFromCapture(sessionId) };
+        let marks = checkpointMarks.get(sessionId);
+        if (!marks) checkpointMarks.set(sessionId, (marks = new Set()));
+        marks.add(mark);
+        const stop = (): boolean => captureClosed || mark.deleted || excludedFromCapture(sessionId);
+        const release = (): void => {
+            marks?.delete(mark);
+            if (marks?.size === 0) checkpointMarks.delete(sessionId);
+        };
+        return { stop, release };
+    };
+    const markCheckpointsDeleted = (sessionId: string): void => {
+        for (const mark of checkpointMarks.get(sessionId) ?? []) mark.deleted = true;
+    };
     const checkpointUser = (sessionId: string, output: unknown): void => {
         if (captureClosed || captureDisabled()) return;
         try {
@@ -308,16 +324,21 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             const previous = pendingUserCaptures.get(sessionId);
             const pending = (async () => {
                 await previous?.catch(() => undefined);
-                const projectRoot = await sessionDirectoryFor(sessionId);
-                if (captureClosed || excludedFromCapture(sessionId)) return;
-                const model = liveModelBySession.get(sessionId);
-                await captureCheckpoint({
-                    sessionId,
-                    projectRoot,
-                    model: model ? `${model.providerID}/${model.modelID}` : undefined,
-                    messages,
-                    stop: stopCheckpoint(sessionId),
-                });
+                const guard = guardCheckpoint(sessionId);
+                try {
+                    const projectRoot = await sessionDirectoryFor(sessionId);
+                    if (guard.stop()) return;
+                    const model = liveModelBySession.get(sessionId);
+                    await captureCheckpoint({
+                        sessionId,
+                        projectRoot,
+                        model: model ? `${model.providerID}/${model.modelID}` : undefined,
+                        messages,
+                        stop: guard.stop,
+                    });
+                } finally {
+                    guard.release();
+                }
             })();
             pendingUserCaptures.set(sessionId, pending);
             activeUserCaptures.add(pending);
@@ -341,6 +362,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const checkpointMemory = async (sessionId: string): Promise<void> => {
         if (captureClosed || captureDisabled() || excludedFromCapture(sessionId)) return;
         let scope: MemoryCaptureScope | undefined;
+        const guard = guardCheckpoint(sessionId);
         try {
             const model = liveModelKey(sessionId);
             // The user's message is acknowledged first, so the transcript read below does not resend it.
@@ -378,13 +400,13 @@ export function createEidnaraHook(deps: EidnaraDeps) {
                           CAPTURE_TAIL_MESSAGES,
                       ) ?? (await readTranscript()));
             // A deletion observed during the read fences this session; nothing may re-enqueue it.
-            if (captureClosed || excludedFromCapture(sessionId)) return;
+            if (guard.stop()) return;
             const accepted = await captureCheckpoint({
                 ...scope,
                 messages: openCodeCaptureMessages(sourceMessages, {
                     notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
                 }),
-                stop: stopCheckpoint(sessionId),
+                stop: guard.stop,
             });
             // A disabled daemon wrote nothing and a stopped checkpoint left batches unsent; those
             // messages stay ahead of the watermark.
@@ -397,10 +419,10 @@ export function createEidnaraHook(deps: EidnaraDeps) {
             );
             warnCaptureIncomplete(scope?.projectRoot ?? deps.directory);
         } finally {
+            guard.release();
             // Draining is what frees a full queue, so a refused checkpoint must not skip it; a
             // session deleted meanwhile must not be drained under.
-            if (scope && !captureClosed && !excludedFromCapture(sessionId))
-                memoryCaptureDrain.schedule(scope);
+            if (scope && !guard.stop()) memoryCaptureDrain.schedule(scope);
         }
     };
     /** Stops capture for this hook before its transport is torn down: later checkpoints write
@@ -561,6 +583,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         // Deletion prunes per-session state so entries do not outlive the session.
         onSessionDeleted: (sessionId: string, directory?: string) => {
             addBoundedSession(deletedSessions, sessionId);
+            markCheckpointsDeleted(sessionId);
             if (directory && !sessionDirectoryBySession.has(sessionId)) {
                 sessionDirectoryBySession.set(sessionId, directory);
             }
