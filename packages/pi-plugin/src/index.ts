@@ -646,6 +646,9 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         drain: MemoryCaptureDrain;
     }
     const captureByProject = new Map<string, ProjectCapture>();
+    /** Project roots whose latest checkpoint the daemon refused; a drain finding no pending
+     * work says nothing about those entries, so only an accepted checkpoint clears the status. */
+    const unconfirmedCheckpoints = new Set<string>();
     activeMemoryCaptureDrains = () =>
         [...captureByProject.values()].map((capture) => capture.drain);
     function createProjectCapture(first: ExtensionContext): ProjectCapture {
@@ -654,10 +657,14 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             moduleClient,
             (work, signal) => piMemoryCaptureExecutor(latest.ctx)(work, signal),
             {
-                onSettled: (_scope, result: MemoryCaptureFlushResult) =>
+                onSettled: (scope, result: MemoryCaptureFlushResult) =>
                     setCaptureStatus(
                         latest.ctx,
-                        result === "pending" ? "Memory capture: pending" : undefined,
+                        result === "pending"
+                            ? "Memory capture: pending"
+                            : unconfirmedCheckpoints.has(scope.projectRoot)
+                              ? "Memory capture: unconfirmed"
+                              : undefined,
                     ),
                 onFailed: (_scope, error) => {
                     warn("memory capture remains pending:", error);
@@ -705,8 +712,10 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             const leaf = branch.at(-1);
             if (accepted === "accepted" && leaf)
                 checkpointedLeafBySession.set(scope.sessionId, leaf.id);
+            unconfirmedCheckpoints.delete(scope.projectRoot);
         } catch (error) {
             warn("memory capture checkpoint pending:", error);
+            if (scope) unconfirmedCheckpoints.add(scope.projectRoot);
             setCaptureStatus(ctx, "Memory capture: unconfirmed");
         }
         return scope;

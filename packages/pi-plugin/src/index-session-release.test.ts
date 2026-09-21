@@ -333,10 +333,9 @@ describe("Pi daemon transport across runtime teardown", () => {
         const bodies: Array<{ messages: Array<{ id: string }> }> = [];
         const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
             async (input) => {
-                // The drain now runs after a refused checkpoint too; a daemon whose store fails
-                // answers both calls that way.
-                if (input.method !== "memory.capture")
-                    return { state: accept ? "ready" : "store_failed" };
+                // The drain runs after the refused checkpoint too and finds nothing pending;
+                // its `ready` must not clear the warning for the entries that were never stored.
+                if (input.method !== "memory.capture") return { state: "ready" };
                 bodies.push(input.body as { messages: Array<{ id: string }> });
                 return { state: accept ? "accepted" : "store_failed" };
             },
@@ -346,6 +345,7 @@ describe("Pi daemon transport across runtime teardown", () => {
             const setStatus = mock(() => undefined);
             const ctx = captureContext({ model: { provider: "openai", id: "test" }, setStatus });
             await agentEnd({}, ctx);
+            await __test.settleMemoryCapture();
             expect(setStatus).toHaveBeenLastCalledWith(
                 "eidnara-capture",
                 "Memory capture: unconfirmed",
@@ -353,6 +353,7 @@ describe("Pi daemon transport across runtime teardown", () => {
             accept = true;
             await agentEnd({}, ctx);
             await __test.settleMemoryCapture();
+            expect(setStatus).toHaveBeenLastCalledWith("eidnara-capture", undefined);
             expect(bodies.map((body) => body.messages.map((message) => message.id))).toEqual([
                 ["source-1"],
                 ["source-1"],
