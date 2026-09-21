@@ -324,9 +324,10 @@ const cases: GoldenCase[] = [
 ];
 
 // Right-censored latency. The reference derives the bound from first principles rather than
-// from the sorted prefix: a percentile is a point only when no censored attempt could have
-// changed the order statistic, that is when fewer censored attempts sort at or below the rank
-// than would be needed to displace it; equivalently, none does.
+// from the sorted prefix: pushing every censored attempt to infinity leaves the rank-th completed
+// duration as the order statistic, so a percentile is a point exactly when at least `rank`
+// completed attempts sit at or below the picked value; a censored attempt below the rank does
+// not by itself make it a bound.
 interface Attempt {
   duration_ms: number;
   censored: string | null;
@@ -340,9 +341,8 @@ function latency(attempts: readonly Attempt[]) {
   const percentile = (p: number) => {
     const rank = Math.ceil((p * n) / 100);
     const picked = sorted[rank - 1] ?? { duration_ms: 0, censored: null };
-    // Censored attempts strictly below the picked value, plus censored ties that sort before it.
-    const displacing = sorted.slice(0, rank).filter((a) => a.censored !== null).length;
-    return { p, value: picked.duration_ms, n, censored, bound: displacing === 0 ? "point" : "lower" };
+    const settled = sorted.filter((a) => a.censored === null && a.duration_ms <= picked.duration_ms).length;
+    return { p, value: picked.duration_ms, n, censored, bound: settled >= rank ? "point" : "lower" };
   };
   const percentiles = n === 0 ? [] : [percentile(50), percentile(95), ...(n >= 299 ? [percentile(99)] : [])];
   return { n, censored, percentiles };
@@ -434,6 +434,7 @@ const censoredCases: GoldenCase[] = [
     "fifteen-timeouts": attempts(90, 15, 10, 1000),
     "mixed-deadlines": [...attempts(3, 2, 10, 500), { duration_ms: 900, censored: null }],
     "tie-at-the-rank": [...attempts(1, 1, 500, 500), { duration_ms: 900, censored: null }],
+    "censored-under-a-tie": [...attempts(0, 1, 0, 1), ...attempts(2, 0, 2, 0)],
     "single-attempt": attempts(0, 1, 0, 250),
   }).map(([id, input]) => ({ id: `latency-${id}`, kind: "latency", input: { attempts: input }, expected: latency(input) })),
   ...[
@@ -461,18 +462,19 @@ cases.push(...censoredCases);
 // The Rust reader recomputes this hash over `serde_json::to_string_pretty` of the whole case
 // array, expectations included, whose maps sort keys; so keys are sorted here before hashing,
 // and a hand-edited expectation is caught.
-function sortKeys(value: unknown): unknown {
+type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
+function sortKeys(value: Json): Json {
   if (Array.isArray(value)) return value.map(sortKeys);
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.keys(value as Record<string, unknown>)
+      Object.keys(value)
         .sort()
-        .map((k) => [k, sortKeys((value as Record<string, unknown>)[k])]),
+        .map((k) => [k, sortKeys(value[k] as Json)]),
     );
   }
   return value;
 }
-const canonical = (value: unknown): string => `${JSON.stringify(sortKeys(value), null, 2)}\n`;
+const canonical = (value: unknown): string => `${JSON.stringify(sortKeys(value as Json), null, 2)}\n`;
 const inputHash = createHash("sha256").update(canonical(cases)).digest("hex");
 const golden = {
   schema: 1,

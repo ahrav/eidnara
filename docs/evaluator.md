@@ -990,10 +990,14 @@ attempt after a completed one of equal duration, takes the nearest rank
 `ceil(p n / 100)` for p50 and p95, and adds p99 only from `P99_MIN_RUNS` (299)
 attempts, because the third-largest of 299 sits at the 99th percentile rank.
 Every `Percentile` names `p`, `value`, `n`, `censored`, and `bound`. Raising a
-censored attempt's true value can only raise an order statistic, so a
-percentile is `point` only when no censored attempt sorts at or below its rank;
-otherwise it is `lower`, and the reported value is a lower bound on the truth
-even when the attempt at the rank itself completed. Nothing is dropped, so a
+censored attempt's true value can only raise an order statistic, and with every
+censored attempt pushed to infinity the order statistic is the rank-th completed
+duration, so a percentile is `point` exactly when at least `rank` completed
+attempts sit at or below the picked value; otherwise it is `lower`, and the
+reported value is a lower bound on the truth even when the attempt at the rank
+itself completed. A censored attempt below the rank does not by itself make a
+bound: p50 over one censored attempt and two completions tied at `2` is `2`
+however long the censored attempt really ran. Nothing is dropped, so a
 summary with `n = 105, censored = 15` reports its p95 as at least the deadline
 rather than a fast number over the 90 that finished.
 

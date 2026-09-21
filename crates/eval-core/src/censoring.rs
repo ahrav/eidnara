@@ -42,8 +42,9 @@ pub struct Percentile {
 
 /// Censored attempts stay in the denominator, ordered by their censoring point
 /// and after a completed attempt of equal duration. Raising a censored value
-/// can only raise an order statistic, so a percentile is a point only when no
-/// censored attempt sorts at or below its rank; otherwise it is a lower bound.
+/// can only raise an order statistic, so a percentile is a point only when at
+/// least `rank` completed attempts sit at or below the picked value; otherwise
+/// it is a lower bound.
 /// `p99` needs [`P99_MIN_RUNS`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,15 +63,23 @@ impl LatencySummary {
         let percentile = |p: u8| {
             // Nearest rank: the smallest rank r with r/n >= p/100.
             let rank = (usize::from(p) * n).div_ceil(100);
+            let value = sorted[rank - 1].duration_ms;
+            // With every censored attempt pushed to infinity the order statistic is the
+            // rank-th completed duration, which is still `value` exactly when at least
+            // `rank` completions sit at or below it.
+            let settled = sorted
+                .iter()
+                .filter(|a| a.censored.is_none() && a.duration_ms <= value)
+                .count();
             Percentile {
                 p,
-                value: sorted[rank - 1].duration_ms,
+                value,
                 n: n as u32,
                 censored: censored as u32,
-                bound: if sorted[..rank].iter().any(|a| a.censored.is_some()) {
-                    PercentileBound::Lower
-                } else {
+                bound: if settled >= rank {
                     PercentileBound::Point
+                } else {
+                    PercentileBound::Lower
                 },
             }
         };

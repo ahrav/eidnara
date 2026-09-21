@@ -158,7 +158,7 @@ fn the_frozen_reference_agrees_on_every_golden_case() {
         json!(format!("{:x}", Sha256::digest(canonical.as_bytes())))
     );
     let cases = golden["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 27);
+    assert_eq!(cases.len(), 28);
     let rates = profile().rates().unwrap();
     for case in cases {
         let id = case["id"].as_str().unwrap();

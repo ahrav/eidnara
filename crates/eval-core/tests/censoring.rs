@@ -69,7 +69,7 @@ fn the_frozen_reference_agrees_on_every_censored_case() {
         assert_eq!(&actual, expected, "{id}");
         seen += 1;
     }
-    assert_eq!(seen, 15);
+    assert_eq!(seen, 16);
 }
 
 #[test]
@@ -120,6 +120,16 @@ fn timeouts_stay_in_every_denominator_and_percentiles_carry_their_counts() {
     assert_eq!(
         (percentile(&early, 50).value, percentile(&early, 50).bound),
         (20, PercentileBound::Point)
+    );
+    // A censored attempt below the rank cannot move the order statistic when enough completions
+    // tie at the picked value: however long the censored attempt really ran, the median is 2.
+    let tied_over = LatencySummary::of(&[timed_out(1), completed(2), completed(2)]);
+    assert_eq!(
+        (
+            percentile(&tied_over, 50).value,
+            percentile(&tied_over, 50).bound
+        ),
+        (2, PercentileBound::Point)
     );
     // A censored attempt sorts after a completed one of equal duration, on either input order.
     for tie in [

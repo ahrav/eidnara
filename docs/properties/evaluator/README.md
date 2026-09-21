@@ -880,14 +880,15 @@ Censoring (`crates/eval-core/tests/censoring.rs`):
 - `the_frozen_reference_agrees_on_every_censored_case`
   (`mtr-timeouts-right-censored-percentiles-carry-n`,
   `mtr-zero-failures-reported-as-three-over-n`): the TypeScript reference's
-  fifteen latency, counter, and pass^k cases equal the Rust summaries exactly;
+  sixteen latency, counter, and pass^k cases equal the Rust summaries exactly;
   its pass^k is an exhaustive subset enumeration and every counter's rational
   bound is checked against the exact one-sided binomial bound it envelopes.
 - `timeouts_stay_in_every_denominator_and_percentiles_carry_their_counts`: 100
   completions and 5 timeouts report `n = 105, censored = 5` with two point
   percentiles and no p99; 15 timeouts put the 95th rank in the censored tail, a
   lower bound at the deadline; a censored attempt below the rank makes a later
-  completion a lower bound too, and a completion below every censored attempt
+  completion a lower bound too, unless enough completions tie at the picked
+  value to fix it, and a completion below every censored attempt
   is a point; a censored attempt sorts after a completed one of equal duration
   on either input order; a single censored attempt is a lower bound; 299
   completions carry a p99 and 298 do not; each of the seven censoring reasons

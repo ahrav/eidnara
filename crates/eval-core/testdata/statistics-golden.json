@@ -16732,6 +16732,46 @@
     {
       "expected": {
         "censored": 1,
+        "n": 3,
+        "percentiles": [
+          {
+            "bound": "point",
+            "censored": 1,
+            "n": 3,
+            "p": 50,
+            "value": 2
+          },
+          {
+            "bound": "lower",
+            "censored": 1,
+            "n": 3,
+            "p": 95,
+            "value": 2
+          }
+        ]
+      },
+      "id": "latency-censored-under-a-tie",
+      "input": {
+        "attempts": [
+          {
+            "censored": "timeout",
+            "duration_ms": 1
+          },
+          {
+            "censored": null,
+            "duration_ms": 2
+          },
+          {
+            "censored": null,
+            "duration_ms": 2
+          }
+        ]
+      },
+      "kind": "latency"
+    },
+    {
+      "expected": {
+        "censored": 1,
         "n": 1,
         "percentiles": [
           {
@@ -17059,7 +17099,7 @@
   "provenance": {
     "generator": "crates/eval-core/gen/gen-statistics-golden.ts",
     "generator_version": "statistics-reference-ts-v1",
-    "input_sha256": "7d92d3210f5ac705cb257c2efbc0e901a63bbfa926cc076c4a4ae3627230535a"
+    "input_sha256": "855fffc25165b1368a40981ccbf3f92de1802e658a15a3b3eb93f790444fb1cf"
   },
   "schema": 1
 }
