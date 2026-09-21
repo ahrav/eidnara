@@ -1272,9 +1272,8 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_ms: u64) -> SuiteBReport {
     let mut report = SuiteBReport {
         schema: SUITE_B_REPORT_SCHEMA.to_string(),
         eval_run_id: "ee".repeat(32),
-        profile_name: profile.name.clone(),
+        profile: profile.clone(),
         profile_digest: profile.digest().unwrap(),
-        ceilings,
         surface: EvaluatedSurface::Surface1,
         family: family.clone(),
         claims: Claims {
@@ -1477,7 +1476,7 @@ fn manifest(
 #[test]
 fn an_s0_campaign_on_the_default_surface_publishes_one_gated_report() {
     let report = campaign(Scale::S0, AGED_MESSAGES, S0_ELAPSED_BOUND_MS);
-    assert_eq!(report.profile_name, "s0-surface1-raw");
+    assert_eq!(report.profile.name, "s0-surface1-raw");
     assert_eq!(
         report.claims.established,
         vec![
@@ -1526,7 +1525,7 @@ fn an_s1_campaign_runs_only_under_its_budget() {
     // the envelope at the reading that crosses it.
     let report = campaign(Scale::S1, S1_AGED_MESSAGES, budget_ms);
     assert!(report.envelope.peaks.elapsed_ms <= budget_ms);
-    assert_eq!(report.profile_name, "s1-surface1-raw");
+    assert_eq!(report.profile.name, "s1-surface1-raw");
     // Over 400 turns the daemon's summarizer fires more than at S0, and one
     // of its prompts draws a calibration example from the daemon's own seed
     // corpus that the secret scanner reads as a key, so the cassette refuses
