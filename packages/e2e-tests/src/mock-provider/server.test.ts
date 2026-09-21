@@ -163,6 +163,43 @@ describe("MockProvider cassette mode", () => {
         expect(mock.cassetteRefusalLog()).toEqual([]);
     });
 
+    test("concurrent identical requests are recorded in capture order, not completion order", async () => {
+        const oracle = new FakeOracle([]);
+        const { mock, baseURL } = await started({ oracle, mode: "record", namespace: NAMESPACE });
+        mock.enqueue({ text: "first", usage: USAGE, delayMs: 80 });
+        mock.enqueue({ text: "second", usage: USAGE });
+        const first = post(baseURL, request, false);
+        await Bun.sleep(10);
+        const second = post(baseURL, request, false);
+        expect((await first).status).toBe(200);
+        expect((await second).status).toBe(200);
+        const texts = oracle.recorded.map(
+            ({ response }) => JSON.parse(response.frames[0]).content[0].text,
+        );
+        expect(texts).toEqual(["first", "second"]);
+    });
+
+    test("useCassette() starts a new log generation, so a pending lookup's miss stays with the old binding", async () => {
+        const inner = new FakeOracle([]);
+        const slow: CassetteSession["oracle"] = {
+            lookup: async (namespace, request) => {
+                await Bun.sleep(80);
+                return inner.lookup(namespace, request);
+            },
+            record: (namespace, request, response) => inner.record(namespace, request, response),
+        };
+        const { mock, baseURL } = await started({
+            oracle: slow,
+            mode: "replay",
+            namespace: NAMESPACE,
+        });
+        const missed = post(baseURL, request);
+        await Bun.sleep(20);
+        mock.useCassette({ oracle: new FakeOracle([]), mode: "replay", namespace: NAMESPACE });
+        expect((await missed).status).toBe(400);
+        expect(mock.cassetteMissLog()).toEqual([]);
+    });
+
     test("a JSON body that is not an object is scripted as an empty object and reaches the oracle as text", async () => {
         const oracle = new FakeOracle([]);
         const { mock, baseURL } = await started({ oracle, mode: "record", namespace: NAMESPACE });

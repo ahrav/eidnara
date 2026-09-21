@@ -804,7 +804,9 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   typed or not, into a 400 with no message text; a delayed record-mode
   exchange is admitted by the cassette bound when it was captured, not by a
   later binding, and a miss or refusal that completes after `reset()` is not
-  in the reset logs; a JSON body that is not an object is scripted as `{}` and
+  in the reset logs; `useCassette()` starts a new log generation; concurrent
+  identical requests are admitted in capture order regardless of scripted
+  delays; a JSON body that is not an object is scripted as `{}` and
   reaches the oracle as text; `reset()` unbinds.
 
 ## Gaps recorded here

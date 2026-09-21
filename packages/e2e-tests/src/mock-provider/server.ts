@@ -188,9 +188,11 @@ export class MockProvider {
         return this.defaultHitCount;
     }
 
-    /** Binds the cassette every later `/messages` request goes through until `reset()`. */
+    /** Binds the cassette every later `/messages` request goes through until `reset()`; the miss and
+     * refusal logs start over with the new binding. */
     useCassette(session: CassetteSession): void {
         this.cassette = session;
+        this.cassetteLogs = { misses: [], refusals: [] };
     }
 
     /** Every typed miss the replay produced; strict replay makes this empty or one entry. */
@@ -303,11 +305,8 @@ export class MockProvider {
                 );
             }
 
-            if (scripted.delayMs && scripted.delayMs > 0) {
-                await Bun.sleep(scripted.delayMs);
-            }
-            captured.responseCompletedAt = Date.now();
-
+            // Admission precedes the scripted delay, so equal-digest entries land in capture order
+            // and replay hands the first-arrived request what the first-arrived request got.
             const produced = produce(scripted, body);
             if (session?.mode === "record") {
                 try {
@@ -316,6 +315,10 @@ export class MockProvider {
                     return refuse("redaction_refused", error, logs);
                 }
             }
+            if (scripted.delayMs && scripted.delayMs > 0) {
+                await Bun.sleep(scripted.delayMs);
+            }
+            captured.responseCompletedAt = Date.now();
             return serve(produced);
         }
 

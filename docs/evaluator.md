@@ -817,13 +817,15 @@ digest. A child exit, an unreadable reply, or a 30 s silence fails every
 pending call; the child's stderr is inherited, never captured into an error.
 
 `MockProvider.useCassette({oracle, mode, namespace})` binds the mock until
-`reset()`, which also clears the miss and refusal logs. In `replay` mode the
+`reset()`; each binding starts with empty miss and refusal logs, and `reset()`
+clears them too. In `replay` mode the
 handler hands the request to the oracle right after capture and answers with
 the recorded frames or an HTTP 400 `cassette_miss` body carrying the typed
 miss; the scripted-selection block is never entered, which
 `scriptedSelectionCount()` and `defaultHits()` show. In `record` mode the
 scripted block produces the response and the oracle admits it before a byte is
-served. Any oracle failure is an HTTP 400 naming only the refusal `kind`
+served and before any scripted delay, so equal-digest entries land in capture
+order. Any oracle failure is an HTTP 400 naming only the refusal `kind`
 (`redaction_refused` or `cassette_refused`; a dead or unreadable oracle is
 `OracleUnavailable`), logged in `cassetteRefusalLog()`; no message text is
 served, and the server's error handler returns a fixed body instead of Bun's
