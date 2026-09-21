@@ -3,8 +3,9 @@
 `crates/eval-core` holds the value-level contracts of the long-horizon
 evaluator: the run manifest, run identity, residue rules, the surface census
 pins, the generated world model (keyed draws, the choice tape, the event log,
-and the step drive), the eligibility spec, and the bitemporal reducer. It is
-sans-I/O. Every function takes values and returns values;
+and the step drive), the eligibility spec, the bitemporal reducer, the
+occurrence identity rule, the fixture renderer, and the coverage-marker
+registry. It is sans-I/O. Every function takes values and returns values;
 the runner shell owns processes, stores, clocks, temp roots, and the build
 sub-record.
 
@@ -26,7 +27,7 @@ sub-record.
   public so callers name a protocol string instead of restating the
   `<protocol>\n<canonical JSON>` framing.
 
-## Manifest `eval-manifest/v2`
+## Manifest `eval-manifest/v3`
 
 `parse_manifest` reads a JSON object, compares its key set against
 `REQUIRED_FIELDS`, checks the `schema` literal, and only then deserializes and
@@ -44,7 +45,7 @@ field to `Manifest` without bumping the schema fails the closure test, and the
 fixture digests in `tests/manifest.rs` are frozen so an encoding change is
 reviewed.
 
-The 25 required fields, sorted:
+The 26 required fields, sorted:
 
 | Field | Content |
 | --- | --- |
@@ -60,24 +61,27 @@ The 25 required fields, sorted:
 | `error` | Typed error text or `null`. |
 | `eval_run_id` | The run identity digest. |
 | `execution_mode` | `generate`, `replay_tape`, or `enumerate`: how the world was driven. |
+| `ingestion` | `adapter-ingested, production caller: none` or `direct-database, non-aged`; the latter with a `replay` construction is refused (`DirectDatabaseAged`). |
 | `reachability` | `default-production`, `explicit-config-only`, or `test-only`. |
 | `residue` | Every non-`Keep` field with its rule, including the manifest's own. |
 | `result_digest`, `witness_digest` | Lowercase hex SHA-256. |
 | `retry_lineage` | Prior `eval_run_id` values of retried attempts; each is lowercase hex SHA-256. |
 | `run_identity` | The nine-component identity tuple, including the build sub-record, the eligibility-spec digest, and the linearization rule version. |
 | `sample_epoch`, `sample_ids`, `sample_order` | Stable sample identity and execution order; `sample_order` must be a permutation of `sample_ids`. |
-| `schema` | `eval-manifest/v2`. |
+| `schema` | `eval-manifest/v3`. |
 | `status` | `completed`, `incomplete`, `refused`, or `blocked`. |
 | `tokenizer_profile` | Name, revision, digest. |
 
 `Manifest::digest` re-parses the manifest, applies the manifest's own residue
 rules (`start_ms`, `end_ms`, and `envelope_peaks` are `Drop`; everything else
-is `Keep`), and hashes with protocol `eval-manifest-digest/v2`. Version 2
-added `execution_mode`; the reducer differential runs under `enumerate`. The
-digest is a function of every kept field, not of the run identity alone: two
-processes that record the same identity and the same kept contents produce the
-same digest (`two_process_same_identity_yields_equal_manifest_and_trace_digests`),
-and two runs that share an identity but differ in `status`, `sample_order`,
+is `Keep`), and hashes with protocol `eval-manifest-digest/v3`. Version 2
+added `execution_mode` (the reducer differential runs under `enumerate`);
+version 3 added `ingestion`, because no ingestion entry point has a production
+caller and every manifest must say so. The digest is a function of every kept
+field, not of the run identity alone: two processes that record the same
+identity and the same kept contents produce the same digest
+(`two_process_same_identity_yields_equal_manifest_and_trace_digests`), and two
+runs that share an identity but differ in `status`, `sample_order`,
 `result_digest`, or any other kept field do not.
 
 Canonical JSON rejects fractional numbers, so every fraction is a canonical
@@ -178,7 +182,12 @@ bound is a config value rather than a
 manifest field; the manifest carries it inside `run_identity.config`.
 `GENERATOR_VERSION`, `RANDOM_SCHEMA_VERSION`, and `LINEARIZATION_RULE_VERSION`
 are constants the shell copies into the run identity's `generator_version`,
-`random_schema_version`, and `linearization_rule_version`.
+`random_schema_version`, and `linearization_rule_version`. `GENERATOR_VERSION`
+changes whenever a draw domain or the schedule changes, because the same seed
+and config then produce a different world: `eval-generator/v1` drew time gaps
+from `{0, 1, 2, 5}` ticks; `eval-generator/v2` draws from `{1, 2, 5}`, so a
+correction always advances its target's revision. A tape recorded under v1
+refuses under v2 as `TapeMismatch`.
 
 ### Keyed draws
 
@@ -404,3 +413,125 @@ the generator constants reach the run identity. The reducer never
 reads a kernel result and never adjusts truth toward one: a typed kernel
 refusal at run time is recorded as a refusal by the shell, not repaired into
 an expectation here.
+
+## Occurrence identity
+
+`encode(&Occurrence { class, identity, revision, representation, span })` is
+the evaluator's versioned copy of the kernel's identity rule: SHA-256 over the
+class code, the identity fields in class order, the canonical decimal
+revision, the representation, and the span, under `OCCURRENCE_ENCODING_VERSION`
+2 and `IDENTITY_CONTRACT_VERSION` `search-projection-identity-v3`. Payload
+bytes never enter. The refusal order (`EncodingRefusal`) is the kernel's. The
+kernel test `eval_identity.rs` reproduces all 23 identity goldens with both
+encoders, pins the two version constants and the shared limits
+(`MAX_IDENTITY_VALUE_BYTES`, `HARNESSES`, `OBJECT_FORMATS`) equal, and shows
+the twin rule that
+makes valid time identity-bearing: a message with a later completion time is a
+new occurrence of the same lineage, while a commit's time is not an input at
+all.
+
+## Renderer
+
+`render(&log, &RenderConfig { project_id, repository_id, object_format })`
+turns an event log into the fixtures the real adapters read, with explicit
+times:
+
+- Every message becomes an OpenCode message JSON (`info.id`, `sessionID`,
+  `role`, and `time`: a user turn's `created` is the event's valid time; an
+  assistant turn's `completed` is the valid time and its `created` sits one
+  millisecond earlier, so the adapter's completed-over-created precedence is
+  exercised rather than assumed) with its text part first and one completed
+  tool part per tool span. The expected units are the text unit (class `messages`, revision
+  the valid time) and one `raw_tool_spans` unit per tool part (revision and
+  `result_revision` the span's valid time), each with the identity the encoder
+  assigns. A message and its tool parts are one fixture observed once, so a
+  span whose `observation_time_ms` differs from its parent's refuses
+  (`ToolSpanObservationDiffers`), and a span whose session has no message with
+  its `message_id` refuses (`ToolSpanParentMissing`) rather than vanish from
+  accounting with neither a unit nor an exclusion rule.
+- Every correction becomes a new message JSON for the same `message_id` at
+  the correction's valid time with the corrected text: the same lineage, a
+  later revision, so `publish` reports `replaced_object_id`. A rendered unit's
+  valid time is immutable; corrections are new events. The renderer refuses a
+  correction that would break that promise: a target in another session
+  (`CorrectionTargetInOtherSession`; the session is an identity field, so the
+  result would be a fresh lineage) or a valid time at or before the target's
+  (`CorrectionDoesNotAdvance`; the result would reuse or precede the target's
+  occurrence), a second base message with the same session and `message_id`
+  (`MessageIdReused`; only a correction may reuse a lineage, and it says so),
+  or a second rendered message with the same session, `message_id`, and valid
+  time, or a second tool span with one `call_id` at one valid time
+  (`OccurrenceReused`; two events would share one occurrence).
+  Two corrections of one target at different valid times both render: the
+  store then replaces the earlier correction with the later one inside the
+  lineage, while `eval-reducer/v1` supersedes only each correction's explicit
+  target and leaves both corrections required. No Phase 1 scenario compares
+  `Truth` with store verdicts, so nothing observes that difference yet;
+  closing it is a reducer version change, not a rendering rule.
+  The generator's time gaps are strictly positive (`eval-generator/v2`), each
+  slot emits at most one correction and one tool span, and its correction
+  targets stay in the correcting entity, so generated worlds never meet these
+  refusals.
+- Every commit becomes a `RenderedCommit { message, valid_time_ms,
+  observation_time_ms }`. The oid exists only once the shell writes the commit
+  into a real repository, so the shell keeps the evaluator-owned
+  `oid -> valid_time_ms` projection and calls `git_identity(&config, oid)` for
+  the expected identity. Git units keep revision `"1"`. `RenderConfig` binds
+  one `repository_id`, so a log whose commits span two repository entities
+  refuses (`SecondRepository`) rather than render the second under the first's
+  identity.
+- Renames and invalidations have no adapter; `excluded_by_rule` counts them by
+  rule so accounting never mistakes them for loss.
+
+`check_accounting(&expected, &published, &refused)` is the load-bearing
+equation for a tolerant reader: every expected identity is exactly one of
+published or refused (`Missing`, `Unexpected`, `PublishedAndRefused` name the
+failure). `observation_time_ms` is always at or after the valid time, so
+generated fixtures never trip the one-hour `MAX_REVISION_LEAD_MS` refusal;
+the boundary is proved with a hand-built unit.
+
+## Coverage markers
+
+`MARKERS` is the evaluator-owned registry: constant, globally unique names,
+each with the test that records it. A test records a marker through
+`Coverage::record` only after asserting the case's preconditions, never the
+invariant; `record` refuses an unregistered name, and `Coverage::complete` is
+`Incomplete { missing }` unless every registered marker fired. The first entry
+is the four-seam lifecycle witness. The daemon suite `eval_ingestion.rs` owns
+every current marker, checks uniqueness and that each named test exists, and
+runs the completeness proof on every pass: all scenarios once, then
+`Coverage::complete`.
+
+## Ingestion shell
+
+`crates/daemon/tests/eval_ingestion.rs` is the Phase 1 shell over the real
+adapters. It generates a world, renders it, and publishes every unit through
+`opencode_units` and `SourcePublisher::publish` with the event's observation
+time, then checks: published identities equal the renderer's expected
+identities with `expected == published + refused` and one typed outcome per
+unit (the adapter's dropped parts and a message it refuses are both accounted
+for); corrections replace their predecessor and republication replays every
+receipt; generated observations never lead and the lead boundary refuses;
+git units read by `read_selection` from a real repository keep revision `"1"`
+and their identity field set, and take valid time only from the projection,
+which agrees with the committer time git recorded for each oid;
+and observation time is inert for identity and eligibility (two stores ten
+years apart agree on every occurrence id and verdict, and a republish at a
+later observation time replays without changing the stored time). Because it
+is inert, `observed_at_ms` stays on the `Keep` allowlist as an
+evaluator-controlled time parameter rather than moving to `Drop`.
+
+The composed lifecycle test bootstraps a search projection whose embedding
+job for the predecessor is held pending, commits a correction through the
+adapter (after showing that a same-time and a backdated correction are refused
+as broken fixtures), catches the projection up, releases the held embedding
+into `Publication::Obsolete(Canonical(Superseded))` while the successor's
+embeds, and runs `query_route::execute` to find the successor and not the
+predecessor. `eval_seam_probe.rs` names every seam the shell uses so the
+`--all-features` daemon build fails when one moves; retrieval's `test-support`
+seams are reachable there only because the daemon's `[dev-dependencies]`
+enable that feature.
+
+Every ingestion entry point still has no production caller; manifests carry
+`adapter-ingested, production caller: none`, and no adapter is made
+production-live here.

@@ -46,7 +46,7 @@ const BUDGET: Duration = Duration::from_secs(30);
 const RELEASE_CONTRACT_SHA256: &str =
     "b63a1686c999983fab62bec9ded5d55250f9697200b6f64c85e91e8a6447bc0b";
 const PRODUCTION_INPUTS_LOCK_SHA256: &str =
-    "86fb7bed51069d776e53ab869a9e09aa772427a300941fdb6ad0ffb58778fe21";
+    "a6b2bf18777d9fba2ba7ac2b2782f248dc8a6448c20951804b65b266aff2122d";
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;

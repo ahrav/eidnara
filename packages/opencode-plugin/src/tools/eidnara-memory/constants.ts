@@ -14,6 +14,19 @@ export const V2_MEMORY_CATEGORIES = [
 /** Every category a write may carry: the positive taxonomy plus the anti-memory category. */
 export const WRITABLE_MEMORY_CATEGORIES = [...V2_MEMORY_CATEGORIES, ANTI_MEMORY_CATEGORY] as const;
 
+/** One gloss per positive category; the `Record` key type fails to compile when the taxonomy changes without it. */
+const V2_MEMORY_CATEGORY_GLOSS: Record<(typeof V2_MEMORY_CATEGORIES)[number], string> = {
+    PROJECT_RULES: "project conventions",
+    ARCHITECTURE: "design decisions",
+    CONSTRAINTS: "requirements and limits",
+    CONFIG_VALUES: "settings and operational values",
+    NAMING: "names and terminology",
+};
+
+const POSITIVE_CATEGORY_LINE = V2_MEMORY_CATEGORIES.map(
+    (category) => `${category} (${V2_MEMORY_CATEGORY_GLOSS[category]})`,
+).join(", ");
+
 export const EIDNARA_MEMORY_TOOL_NAME = "eidnara_memory";
 export const EIDNARA_MEMORY_DESCRIPTION = `Durable project memories shared across sessions, served by the memory daemon.
 
@@ -26,8 +39,8 @@ Actions:
 - archive: objectId.
 - merge: objectIds into one survivor + content/category or antiMemory.
 
-Positive categories (exact names): PROJECT_RULES (project conventions), ARCHITECTURE (design decisions), CONSTRAINTS (requirements and limits), CONFIG_VALUES (settings and operational values), NAMING (names and terminology).
-REJECTED_APPROACH requires antiMemory, not content. Do not invent category names.
+Positive categories (exact names): ${POSITIVE_CATEGORY_LINE}.
+${ANTI_MEMORY_CATEGORY} requires antiMemory, not content. Do not invent category names.
 
 Memories created here are available through explicit search as labeled model inference. Automatic context injection follows the kernel's admission policy. Agent calls to approve/enforce are rejected.`;
 export const GET_MAX_CLAIMS = 20;
