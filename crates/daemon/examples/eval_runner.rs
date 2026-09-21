@@ -83,13 +83,14 @@ enum Reply {
 /// Every refusal the oracle reports. `kind` is the wire contract; `detail` is
 /// only ever the oracle's own values (paths, namespaces, digests, variant
 /// text), never request content; see `CassetteError::detail`.
+#[derive(Clone)]
 enum OracleError {
     NoOpenCassette,
     AlreadyOpen,
     LineTooLong,
     Json,
     UnsafePath(PathBuf),
-    Io(io::Error),
+    Io(io::ErrorKind),
     Cassette(CassetteError),
 }
 
@@ -109,7 +110,7 @@ impl OracleError {
     fn detail(&self) -> String {
         match self {
             Self::UnsafePath(path) => path.display().to_string(),
-            Self::Io(error) => error.kind().to_string(),
+            Self::Io(kind) => kind.to_string(),
             Self::Cassette(error) => error.detail(),
             _ => String::new(),
         }
@@ -124,7 +125,7 @@ impl From<CassetteError> for OracleError {
 
 impl From<io::Error> for OracleError {
     fn from(error: io::Error) -> Self {
-        Self::Io(error)
+        Self::Io(error.kind())
     }
 }
 
@@ -132,6 +133,10 @@ struct Open {
     cassette: Cassette,
     /// The file `close` writes; `None` for a replay, which never writes.
     write_to: Option<PathBuf>,
+    /// The first line the oracle could not read while this recording was
+    /// open. It may have been a `record`, so `close` reports it and writes
+    /// nothing, as it does for a refused entry.
+    unreadable: Option<OracleError>,
 }
 
 #[derive(Default)]
@@ -145,6 +150,16 @@ impl Oracle {
             .as_mut()
             .map(|open| &mut open.cassette)
             .ok_or(OracleError::NoOpenCassette)
+    }
+
+    /// Refuses the open recording, if any, for a line that could not be read.
+    fn unreadable(&mut self, error: OracleError) -> OracleError {
+        if let Some(open) = &mut self.open
+            && open.write_to.is_some()
+        {
+            open.unreadable.get_or_insert_with(|| error.clone());
+        }
+        error
     }
 
     fn apply(&mut self, op: Op) -> Result<Reply, OracleError> {
@@ -167,7 +182,11 @@ impl Oracle {
                     }
                 };
                 let cases = cassette.cases().len();
-                self.open = Some(Open { cassette, write_to });
+                self.open = Some(Open {
+                    cassette,
+                    write_to,
+                    unreadable: None,
+                });
                 Ok(Reply::Open { cases })
             }
             Op::Lookup { namespace, request } => {
@@ -197,11 +216,17 @@ impl Oracle {
                 })
             }
             Op::Close => {
-                let Open { cassette, write_to } =
-                    self.open.take().ok_or(OracleError::NoOpenCassette)?;
+                let Open {
+                    cassette,
+                    write_to,
+                    unreadable,
+                } = self.open.take().ok_or(OracleError::NoOpenCassette)?;
                 let mut input_sha256 = None;
                 if let Some(path) = write_to {
                     // A refused cassette has no file form, so nothing is written for it.
+                    if let Some(error) = unreadable {
+                        return Err(error);
+                    }
                     let file = cassette.to_file()?;
                     input_sha256 = Some(file.provenance.input_sha256.clone());
                     write_then_rename(&path, &format!("{}\n", serde_json::to_string(&file)?))?;
@@ -275,12 +300,14 @@ fn serve(input: impl BufRead, mut output: impl Write) -> io::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let outcome = if line.len() > MAX_LINE_BYTES {
+        let parsed = if line.len() > MAX_LINE_BYTES {
             Err(OracleError::LineTooLong)
         } else {
-            serde_json::from_str::<Op>(&line)
-                .map_err(|_| OracleError::Json)
-                .and_then(|op| oracle.apply(op))
+            serde_json::from_str::<Op>(&line).map_err(|_| OracleError::Json)
+        };
+        let outcome = match parsed {
+            Ok(op) => oracle.apply(op),
+            Err(error) => Err(oracle.unreadable(error)),
         };
         let reply = match outcome {
             Ok(reply) => json!({"ok": reply}),
@@ -354,6 +381,35 @@ mod tests {
         assert_eq!(replies[3]["error"]["kind"], json!("UnknownRequestField"));
         assert!(!path.exists(), "a partial recording is never published");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_line_while_recording_leaves_close_with_no_file() {
+        for (label, unreadable) in [
+            ("LineTooLong", "x".repeat(MAX_LINE_BYTES + 1)),
+            ("Json", "{not json".to_string()),
+        ] {
+            let dir = scratch(label);
+            let path = dir.join("cassette.json");
+            let lines = [
+                open(&path).to_string(),
+                record(json!({"model": "m"})).to_string(),
+                unreadable,
+                json!({"op": "close"}).to_string(),
+            ];
+            let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            let mut output = Vec::new();
+            serve(input.as_bytes(), &mut output).unwrap();
+            let replies: Vec<Value> = String::from_utf8(output)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(replies[2]["error"]["kind"], json!(label));
+            assert_eq!(replies[3]["error"]["kind"], json!(label), "{label}");
+            assert!(!path.exists(), "{label}: the line may have been a record");
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 mod support;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -399,7 +399,7 @@ fn memory_reviewer_replays_through_the_keyed_peer(coverage: &mut Coverage) {
 
         // Replay: the same body hits once; each entry answers one request, so
         // the same body again is a miss; each other key field alone misses.
-        let entries = BTreeMap::from([(key.clone(), text_response("cargo build"))]);
+        let entries = vec![(key.clone(), text_response("cargo build"))];
         let mut replay_peer = Peer::start().await;
         let sender = replay_peer.sender_with_credential("cred-7");
         let served = serve_keyed(&mut replay_peer, 2, entries.clone(), "cred-7");
@@ -441,6 +441,28 @@ fn memory_reviewer_replays_through_the_keyed_peer(coverage: &mut Coverage) {
             assert_eq!(keys.len(), 2, "{label}");
             assert_ne!(keys[0], key, "{label}");
         }
+        // Equal keys replay in recorded order: independent jobs can send the
+        // same body, and each recorded occurrence answers once.
+        let mut peer = Peer::start().await;
+        let sender = peer.sender_with_credential("cred-7");
+        let served = serve_keyed(
+            &mut peer,
+            3,
+            [
+                (key.clone(), text_response("one")),
+                (key.clone(), text_response("two")),
+            ]
+            .into_iter()
+            .collect(),
+            "cred-7",
+        );
+        assert_eq!(send(&sender, &prompt).await.unwrap(), "one");
+        assert_eq!(send(&sender, &prompt).await.unwrap(), "two");
+        assert!(matches!(
+            send(&sender, &prompt).await.unwrap_err(),
+            SendError::Status(409)
+        ));
+        assert_eq!(served.await.unwrap().len(), 3);
         // The provider identity is the dialled host, so another host misses too.
         let mut relocated = key.clone();
         relocated.provider = "api.anthropic.com/v1/messages@2023-06-01".to_string();
@@ -449,7 +471,7 @@ fn memory_reviewer_replays_through_the_keyed_peer(coverage: &mut Coverage) {
         let served = serve_keyed(
             &mut peer,
             1,
-            BTreeMap::from([(relocated, text_response("x"))]),
+            vec![(relocated, text_response("x"))],
             "cred-7",
         );
         assert!(matches!(

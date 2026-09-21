@@ -822,7 +822,9 @@ over 4 MiB is `LineTooLong`. `close` writes a recording write-then-rename
 through a freshly created owner-only `.json.tmp` sibling, removing that
 sibling again when a later write, sync, or rename step fails, and writes
 nothing for a replay or a refused recording, including one whose `record`
-could not project a request. `close` is terminal either way: a failed
+could not project a request or that saw a `LineTooLong` or `Json` line while
+open, since that line may have been a `record`; `close` then reports that
+refusal. `close` is terminal either way: a failed
 publication is reported once and the oracle accepts the next `open`.
 
 ### `LlmExecutionBackend` and MemoryReviewer
@@ -857,8 +859,9 @@ provider, model, credential_id}`: the SHA-256 of the request body (what
 `prepare_body` puts in the attempt marker), the
 `{host}/v1/messages@{anthropic-version}` identity the production sender
 reports, the body's `model`, and the credential id the peer is configured with
-(the header carries only the secret). Each entry answers one request. A key
-with no unconsumed entry is an HTTP 409
+(the header carries only the secret). Each entry answers one request, and
+equal keys (independent jobs can send one body) answer in recorded order. A
+key with no unconsumed entry is an HTTP 409
 `cassette_miss` and a `SendError::Status(409)` at the sender, and every later
 request on that peer is refused too. A run that spawns no reviewer worker
 declares `memory_reviewer_model_calls: excluded` in its manifest instead.

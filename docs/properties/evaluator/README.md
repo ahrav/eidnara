@@ -774,7 +774,9 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
   request equals the production sender's `provider_identity()` and credential
   id, the request's model, and the SHA-256 of `MessagesRequest::body`'s bytes;
   the same body replays once through `serve_keyed` and misses when sent
-  again, each entry answering one request; a changed body, model, or
+  again, each entry answering one request, and two entries under one key
+  answer in recorded order before the third request misses; a changed body,
+  model, or
   credential each miss with a 409 the sender reports as
   `SendError::Status(409)`, after which the recorded body is refused too; an
   entry keyed to another host misses.
@@ -793,6 +795,10 @@ tested as an example target):
   with a body field outside the covered list is `UnknownRequestField` with an
   empty detail, and the following `close` reports the same refusal and writes
   nothing.
+- `an_unreadable_line_while_recording_leaves_close_with_no_file`: a line over
+  4 MiB and a line that is not JSON, each between an admitted `record` and
+  `close`, are `LineTooLong` and `Json`, and `close` reports the same kind and
+  writes nothing.
 - `a_failed_publication_removes_the_temp_file_it_created`: with a directory at
   the target path, `close` reports `Io` and the attempt's `.json.tmp` sibling
   is gone.
@@ -812,11 +818,11 @@ tested as an example target):
 - The keyed reviewer peer holds its entries in memory; reviewer traffic is not
   yet persisted in the cassette file, and `memory_reviewer_model_calls` is a
   manifest declaration no runner enforces yet.
-- The Rust oracle's stdin protocol has two Rust-side tests (the projection
-  latch and the failed publication); its consumer is the TypeScript
-  MockProvider cassette mode. The `{kind, detail}` refusal contract is pinned
-  in `eval-core` (`no_wire_detail_carries_request_content`), but the oracle's
-  other variants (`UnsafePath`, `Json`, `LineTooLong`, `AlreadyOpen`,
+- The Rust oracle's stdin protocol has three Rust-side tests (the projection
+  latch, the unreadable-line latch, and the failed publication); its consumer
+  is the TypeScript MockProvider cassette mode. The `{kind, detail}` refusal
+  contract is pinned in `eval-core` (`no_wire_detail_carries_request_content`),
+  but the oracle's other variants (`UnsafePath`, `AlreadyOpen`,
   `NoOpenCassette`) are exercised only through that consumer.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
