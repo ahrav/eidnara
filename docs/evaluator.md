@@ -945,7 +945,10 @@ threshold no interval of any method is emitted; the report carries
 
 **Report.** `analyze(frozen, family, pairs, arm_rates)` checks the freeze
 (`FrozenFamily::from_manifest` reads the manifest's recorded digest; a
-manifest without one is `FamilyNotRecorded`), then the pilot's block, then the
+manifest `Manifest::validate` refuses is `Manifest(error)`, so a paired
+report cannot be authorized without the recency baseline its pairs were
+judged against, and a manifest without a digest is `FamilyNotRecorded`),
+then the pilot's block, then the
 per-arm cassette-miss asymmetry (the gap between the highest and lowest
 `arm_rates.*.miss_rate`; fewer than two arms is `TooFewArms`, missing evidence
 that never passes) against `miss_asymmetry_bound`, which blocks as

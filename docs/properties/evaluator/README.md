@@ -830,7 +830,10 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   exclusions, multiplicity, margin, floor, threshold, seed, pilot) is
   `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
   below 300, fewer than 40 replicates, an empty endpoint list, and an unknown
-  field refuse; a manifest without a recorded digest is `FamilyNotRecorded`.
+  field refuse; a manifest without a recorded digest is `FamilyNotRecorded`,
+  and one with a digest and no recency baseline is
+  `Manifest(RecencyBaselineMismatch {recency_baseline})` until the baseline
+  is recorded.
 - `the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpowered`
   (`mtr-world-clustered-intervals-after-icc-pilot`): a family effect selects
   the family unit; a flat pilot whose tasks agree within each world has world
