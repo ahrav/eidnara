@@ -797,10 +797,12 @@ can straddle a window edge, before the entry exists anywhere. A finding is
 input cap is `RedactionRefused(location, InputLimit)`. A refused entry is never
 substituted with a placeholder and never persisted, and the refusal latches:
 `to_file` returns the first refusal, so a recording that refused one exchange
-has no file form and a partial cassette can never pass for a complete one. A request
-the boundary could not even project (`UnknownRequestField`, an unencodable
-number) latches the same way through `Cassette::refuse`, because the exchange
-it stands for is missing from the cassette just as a refused entry is.
+has no file form and a partial cassette can never pass for a complete one.
+Every `record` failure latches the same way (a `WrongNamespace` offer, an
+undigestable request), and so does a request the boundary could not even
+project (`UnknownRequestField`, an unencodable number) through
+`Cassette::refuse`, because the exchange it stands for is missing from the
+cassette just as a refused entry is.
 
 ### Rust oracle and the TypeScript mock
 

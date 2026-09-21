@@ -412,8 +412,10 @@ impl Cassette {
 
     /// Admits one exchange. The covered request projection and the response
     /// are scanned first; a finding or an unscannable text refuses the entry
-    /// before it exists anywhere and marks the cassette refused. The first
-    /// refusal is the one `to_file` reports; later ones do not replace it.
+    /// before it exists anywhere. Every failure here (a wrong namespace, a
+    /// finding, an undigestable request) marks the cassette refused, because
+    /// the exchange it stands for is in no file; the first refusal is the one
+    /// `to_file` reports.
     pub fn record(
         &mut self,
         namespace: &str,
@@ -421,20 +423,22 @@ impl Cassette {
         request: Value,
         response: Value,
     ) -> Result<&Entry, CassetteError> {
-        let redactor = self
-            .redactor
-            .as_ref()
-            .ok_or(CassetteError::RecordOnReplay)?;
-        self.check_namespace(namespace)?;
-        if let Err(error) = admit(redactor, Location::Request, &request)
-            .and_then(|()| admit(redactor, Location::Response, &response))
-        {
-            self.refused.get_or_insert_with(|| error.clone());
-            return Err(error);
-        }
+        let admitted = self.check_namespace(namespace).and_then(|()| {
+            let redactor = self
+                .redactor
+                .as_ref()
+                .ok_or(CassetteError::RecordOnReplay)?;
+            admit(redactor, Location::Request, &request)?;
+            admit(redactor, Location::Response, &response)?;
+            request_digest(&request)
+        });
+        let request_digest = match admitted {
+            Ok(digest) => digest,
+            Err(error) => return Err(self.refuse(error)),
+        };
         let entry = Entry {
             boundary,
-            request_digest: request_digest(&request)?,
+            request_digest,
             request,
             response,
         };
@@ -443,11 +447,11 @@ impl Cassette {
         Ok(self.cases.last().expect("pushed"))
     }
 
-    /// Latches `error` as a recording's refusal for an exchange the boundary
-    /// could not even project (an unknown field, an unencodable number), so
-    /// the exchange missing from the cassette leaves it without a file form
-    /// exactly as a refused entry does. An earlier refusal stays; a replay is
-    /// unchanged.
+    /// Latches `error` as a recording's refusal: `record` calls it for every
+    /// failure, and a boundary calls it for a request it could not even
+    /// project (an unknown field, an unencodable number), so an exchange
+    /// missing from the cassette leaves it without a file form. An earlier
+    /// refusal stays; a replay is unchanged.
     pub fn refuse(&mut self, error: CassetteError) -> CassetteError {
         if self.redactor.is_some() {
             self.refused.get_or_insert_with(|| error.clone());

@@ -707,8 +707,9 @@ Cassette core (`crates/eval-core/tests/cassette.rs`):
 - `namespaces_bind_the_cassette_and_equal_digests_elsewhere_refuse`
   (`rid-cassette-world-namespaced-no-cross-replay`): replay under another
   namespace is `NamespaceMismatch` before any request; a lookup or record under
-  another namespace is `WrongNamespace`; recording into a replay is
-  `RecordOnReplay` and a lookup on a recording is `LookupOnRecord`.
+  another namespace is `WrongNamespace`, after which the recording has no
+  file form; recording into a replay is `RecordOnReplay` and a lookup on a
+  recording is `LookupOnRecord`.
 - `provenance_schema_and_version_pins_are_recomputed_on_read`
   (`rid-shared-cassette-schema-verified-provenance`): one edited frame or one
   edited declaration is `ProvenanceMismatch`; a re-signed declaration edit loads

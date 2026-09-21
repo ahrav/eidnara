@@ -458,6 +458,12 @@ fn namespaces_bind_the_cassette_and_equal_digests_elsewhere_refuse() {
         recording.record(OTHER_NAMESPACE, Boundary::Opencode, json!({}), json!({})),
         Err(CassetteError::WrongNamespace { .. })
     ));
+    // An exchange offered under another namespace is missing from this
+    // recording, so it has no file form either.
+    assert!(matches!(
+        recording.to_file().err(),
+        Some(CassetteError::WrongNamespace { .. })
+    ));
     assert_eq!(
         recording
             .lookup(NAMESPACE, Boundary::Opencode, &covered)
