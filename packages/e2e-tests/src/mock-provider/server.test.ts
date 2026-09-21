@@ -134,6 +134,37 @@ describe("MockProvider cassette mode", () => {
         expect(later.recorded).toHaveLength(0);
     });
 
+    test("a request whose body is still uploading stays with the cassette bound when it began", async () => {
+        const accepted = new FakeOracle([]);
+        const later = new FakeOracle([]);
+        const { mock, baseURL } = await started({
+            oracle: accepted,
+            mode: "record",
+            namespace: NAMESPACE,
+        });
+        mock.setDefault({ text: "ok", usage: USAGE });
+        const encoder = new TextEncoder();
+        const body = new ReadableStream({
+            async start(controller) {
+                controller.enqueue(encoder.encode('{"model":"mock-sonnet",'));
+                await Bun.sleep(80);
+                controller.enqueue(encoder.encode('"messages":[]}'));
+                controller.close();
+            },
+        });
+        const pending = fetch(`${baseURL}/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body,
+            duplex: "half",
+        } as RequestInit);
+        await Bun.sleep(20);
+        mock.useCassette({ oracle: later, mode: "record", namespace: NAMESPACE });
+        expect((await pending).status).toBe(200);
+        expect(accepted.recorded).toHaveLength(1);
+        expect(later.recorded).toHaveLength(0);
+    });
+
     test("a completion that lands after reset() writes no miss or refusal into the reset logs", async () => {
         const inner = new FakeOracle([]);
         const slow: CassetteSession["oracle"] = {

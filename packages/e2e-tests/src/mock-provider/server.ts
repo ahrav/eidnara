@@ -232,6 +232,11 @@ export class MockProvider {
         const isMessages = url.pathname === "/messages" || url.pathname === "/v1/messages";
 
         if (method === "POST" && isMessages) {
+            // The binding and its logs when handling begins own this exchange; a `reset()` or
+            // `useCassette()` during the body upload, a scripted delay, or a pending oracle call must
+            // not serve it unadmitted, record it into the next cassette, or log into the next run.
+            const session = this.cassette;
+            const logs = this.cassetteLogs;
             const bodyText = await req.text();
             // Unparseable and non-object bodies script as `{}`; the oracle judges `bodyText` itself.
             let body: Record<string, unknown> = {};
@@ -261,11 +266,6 @@ export class MockProvider {
                 headers,
                 body_text: bodyText,
             };
-            // The binding and its logs at capture own this exchange; a `reset()` or `useCassette()`
-            // during a scripted delay or a pending oracle call must not serve it unadmitted, record
-            // it into the next cassette, or log its miss or refusal into the next run.
-            const session = this.cassette;
-            const logs = this.cassetteLogs;
             if (session?.mode === "replay") {
                 return this.replay(session, oracleRequest, captured, logs);
             }
