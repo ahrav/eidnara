@@ -541,6 +541,30 @@ fn a_delivered_stale_occurrence_names_the_stage_it_entered() {
         StageVerdict::Clean,
         "stale evidence removed before the terminal stage is clean wherever it entered"
     );
+
+    let reintroduced = ledger(CHAIN_STAGES.iter().map(|stage| match stage {
+        ChainStage::Exact | ChainStage::Fusion | ChainStage::Selection | ChainStage::Packing => {
+            observe(*stage, &[RULE, STALE])
+        }
+        _ => observe(*stage, &[RULE]),
+    }));
+    assert_eq!(
+        judge_stale(&reintroduced),
+        StageVerdict::StaleIngress(ChainStage::Fusion),
+        "a filter that removed the occurrence clears the earlier sighting; the delivered copy entered later"
+    );
+
+    let mut opaque_after_ingress = clean_run();
+    opaque_after_ingress[0] = observe(ChainStage::Exact, &[RULE, OTHER, STALE]);
+    opaque_after_ingress[3] = Observation::unjoinable(ChainStage::Eligibility, 0, Some(1));
+    opaque_after_ingress[4] = observe(ChainStage::Fusion, &[RULE, OTHER, STALE]);
+    opaque_after_ingress[5] = observe(ChainStage::Selection, &[RULE, OTHER, STALE]);
+    opaque_after_ingress[6] = observe(ChainStage::Packing, &[RULE, OTHER, STALE]);
+    assert_eq!(
+        judge_stale(&ledger(opaque_after_ingress)),
+        StageVerdict::StaleIngress(ChainStage::Exact),
+        "an unjoinable stage after a known sighting does not hide where it entered"
+    );
 }
 
 #[test]

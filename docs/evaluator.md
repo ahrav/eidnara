@@ -517,18 +517,19 @@ reach. A required occurrence's path is its entry, then every later filter up
 to `through`; other sources are not its path. The verdict is the earliest
 event the observations support: `FirstLoss(stage)` at the first stage on the
 path whose output lacks the occurrence; `StaleIngress(stage)` when a stale
-occurrence is present at `through`, naming the stage where it first appeared
+occurrence is present at `through`, naming the stage where the delivered copy
+entered: its earliest sighting after the last filter whose output lacked it
 (stale evidence the chain removed before `through` is `Clean`); at equal
 ordinals the loss is named; `Clean` only when every required occurrence is
 present at `through` and `through` itself reported candidates, so an empty
 required list certifies nothing about a run that never reached it. A filter
 passes only what it received, so presence at a later filter proves presence at
 an unjoinable one before it, and a filter's output without a stale occurrence
-proves it did not enter earlier; an absence right behind an unjoinable stage,
-a stale sighting right behind one, an unjoinable stage with no later sighting,
-an entry or terminal that was never reached, a contradiction, and two
-incarnation tokens in one fold are all `Indeterminate`. A stage that ends the
-request reports an empty output and is a loss.
+proves the delivered copy did not enter earlier; an absence right behind an
+unjoinable stage, a stale sighting right behind one, an unjoinable stage with
+no later sighting, an entry or terminal that was never reached, a
+contradiction, and two incarnation tokens in one fold are all `Indeterminate`.
+A stage that ends the request reports an empty output and is a loss.
 
 `Completed` pairs a verdict with the store's persisted
 `database_incarnation_id`; `Completed::agrees_with` compares two folds'
@@ -573,7 +574,10 @@ A refusal after admission is an empty output at fusion (`fused_union`) or at
 selection (`response_bytes`, `response_measure`); every other refusal
 discards what fusion produced and is `Unjoinable` at fusion. `Packing` is the
 required items plus every member of every `Charged::Range` in the closed
-ledger, joined through the admitted group the range labels. The shell numbers
+ledger, joined through the admitted group the range labels; a packer refusal
+at a bound (`Required`, `OptionalBound`, `Accounting`, `CloseOverBudget`) is
+an empty output, and a deadline, a projection, storage, or kernel fault, or a
+caller mismatch leaves no closed render and is `Unjoinable`. The shell numbers
 each distinct `CommitReadIncarnation` in first-seen order as the observation
 token, and the terminal stage is `Selection` for a query-only run and
 `Packing` once the packer ran.

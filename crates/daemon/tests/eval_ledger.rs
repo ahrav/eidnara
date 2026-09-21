@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::num::NonZeroUsize;
 
-use daemon::packing::ClaudeTokens;
+use daemon::packing::{ClaudeTokens, PreparationRefusal};
 use daemon::query_route::{
     DenseLane, ExactAdmission, ExactReport, ExhaustiveProducer, LaneStatus, Phase, QueryFailure,
     QueryOutcome, QueryRouteLimits, admit_lanes, execute, select,
@@ -22,6 +22,7 @@ use kernel::ArtifactDestination;
 use kernel::applicability::EvalBudget;
 use retrieval::eligibility::{Authority, Disposition};
 use retrieval::fusion::Lane;
+use retrieval::packing::{BoundExceeded, OptionalBound};
 use support::eval_ledger::{
     ChainLedger, Incarnations, LaneView, observe_lanes, observe_outcome, observe_packing,
     observe_refusal, pack, packing_store, request, survivors,
@@ -880,6 +881,43 @@ fn run(name: &str) {
         coverage.fired().contains(marker.name),
         "{name} records its marker"
     );
+}
+
+#[test]
+fn a_packing_refusal_is_a_loss_at_a_bound_and_unjoinable_at_a_fault() {
+    let bounds = [
+        PreparationRefusal::OptionalBound(BoundExceeded {
+            bound: OptionalBound::FusedCandidates,
+            at: 16,
+        }),
+        PreparationRefusal::CloseOverBudget {
+            limit: ClaudeTokens::new(1),
+            charged: ClaudeTokens::new(2),
+        },
+    ];
+    for refusal in &bounds {
+        let mut ledger = ChainLedger::default();
+        observe_packing(&mut ledger, Err(refusal));
+        assert_eq!(
+            ledger.presence(ChainStage::Packing, "rule"),
+            Some(Presence::ReachedEvidenceAbsent),
+            "a bound ends the request with nothing packed: {refusal:?}"
+        );
+    }
+    let faults = [
+        PreparationRefusal::Deadline,
+        PreparationRefusal::Storage("busy".to_string()),
+        PreparationRefusal::Kernel(kernel::KernelError::Io),
+    ];
+    for refusal in &faults {
+        let mut ledger = ChainLedger::default();
+        observe_packing(&mut ledger, Err(refusal));
+        assert_eq!(
+            ledger.presence(ChainStage::Packing, "rule"),
+            None,
+            "a fault leaves no closed packing result: {refusal:?}"
+        );
+    }
 }
 
 #[test]

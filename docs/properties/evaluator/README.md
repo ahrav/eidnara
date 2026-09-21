@@ -515,15 +515,22 @@ Ledger join (`crates/eval-core/tests/ledger.rs`):
   tokens are `Indeterminate`; a return carrying no token asserts nothing.
 - `a_delivered_stale_occurrence_names_the_stage_it_entered`: `StaleIngress`
   names the ingress stage only when the stale occurrence reaches the terminal
-  stage; loss and ingress order by ordinal with the loss winning ties; a stale
-  occurrence seen before an unjoinable terminal, or first seen right behind an
-  unjoinable stage, is `Indeterminate`, while a filter's output without it
-  closes that opacity and its removal before the terminal is `Clean`.
+  stage, and names where the delivered copy entered: a filter that removed an
+  earlier copy clears that sighting, so a reintroduced occurrence is attributed
+  to the reintroducing stage; loss and ingress order by ordinal with the loss
+  winning ties; a stale occurrence seen before an unjoinable terminal, or first
+  seen right behind an unjoinable stage, is `Indeterminate`, while an
+  unjoinable stage after a known sighting keeps that ingress, a filter's output
+  without it closes the opacity, and its removal before the terminal is
+  `Clean`.
 - `a_stage_observation_over_the_kernel_batch_is_refused` pins
   `MAX_CANDIDATES_PER_STAGE_OBSERVATION` at 1024 with a refusal at 1025;
   `over_bound_stage_returns_are_unjoinable_instead_of_panicking` pins the
   daemon shell's mapping of that refusal to `Unjoinable` at the source and
-  combined eligibility stage.
+  combined eligibility stage;
+  `a_packing_refusal_is_a_loss_at_a_bound_and_unjoinable_at_a_fault` pins the
+  shell's packing refusals: a bound is an empty output, a fault is
+  `Unjoinable`.
 - `completed_folds_compare_only_within_one_persisted_store`: `agrees_with`
   answers within one `database_incarnation_id`, refuses `CrossStore`, and the
   fold round-trips through JSON.

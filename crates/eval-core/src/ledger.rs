@@ -307,9 +307,11 @@ impl<S: Stage> Ledger<S> {
         }
     }
 
-    /// The stage where `stale` first appeared, or `Indeterminate` when that
-    /// sighting is right behind an unjoinable stage it could have entered
-    /// through; a filter whose output lacks it closes the opacity before it.
+    /// The stage where the delivered `stale` entered: its earliest sighting
+    /// after the last filter whose output lacked it (a filter passes only what
+    /// it received, so that copy was removed and the delivered one entered
+    /// later), or `Indeterminate` when that sighting is behind an unjoinable
+    /// stage it could have entered through.
     fn stale_ingress(&self, stale: &str, through: S) -> Result<Option<S>, Indeterminate> {
         let mut opaque = false;
         let mut entered = None;
@@ -319,15 +321,13 @@ impl<S: Stage> Ledger<S> {
             .take_while(|stage| stage.ordinal() <= through.ordinal())
         {
             match self.presence(stage, stale) {
-                None => opaque = true,
-                Some(Presence::Reached) => {
-                    entered = Some(stage);
-                    break;
-                }
+                None if entered.is_none() => opaque = true,
+                Some(Presence::Reached) if entered.is_none() => entered = Some(stage),
                 Some(Presence::ReachedEvidenceAbsent) if stage.kind() == StageKind::Filter => {
                     opaque = false;
+                    entered = None;
                 }
-                Some(_) => {}
+                _ => {}
             }
         }
         match self.presence(through, stale) {

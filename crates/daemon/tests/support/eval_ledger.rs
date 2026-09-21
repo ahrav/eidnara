@@ -259,12 +259,32 @@ pub fn survivors(admission: &OptionalAdmission) -> BTreeSet<String> {
     out
 }
 
+/// A closed render is the packing output. A bound the render hit ends the
+/// request with nothing packed, so it is an empty output; a deadline, a
+/// storage, projection, or kernel fault, or a caller mismatch leaves no
+/// closed result, so packing is unjoinable.
 pub fn observe_packing(
     ledger: &mut ChainLedger,
     admission: Result<&OptionalAdmission, &PreparationRefusal>,
 ) {
-    let packed = admission.map(survivors).unwrap_or_default();
-    ledger.observe(Observation::new(ChainStage::Packing, 0, None, packed).unwrap());
+    let observation = match admission {
+        Ok(admission) => candidates(ChainStage::Packing, None, survivors(admission)),
+        Err(
+            PreparationRefusal::Required(_)
+            | PreparationRefusal::OptionalBound(_)
+            | PreparationRefusal::Accounting(_)
+            | PreparationRefusal::CloseOverBudget { .. },
+        ) => candidates(ChainStage::Packing, None, []),
+        Err(
+            PreparationRefusal::ProfileMismatch
+            | PreparationRefusal::OptionalCostOverflow { .. }
+            | PreparationRefusal::Deadline
+            | PreparationRefusal::Projection(_)
+            | PreparationRefusal::Storage(_)
+            | PreparationRefusal::Kernel(_),
+        ) => Observation::unjoinable(ChainStage::Packing, 0, None),
+    };
+    ledger.observe(observation);
 }
 
 /// The projection file the route read, reopened as the store the packer takes.
