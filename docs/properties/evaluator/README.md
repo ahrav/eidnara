@@ -968,7 +968,11 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   family ICC `43/195` and world ICC `4/9` (attainable `1755/443`, the joint
   allocation, not `54/13`), while 12 pairs over five worlds and two families
   under a family ICC of `2/5` attain exactly the four required, the larger
-  worlds evening the family totals; a repeated pilot observation is
+  worlds evening the family totals, and six pairs over three worlds and two
+  families under a family ICC of `13/53` reach `318/79` with world sizes
+  3, 2, 1 where balanced worlds would not; a plan of four billion pairs over
+  two billion worlds is judged in closed form (and refused as
+  `RationalOverflow`); a repeated pilot observation is
   `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
   hand-built counts with `b + c > n`, `b + aged_pass > n`, `c > aged_pass`,
   `aged_censored + aged_pass > n`, `fresh_censored + c > b + aged_pass`, a
