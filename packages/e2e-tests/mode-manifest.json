@@ -19,6 +19,14 @@
             ]
         },
         {
+            "path": "tests/cassette-replay.test.ts",
+            "tier": "rust-only",
+            "rationale": "agent-loop cassette faithfulness: a recorded tool loop replays with the same tool-call sequence, arguments, request count, and outcome without entering the scripted block; a request past the recording is one typed miss that stops the run; a planted credential is refused before persistence",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
             "path": "tests/incident-pool-green.test.ts",
             "tier": "rust-only",
             "rationale": "baseline-green incident variants executed in isolation through the incident-pool runner",

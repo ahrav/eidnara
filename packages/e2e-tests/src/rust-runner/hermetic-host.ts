@@ -14,6 +14,7 @@ import {
     readFileSync,
     realpathSync,
     rmSync,
+    statSync,
     writeFileSync,
 } from "node:fs";
 import { createConnection, type Socket } from "node:net";
@@ -28,7 +29,6 @@ import { probeCapabilities } from "@eidnara/shm-native";
 import { waitForChildExit } from "../process-exit";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
-const FIXTURE_BINARY = join(REPO_ROOT, "target/debug/examples/direct_host_fixture");
 const CONTROL_FILE = "direct-host-control.sock";
 const PID_FILE = "rust-e2e-pids.json";
 const MAX_LINE_BYTES = 64 * 1024;
@@ -285,8 +285,6 @@ export function detectRustModePrereqs(): RustModePrereqs {
     return { ok: true };
 }
 
-let fixtureBuild: Promise<string> | null = null;
-
 function runCargo(args: string[]): Promise<{ ok: boolean; stderr: string }> {
     return new Promise((resolveRun) => {
         const child = spawn("cargo", args, {
@@ -302,31 +300,56 @@ function runCargo(args: string[]): Promise<{ ok: boolean; stderr: string }> {
     });
 }
 
+const exampleBuilds = new Map<string, Promise<string>>();
+
 /**
- * Resolves the fixture binary once per Bun process; Cargo caches builds across processes.
- * `EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN` names a prebuilt binary and skips the build.
+ * Resolves a daemon example binary once per Bun process; Cargo caches builds across processes.
+ * `prebuiltEnv` names an environment variable whose value must be an existing file when set.
+ * A failed build is not cached, so a later call retries it.
  */
-export function buildDirectHostFixture(): Promise<string> {
-    if (fixtureBuild) return fixtureBuild;
-    fixtureBuild = (async () => {
-        const configured = process.env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN;
-        if (configured && existsSync(configured)) return configured;
-        const build = await runCargo([
+export function buildDaemonExample(args: {
+    example: string;
+    feature: string;
+    prebuiltEnv: string;
+}): Promise<string> {
+    const key = `${args.example}\0${args.feature}\0${args.prebuiltEnv}`;
+    const cached = exampleBuilds.get(key);
+    if (cached) return cached;
+    const build = (async () => {
+        const configured = process.env[args.prebuiltEnv];
+        if (configured !== undefined && configured !== "") {
+            if (!existsSync(configured) || !statSync(configured).isFile()) {
+                throw new Error(`${args.prebuiltEnv}=${configured} is not a file`);
+            }
+            return configured;
+        }
+        const binary = join(REPO_ROOT, "target/debug/examples", args.example);
+        const result = await runCargo([
             "build",
             "-p",
             "daemon",
             "--example",
-            "direct_host_fixture",
+            args.example,
             "--features",
-            "direct-host-fixture",
+            args.feature,
             "--locked",
         ]);
-        if (!build.ok || !existsSync(FIXTURE_BINARY)) {
-            throw new Error(`direct host fixture build failed\n${build.stderr}`);
+        if (!result.ok || !existsSync(binary)) {
+            throw new Error(`${args.example} example build failed\n${result.stderr}`);
         }
-        return FIXTURE_BINARY;
+        return binary;
     })();
-    return fixtureBuild;
+    exampleBuilds.set(key, build);
+    build.catch(() => exampleBuilds.delete(key));
+    return build;
+}
+
+export function buildDirectHostFixture(): Promise<string> {
+    return buildDaemonExample({
+        example: "direct_host_fixture",
+        feature: "direct-host-fixture",
+        prebuiltEnv: "EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN",
+    });
 }
 
 function exactKeys(value: Record<string, unknown>, expected: string[]): boolean {

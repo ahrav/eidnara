@@ -22,7 +22,7 @@ const VALID_TEST_SOURCE = 'import { it } from "bun:test";\nit("x", () => {});\n'
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(18);
+        expect(validation.files.length).toBe(19);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,

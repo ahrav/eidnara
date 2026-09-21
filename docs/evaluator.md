@@ -809,6 +809,27 @@ over 4 MiB is `LineTooLong`. `close` writes a recording write-then-rename
 through a freshly created owner-only `.json.tmp` sibling and writes nothing for
 a replay or a refused recording.
 
+`packages/e2e-tests/src/mock-provider/cassette-oracle.ts` spawns the binary
+(built through `buildDaemonExample` in `src/rust-runner/hermetic-host.ts`, or
+taken from `EIDNARA_E2E_EVAL_RUNNER_BIN`), forwards over the same strict JSONL
+reader the Pi runner uses, validates each reply's shape, and computes no
+digest. A child exit, an unreadable reply, or a 30 s silence fails every
+pending call; the child's stderr is inherited, never captured into an error.
+
+`MockProvider.useCassette({oracle, mode, namespace})` binds the mock until
+`reset()`, which also clears the miss and refusal logs. In `replay` mode the
+handler hands the request to the oracle right after capture and answers with
+the recorded frames or an HTTP 400 `cassette_miss` body carrying the typed
+miss; the scripted-selection block is never entered, which
+`scriptedSelectionCount()` and `defaultHits()` show. In `record` mode the
+scripted block produces the response and the oracle admits it before a byte is
+served. Any oracle failure is an HTTP 400 naming only the refusal `kind`
+(`redaction_refused` or `cassette_refused`; a dead or unreadable oracle is
+`OracleUnavailable`), logged in `cassetteRefusalLog()`; no message text is
+served, and the server's error handler returns a fixed body instead of Bun's
+stack page. Misses and refusals are 400 because the AI SDK retries 408, 409,
+429, and 5xx. `MockResponse.abortAfterFrames` records a provider disconnect.
+
 ### `LlmExecutionBackend` and MemoryReviewer
 
 `crates/daemon/tests/support/eval_cassette.rs` holds `CassetteBackend`, the

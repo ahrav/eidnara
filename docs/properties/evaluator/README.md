@@ -767,6 +767,42 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
 - `every_cassette_marker_fires_across_the_scenarios` is the completeness
   proof over this suite's markers.
 
+OpenCode process driver (`packages/e2e-tests/tests/cassette-replay.test.ts`,
+rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
+`rid-opencode-provider-cassette-strict-miss`,
+`xc-captured-provider-requests-redacted-before-persistence`):
+
+- `records a tool loop, replays it faithfully, and stops at the first miss`:
+  a scripted `glob` tool loop is recorded through a real OpenCode process into
+  a cassette whose provenance digest matches the oracle's close report, whose
+  bytes contain no `x-api-key`, credential value, or session id, and whose
+  directory holds no other file. A fresh session replays it with the queue and
+  default loaded with sentinels: the same request count, tool call, arguments,
+  and final text, zero scripted selections, zero default hits, no miss, no
+  sentinel in any message. A further session's request is one typed miss
+  (`turn` = the recording length, `ModelRequestChanged`, nearest = the last
+  entry) that yields no assistant text; the close report shows one miss and no
+  unconsumed entry; the file is byte-identical after replay; a replay closed
+  without requests reports every entry unconsumed.
+- `a changed tool result is a ToolResultDrift miss`: a recorded `read` loop
+  replayed after the file's content changed misses at the tool-result turn
+  with `ToolResultDrift`, the replayed `tool_use` still ran, and no text
+  follows.
+- `refuses to persist a planted credential and writes no cassette`: a prompt
+  carrying an `sk-ant-` canary is `RedactionRefused` in record mode; the run
+  produces no assistant text, `close` refuses with the same kind, and no file
+  or temporary sibling is written.
+- `packages/e2e-tests/src/mock-provider/server.test.ts` drives the mock against
+  an in-memory oracle double with the real oracle's observable contract (a
+  latched terminal, `turn` as the lookup count, nearest as the last entry once
+  consumed): record mode forwards headers and body text and the produced frames
+  (including an `abortAfterFrames` truncation) before serving; a recording
+  refusal is a 400 naming only the kind with nothing recorded; replay serves
+  recorded SSE and provider-error frames byte for byte, answers a miss with a
+  400 `cassette_miss` and repeats it after, never enters the scripted block,
+  hands a malformed body to the oracle as text, and turns any oracle failure,
+  typed or not, into a 400 with no message text; `reset()` unbinds.
+
 ## Gaps recorded here
 
 - The OpenCode cassette is bound to the environment that recorded it: the
@@ -782,8 +818,9 @@ Daemon shell (`crates/daemon/tests/eval_cassette.rs`, `--all-features`):
 - The keyed reviewer peer holds its entries in memory; reviewer traffic is not
   yet persisted in the cassette file, and `memory_reviewer_model_calls` is a
   manifest declaration no runner enforces yet.
-- The Rust oracle protocol has no Rust-side test; its consumer is the
-  TypeScript MockProvider cassette mode.
+- The Rust oracle protocol has no Rust-side test; the rust-only e2e suite
+  exercises it through the real binary, and the default `bun test` lane sees
+  only the in-memory double.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries
