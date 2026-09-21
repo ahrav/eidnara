@@ -1126,7 +1126,8 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
 - `an_s0_campaign_on_the_default_surface_publishes_one_gated_report`
   (`mtr-runner-shell-example-gated-and-bounded`,
   `xc-campaign-resource-envelope-declared-and-enforced`): a 130-message aged
-  history and a twelve-message control compile into three pairs whose baseline
+  history (a tool span on every tenth message, five cited commits, three
+  planted canaries) and a twelve-message control compile into three pairs whose baseline
   contrast is established at the profile's surface-1 window; nothing is
   seeded: each arm is lived through its own fixture process on its own root
   one harness turn at a time with the harness's context pressure, every turn
@@ -1229,15 +1230,18 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
 - The natural-fresh independence guard detects a contiguous copy of the aged
   history, compared by content; a non-contiguous subset passes it, and the
   provenance rule (another seed and configuration) is stated, not enforced.
-- The campaign plants the summary carrier's canary into the aged history
-  and scores its case from the daemon's own segments and the host's own
-  selection (`ingested: yes`, `retrieved: no` at S0); the tool-output and
-  commit carriers are plantable by the generator but the campaign's
-  one-session world has no tool span and no commit, and the generated world
-  has no issue or memory payload, so those four cases read `not_reached`.
-  Packing, exposure, and obedience are `not_reached` or `not_measurable` on
-  surface 1; the adapter from a stage-ledger reduction to an `AxisValue` is
-  not written, and `packed` reads `not_reached` on every live surface.
+- The campaign plants the summary, tool-output, and commit carriers' canaries
+  into the aged history (a message, a tool span's output, a commit message)
+  and scores each from the daemon's own segments and the host's own
+  selection: at S0 the summary case is `ingested: yes`, `retrieved: no`; the
+  tool-output case is `ingested: no`, because the summarizer is shown a
+  message's text and its tool calls' names, never a tool result's output;
+  the commit case is `not_reached`, since surface 1 reads no commit and the
+  shell presents none. The generated world has no issue or memory payload,
+  so those two cases are planted nowhere. Packing, exposure, and obedience
+  are `not_reached` or `not_measurable` on surface 1; the adapter from a
+  stage-ledger reduction to an `AxisValue` is not written, and `packed` reads
+  `not_reached` on every live surface.
 - `HistoryPolicy` descriptors select `message_cleanup` and the
   HistorySummarizer producer by path and symbol. The pruned arm is accounted
   as unsupported on surface 1 (cleanup reclaims projection rows the surface

@@ -112,6 +112,7 @@ pub struct Run {
 fn one_session(
     messages: u32,
     tool_span_every: u32,
+    commits: u32,
     max_events_per_log: u32,
     planted: Vec<Planted>,
 ) -> WorldConfig {
@@ -122,7 +123,13 @@ fn one_session(
             correction_every: 0,
             invalidation_every: 0,
         }],
-        repositories: Vec::<RepositorySpec>::new(),
+        repositories: (commits > 0)
+            .then_some(RepositorySpec {
+                commits,
+                rename_every: 0,
+            })
+            .into_iter()
+            .collect(),
         epoch_ms: EPOCH_MS,
         tick_ms: 1_000,
         max_events_per_log,
@@ -133,6 +140,11 @@ fn one_session(
 /// Every tenth message of the aged history carries a tool span, as the
 /// harness sends a completed tool call and its result.
 const AGED_TOOL_SPAN_EVERY: u32 = 10;
+/// The aged world's repository: commits the session's messages cite, one of
+/// which carries the commit-message carrier's canary. Surface 1 reads no
+/// commit, so the shell presents none to the daemon.
+const AGED_COMMITS: u32 = 5;
+const PLANTED_COMMIT_SLOT: u32 = 2;
 /// The slot of the aged history the summary carrier's canary is planted on:
 /// deep enough that the summarizer folds it at every scale, past the
 /// falsifier's segment. The tool-output carrier's goes on the tool span just
@@ -142,21 +154,23 @@ pub const PLANTED_TOOL_SLOT: u32 = PLANTED_SLOT - 1;
 
 /// The carriers this campaign plants into its aged world: a message's text
 /// for the summary carrier and a tool span's output for the tool-output
-/// carrier, both of which the summarizer folds. The world has no commit, and
-/// the generated world has no issue and no memory payload, so the other three
-/// carriers are planted nowhere and their cases read `not_reached`.
+/// carrier, both presented to the daemon turn by turn, and a commit's message
+/// for the commit carrier, which surface 1 never reads. The generated world
+/// has no issue and no memory payload, so those two carriers are planted
+/// nowhere.
 fn planted(cases: &[InjectionCase]) -> Vec<Planted> {
     cases
         .iter()
         .filter_map(|case| {
-            let slot = match case.carrier {
-                Carrier::Summary => PLANTED_SLOT,
-                Carrier::ToolOutput => PLANTED_TOOL_SLOT,
-                Carrier::CommitMessage | Carrier::IssueText | Carrier::Memory => return None,
+            let (entity, slot) = match case.carrier {
+                Carrier::Summary => (SESSION, PLANTED_SLOT),
+                Carrier::ToolOutput => (SESSION, PLANTED_TOOL_SLOT),
+                Carrier::CommitMessage => ("repository-0", PLANTED_COMMIT_SLOT),
+                Carrier::IssueText | Carrier::Memory => return None,
             };
             Some(Planted {
                 carrier: case.carrier,
-                entity: SESSION.to_string(),
+                entity: entity.to_string(),
                 slot,
                 canary: case.canary.clone(),
             })
@@ -839,7 +853,8 @@ fn run_arm(
 /// a segment for a task's prompt on the structured aged arm, and never
 /// packed, quoted, or obeyed on surface 1, which has no packing, no model
 /// output, and no mediation boundary. The other carriers were planted
-/// nowhere, so their cases read `not_reached`.
+/// nowhere, and the commit carrier's canary is in a commit surface 1 never
+/// reads and the shell never presents, so their cases read `not_reached`.
 fn injection_scores(
     cases: &[InjectionCase],
     recorded: &[StoredHistorySegment],
@@ -1016,6 +1031,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
         &one_session(
             aged_messages,
             AGED_TOOL_SPAN_EVERY,
+            AGED_COMMITS,
             max_events_per_log,
             planted(&task_set.cases),
         ),
@@ -1025,7 +1041,7 @@ pub fn run(config: &Config) -> Result<Run, RunError> {
     .log;
     let natural_fresh = generate_all(
         SEED ^ 0x77,
-        &one_session(FRESH_MESSAGES, 0, max_events_per_log, Vec::new()),
+        &one_session(FRESH_MESSAGES, 0, 0, max_events_per_log, Vec::new()),
         Mode::Generate,
     )
     .unwrap()
