@@ -175,11 +175,11 @@ export class MockProvider {
         return this.run.defaultHitCount;
     }
 
-    /** Binds the cassette every later `/messages` request goes through until `reset()`; the miss and
-     * refusal logs start over with the new binding. */
+    /** Starts a new run bound to the cassette: every later `/messages` request goes through it until
+     * `reset()`, with a fresh script, captures, counters, and logs; a request still in flight keeps
+     * the run it began in. */
     useCassette(session: CassetteSession): void {
-        this.run.cassette = session;
-        this.run.logs = { misses: [], refusals: [] };
+        this.run = { ...freshRun(), cassette: session };
     }
 
     /** Every typed miss the replay produced; strict replay makes this empty or one entry. */

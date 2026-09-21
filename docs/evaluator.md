@@ -838,9 +838,9 @@ arrives, before the next queued call can settle), or a 30 s silence fails
 every pending call and every later one; the child's stderr is inherited,
 never captured into an error.
 
-`MockProvider.useCassette({oracle, mode, namespace})` binds the mock until
-`reset()`; each binding starts with empty miss and refusal logs, and `reset()`
-clears them too. In `replay` mode the
+`MockProvider.useCassette({oracle, mode, namespace})` starts a new run bound
+to the cassette until `reset()`; both start with an empty script and empty miss
+and refusal logs, and a request still in flight keeps the run it began in. In `replay` mode the
 handler hands the request to the oracle right after capture and answers with
 the recorded frames or an HTTP 400 `cassette_miss` body carrying the typed
 miss; the scripted-selection block is never entered, which

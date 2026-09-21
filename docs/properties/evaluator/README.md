@@ -843,7 +843,7 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   typed or not, into a 400 with no message text; a request still in flight
   across `reset()` (uploading, delayed, or awaiting the oracle) consumes,
   counts, records, and logs in the run it began in, never in the next one;
-  `useCassette()` starts a new log generation; concurrent
+  `useCassette()` starts a new run the same way; concurrent
   identical requests are admitted in capture order regardless of scripted
   delays; a JSON body that is not an object is scripted as `{}` and
   reaches the oracle as text; `reset()` unbinds.
@@ -873,8 +873,9 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   exercises through the real binary while the default `bun test` lane sees
   only the in-memory double. The `{kind, detail}` refusal contract is pinned
   in `eval-core` (`no_wire_detail_carries_request_content`), but the oracle's
-  other variants (`UnsafePath`, `AlreadyOpen`, `NoOpenCassette`) are exercised
-  only through that e2e suite.
+  other variants (`UnsafePath`, `AlreadyOpen`, `NoOpenCassette`) have no test:
+  the e2e suite opens each oracle once with an absolute temporary path and
+  issues no operation before `open` or after `close`.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries
