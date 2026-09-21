@@ -936,8 +936,8 @@ integer outside the safe range is `NotCanonical` at parse). It also recomputes t
 pilot's clustering unit and `effective_n_at_max` from its recorded counts and
 ICCs and refuses a pilot that disagrees with its own evidence, whose
 counts the ICC could not have been estimated from (fewer than two families,
-fewer worlds than families, or no replication within worlds), or whose family
-count is not the registered family count (the pilot sampled the registered
+fewer worlds than families, or no replication within worlds), whose ICC at
+either level exceeds one, or whose family count is not the registered family count (the pilot sampled the registered
 population, so the family-unit projection spreads items over exactly those
 families) (`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
 block, and refuses a plan whose pair count is below the pilot's

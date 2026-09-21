@@ -997,6 +997,17 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         unreplicated.validate(),
         Err(StatisticsError::PilotInconsistent)
     );
+    // An ICC above one is outside the estimator's range; a negative one is
+    // clamped to zero by the projection, so it can never raise effective N.
+    let mut over_one = family.clone();
+    over_one.icc_pilot.icc_world_seed = ratio(2, 1);
+    assert_eq!(over_one.validate(), Err(StatisticsError::PilotInconsistent));
+    for icc in [Ratio::ZERO, ratio(-100, 1)] {
+        let mut clamped = family.clone();
+        clamped.icc_pilot.icc_world_seed = icc;
+        clamped.icc_pilot.effective_n_at_max = ratio(450, 1);
+        assert_eq!(clamped.validate(), Ok(()), "{icc:?} projects undeflated");
+    }
     // The three gates are one all-must-pass conclusion over fixed bounds, so no
     // correction applies; a plan declaring one is refused, not analyzed uncorrected.
     for correction in [
@@ -1138,6 +1149,15 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             aged_pass: 2,
             fresh_censored: 0,
             aged_censored: 1,
+        },
+        // A censored fresh arm is in `b` or beside an aged pass.
+        PairCounts {
+            n: 1,
+            b: 0,
+            c: 0,
+            aged_pass: 0,
+            fresh_censored: 1,
+            aged_censored: 0,
         },
     ] {
         assert_eq!(

@@ -925,16 +925,17 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   `DuplicatePair`; a pilot whose effective N or unit is not what its recorded
   counts and ICCs imply, that names zero worlds, or whose counts (one
   observation, or no replication within worlds) could not have estimated an
-  ICC, or whose family count is not the registered one, is
-  `PilotInconsistent`; 300 pairs in one world are `Blocked
+  ICC, whose family count is not the registered one, or whose ICC exceeds one,
+  is `PilotInconsistent`, while a negative ICC projects the same undeflated N
+  as zero; 300 pairs in one world are `Blocked
   {table_underpowered}` at `3000/309` effective items; a `holm` or `benjamini_hochberg` plan is
   `UnsupportedMultiplicity`
   while a computed pilot validates; a plan of 299 pairs against a required N
   of 300 is `PlanBelowRequiredN`; a repeated pilot observation is
   `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
   hand-built counts with `b + c > n`, `b + aged_pass > n`, `c > aged_pass`,
-  `aged_censored + aged_pass > n`, a count above `n`, or `n` past the safe
-  range are `InconsistentCounts`; `i128::MIN` as either ratio component is
+  `aged_censored + aged_pass > n`, `fresh_censored + c > b + aged_pass`, a
+  count above `n`, or `n` past the safe range are `InconsistentCounts`; `i128::MIN` as either ratio component is
   `RationalOverflow`, never a wrapped value.
 - `no_judge_type_reaches_the_gates`
   (`mtr-judge-output-never-feeds-control-or-floor`): the statistics source

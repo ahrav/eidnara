@@ -519,6 +519,8 @@ impl AnalysisFamily {
         // worlds.
         let pilot = &self.icc_pilot;
         if pilot.max_affordable_worlds == 0
+            || pilot.icc_family > Ratio::ONE
+            || pilot.icc_world_seed > Ratio::ONE
             || pilot.n_families < 2
             || pilot.n_worlds < pilot.n_families
             || pilot.n_items <= pilot.n_worlds
@@ -718,8 +720,9 @@ impl Gates {
             return Err(StatisticsError::NoPairs);
         }
         // `b` and `c` are disjoint cells, `b` and every censored aged arm exclude
-        // an aged pass while `c` requires one, and every count is over `n`;
-        // within the safe range the rate methods cannot overflow.
+        // an aged pass while `c` requires one, every censored fresh arm lands in
+        // `b` or in an aged pass that `c` cannot also occupy, and every count is
+        // over `n`; within the safe range the rate methods cannot overflow.
         let PairCounts {
             n,
             b,
@@ -735,6 +738,7 @@ impl Gates {
             || c > aged_pass
             || aged_censored > n - aged_pass
             || fresh_censored > n
+            || fresh_censored + c > b + aged_pass
         {
             return Err(StatisticsError::InconsistentCounts);
         }
