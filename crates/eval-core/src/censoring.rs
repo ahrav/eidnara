@@ -231,6 +231,10 @@ fn pass_power_k(passes: u64, n: u64, k: u64) -> Result<Ratio, StatisticsError> {
     if denominator == 0 {
         return Ok(Ratio::ONE);
     }
+    // Reduce while still in u128: the coefficients may sit above i128::MAX when the ratio
+    // itself is small.
+    let divisor = gcd(numerator, denominator);
+    let (numerator, denominator) = (numerator / divisor, denominator / divisor);
     let fits = |value: u128| i128::try_from(value).map_err(|_| StatisticsError::RationalOverflow);
     Ratio::try_new(fits(numerator)?, fits(denominator)?)
 }

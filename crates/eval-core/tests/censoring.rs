@@ -391,6 +391,17 @@ fn pass_k_bounds_resolve_censoring_both_ways_and_are_indeterminate_when_all_are_
             censored_excluded: ratio(65, 126),
         }
     );
+    // C(131,65) sits between i128::MAX and u128::MAX; the ratio reduces to 66/131 before it is
+    // narrowed.
+    let mut one_fail = vec![Pass; 131];
+    one_fail[0] = Fail;
+    assert_eq!(
+        pass_k(&one_fail, 65).unwrap().pass_k,
+        PassKBounds::Bounds {
+            censored_as_fail: ratio(66, 131),
+            censored_excluded: ratio(66, 131),
+        }
+    );
     let mut nearly = vec![Pass; 100];
     nearly[0] = Fail;
     assert_eq!(
