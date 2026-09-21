@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { normalizeSDKResponse } from "../../shared/normalize-sdk-response";
 import { HOST_SDK_READ_TIMEOUT_MS, TimeoutError, withTimeout } from "../../shared/with-timeout";
 
@@ -30,6 +31,7 @@ interface ChildSessionSpawnArgs {
     title: string;
     directory?: string;
     signal?: AbortSignal;
+    denyTools?: boolean;
 }
 
 export async function createChildSession(args: ChildSessionSpawnArgs): Promise<unknown> {
@@ -38,6 +40,9 @@ export async function createChildSession(args: ChildSessionSpawnArgs): Promise<u
             body: {
                 ...(args.parentSessionId ? { parentID: args.parentSessionId } : {}),
                 title: args.title,
+                ...(args.denyTools
+                    ? { permission: [{ permission: "*", pattern: "*", action: "deny" }] }
+                    : {}),
             },
             query: { directory: args.directory },
             ...(args.signal ? { signal: args.signal } : {}),
@@ -54,11 +59,20 @@ export async function createChildSession(args: ChildSessionSpawnArgs): Promise<u
         if (error instanceof TimeoutError) {
             void creating
                 .then((response) => {
+                    // A delete under a directory that has since been removed would make OpenCode
+                    // bootstrap an instance there; the row in the disposed instance is inert.
+                    if (args.directory !== undefined && !existsSync(args.directory))
+                        return undefined;
                     const created = normalizeSDKResponse(response, null as { id?: string } | null, {
                         preferResponseOnMissingData: true,
                     });
                     if (typeof created?.id === "string" && created.id.length > 0) {
-                        return deleteChildSession(args.client, created.id);
+                        return deleteChildSession(
+                            args.client,
+                            created.id,
+                            undefined,
+                            args.directory,
+                        );
                     }
                     return undefined;
                 })
@@ -73,11 +87,13 @@ export async function deleteChildSession(
     client: ChildSessionDeleteClient,
     sessionId: string,
     signal?: AbortSignal,
+    directory?: string,
 ): Promise<void> {
     await withTimeout(
         Promise.resolve(
             client.session.delete({
                 path: { id: sessionId },
+                ...(directory ? { query: { directory } } : {}),
                 ...(signal ? { signal } : {}),
             } as never),
         ),

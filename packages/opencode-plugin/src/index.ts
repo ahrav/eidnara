@@ -12,6 +12,10 @@ import { getEidnaraBuiltinCommands } from "./features/builtin-commands/commands"
 import { CONTEXT_RESEARCHER_SYSTEM_PROMPT } from "./features/context/context-researcher/agent";
 import { createLiveSessionState } from "./hooks/context/live-session-state";
 import {
+    disposeNativeCaptureProjects,
+    isNativeCaptureProject,
+} from "./hooks/context/memory-capture-native";
+import {
     configureManagedDemandStart,
     createHostModuleClient,
     createLazyManagedDemandStart,
@@ -46,6 +50,7 @@ const managedDemandStart = createLazyManagedDemandStart({
 });
 
 const server: Plugin = async (ctx) => {
+    if (isNativeCaptureProject(ctx.directory)) return {};
     // ModelExecution child processes must not initialize Eidnara.
     // Do not use the buffered logger: it arms a flush timer and appends to the Eidnara log file.
     if (process.env.EIDNARA_MODEL_EXECUTION_CHILD === "1") {
@@ -199,7 +204,6 @@ const server: Plugin = async (ctx) => {
                     await eidnara?.event?.(input);
                 },
             },
-            // `onInstanceDisposed` cleans up only this instance's process-resident resources: its RPC server and its daemon transport.
             onInstanceDisposed: (disposedDirectory: string) => {
                 if (path.resolve(disposedDirectory) !== path.resolve(ownInstanceDirectory)) return;
                 try {
@@ -207,11 +211,27 @@ const server: Plugin = async (ctx) => {
                 } catch {
                     // best-effort
                 }
-                // Every reload builds a new client, so the old one is torn down here; otherwise its socket, channel poller, route handles, and ring mappings stay cached for the process lifetime.
-                moduleClient.disconnect();
                 log(
-                    "[eidnara] instance disposed — stopped RPC server and disconnected the daemon transport",
+                    "[eidnara] instance disposed — stopped RPC server; stopping capture and disconnecting the daemon transport",
                 );
+                // Every reload builds a new client, so the old one is torn down here; otherwise its socket, channel poller, route handles, and ring mappings stay cached for the process lifetime.
+                // A capture drain still running would redial that transport on its next daemon call
+                // and prepare fresh private projects nobody disposes, and a user checkpoint still
+                // resolving its directory would do the same, so capture stops first. The disposal
+                // event settles only when this chain does, so the replacement instance never sees
+                // this one's projects retired under it.
+                return (eidnara?.closeMemoryCapture() ?? Promise.resolve())
+                    .catch((error) => {
+                        log(`[eidnara] native capture drain stop failed: ${error}`);
+                    })
+                    .then(() => {
+                        moduleClient.disconnect();
+                        // The private projects are process-global; a reloaded instance prepares fresh ones on demand.
+                        return disposeNativeCaptureProjects(ctx.client);
+                    })
+                    .catch((error) => {
+                        log(`[eidnara] native capture project cleanup failed: ${error}`);
+                    });
             },
         }),
         // SAFETY: the wrapper matches the hook's runtime call shape; only its declared input type is narrower than the SDK's.
@@ -225,12 +245,12 @@ const server: Plugin = async (ctx) => {
         "command.execute.before": async (input, output) => {
             await eidnara?.["command.execute.before"]?.(input, output);
         },
-        "chat.message": async (input, _output) => {
+        "chat.message": async (input, output) => {
             // Fire-and-forget: a pending delivery must not delay the user's prompt.
             if (configWarning?.pending && input.sessionID) {
                 void configWarning.deliverTo(input.sessionID);
             }
-            await eidnara?.["chat.message"]?.(input);
+            await eidnara?.["chat.message"]?.(input, output);
         },
         "tool.execute.after": async (input, _output) => {
             await eidnara?.["tool.execute.after"]?.(input);

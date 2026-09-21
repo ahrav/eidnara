@@ -486,37 +486,46 @@ describe("models-dev-cache (SDK-only)", () => {
             expect(calls).toBe(2);
         });
 
-        test("a timed-out re-warm resets the latch so a later usage event retries", async () => {
+        test("a timed-out metadata waiter leaves shared model initialization alive", async () => {
             resetAuthRewarmLatchForTest(20);
+            const data = {
+                data: {
+                    providers: [
+                        { id: "openai", models: { "gpt-5.5": { limit: { input: 272000 } } } },
+                    ],
+                },
+            };
+            let resolve = (_value: typeof data) => {};
+            let reject = (_reason: Error) => {};
+            const initialization = new Promise<typeof data>((yes, no) => {
+                resolve = yes;
+                reject = no;
+            });
+            const modelCaller = initialization.then(
+                () => true,
+                () => false,
+            );
             let calls = 0;
-            let firstSignal: AbortSignal | undefined;
+            let signal: AbortSignal | undefined;
             const client = {
                 config: {
                     providers: (options?: { signal?: AbortSignal }) => {
                         calls++;
-                        if (calls === 1) {
-                            firstSignal = options?.signal;
-                            return new Promise<never>(() => {});
-                        }
-                        return Promise.resolve({
-                            data: {
-                                providers: [
-                                    {
-                                        id: "openai",
-                                        models: { "gpt-5.5": { limit: { input: 272000 } } },
-                                    },
-                                ],
-                            },
-                        });
+                        signal = options?.signal;
+                        signal?.addEventListener(
+                            "abort",
+                            () => reject(new Error("shared initialization interrupted")),
+                            { once: true },
+                        );
+                        return initialization;
                     },
                 },
             };
-
-            const startedAt = performance.now();
             await refreshModelLimitsAfterAuthOnce(client);
-            expect(performance.now() - startedAt).toBeGreaterThanOrEqual(10);
-            expect(firstSignal?.aborted).toBe(true);
-
+            expect(signal?.aborted ?? false).toBe(false);
+            resolve(data);
+            expect(await modelCaller).toBe(true);
+            expect(getSdkContextLimit("openai", "gpt-5.5")).toBeUndefined();
             await refreshModelLimitsAfterAuthOnce(client);
             expect(calls).toBe(2);
             expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272000);

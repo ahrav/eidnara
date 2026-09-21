@@ -67,6 +67,37 @@ describe("createChildSession", () => {
         await Bun.sleep(0);
         expect(del).toHaveBeenCalledWith({ path: { id: "ses_late" } });
     });
+
+    it("does not delete a late child under a directory that no longer exists", async () => {
+        const { mkdtempSync, rmSync } = await import("node:fs");
+        const { tmpdir } = await import("node:os");
+        const { join } = await import("node:path");
+        const directory = mkdtempSync(join(tmpdir(), "eidnara-late-child-"));
+        let settle: ((value: { data: { id: string } }) => void) | undefined;
+        const create = mock(
+            () =>
+                new Promise<{ data: { id: string } }>((resolve) => {
+                    settle = resolve;
+                }),
+        );
+        const del = mock(async (_input: unknown) => ({}));
+        __childSessionSpawnTest.setLifecycleTimeoutMs(20);
+        await expect(
+            createChildSession({
+                client: { session: { create, delete: del } } as never,
+                title: "t",
+                directory,
+            }),
+        ).rejects.toThrow("child session create timed out");
+        __childSessionSpawnTest.reset();
+        // The private project was evicted meanwhile; a delete there would make OpenCode
+        // bootstrap an instance for a removed directory.
+        rmSync(directory, { recursive: true, force: true });
+        settle?.({ data: { id: "ses_late" } });
+        await Bun.sleep(0);
+        await Bun.sleep(0);
+        expect(del).not.toHaveBeenCalled();
+    });
 });
 
 describe("deleteChildSession", () => {

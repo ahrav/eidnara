@@ -11,9 +11,22 @@ import {
 } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
-import { log } from "../../shared/logger";
+import { projectConfigDisabled } from "../../shared/conflict-detector";
+import { log, sessionLog } from "../../shared/logger";
+import {
+    CAPTURE_MAX_AGE_MS,
+    createMemoryCaptureCheckpoint,
+    createMemoryCaptureDrain,
+    type MemoryCaptureDrain,
+    type MemoryCaptureScope,
+    openCodeCaptureMessages,
+    openCodeLastFinalMessageId,
+    openCodeMessagesSince,
+} from "../../shared/memory-capture";
+import { normalizeSDKResponse } from "../../shared/normalize-sdk-response";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
+import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "../../shared/with-timeout";
 import { createEidnaraCommandHandler } from "./command-handler";
 import { invalidateToolPermissionDenied } from "./eidnara-reduce-availability";
 import { type ContextUsageEntry, createEventHandler } from "./event-handler";
@@ -31,6 +44,7 @@ import {
     type LiveSessionState,
     MAX_LIVE_USAGE_SESSIONS,
 } from "./live-session-state";
+import { openCodeMemoryCaptureExecutor } from "./memory-capture-native";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -61,6 +75,8 @@ export interface EidnaraDeps {
         history_budget_percentage?: number;
         memory?: {
             enabled: boolean;
+            auto_promote?: boolean;
+            auto_capture?: boolean;
             injection_budget_tokens: number;
             auto_search?: {
                 enabled: boolean;
@@ -208,6 +224,214 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         ? deps.config.context_researcher
         : undefined;
     const moduleClient = deps.rustModeModuleClient;
+    const captureCheckpoint = createMemoryCaptureCheckpoint(moduleClient);
+    const executeCapture = openCodeMemoryCaptureExecutor(deps.client);
+    const notifyCaptureIncomplete = () =>
+        deps.client.tui.showToast({
+            body: {
+                title: "Eidnara memory capture",
+                message:
+                    "Capture incomplete. Some facts are not confirmed saved. See Eidnara logs.",
+                variant: "warning",
+            },
+        });
+    /** One warning per project outage: the toast repeats only after that project's drain ends
+     * with no work left. A checkpoint alone, a `pending` drain (retry backoff, another claimant),
+     * or another project's recovery cannot re-arm it, or a persistent model outage would warn on
+     * every eligible retry. */
+    const captureWarned = new Set<string>();
+    const warnCaptureIncomplete = (projectRoot: string): void => {
+        if (captureWarned.has(projectRoot)) return;
+        captureWarned.add(projectRoot);
+        // `.then` turns a synchronous throw from a disposed client into a rejection this swallows.
+        void withTimeout(
+            Promise.resolve().then(notifyCaptureIncomplete),
+            HOST_SDK_READ_TIMEOUT_MS,
+            "capture notification timed out",
+        ).catch(() => undefined);
+    };
+    // Model batches run detached from the idle checkpoint that schedules them, so the idle event
+    // returns before any extraction work. One drain per completed turn sees the user's message
+    // and the answer together.
+    const memoryCaptureDrain = createMemoryCaptureDrain(moduleClient, executeCapture, {
+        onSettled: (scope, result) => {
+            if (result !== "pending") captureWarned.delete(scope.projectRoot);
+        },
+        onFailed: (scope, error) => {
+            sessionLog.warn(scope.sessionId, "memory capture drain failed:", error);
+            warnCaptureIncomplete(scope.projectRoot);
+        },
+    });
+    const liveModelKey = (sessionId: string): string | undefined => {
+        const model = resolveLiveModel(sessionId);
+        return model ? `${model.providerID}/${model.modelID}` : undefined;
+    };
+    const pendingUserCaptures = new BoundedSessionMap<Promise<void>>(MAX_LIVE_USAGE_SESSIONS);
+    /** Every user checkpoint still running; the per-session map above evicts, this does not. */
+    const activeUserCaptures = new Set<Promise<void>>();
+    /** Per session, the last final message an idle checkpoint offered; later checkpoints read past it. */
+    const captureWatermark = new BoundedSessionMap<string>(MAX_LIVE_USAGE_SESSIONS);
+    /** Messages read back per later checkpoint before falling back to the whole transcript. */
+    const CAPTURE_TAIL_MESSAGES = 32;
+    const captureDisabled = (): boolean =>
+        deps.config.memory?.enabled === false ||
+        deps.config.memory?.auto_promote === false ||
+        deps.config.memory?.auto_capture === false ||
+        // The private capture project is configured through its own `opencode.json`; without
+        // project config layers the capture agent does not exist, so nothing is queued for it.
+        projectConfigDisabled();
+    /** Set by `closeMemoryCapture`; checkpoints that resume afterwards write nothing. */
+    let captureClosed = false;
+    /** Capture excludes deleted and child sessions. Callers re-check after `sessionDirectoryFor`
+     * because that read can add `sessionId` to the child-session sets. */
+    const excludedFromCapture = (sessionId: string): boolean =>
+        deletedSessions.has(sessionId) ||
+        subagentSessions.has(sessionId) ||
+        internalChildSessions.has(sessionId);
+    /** A checkpoint already sending batches stops at the next one once its session is gone or
+     * capture has closed; a batch started after either would re-enqueue fenced text. The mark is
+     * pinned per checkpoint because `deletedSessions` is bounded and can forget a deletion while
+     * a long checkpoint is still running. */
+    const checkpointMarks = new Map<string, Set<{ deleted: boolean }>>();
+    const guardCheckpoint = (sessionId: string) => {
+        const mark = { deleted: excludedFromCapture(sessionId) };
+        let marks = checkpointMarks.get(sessionId);
+        if (!marks) checkpointMarks.set(sessionId, (marks = new Set()));
+        marks.add(mark);
+        const stop = (): boolean => captureClosed || mark.deleted || excludedFromCapture(sessionId);
+        const release = (): void => {
+            marks?.delete(mark);
+            if (marks?.size === 0) checkpointMarks.delete(sessionId);
+        };
+        return { stop, release };
+    };
+    const markCheckpointsDeleted = (sessionId: string): void => {
+        for (const mark of checkpointMarks.get(sessionId) ?? []) mark.deleted = true;
+    };
+    const checkpointUser = (sessionId: string, output: unknown): void => {
+        if (captureClosed || captureDisabled()) return;
+        try {
+            const messages = [
+                ...openCodeCaptureMessages([
+                    {
+                        info: readOwnDataProperty(output, "message"),
+                        parts: readOwnDataProperty(output, "parts"),
+                    },
+                ]),
+            ];
+            if (messages.length === 0) return;
+            // Checkpoints for one session run in order, so the newest promise covers every earlier one.
+            const previous = pendingUserCaptures.get(sessionId);
+            const pending = (async () => {
+                await previous?.catch(() => undefined);
+                const guard = guardCheckpoint(sessionId);
+                try {
+                    const projectRoot = await sessionDirectoryFor(sessionId);
+                    if (guard.stop()) return;
+                    const model = liveModelBySession.get(sessionId);
+                    await captureCheckpoint({
+                        sessionId,
+                        projectRoot,
+                        model: model ? `${model.providerID}/${model.modelID}` : undefined,
+                        messages,
+                        stop: guard.stop,
+                    });
+                } finally {
+                    guard.release();
+                }
+            })();
+            pendingUserCaptures.set(sessionId, pending);
+            activeUserCaptures.add(pending);
+            void pending
+                .finally(() => {
+                    activeUserCaptures.delete(pending);
+                    if (pendingUserCaptures.get(sessionId) === pending)
+                        pendingUserCaptures.delete(sessionId);
+                })
+                .catch((error) =>
+                    log(
+                        `memory capture user checkpoint pending: ${error instanceof Error ? error.message : "unknown error"}`,
+                    ),
+                );
+        } catch (error) {
+            log(
+                `memory capture user snapshot failed: ${error instanceof Error ? error.message : "unknown error"}`,
+            );
+        }
+    };
+    const checkpointMemory = async (sessionId: string): Promise<void> => {
+        if (captureClosed || captureDisabled() || excludedFromCapture(sessionId)) return;
+        let scope: MemoryCaptureScope | undefined;
+        const guard = guardCheckpoint(sessionId);
+        try {
+            const model = liveModelKey(sessionId);
+            // The user's message is acknowledged first, so the transcript read below does not resend it.
+            await pendingUserCaptures.get(sessionId)?.catch(() => undefined);
+            const projectRoot = await sessionDirectoryFor(sessionId);
+            // That read can classify this session as a child; a child never checkpoints or drains.
+            if (excludedFromCapture(sessionId)) return;
+            // From here the user checkpoint may have queued a source, so the drain runs whatever
+            // happens to the transcript read or this checkpoint.
+            scope = { sessionId, projectRoot, model };
+            const readTranscript = async (limit?: number): Promise<unknown[]> =>
+                normalizeSDKResponse(
+                    await withTimeout(
+                        Promise.resolve(
+                            deps.client.session.messages({
+                                path: { id: sessionId },
+                                query: { directory: projectRoot, limit },
+                            } as never),
+                        ),
+                        HOST_SDK_READ_TIMEOUT_MS,
+                        "memory capture transcript read timed out",
+                    ),
+                    [] as unknown[],
+                    { preferResponseOnMissingData: true },
+                );
+            // The first checkpoint offers the whole recent transcript; later ones read only the
+            // tail past the last final message this process already offered.
+            const since = captureWatermark.get(sessionId);
+            const sourceMessages =
+                since === undefined
+                    ? await readTranscript()
+                    : (openCodeMessagesSince(
+                          await readTranscript(CAPTURE_TAIL_MESSAGES),
+                          since,
+                          CAPTURE_TAIL_MESSAGES,
+                      ) ?? (await readTranscript()));
+            // A deletion observed during the read fences this session; nothing may re-enqueue it.
+            if (guard.stop()) return;
+            const accepted = await captureCheckpoint({
+                ...scope,
+                messages: openCodeCaptureMessages(sourceMessages, {
+                    notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
+                }),
+                stop: guard.stop,
+            });
+            // A disabled daemon wrote nothing and a stopped checkpoint left batches unsent; those
+            // messages stay ahead of the watermark.
+            if (accepted !== "accepted") return;
+            const final = openCodeLastFinalMessageId(sourceMessages);
+            if (final !== undefined) captureWatermark.set(sessionId, final);
+        } catch (error) {
+            log(
+                `memory capture checkpoint pending: ${error instanceof Error ? error.message : "unknown error"}`,
+            );
+            warnCaptureIncomplete(scope?.projectRoot ?? deps.directory);
+        } finally {
+            guard.release();
+            // Draining is what frees a full queue, so a refused checkpoint must not skip it; a
+            // session deleted meanwhile must not be drained under.
+            if (scope && !guard.stop()) memoryCaptureDrain.schedule(scope);
+        }
+    };
+    /** Stops capture for this hook before its transport is torn down: later checkpoints write
+     * nothing, pending user checkpoints settle, and the drain cancels its batch in flight. */
+    const closeMemoryCapture = async (): Promise<void> => {
+        captureClosed = true;
+        await Promise.all([...activeUserCaptures].map((pending) => pending.catch(() => undefined)));
+        await memoryCaptureDrain.close();
+    };
 
     const rustToolBackends: RustToolBackends = {
         reduce: async ({ sessionId, drop, commandId }) => {
@@ -359,6 +583,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         // Deletion prunes per-session state so entries do not outlive the session.
         onSessionDeleted: (sessionId: string, directory?: string) => {
             addBoundedSession(deletedSessions, sessionId);
+            markCheckpointsDeleted(sessionId);
             if (directory && !sessionDirectoryBySession.has(sessionId)) {
                 sessionDirectoryBySession.set(sessionId, directory);
             }
@@ -426,6 +651,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
 
     const eventHook = createEventHook({
         eventHandler,
+        checkpointMemory,
         contextUsageMap,
         liveModelBySession,
         variantBySession,
@@ -446,6 +672,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         "experimental.chat.system.transform": systemPromptHash.handler,
         "experimental.text.complete": createTextCompleteHandler(),
         "chat.message": createChatMessageHook({
+            checkpointUser,
             liveModelBySession,
             variantBySession,
             agentBySession,
@@ -486,6 +713,8 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     const hooksWithBackends = hooks as typeof hooks & {
         rustToolBackends: RustToolBackends;
         resolveSessionDirectory: typeof sessionDirectoryFor;
+        memoryCaptureDrain: MemoryCaptureDrain;
+        closeMemoryCapture: () => Promise<void>;
     };
     Object.defineProperty(hooksWithBackends, "rustToolBackends", {
         value: rustToolBackends,
@@ -493,6 +722,14 @@ export function createEidnaraHook(deps: EidnaraDeps) {
     });
     Object.defineProperty(hooksWithBackends, "resolveSessionDirectory", {
         value: projectRootForLiveSession,
+        enumerable: false,
+    });
+    Object.defineProperty(hooksWithBackends, "memoryCaptureDrain", {
+        value: memoryCaptureDrain,
+        enumerable: false,
+    });
+    Object.defineProperty(hooksWithBackends, "closeMemoryCapture", {
+        value: closeMemoryCapture,
         enumerable: false,
     });
     return hooksWithBackends;

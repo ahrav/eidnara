@@ -29,6 +29,7 @@ function fakeClient() {
 
 async function dispose(hooks: Record<string, unknown>, directory: string): Promise<void> {
     const event = hooks.event as (input: { event: unknown }) => Promise<void>;
+    // The disposal event settles only after capture has stopped and the transport is gone.
     await event({ event: { type: "server.instance.disposed", properties: { directory } } });
 }
 

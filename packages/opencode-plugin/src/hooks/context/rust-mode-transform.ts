@@ -119,6 +119,8 @@ export interface RustModeModuleClient {
         body: unknown;
         signal?: AbortSignal;
         generationSensitive?: boolean;
+        /** Capture flush waits up to 20 seconds in the daemon; its transport must outlive that wait. */
+        timeoutMs?: number;
     }): Promise<unknown>;
     deleteSession?(sessionId: string, projectRoot: string): Promise<void>;
     closeSession?(sessionId: string): void;
