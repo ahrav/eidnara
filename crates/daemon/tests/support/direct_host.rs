@@ -28,6 +28,12 @@ pub fn workspace_root() -> PathBuf {
 }
 
 pub fn fixture_binary() -> PathBuf {
+    example_binary("direct_host_fixture", "direct-host-fixture")
+}
+
+/// Builds one of the daemon's examples under `features` and returns its
+/// binary; builds are serialized so concurrent tests share one cargo lock.
+pub fn example_binary(example: &str, features: &str) -> PathBuf {
     let _guard = BUILD_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -39,25 +45,25 @@ pub fn fixture_binary() -> PathBuf {
             "-p",
             "daemon",
             "--example",
-            "direct_host_fixture",
+            example,
             "--features",
-            "direct-host-fixture",
+            features,
             "--locked",
         ])
         .current_dir(&workspace)
         .output()
-        .expect("cargo builds direct host fixture");
+        .expect("cargo builds the example");
     assert!(
         output.status.success(),
-        "direct host fixture build failed:\nstdout:\n{}\nstderr:\n{}",
+        "{example} build failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace.join("target"));
-    let binary = target.join("debug/examples/direct_host_fixture");
-    assert!(binary.is_file(), "missing fixture at {}", binary.display());
+    let binary = target.join("debug/examples").join(example);
+    assert!(binary.is_file(), "missing example at {}", binary.display());
     binary
 }
 

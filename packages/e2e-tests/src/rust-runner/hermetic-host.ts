@@ -55,6 +55,8 @@ export interface BackendCounters {
     released: number;
     failed: number;
     cancelled: number;
+    /** Frames a recording cassette refused as carrying a secret-shaped span; zero without a recording. */
+    cassetteRefused: number;
 }
 
 interface ReadyRecord {
@@ -600,7 +602,15 @@ class FixtureControlClient {
 
     private parseCounters(value: unknown): BackendCounters {
         const object = record(value);
-        const keys = ["blocked", "cancelled", "completed", "failed", "released", "started"];
+        const keys = [
+            "blocked",
+            "cancelled",
+            "cassette_refused",
+            "completed",
+            "failed",
+            "released",
+            "started",
+        ];
         if (!object || !exactKeys(object, keys)) {
             throw new Error("fixture control counters were malformed");
         }
@@ -616,6 +626,7 @@ class FixtureControlClient {
             released: object.released as number,
             failed: object.failed as number,
             cancelled: object.cancelled as number,
+            cassetteRefused: object.cassette_refused as number,
         };
     }
 

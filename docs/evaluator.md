@@ -808,9 +808,10 @@ file form and a partial cassette can never pass for a complete one.
 
 ### Rust oracle and the TypeScript mock
 
-`crates/daemon/examples/eval_runner.rs` (feature `eval-runner`, an example so
-it reaches the `eval-core` dev-dependency without a normal edge) serves
-`cassette-oracle` over line-delimited JSON: `open {mode, namespace, path}`,
+`crates/daemon/examples/eval_runner/main.rs` (feature `eval-runner`, which
+carries `test-support`; an example so it reaches the `eval-core`
+dev-dependency without a normal edge) serves `cassette-oracle` over
+line-delimited JSON: `open {mode, namespace, path}`,
 `lookup {namespace, request}`, `record {namespace, request, response}`, and
 `close`. Requests arrive as `{path, headers, body_text}`; Rust parses the body,
 so a malformed body is `MalformedBody` rather than a lookup of `{}`. Every
@@ -1319,12 +1320,24 @@ at most the bound; a ledger with no attempted sample has no gates
 
 ## Campaign shell
 
-`crates/daemon/tests/eval_campaign.rs` runs one Suite B campaign on surface 1
-through the direct-host fixture, composing the seams above and nothing new:
-the paired-world compiler, the recency baseline, the surface-1 pass and stage
-ledger (`tests/support/eval_surface.rs`, the helpers the surface-ledger suite
-uses), the paired statistics, the run profile, the sample ledger, the
-envelope, and the report serializer.
+The campaign shell is `crates/daemon/examples/eval_runner/campaign.rs`: it
+runs one Suite B campaign on surface 1 through the direct-host fixture,
+composing the seams above and nothing new: the paired-world compiler, the
+recency baseline, the surface-1 pass and stage ledger
+(`tests/support/eval_surface.rs`, the helpers the surface-ledger suite uses,
+which the example includes by path beside `tests/support/direct_host.rs`),
+the paired statistics, the run profile, the sample ledger, the envelope, and
+the report serializer. Two callers drive it. The `eval_runner` example's
+`campaign` subcommand takes every input on the command line, all required
+(`--scale`, `--aged-messages`, `--elapsed-bound-ms`, `--approved-by`,
+`--approval-run-id`, `--publish`), runs the campaign, publishes the report
+and manifest into the publish directory, and answers with one JSON line
+naming them with their digests, the run identity, the sample counts, and the
+aged life's summarizer facts; a missing flag is refused before anything runs.
+`crates/daemon/tests/eval_campaign.rs` includes the same module by path,
+drives it in-process, and asserts what a run found; it also runs the built
+example on S0 and checks its published manifest and report parse and its
+summary agrees with them.
 
 The campaign refuses an unapproved profile before anything runs. Under an
 approved one it generates a one-session aged history (130 messages at S0) and
@@ -1484,9 +1497,8 @@ recency there; a recency loss on surface 1 needs more than 500 messages,
 which the meta bound puts near the limit of what one firing can persist.
 The falsification pair's structural verdict is still the compiler's.
 
-Not composed yet: the `eval_runner` example still serves the cassette oracle
-only, and the write-then-rename publisher is the test's own, since no shipped
-publisher exists.
+Not composed yet: the write-then-rename publisher is the shell's own, since
+no shipped publisher exists.
 
 ## Coverage markers
 

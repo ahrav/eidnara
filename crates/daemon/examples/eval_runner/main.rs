@@ -3,8 +3,16 @@
 //! every request digest, admits every recorded exchange through the header
 //! allowlist and the secret scanner, and writes the cassette; TypeScript only
 //! forwards requests and compares the digest strings it gets back.
+//! `campaign` runs one Suite B campaign through the direct-host fixture under
+//! an approved profile and publishes its report and manifest.
 
 #![forbid(unsafe_code)]
+
+#[cfg(unix)]
+mod campaign;
+#[cfg(unix)]
+#[allow(dead_code)]
+mod support;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -14,6 +22,8 @@ use std::path::{Component, Path, PathBuf};
 use eval_core::{Boundary, Cassette, CassetteError, Lookup, OpenCodeRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(unix)]
+use sha2::Digest;
 
 /// The largest request line accepted; a provider body is a few hundred KiB at
 /// most and the redaction scanner refuses anything past 512 KiB anyway.
@@ -286,12 +296,99 @@ fn serve(input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     Ok(())
 }
 
+const USAGE: &str = "usage: eval_runner cassette-oracle | campaign --scale <s0|s1|s2> \
+--aged-messages <n> --elapsed-bound-ms <n> --approved-by <name> \
+--approval-run-id <hex64> --publish <dir>";
+
+/// `campaign`'s arguments, every one required: a campaign runs only under
+/// values someone wrote down.
+#[cfg(unix)]
+fn campaign_config(args: impl Iterator<Item = String>) -> io::Result<campaign::Config> {
+    let mut values: BTreeMap<String, String> = BTreeMap::new();
+    let mut args = args.peekable();
+    while let Some(flag) = args.next() {
+        let Some(name) = flag.strip_prefix("--") else {
+            return Err(io::Error::other(format!("{USAGE} (got {flag:?})")));
+        };
+        let value = args
+            .next()
+            .ok_or_else(|| io::Error::other(format!("--{name} needs a value")))?;
+        if values.insert(name.to_string(), value).is_some() {
+            return Err(io::Error::other(format!("--{name} given twice")));
+        }
+    }
+    let mut take = |name: &str| {
+        values
+            .remove(name)
+            .ok_or_else(|| io::Error::other(format!("--{name} is required; {USAGE}")))
+    };
+    let scale: eval_core::Scale = serde_json::from_value(Value::String(take("scale")?))
+        .map_err(|error| io::Error::other(format!("--scale: {error}")))?;
+    let number = |name: &str, text: String| {
+        text.parse::<u64>()
+            .map_err(|error| io::Error::other(format!("--{name}: {error}")))
+    };
+    let aged_messages = u32::try_from(number("aged-messages", take("aged-messages")?)?)
+        .map_err(|error| io::Error::other(format!("--aged-messages: {error}")))?;
+    let elapsed_bound_ms = number("elapsed-bound-ms", take("elapsed-bound-ms")?)?;
+    let approval = eval_core::Approval {
+        approved_by: take("approved-by")?,
+        approved_at_run_id: take("approval-run-id")?,
+    };
+    let publish = PathBuf::from(take("publish")?);
+    if let Some(unknown) = values.keys().next() {
+        return Err(io::Error::other(format!(
+            "unknown flag --{unknown}; {USAGE}"
+        )));
+    }
+    Ok(campaign::Config {
+        scale,
+        aged_messages,
+        elapsed_bound_ms,
+        approval,
+        publish,
+    })
+}
+
+/// Runs the campaign and prints one JSON line naming what was published.
+#[cfg(unix)]
+fn run_campaign(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let config = campaign_config(args)?;
+    let run = campaign::run(&config).map_err(|error| io::Error::other(format!("{error:?}")))?;
+    let digest = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+    let summary = json!({
+        "report": config.publish.join(campaign::REPORT_FILE),
+        "report_digest": digest(&run.report_bytes),
+        "manifest": config.publish.join(campaign::MANIFEST_FILE),
+        "manifest_digest": digest(&run.manifest_bytes),
+        "eval_run_id": run.manifest.eval_run_id,
+        "status": run.manifest.status,
+        "pairs": run.set.pairs.len(),
+        "samples": run.report.rates.samples,
+        "attempted": run.report.samples.attempted(),
+        "first_losses": run
+            .verdicts
+            .values()
+            .filter(|verdict| matches!(verdict, eval_core::StageVerdict::FirstLoss(_)))
+            .count(),
+        "raw_pairs": run.outcomes.len(),
+        "structured_pairs": run.structured_outcomes.len(),
+        "aged_summarizer": {
+            "firings": run.aged.firings,
+            "refused": run.aged.refused,
+            "segments": run.aged.covered.len(),
+        },
+    });
+    println!("{summary}");
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("cassette-oracle") => serve(io::stdin().lock(), io::stdout().lock()),
-        other => Err(io::Error::other(format!(
-            "usage: eval_runner cassette-oracle (got {other:?})"
-        ))),
+        #[cfg(unix)]
+        Some("campaign") => run_campaign(args),
+        other => Err(io::Error::other(format!("{USAGE} (got {other:?})"))),
     }
 }

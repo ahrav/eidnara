@@ -1121,7 +1121,8 @@ Report (`crates/eval-core/tests/report.rs`):
 Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
 
 - `an_unapproved_profile_runs_no_campaign`: the S0 profile without an
-  approval refuses `approved` by name.
+  approval refuses `approved` by name, and the shell refuses to run under an
+  approval with no approver, publishing nothing.
 - `an_s0_campaign_on_the_default_surface_publishes_one_gated_report`
   (`mtr-runner-shell-example-gated-and-bounded`,
   `xc-campaign-resource-envelope-declared-and-enforced`): a 130-message aged
@@ -1158,6 +1159,13 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   sample in run order, the frozen family's digest, and the recency baseline,
   says `replay` and `transform-route, turn by turn`, and is refused when
   relabelled `direct-database, non-aged`.
+- `the_eval_runner_example_publishes_the_s0_campaign`
+  (`mtr-runner-shell-example-gated-and-bounded`): the built `eval_runner`
+  example runs the S0 campaign from its command line with every input given,
+  publishes the report and manifest into the directory it is told, answers
+  with one JSON line whose run identity is the published manifest's and whose
+  counts are the report's, and refuses a campaign with an input missing
+  before anything runs.
 - `the_fixture_records_its_backend_and_replays_it_strictly`
   (`crates/daemon/tests/eval_fixture_cassette.rs`,
   `rid-cassette-strict-miss-typed-error`,
@@ -1240,9 +1248,10 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   the segment: at S0 the twenty segments sit inside a window of 100 and no
   truth is lost to recency on that surface; the falsification pair's
   structural verdict is the compiler's.
-- The campaign shell lives in the daemon test suite and drives the
-  direct-host fixture; the `eval_runner` example still serves the cassette
-  oracle only.
+- The campaign shell is the `eval_runner` example's `campaign` module,
+  driven from its command line and, in-process, by the daemon's campaign
+  test; the fixture and surface helpers it uses are included by path from
+  `tests/support/`, so they live in the test tree and the example alike.
 - Surface 1 makes no model call (the fixture's counters read zero), so the
   surface boundary's cassette holds no frame; the summarizer boundary's
   cassette holds the four frames the aged life's firings recorded, replayed
