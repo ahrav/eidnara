@@ -161,6 +161,7 @@ pub fn manifest_for(identity: RunIdentity, trace: &SemanticTrace) -> Manifest {
         failure_class_table_digest: eval_core::FAILURE_CLASS_TABLE_DIGEST.to_string(),
         ingestion: Ingestion::AdapterIngestedNoProductionCaller,
         memory_reviewer_model_calls: MemoryReviewerModelCalls::Excluded,
+        analysis_family_digest: None,
         reachability: Reachability::DefaultProduction,
         claim_boundary: ClaimBoundary::pinned(),
         component_versions: ComponentVersions {

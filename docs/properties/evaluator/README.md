@@ -18,7 +18,7 @@ provide, so a reader can find them by test name.
 Manifest, identity, and residue (`crates/eval-core/tests/manifest.rs`):
 
 - `required_fields_are_sorted_and_equal_the_struct_field_set` pins
-  `eval-manifest/v5` to `REQUIRED_FIELDS`; a struct field added without a
+  `eval-manifest/v6` to `REQUIRED_FIELDS`; a struct field added without a
   version bump fails here. `fixture_digests_are_frozen` pins the fixture's
   `eval_run_id` and manifest digest so an encoding change is reviewed.
 - `every_missing_field_is_refused_by_name_before_digesting`,
@@ -860,6 +860,145 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   delays; a JSON body that is not an object is scripted as `{}` and
   reaches the oracle as text; `reset()` unbinds.
 
+## Phase 3 executed checks: frozen statistics
+
+Statistics core (`crates/eval-core/tests/statistics.rs`):
+
+- `the_frozen_reference_agrees_on_every_golden_case`
+  (`mtr-three-gates-signed-history-effect`,
+  `mtr-world-clustered-intervals-after-icc-pilot`): the TypeScript reference's
+  fourteen cases (five pair tables with gate verdicts, including censored arms,
+  a failing noninferiority gate, and one at the margin; six ICC pilots with
+  and without a family effect, with fewer affordable worlds than the pilot
+  had (with and without a family effect, so the family-cluster cap is
+  exercised), unbalanced, and internally constant, where the world level
+  binds the effective N; three cluster bootstraps by family
+  and by world over 300 pairs, one at the minimum 40 replicates where the
+  `1/40` order statistic is the smallest replicate) equal the Rust counts, rates, gates, ICC,
+  clustering unit, effective N, and interval bounds exactly; the golden's
+  `input_sha256` is recomputed over the whole case array first.
+- `ratios_are_exact_normalized_and_refuse_overflow`: reduction, decimal
+  parsing, the four checked operations, a zero divisor, a difference past the
+  safe range and a component at `2^53` refusing as `RationalOverflow`, and a
+  wire ratio normalizing on deserialization while a zero denominator refuses.
+- `every_profile_input_is_required_and_bounded`: each of the five profile
+  fields and each of the four liveness bounds is required; a rate above one, a
+  non-canonical decimal, or a liveness bound past canonical JSON's safe
+  integer refuses.
+- `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
+  (`mtr-analysis-family-frozen-before-results`): the frozen digest accepts the
+  unchanged family; an edit to any of nine components (endpoints, families,
+  exclusions, stopping rule, margin, floor, threshold, seed, pilot) is
+  `FamilyChangedAfterResults`, from `check` and from `analyze`; a threshold
+  below 300, fewer than 40 or more than 10,000 replicates, an empty endpoint
+  list, an endpoint list that is not exactly the three gates
+  (`UnsupportedEndpoints`), and an unknown field refuse; a manifest without a recorded digest is
+  `FamilyNotRecorded`.
+- `the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpowered`
+  (`mtr-world-clustered-intervals-after-icc-pilot`): a family effect selects
+  the family unit; a flat pilot whose tasks agree within each world has world
+  ICC one and counts each world once; a zero required N refuses
+  (`NoRequiredN`); fewer affordable worlds shrink N, and
+  under the family unit two affordable worlds realize at most two family
+  clusters so the projected items are deflated; zero
+  affordable worlds, a two-observation pilot, a single group, and no variance
+  at all refuse; constant and unbalanced constant groups give ICC one; an
+  unbalanced pilot uses the `n0` size correction, which here puts the ICC over
+  the threshold where the mean size would not; a
+  large-valued pilot refuses as `RationalOverflow`; an effective N below the
+  required N makes `analyze` return `Blocked {insufficient_effective_n}`, and a
+  hand-written degenerate ratio cannot slip past it.
+- `the_three_gates_are_separate_signed_and_bound_by_the_profile`
+  (`mtr-three-gates-signed-history-effect`): `b = 3, c = 5, n = 20` passes
+  noninferiority with `-1/10` while failing harm at `3/20`; `b = c = 4` passes
+  noninferiority at zero while failing harm and the floor; `1/4` fails
+  noninferiority; exact-margin and exact-floor statistics pass; every bound
+  equals the profile's rate; a censored aged arm beside a fresh pass and a
+  censored fresh arm beside an aged fail or a censored aged arm each count in
+  `b`, and a censored fresh arm beside an aged pass counts in neither `b` nor
+  `c`.
+- `censoring_never_makes_a_gate_easier_than_any_definite_resolution`
+  (`mtr-three-gates-signed-history-effect`): for each of the five cells with a
+  censored arm, against a fixed background of concordant passes, `quality_loss`
+  and `harm` are no smaller and the aged pass rate is no larger than under
+  every definite (pass or fail) resolution of the censored arm.
+- `intervals_name_their_unit_and_counts_and_are_withheld_below_the_floor`:
+  the interval names unit, method, cluster count, item count, and replicates
+  with pinned bounds; 299 items withhold it as `item_count_below_threshold`
+  and a caller cannot lower the threshold or the replicate count; a replicate
+  count past the cap is `TooManyReplicates` before any replicate runs; one
+  cluster withholds it as `fewer_than_two_clusters`; the same seed reproduces
+  the same bounds and another seed moves them.
+- `arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained`:
+  a miss-rate gap of `2/25` against a `1/20` bound is `Blocked
+  {arm_miss_asymmetry}`; zero arms, one arm, a renamed arm, or a third arm is
+  `ArmsNotPaired`; within the bound,
+  the report carries the frozen digest, the counts, the per-arm miss and
+  refusal rates, and exactly three gate fields.
+- `the_pair_table_and_the_pilot_must_match_the_frozen_plan`
+  (`mtr-analysis-family-frozen-before-results`): a table of one or 299 pairs
+  against a frozen count of 300 is `PairCountMismatch`; a pair from a family
+  the plan did not freeze is `PairOutsideFamilies`; 300 copies of one pair are
+  `DuplicatePair`; a pilot whose effective N or unit is not what its recorded
+  counts and ICCs imply, that names zero worlds, or whose counts (one
+  observation, or no replication within worlds) could not have estimated an
+  ICC, whose sampled families are not the registered ones (by identity, not
+  count), or whose ICC exceeds one,
+  is `PilotInconsistent`, while a negative ICC projects the same undeflated N
+  as zero; 300 pairs in one world are `Blocked
+  {table_underpowered}` at `3000/309` effective items, and a 299/1 split over
+  two worlds at `450000/46051` (the size-weighted mean, not two clusters of
+  150); a pair id outside the manifest's `sample_ids` is
+  `PairsNotManifestSamples`; the same ids with one re-scored row are
+  `PairsNotManifestResult` while a reordered table digests the same; 300 worlds over a 150-world plan is
+  `WorldsExceedAffordable`; a world seed of `2^53 + 1` is
+  `WorldSeedOutOfRange` from `analyze`, `run_icc_pilot`, and
+  `cluster_bootstrap_interval`, whose draw seed of `2^53` is
+  `BootstrapSeedOutOfRange` and which refuses 300 copies of one pair over two
+  worlds as `DuplicatePair`; a required N of zero is `PilotInconsistent`; a pilot whose projection
+  leaves the safe range is `RationalOverflow`; three families of two
+  internally constant worlds (family ICC `1/9`, world ICC one) project six
+  effective items, the finer level, not nine; 10,000 replicates over 100,000
+  pairs and worlds or 501 worlds is `TooManyDraws`, while the same
+  replicates over a 300-pair plan is 3,000,000 draws and validates, as does a
+  two-family family-unit plan over 100,000 pairs (20,000 draws); an `incomplete`, `refused`, or `blocked` manifest
+  is `RunNotCompleted`; a manifest with the wrong schema or a `sample_order`
+  that is not a permutation is `InvalidManifest`; a two-family, two-world
+  pilot recording different family and world ICCs is `PilotInconsistent`;
+  `Ratio::try_new(1, 0)` and `(i64::MAX, 1)` are typed refusals; an underpowered plan blocks before a bad seed in its
+  table is read; a zero-pair
+  plan is `NoPairs`; the rate helpers validate their counts, so `n = 0` is `NoPairs` and
+  `b > n` or `n` past the safe range is `InconsistentCounts` instead of a
+  rate or a panic; a `holm` or `benjamini_hochberg` plan is
+  `UnsupportedMultiplicity`
+  while a computed pilot validates; a plan of 299 pairs against a required N
+  of 300 is `PlanBelowRequiredN` (attainable 299), as is one of 300 pairs
+  over at most 150 worlds under a world ICC of `1/10` (attainable
+  `3000/11`) and one of 301 pairs over 150 worlds under a world ICC of one
+  (attainable `90601/605`, the whole-pair allocation, not 150), and 12 pairs
+  over three worlds and two families under ICCs of `11/20` and `9/10` against
+  a required N of four (attainable `16/5`); the plan bound takes each level at
+  its own best spread and is necessary, not sufficient: a six-pair plan over
+  two families and three worlds under a real pilot's family ICC `43/195` and
+  world ICC `4/9` is admitted (bound `54/13`) while its best table reaches
+  only `1755/443` and is blocked as `TableUnderpowered` with two clusters,
+  and plans whose levels' optima coincide in one table (12 pairs over five
+  worlds and two families under a family ICC of `2/5`, six pairs over three
+  worlds and two families under `13/53`, seven pairs over five worlds and
+  three families under `1/10` and `1/5`) are admitted; a plan of four billion
+  pairs over two billion worlds is decided in closed form (and refused as
+  `RationalOverflow`); a repeated pilot observation is
+  `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
+  hand-built counts with `b + c > n`, `b + aged_pass > n`, `c > aged_pass`,
+  `aged_censored + aged_pass > n`, `fresh_censored + c > b + aged_pass`, a
+  count above `n`, or `n` past the safe range are `InconsistentCounts`; `i128::MIN` as either ratio component is
+  `RationalOverflow`, never a wrapped value.
+- `no_judge_type_reaches_the_gates`
+  (`mtr-judge-output-never-feeds-control-or-floor`): the statistics source
+  names no judge, so no judge verdict type can be an input to a gate.
+- `crates/eval-core/tests/manifest.rs` pins `analysis_family_digest` as a
+  required manifest field (schema v6) that enters the digest.
+
 ## Gaps recorded here
 
 - The OpenCode cassette is bound to the environment that recorded it: the
@@ -893,6 +1032,12 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   other variants (`UnsafePath`, `AlreadyOpen`, `NoOpenCassette`) have no test:
   the e2e suite opens each oracle once with an absolute temporary path and
   issues no operation before `open` or after `close`.
+- No approved campaign profile exists: the margins, harm bound, floor,
+  miss-asymmetry bound, and liveness bounds are maintainer inputs that the
+  code refuses to default, so no empirical Suite B or D acceptance can be
+  claimed until one is pre-registered.
+- The interval method is the percentile cluster bootstrap only; a
+  cluster-robust analytic interval is not implemented.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries
