@@ -751,10 +751,10 @@ Receipt state is in memory and cleared by a daemon restart or by uninstalling th
 
 `memory.capture`, `memory.capture.next`, `memory.capture.submit`, and
 `memory.capture.status` use the Context route and `v: 2`. Revision 1 capture
-requests are refused; `memory.capture.flush` is no longer served. These are
-harness lifecycle calls, not model tools. The route supplies project, harness,
-and session identity. Unknown fields are refused. Optional `project_root` must
-be an absolute path matching the route, never null or another type.
+requests are refused. These are harness lifecycle calls, not model tools. The
+route supplies project, harness, and session identity. Unknown fields are
+refused. Optional `project_root` must be an absolute path matching the route,
+never null or another type.
 
 A checkpoint is:
 
@@ -775,7 +775,9 @@ without this hint.
 a saved memory. Exact replay is idempotent. `disabled` writes nothing.
 `queue_full`, `project_mismatch`, and `store_failed` include `accepted`, the
 identities queued before refusal. A conversation previously captured under a
-different project cannot be copied into this project. Unacknowledged input
+different project cannot be copied into this project while any of its capture
+identities is retained: pending sources until they finish, completed or
+abandoned ones for 30 days after their first enqueue. Unacknowledged input
 must remain available for retry. Limits are 1,024 pending sources per project
 and 8,192 overall.
 
@@ -794,15 +796,23 @@ A `work` response contains:
 - `max_output_tokens: 8192`, `max_output_bytes: 131072`, and
   `max_duration_ms: 90000`.
 
-The lease lasts 180 seconds and belongs to the claiming route's project,
-harness, and session. A ready lease can expire and be replaced. Preparing or
-submitting work remains reserved until its handler finishes or is cancelled.
+The lease lasts 180 seconds from the `work` response and belongs to the
+claiming route's project, harness, and session. A ready lease can expire and
+be replaced. Preparing or submitting work remains reserved until its store
+work finishes, even when the request itself is cancelled first.
 A stale reply cannot remove or publish against a successor reservation.
-Leases are process-local; source jobs and frozen plans are durable.
+Leases are process-local; source jobs and frozen plans are durable. Capture
+queues and leases key on the same canonical project identity the kernel scope
+uses, so a symlinked spelling of one root is the same project and two roots
+that differ only in raw path bytes stay distinct. A dispatch is recorded only
+when work is issued; a `next` request cancelled during preparation records
+none, except that a source whose prompt exceeds the ceiling even alone is
+failed as soon as it is discovered, whatever becomes of the request.
 
 Other `next` states are `ready`, `pending`, `stale`, `disabled`,
 `store_failed`, and `unavailable`. `ready` means the project has no pending
-sources. It does not count saved memories. Retry backoff, exhausted failures,
+sources and no checkpoint admitted by a transform still waiting to reach the
+store. It does not count saved memories. Retry backoff, exhausted failures,
 another claimant, missing model selection, or unavailable preparation can
 produce `pending`. A lease that expired or was replaced while its work was
 being prepared produces `stale`. Clients treat `pending` and `stale` as work
@@ -838,29 +848,37 @@ and `store_failed`; mismatched models and malformed envelopes are errors.
 
 Before freezing, each memory's text becomes its exact supporting quotation,
 prefixed with `User stated:` or `Assistant reported:` from the native role.
-The model's paraphrase is not published. Relevant and sufficiently complete
-quote selection still depends on model quality. Only user-source proposals
-may replace capture-owned memories; parsing and kernel publication both
-enforce this rule. User intent and observed implementation remain distinct.
+The model's paraphrase is not published. Memories of one source that share a
+category and quotation freeze as one memory, keeping any replacement target
+among them; distinct replacement targets keep one memory each, since a
+memory supersedes exactly one predecessor. Relevant and sufficiently complete quote selection still depends
+on model quality. Only user-source proposals may replace capture-owned
+memories; parsing and kernel publication both enforce this rule, and one
+target may be replaced once per batch whichever source claims it. User intent
+and observed implementation remain distinct.
 The canonical plan freezes before publication, and replay uses its exact
 intent. A kernel receipt completes the source and clears source/plan payloads
 while retaining replay identity.
 
-Each source permits three recorded model/output failures per store-owner
-lifetime. Cancellation and unavailable native auth do not consume that
-allowance. Dispatch counts survive restart and drive exponential retry delay
-from one second to 128 seconds. A new store owner resets failures only for
+Each source permits three recorded model/output failures before it pauses
+for six hours; the pause ends with a fresh failure allowance. Cancellation
+and unavailable native auth do not consume that allowance. Dispatch counts
+survive restart and drive exponential retry delay from one second to 128
+seconds; issued work carries its deadline, so a lease lost to a restart is
+retried after that delay, not at once. A new store owner clears pauses and resets failures only for
 unfinished, unprepared sources while preserving dispatch counts and deadlines.
 A store refusal of a frozen plan is a recorded model/output failure of that
-source alone; other sources in the batch still commit. Dispatches are capped
-at nine per source across owners: a model/output failure on or after the ninth
-dispatch abandons the source. An abandoned source keeps its replay identity
-and its last error, releases its text, no longer counts toward the pending
-quota or the `pending` status count, is never returned as work, and is not
-revived by a new store owner. The native drain processes at most 32 batches
-per invocation. No model work runs in the daemon after a harness exits;
-unfinished sources await a later connected harness, and an abandoned lease may
-first need to expire.
+source alone; other sources in the batch still commit. A source whose prompt
+exceeds the prompt ceiling even alone is likewise a recorded dispatch and
+model/output failure of that source, so later sources are not held behind it.
+Dispatches are capped at nine per source across owners: a model/output failure
+on or after the ninth dispatch abandons the source. An abandoned source keeps
+its replay identity and its last error, releases its text, no longer counts
+toward the pending quota or the `pending` status count, is never returned as
+work, and is not revived by a new store owner. The native drain processes at
+most 32 batches per invocation. No model work runs in the daemon after a
+harness exits; unfinished sources await a later connected harness, and an
+abandoned lease may first need to expire.
 
 `memory.capture.status` returns `available` with project-level `pending`,
 `prepared`, `completed`, and `failed` source counts, or `store_failed`.

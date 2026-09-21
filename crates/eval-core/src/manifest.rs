@@ -11,11 +11,11 @@ use crate::census::{Construction, Reachability};
 use crate::identity::{IdentityError, RunIdentity, eval_run_id};
 use crate::residue::{ObservationSchema, RelativeDomains, ResidueEntry, ResidueError, Rule};
 
-pub const MANIFEST_SCHEMA: &str = "eval-manifest/v2";
-pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v2";
+pub const MANIFEST_SCHEMA: &str = "eval-manifest/v3";
+pub const MANIFEST_DIGEST_PROTOCOL: &str = "eval-manifest-digest/v3";
 
 /// Sorted; a field added to [`Manifest`] without a schema version bump fails the closure test.
-pub const REQUIRED_FIELDS: [&str; 25] = [
+pub const REQUIRED_FIELDS: [&str; 26] = [
     "arm_rates",
     "attestation",
     "claim_boundary",
@@ -28,6 +28,7 @@ pub const REQUIRED_FIELDS: [&str; 25] = [
     "error",
     "eval_run_id",
     "execution_mode",
+    "ingestion",
     "reachability",
     "residue",
     "result_digest",
@@ -76,6 +77,7 @@ pub struct Manifest {
     pub residue: BTreeSet<ResidueEntry>,
     pub construction: Construction,
     pub execution_mode: ExecutionMode,
+    pub ingestion: Ingestion,
     pub reachability: Reachability,
     pub claim_boundary: ClaimBoundary,
     pub component_versions: ComponentVersions,
@@ -92,6 +94,18 @@ pub enum ExecutionMode {
     Generate,
     ReplayTape,
     Enumerate,
+}
+
+/// How the world's units reached the store. No ingestion entry point has a
+/// production caller, so adapter ingestion is labelled as such and never as
+/// validated real ingestion; the direct-database path serves only non-aged
+/// fixtures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Ingestion {
+    #[serde(rename = "adapter-ingested, production caller: none")]
+    AdapterIngestedNoProductionCaller,
+    #[serde(rename = "direct-database, non-aged")]
+    DirectDatabaseNonAged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +219,7 @@ pub enum ManifestError {
     RunIdMismatch { declared: String, derived: String },
     GeneratorVersionMismatch,
     ClaimBoundaryMismatch,
+    DirectDatabaseAged,
     ResidueIncomplete { field: String },
     ResidueContradiction { type_name: String, field: String },
     SampleOrderNotAPermutation,
@@ -302,6 +317,11 @@ impl Manifest {
         }
         if self.claim_boundary != ClaimBoundary::pinned() {
             return Err(ManifestError::ClaimBoundaryMismatch);
+        }
+        if self.ingestion == Ingestion::DirectDatabaseNonAged
+            && self.construction == Construction::Replay
+        {
+            return Err(ManifestError::DirectDatabaseAged);
         }
         for entry in Self::field_schema().residue() {
             if !self.residue.contains(&entry) {

@@ -101,14 +101,17 @@ function removeDirectory(directory: string, failures: string[]): void {
     }
 }
 
+/** The model's native limits from OpenCode's provider metadata, or `undefined` when they are
+ * unknown: metadata timed out, listed no such model, or carried no usable numbers. An unknown
+ * limit is never replaced by a guess, since an override above the real output cap would make
+ * the provider reject every request. */
 async function nativeLimits(
     client: EidnaraDeps["client"],
     providerID: string,
     modelID: string,
     maxOutputTokens: number,
-): Promise<{ contextLimit: number; outputLimit: number }> {
-    let contextLimit = 1_048_576;
-    let outputLimit = maxOutputTokens;
+): Promise<{ contextLimit: number; outputLimit: number } | undefined> {
+    let limit: { context?: number; output?: number } | undefined;
     try {
         const response = await withTimeout(
             Promise.resolve(client.config.providers()),
@@ -125,27 +128,19 @@ async function nativeLimits(
             } | null,
             { preferResponseOnMissingData: true },
         );
-        const limit = info?.providers?.find((provider) => provider.id === providerID)?.models?.[
-            modelID
-        ]?.limit;
-        const nativeContext = limit?.context;
-        const nativeOutput = limit?.output;
-        if (
-            typeof nativeContext === "number" &&
-            Number.isSafeInteger(nativeContext) &&
-            nativeContext > 0
-        )
-            contextLimit = nativeContext;
-        if (
-            typeof nativeOutput === "number" &&
-            Number.isSafeInteger(nativeOutput) &&
-            nativeOutput > 0
-        )
-            outputLimit = Math.min(outputLimit, nativeOutput);
+        limit = info?.providers?.find((provider) => provider.id === providerID)?.models?.[modelID]
+            ?.limit;
     } catch {
-        // Metadata is advisory; the native provider still enforces its actual limits.
+        // Metadata is advisory; without it the private project keeps OpenCode's own model limits.
     }
-    outputLimit = Math.max(1, Math.min(outputLimit, Math.floor(contextLimit / 4)));
+    const usable = (value: unknown): value is number =>
+        typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+    if (!usable(limit?.context) || !usable(limit?.output)) return undefined;
+    const contextLimit = limit.context;
+    const outputLimit = Math.max(
+        1,
+        Math.min(maxOutputTokens, limit.output, Math.floor(contextLimit / 4)),
+    );
     return { contextLimit, outputLimit };
 }
 
@@ -190,16 +185,13 @@ async function prepareProject(
     const separator = work.model.indexOf("/");
     const providerID = work.model.slice(0, separator);
     const modelID = work.model.slice(separator + 1);
-    const { contextLimit, outputLimit } = await nativeLimits(
-        client,
-        providerID,
-        modelID,
-        work.maxOutputTokens,
-    );
+    const limits = await nativeLimits(client, providerID, modelID, work.maxOutputTokens);
     // A real root prevents native config discovery from walking into an outer checkout.
     isolateRoot(directory);
     // The authored config lives at the root; a `.opencode` directory would make OpenCode's
-    // config loader install `@opencode-ai/plugin` into it from the npm registry.
+    // config loader install `@opencode-ai/plugin` into it from the npm registry. The output cap
+    // is written only when the native limits are known; a guess above the real cap would make
+    // the provider reject every request, while OpenCode's own limits already bound the model.
     writeFileSync(
         join(directory, "opencode.json"),
         JSON.stringify({
@@ -214,13 +206,22 @@ async function prepareProject(
                     permission: { "*": "deny" },
                 },
             },
-            provider: {
-                [providerID]: {
-                    models: {
-                        [modelID]: { limit: { context: contextLimit, output: outputLimit } },
-                    },
-                },
-            },
+            ...(limits
+                ? {
+                      provider: {
+                          [providerID]: {
+                              models: {
+                                  [modelID]: {
+                                      limit: {
+                                          context: limits.contextLimit,
+                                          output: limits.outputLimit,
+                                      },
+                                  },
+                              },
+                          },
+                      },
+                  }
+                : {}),
         })
             .replaceAll("{env:", "\\u007benv:")
             .replaceAll("{file:", "\\u007bfile:"),
@@ -267,7 +268,7 @@ function projectFor(
     const key = `${work.model}\0${createHash("sha256").update(work.system).digest("hex")}\0${work.maxOutputTokens}`;
     const existing = state.byKey.get(key);
     if (existing) return existing;
-    const directory = realpathSync(mkdtempSync(join(tmpdir(), "eidnara-capture-")));
+    const directory = realpathSync(mkdtempSync(join(privateRootParent(), "eidnara-capture-")));
     state.projects.add(directory);
     const project: PrivateProject = {
         key,
@@ -287,7 +288,15 @@ function projectFor(
     return project;
 }
 
-export const __nativeCaptureTest = { isolateRoot };
+/** Where private project roots are allocated; tests point it at a directory that cannot hold one. */
+let privateRootParent: () => string = tmpdir;
+
+export const __nativeCaptureTest = {
+    isolateRoot,
+    setPrivateRootParent(parent: (() => string) | undefined): void {
+        privateRootParent = parent ?? tmpdir;
+    },
+};
 
 /** Busy projects remain available until their in-flight captures finish. */
 export async function disposeNativeCaptureProjects(client: EidnaraDeps["client"]): Promise<void> {
@@ -310,7 +319,14 @@ export function openCodeMemoryCaptureExecutor(
         const providerID = work.model.slice(0, separator);
         const modelID = work.model.slice(separator + 1);
         if (state.inFlight >= MAX_IN_FLIGHT) throw new NativeCaptureError("provider_unavailable");
-        const project = projectFor(client, work);
+        let project: PrivateProject;
+        try {
+            project = projectFor(client, work);
+        } catch (error) {
+            // Allocating the private root precedes any model call; its failure is not the model's.
+            log.warn("[eidnara] native memory capture project unavailable", describeFailure(error));
+            throw new NativeCaptureError("provider_unavailable");
+        }
         const directory = project.directory;
         state.inFlight += 1;
         project.inFlight += 1;

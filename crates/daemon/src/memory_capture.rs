@@ -6,13 +6,16 @@
 //! the model found every fact. Exact quotations prove provenance, not entailment.
 
 mod native;
+#[cfg(test)]
+pub(crate) use native::LEASE_DURATION;
 pub(crate) use native::NativeCaptureState;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use host_runtime::RouteHandle;
+use host_runtime::wire::ByteCharge;
 use memory_store::memory_capture::{CaptureEnqueue, CaptureJob, CaptureSource};
 use memory_store::{MemoryStore, MemoryStoreError};
 use serde_json::{Value, json};
@@ -20,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::PreparedOutcome;
 use crate::kernel_routes::{self, KernelOpenCoordinator, ProjectBinding};
+use crate::metered_decode::ResidentReserve;
 use crate::{
     HandlerCore, SessionBinding, invalid_params_error, now_ms, respond, store_unavailable_error,
 };
@@ -82,17 +86,22 @@ struct ExistingCaptureMemory {
     created_commit_seq: i64,
 }
 
+/// The batch parser's view: whole-document shape is typed once, and each
+/// decision stays untyped until its own source validates it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CaptureOutput {
+struct CaptureDocument {
     version: u32,
-    decisions: Vec<MessageDecision>,
+    decisions: Vec<Value>,
 }
 
+/// The batch parser matches a decision to its source by the untyped row's id
+/// before typing it, so the typed id only has to be present and a string.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MessageDecision {
-    message_id: String,
+    #[serde(rename = "message_id")]
+    _message_id: String,
     memories: Vec<CapturedMemory>,
 }
 
@@ -159,10 +168,6 @@ pub fn validate_capture_messages(messages: &[CaptureMessage]) -> Result<(), &'st
 
 /// JSON serialization keeps source IDs, roles, and bodies structurally distinct.
 /// It does not claim to prevent semantic prompt injection.
-pub fn render_capture_prompt(messages: &[CaptureMessage]) -> Result<String, &'static str> {
-    render_capture_prompt_with_existing(messages, &[])
-}
-
 fn render_capture_prompt_with_existing(
     messages: &[CaptureMessage],
     existing: &[ExistingCaptureMemory],
@@ -170,17 +175,6 @@ fn render_capture_prompt_with_existing(
     validate_capture_messages(messages)?;
     serde_json::to_string(&json!({"messages":messages,"existing_memories":existing}))
         .map_err(|_| "capture input cannot be encoded")
-}
-
-/// Validates schema, exact source coverage, bounds, categories, and quotations.
-/// A single enclosing JSON code fence is tolerated; prose, trailing objects,
-/// unknown fields, missing decisions, and unsupported citations are refused.
-/// Errors contain no model output or conversation content.
-pub fn parse_capture_output(
-    text: &str,
-    messages: &[CaptureMessage],
-) -> Result<Vec<CapturedMessage>, &'static str> {
-    parse_capture_output_with_existing(text, messages, &[])
 }
 
 fn capture_json_text(text: &str) -> Result<&str, &'static str> {
@@ -203,18 +197,22 @@ fn capture_json_text(text: &str) -> Result<&str, &'static str> {
 
 /// Each source owns its own durable job. A bad quotation for one source must
 /// not discard independently valid facts from another source in the batch.
+///
+/// Whole-document defects (schema, version, bounds, unknown or duplicate
+/// sources) refuse the batch; a defect inside one decision refuses only its
+/// source. Either refusal fails the affected jobs the same way.
 fn parse_capture_batch(
     text: &str,
     messages: &[CaptureMessage],
     existing: &[ExistingCaptureMemory],
 ) -> Result<Vec<Result<CapturedMessage, &'static str>>, &'static str> {
     validate_capture_messages(messages)?;
-    let document: Value = serde_json::from_str(capture_json_text(text)?)
+    let document: CaptureDocument = serde_json::from_str(capture_json_text(text)?)
         .map_err(|_| "capture output does not match the JSON schema")?;
-    let rows = document
-        .get("decisions")
-        .and_then(Value::as_array)
-        .ok_or("capture output requires decisions")?;
+    if document.version != CAPTURE_SCHEMA_VERSION {
+        return Err("capture output version is unsupported");
+    }
+    let rows = &document.decisions;
     if rows.len() > messages.len()
         || rows
             .iter()
@@ -238,6 +236,9 @@ fn parse_capture_batch(
             return Err("capture output names an unknown or duplicate source");
         }
     }
+    // One target may be superseded once per batch, whichever source claims it.
+    // A refused source commits nothing, so its claims are staged until it validates.
+    let mut replaced = BTreeSet::new();
     Ok(messages
         .iter()
         .map(|message| {
@@ -247,103 +248,64 @@ fn parse_capture_batch(
                     row.get("message_id").and_then(Value::as_str) == Some(message.id.as_str())
                 })
                 .ok_or("capture output omits a source message")?;
-            let mut single = document.clone();
-            single["decisions"] = json!([row]);
-            let encoded =
-                serde_json::to_string(&single).map_err(|_| "capture output cannot be encoded")?;
-            parse_capture_output_with_existing(&encoded, std::slice::from_ref(message), existing)?
-                .into_iter()
-                .next()
-                .ok_or("capture output omits a source message")
+            let decision = MessageDecision::deserialize(row)
+                .map_err(|_| "capture output does not match the JSON schema")?;
+            let mut staged = replaced.clone();
+            validate_capture_memories(&decision.memories, message, existing, &mut staged)?;
+            replaced = staged;
+            Ok(CapturedMessage {
+                source_id: message.id.clone(),
+                memories: decision.memories,
+            })
         })
         .collect())
 }
 
-fn parse_capture_output_with_existing(
-    text: &str,
-    messages: &[CaptureMessage],
+/// One source's proposed memories against its own text and the provided
+/// targets. `replaced` carries replacement uniqueness across the caller's scope.
+fn validate_capture_memories(
+    memories: &[CapturedMemory],
+    source: &CaptureMessage,
     existing: &[ExistingCaptureMemory],
-) -> Result<Vec<CapturedMessage>, &'static str> {
-    validate_capture_messages(messages)?;
-    let text = capture_json_text(text)?;
-    let output: CaptureOutput =
-        serde_json::from_str(text).map_err(|_| "capture output does not match the JSON schema")?;
-    if output.version != CAPTURE_SCHEMA_VERSION {
-        return Err("capture output version is unsupported");
-    }
-    if output.decisions.len() != messages.len() {
-        return Err("capture output must address every source message exactly once");
-    }
-    let sources: BTreeMap<&str, &CaptureMessage> = messages
-        .iter()
-        .map(|message| (message.id.as_str(), message))
-        .collect();
-    let mut decisions = BTreeMap::new();
-    let mut replaced = BTreeSet::new();
-    let mut count = 0;
-    for decision in output.decisions {
-        let source = sources
-            .get(decision.message_id.as_str())
-            .ok_or("capture output names an unknown source")?;
-        count += decision.memories.len();
-        if count > MAX_CAPTURE_MEMORIES {
-            return Err("capture output exceeds 64 memories");
+    replaced: &mut BTreeSet<String>,
+) -> Result<(), &'static str> {
+    let mut distinct = BTreeSet::new();
+    for memory in memories {
+        if !MEMORY_CATEGORY_ORDER.contains(&memory.category.as_str()) {
+            return Err(
+                "capture category must be PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING",
+            );
         }
-        let mut distinct = BTreeSet::new();
-        for memory in &decision.memories {
-            if !MEMORY_CATEGORY_ORDER.contains(&memory.category.as_str()) {
-                return Err(
-                    "capture category must be PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING",
-                );
-            }
-            if memory.content.trim().is_empty() || memory.content.len() > MAX_CAPTURE_MEMORY_BYTES {
-                return Err("capture memory content must be nonempty and at most 2048 bytes");
-            }
-            if memory.quote.trim().is_empty()
-                || memory.quote.len() > MAX_CAPTURE_MEMORY_BYTES
-                || !source.text.contains(&memory.quote)
-            {
-                return Err("capture memory must quote its source exactly in at most 2048 bytes");
-            }
-            if memory.replaces.is_some() && source.role != CaptureRole::User {
-                return Err("only user statements may replace captured memories");
-            }
-            if memory.replaces.is_some() && memory.duplicate_of.is_some() {
-                return Err("capture cannot both replace and duplicate a memory");
-            }
-            if let Some(target) = memory.replaces.as_ref().or(memory.duplicate_of.as_ref()) {
-                let Some(previous) = existing.iter().find(|previous| previous.id == *target) else {
-                    return Err("capture names an unprovided memory target");
-                };
-                if memory.replaces.is_some()
-                    && (!previous.can_replace || !replaced.insert(target.clone()))
-                {
-                    return Err("capture target is protected or already replaced");
-                }
-            }
-            if !distinct.insert((memory.category.as_str(), memory.content.as_str())) {
-                return Err("capture output repeats a memory in one source");
-            }
+        if memory.content.trim().is_empty() || memory.content.len() > MAX_CAPTURE_MEMORY_BYTES {
+            return Err("capture memory content must be nonempty and at most 2048 bytes");
         }
-        if decisions
-            .insert(decision.message_id, decision.memories)
-            .is_some()
+        if memory.quote.trim().is_empty()
+            || memory.quote.len() > MAX_CAPTURE_MEMORY_BYTES
+            || !source.text.contains(&memory.quote)
         {
-            return Err("capture output repeats a source message");
+            return Err("capture memory must quote its source exactly in at most 2048 bytes");
+        }
+        if memory.replaces.is_some() && source.role != CaptureRole::User {
+            return Err("only user statements may replace captured memories");
+        }
+        if memory.replaces.is_some() && memory.duplicate_of.is_some() {
+            return Err("capture cannot both replace and duplicate a memory");
+        }
+        if let Some(target) = memory.replaces.as_ref().or(memory.duplicate_of.as_ref()) {
+            let Some(previous) = existing.iter().find(|previous| previous.id == *target) else {
+                return Err("capture names an unprovided memory target");
+            };
+            if memory.replaces.is_some()
+                && (!previous.can_replace || !replaced.insert(target.clone()))
+            {
+                return Err("capture target is protected or already replaced");
+            }
+        }
+        if !distinct.insert((memory.category.as_str(), memory.content.as_str())) {
+            return Err("capture output repeats a memory in one source");
         }
     }
-    messages
-        .iter()
-        .map(|message| {
-            let memories = decisions
-                .remove(&message.id)
-                .ok_or("capture output omits a source message")?;
-            Ok(CapturedMessage {
-                source_id: message.id.clone(),
-                memories,
-            })
-        })
-        .collect()
+    Ok(())
 }
 
 fn native_capture_fragments(
@@ -372,8 +334,13 @@ fn native_capture_fragments(
         .harness_id
         .as_deref()
         .unwrap_or(&message.mid);
-    let source_hash = (bytes > CAPTURE_FRAGMENT_BYTES || source_id.len() > 256)
-        .then(|| format!("{:x}", Sha256::digest(source_id.as_bytes())));
+    // Ids outside the store's grammar are hashed rather than refused, so one
+    // odd native id cannot stall every later fragment of the checkpoint.
+    let source_hash = (bytes > CAPTURE_FRAGMENT_BYTES
+        || source_id.is_empty()
+        || source_id.len() > 256
+        || source_id.chars().any(char::is_control))
+    .then(|| format!("{:x}", Sha256::digest(source_id.as_bytes())));
     let mut offset = 0;
     let mut chunk = String::with_capacity(bytes.min(CAPTURE_FRAGMENT_BYTES));
     let mut send = |chunk: &str| {
@@ -382,15 +349,21 @@ fn native_capture_fragments(
         offset += chunk.len();
         result
     };
-    for ch in texts()
-        .enumerate()
-        .flat_map(|(index, text)| (index > 0).then_some('\n').into_iter().chain(text.chars()))
-    {
-        if chunk.len() + ch.len_utf8() > CAPTURE_FRAGMENT_BYTES {
-            send(&chunk)?;
-            chunk.clear();
+    for (index, text) in texts().enumerate() {
+        for piece in [if index > 0 { "\n" } else { "" }, text] {
+            let mut pending = piece;
+            while !pending.is_empty() {
+                let room = CAPTURE_FRAGMENT_BYTES - chunk.len();
+                let take = pending.floor_char_boundary(room.min(pending.len()));
+                if take == 0 {
+                    send(&chunk)?;
+                    chunk.clear();
+                    continue;
+                }
+                chunk.push_str(&pending[..take]);
+                pending = &pending[take..];
+            }
         }
-        chunk.push(ch);
     }
     if !chunk.is_empty() {
         send(&chunk)?;
@@ -423,6 +396,11 @@ fn fragment_digest(id: &str, role: &str, text: &str) -> FragmentDigest {
 
 #[derive(Default)]
 struct SessionCaptureMemo {
+    /// Distinguishes this session's memo from one recreated after a purge.
+    epoch: u64,
+    /// Checkpoints admitted but not yet run. A pinned memo is not evicted for
+    /// capacity; only deletion removes it.
+    pinned: u32,
     seen: HashSet<FragmentDigest>,
     order: VecDeque<FragmentDigest>,
 }
@@ -433,6 +411,11 @@ struct SessionCaptureMemo {
 pub(crate) struct CaptureCheckpointMemo {
     sessions: HashMap<String, SessionCaptureMemo>,
     order: VecDeque<String>,
+    next_epoch: u64,
+    /// Checkpoints admitted but not yet run, per capture project. A drain
+    /// answers `pending` while any is outstanding, so a harness cannot see
+    /// `ready` between a transform's reply and its text reaching the store.
+    outstanding: HashMap<String, usize>,
 }
 
 impl CaptureCheckpointMemo {
@@ -442,19 +425,85 @@ impl CaptureCheckpointMemo {
             .is_some_and(|memo| memo.seen.contains(digest))
     }
 
-    fn insert(&mut self, session: &str, digest: FragmentDigest) {
+    /// Pins a session's memo for one outstanding checkpoint and returns its
+    /// epoch, creating the memo when absent. A purge removes the memo, so a
+    /// checkpoint holding an older epoch knows its session was deleted.
+    /// Capacity eviction skips pinned memos; with every memo pinned the map
+    /// exceeds its cap, bounded by the outstanding checkpoints, and shrinks
+    /// back as later insertions evict the released surplus.
+    fn epoch(&mut self, session: &str) -> u64 {
         if !self.sessions.contains_key(session) {
             while self.sessions.len() >= CAPTURE_MEMO_SESSIONS {
-                match self.order.pop_front() {
-                    Some(evicted) => {
-                        self.sessions.remove(&evicted);
+                let victim = self
+                    .order
+                    .iter()
+                    .position(|kept| self.sessions.get(kept).is_none_or(|memo| memo.pinned == 0));
+                match victim.and_then(|index| self.order.remove(index)) {
+                    Some(victim) => {
+                        self.sessions.remove(&victim);
                     }
                     None => break,
                 }
             }
             self.order.push_back(session.to_owned());
+            self.next_epoch += 1;
+            self.sessions.insert(
+                session.to_owned(),
+                SessionCaptureMemo {
+                    epoch: self.next_epoch,
+                    ..Default::default()
+                },
+            );
         }
-        let memo = self.sessions.entry(session.to_owned()).or_default();
+        let memo = self
+            .sessions
+            .get_mut(session)
+            .expect("memo was just ensured");
+        memo.pinned += 1;
+        memo.epoch
+    }
+
+    fn release(&mut self, session: &str, epoch: u64) {
+        if let Some(memo) = self
+            .sessions
+            .get_mut(session)
+            .filter(|memo| memo.epoch == epoch)
+        {
+            memo.pinned = memo.pinned.saturating_sub(1);
+        }
+    }
+
+    fn admit(&mut self, project: &str) {
+        *self.outstanding.entry(project.to_owned()).or_insert(0) += 1;
+    }
+
+    fn settle(&mut self, project: &str) {
+        if let Some(count) = self.outstanding.get_mut(project) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.outstanding.remove(project);
+            }
+        }
+    }
+
+    pub(crate) fn outstanding(&self, project: &str) -> usize {
+        self.outstanding.get(project).copied().unwrap_or(0)
+    }
+
+    fn matches(&self, session: &str, epoch: u64) -> bool {
+        self.sessions
+            .get(session)
+            .is_some_and(|memo| memo.epoch == epoch)
+    }
+
+    fn insert(&mut self, session: &str, epoch: u64, digest: FragmentDigest) {
+        let Some(memo) = self
+            .sessions
+            .get_mut(session)
+            .filter(|memo| memo.epoch == epoch)
+        else {
+            return;
+        };
         if !memo.seen.insert(digest) {
             return;
         }
@@ -478,82 +527,105 @@ impl CaptureCheckpointMemo {
     }
 }
 
+/// Holds a memo pin for one outstanding checkpoint; dropping it, on any path,
+/// makes the session evictable again and lets the project's drain proceed.
+struct MemoPin {
+    memo: Arc<Mutex<CaptureCheckpointMemo>>,
+    project: String,
+    session: String,
+    epoch: u64,
+}
+
+impl Drop for MemoPin {
+    fn drop(&mut self) {
+        let mut memo = self.memo.lock().expect("capture memo mutex");
+        memo.release(&self.session, self.epoch);
+        memo.settle(&self.project);
+    }
+}
+
 struct PendingFragment {
     id: String,
     role: String,
     text: String,
     digest: FragmentDigest,
+    // Dropped with the fragment, after the store owns its bytes.
+    _charge: ByteCharge,
 }
 
-impl HandlerCore {
-    /// Checkpoints admitted raw text before any transform can fold it away.
-    /// Reasoning/tool blocks and synthetic summaries never enter extraction.
-    ///
-    /// Only the request's own `delta_messages` (the array tail after tail-delta
-    /// expansion) are considered. Memo-seen fragments skip the store; redaction
-    /// and store transactions run on the blocking pool.
-    ///
-    /// Only `pi` sources are taken from the transform. Pi joins text blocks with
-    /// `\n` exactly as `native_capture_fragments` does and marks synthetic text
-    /// per message. OpenCode marks synthetic text per part (`@file` contents,
-    /// reminders) and that flag is not carried on the wire, so only the OpenCode
-    /// plugin's own derivation is authoritative there; a daemon copy would
-    /// enqueue different text for the same message id and store scaffolding as
-    /// user statements.
-    ///
-    /// Returns the number of fragments handed to the store.
-    pub(super) async fn capture_transform_sources(
-        &self,
-        store: Arc<MemoryStore>,
-        binding: &SessionBinding,
-        request: &crate::transform::TransformRequest,
-        delta_messages: usize,
-    ) -> usize {
-        if request.is_subagent
-            || !binding.config.memory_enabled
-            || !binding.config.auto_promote
-            || !binding.config.memory_auto_capture
-            || binding.harness != "pi"
-        {
-            return 0;
-        }
-        let start = request.messages.len().saturating_sub(delta_messages);
-        let mut fragments = Vec::new();
-        {
-            let memo = self.capture_memo.lock().expect("capture memo mutex");
-            for message in &request.messages[start..] {
-                if !matches!(message.ck.role.as_str(), "user" | "assistant")
-                    || message.ck.meta.synthetic
-                    || message.ck.meta.summary
-                    || message.ck.meta.errored
-                {
-                    continue;
-                }
-                let role = message.ck.role.as_str();
-                let _ = native_capture_fragments(message, |id, text| {
-                    if text.trim().is_empty() {
-                        return Ok(());
-                    }
-                    let digest = fragment_digest(id, role, text);
-                    if !memo.contains(&binding.session, &digest) {
-                        fragments.push(PendingFragment {
-                            id: id.to_owned(),
-                            role: role.to_owned(),
-                            text: text.to_owned(),
-                            digest,
-                        });
-                    }
-                    Ok(())
-                });
+impl PendingFragment {
+    /// Bytes one retained fragment costs: its own struct (headers, digest,
+    /// charge), the three heap buffers, and a second struct-sized share for
+    /// the `Vec` doubling and allocator rounding those buffers incur.
+    fn retained_bytes(id: &str, role: &str, text: &str) -> usize {
+        (std::mem::size_of::<PendingFragment>() * 2)
+            .saturating_add(id.len())
+            .saturating_add(role.len())
+            .saturating_add(text.len())
+    }
+}
+
+/// The user-only consent gate shared by checkpointing and draining. Both sides
+/// must agree, or sources accumulate with no drainer, or drain without consent.
+pub(crate) fn capture_enabled(binding: &SessionBinding) -> bool {
+    binding.config.memory_enabled
+        && binding.config.auto_promote
+        && binding.config.memory_auto_capture
+}
+
+/// Capture storage and leases key on the kernel binding's project digest:
+/// one canonical root is one queue however it is spelled, and two roots that
+/// differ only in bytes a lossy string would fold together stay distinct.
+fn capture_project(binding: &SessionBinding) -> String {
+    binding.kernel_project.digest().to_owned()
+}
+
+/// Fragments a transform admitted but has not yet handed to the store.
+///
+/// The memo learns a fragment only after the store accepted it, so a checkpoint
+/// that never runs, or stops at a refusal, replays those fragments on the next
+/// sync and the store dedups them by identity.
+///
+/// Session deletion sweeps queued sources and the memo under the capture
+/// commit gate; the checkpoint enqueues under the same gate only while its
+/// memo epoch is current, so pre-delete work cannot land after the sweep.
+pub(crate) struct CaptureCheckpoint {
+    store: Arc<MemoryStore>,
+    commit_gate: Arc<Mutex<()>>,
+    project: String,
+    harness: String,
+    pin: MemoPin,
+    fragments: Vec<PendingFragment>,
+}
+
+impl CaptureCheckpoint {
+    /// Redaction and store transactions run on the blocking pool. Returns the
+    /// number of fragments handed to the store.
+    pub(crate) async fn run(self) -> usize {
+        let Self {
+            store,
+            commit_gate,
+            project,
+            harness,
+            pin,
+            fragments,
+        } = self;
+        kernel_routes::blocking(move || {
+            let MemoPin {
+                memo,
+                session,
+                epoch,
+                ..
+            } = &pin;
+            let (memo, session, epoch) = (Arc::clone(memo), session.clone(), *epoch);
+            let _gate = commit_gate.lock().expect("capture publication mutex");
+            if !memo
+                .lock()
+                .expect("capture memo mutex")
+                .matches(&session, epoch)
+            {
+                return 0;
             }
-        }
-        if fragments.is_empty() {
-            return 0;
-        }
-        let project = binding.project_root.to_string_lossy().into_owned();
-        let harness = binding.harness.clone();
-        let session = binding.session.clone();
-        let outcome = kernel_routes::blocking(move || {
             let mut accepted = Vec::with_capacity(fragments.len());
             let mut enqueued = 0;
             for fragment in fragments {
@@ -577,22 +649,118 @@ impl HandlerCore {
                     }
                 }
             }
-            (enqueued, accepted)
+            let mut memo = memo.lock().expect("capture memo mutex");
+            for digest in accepted {
+                memo.insert(&session, epoch, digest);
+            }
+            enqueued
         })
-        .await;
-        let Ok((enqueued, accepted)) = outcome else {
-            return 0;
-        };
-        let mut memo = self.capture_memo.lock().expect("capture memo mutex");
-        for digest in accepted {
-            memo.insert(&binding.session, digest);
+        .await
+        .unwrap_or(0)
+    }
+}
+
+impl HandlerCore {
+    /// Checkpoints admitted raw text before any transform can fold it away.
+    /// Reasoning/tool blocks and synthetic summaries never enter extraction.
+    ///
+    /// Only the request's own `delta_messages` (the array tail after tail-delta
+    /// expansion) are considered. Memo-seen fragments skip the store.
+    ///
+    /// Only `pi` sources are taken from the transform. Pi joins text blocks with
+    /// `\n` exactly as `native_capture_fragments` does and marks synthetic text
+    /// per message. OpenCode marks synthetic text per part (`@file` contents,
+    /// reminders) and that flag is not carried on the wire, so only the OpenCode
+    /// plugin's own derivation is authoritative there; a daemon copy would
+    /// enqueue different text for the same message id and store scaffolding as
+    /// user statements.
+    ///
+    /// Each retained fragment, headers and buffers included, is charged to
+    /// `reserve` before it is copied, so detached checkpoints stay inside the
+    /// scratch pool however small the fragments are. A refused charge skips
+    /// the whole checkpoint; the memo has not learned it, so it replays on the
+    /// next sync.
+    ///
+    /// Returns `None` when nothing needs the store, so the caller spawns no task.
+    pub(super) fn capture_checkpoint(
+        &self,
+        store: Arc<MemoryStore>,
+        binding: &SessionBinding,
+        request: &crate::transform::TransformRequest,
+        delta_messages: usize,
+        reserve: &dyn ResidentReserve,
+    ) -> Option<CaptureCheckpoint> {
+        if request.is_subagent || !capture_enabled(binding) || binding.harness != "pi" {
+            return None;
         }
-        enqueued
+        let start = request.messages.len().saturating_sub(delta_messages);
+        let project = capture_project(binding);
+        let mut fragments = Vec::new();
+        let mut refused = false;
+        let epoch = {
+            let mut memo = self.capture_memo.lock().expect("capture memo mutex");
+            for message in &request.messages[start..] {
+                if !matches!(message.ck.role.as_str(), "user" | "assistant")
+                    || message.ck.meta.synthetic
+                    || message.ck.meta.summary
+                    || message.ck.meta.errored
+                {
+                    continue;
+                }
+                let role = message.ck.role.as_str();
+                refused |= native_capture_fragments(message, |id, text| {
+                    if text.trim().is_empty() {
+                        return Ok(());
+                    }
+                    let digest = fragment_digest(id, role, text);
+                    if memo.contains(&binding.session, &digest) {
+                        return Ok(());
+                    }
+                    let charge = reserve
+                        .try_reserve(PendingFragment::retained_bytes(id, role, text))
+                        .ok_or("resident_pool_short")?;
+                    fragments.push(PendingFragment {
+                        id: id.to_owned(),
+                        role: role.to_owned(),
+                        text: text.to_owned(),
+                        digest,
+                        _charge: charge,
+                    });
+                    Ok(())
+                })
+                .is_err();
+                if refused {
+                    break;
+                }
+            }
+            if refused {
+                eprintln!("daemon: memory capture checkpoint deferred: resident_pool_short");
+                return None;
+            }
+            if fragments.is_empty() {
+                return None;
+            }
+            memo.admit(&project);
+            memo.epoch(&binding.session)
+        };
+        Some(CaptureCheckpoint {
+            store,
+            commit_gate: Arc::clone(&self.capture_commit_gate),
+            project: project.clone(),
+            harness: binding.harness.clone(),
+            pin: MemoPin {
+                memo: Arc::clone(&self.capture_memo),
+                project,
+                session: binding.session.clone(),
+                epoch,
+            },
+            fragments,
+        })
     }
 
     /// The route owns project/session identity. The payload supplies completed
     /// text and the current model only, never provider credentials or prompts.
-    pub(crate) fn handle_memory_capture(
+    pub(crate) async fn handle_memory_capture(
         &self,
         channel: RouteHandle,
         request: &Value,
@@ -606,17 +774,16 @@ impl HandlerCore {
             Ok(value) => value,
             Err(error) => return error,
         };
-        if !binding.config.memory_enabled
-            || !binding.config.auto_promote
-            || !binding.config.memory_auto_capture
-        {
+        if !capture_enabled(&binding) {
             return respond(json!({"state":"disabled"}));
         }
-        let messages: Vec<CaptureMessage> =
-            match request.get("messages").cloned().map(serde_json::from_value) {
-                Some(Ok(messages)) => messages,
-                _ => return invalid_params_error("memory.capture requires messages"),
-            };
+        let messages: Vec<CaptureMessage> = match request
+            .get("messages")
+            .map(<Vec<CaptureMessage>>::deserialize)
+        {
+            Some(Ok(messages)) => messages,
+            _ => return invalid_params_error("memory.capture requires messages"),
+        };
         if let Err(error) = validate_capture_messages(&messages) {
             return invalid_params_error(error);
         }
@@ -632,34 +799,45 @@ impl HandlerCore {
         let Some(store) = self.store() else {
             return store_unavailable_error();
         };
-        let project = binding.project_root.to_string_lossy().into_owned();
-        let mut accepted = Vec::new();
-        for message in messages {
-            match store.enqueue_memory_capture(
-                CaptureSource {
-                    project: &project,
-                    harness: &binding.harness,
-                    session_id: &session,
-                    message_id: &message.id,
-                    role: match message.role {
-                        CaptureRole::User => "user",
-                        CaptureRole::Assistant => "assistant",
+        let project = capture_project(&binding);
+        let harness = binding.harness.clone();
+        let gate = Arc::clone(&self.capture_commit_gate);
+        // Session deletion sweeps under the same gate, so a batch lands whole
+        // before the sweep or whole after it, never half-swept.
+        kernel_routes::blocking(move || {
+            let _gate = gate.lock().expect("capture publication mutex");
+            let mut accepted = Vec::new();
+            for message in messages {
+                match store.enqueue_memory_capture(
+                    CaptureSource {
+                        project: &project,
+                        harness: &harness,
+                        session_id: &session,
+                        message_id: &message.id,
+                        role: match message.role {
+                            CaptureRole::User => "user",
+                            CaptureRole::Assistant => "assistant",
+                        },
+                        text: &message.text,
                     },
-                    text: &message.text,
-                },
-                now_ms(),
-            ) {
-                Ok(CaptureEnqueue::Accepted { job_id, .. }) => accepted.push(job_id),
-                Ok(CaptureEnqueue::Full) => {
-                    return respond(json!({"state":"queue_full","accepted":accepted}));
+                    now_ms(),
+                ) {
+                    Ok(CaptureEnqueue::Accepted { job_id, .. }) => accepted.push(job_id),
+                    Ok(CaptureEnqueue::Full) => {
+                        return respond(json!({"state":"queue_full","accepted":accepted}));
+                    }
+                    Ok(CaptureEnqueue::ProjectMismatch) => {
+                        return respond(json!({"state":"project_mismatch","accepted":accepted}));
+                    }
+                    Err(_) => {
+                        return respond(json!({"state":"store_failed","accepted":accepted}));
+                    }
                 }
-                Ok(CaptureEnqueue::ProjectMismatch) => {
-                    return respond(json!({"state":"project_mismatch","accepted":accepted}));
-                }
-                Err(_) => return respond(json!({"state":"store_failed","accepted":accepted})),
             }
-        }
-        respond(json!({"state":"accepted","jobs":accepted}))
+            respond(json!({"state":"accepted","jobs":accepted}))
+        })
+        .await
+        .unwrap_or_else(|_| respond(json!({"state":"store_failed","accepted":[]})))
     }
 
     pub(crate) fn handle_memory_capture_status(
@@ -675,7 +853,7 @@ impl HandlerCore {
         let Some(store) = self.store() else {
             return store_unavailable_error();
         };
-        match store.memory_capture_status(&binding.project_root.to_string_lossy()) {
+        match store.memory_capture_status(&capture_project(&binding)) {
             Ok(status) => respond(
                 json!({"state":"available","pending":status.pending,"prepared":status.prepared,"completed":status.completed,"failed":status.failed}),
             ),
@@ -741,7 +919,9 @@ fn capture_retry_delay_ms(attempt: u32) -> i64 {
 }
 
 impl CaptureWork {
-    async fn existing_memories(
+    /// Every method here performs store or kernel I/O and runs on the blocking
+    /// pool; the handlers wrap one request's whole drain in a single hop.
+    fn existing_memories(
         &self,
         messages: &[CaptureMessage],
     ) -> Result<Vec<ExistingCaptureMemory>, &'static str> {
@@ -749,73 +929,19 @@ impl CaptureWork {
             .kernel
             .kernel_store()
             .map_err(|_| "kernel_unavailable")?;
-        let project = self.binding.kernel_project.clone();
         let words: HashSet<String> = messages
             .iter()
             .flat_map(|message| message.text.split(|ch: char| !ch.is_alphanumeric()))
             .filter(|word| word.chars().count() >= 3)
             .map(str::to_lowercase)
             .collect();
-        kernel_routes::blocking(move || {
-            let read = kernel_routes::read::read_visible(
-                &kernel,
-                &project,
-                kernel::Surface::ExplicitSearch,
-                None,
-                kernel_routes::read::RowSelection::DomainDecisions("memory"),
-            )
-            .map_err(|_| "kernel_unavailable")?;
-            let mut candidates: Vec<_> = read
-                .rows
-                .iter()
-                .filter_map(|row| {
-                    if row.object.sensitivity != kernel::Sensitivity::Normal {
-                        return None;
-                    }
-                    let decision = read.decisions.get(&row.object.object_id)?;
-                    if !MEMORY_CATEGORY_ORDER.contains(&decision.decision_kind.as_str())
-                        || decision.payload.summary.len() > MAX_CAPTURE_MEMORY_BYTES + 32
-                    {
-                        return None;
-                    }
-                    let score = decision
-                        .payload
-                        .summary
-                        .split(|ch: char| !ch.is_alphanumeric())
-                        .filter(|word| words.contains(&word.to_lowercase()))
-                        .count();
-                    Some((
-                        score,
-                        ExistingCaptureMemory {
-                            id: row.object.object_id.clone(),
-                            category: decision.decision_kind.clone(),
-                            content: decision.payload.summary.clone(),
-                            can_replace: row.object.source_id == "memory_capture"
-                                && row.visibility == kernel::SurfaceVisibility::Labeled,
-                            source_revision: row.object.source_revision,
-                            created_commit_seq: row.object.created_commit_seq,
-                        },
-                    ))
-                })
-                .collect();
-            candidates.sort_by(|a, b| {
-                b.0.cmp(&a.0)
-                    .then_with(|| b.1.created_commit_seq.cmp(&a.1.created_commit_seq))
-                    .then_with(|| a.1.id.cmp(&b.1.id))
-            });
-            Ok(candidates
-                .into_iter()
-                .take(64)
-                .map(|(_, memory)| memory)
-                .collect())
-        })
-        .await
-        .map_err(|_| "kernel_unavailable")?
+        select_existing_memories(&kernel, &self.binding.kernel_project, &words)
     }
 
     /// Transport, provider, store, and kernel outcomes say nothing about the
     /// model's answer, so they leave the model-failure allowance untouched.
-    fn failed(&self, jobs: &[CaptureJob], code: &str, retry_at: i64) -> Result<(), &'static str> {
+    /// Each source backs off by its own dispatch count.
+    fn failed(&self, jobs: &[CaptureJob], code: &str, now: i64) -> Result<(), &'static str> {
         if self.cancel.is_cancelled() {
             return Ok(());
         }
@@ -829,58 +955,159 @@ impl CaptureWork {
                     &job.project,
                     &job.job_id,
                     code,
-                    retry_at,
+                    now.saturating_add(capture_retry_delay_ms(job.attempts)),
                     model_failure,
-                    now_ms(),
+                    now,
                 )
                 .map_err(|_| "store_failed")?;
         }
         Ok(())
     }
 
-    async fn publish(&self, job: CaptureJob) -> Result<(), &'static str> {
-        let store = Arc::clone(&self.store);
+    fn publish(&self, job: &CaptureJob) -> Result<(), &'static str> {
         let kernel = self
             .kernel
             .kernel_store()
             .map_err(|_| "kernel_unavailable")?;
-        let project = self.binding.kernel_project.clone();
-        let gate = Arc::clone(&self.commit_gate);
-        kernel_routes::blocking(move || {
-            // Session deletion takes the same gate. No await occurs while it is
-            // held, and deletion cannot race a post-check capture publication.
-            let _gate = gate.lock().expect("capture publication mutex");
-            let Some(prepared) = store
-                .prepare_memory_capture(
+        // Session deletion takes the same gate. No await occurs while it is
+        // held, and deletion cannot race a post-check capture publication.
+        let _gate = self.commit_gate.lock().expect("capture publication mutex");
+        let Some(prepared) = self
+            .store
+            .prepare_memory_capture(
+                &job.project,
+                &job.job_id,
+                job.prepared.as_deref().ok_or("missing_preparation")?,
+            )
+            .map_err(|_| "store_failed")?
+        else {
+            return Ok(());
+        };
+        let output: PreparedCapture =
+            serde_json::from_str(&prepared).map_err(|_| "invalid_preparation")?;
+        if output.version != CAPTURE_SCHEMA_VERSION {
+            return Err("invalid_preparation");
+        }
+        let receipt = publish_captured_memories(
+            &kernel,
+            &self.binding.kernel_project,
+            job,
+            &output,
+            &prepared,
+        )
+        .map_err(|error| {
+            if matches!(error, kernel::KernelError::Conflict) {
+                "reconciliation_conflict"
+            } else {
+                "kernel_write_failed"
+            }
+        })?;
+        self.store
+            .complete_memory_capture(&job.project, &job.job_id, receipt.commit_seq)
+            .map_err(|_| "store_failed")?;
+        Ok(())
+    }
+
+    /// A rejected kernel transaction wrote nothing. A revision conflict means a
+    /// target moved under the frozen plan, so the source is re-planned; any
+    /// other kernel failure keeps the plan and retries on the dispatch backoff.
+    fn publish_or_recover(&self, job: &CaptureJob) -> Result<(), &'static str> {
+        let Err(code) = self.publish(job) else {
+            return Ok(());
+        };
+        if code == "reconciliation_conflict" {
+            self.store
+                .retry_memory_capture_reconciliation(
                     &job.project,
                     &job.job_id,
-                    job.prepared.as_deref().ok_or("missing_preparation")?,
+                    job.prepared.as_deref().unwrap_or_default(),
                 )
-                .map_err(|_| "store_failed")?
-            else {
-                return Ok(());
-            };
-            let output: PreparedCapture =
-                serde_json::from_str(&prepared).map_err(|_| "invalid_preparation")?;
-            if output.version != CAPTURE_SCHEMA_VERSION {
-                return Err("invalid_preparation");
-            }
-            let receipt = publish_captured_memories(&kernel, &project, &job, &output, &prepared)
-                .map_err(|error| {
-                    if matches!(error, kernel::KernelError::Conflict) {
-                        "reconciliation_conflict"
-                    } else {
-                        "kernel_write_failed"
-                    }
-                })?;
-            store
-                .complete_memory_capture(&job.project, &job.job_id, receipt.commit_seq)
-                .map_err(|_| "store_failed")?;
-            Ok(())
-        })
-        .await
-        .map_err(|_| "kernel_unavailable")?
+                .map_err(|_| "store_failed")
+        } else {
+            self.store
+                .fail_memory_capture(
+                    &job.project,
+                    &job.job_id,
+                    "kernel_write_failed",
+                    now_ms().saturating_add(capture_retry_delay_ms(job.attempts)),
+                    false,
+                    now_ms(),
+                )
+                .map_err(|_| "store_failed")
+        }
     }
+}
+
+/// The bounded candidate set for one batch: the 64 memory decisions sharing
+/// the most of the batch's lowercase words, newest first among ties.
+fn select_existing_memories(
+    kernel: &kernel::KernelStore,
+    project: &ProjectBinding,
+    words: &HashSet<String>,
+) -> Result<Vec<ExistingCaptureMemory>, &'static str> {
+    let read = kernel_routes::read::read_visible(
+        kernel,
+        project,
+        kernel::Surface::ExplicitSearch,
+        None,
+        kernel_routes::read::RowSelection::DomainDecisions("memory"),
+    )
+    .map_err(|_| "kernel_unavailable")?;
+    // Score borrows the read; only the 64 kept candidates are materialized.
+    let mut lowered = String::new();
+    let mut candidates: Vec<(usize, &kernel::VisibleRow, &kernel::DecisionRow)> = read
+        .rows
+        .iter()
+        .filter_map(|row| {
+            if row.object.sensitivity != kernel::Sensitivity::Normal {
+                return None;
+            }
+            let decision = read.decisions.get(&row.object.object_id)?;
+            if !MEMORY_CATEGORY_ORDER.contains(&decision.decision_kind.as_str())
+                || decision.payload.summary.len() > MAX_CAPTURE_MEMORY_BYTES + 32
+            {
+                return None;
+            }
+            let score = decision
+                .payload
+                .summary
+                .split(|ch: char| !ch.is_alphanumeric())
+                .filter(|word| {
+                    if word.is_ascii() {
+                        lowered.clear();
+                        lowered.push_str(word);
+                        lowered.make_ascii_lowercase();
+                        words.contains(lowered.as_str())
+                    } else {
+                        words.contains(&word.to_lowercase())
+                    }
+                })
+                .count();
+            Some((score, row, decision))
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| {
+                b.1.object
+                    .created_commit_seq
+                    .cmp(&a.1.object.created_commit_seq)
+            })
+            .then_with(|| a.1.object.object_id.cmp(&b.1.object.object_id))
+    });
+    Ok(candidates
+        .into_iter()
+        .take(64)
+        .map(|(_, row, decision)| ExistingCaptureMemory {
+            id: row.object.object_id.clone(),
+            category: decision.decision_kind.clone(),
+            content: decision.payload.summary.clone(),
+            can_replace: row.object.source_id == "memory_capture"
+                && row.visibility == kernel::SurfaceVisibility::Labeled,
+            source_revision: row.object.source_revision,
+            created_commit_seq: row.object.created_commit_seq,
+        })
+        .collect())
 }
 
 fn checked_capture_target(
@@ -982,6 +1209,28 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn render_capture_prompt(messages: &[CaptureMessage]) -> Result<String, &'static str> {
+        render_capture_prompt_with_existing(messages, &[])
+    }
+
+    /// The strict view of a batch: any refused source refuses the whole answer.
+    fn parse_capture_output_with_existing(
+        text: &str,
+        messages: &[CaptureMessage],
+        existing: &[ExistingCaptureMemory],
+    ) -> Result<Vec<CapturedMessage>, &'static str> {
+        parse_capture_batch(text, messages, existing)?
+            .into_iter()
+            .collect()
+    }
+
+    fn parse_capture_output(
+        text: &str,
+        messages: &[CaptureMessage],
+    ) -> Result<Vec<CapturedMessage>, &'static str> {
+        parse_capture_output_with_existing(text, messages, &[])
+    }
+
     #[test]
     fn dispatch_backoff_grows_even_without_confirmed_model_failures() {
         assert_eq!(capture_retry_delay_ms(0), 1_000);
@@ -1070,6 +1319,63 @@ mod tests {
         assert!(batch[1].is_err());
         // The strict whole-document interface still refuses incomplete results.
         assert!(parse_capture_output(&response.to_string(), &sources()).is_err());
+        // A shape defect inside one decision refuses only that source.
+        let mut malformed = output();
+        malformed["decisions"][0]["extra"] = json!(true);
+        let batch = parse_capture_batch(&malformed.to_string(), &sources(), &[]).unwrap();
+        assert!(batch[0].is_ok());
+        assert!(batch[1].is_err());
+        // Whole-document defects refuse the batch before any source is judged.
+        for (path, value) in [
+            ("version", json!(2)),
+            ("extra", json!(true)),
+            ("decisions", json!({})),
+        ] {
+            let mut document = output();
+            document[path] = value;
+            assert!(parse_capture_batch(&document.to_string(), &sources(), &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn a_refused_source_does_not_consume_a_replacement_target_for_a_later_source() {
+        let messages = vec![
+            CaptureMessage {
+                id: "u1".into(),
+                role: CaptureRole::User,
+                text: "Use port 4321 for staging.".into(),
+            },
+            CaptureMessage {
+                id: "u2".into(),
+                role: CaptureRole::User,
+                text: "Staging moved to port 5555.".into(),
+            },
+        ];
+        let existing = vec![ExistingCaptureMemory {
+            id: "mem_old".into(),
+            category: "CONFIG_VALUES".into(),
+            content: "Staging uses port 1234.".into(),
+            can_replace: true,
+            source_revision: 1,
+            created_commit_seq: 1,
+        }];
+        let text = json!({"version":1,"decisions":[
+            {"message_id":"u1","memories":[
+                {"category":"CONFIG_VALUES","content":"Staging uses port 4321.","quote":"Use port 4321 for staging.","replaces":"mem_old"},
+                {"category":"CONFIG_VALUES","content":"Invented.","quote":"not in the source"}]},
+            {"message_id":"u2","memories":[
+                {"category":"CONFIG_VALUES","content":"Staging uses port 5555.","quote":"Staging moved to port 5555.","replaces":"mem_old"}]}
+        ]})
+        .to_string();
+        let batch = parse_capture_batch(&text, &messages, &existing).unwrap();
+        assert!(
+            batch[0].is_err(),
+            "the source with a bad quotation is refused"
+        );
+        let second = batch[1]
+            .as_ref()
+            .expect("a refused source must not hold the replacement target it never committed");
+        assert_eq!(second.memories[0].replaces.as_deref(), Some("mem_old"));
     }
 
     #[test]
@@ -1147,6 +1453,81 @@ mod tests {
         assert_eq!(message, original);
     }
 
+    #[test]
+    fn a_source_id_outside_the_capture_grammar_is_hashed_not_poisonous() {
+        use memory_store::{BlockKind, WireBlock, WireMessage};
+        let message = crate::wire::IngressMessage {
+            mid: "line\nbreak".into(),
+            ordinal: 1,
+            ck: WireMessage::from_parts(
+                "user",
+                vec![WireBlock::bare(BlockKind::Text {
+                    text: "Use port 4321 for staging.".into(),
+                })],
+                None,
+                Default::default(),
+                Default::default(),
+            ),
+        };
+        let mut ids = Vec::new();
+        native_capture_fragments(&message, |id, _| {
+            ids.push(id.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(ids.len(), 1);
+        assert!(
+            !ids[0].is_empty() && ids[0].len() <= 256 && !ids[0].chars().any(char::is_control),
+            "a fragment id must satisfy the store's id grammar: {:?}",
+            ids[0]
+        );
+    }
+
+    #[test]
+    fn an_outstanding_checkpoint_pins_its_session_memo_against_capacity_eviction() {
+        let mut memo = CaptureCheckpointMemo::default();
+        let epoch = memo.epoch("ses");
+        for other in 0..CAPTURE_MEMO_SESSIONS {
+            let session = format!("other-{other}");
+            let released = memo.epoch(&session);
+            memo.release(&session, released);
+        }
+        assert!(
+            memo.matches("ses", epoch),
+            "a session with an admitted checkpoint outlives the capacity sweep"
+        );
+        memo.release("ses", epoch);
+        memo.epoch("one-more");
+        assert!(
+            !memo.matches("ses", epoch),
+            "once released, the oldest session is ordinary eviction fodder again"
+        );
+    }
+
+    #[test]
+    fn releasing_a_pin_burst_lets_the_memo_shrink_back_to_its_cap() {
+        let mut memo = CaptureCheckpointMemo::default();
+        let burst = CAPTURE_MEMO_SESSIONS + 44;
+        let pins: Vec<(String, u64)> = (0..burst)
+            .map(|index| {
+                let session = format!("burst-{index}");
+                let epoch = memo.epoch(&session);
+                (session, epoch)
+            })
+            .collect();
+        assert_eq!(memo.sessions.len(), burst, "every pinned memo survives");
+        for (session, epoch) in &pins {
+            memo.release(session, *epoch);
+        }
+        let epoch = memo.epoch("after");
+        memo.release("after", epoch);
+        assert!(
+            memo.sessions.len() <= CAPTURE_MEMO_SESSIONS,
+            "surplus unpinned memos are evicted, not kept at the high-water mark: {}",
+            memo.sessions.len()
+        );
+    }
+
     fn job(key: &str) -> CaptureJob {
         CaptureJob {
             job_id: key.into(),
@@ -1170,6 +1551,54 @@ mod tests {
             replaces: None,
             duplicate_of: None,
         }
+    }
+
+    #[test]
+    fn a_replacement_target_survives_quotation_collapse_whatever_the_output_order() {
+        let mut duplicate = memory("Use port 4321 for staging.");
+        duplicate.duplicate_of = Some("mem_same".into());
+        let mut replacement = memory("Staging listens on 4321.");
+        replacement.quote = duplicate.quote.clone();
+        replacement.replaces = Some("mem_old".into());
+        for order in [
+            vec![duplicate.clone(), replacement.clone()],
+            vec![replacement.clone(), duplicate.clone()],
+        ] {
+            let collapsed = native::collapse_quotations("User stated", order);
+            assert_eq!(collapsed.len(), 1);
+            assert_eq!(collapsed[0].replaces.as_deref(), Some("mem_old"));
+            assert_eq!(collapsed[0].duplicate_of, None);
+            assert_eq!(
+                collapsed[0].content,
+                "User stated: Use port 4321 for staging."
+            );
+        }
+    }
+
+    #[test]
+    fn distinct_replacement_targets_survive_quotation_collapse_as_separate_memories() {
+        let mut first = memory("Staging listens on 4321.");
+        first.quote = "Use port 4321 for staging.".into();
+        first.replaces = Some("mem_port".into());
+        let mut second = memory("The staging port changed.");
+        second.quote = first.quote.clone();
+        second.replaces = Some("mem_staging".into());
+        let collapsed = native::collapse_quotations("User stated", vec![first, second]);
+        let mut targets: Vec<&str> = collapsed
+            .iter()
+            .filter_map(|memory| memory.replaces.as_deref())
+            .collect();
+        targets.sort_unstable();
+        assert_eq!(
+            targets,
+            vec!["mem_port", "mem_staging"],
+            "one quotation superseding two memories keeps both targets"
+        );
+        assert!(
+            collapsed
+                .iter()
+                .all(|memory| memory.content == "User stated: Use port 4321 for staging.")
+        );
     }
 
     fn current(kernel: &kernel::KernelStore, project: &ProjectBinding) -> ExistingCaptureMemory {
@@ -1338,6 +1767,40 @@ mod tests {
         };
         assert!(
             parse_capture_output_with_existing(&response.to_string(), &sources(), &[protected])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_replacement_target_is_claimed_at_most_once_across_a_batch() {
+        let existing = ExistingCaptureMemory {
+            id: "mem_old".into(),
+            category: "CONFIG_VALUES".into(),
+            content: "Staging port was 1234.".into(),
+            can_replace: true,
+            source_revision: 1,
+            created_commit_seq: 1,
+        };
+        let mut users = sources();
+        users[1].role = CaptureRole::User;
+        let response = json!({"version":1,"decisions":[
+            {"message_id":"native-1","memories":[{"category":"CONFIG_VALUES","content":"Staging uses port 4321.","quote":"Use port 4321 for staging.","replaces":"mem_old"}]},
+            {"message_id":"native-2","memories":[{"category":"CONSTRAINTS","content":"Investigation is pending.","quote":"I will investigate.","replaces":"mem_old"}]}
+        ]})
+        .to_string();
+        let batch =
+            parse_capture_batch(&response, &users, std::slice::from_ref(&existing)).unwrap();
+        assert!(batch[0].is_ok(), "the first claimant keeps its replacement");
+        assert!(
+            matches!(
+                batch[1],
+                Err("capture target is protected or already replaced")
+            ),
+            "a second source cannot claim the same target: {:?}",
+            batch[1].as_ref().map(|_| ())
+        );
+        assert!(
+            parse_capture_output_with_existing(&response, &users, std::slice::from_ref(&existing))
                 .is_err()
         );
     }

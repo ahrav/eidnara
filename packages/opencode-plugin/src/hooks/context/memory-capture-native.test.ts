@@ -41,6 +41,8 @@ function harness(overrides: {
     /** `instance.dispose` throws synchronously, as a disposed SDK client does. */
     disposeThrowsSync?: boolean;
     onCreate?: (directory: string) => void;
+    /** `config.providers()` omits the selected model, so native limits are unknown. */
+    unknownModel?: boolean;
     /** The private session create rejects with this error. */
     createError?: Error;
     /** OpenCode's unified finish reason for the private session's answer. */
@@ -61,6 +63,7 @@ function harness(overrides: {
         config: {
             providers: async () => {
                 state.providerReads += 1;
+                if (overrides.unknownModel) return { data: { providers: [] } };
                 return {
                     data: {
                         providers: [
@@ -307,6 +310,42 @@ describe("OpenCode native memory capture executor", () => {
             rmSync(directory as string, { recursive: true, force: true });
         } finally {
             warn.mockRestore();
+        }
+    });
+
+    it("writes no model override when native limits are unknown, leaving OpenCode's own limits in force", async () => {
+        const configs: Array<Record<string, unknown>> = [];
+        const h = harness({
+            unknownModel: true,
+            onCreate: (directory) => {
+                configs.push(JSON.parse(readFileSync(join(directory, "opencode.json"), "utf8")));
+            },
+        });
+        lastClient = h.client;
+        const result = await openCodeMemoryCaptureExecutor(h.client as never)(
+            { ...work, system: "unknown-limits" },
+            new AbortController().signal,
+        );
+        expect(result).toEqual({ model: "custom/m", text: '{"ok":true}' });
+        expect(configs).toHaveLength(1);
+        expect(configs[0]?.provider).toBeUndefined();
+        expect(configs[0]?.agent).toBeDefined();
+    });
+
+    it("reports a private root that cannot be allocated as unavailable", async () => {
+        const missing = join(tmpdir(), "eidnara-missing-tmp", "nested");
+        __nativeCaptureTest.setPrivateRootParent(() => missing);
+        try {
+            const h = harness({});
+            lastClient = h.client;
+            await expect(
+                openCodeMemoryCaptureExecutor(h.client as never)(
+                    { ...work, system: "no-tmp" },
+                    new AbortController().signal,
+                ),
+            ).rejects.toThrow("Native memory capture: provider_unavailable");
+        } finally {
+            __nativeCaptureTest.setPrivateRootParent(undefined);
         }
     });
 

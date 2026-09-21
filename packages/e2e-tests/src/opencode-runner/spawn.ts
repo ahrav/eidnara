@@ -203,9 +203,11 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
         execute_threshold_percentage: 40,
         history_budget_percentage: 0.15,
         context_researcher: { disable: true },
-        // Generic mock responses do not implement extraction; capture scenarios opt in explicitly.
-        memory: { auto_capture: false },
         ...(eidnaraConfig ?? {}),
+        // Generic mock responses do not implement extraction; capture scenarios opt in explicitly.
+        // Merged under the caller's memory block so a scenario that tunes other memory settings
+        // does not silently restore the schema default of `auto_capture: true`.
+        memory: { auto_capture: false, ...callerMemory(eidnaraConfig) },
     };
     if (opts.userHostConnectionFile) {
         // The user tier names the daemon; only the user tier may set `host`.
@@ -257,6 +259,13 @@ function canonicalizeSpawnConfigs(opts: SpawnOptions): SpawnOptions {
  * Serialize before validation so `toJSON()` transformations cannot bypass credential checks.
  * Cyclic input causes `JSON.stringify` to throw before credential validation.
  */
+function callerMemory(config: Record<string, unknown> | undefined): Record<string, unknown> {
+    const memory = config?.memory;
+    return memory !== null && typeof memory === "object" && !Array.isArray(memory)
+        ? (memory as Record<string, unknown>)
+        : {};
+}
+
 function canonicalConfig(
     value: Record<string, unknown> | undefined,
     label: string,

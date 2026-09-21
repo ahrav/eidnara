@@ -263,7 +263,7 @@ Example: eidnara_note(action="write", content="Revisit the retry logic after the
 }
 ```
 
-### eidnara_memory — description ~243 tokens, params ~417 tokens (total ~660)
+### eidnara_memory — description ~271 tokens, params ~417 tokens (total ~688)
 
 **Description:**
 
