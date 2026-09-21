@@ -21,6 +21,7 @@ mod eligibility;
 mod event;
 mod generator;
 mod identity;
+mod ledger;
 mod manifest;
 mod markers;
 mod occurrence;
@@ -38,6 +39,11 @@ pub use generator::*;
 pub use identity::{
     BUILD_PROTOCOL, BinaryDigest, BuildRecord, IdentityError, RUN_ID_PROTOCOL, RunIdentity,
     eval_run_id, zero_bytes_sha256,
+};
+pub use ledger::{
+    CHAIN_STAGES, ChainStage, Completed, Evidence, Ledger, LedgerError,
+    MAX_CANDIDATES_PER_STAGE_OBSERVATION, Observation, Presence, Required, Stage, StageKind,
+    StageVerdict,
 };
 pub use manifest::{
     ArmRates, Attestation, CLAIM_BOUNDARY_EXCLUSIONS, CLAIM_BOUNDARY_SCHEMA, ClaimBoundary,

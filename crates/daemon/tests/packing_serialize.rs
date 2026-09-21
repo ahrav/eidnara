@@ -21,7 +21,9 @@ use kernel::applicability::EvalBudget;
 use retrieval::packing::{OptionalBounds, RequiredBounds};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use support::packing::{Fixture, ToolSpan, accounting_bounds, bounds, byte_profile, tool_span};
+use support::packing::{
+    Fixture, ToolSpan, accounting_bounds, bounds, byte_profile, tool_span, wide,
+};
 
 const REQUIRED: ToolSpan = tool_span("req", "1", "required bytes stay\n");
 const GROUPS: [ToolSpan; 3] = [
@@ -29,17 +31,6 @@ const GROUPS: [ToolSpan; 3] = [
     tool_span("opt-b", "1", "second optional group, a bit longer\n"),
     tool_span("opt-c", "1", "third\n"),
 ];
-
-fn wide() -> OptionalBounds {
-    OptionalBounds {
-        max_fused_candidates: NonZeroUsize::new(16).unwrap(),
-        max_parents: NonZeroUsize::new(16).unwrap(),
-        max_spans_per_parent: NonZeroUsize::new(16).unwrap(),
-        max_payload_loads: NonZeroUsize::new(16).unwrap(),
-        max_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
-        max_item_bytes: NonZeroU64::new(1 << 19).unwrap(),
-    }
-}
 
 fn fixture() -> Fixture {
     Fixture::new(&[REQUIRED, GROUPS[0], GROUPS[1], GROUPS[2]])

@@ -159,6 +159,15 @@ impl PackingTrace {
         self.payload_loads
     }
 
+    /// A read row can still be excluded, skipped, or refused later.
+    pub fn read_occurrences(&self) -> impl Iterator<Item = OccurrenceId> + '_ {
+        self.events.iter().filter_map(|event| match event {
+            StageEvent::Required(RequiredEvent::Read, Some(occurrence))
+            | StageEvent::Optional(OptionalEvent::Read, Some(occurrence)) => Some(*occurrence),
+            _ => None,
+        })
+    }
+
     /// Candidate-retrieving lanes call this; the packer never does.
     pub fn note_retrieval_call(&mut self) {
         self.retrieval_calls += 1;
@@ -594,10 +603,12 @@ pub fn prepare_optional(
     let mut live: Vec<(OptionalRequest, SelectedOccurrence)> = Vec::new();
     for (request, read) in requests.iter().zip(reads) {
         match read {
-            Ok(row) => live.push((*request, row)),
+            Ok(row) => {
+                trace.optional(OptionalEvent::Read, Some(request.occurrence));
+                live.push((*request, row));
+            }
             Err(exclusion) => excluded.push((request.occurrence, exclusion)),
         }
-        trace.optional(OptionalEvent::Read, Some(request.occurrence));
     }
     if let Some(fault) = fault {
         return Err(fault.into());

@@ -9,8 +9,9 @@ they would distort reachability summaries.
 
 Records enter this directory when their checks are re-verified at the
 then-current HEAD, in the METHOD field order from [`../METHOD.md`](../METHOD.md).
-Until then, this file lists the executed checks the Phase 0 regression net
-provides, so a reader can find them by test name.
+Until then, this file lists the executed checks the Phase 0 regression net,
+the Phase 1 world model, and the Phase 2 stage ledger provide, so a reader can
+find them by test name.
 
 ## Phase 0 executed checks
 
@@ -478,6 +479,126 @@ field (`ing-adapter-path-no-production-caller-labelled`); its wire value is
 `adapter-ingested, production caller: none`, and `direct-database, non-aged`
 with a `replay` construction is refused as `DirectDatabaseAged`.
 
+## Phase 2 executed checks: stage ledger on the activated chain
+
+Ledger join (`crates/eval-core/tests/ledger.rs`):
+
+- `the_chain_stages_are_pinned_in_production_order_with_their_kinds` pins
+  `CHAIN_STAGES` (exact, lexical, dense, eligibility, fusion, selection,
+  packing), their `Source`/`Filter` kinds, their ordinals, and their wire
+  names.
+- `stage_presence_is_three_valued_and_an_unjoinable_stage_has_none`
+  (`ldg-stage-presence-three-valued`): `NotReached`, `ReachedEvidenceAbsent`,
+  and `Reached` from one ledger, and `None` for a stage whose only output is
+  `Unjoinable`.
+- `the_first_loss_is_the_earliest_absent_stage_on_the_entry_path` drops the
+  rule from one stage at a time under three entries and expects a loss only on
+  the entry's path; `the_earliest_loss_wins_and_later_absences_are_not_a_second_verdict`,
+  `an_unreached_entry_is_indeterminate_not_a_loss_downstream`,
+  `a_chain_that_never_reaches_the_terminal_stage_is_indeterminate_not_clean`
+  (also with nothing required: an unreached or unjoinable terminal, or an
+  empty ledger, is never `Clean`),
+  `an_unobserved_filter_between_observed_stages_is_transparent`, and
+  `a_stage_that_ends_the_request_reports_an_empty_output` fix the edges.
+- `an_unjoinable_stage_is_never_evidence_absence`: a rule present after an
+  unjoinable stage is `Clean`; a later sighting places a later loss; an
+  absence right behind the unjoinable stage, or an unjoinable last stage, is
+  `Indeterminate`.
+- `every_permutation_of_the_observations_folds_the_same` folds all 720
+  orders of six observations (two of them contradicting) and all 120 orders
+  of the five distinct ones to one ledger, one verdict, and one presence per
+  stage; `the_highest_sequence_is_the_stage_output` and
+  `identical_duplicates_are_idempotent_and_contradictions_are_indeterminate`
+  (`ldg-duplicate-observations-idempotent-contradictions-indeterminate`) pin
+  sequence and duplicate semantics, the latter in both arrival orders.
+- `a_fold_accepts_exactly_one_commit_read_incarnation`
+  (`ldg-observation-carries-incarnation-cross-incarnation-refuses`): two
+  tokens are `Indeterminate`; a return carrying no token asserts nothing.
+- `a_delivered_stale_occurrence_names_the_stage_it_entered`: `StaleIngress`
+  names the ingress stage only when the stale occurrence reaches the terminal
+  stage, and names where the delivered copy entered: a filter that removed an
+  earlier copy clears that sighting, so a reintroduced occurrence is attributed
+  to the reintroducing stage; loss and ingress order by ordinal with the loss
+  winning ties; a stale occurrence seen before an unjoinable terminal, or first
+  seen right behind an unjoinable stage, is `Indeterminate`, while an
+  unjoinable stage after a known sighting keeps that ingress, a filter's output
+  without it closes the opacity, and its removal before the terminal is
+  `Clean`.
+- `a_stage_observation_over_the_kernel_batch_is_refused` pins
+  `MAX_CANDIDATES_PER_STAGE_OBSERVATION` at 1024 with a refusal at 1025;
+  `over_bound_stage_returns_are_unjoinable_instead_of_panicking` pins the
+  daemon shell's mapping of that refusal to `Unjoinable` at the source and
+  combined eligibility stage;
+  `a_packing_refusal_is_a_loss_at_a_bound_and_unjoinable_at_a_fault` pins the
+  shell's packing refusals: a bound is an empty output, a fault is
+  `Unjoinable`.
+- `completed_folds_compare_only_within_one_persisted_store`: `agrees_with`
+  answers within one `database_incarnation_id`, refuses `CrossStore`, and the
+  fold round-trips through JSON.
+
+Production taps and the seven injections (`crates/daemon/tests/eval_ledger.rs`,
+`ldg-seven-fault-self-test-classifies-each-injection`,
+`ldg-seven-fault-injections-reached`): each scenario asserts its
+preconditions from the returned values, records its `ldg_` marker, and
+classifies to its stage.
+
+- `exact_page_bound_loses_the_rule_at_the_exact_lane`: `exact_pages` and
+  `exact_page_rows` of one leave the lane `Incomplete("page_bound")` with the
+  last rule row unread; `FirstLoss(Exact)`.
+- `lexical_accepted_bound_loses_the_rule_at_the_lexical_lane`:
+  `lexical_accepted` of one leaves the lane `Incomplete("accepted_bound")`
+  with one ranked hit; a lexical-only hit is `FirstLoss(Lexical)`.
+- `dense_k_bound_loses_the_rule_at_the_dense_lane`: the exhaustive producer
+  at `k = 1` ranks the reference's first row only; the second is
+  `FirstLoss(Dense)`.
+- `a_retired_object_loses_the_rule_at_eligibility`: after `retire("rule")`
+  the exact report reads the rule rows and judges them `PolicyExcluded`;
+  `FirstLoss(Eligibility)`.
+- `fused_union_bound_loses_the_rule_at_fusion`: `fused_union` of one refuses
+  the request as `fused_union` after the lanes admitted the rule;
+  `FirstLoss(Fusion)`.
+- `result_rows_bound_loses_the_rule_at_selection`: `result_rows` of one
+  truncates a fused, revalidated-eligible rule out of the body;
+  `FirstLoss(Selection)`.
+- `optional_budget_loses_the_rule_at_packing`
+  (`ldg-packing-attribution-via-charged-range-members-join`): the packer
+  reads every fused entry from the same projection file the route read; under
+  a wide budget the `Charged::Range` members join equals the fused set, and a
+  budget short by the rule's group cost skips that group;
+  `FirstLoss(Packing)`.
+- `the_clean_chain_keeps_the_rule_at_every_stage_and_folds_compare_within_one_store`:
+  every stage except the undeclared dense lane is `Reached`, one incarnation
+  token is seen by both the shell and the ledger, and the fold completes under
+  `KernelStore::database_incarnation_id_within_budget`.
+- `reports_from_two_stores_carry_two_incarnations_and_fold_indeterminate`:
+  eligibility reports from two kernel stores intern to two tokens and the
+  fold is `Indeterminate`.
+- `a_held_classification_window_makes_eligibility_unjoinable_never_absent`
+  (`sls-eligibility-report-non-reusable-window-constructible`):
+  `hold_classification_change_for_test` from the admission phase leaves the
+  exact and lexical lanes `snapshot_changed`, returns a non-reusable report as
+  `ExactAdmission::Moved`, folds eligibility as `Unjoinable` (`presence` is
+  `None`), and the verdict is `Indeterminate`;
+  `a_window_opened_at_fusion_makes_revalidation_unjoinable_not_a_selection_loss`
+  does the same from the fusion phase, so a moved revalidation is never a
+  selection loss; `an_exact_lane_that_ends_after_reading_leaves_eligibility_unjoinable`
+  covers `KernelError` after rows were read and an exact lane that read
+  nothing.
+- `tap_returns_leave_production_output_byte_equal`: a direct `execute` and
+  the observing shell produce byte-equal bodies, equal statuses, fused sets,
+  exact reports, and revalidation reports; two packer runs produce equal
+  admissions and `read_occurrences` names every request.
+- `a_misattributed_observation_and_missing_coverage_fail_the_self_test`: a
+  shell that swaps the fusion and selection labels names `FirstLoss(Fusion)`
+  where `FirstLoss(Selection)` is expected, and a coverage missing one `ldg_`
+  marker is `Incomplete { missing }` naming it.
+- `ledger_markers_each_name_a_scenario_here` and
+  `every_ledger_marker_fires_across_the_scenarios` are this suite's registry
+  check and completeness proof over the `ldg_` prefix
+  (`xc-shell-uses-kernel-value-types-directly`: the shell names
+  `CommitReadIncarnation`, `EligibilityReport`, `OccurrenceId`, and
+  `Disposition` directly, with no wrapper trait or newtype).
+
 ## Gaps recorded here
 
 - Every ingestion entry point lacks a production caller. No world is labelled
@@ -495,5 +616,32 @@ with a `replay` construction is refused as `DirectDatabaseAged`.
   80-unit fragment cap and 3-result cap; the census exercises the cap function
   directly.
 - Residue rules apply to top-level observation fields. Nested values under
-  `Keep` enter the digest whole; per-tap observation schemas in Phase 2 must
-  flatten or register nested records.
+  `Keep` enter the digest whole; per-tap observation schemas must flatten or
+  register nested records.
+- A refusal inside `admit_lanes` (a deadline, a cancellation, or `no_lane`)
+  returns no `Admitted`, so the lane and eligibility stages of that request
+  are unobserved; the ledger reads them as `NotReached` and the fold is
+  `Indeterminate` for any required occurrence that entered through them.
+- The lexical and dense lanes judge eligibility inside retrieval and return
+  only their eligible rankings, so an occurrence those lanes scanned and the
+  kernel excluded is absent at the lane stage, not at eligibility. Only the
+  exact lane's admission is attributable to eligibility on its own.
+- The lexical lane's `Retrieval.incarnation`, the dense producer's, and the
+  packer's kernel judgement are not returned by the route or the packer, so
+  their observations carry no incarnation token; the fold's incarnation guard
+  covers the exact admission and revalidation reports.
+- A `select` refusal discards the revalidation report, so every refusal after
+  the union bound, including `response_bytes` and `response_measure`, folds
+  as `Unjoinable` at fusion from the refusal reason rather than from the
+  report itself; a loss at revalidation or at the response cap cannot be
+  placed, and a revalidation incarnation the refusal dropped cannot be
+  counted (`a_response_refusal_discards_revalidation_so_fusion_is_unjoinable`).
+  The shell matches the reason `fused_union` as a wire literal.
+- Cross-restart fold comparison is shown against the persisted
+  `database_incarnation_id` of one store; no daemon restart runs in the
+  suite.
+- The query route and the packer have no production caller. Every result in
+  `eval_ledger.rs` is activated-component evidence labelled `test-only`; a
+  ledger verdict there is not a statement about shipped retrieval or packing.
+- `Surface1Stage` does not implement `Stage`; the default-surface ledger and
+  its five injections land with the surface-1 attribution work.

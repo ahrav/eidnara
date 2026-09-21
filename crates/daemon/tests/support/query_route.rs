@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use daemon::claim_sources::{ClaimMaterializer, MaterializationEnd};
 use daemon::query_route::{
-    DenseLane, Phase, QueryFailure, QueryOutcome, QueryRouteLimits, execute,
+    DenseLane, DenseLimits, Phase, QueryFailure, QueryOutcome, QueryRouteLimits, execute,
 };
 use daemon::request_budget::{RequestBudget, SharedBudget};
 use daemon::search_projection::SearchProjection;
@@ -505,6 +505,33 @@ pub fn generation() -> VectorGeneration {
         vector_dimension: DIMENSION,
         generation_epoch: 1,
     }
+}
+
+pub fn dense_limits(k: usize) -> DenseLimits {
+    DenseLimits {
+        k: NonZeroUsize::new(k).unwrap(),
+        page_rows: NonZeroUsize::new(4).unwrap(),
+        max_rows: NonZeroUsize::new(64).unwrap(),
+        unit_norm_tolerance: 1e-3,
+    }
+}
+
+/// A unit vector derived from the identifier alone, so rows differ by
+/// occurrence and the reference order is reproducible.
+pub fn vector_for(occurrence_id: &str) -> Vec<f32> {
+    let seed = occurrence_id.bytes().fold(0u32, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(u32::from(b))
+    });
+    let mut raw = [0.0f32; DIMENSION as usize];
+    for (i, slot) in raw.iter_mut().enumerate() {
+        let bit = (seed >> (i * 3)) & 0b111;
+        *slot = 0.2 + bit as f32 * 0.1;
+    }
+    unit(raw)
+}
+
+pub fn query_vector() -> Vec<f32> {
+    unit([0.9, 0.1, 0.6, 0.2, 0.3, 0.7, 0.1, 0.4])
 }
 
 pub fn unit(raw: [f32; DIMENSION as usize]) -> Vec<f32> {

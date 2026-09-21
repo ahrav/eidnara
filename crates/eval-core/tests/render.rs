@@ -662,12 +662,38 @@ fn the_marker_registry_is_unique_and_incomplete_until_every_marker_fires() {
         coverage.record(marker.name).unwrap();
     }
     assert_eq!(
-        coverage.complete(),
+        coverage.complete(""),
         Err(CoverageError::Incomplete {
             missing: BTreeSet::from([MARKERS[MARKERS.len() - 1].name]),
         })
     );
+    let last_suite = MARKERS[MARKERS.len() - 1]
+        .test
+        .rsplit_once("::")
+        .map(|(suite, _)| suite)
+        .unwrap();
+    assert!(
+        MARKERS[..MARKERS.len() - 1]
+            .iter()
+            .any(|marker| !marker.test.starts_with(last_suite)),
+        "the registry spans more than one suite"
+    );
+    let mut other_suites = Coverage::default();
+    for marker in MARKERS.iter().filter(|m| !m.test.starts_with(last_suite)) {
+        other_suites.record(marker.name).unwrap();
+    }
+    assert!(matches!(
+        other_suites.complete(last_suite),
+        Err(CoverageError::Incomplete { .. })
+    ));
+    assert_eq!(
+        other_suites.complete("crates/nowhere/tests/none.rs::"),
+        Err(CoverageError::EmptySuite(
+            "crates/nowhere/tests/none.rs::".to_string()
+        )),
+        "a prefix that selects no marker never passes"
+    );
     coverage.record(MARKERS[MARKERS.len() - 1].name).unwrap();
-    coverage.complete().unwrap();
+    coverage.complete("").unwrap();
     assert_eq!(coverage.fired().len(), MARKERS.len());
 }

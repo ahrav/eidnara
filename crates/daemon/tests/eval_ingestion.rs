@@ -880,20 +880,20 @@ fn coverage_markers_are_unique_and_each_names_a_scenario_here() {
     );
     coverage.record(MARKERS[0].name).unwrap();
     assert!(matches!(
-        coverage.complete(),
+        coverage.complete(SUITE),
         Err(eval_core::CoverageError::Incomplete { .. })
     ));
 }
 
-/// The completeness proof: one run of every scenario fires every registered
-/// marker, so a marker whose scenario stops recording it fails here.
+/// The completeness proof: one run of every scenario fires every marker this
+/// suite owns, so a marker whose scenario stops recording it fails here.
 #[test]
 fn every_registered_marker_fires_across_the_scenarios() {
     let mut coverage = Coverage::default();
     for (_, scenario) in scenarios() {
         scenario(&mut coverage);
     }
-    coverage.complete().unwrap();
+    coverage.complete(SUITE).unwrap();
 }
 
 fn adapter_ids(session: &SessionIdentity, message: &serde_json::Value) -> Vec<String> {

@@ -375,3 +375,92 @@ fn a_batch_never_mixes_snapshots_while_a_writer_flips_candidates_and_scopes() {
         "readers observed every legal state of a flipping candidate: {seen:?}"
     );
 }
+
+#[test]
+fn racing_test_holders_never_hold_the_window_together() {
+    let fixture = fixture();
+    let store = &fixture.store;
+    let project = ProjectScope::new(PROJECT_A).unwrap();
+    let candidates = [candidate("ok", 1)];
+    // Two holders that both passed the parity check would leave the generation
+    // even while both guards live, so a snapshot taken then would look reusable.
+    // A racing second holder is either refused or waits for the first to drop.
+    for _ in 0..200 {
+        let barrier = std::sync::Barrier::new(2);
+        let hold = || {
+            barrier.wait();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _window = store.hold_classification_change_for_test();
+                store
+                    .judge_eligibility(&project, ArtifactDestination::Remote, &candidates)
+                    .unwrap()
+                    .snapshot
+                    .classification_generation
+            }))
+            .ok()
+        };
+        let outcomes = thread::scope(|scope| {
+            let first = scope.spawn(hold);
+            let second = scope.spawn(hold);
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        let held: Vec<_> = outcomes.iter().flatten().collect();
+        assert!(!held.is_empty(), "one racing holder opens the window");
+        assert!(
+            held.iter().all(|generation| generation.is_none()),
+            "a snapshot under a held window is never reusable: {outcomes:?}"
+        );
+    }
+    let closed = store
+        .judge_eligibility(&project, ArtifactDestination::Remote, &candidates)
+        .unwrap();
+    assert!(closed.snapshot.classification_generation.is_some());
+}
+
+#[test]
+fn a_production_opener_waits_for_the_held_test_window() {
+    let fixture = fixture();
+    let store = &fixture.store;
+    let project = ProjectScope::new(PROJECT_A).unwrap();
+    let normal = store
+        .ingest_artifact(artifact("normal", b"public bytes", Sensitivity::Normal))
+        .unwrap();
+    let candidates = [with_artifact(candidate("ok", 1), &normal.digest)];
+    let window = store.hold_classification_change_for_test();
+    let (done, finished) = std::sync::mpsc::channel();
+    let (ready, at_writer_lock) = std::sync::mpsc::sync_channel(0);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            // Tightening the stored classification opens a production window;
+            // the hook runs right before the tightening takes the writer lock.
+            store
+                .ingest_artifact_with_temp_hook_for_test(
+                    artifact("normal", b"public bytes", Sensitivity::Sensitive),
+                    |_| ready.send(()).unwrap(),
+                )
+                .unwrap();
+            let _ = done.send(());
+        });
+        at_writer_lock.recv().unwrap();
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_err(),
+            "the tightening waited behind the held window"
+        );
+        let batch = store
+            .judge_eligibility(&project, ArtifactDestination::Remote, &candidates)
+            .unwrap();
+        assert_eq!(
+            batch.snapshot.classification_generation, None,
+            "a snapshot under a held window is never reusable"
+        );
+        drop(window);
+        finished.recv().unwrap();
+    });
+    let after = store
+        .judge_eligibility(&project, ArtifactDestination::Remote, &candidates)
+        .unwrap();
+    assert_eq!(after.verdicts, [EligibilityVerdict::ProviderSensitive]);
+    assert!(after.snapshot.classification_generation.is_some());
+}
