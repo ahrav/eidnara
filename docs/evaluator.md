@@ -989,13 +989,19 @@ summary with `n = 105, censored = 15` reports its p95 as at least the deadline
 rather than a fast number over the 90 that finished.
 
 **Zero failures.** `Counter {n, failures, unit}` renders through
-`Counter::rate`: with failures it is `FailureRate::Observed {rate, n, unit}`;
-with none it is `FailureRate::Bound {upper_bound_95, bound_method:
-rule_of_three, n, unit}` where the bound is `3/n` capped at one, tagged
-`evidence_kind: bound`, so zero observed failures in `n` trials at the named
-cluster unit is a bound, never a proof. A gate over a counter reads the bound
-where only a bound exists; sixty stall-free schedules cannot rule out one stall
-in twenty.
+`Counter::rate` as `FailureRate`, tagged `evidence_kind`. Both variants carry
+`upper_bound_95 = min((2 failures + 3) / n, 1)` and `bound_method`, and
+`FailureRate::upper_bound_95` is the one number a gate compares, so the
+compared quantity rises with every failure. With no failures the variant is
+`bound` with `bound_method: rule_of_three` (the bound is `3/n`), so zero
+observed failures in `n` trials at the named cluster unit is a bound, never a
+proof; sixty stall-free schedules cannot rule out one stall in twenty. With
+failures it is `observed`, adding the point estimate `rate` and using
+`bound_method: poisson_envelope`: the one-sided 95 percent Poisson limit for `x`
+events is `chi2_0.95(2x + 2) / 2`, which is at most `2x + 3` for every `x` and
+sits above the exact binomial limit. A gate that read the point estimate after
+a failure but the bound after none would let one failure in sixty (`1/60`) pass
+a threshold that zero failures in sixty (`3/60`) fails.
 
 **Repeated live trials.** `pass_k(attempts, k)` reads the repeat count `k` from
 the frozen family (`trials_k`) and summarizes as `PassK`: `pass_at_1` (passes
@@ -1011,10 +1017,11 @@ is `RationalOverflow`.
 
 The TypeScript reference in `gen/gen-statistics-golden.ts` derives these
 independently where a second derivation exists: pass^k by exhaustive
-enumeration of every `k`-subset rather than binomials, and the rule of three
-checked against the exact one-sided bound `1 - 0.05^(1/n)` it approximates.
-`tests/censoring.rs` asserts equality on every latency, counter, and pass^k
-case in the golden.
+enumeration of every `k`-subset rather than binomials, and every counter's
+rational bound checked against the exact one-sided 95 percent binomial bound
+it envelopes (`1 - 0.05^(1/n)` at zero failures, bisection on the binomial CDF
+otherwise). `tests/censoring.rs` asserts equality on every latency, counter,
+and pass^k case in the golden.
 
 ## Coverage markers
 

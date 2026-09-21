@@ -100,13 +100,13 @@ pub struct Counter {
     pub unit: ClusteringUnit,
 }
 
-/// A gate over a counter reads `upper_bound_95` where only a bound exists;
-/// `Observed` is the point estimate over `n` trials at `unit`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "evidence_kind", deny_unknown_fields)]
 pub enum FailureRate {
     Observed {
         rate: Ratio,
+        upper_bound_95: Ratio,
+        bound_method: BoundMethod,
         n: u64,
         unit: ClusteringUnit,
     },
@@ -120,10 +120,24 @@ pub enum FailureRate {
     },
 }
 
+impl FailureRate {
+    /// The one number a gate compares against its threshold.
+    pub fn upper_bound_95(&self) -> Ratio {
+        match self {
+            Self::Observed { upper_bound_95, .. } | Self::Bound { upper_bound_95, .. } => {
+                *upper_bound_95
+            }
+        }
+    }
+}
+
+/// `RuleOfThree` uses `3/n` when `failures` is zero; `PoissonEnvelope` uses
+/// `(2 * failures + 3) / n` otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoundMethod {
     RuleOfThree,
+    PoissonEnvelope,
 }
 
 impl Counter {
@@ -134,16 +148,21 @@ impl Counter {
                 failures: self.failures,
             });
         }
+        let n = i128::from(self.n);
+        let failures = i128::from(self.failures);
+        let upper_bound_95 = Ratio::try_new(2 * failures + 3, n)?.min(Ratio::ONE);
         Ok(if self.failures == 0 {
             FailureRate::Bound {
-                upper_bound_95: Ratio::try_new(3, i128::from(self.n))?.min(Ratio::ONE),
+                upper_bound_95,
                 bound_method: BoundMethod::RuleOfThree,
                 n: self.n,
                 unit: self.unit,
             }
         } else {
             FailureRate::Observed {
-                rate: Ratio::try_new(i128::from(self.failures), i128::from(self.n))?,
+                rate: Ratio::try_new(failures, n)?,
+                upper_bound_95,
+                bound_method: BoundMethod::PoissonEnvelope,
                 n: self.n,
                 unit: self.unit,
             }

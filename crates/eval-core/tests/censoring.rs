@@ -69,7 +69,7 @@ fn the_frozen_reference_agrees_on_every_censored_case() {
         assert_eq!(&actual, expected, "{id}");
         seen += 1;
     }
-    assert_eq!(seen, 14);
+    assert_eq!(seen, 15);
 }
 
 #[test]
@@ -200,14 +200,42 @@ fn zero_failures_is_a_bound_never_a_proof() {
     assert_eq!(counter(60, 0).rate().unwrap(), bound(60, ratio(1, 20)));
     // Below three trials the rule would exceed one; a rate is at most one.
     assert_eq!(counter(2, 0).rate().unwrap(), bound(2, Ratio::ONE));
+    // An observed rate carries a bound on the same scale as the zero-failure case, so a gate
+    // never compares a bound in one branch with a point estimate in the other:
+    // (2 * failures + 3) / n envelopes the one-sided 95 percent limit.
     assert_eq!(
         counter(60, 3).rate().unwrap(),
         FailureRate::Observed {
             rate: ratio(1, 20),
+            upper_bound_95: ratio(3, 20),
+            bound_method: BoundMethod::PoissonEnvelope,
             n: 60,
             unit: ClusteringUnit::WorldSeed,
         }
     );
+    assert_eq!(
+        counter(60, 1).rate().unwrap(),
+        FailureRate::Observed {
+            rate: ratio(1, 60),
+            upper_bound_95: ratio(1, 12),
+            bound_method: BoundMethod::PoissonEnvelope,
+            n: 60,
+            unit: ClusteringUnit::WorldSeed,
+        }
+    );
+    // The envelope caps at one like the rule of three does.
+    assert_eq!(counter(2, 1).rate().unwrap().upper_bound_95(), Ratio::ONE);
+    // Strictly worse evidence never reads as a smaller bound: one failure in sixty must not
+    // pass a 1/30 gate that zero failures in sixty fails.
+    let gate = ratio(1, 30);
+    let bounds: Vec<Ratio> = (0..=5)
+        .map(|failures| counter(60, failures).rate().unwrap().upper_bound_95())
+        .collect();
+    assert!(
+        bounds.windows(2).all(|pair| pair[0] < pair[1]),
+        "{bounds:?}"
+    );
+    assert!(bounds[0] > gate && bounds[1] > gate);
     assert_eq!(
         counter(0, 0).rate().err(),
         Some(StatisticsError::MalformedCounter { n: 0, failures: 0 })
@@ -224,6 +252,13 @@ fn zero_failures_is_a_bound_never_a_proof() {
         "a bound never renders as a rate"
     );
     assert!(rendered.get("proven").is_none());
+    let observed = serde_json::to_value(counter(60, 1).rate().unwrap()).unwrap();
+    assert_eq!(observed["evidence_kind"], json!("observed"));
+    assert_eq!(observed["bound_method"], json!("poisson_envelope"));
+    assert_eq!(
+        observed["upper_bound_95"],
+        json!({"numerator": 1, "denominator": 12})
+    );
 }
 
 #[test]

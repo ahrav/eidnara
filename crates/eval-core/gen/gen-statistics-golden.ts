@@ -355,17 +355,45 @@ const attempts = (completed: number, timeouts: number, duration: number, deadlin
   ...Array.from({ length: timeouts }, (): Attempt => ({ duration_ms: deadline, censored: "timeout" })),
 ];
 
-// Zero failures in n trials is the rule-of-three bound min(3/n, 1); otherwise the observed rate.
-// The rule approximates the exact one-sided bound 1 - 0.05^(1/n) from above, which the
-// generator checks so the convention itself is verified rather than copied.
-function counter(n: number, failures: number, unit: string) {
-  if (failures === 0) {
-    const exact = 1 - 0.05 ** (1 / n);
-    if (Math.min(3 / n, 1) < exact) throw new Error(`3/${n} is below the exact bound ${exact}`);
-    const bound = cmp(ratio(3n, BigInt(n)), whole(1)) > 0 ? whole(1) : ratio(3n, BigInt(n));
-    return { evidence_kind: "bound", upper_bound_95: emit(bound), bound_method: "rule_of_three", n, unit };
+// `counter` rejects envelopes below the exact one-sided 95% binomial bound.
+function binomialCdf(n: number, x: number, p: number): number {
+  let term = (1 - p) ** n;
+  let total = term;
+  for (let i = 1; i <= x; i += 1) {
+    term *= ((n - i + 1) / i) * (p / (1 - p));
+    total += term;
   }
-  return { evidence_kind: "observed", rate: emit(ratio(BigInt(failures), BigInt(n))), n, unit };
+  return total;
+}
+// `exactUpperBound` returns the `p` satisfying `P[X <= failures | n, p] = 0.05`.
+function exactUpperBound(n: number, failures: number): number {
+  if (failures === 0) return 1 - 0.05 ** (1 / n);
+  let lo = 0;
+  let hi = 1;
+  for (let step = 0; step < 200; step += 1) {
+    const mid = (lo + hi) / 2;
+    if (binomialCdf(n, failures, mid) > 0.05) lo = mid;
+    else hi = mid;
+  }
+  return hi;
+}
+function counter(n: number, failures: number, unit: string) {
+  const exact = exactUpperBound(n, failures);
+  const envelope = 2 * failures + 3;
+  if (Math.min(envelope / n, 1) < exact) throw new Error(`${envelope}/${n} is below the exact bound ${exact}`);
+  const raw = ratio(BigInt(envelope), BigInt(n));
+  const upper_bound_95 = emit(cmp(raw, whole(1)) > 0 ? whole(1) : raw);
+  if (failures === 0) {
+    return { evidence_kind: "bound", upper_bound_95, bound_method: "rule_of_three", n, unit };
+  }
+  return {
+    evidence_kind: "observed",
+    rate: emit(ratio(BigInt(failures), BigInt(n))),
+    upper_bound_95,
+    bound_method: "poisson_envelope",
+    n,
+    unit,
+  };
 }
 
 // pass^k by exhaustive enumeration of every k-subset: the share whose members all passed.
@@ -415,6 +443,7 @@ const censoredCases: GoldenCase[] = [
     [400, 0],
     [20, 0],
     [2, 0],
+    [60, 1],
     [60, 3],
   ].map(([n, failures]) => ({
     id: `counter-${n}-${failures}`,
