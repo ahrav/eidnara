@@ -921,6 +921,10 @@ value from the outcomes it gates. The margins are experimental values, not
 product targets. The code and its refusal tests land without values; an
 empirical acceptance needs an approved profile.
 
+`parse_campaign_profile` also applies the canonical-JSON check, so a profile
+that parses can be embedded in a family and frozen; an integer past the safe
+range is `NotCanonical` at parse.
+
 **Analysis family.** `AnalysisFamily` (`eval-analysis-family/v1`) fixes
 everything a result depends on: endpoints (exactly the three gates
 `quality_loss`, `harm`, `floor`, since the report always carries them; any
@@ -947,7 +951,8 @@ is zero (no power target), or whose recorded `families` (the distinct, sorted
 families it sampled) are not the registered families (the pilot sampled the
 registered population, so its ICCs describe the campaign's clusters and the
 family-unit projection spreads items over exactly those families)
-(`PilotInconsistent`), so a hand-written pilot cannot inflate its way past the
+(`PilotInconsistent`; a projection that leaves the safe range is reported as
+`RationalOverflow`), so a hand-written pilot cannot inflate its way past the
 block, and refuses a plan whose pair count is zero (`NoPairs`) or below the
 pilot's `required_n_for_margin` (`PlanBelowRequiredN`), since deflation only
 shrinks N. `FrozenFamily::freeze` digests it

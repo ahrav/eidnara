@@ -329,6 +329,14 @@ fn every_profile_input_is_required_and_bounded() {
             field: "harm_bound"
         })
     );
+    // A profile that parses can be frozen: an integer past canonical JSON's safe
+    // range is refused here, not first when the family is digested.
+    let mut unsafe_bound = value.clone();
+    unsafe_bound["liveness_bounds"]["catch_up_episodes"] = json!(9_007_199_254_740_992u64);
+    assert!(matches!(
+        parse_campaign_profile(&unsafe_bound),
+        Err(StatisticsError::NotCanonical(_))
+    ));
     let mut malformed = value;
     malformed["floor_threshold"] = json!(".7");
     assert_eq!(
@@ -1320,6 +1328,24 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             Some(StatisticsError::RunNotCompleted(status))
         );
     }
+    // A projection that leaves the safe range reports the overflow, not a
+    // disagreement with the recorded values.
+    let mut vast = family.clone();
+    vast.families = vec!["a".into(), "b".into()];
+    vast.icc_pilot = IccPilot {
+        families: vec!["a".into(), "b".into()],
+        n_items: u32::MAX,
+        n_families: 2,
+        n_worlds: 3,
+        icc_family: Ratio::ZERO,
+        icc_world_seed: Ratio::ZERO,
+        max_affordable_worlds: u32::MAX,
+        effective_n_at_max: Ratio::ONE,
+        required_n_for_margin: 1,
+        ..family.icc_pilot.clone()
+    };
+    vast.stopping_rule = StoppingRule::FixedN { pairs: 1 };
+    assert_eq!(vast.validate(), Err(StatisticsError::RationalOverflow));
     // A required N of zero is no power target; the plan is refused before it freezes.
     let mut no_target = family.clone();
     no_target.icc_pilot.required_n_for_margin = 0;

@@ -869,8 +869,9 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   safe range and a component at `2^53` refusing as `RationalOverflow`, and a
   wire ratio normalizing on deserialization while a zero denominator refuses.
 - `every_profile_input_is_required_and_bounded`: each of the five profile
-  fields and each of the four liveness bounds is required; a rate above one or
-  a non-canonical decimal refuses.
+  fields and each of the four liveness bounds is required; a rate above one, a
+  non-canonical decimal, or a liveness bound past canonical JSON's safe
+  integer refuses.
 - `the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses`
   (`mtr-analysis-family-frozen-before-results`): the frozen digest accepts the
   unchanged family; an edit to any of nine components (endpoints, families,
@@ -940,7 +941,8 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   `WorldSeedOutOfRange` from `analyze`, `run_icc_pilot`, and
   `cluster_bootstrap_interval`, whose draw seed of `2^53` is
   `BootstrapSeedOutOfRange` and which refuses 300 copies of one pair over two
-  worlds as `DuplicatePair`; a required N of zero is `PilotInconsistent`; an `incomplete`, `refused`, or `blocked` manifest
+  worlds as `DuplicatePair`; a required N of zero is `PilotInconsistent`; a pilot whose projection
+  leaves the safe range is `RationalOverflow`; an `incomplete`, `refused`, or `blocked` manifest
   is `RunNotCompleted`; a manifest with the wrong schema or a `sample_order`
   that is not a permutation is `InvalidManifest`; a two-family, two-world
   pilot recording different family and world ICCs is `PilotInconsistent`;

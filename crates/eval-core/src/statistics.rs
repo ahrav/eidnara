@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use context_core::canonical_json::{ContractError, protocol_digest};
+use context_core::canonical_json::{ContractError, canonical_json_encode, protocol_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -222,10 +222,13 @@ fn unit_rate(field: &'static str, text: &str) -> Result<Ratio, StatisticsError> 
     Ok(ratio)
 }
 
+/// Parses a profile whose rates are in range and whose integers are canonical,
+/// so a profile that parses can be embedded in a family and frozen.
 pub fn parse_campaign_profile(value: &Value) -> Result<CampaignProfile, StatisticsError> {
     let profile: CampaignProfile = serde_json::from_value(value.clone())
         .map_err(|error| StatisticsError::Shape(error.to_string()))?;
     profile.rates()?;
+    canonical_json_encode(&serde_json::to_value(&profile).expect("serializes"))?;
     Ok(profile)
 }
 
@@ -572,7 +575,7 @@ impl AnalysisFamily {
             || pilot.n_worlds < pilot.n_families
             || pilot.n_items <= pilot.n_worlds
             || (pilot.n_worlds == pilot.n_families && pilot.icc_family != pilot.icc_world_seed)
-            || pilot.projection().ok() != Some((pilot.clustering_unit, pilot.effective_n_at_max))
+            || pilot.projection()? != (pilot.clustering_unit, pilot.effective_n_at_max)
         {
             return Err(StatisticsError::PilotInconsistent);
         }
