@@ -76,7 +76,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** The reply section named `name`, with every listed field checked against a type predicate. */
-function section(
+function checkSection(
     ok: Record<string, unknown>,
     name: string,
     fields: Record<string, (value: unknown) => boolean>,
@@ -130,17 +130,17 @@ export class CassetteOracle {
 
     async open(mode: CassetteMode, namespace: string, path: string): Promise<{ cases: number }> {
         const ok = await this.call({ op: "open", mode, namespace, path });
-        return { cases: section(ok, "open", { cases: isCount }).cases as number };
+        return { cases: this.section(ok, "open", { cases: isCount }).cases as number };
     }
 
     async lookup(namespace: string, request: OracleRequest): Promise<LookupOutcome> {
         const ok = await this.call({ op: "lookup", namespace, request });
         if (isRecord(ok.hit)) {
-            const hit = section(ok, "hit", { request_digest: isText, response: isRecord });
+            const hit = this.section(ok, "hit", { request_digest: isText, response: isRecord });
             // SAFETY: `section` threw unless every `CassetteHit` field passed its runtime check.
             return { hit: hit as unknown as CassetteHit };
         }
-        const miss = section(ok, "miss", {
+        const miss = this.section(ok, "miss", {
             turn: isCount,
             class: (value) => value === "ModelRequestChanged" || value === "ToolResultDrift",
             request_digest: isText,
@@ -156,7 +156,7 @@ export class CassetteOracle {
         response: RecordedResponse,
     ): Promise<{ request_digest: string }> {
         const ok = await this.call({ op: "record", namespace, request, response });
-        const record = section(ok, "record", { request_digest: isText });
+        const record = this.section(ok, "record", { request_digest: isText });
         return { request_digest: record.request_digest as string };
     }
 
@@ -167,7 +167,7 @@ export class CassetteOracle {
      */
     async close(): Promise<CloseReport> {
         const ok = await this.call({ op: "close" });
-        const close = section(ok, "close", {
+        const close = this.section(ok, "close", {
             cases: isCount,
             misses: isCount,
             unconsumed: isCount,
@@ -211,6 +211,23 @@ export class CassetteOracle {
             next.settle({ error: { kind: error.kind as string, detail: error.detail as string } });
         } else {
             fail(new Error("cassette oracle reply is neither ok nor error"));
+        }
+    }
+
+    /**
+     * A well-formed envelope whose operation section is malformed comes from a process that does
+     * not speak this protocol; like an unreadable line, it fails every call from here on.
+     */
+    private section(
+        ok: Record<string, unknown>,
+        name: string,
+        fields: Record<string, (value: unknown) => boolean>,
+    ): Record<string, unknown> {
+        try {
+            return checkSection(ok, name, fields);
+        } catch (error) {
+            this.failAll(error as Error);
+            throw error;
         }
     }
 

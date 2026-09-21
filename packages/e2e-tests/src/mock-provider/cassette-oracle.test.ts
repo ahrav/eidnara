@@ -68,6 +68,25 @@ describe("CassetteOracle client", () => {
         expect(String(first)).toContain("neither ok nor error");
     });
 
+    test("a malformed operation section latches the failure like a malformed envelope", async () => {
+        const oracle = await started(
+            "for await (const line of console) console.log(JSON.stringify({ ok: { record: {} } }));",
+        );
+        const first = await outcome(
+            oracle.record("ns", REQUEST, {
+                status: 200,
+                content_type: "application/json",
+                frames: ["{}"],
+                aborted: false,
+            }),
+        );
+        expect(first).toBeInstanceOf(Error);
+        expect(String(first)).toContain("record.request_digest is malformed");
+        // The process is protocol-incompatible; every later call fails with the same latched error.
+        const later = await outcome(oracle.lookup("ns", REQUEST));
+        expect(later).toBe(first);
+    });
+
     test("a child that dies mid-reply fails the in-flight call", async () => {
         // A partial line with no newline is flushed by the reader when stdout ends.
         const oracle = await started(
