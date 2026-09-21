@@ -955,8 +955,9 @@ family-unit projection spreads items over exactly those families)
 `RationalOverflow`), so a hand-written pilot cannot inflate its way past the
 block, and refuses a plan whose pair count is zero (`NoPairs`) or whose best
 attainable table (worlds spread as evenly as whole worlds allow over the
-families, pairs as evenly as whole pairs allow over the worlds, the larger
-worlds in the smaller families, each level deflated by its ICC with the same
+families, pairs as evenly as whole pairs allow over the worlds, each larger
+world placed in the family with the smallest pair total that can still hold
+one, each level deflated by its ICC with the same
 size-weighted mean a completed table gets, the smaller kept) falls short of the
 pilot's `required_n_for_margin` (`PlanBelowRequiredN {attainable, ..}`), since
 such a plan can only ever block after the campaign has run. `FrozenFamily::freeze` digests it

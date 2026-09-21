@@ -3,8 +3,8 @@
 //! Censored arms resolve to the verdict least favorable to the aged arm.
 //! Inference the evidence cannot support is withheld or `Blocked`.
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use context_core::canonical_json::{ContractError, canonical_json_encode, protocol_digest};
 use serde::{Deserialize, Serialize};
@@ -505,23 +505,28 @@ fn attainable_effective_n(
     // `extra` families hold `base + 1` worlds, the rest `base`; the smaller
     // families come first so the larger worlds land in them.
     let (base, extra) = (worlds / families, worlds % families);
-    let mut worlds_in: Vec<i128> = (0..families)
-        .map(|i| if i < families - extra { base } else { base + 1 })
+    // Each larger world goes to the family with the smallest pair total that
+    // still has a world to hold it, so the family totals end as even as the
+    // world sizes allow.
+    let mut totals: BinaryHeap<Reverse<(i128, i128)>> = (0..families)
+        .map(|i| {
+            let worlds = if i < families - extra { base } else { base + 1 };
+            Reverse((worlds * quotient, worlds))
+        })
         .collect();
-    let mut large_in = vec![0i128; worlds_in.len()];
-    let mut remaining = remainder;
-    while remaining > 0 {
-        for (large, worlds) in large_in.iter_mut().zip(&worlds_in) {
-            if remaining > 0 && *large < *worlds {
-                *large += 1;
-                remaining -= 1;
-            }
+    let mut placed: Vec<i128> = Vec::with_capacity(families as usize);
+    for _ in 0..remainder {
+        let Reverse((total, capacity)) = totals.pop().expect("a family per world");
+        if capacity > 1 {
+            totals.push(Reverse((total + 1, capacity - 1)));
+        } else {
+            placed.push(total + 1);
         }
     }
-    let family_squares: i128 = worlds_in
-        .iter_mut()
-        .zip(&large_in)
-        .map(|(worlds, large)| (*worlds * quotient + *large).pow(2))
+    let family_squares: i128 = placed
+        .iter()
+        .chain(totals.iter().map(|Reverse((total, _))| total))
+        .map(|total| total.pow(2))
         .sum();
     let world_squares = remainder * (quotient + 1).pow(2) + (worlds - remainder) * quotient.pow(2);
     let n = Ratio::try_new(pairs, 1)?;
@@ -1130,9 +1135,10 @@ pub fn analyze(
             found: pairs.len(),
         });
     }
+    let registered: BTreeSet<&str> = family.families.iter().map(String::as_str).collect();
     if let Some(pair) = pairs
         .iter()
-        .find(|pair| !family.families.contains(&pair.cluster.family))
+        .find(|pair| !registered.contains(pair.cluster.family.as_str()))
     {
         return Err(StatisticsError::PairOutsideFamilies {
             pair_id: pair.pair_id.clone(),

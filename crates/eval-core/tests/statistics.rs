@@ -1163,6 +1163,26 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             required_n_for_margin: 4
         })
     );
+    // The larger worlds go where they even the family totals: 12 pairs over five
+    // worlds (3, 3, 2, 2, 2) and two families (two and three worlds) is 6 and 6,
+    // which under a family ICC of 2/5 is exactly the four required, not 5 and 7.
+    let mut lopsided = family.clone();
+    lopsided.families = vec!["a".into(), "b".into()];
+    lopsided.icc_pilot = IccPilot {
+        families: vec!["a".into(), "b".into()],
+        n_items: 12,
+        n_families: 2,
+        n_worlds: 5,
+        icc_family: ratio(2, 5),
+        icc_world_seed: Ratio::ZERO,
+        clustering_unit: ClusteringUnit::Family,
+        max_affordable_worlds: 5,
+        effective_n_at_max: ratio(4, 1),
+        required_n_for_margin: 4,
+        ..family.icc_pilot.clone()
+    };
+    lopsided.stopping_rule = StoppingRule::FixedN { pairs: 12 };
+    assert_eq!(lopsided.validate(), Ok(()));
     // Nor can 300 pairs over at most 150 worlds: the best table has two pairs per
     // world, and under a world ICC of 1/10 that is 3000/11 effective items.
     let mut crowded = family.clone();

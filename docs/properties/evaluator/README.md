@@ -966,7 +966,9 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   (attainable `90601/605`, the whole-pair allocation, not 150), and a
   six-pair plan over two families and three worlds under a real pilot's
   family ICC `43/195` and world ICC `4/9` (attainable `1755/443`, the joint
-  allocation, not `54/13`); a repeated pilot observation is
+  allocation, not `54/13`), while 12 pairs over five worlds and two families
+  under a family ICC of `2/5` attain exactly the four required, the larger
+  worlds evening the family totals; a repeated pilot observation is
   `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
   hand-built counts with `b + c > n`, `b + aged_pass > n`, `c > aged_pass`,
   `aged_censored + aged_pass > n`, `fresh_censored + c > b + aged_pass`, a
