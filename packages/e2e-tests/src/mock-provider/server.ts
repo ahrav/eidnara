@@ -18,6 +18,7 @@ import {
     type CassetteMode,
     type CassetteOracle,
     CassetteRefused,
+    isRecord,
     type OracleRequest,
     type RecordedResponse,
 } from "./cassette-oracle";
@@ -230,9 +231,11 @@ export class MockProvider {
 
         if (method === "POST" && isMessages) {
             const bodyText = await req.text();
+            // Unparseable and non-object bodies script as `{}`; the oracle judges `bodyText` itself.
             let body: Record<string, unknown> = {};
             try {
-                body = JSON.parse(bodyText) as Record<string, unknown>;
+                const parsed: unknown = JSON.parse(bodyText);
+                if (isRecord(parsed)) body = parsed;
             } catch {
                 body = {};
             }
@@ -256,8 +259,11 @@ export class MockProvider {
                 headers,
                 body_text: bodyText,
             };
-            if (this.cassette?.mode === "replay") {
-                return this.replay(this.cassette, oracleRequest, captured);
+            // The binding at capture owns this exchange; a `reset()` or `useCassette()` during a
+            // scripted delay must not serve it unadmitted or record it into the next cassette.
+            const session = this.cassette;
+            if (session?.mode === "replay") {
+                return this.replay(session, oracleRequest, captured);
             }
 
             this.scriptedSelections += 1;
@@ -301,13 +307,9 @@ export class MockProvider {
             captured.responseCompletedAt = Date.now();
 
             const produced = produce(scripted, body);
-            if (this.cassette?.mode === "record") {
+            if (session?.mode === "record") {
                 try {
-                    await this.cassette.oracle.record(
-                        this.cassette.namespace,
-                        oracleRequest,
-                        produced,
-                    );
+                    await session.oracle.record(session.namespace, oracleRequest, produced);
                 } catch (error) {
                     return this.refuse("redaction_refused", error);
                 }

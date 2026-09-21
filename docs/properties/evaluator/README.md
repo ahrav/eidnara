@@ -801,7 +801,10 @@ rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
   recorded SSE and provider-error frames byte for byte, answers a miss with a
   400 `cassette_miss` and repeats it after, never enters the scripted block,
   hands a malformed body to the oracle as text, and turns any oracle failure,
-  typed or not, into a 400 with no message text; `reset()` unbinds.
+  typed or not, into a 400 with no message text; a delayed record-mode
+  exchange is admitted by the cassette bound when it was captured, not by a
+  later binding; a JSON body that is not an object is scripted as `{}` and
+  reaches the oracle as text; `reset()` unbinds.
 
 ## Gaps recorded here
 

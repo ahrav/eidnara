@@ -115,6 +115,35 @@ describe("MockProvider cassette mode", () => {
         expect(mock.scriptedSelectionCount()).toBe(1);
     });
 
+    test("a delayed record-mode response is admitted by the cassette that accepted the request", async () => {
+        const accepted = new FakeOracle([]);
+        const later = new FakeOracle([]);
+        const { mock, baseURL } = await started({
+            oracle: accepted,
+            mode: "record",
+            namespace: NAMESPACE,
+        });
+        mock.setDefault({ text: "slow", usage: USAGE, delayMs: 80 });
+        const pending = post(baseURL, request);
+        await Bun.sleep(20);
+        // The binding changes while the request sleeps; the in-flight exchange stays with `accepted`.
+        mock.useCassette({ oracle: later, mode: "record", namespace: NAMESPACE });
+        const response = await pending;
+        expect(response.status).toBe(200);
+        expect(accepted.recorded).toHaveLength(1);
+        expect(later.recorded).toHaveLength(0);
+    });
+
+    test("a JSON body that is not an object is scripted as an empty object and reaches the oracle as text", async () => {
+        const oracle = new FakeOracle([]);
+        const { mock, baseURL } = await started({ oracle, mode: "record", namespace: NAMESPACE });
+        mock.setDefault({ text: "ok", usage: USAGE });
+        const response = await post(baseURL, "null");
+        expect(response.status).toBe(200);
+        expect(oracle.recorded[0]?.request.body_text).toBe("null");
+        expect(mock.lastRequest()?.body).toEqual({});
+    });
+
     test("a mock misconfiguration in record mode is served as a 500 and never recorded", async () => {
         const oracle = new FakeOracle([]);
         const { mock, baseURL } = await started({ oracle, mode: "record", namespace: NAMESPACE });

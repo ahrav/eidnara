@@ -71,7 +71,7 @@ export interface OracleCommand {
 
 type Reply = { ok: Record<string, unknown> } | { error: { kind: string; detail: string } };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -137,6 +137,7 @@ export class CassetteOracle {
         const ok = await this.call({ op: "lookup", namespace, request });
         if (isRecord(ok.hit)) {
             const hit = section(ok, "hit", { request_digest: isText, response: isRecord });
+            // SAFETY: `section` threw unless every `CassetteHit` field passed its runtime check.
             return { hit: hit as unknown as CassetteHit };
         }
         const miss = section(ok, "miss", {
@@ -145,6 +146,7 @@ export class CassetteOracle {
             request_digest: isText,
             nearest_recorded: isTextOrNull,
         });
+        // SAFETY: `section` threw unless every `CassetteMiss` field passed its runtime check.
         return { miss: miss as unknown as CassetteMiss };
     }
 
@@ -171,6 +173,7 @@ export class CassetteOracle {
             unconsumed: isCount,
             input_sha256: isTextOrNull,
         });
+        // SAFETY: `section` threw unless every `CloseReport` field passed its runtime check.
         return close as unknown as CloseReport;
     }
 
