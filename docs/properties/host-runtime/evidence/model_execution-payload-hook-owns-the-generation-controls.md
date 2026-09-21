@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`crates/host-runtime/src/model_execution/pi.rs:35` compiles `assets/pi-model_execution-extension.mjs`
+`crates/host-runtime/src/model_execution/pi.rs:38-39` compiles `assets/pi-model_execution-extension.mjs`
 into the runtime with `include_bytes!`, and the hook's own header
 (`pi-model_execution-extension.mjs:1-16`) states the contract: loaded last, it replaces the
 provider-native output-token and temperature fields with the values ModelExecution
@@ -17,40 +17,55 @@ payload the hook returns.
 All references are at the tree this record enters with.
 
 Admission. `GenerationParams` carries `max_output_tokens: u64` and
-`temperature: f64` (`model_execution/protocol.rs:42-43`), and `parse_send` rejects a
-zero or over-bound token count (`:229-230`), so the values the hook receives
-are already bounded.
+`temperature: Option<f64>` (`model_execution/protocol.rs:43-45`). The wire form
+carries a generation `revision` defaulting to 1 (`:108`); `parse_send` rejects a
+zero or over-bound token count (`:262`), a revision outside `1 | 2` (`:266`), and
+a revision 1 request with no temperature (`:269`), and bounds any present
+temperature (`:271-275`). A revision 2 request may omit temperature to keep the
+model's native decoding policy, so the hook can receive a bound with no
+temperature.
 
 Delivery. `run_pi` writes `PI_MODEL_EXECUTION_EXTENSION_BYTES` to a 0600 file in the
-per-run 0700 directory through `PrivateDir::write_private` (`pi.rs:226`;
-`subprocess.rs:772-778`, `create_new` refuses an existing path or symlink), so
+per-run 0700 directory through `PrivateDir::write_private_async` (`pi.rs:335-337`;
+`subprocess.rs:1336-1342`, `create_new` refuses an existing path or symlink), so
 no installed hook can be swapped under the daemon. The argv disables
-extension discovery with `--no-approve --no-extensions` (`pi.rs:262-263`),
-pushes each trusted closure extension (`:296-297`), and pushes the hook last
-(`:300-301`). The admitted values reach the child as
-`EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS` and `EIDNARA_MODEL_EXECUTION_TEMPERATURE` (`:314-321`).
+extension discovery with `--no-approve --no-extensions` (`pi.rs:402-403`),
+pushes each trusted closure extension (`:405-408`), and pushes the hook last
+(`:409-410`). The admitted bound reaches the child as
+`EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS` (`:424`); `EIDNARA_MODEL_EXECUTION_TEMPERATURE` is
+set only when the request admitted a temperature (`:427-431`).
 
-The hook. `requiredNumber` (`pi-model_execution-extension.mjs:21-29`) throws when either
-variable is absent, empty, or not finite. The handler (`:35-79`) throws on a
-non-object payload (`:39-41`), collects every present spelling from
-`max_output_tokens`, `max_completion_tokens`, `max_tokens`, and
-`maxOutputTokens` (`:50-55`), reads a Gemini-style `generationConfig` object
-(`:56-58`), throws when neither is present (`:59-63`), copies the payload
-(`:64`), rewrites every collected spelling (`:65-67`), sets `temperature` when
-any spelling was present (`:68-70`), and rewrites `generationConfig` with
-both values while preserving its other keys (`:71-77`).
+The hook. `requiredNumber` (`pi-model_execution-extension.mjs:22`) throws when a
+variable is present but empty or not finite; the bound is always required
+(`:37`), while temperature is read only when its variable exists (`:38-39`).
+The handler throws on a non-object payload, collects every present spelling
+from `max_output_tokens`, `max_completion_tokens`, `max_tokens`, and
+`maxOutputTokens`, reads Gemini-style `generationConfig` and Bedrock-style
+`inferenceConfig` objects and rejects either when present but not an object
+(`:62`), throws when none is present (`:73`), rewrites every collected
+spelling, sets `temperature` only when a spelling was present and a temperature
+was admitted (`:82`), and rewrites `generationConfig` and `inferenceConfig`
+with the bound and, when admitted, the temperature, preserving their other keys
+(`:89`, `:92-96`). With no admitted temperature the hook neither writes nor
+removes a `temperature` field, so an earlier handler's value or the provider
+default survives.
 
 Check. `pi_model_execution_hook_owns_generation_controls`
-(`tests/model_execution_subprocess.rs:1599-1670`) writes the compiled-in bytes to a
+(`tests/model_execution_subprocess.rs:1694`) writes the compiled-in bytes to a
 scratch file, registers a handler ahead of the hook that sets `temperature: 9`
-and adds `providerTouched`, and drives four payloads under Node or Bun with
-the two environment variables set to `32000` and `0.25`. It asserts the
-OpenAI-style payload carries `max_tokens == 32000`, `temperature == 0.25`, and
-its unrelated fields (`:1648-1652`); the Gemini-style payload carries the
-rewritten `generationConfig` with `topK` preserved (`:1656-1659`); a payload
-with both `max_completion_tokens` and `max_tokens` has both rewritten
-(`:1664-1666`); and `{ foo: "bar" }` is rejected (`:1669`). The runner lists
-the check in its `main` table (`:100-101`); the binary is `harness = false`.
+and adds `providerTouched`, and drives the payloads under Node or Bun with the
+two environment variables set to `32000` and `0.25`. It asserts the OpenAI-style
+payload carries `max_tokens == 32000`, `temperature == 0.25`, and its unrelated
+fields; the Gemini-style payload carries the rewritten `generationConfig` with
+`topK` preserved; the Bedrock-style payload carries `inferenceConfig.maxTokens ==
+32000`, `temperature == 0.25`, and `topP` preserved, and a non-object
+`inferenceConfig` is rejected; a payload with both `max_completion_tokens` and
+`max_tokens` has both rewritten; and `{ foo: "bar" }` is rejected. It then
+deletes `EIDNARA_MODEL_EXECUTION_TEMPERATURE` and drops the tampering handler
+(`:1719`) to model revision 2: an OpenAI-style payload gains
+`max_output_tokens == 32000` and no `temperature` (`:1786`), and a Bedrock-style
+payload keeps its own `inferenceConfig.temperature == 1` beside the rewritten
+bound (`:1790`). The binary is `harness = false`.
 
 ## Reachability
 
@@ -79,16 +94,18 @@ array both assume.
 ## What a test must construct
 
 - Present: a tampering handler ahead of the hook; OpenAI-style, Gemini-style,
-  and two-spelling payloads; one unrecognized shape.
+  Bedrock-style, and two-spelling payloads; one unrecognized shape; a
+  non-object `inferenceConfig`; the revision 2 path with the temperature
+  variable absent.
 - Missing: the hook running inside a real Pi process rather than the driver's
-  handler array; a missing or non-numeric environment value; a payload whose
+  handler array; a non-numeric environment value; a payload whose
   `generationConfig` is present but not an object.
 
 ## Investigation log
 
 ### Q: Can a project-owned extension run after the hook?
 
-- Sources examined: `pi.rs:258-301`; `tests/model_execution_subprocess.rs:1566-1583`.
+- Sources examined: `pi.rs:401-410`; `tests/model_execution_subprocess.rs:1640-1675`.
 - Findings: `--no-extensions` disables discovery, only closure extensions and
   the hook are passed with `--extension`, and the hook is pushed last;
   `pi_project_pi_resources_ignored` asserts exactly one `--extension` ending in
@@ -98,9 +115,11 @@ array both assume.
 
 ### Q: Does the hook trust the environment values?
 
-- Sources examined: `pi-model_execution-extension.mjs:21-29`; `pi.rs:314-321`;
-  `model_execution/protocol.rs:229-230`.
-- Findings: the values are formatted from the admitted request, and the hook
-  fails the request rather than defaulting when they are absent or not finite.
-- Missing evidence: no test drives the absent-variable path.
-- Conclusion: resolved as a mechanism; the negative path is unexercised.
+- Sources examined: `pi-model_execution-extension.mjs:22-39`; `pi.rs:424-431`;
+  `model_execution/protocol.rs:262-275`.
+- Findings: the values are formatted from the admitted request. The hook fails
+  the request rather than defaulting when the bound is absent or either value is
+  present but not finite. An absent temperature variable is the revision 2
+  contract, not a fault: the hook then leaves temperature to the provider.
+- Missing evidence: no test drives the absent-bound or non-numeric path.
+- Conclusion: resolved as a mechanism; the negative paths are unexercised.

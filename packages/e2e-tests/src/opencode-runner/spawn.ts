@@ -204,6 +204,10 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
         history_budget_percentage: 0.15,
         context_researcher: { disable: true },
         ...(eidnaraConfig ?? {}),
+        // Generic mock responses do not implement extraction; capture scenarios opt in explicitly.
+        // Merged under the caller's memory block so a scenario that tunes other memory settings
+        // does not silently restore the schema default of `auto_capture: true`.
+        memory: { auto_capture: false, ...callerMemory(eidnaraConfig) },
     };
     if (opts.userHostConnectionFile) {
         // The user tier names the daemon; only the user tier may set `host`.
@@ -255,13 +259,26 @@ function canonicalizeSpawnConfigs(opts: SpawnOptions): SpawnOptions {
  * Serialize before validation so `toJSON()` transformations cannot bypass credential checks.
  * Cyclic input causes `JSON.stringify` to throw before credential validation.
  */
+function callerMemory(config: Record<string, unknown> | undefined): Record<string, unknown> {
+    const memory = config?.memory;
+    return memory !== null && typeof memory === "object" && !Array.isArray(memory)
+        ? (memory as Record<string, unknown>)
+        : {};
+}
+
 function canonicalConfig(
     value: Record<string, unknown> | undefined,
     label: string,
 ): Record<string, unknown> | undefined {
     if (value === undefined) return undefined;
     /** A spread copies own enumerable fields whatever `toJSON()` reported, so the scan and the write must read one representation; `writeConfigs` assembles every file from this return value. */
-    const serialized = JSON.parse(JSON.stringify(value)) as unknown;
+    let serialized: unknown;
+    try {
+        serialized = JSON.parse(JSON.stringify(value));
+    } catch {
+        // A caller's toJSON exception may contain credentials; retain only the config channel.
+        throw new Error(`${label} must serialize to a JSON object`);
+    }
     /** A `toJSON()` returning a non-object leaves no fields to spread, and treating it as a config would write the scalar's own properties instead. */
     if (serialized === null || typeof serialized !== "object" || Array.isArray(serialized)) {
         throw new Error(`${label} must serialize to a JSON object`);

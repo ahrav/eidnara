@@ -5,8 +5,9 @@
 // `before_provider_request` chain: whatever an earlier extension did to the
 // payload, this hook owns the final generation contract.
 //
-// It REPLACES the provider-native output-token and temperature fields with
-// the values requested through ModelExecution's `session.send`, preserves every
+// It replaces the provider-native output-token fields and any explicitly
+// requested temperature. Generation revision 2 can leave temperature absent
+// so reasoning-only models keep their native decoding behavior. The hook preserves every
 // unrelated payload field, and REJECTS (throws, failing the request)
 // payload shapes it does not recognize — silently dropping generation
 // controls would let a provider default exceed the caller's budget.
@@ -34,7 +35,8 @@ function isPlainObject(value) {
 export default function (pi) {
 	pi.on("before_provider_request", (event) => {
 		const maxOutputTokens = requiredNumber(MAX_OUTPUT_TOKENS_ENV);
-		const temperature = requiredNumber(TEMPERATURE_ENV);
+		const temperature = process.env[TEMPERATURE_ENV] === undefined
+			? undefined : requiredNumber(TEMPERATURE_ENV);
 		const payload = event.payload;
 		if (!isPlainObject(payload)) {
 			throw new Error(
@@ -57,18 +59,18 @@ export default function (pi) {
 		].filter((name) => name in payload);
 		// A present but non-object generationConfig would be copied through unowned; the hook
 		// refuses rather than forward a generation-control field it cannot cap.
-		if (
-			"generationConfig" in payload &&
-			!isPlainObject(payload.generationConfig)
-		) {
-			throw new Error(
-				"model_execution payload hook: unsupported generationConfig shape",
-			);
+		for (const name of ["generationConfig", "inferenceConfig"]) {
+			if (name in payload && !isPlainObject(payload[name])) {
+				throw new Error(`model_execution payload hook: unsupported ${name} shape`);
+			}
 		}
 		const generationConfig = isPlainObject(payload.generationConfig)
 			? payload.generationConfig
 			: null;
-		if (spellings.length === 0 && generationConfig === null) {
+		const inferenceConfig = isPlainObject(payload.inferenceConfig)
+			? payload.inferenceConfig
+			: null;
+		if (spellings.length === 0 && generationConfig === null && inferenceConfig === null) {
 			throw new Error(
 				"model_execution payload hook: no recognized output-token field; refusing to send without generation controls",
 			);
@@ -77,14 +79,21 @@ export default function (pi) {
 		for (const name of spellings) {
 			next[name] = maxOutputTokens;
 		}
-		if (spellings.length > 0) {
+		if (spellings.length > 0 && temperature !== undefined) {
 			next.temperature = temperature;
 		}
 		if (generationConfig !== null) {
 			next.generationConfig = {
 				...generationConfig,
 				maxOutputTokens,
-				temperature,
+				...(temperature === undefined ? {} : { temperature }),
+			};
+		}
+		if (inferenceConfig !== null) {
+			next.inferenceConfig = {
+				...inferenceConfig,
+				maxTokens: maxOutputTokens,
+				...(temperature === undefined ? {} : { temperature }),
 			};
 		}
 		return next;
