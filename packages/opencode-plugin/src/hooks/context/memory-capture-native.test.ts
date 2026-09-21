@@ -333,8 +333,8 @@ describe("OpenCode native memory capture executor", () => {
     });
 
     it("reports a private root that cannot be allocated as unavailable", async () => {
-        const saved = process.env.TMPDIR;
-        process.env.TMPDIR = join(tmpdir(), "eidnara-missing-tmp", "nested");
+        const missing = join(tmpdir(), "eidnara-missing-tmp", "nested");
+        __nativeCaptureTest.setPrivateRootParent(() => missing);
         try {
             const h = harness({});
             lastClient = h.client;
@@ -345,8 +345,7 @@ describe("OpenCode native memory capture executor", () => {
                 ),
             ).rejects.toThrow("Native memory capture: provider_unavailable");
         } finally {
-            if (saved === undefined) delete process.env.TMPDIR;
-            else process.env.TMPDIR = saved;
+            __nativeCaptureTest.setPrivateRootParent(undefined);
         }
     });
 

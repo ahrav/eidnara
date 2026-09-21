@@ -268,7 +268,7 @@ function projectFor(
     const key = `${work.model}\0${createHash("sha256").update(work.system).digest("hex")}\0${work.maxOutputTokens}`;
     const existing = state.byKey.get(key);
     if (existing) return existing;
-    const directory = realpathSync(mkdtempSync(join(tmpdir(), "eidnara-capture-")));
+    const directory = realpathSync(mkdtempSync(join(privateRootParent(), "eidnara-capture-")));
     state.projects.add(directory);
     const project: PrivateProject = {
         key,
@@ -288,7 +288,15 @@ function projectFor(
     return project;
 }
 
-export const __nativeCaptureTest = { isolateRoot };
+/** Where private project roots are allocated; tests point it at a directory that cannot hold one. */
+let privateRootParent: () => string = tmpdir;
+
+export const __nativeCaptureTest = {
+    isolateRoot,
+    setPrivateRootParent(parent: (() => string) | undefined): void {
+        privateRootParent = parent ?? tmpdir;
+    },
+};
 
 /** Busy projects remain available until their in-flight captures finish. */
 export async function disposeNativeCaptureProjects(client: EidnaraDeps["client"]): Promise<void> {
