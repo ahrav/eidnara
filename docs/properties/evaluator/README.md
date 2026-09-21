@@ -800,8 +800,8 @@ tested as an example target):
 
 - `a_record_the_oracle_cannot_project_leaves_close_with_no_file`: a `record`
   with a body field outside the covered list is `UnknownRequestField` with an
-  empty detail, and the following `close` reports the same refusal and writes
-  nothing.
+  empty detail; a later `{not json` line is `Json`; and `close` reports the
+  first refusal, `UnknownRequestField`, and writes nothing.
 - `an_unreadable_line_while_recording_leaves_close_with_no_file`: a line over
   4 MiB and a line that is not JSON, each between an admitted `record` and
   `close`, are `LineTooLong` and `Json`, and `close` reports the same kind and

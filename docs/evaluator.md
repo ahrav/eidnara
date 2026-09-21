@@ -823,10 +823,10 @@ be absolute with no `..` component; a second `open` is `AlreadyOpen`; a line
 over 4 MiB is `LineTooLong`. `close` writes a recording write-then-rename
 through a freshly created owner-only `.json.tmp` sibling, removing that
 sibling again when a later write, sync, or rename step fails, and writes
-nothing for a replay or a refused recording, including one whose `record`
-could not project a request or that saw a `LineTooLong` or `Json` line while
-open, since that line may have been a `record`; `close` then reports that
-refusal. `close` is terminal either way: a failed
+nothing for a refused recording: one whose `record` failed, or that saw a
+`LineTooLong` or `Json` line while open, since that line may have been a
+`record`. `close` reports the first such refusal, whichever kind it was, and
+writes nothing for a replay. `close` is terminal either way: a failed
 publication is reported once and the oracle accepts the next `open`.
 
 ### `LlmExecutionBackend` and MemoryReviewer

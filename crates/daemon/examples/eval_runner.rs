@@ -133,10 +133,10 @@ struct Open {
     cassette: Cassette,
     /// The file `close` writes; `None` for a replay, which never writes.
     write_to: Option<PathBuf>,
-    /// The first line the oracle could not read while this recording was
-    /// open. It may have been a `record`, so `close` reports it and writes
-    /// nothing, as it does for a refused entry.
-    unreadable: Option<OracleError>,
+    /// The first refusal while this recording was open: a `record` that
+    /// failed, or a line the oracle could not read (it may have been a
+    /// `record`). `close` reports it and writes nothing.
+    refused: Option<OracleError>,
 }
 
 #[derive(Default)]
@@ -152,12 +152,12 @@ impl Oracle {
             .ok_or(OracleError::NoOpenCassette)
     }
 
-    /// Refuses the open recording, if any, for a line that could not be read.
-    fn unreadable(&mut self, error: OracleError) -> OracleError {
+    /// Latches `error` as the open recording's first refusal, if any is open.
+    fn refuse(&mut self, error: OracleError) -> OracleError {
         if let Some(open) = &mut self.open
             && open.write_to.is_some()
         {
-            open.unreadable.get_or_insert_with(|| error.clone());
+            open.refused.get_or_insert_with(|| error.clone());
         }
         error
     }
@@ -185,7 +185,7 @@ impl Oracle {
                 self.open = Some(Open {
                     cassette,
                     write_to,
-                    unreadable: None,
+                    refused: None,
                 });
                 Ok(Reply::Open { cases })
             }
@@ -208,23 +208,27 @@ impl Oracle {
                 response,
             } => {
                 let cassette = self.cassette()?;
-                // A request that cannot be projected leaves the recording with no file form.
-                let covered = covered(request).map_err(|error| cassette.refuse(error))?;
-                let entry = cassette.record(&namespace, Boundary::Opencode, covered, response)?;
-                Ok(Reply::Record {
-                    request_digest: entry.request_digest.clone(),
-                })
+                let recorded = covered(request).and_then(|covered| {
+                    let entry =
+                        cassette.record(&namespace, Boundary::Opencode, covered, response)?;
+                    Ok(entry.request_digest.clone())
+                });
+                match recorded {
+                    Ok(request_digest) => Ok(Reply::Record { request_digest }),
+                    // The exchange is in no file, so the recording has no file form.
+                    Err(error) => Err(self.refuse(error.into())),
+                }
             }
             Op::Close => {
                 let Open {
                     cassette,
                     write_to,
-                    unreadable,
+                    refused,
                 } = self.open.take().ok_or(OracleError::NoOpenCassette)?;
                 let mut input_sha256 = None;
                 if let Some(path) = write_to {
-                    // A refused cassette has no file form, so nothing is written for it.
-                    if let Some(error) = unreadable {
+                    // A refused recording has no file form, so nothing is written for it.
+                    if let Some(error) = refused {
                         return Err(error);
                     }
                     let file = cassette.to_file()?;
@@ -307,7 +311,7 @@ fn serve(input: impl BufRead, mut output: impl Write) -> io::Result<()> {
         };
         let outcome = match parsed {
             Ok(op) => oracle.apply(op),
-            Err(error) => Err(oracle.unreadable(error)),
+            Err(error) => Err(oracle.refuse(error)),
         };
         let reply = match outcome {
             Ok(reply) => json!({"ok": reply}),
@@ -368,17 +372,28 @@ mod tests {
     fn a_record_the_oracle_cannot_project_leaves_close_with_no_file() {
         let dir = scratch("unprojectable");
         let path = dir.join("cassette.json");
-        let replies = oracle(&[
-            open(&path),
-            record(json!({"model": "m"})),
-            record(json!({"model": "m", "metadata": {"user_id": "u1"}})),
-            json!({"op": "close"}),
-        ]);
+        let lines = [
+            open(&path).to_string(),
+            record(json!({"model": "m"})).to_string(),
+            record(json!({"model": "m", "metadata": {"user_id": "u1"}})).to_string(),
+            // A later unreadable line does not replace the first refusal.
+            "{not json".to_string(),
+            json!({"op": "close"}).to_string(),
+        ];
+        let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let mut output = Vec::new();
+        serve(input.as_bytes(), &mut output).unwrap();
+        let replies: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert_eq!(replies[0], json!({"ok": {"open": {"cases": 0}}}));
         assert!(replies[1]["ok"]["record"]["request_digest"].is_string());
         assert_eq!(replies[2]["error"]["kind"], json!("UnknownRequestField"));
         assert_eq!(replies[2]["error"]["detail"], json!(""));
-        assert_eq!(replies[3]["error"]["kind"], json!("UnknownRequestField"));
+        assert_eq!(replies[3]["error"]["kind"], json!("Json"));
+        assert_eq!(replies[4]["error"]["kind"], json!("UnknownRequestField"));
         assert!(!path.exists(), "a partial recording is never published");
         let _ = fs::remove_dir_all(&dir);
     }
