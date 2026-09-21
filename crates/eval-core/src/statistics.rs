@@ -29,17 +29,22 @@ pub const ICC_THRESHOLD: Ratio = Ratio {
     denominator: 20,
 };
 /// Canonical JSON's largest safe integer; every ratio component stays within it.
-const MAX_SAFE: i128 = (1 << 53) - 1;
+const MAX_SAFE: u128 = (1 << 53) - 1;
 
 /// An exact rational in lowest terms with a positive denominator, both
 /// components inside the canonical-JSON safe range, so two runtimes that
 /// compute the same statistic serialize the same bytes. Construction and
-/// deserialization normalize; arithmetic is checked.
+/// deserialization normalize; arithmetic is checked. The fields are private so
+/// no literal can disagree with `Eq` and `Ord`:
+///
+/// ```compile_fail
+/// let _ = eval_core::Ratio { numerator: 2, denominator: 4 };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RatioWire", deny_unknown_fields)]
 pub struct Ratio {
-    pub numerator: i64,
-    pub denominator: u64,
+    numerator: i64,
+    denominator: u64,
 }
 
 #[derive(Deserialize)]
@@ -68,24 +73,22 @@ impl Ratio {
     };
 
     /// Reduces `numerator / denominator`; a zero denominator or a component
-    /// outside the safe range is a typed refusal, never a wrapped value.
+    /// outside the safe range is a typed refusal, never a wrapped value. The
+    /// reduction runs on unsigned magnitudes, so `i128::MIN` cannot overflow.
     pub fn try_new(numerator: i128, denominator: i128) -> Result<Self, StatisticsError> {
         if denominator == 0 {
             return Err(StatisticsError::ZeroDenominator);
         }
-        let (numerator, denominator) = if denominator < 0 {
-            (-numerator, -denominator)
-        } else {
-            (numerator, denominator)
-        };
-        let divisor = i128::try_from(gcd(numerator.unsigned_abs(), denominator.unsigned_abs()))
-            .map_err(|_| StatisticsError::RationalOverflow)?;
-        let (numerator, denominator) = (numerator / divisor, denominator / divisor);
-        if numerator.abs() > MAX_SAFE || denominator > MAX_SAFE {
+        let negative = (numerator < 0) != (denominator < 0);
+        let (magnitude, denominator) = (numerator.unsigned_abs(), denominator.unsigned_abs());
+        let divisor = gcd(magnitude, denominator);
+        let (magnitude, denominator) = (magnitude / divisor, denominator / divisor);
+        if magnitude > MAX_SAFE || denominator > MAX_SAFE {
             return Err(StatisticsError::RationalOverflow);
         }
+        let magnitude = magnitude as i64;
         Ok(Self {
-            numerator: numerator as i64,
+            numerator: if negative { -magnitude } else { magnitude },
             denominator: denominator as u64,
         })
     }
@@ -234,10 +237,11 @@ pub enum MultiplicityCorrection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", tag = "rule", deny_unknown_fields)]
 pub enum StoppingRule {
-    /// The pair count is fixed before the first outcome.
-    FixedN,
+    /// The pair count is fixed before the first outcome; a completed table of
+    /// any other size is refused, so a campaign cannot stop early or run on.
+    FixedN { pairs: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -434,6 +438,18 @@ impl AnalysisFamily {
             return Err(StatisticsError::EmptyFamilyField);
         }
         self.profile.rates()?;
+        // Deflation only shrinks, so the pilot's effective N is at most the items
+        // the affordable worlds hold; a pilot claiming more did not come from
+        // `run_icc_pilot`, whatever its other fields say.
+        let pilot = &self.icc_pilot;
+        let items_at_max = Ratio::try_new(
+            i128::from(pilot.n_items) * i128::from(pilot.max_affordable_worlds),
+            i128::from(pilot.n_worlds),
+        )
+        .map_err(|_| StatisticsError::PilotInconsistent)?;
+        if pilot.max_affordable_worlds == 0 || pilot.effective_n_at_max > items_at_max {
+            return Err(StatisticsError::PilotInconsistent);
+        }
         Ok(())
     }
 
@@ -776,9 +792,13 @@ pub fn arm_miss_asymmetry(
     let rates: Vec<Ratio> = arm_rates
         .values()
         .map(|rates| {
-            Ratio::from_decimal(&rates.miss_rate).ok_or(StatisticsError::MalformedDecimal {
-                field: "arm_rates.miss_rate",
-            })
+            let field = "arm_rates.miss_rate";
+            let rate = Ratio::from_decimal(&rates.miss_rate)
+                .ok_or(StatisticsError::MalformedDecimal { field })?;
+            if rate > Ratio::ONE {
+                return Err(StatisticsError::RateOutOfRange { field });
+            }
+            Ok(rate)
         })
         .collect::<Result<_, _>>()?;
     match (rates.iter().max(), rates.iter().min()) {
@@ -789,8 +809,9 @@ pub fn arm_miss_asymmetry(
 
 /// Analyzes a completed pair table under the frozen family. The order is the
 /// contract: the freeze check, then the pilot's block, then the arm-miss
-/// asymmetry block, and only then the gates, so a blocked campaign computes
-/// none.
+/// asymmetry block, then the table's conformance to the frozen plan (its size
+/// is the frozen pair count and every pair is in a frozen task family), and
+/// only then the gates, so a blocked campaign computes none.
 pub fn analyze(
     frozen: &FrozenFamily,
     family: &AnalysisFamily,
@@ -808,6 +829,22 @@ pub fn analyze(
             asymmetry,
             bound: rates.miss_asymmetry_bound,
         }));
+    }
+    let StoppingRule::FixedN { pairs: expected } = family.stopping_rule;
+    if pairs.len() != expected as usize {
+        return Err(StatisticsError::PairCountMismatch {
+            expected,
+            found: pairs.len(),
+        });
+    }
+    if let Some(pair) = pairs
+        .iter()
+        .find(|pair| !family.families.contains(&pair.cluster.family))
+    {
+        return Err(StatisticsError::PairOutsideFamilies {
+            pair_id: pair.pair_id.clone(),
+            family: pair.cluster.family.clone(),
+        });
     }
     let counts = PairCounts::of(pairs);
     Ok(Analysis::Report(Box::new(PairedReport {
@@ -828,7 +865,10 @@ pub fn analyze(
 /// `FamilyChangedAfterResults` is the post-hoc edit refusal;
 /// `RationalOverflow` means a statistic left the canonical-JSON safe range and
 /// is refused rather than wrapped; `PilotTooSmall` means a clustering level
-/// had fewer than two groups or no replication.
+/// had fewer than two groups or no replication; `PilotInconsistent` means a
+/// frozen pilot's effective N exceeds what its own counts allow;
+/// `PairCountMismatch` and `PairOutsideFamilies` mean the pair table is not
+/// the one the plan froze.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatisticsError {
     Shape(String),
@@ -842,6 +882,9 @@ pub enum StatisticsError {
     FamilyChangedAfterResults { recorded: String, found: String },
     FamilyNotRecorded,
     PilotTooSmall,
+    PilotInconsistent,
+    PairCountMismatch { expected: u32, found: usize },
+    PairOutsideFamilies { pair_id: String, family: String },
     NoAffordableWorlds,
     NoPairs,
     TooFewArms(usize),

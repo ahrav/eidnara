@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const REFERENCE_VERSION: &str = "statistics-reference-ts-v1";
+const FAMILIES: [&str; 6] = ["cargo", "tokio", "django", "git", "docs", "tests"];
 
 type Edit = (&'static str, Box<dyn Fn(&mut AnalysisFamily)>);
 
@@ -46,7 +47,7 @@ fn pilot(effective_n_at_max: Ratio, required: u32) -> IccPilot {
         icc_family: ratio(1, 4),
         icc_world_seed: ratio(0, 1),
         clustering_unit: ClusteringUnit::Family,
-        max_affordable_worlds: 60,
+        max_affordable_worlds: 150,
         effective_n_at_max,
         required_n_for_margin: required,
     }
@@ -56,9 +57,9 @@ fn family() -> AnalysisFamily {
     AnalysisFamily {
         schema: ANALYSIS_FAMILY_SCHEMA.to_string(),
         endpoints: vec!["quality_loss".into(), "harm".into(), "floor".into()],
-        families: vec!["cargo".into(), "tokio".into()],
+        families: FAMILIES.iter().map(|family| family.to_string()).collect(),
         exclusions: vec![],
-        stopping_rule: StoppingRule::FixedN,
+        stopping_rule: StoppingRule::FixedN { pairs: 300 },
         multiplicity_correction: MultiplicityCorrection::Holm,
         profile: profile(),
         interval_method: IntervalMethod::ClusterBootstrap,
@@ -106,8 +107,7 @@ fn arm_rates(fresh_miss: &str, aged_miss: &str) -> BTreeMap<String, ArmRates> {
 
 /// Three hundred pairs over six families, mostly concordant.
 fn pairs_at_threshold() -> Vec<PairOutcome> {
-    let families = ["cargo", "tokio", "django", "git", "docs", "tests"];
-    families
+    FAMILIES
         .iter()
         .enumerate()
         .flat_map(|(f, family)| {
@@ -335,6 +335,10 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
         (
             "exclusions",
             Box::new(|f| f.exclusions.push("drop timed-out fresh runs".into())),
+        ),
+        (
+            "stopping",
+            Box::new(|f| f.stopping_rule = StoppingRule::FixedN { pairs: 301 }),
         ),
         (
             "multiplicity",
@@ -836,6 +840,99 @@ fn arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained
     }
     let keys: Vec<&String> = value["gates"].as_object().unwrap().keys().collect();
     assert_eq!(keys, ["floor", "harm", "quality_loss"]);
+}
+
+/// The pair table is read against the frozen plan: its size is the frozen
+/// pair count and every pair falls in a frozen task family; the pilot's
+/// effective N cannot exceed the items the affordable worlds hold; an arm miss
+/// rate outside `[0, 1]` is refused; and `i128::MIN` is a refusal, never a wrap.
+#[test]
+fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
+    let family = family();
+    let frozen = FrozenFamily::freeze(&family).unwrap();
+    let pairs = pairs_at_threshold();
+    let rates = arm_rates("0", "0");
+    assert!(matches!(
+        analyze(&frozen, &family, &pairs, &rates).unwrap(),
+        Analysis::Report(_)
+    ));
+    // One pair is not the frozen count, so no gate is computed from it.
+    assert_eq!(
+        analyze(&frozen, &family, &pairs[..1], &rates).err(),
+        Some(StatisticsError::PairCountMismatch {
+            expected: 300,
+            found: 1
+        }),
+        "an early-stopped table reports no gates"
+    );
+    assert_eq!(
+        analyze(&frozen, &family, &pairs[..299], &rates).err(),
+        Some(StatisticsError::PairCountMismatch {
+            expected: 300,
+            found: 299
+        })
+    );
+    // A pair from a family the plan did not freeze is refused, whatever the count.
+    let mut foreign = pairs.clone();
+    foreign[0].cluster.family = "rails".to_string();
+    assert_eq!(
+        analyze(&frozen, &family, &foreign, &rates).err(),
+        Some(StatisticsError::PairOutsideFamilies {
+            pair_id: "cargo-0".to_string(),
+            family: "rails".to_string()
+        })
+    );
+    // The pilot's effective N is bounded by the items the affordable worlds hold
+    // (`n_items * max_affordable_worlds / n_worlds`), since deflation only shrinks.
+    let mut inflated = family.clone();
+    inflated.icc_pilot.n_items = 1;
+    inflated.icc_pilot.n_worlds = 1;
+    inflated.icc_pilot.max_affordable_worlds = 1;
+    inflated.icc_pilot.effective_n_at_max = ratio(1000, 1);
+    assert_eq!(inflated.validate(), Err(StatisticsError::PilotInconsistent));
+    let mut no_worlds = family.clone();
+    no_worlds.icc_pilot.n_worlds = 0;
+    assert_eq!(
+        no_worlds.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
+    let mut at_bound = family.clone();
+    at_bound.icc_pilot.effective_n_at_max = ratio(450, 1);
+    assert_eq!(
+        at_bound.validate(),
+        Ok(()),
+        "an undeflated pilot is possible"
+    );
+    let mut honest = family.clone();
+    honest.icc_pilot = run_icc_pilot(
+        "p",
+        &[
+            observation("cargo", 0, "a", 1),
+            observation("cargo", 0, "b", 2),
+            observation("tokio", 1, "a", 8),
+            observation("tokio", 1, "b", 9),
+        ],
+        4,
+        1,
+    )
+    .unwrap();
+    assert_eq!(honest.validate(), Ok(()), "a computed pilot validates");
+    // An arm miss rate past one is not a rate.
+    assert_eq!(
+        arm_miss_asymmetry(&arm_rates("2", "2")).err(),
+        Some(StatisticsError::RateOutOfRange {
+            field: "arm_rates.miss_rate"
+        })
+    );
+    // The minimum i128 is refused rather than wrapped into a wrong ratio.
+    assert_eq!(
+        Ratio::try_new(i128::MIN, 1).err(),
+        Some(StatisticsError::RationalOverflow)
+    );
+    assert_eq!(
+        Ratio::try_new(1, i128::MIN).err(),
+        Some(StatisticsError::RationalOverflow)
+    );
 }
 
 /// Gates take oracle verdicts only: the statistics module names no judge, so
