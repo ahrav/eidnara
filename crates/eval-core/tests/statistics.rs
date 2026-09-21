@@ -6,9 +6,9 @@ use eval_core::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmRates, ArmResult, BlockedReason,
     CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, Gates, ICC_THRESHOLD,
     ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome, IntervalWithheld,
-    LivenessBounds, MIN_BOOTSTRAP_REPLICATES, MultiplicityCorrection, PairCounts, PairOutcome,
-    PilotObservation, Ratio, StatisticsError, StoppingRule, analyze, arm_miss_asymmetry,
-    cluster_bootstrap_interval, intraclass_correlation, parse_analysis_family,
+    LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES, MultiplicityCorrection,
+    PairCounts, PairOutcome, PilotObservation, Ratio, StatisticsError, StoppingRule, analyze,
+    arm_miss_asymmetry, cluster_bootstrap_interval, intraclass_correlation, parse_analysis_family,
     parse_campaign_profile, run_icc_pilot,
 };
 use serde_json::{Value, json};
@@ -391,6 +391,14 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
     let mut few = family.clone();
     few.bootstrap_replicates = 39;
     assert_eq!(few.validate(), Err(StatisticsError::TooFewReplicates(39)));
+    let mut many = family.clone();
+    many.bootstrap_replicates = MAX_BOOTSTRAP_REPLICATES + 1;
+    assert_eq!(
+        many.validate(),
+        Err(StatisticsError::TooManyReplicates(
+            MAX_BOOTSTRAP_REPLICATES + 1
+        ))
+    );
     let mut empty = family.clone();
     empty.endpoints.clear();
     assert_eq!(empty.validate(), Err(StatisticsError::EmptyFamilyField));
@@ -577,8 +585,9 @@ fn the_three_gates_are_separate_signed_and_bound_by_the_profile() {
         Some(StatisticsError::NoPairs)
     );
 
-    // Censoring only ever makes a gate harder: a censored aged arm is a loss, a censored
-    // fresh arm is neither a pass nor a fail, and no censored arm is a pass.
+    // Each censored arm resolves to the verdict least favorable to the aged arm: a censored
+    // aged arm is not a pass, a censored fresh arm is a pass, and `c` needs a definite fresh
+    // fail, so a censored fresh arm beside an aged pass is a concordant pair.
     let censored = PairCounts::of(&[
         pair(
             "loss",
@@ -594,19 +603,92 @@ fn the_three_gates_are_separate_signed_and_bound_by_the_profile() {
             ArmResult::Censored(CensorReason::HardDeadlineMs),
             ArmResult::Pass,
         ),
+        pair(
+            "fresh_lost",
+            "f",
+            2,
+            ArmResult::Censored(CensorReason::Timeout),
+            ArmResult::Fail,
+        ),
+        pair(
+            "both",
+            "f",
+            3,
+            ArmResult::Censored(CensorReason::MaxModelCalls),
+            ArmResult::Censored(CensorReason::MaxToolCalls),
+        ),
         pair("kept", "g", 0, ArmResult::Pass, ArmResult::Pass),
     ]);
     assert_eq!(
         censored,
         PairCounts {
-            n: 3,
-            b: 1,
+            n: 5,
+            b: 3,
             c: 0,
             aged_pass: 2,
-            fresh_censored: 1,
-            aged_censored: 1,
+            fresh_censored: 3,
+            aged_censored: 2,
         }
     );
+}
+
+/// Every cell with a censored arm yields gate statistics at least as hard as
+/// each definite resolution of that arm against the same background.
+#[test]
+fn censoring_never_makes_a_gate_easier_than_any_definite_resolution() {
+    let definite = [ArmResult::Pass, ArmResult::Fail];
+    let censored = ArmResult::Censored(CensorReason::Timeout);
+    let arms = [ArmResult::Pass, ArmResult::Fail, censored];
+    let background: Vec<PairOutcome> = (0..9u64)
+        .map(|seed| {
+            pair(
+                &format!("bg-{seed}"),
+                "bg",
+                seed,
+                ArmResult::Pass,
+                ArmResult::Pass,
+            )
+        })
+        .collect();
+    let counts = |fresh, aged| {
+        let mut pairs = background.clone();
+        pairs.push(pair("cell", "cell", 0, fresh, aged));
+        PairCounts::of(&pairs)
+    };
+    let resolutions = |arm: ArmResult| -> Vec<ArmResult> {
+        if matches!(arm, ArmResult::Censored(_)) {
+            definite.to_vec()
+        } else {
+            vec![arm]
+        }
+    };
+    let mut cells = 0;
+    for fresh in arms {
+        for aged in arms {
+            if !matches!(fresh, ArmResult::Censored(_)) && !matches!(aged, ArmResult::Censored(_)) {
+                continue;
+            }
+            cells += 1;
+            let actual = counts(fresh, aged);
+            for fresh_resolved in resolutions(fresh) {
+                for aged_resolved in resolutions(aged) {
+                    let resolved = counts(fresh_resolved, aged_resolved);
+                    let cell =
+                        format!("{fresh:?}/{aged:?} vs {fresh_resolved:?}/{aged_resolved:?}");
+                    assert!(
+                        actual.quality_loss() >= resolved.quality_loss(),
+                        "quality_loss easier: {cell}"
+                    );
+                    assert!(actual.harm() >= resolved.harm(), "harm easier: {cell}");
+                    assert!(
+                        actual.aged_pass_rate() <= resolved.aged_pass_rate(),
+                        "floor easier: {cell}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(cells, 5, "every cell with a censored arm is covered");
 }
 
 #[test]
@@ -666,6 +748,11 @@ fn intervals_name_their_unit_and_counts_and_are_withheld_below_the_floor() {
         )
         .err(),
         Some(StatisticsError::TooFewReplicates(39))
+    );
+    // A replicate count past the cap is refused before any replicate runs.
+    assert_eq!(
+        cluster_bootstrap_interval(&pairs, ClusteringUnit::Family, 300, 7, u32::MAX).err(),
+        Some(StatisticsError::TooManyReplicates(u32::MAX))
     );
     let one_family: Vec<PairOutcome> = pairs
         .iter()

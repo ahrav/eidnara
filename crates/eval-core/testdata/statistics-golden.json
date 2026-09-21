@@ -1250,7 +1250,7 @@
           "denominator": 2,
           "numerator": 1
         },
-        "b": 1,
+        "b": 2,
         "c": 0,
         "fresh_censored": 2,
         "gates": {
@@ -1272,7 +1272,7 @@
             },
             "passed": false,
             "statistic": {
-              "denominator": 4,
+              "denominator": 2,
               "numerator": 1
             }
           },
@@ -1283,18 +1283,18 @@
             },
             "passed": false,
             "statistic": {
-              "denominator": 4,
+              "denominator": 2,
               "numerator": 1
             }
           }
         },
         "harm": {
-          "denominator": 4,
+          "denominator": 2,
           "numerator": 1
         },
         "n": 4,
         "quality_loss": {
-          "denominator": 4,
+          "denominator": 2,
           "numerator": 1
         }
       },
@@ -17059,7 +17059,7 @@
   "provenance": {
     "generator": "crates/eval-core/gen/gen-statistics-golden.ts",
     "generator_version": "statistics-reference-ts-v1",
-    "input_sha256": "5b16580ad6fc646c3fcb467aacbea81431e8c13c5ccd4dba4042b34c390f94c7"
+    "input_sha256": "7d92d3210f5ac705cb257c2efbc0e901a63bbfa926cc076c4a4ae3627230535a"
   },
   "schema": 1
 }

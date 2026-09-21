@@ -50,8 +50,6 @@ const emit = (r: Ratio) => {
   return { numerator: Number(r.numerator), denominator: Number(r.denominator) };
 };
 
-// Pair counts under the conservative rule: a censored arm never passes; a censored aged arm
-// is a loss; a censored fresh arm is neither a pass nor a fail.
 type Arm = "pass" | "fail" | { censored: string };
 interface Pair {
   pair_id: string;
@@ -70,7 +68,7 @@ function counts(pairs: readonly Pair[]) {
     if (isCensored(pair.fresh)) freshCensored += 1;
     if (isCensored(pair.aged)) agedCensored += 1;
     if (pair.aged === "pass") agedPass += 1;
-    if (pair.fresh === "pass" && pair.aged !== "pass") b += 1;
+    if (pair.fresh !== "fail" && pair.aged !== "pass") b += 1;
     if (pair.fresh === "fail" && pair.aged === "pass") c += 1;
   }
   const n = pairs.length;
@@ -228,7 +226,6 @@ for (const [f, family] of families.entries()) {
 }
 const gateFixtures = {
   "aged-better": {
-    b: 3, c: 5, n: 20,
     pairs: [
       ...Array.from({ length: 3 }, (_, i): Pair => ({ pair_id: `b${i}`, cluster: { family: "f", world_seed: i }, fresh: "pass", aged: "fail" })),
       ...Array.from({ length: 5 }, (_, i): Pair => ({ pair_id: `c${i}`, cluster: { family: "f", world_seed: i + 3 }, fresh: "fail", aged: "pass" })),
