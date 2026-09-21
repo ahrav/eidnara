@@ -82,10 +82,10 @@ pub use statistics::{
     ANALYSIS_FAMILY_SCHEMA, Analysis, AnalysisFamily, ArmResult, BlockedReason, CampaignProfile,
     CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, GATE_ENDPOINTS, GateVerdict, Gates,
     ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome,
-    IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES,
-    MultiplicityCorrection, PAIRED_ARMS, PairCounts, PairOutcome, PairedReport, PilotObservation,
-    ProfileRates, Ratio, StatisticsError, StoppingRule, analyze, arm_miss_asymmetry,
-    cluster_bootstrap_interval, intraclass_correlation, parse_analysis_family,
-    parse_campaign_profile, run_icc_pilot,
+    IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_DRAWS, MAX_BOOTSTRAP_REPLICATES,
+    MIN_BOOTSTRAP_REPLICATES, MultiplicityCorrection, PAIR_TABLE_DIGEST_PROTOCOL, PAIRED_ARMS,
+    PairCounts, PairOutcome, PairedReport, PilotObservation, ProfileRates, Ratio, StatisticsError,
+    StoppingRule, analyze, arm_miss_asymmetry, cluster_bootstrap_interval, intraclass_correlation,
+    pair_table_digest, parse_analysis_family, parse_campaign_profile, run_icc_pilot,
 };
 pub use stream::*;

@@ -6,7 +6,7 @@ use eval_core::{
 use serde_json::{Value, json};
 
 fn ratio(numerator: i64, denominator: u64) -> Ratio {
-    Ratio::new(numerator, denominator)
+    Ratio::try_new(i128::from(numerator), i128::from(denominator)).unwrap()
 }
 
 fn completed(duration_ms: u64) -> Attempt {

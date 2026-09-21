@@ -7,9 +7,10 @@ use eval_core::{
     CampaignProfile, CensorReason, ClusterKey, ClusteringUnit, FrozenFamily, GATE_ENDPOINTS, Gates,
     ICC_THRESHOLD, ITEM_COUNT_THRESHOLD, IccPilot, Interval, IntervalMethod, IntervalOutcome,
     IntervalWithheld, LivenessBounds, MAX_BOOTSTRAP_REPLICATES, MIN_BOOTSTRAP_REPLICATES, Manifest,
-    MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, Ratio, StatisticsError,
-    StoppingRule, analyze, arm_miss_asymmetry, cluster_bootstrap_interval, intraclass_correlation,
-    parse_analysis_family, parse_campaign_profile, run_icc_pilot,
+    ManifestError, MultiplicityCorrection, PairCounts, PairOutcome, PilotObservation, Ratio,
+    RunStatus, StatisticsError, StoppingRule, analyze, arm_miss_asymmetry,
+    cluster_bootstrap_interval, intraclass_correlation, pair_table_digest, parse_analysis_family,
+    parse_campaign_profile, run_icc_pilot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -20,7 +21,7 @@ const FAMILIES: [&str; 6] = ["cargo", "tokio", "django", "git", "docs", "tests"]
 type Edit = (&'static str, Box<dyn Fn(&mut AnalysisFamily)>);
 
 fn ratio(numerator: i64, denominator: u64) -> Ratio {
-    Ratio::new(numerator, denominator)
+    Ratio::try_new(i128::from(numerator), i128::from(denominator)).unwrap()
 }
 
 fn profile() -> CampaignProfile {
@@ -39,18 +40,24 @@ fn profile() -> CampaignProfile {
 }
 
 /// A pilot whose recorded counts and ICCs imply the world unit and
-/// `450 * 5/6 = 375` effective items at 150 affordable worlds.
+/// `900 * 5/6 = 750` effective items at 300 affordable worlds.
 fn pilot(required: u32) -> IccPilot {
     IccPilot {
         pilot_run_id: "ab".repeat(32),
+        families: FAMILIES
+            .iter()
+            .map(|family| family.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         n_items: 360,
         n_families: 6,
         n_worlds: 120,
         icc_family: ratio(0, 1),
         icc_world_seed: ratio(1, 10),
         clustering_unit: ClusteringUnit::WorldSeed,
-        max_affordable_worlds: 150,
-        effective_n_at_max: ratio(375, 1),
+        max_affordable_worlds: 300,
+        effective_n_at_max: ratio(750, 1),
         required_n_for_margin: required,
     }
 }
@@ -108,11 +115,19 @@ fn arm_rates(fresh_miss: &str, aged_miss: &str) -> BTreeMap<String, ArmRates> {
     ])
 }
 
-/// A manifest that recorded `frozen` before its first outcome and carries `rates`.
-fn recorded(frozen: &FrozenFamily, rates: BTreeMap<String, ArmRates>) -> Manifest {
+/// A manifest that recorded `frozen` before its first outcome, carries `rates`,
+/// and names `pairs` as its samples.
+fn recorded(
+    frozen: &FrozenFamily,
+    rates: BTreeMap<String, ArmRates>,
+    pairs: &[PairOutcome],
+) -> Manifest {
     let mut manifest = support::manifest();
     manifest.analysis_family_digest = Some(frozen.analysis_family_digest.clone());
     manifest.arm_rates = rates;
+    manifest.sample_ids = pairs.iter().map(|pair| pair.pair_id.clone()).collect();
+    manifest.sample_order = manifest.sample_ids.clone();
+    manifest.result_digest = pair_table_digest(pairs).unwrap();
     manifest
 }
 
@@ -181,8 +196,8 @@ fn the_frozen_reference_agrees_on_every_golden_case() {
                 let actual = json!({
                     "n": counts.n, "b": counts.b, "c": counts.c, "aged_pass": counts.aged_pass,
                     "fresh_censored": counts.fresh_censored, "aged_censored": counts.aged_censored,
-                    "quality_loss": counts.quality_loss(), "harm": counts.harm(),
-                    "aged_pass_rate": counts.aged_pass_rate(),
+                    "quality_loss": counts.quality_loss().unwrap(), "harm": counts.harm().unwrap(),
+                    "aged_pass_rate": counts.aged_pass_rate().unwrap(),
                     "gates": Gates::of(&counts, &rates).unwrap(),
                 });
                 assert_eq!(&actual, expected, "{id}");
@@ -317,6 +332,14 @@ fn every_profile_input_is_required_and_bounded() {
             field: "harm_bound"
         })
     );
+    // A profile that parses can be frozen: an integer past canonical JSON's safe
+    // range is refused here, not first when the family is digested.
+    let mut unsafe_bound = value.clone();
+    unsafe_bound["liveness_bounds"]["catch_up_episodes"] = json!(9_007_199_254_740_992u64);
+    assert!(matches!(
+        parse_campaign_profile(&unsafe_bound),
+        Err(StatisticsError::NotCanonical(_))
+    ));
     let mut malformed = value;
     malformed["floor_threshold"] = json!(".7");
     assert_eq!(
@@ -338,7 +361,7 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
 
     let edits: Vec<Edit> = vec![
         ("endpoints", Box::new(|f| f.endpoints.reverse())),
-        ("families", Box::new(|f| f.families[0] = "rails".into())),
+        ("families", Box::new(|f| f.families.reverse())),
         (
             "exclusions",
             Box::new(|f| f.exclusions.push("drop timed-out fresh runs".into())),
@@ -378,7 +401,7 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
     edited.exclusions.push("post hoc".into());
     assert!(matches!(
         analyze(
-            &recorded(&frozen, arm_rates("0", "0")),
+            &recorded(&frozen, arm_rates("0", "0"), &pairs_at_threshold()),
             &edited,
             &pairs_at_threshold(),
         ),
@@ -556,7 +579,7 @@ fn the_pilot_picks_the_highest_level_over_the_threshold_and_blocks_when_underpow
     let frozen = FrozenFamily::freeze(&underpowered).unwrap();
     assert_eq!(
         analyze(
-            &recorded(&frozen, arm_rates("0", "0")),
+            &recorded(&frozen, arm_rates("0", "0"), &pairs_at_threshold()),
             &underpowered,
             &pairs_at_threshold(),
         )
@@ -720,12 +743,15 @@ fn censoring_never_makes_a_gate_easier_than_any_definite_resolution() {
                     let cell =
                         format!("{fresh:?}/{aged:?} vs {fresh_resolved:?}/{aged_resolved:?}");
                     assert!(
-                        actual.quality_loss() >= resolved.quality_loss(),
+                        actual.quality_loss().unwrap() >= resolved.quality_loss().unwrap(),
                         "quality_loss easier: {cell}"
                     );
-                    assert!(actual.harm() >= resolved.harm(), "harm easier: {cell}");
                     assert!(
-                        actual.aged_pass_rate() <= resolved.aged_pass_rate(),
+                        actual.harm().unwrap() >= resolved.harm().unwrap(),
+                        "harm easier: {cell}"
+                    );
+                    assert!(
+                        actual.aged_pass_rate().unwrap() <= resolved.aged_pass_rate().unwrap(),
                         "floor easier: {cell}"
                     );
                 }
@@ -875,7 +901,7 @@ fn arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained
     let pairs = pairs_at_threshold();
     assert_eq!(
         analyze(
-            &recorded(&frozen, arm_rates("0.1", "0.02")),
+            &recorded(&frozen, arm_rates("0.1", "0.02"), &pairs),
             &family,
             &pairs
         )
@@ -886,12 +912,15 @@ fn arm_miss_asymmetry_past_the_bound_blocks_with_no_gates_and_rates_are_retained
         })
     );
     assert!(matches!(
-        analyze(&recorded(&frozen, renamed.clone()), &family, &pairs),
+        analyze(&recorded(&frozen, renamed.clone(), &pairs), &family, &pairs),
         Err(StatisticsError::ArmsNotPaired { .. })
     ));
-    let Analysis::Report(report) =
-        analyze(&recorded(&frozen, arm_rates("0.05", "0")), &family, &pairs).unwrap()
-    else {
+    let Analysis::Report(report) = analyze(
+        &recorded(&frozen, arm_rates("0.05", "0"), &pairs),
+        &family,
+        &pairs,
+    )
+    .unwrap() else {
         panic!("at the bound reports");
     };
     assert_eq!(report.analysis_family_digest, frozen.analysis_family_digest);
@@ -929,12 +958,17 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let pairs = pairs_at_threshold();
     let rates = arm_rates("0", "0");
     assert!(matches!(
-        analyze(&recorded(&frozen, rates.clone()), &family, &pairs).unwrap(),
+        analyze(&recorded(&frozen, rates.clone(), &pairs), &family, &pairs).unwrap(),
         Analysis::Report(_)
     ));
     // One pair is not the frozen count, so no gate is computed from it.
     assert_eq!(
-        analyze(&recorded(&frozen, rates.clone()), &family, &pairs[..1]).err(),
+        analyze(
+            &recorded(&frozen, rates.clone(), &pairs[..1]),
+            &family,
+            &pairs[..1]
+        )
+        .err(),
         Some(StatisticsError::PairCountMismatch {
             expected: 300,
             found: 1
@@ -942,7 +976,12 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         "an early-stopped table reports no gates"
     );
     assert_eq!(
-        analyze(&recorded(&frozen, rates.clone()), &family, &pairs[..299]).err(),
+        analyze(
+            &recorded(&frozen, rates.clone(), &pairs[..299]),
+            &family,
+            &pairs[..299]
+        )
+        .err(),
         Some(StatisticsError::PairCountMismatch {
             expected: 300,
             found: 299
@@ -952,7 +991,12 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let mut foreign = pairs.clone();
     foreign[0].cluster.family = "rails".to_string();
     assert_eq!(
-        analyze(&recorded(&frozen, rates.clone()), &family, &foreign).err(),
+        analyze(
+            &recorded(&frozen, rates.clone(), &foreign),
+            &family,
+            &foreign
+        )
+        .err(),
         Some(StatisticsError::PairOutsideFamilies {
             pair_id: "cargo-0".to_string(),
             family: "rails".to_string()
@@ -961,7 +1005,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     // Three hundred copies of one pair are not three hundred pairs.
     let copies: Vec<PairOutcome> = std::iter::repeat_n(pairs[0].clone(), 300).collect();
     assert_eq!(
-        analyze(&recorded(&frozen, rates.clone()), &family, &copies).err(),
+        analyze(&recorded(&frozen, rates.clone(), &pairs), &family, &copies).err(),
         Some(StatisticsError::DuplicatePair {
             pair_id: "cargo-0".to_string()
         })
@@ -969,7 +1013,7 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     // The pilot's unit and effective N are recomputed from its recorded counts and
     // ICCs, so a hand-written value that disagrees with its own evidence is refused.
     let mut inflated = family.clone();
-    inflated.icc_pilot.effective_n_at_max = ratio(376, 1);
+    inflated.icc_pilot.effective_n_at_max = ratio(751, 1);
     assert_eq!(inflated.validate(), Err(StatisticsError::PilotInconsistent));
     let mut wrong_unit = family.clone();
     wrong_unit.icc_pilot.clustering_unit = ClusteringUnit::Family;
@@ -1006,6 +1050,48 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         unreplicated.validate(),
         Err(StatisticsError::PilotInconsistent)
     );
+    // When every family holds exactly one world the two partitions coincide, so
+    // a pilot recording different ICCs for them did not come from the estimator.
+    let mut coinciding = family.clone();
+    coinciding.families = vec!["a".into(), "b".into()];
+    coinciding.icc_pilot = IccPilot {
+        families: vec!["a".into(), "b".into()],
+        n_items: 300,
+        n_families: 2,
+        n_worlds: 2,
+        icc_family: ratio(1, 20),
+        icc_world_seed: Ratio::ZERO,
+        max_affordable_worlds: 2,
+        effective_n_at_max: ratio(300, 1),
+        ..family.icc_pilot.clone()
+    };
+    assert_eq!(
+        coinciding.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
+    coinciding.icc_pilot.icc_family = Ratio::ZERO;
+    assert_eq!(coinciding.validate(), Ok(()), "equal ICCs are consistent");
+    // The public constructor is fallible: a zero denominator or an unsafe
+    // component is a typed refusal, never a panic.
+    assert_eq!(
+        Ratio::try_new(1, 0).err(),
+        Some(StatisticsError::ZeroDenominator)
+    );
+    assert_eq!(
+        Ratio::try_new(i128::from(i64::MAX), 1).err(),
+        Some(StatisticsError::RationalOverflow)
+    );
+    // An ICC above one is outside the estimator's range; a negative one is
+    // clamped to zero by the projection, so it can never raise effective N.
+    let mut over_one = family.clone();
+    over_one.icc_pilot.icc_world_seed = ratio(2, 1);
+    assert_eq!(over_one.validate(), Err(StatisticsError::PilotInconsistent));
+    for icc in [Ratio::ZERO, ratio(-100, 1)] {
+        let mut clamped = family.clone();
+        clamped.icc_pilot.icc_world_seed = icc;
+        clamped.icc_pilot.effective_n_at_max = ratio(900, 1);
+        assert_eq!(clamped.validate(), Ok(()), "{icc:?} projects undeflated");
+    }
     // The three gates are one all-must-pass conclusion over fixed bounds, so no
     // correction applies; a plan declaring one is refused, not analyzed uncorrected.
     for correction in [
@@ -1044,6 +1130,14 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let mut narrowed = family.clone();
     narrowed.families = vec!["cargo".into()];
     assert_eq!(narrowed.validate(), Err(StatisticsError::PilotInconsistent));
+    // Nor can a pilot over other families of the same count: the identities match.
+    let mut elsewhere = honest.clone();
+    elsewhere.families = vec!["django".into(), "git".into()];
+    assert_eq!(
+        elsewhere.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
+    assert_eq!(honest.icc_pilot.families, ["cargo", "tokio"]);
     let mut repeated_family = family.clone();
     repeated_family.families.push("cargo".into());
     assert_eq!(
@@ -1064,12 +1158,290 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
         })
         .collect();
     assert_eq!(
-        analyze(&recorded(&frozen, rates.clone()), &family, &one_world).unwrap(),
+        analyze(
+            &recorded(&frozen, rates.clone(), &one_world),
+            &family,
+            &one_world
+        )
+        .unwrap(),
         Analysis::Blocked(BlockedReason::TableUnderpowered {
             effective_n: ratio(3000, 309),
             n_clusters: 1,
             required_n_for_margin: 300
         })
+    );
+    // Unequal clusters deflate by the size-weighted mean `sum(m_i^2) / n`: a
+    // 299/1 split is nearly one cluster, not two clusters of 150.
+    let mut split = one_world.clone();
+    split[0].cluster.world_seed = 1;
+    let mut lenient = family.clone();
+    lenient.icc_pilot.required_n_for_margin = 15;
+    let lenient_frozen = FrozenFamily::freeze(&lenient).unwrap();
+    assert_eq!(
+        analyze(
+            &recorded(&lenient_frozen, rates.clone(), &split),
+            &lenient,
+            &split
+        )
+        .unwrap(),
+        Analysis::Blocked(BlockedReason::TableUnderpowered {
+            effective_n: ratio(450_000, 46_051),
+            n_clusters: 2,
+            required_n_for_margin: 15
+        })
+    );
+    // The manifest's samples are the pairs; a table of other pairs is refused.
+    let mut relabeled = pairs.clone();
+    relabeled[0].pair_id = "elsewhere".to_string();
+    assert_eq!(
+        analyze(
+            &recorded(&frozen, rates.clone(), &pairs),
+            &family,
+            &relabeled
+        )
+        .err(),
+        Some(StatisticsError::PairsNotManifestSamples {
+            pairs: 300,
+            samples: 300,
+            first_unrecorded: Some("elsewhere".to_string())
+        })
+    );
+    // The same ids with re-scored or relabeled rows are not the recorded table:
+    // the manifest's `result_digest` is the table's digest, in any row order.
+    let mut flipped = pairs.clone();
+    flipped[0].fresh = ArmResult::Fail;
+    assert!(matches!(
+        analyze(&recorded(&frozen, rates.clone(), &pairs), &family, &flipped),
+        Err(StatisticsError::PairsNotManifestResult { .. })
+    ));
+    let mut shuffled = pairs.clone();
+    shuffled.reverse();
+    assert_eq!(pair_table_digest(&shuffled), pair_table_digest(&pairs));
+    assert!(matches!(
+        analyze(
+            &recorded(&frozen, rates.clone(), &pairs),
+            &family,
+            &shuffled
+        )
+        .unwrap(),
+        Analysis::Report(_)
+    ));
+    // The rate helpers validate the counts they divide: no total is not a rate.
+    assert_eq!(
+        PairCounts {
+            n: 0,
+            b: 1,
+            ..PairCounts::default()
+        }
+        .harm()
+        .err(),
+        Some(StatisticsError::NoPairs)
+    );
+    assert_eq!(
+        PairCounts {
+            n: 1,
+            b: 2,
+            ..PairCounts::default()
+        }
+        .harm()
+        .err(),
+        Some(StatisticsError::InconsistentCounts)
+    );
+    // A table over more worlds than the plan could afford is not the registered campaign.
+    let mut narrow = family.clone();
+    narrow.icc_pilot.max_affordable_worlds = 150;
+    narrow.icc_pilot.effective_n_at_max = ratio(375, 1);
+    let narrow_frozen = FrozenFamily::freeze(&narrow).unwrap();
+    assert_eq!(
+        analyze(
+            &recorded(&narrow_frozen, rates.clone(), &pairs),
+            &narrow,
+            &pairs
+        )
+        .err(),
+        Some(StatisticsError::WorldsExceedAffordable {
+            worlds: 300,
+            max_affordable_worlds: 150
+        })
+    );
+    // The pre-outcome blocks never read the table, so an underpowered plan blocks
+    // before a bad seed in the table could be refused.
+    let mut underpowered = family.clone();
+    underpowered.icc_pilot.required_n_for_margin = 751;
+    underpowered.stopping_rule = StoppingRule::FixedN { pairs: 751 };
+    let underpowered_frozen = FrozenFamily::freeze(&underpowered).unwrap();
+    let mut wide = pairs.clone();
+    wide[0].cluster.world_seed = 9_007_199_254_740_993;
+    assert!(matches!(
+        analyze(
+            &recorded(&underpowered_frozen, rates.clone(), &pairs),
+            &underpowered,
+            &wide
+        )
+        .unwrap(),
+        Analysis::Blocked(BlockedReason::InsufficientEffectiveN { .. })
+    ));
+    // A world seed past canonical JSON's safe integer is refused at both entries.
+    assert_eq!(
+        analyze(&recorded(&frozen, rates.clone(), &pairs), &family, &wide).err(),
+        Some(StatisticsError::WorldSeedOutOfRange(9_007_199_254_740_993))
+    );
+    assert_eq!(
+        run_icc_pilot(
+            "p",
+            &[
+                observation("cargo", 9_007_199_254_740_992, "a", 1),
+                observation("cargo", 0, "a", 2),
+            ],
+            4,
+            1
+        )
+        .err(),
+        Some(StatisticsError::WorldSeedOutOfRange(9_007_199_254_740_992))
+    );
+    // The standalone bootstrap refuses the same unsafe seeds, in the pairs and
+    // in its own draw key.
+    assert_eq!(
+        cluster_bootstrap_interval(&wide, ClusteringUnit::WorldSeed, 300, 7, 40).err(),
+        Some(StatisticsError::WorldSeedOutOfRange(9_007_199_254_740_993))
+    );
+    assert_eq!(
+        cluster_bootstrap_interval(&pairs, ClusteringUnit::WorldSeed, 300, 1 << 53, 40).err(),
+        Some(StatisticsError::BootstrapSeedOutOfRange(1 << 53))
+    );
+    // The manifest must be a valid record before anything is read from it.
+    let mut wrong_schema = recorded(&frozen, rates.clone(), &pairs);
+    wrong_schema.schema = "eval-manifest/v1".to_string();
+    assert!(matches!(
+        analyze(&wrong_schema, &family, &pairs),
+        Err(StatisticsError::InvalidManifest(
+            ManifestError::SchemaMismatch { .. }
+        ))
+    ));
+    let mut unordered = recorded(&frozen, rates.clone(), &pairs);
+    unordered.sample_order.pop();
+    assert!(matches!(
+        analyze(&unordered, &family, &pairs),
+        Err(StatisticsError::InvalidManifest(_))
+    ));
+    // Only a completed run's outcomes are evidence.
+    for status in [
+        RunStatus::Incomplete,
+        RunStatus::Refused,
+        RunStatus::Blocked,
+    ] {
+        let mut unfinished = recorded(&frozen, rates.clone(), &pairs);
+        unfinished.status = status;
+        assert_eq!(
+            analyze(&unfinished, &family, &pairs).err(),
+            Some(StatisticsError::RunNotCompleted(status))
+        );
+    }
+    // A projection that leaves the safe range reports the overflow, not a
+    // disagreement with the recorded values.
+    let mut vast = family.clone();
+    vast.families = vec!["a".into(), "b".into()];
+    vast.icc_pilot = IccPilot {
+        families: vec!["a".into(), "b".into()],
+        n_items: u32::MAX,
+        n_families: 2,
+        n_worlds: 3,
+        icc_family: Ratio::ZERO,
+        icc_world_seed: Ratio::ZERO,
+        max_affordable_worlds: u32::MAX,
+        effective_n_at_max: Ratio::ONE,
+        required_n_for_margin: 1,
+        ..family.icc_pilot.clone()
+    };
+    vast.stopping_rule = StoppingRule::FixedN { pairs: 1 };
+    assert_eq!(vast.validate(), Err(StatisticsError::RationalOverflow));
+    // Effective N is the smaller of the two nesting levels' deflations: three
+    // families of two internally constant worlds have a family ICC of 1/9 and a
+    // world ICC of one, and six two-item worlds support six items, not nine.
+    let nested: Vec<PilotObservation> = [("a", [0, 0]), ("b", [0, 1]), ("c", [0, 1])]
+        .iter()
+        .flat_map(|(family, worlds)| {
+            worlds.iter().enumerate().flat_map(move |(seed, value)| {
+                ["t", "u"]
+                    .into_iter()
+                    .map(move |task| observation(family, seed as u64, task, *value))
+            })
+        })
+        .collect();
+    let two_level = run_icc_pilot("p", &nested, 6, 8).unwrap();
+    assert_eq!(
+        (
+            two_level.icc_family,
+            two_level.icc_world_seed,
+            two_level.clustering_unit
+        ),
+        (ratio(1, 9), Ratio::ONE, ClusteringUnit::Family)
+    );
+    assert_eq!(two_level.effective_n_at_max, ratio(6, 1));
+    // The bootstrap draws once per replicate per cluster; a plan or a table whose
+    // draws exceed the budget is refused instead of run without bound.
+    let mut vast_plan = family.clone();
+    vast_plan.icc_pilot.max_affordable_worlds = 100_000;
+    vast_plan.icc_pilot.effective_n_at_max = ratio(250_000, 1);
+    vast_plan.bootstrap_replicates = MAX_BOOTSTRAP_REPLICATES;
+    assert_eq!(
+        vast_plan.validate(),
+        Err(StatisticsError::TooManyDraws(1_000_000_000))
+    );
+    let many_worlds: Vec<PairOutcome> = (0..501)
+        .map(|i| {
+            pair(
+                &format!("w{i}"),
+                "cargo",
+                i,
+                ArmResult::Pass,
+                ArmResult::Pass,
+            )
+        })
+        .collect();
+    assert_eq!(
+        cluster_bootstrap_interval(
+            &many_worlds,
+            ClusteringUnit::WorldSeed,
+            300,
+            7,
+            MAX_BOOTSTRAP_REPLICATES
+        )
+        .err(),
+        Some(StatisticsError::TooManyDraws(5_010_000))
+    );
+    // A required N of zero is no power target; the plan is refused before it freezes.
+    let mut no_target = family.clone();
+    no_target.icc_pilot.required_n_for_margin = 0;
+    assert_eq!(
+        no_target.validate(),
+        Err(StatisticsError::PilotInconsistent)
+    );
+    // The standalone bootstrap refuses repeated pair ids like `analyze` does.
+    let mut two_worlds = copies.clone();
+    for pair in &mut two_worlds[150..] {
+        pair.cluster.world_seed = 1;
+    }
+    assert_eq!(
+        cluster_bootstrap_interval(&two_worlds, ClusteringUnit::WorldSeed, 300, 7, 40).err(),
+        Some(StatisticsError::DuplicatePair {
+            pair_id: "cargo-0".to_string()
+        })
+    );
+    // A plan of zero pairs computes no gate and is refused before it freezes.
+    let mut empty_plan = family.clone();
+    empty_plan.stopping_rule = StoppingRule::FixedN { pairs: 0 };
+    assert_eq!(empty_plan.validate(), Err(StatisticsError::NoPairs));
+    // The rate helpers refuse counts past the safe range instead of panicking.
+    assert_eq!(
+        PairCounts {
+            n: u64::MAX,
+            b: u64::MAX - 1,
+            ..PairCounts::default()
+        }
+        .harm()
+        .err(),
+        Some(StatisticsError::InconsistentCounts)
     );
     // One score per task per world: a repeated observation is not another item.
     let mut repeated = honest_observations.to_vec();
@@ -1091,11 +1463,22 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     let mut refusing = arm_rates("0", "0");
     refusing.get_mut("aged").unwrap().refusal_rate = "2".to_string();
     assert_eq!(
-        analyze(&recorded(&frozen, refusing.clone()), &family, &pairs).err(),
+        arm_miss_asymmetry(&refusing).err(),
         Some(StatisticsError::RateOutOfRange {
             field: "arm_rates.refusal_rate"
         })
     );
+    // Through `analyze` the manifest's own validation refuses it first.
+    assert!(matches!(
+        analyze(
+            &recorded(&frozen, refusing.clone(), &pairs),
+            &family,
+            &pairs
+        ),
+        Err(StatisticsError::InvalidManifest(
+            ManifestError::RateOutOfRange { .. }
+        ))
+    ));
     // Hand-built counts that no pair table produces are refused before any rate.
     let profile_rates = profile().rates().unwrap();
     for counts in [
@@ -1147,6 +1530,15 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             aged_pass: 2,
             fresh_censored: 0,
             aged_censored: 1,
+        },
+        // A censored fresh arm is in `b` or beside an aged pass.
+        PairCounts {
+            n: 1,
+            b: 0,
+            c: 0,
+            aged_pass: 0,
+            fresh_censored: 1,
+            aged_censored: 0,
         },
     ] {
         assert_eq!(

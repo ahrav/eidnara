@@ -6,11 +6,11 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use context_core::canonical_json::{ContractError, protocol_digest};
+use context_core::canonical_json::{ContractError, canonical_json_encode, protocol_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::manifest::{ArmRates, Manifest, is_canonical_decimal};
+use crate::manifest::{ArmRates, Manifest, ManifestError, RunStatus, is_canonical_decimal};
 
 pub const ANALYSIS_FAMILY_SCHEMA: &str = "eval-analysis-family/v1";
 /// The gates a report carries; a frozen family declares exactly these.
@@ -19,6 +19,9 @@ pub const GATE_ENDPOINTS: [&str; 3] = ["quality_loss", "harm", "floor"];
 pub const PAIRED_ARMS: [&str; 2] = ["aged", "fresh"];
 const ANALYSIS_FAMILY_DIGEST_PROTOCOL: &str = "eval-analysis-family-digest/v1";
 const BOOTSTRAP_PROTOCOL: &str = "eval-cluster-bootstrap/v1";
+/// The digest a paired campaign's manifest records as `result_digest`: the
+/// completed pair table, ordered by pair id.
+pub const PAIR_TABLE_DIGEST_PROTOCOL: &str = "eval-pair-table/v1";
 /// The smallest item count an interval may be computed from.
 pub const ITEM_COUNT_THRESHOLD: u32 = 300;
 /// The fewest replicates whose `1/40` tails are distinct order statistics.
@@ -26,6 +29,9 @@ pub const MIN_BOOTSTRAP_REPLICATES: u32 = 40;
 /// The most replicates a family may ask for; each costs one digest per
 /// cluster, so the bound keeps the resample work and its buffer finite.
 pub const MAX_BOOTSTRAP_REPLICATES: u32 = 10_000;
+/// The most draws (replicates times clusters) one bootstrap may perform, so a
+/// valid plan or table cannot make the analysis run without bound.
+pub const MAX_BOOTSTRAP_DRAWS: u64 = 5_000_000;
 /// The clustering level above which within-cluster correlation is treated as
 /// real, so the pilot picks the highest level whose ICC exceeds `1/20`.
 pub const ICC_THRESHOLD: Ratio = Ratio {
@@ -97,8 +103,9 @@ impl Ratio {
         })
     }
 
-    /// `new` for small literals that cannot overflow.
-    pub fn new(numerator: i64, denominator: u64) -> Self {
+    /// `new` for in-crate literals that cannot overflow; callers outside the
+    /// crate go through the fallible `try_new`.
+    pub(crate) fn new(numerator: i64, denominator: u64) -> Self {
         Self::try_new(i128::from(numerator), i128::from(denominator)).expect("small literal")
     }
 
@@ -186,7 +193,7 @@ pub struct LivenessBounds {
 /// constructs one, so every bound a gate sees has passed that check:
 ///
 /// ```compile_fail
-/// let one = eval_core::Ratio::new(1, 1);
+/// let one = eval_core::Ratio::ONE;
 /// let _ = eval_core::ProfileRates { noninferiority_margin: one, harm_bound: one, floor_threshold: one, miss_asymmetry_bound: one };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,10 +225,13 @@ fn unit_rate(field: &'static str, text: &str) -> Result<Ratio, StatisticsError> 
     Ok(ratio)
 }
 
+/// Parses a profile whose rates are in range and whose integers are canonical,
+/// so a profile that parses can be embedded in a family and frozen.
 pub fn parse_campaign_profile(value: &Value) -> Result<CampaignProfile, StatisticsError> {
     let profile: CampaignProfile = serde_json::from_value(value.clone())
         .map_err(|error| StatisticsError::Shape(error.to_string()))?;
     profile.rates()?;
+    canonical_json_encode(&serde_json::to_value(&profile).expect("serializes"))?;
     Ok(profile)
 }
 
@@ -282,6 +292,34 @@ impl ClusterKey {
     }
 }
 
+/// The distinct pair ids of a table, or the first id that repeats: a copy of a
+/// pair is not another pair, at any entry that counts them.
+fn distinct_pair_ids(pairs: &[PairOutcome]) -> Result<BTreeSet<&str>, StatisticsError> {
+    let mut seen = BTreeSet::new();
+    match pairs
+        .iter()
+        .find(|pair| !seen.insert(pair.pair_id.as_str()))
+    {
+        Some(repeat) => Err(StatisticsError::DuplicatePair {
+            pair_id: repeat.pair_id.clone(),
+        }),
+        None => Ok(seen),
+    }
+}
+
+/// A world seed past canonical JSON's safe integer would not survive the
+/// TypeScript reference or a canonical record, so it is refused at the entry
+/// rather than merged with its neighbor.
+fn check_seeds<'a>(keys: impl Iterator<Item = &'a ClusterKey>) -> Result<(), StatisticsError> {
+    match keys
+        .map(|key| key.world_seed)
+        .find(|seed| u128::from(*seed) > MAX_SAFE)
+    {
+        Some(world_seed) => Err(StatisticsError::WorldSeedOutOfRange(world_seed)),
+        None => Ok(()),
+    }
+}
+
 /// One pilot observation: a paired score for one task in one world.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -338,6 +376,9 @@ pub fn intraclass_correlation(groups: &[Vec<i64>]) -> Result<Ratio, StatisticsEr
 #[serde(deny_unknown_fields)]
 pub struct IccPilot {
     pub pilot_run_id: String,
+    /// The task families the pilot sampled, distinct and sorted; a plan
+    /// registering any other set cannot carry this pilot.
+    pub families: Vec<String>,
     pub n_items: u32,
     pub n_families: u32,
     pub n_worlds: u32,
@@ -346,8 +387,8 @@ pub struct IccPilot {
     pub clustering_unit: ClusteringUnit,
     pub max_affordable_worlds: u32,
     /// Items at the affordable world count deflated by the design effect
-    /// `1 + (m - 1) ICC` of the selected unit; the effect is never below one,
-    /// so deflation only ever shrinks N.
+    /// `1 + (m - 1) ICC` at each nesting level, the smaller taken; the effect
+    /// is never below one, so deflation only ever shrinks N.
     pub effective_n_at_max: Ratio,
     pub required_n_for_margin: u32,
 }
@@ -375,6 +416,7 @@ pub fn run_icc_pilot(
     if max_affordable_worlds == 0 {
         return Err(StatisticsError::NoAffordableWorlds);
     }
+    check_seeds(observations.iter().map(|o| &o.cluster))?;
     let mut seen = BTreeSet::new();
     if let Some(repeat) = observations
         .iter()
@@ -391,6 +433,12 @@ pub fn run_icc_pilot(
         pilot_run_id: pilot_run_id.to_string(),
         n_items: observations.len() as u32,
         n_families: by_family.len() as u32,
+        families: observations
+            .iter()
+            .map(|o| o.cluster.family.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         n_worlds: by_world.len() as u32,
         icc_family: intraclass_correlation(&by_family)?,
         icc_world_seed: intraclass_correlation(&by_world)?,
@@ -405,29 +453,36 @@ pub fn run_icc_pilot(
 
 impl IccPilot {
     /// The unit and effective N the recorded counts and ICCs imply, so a
-    /// frozen pilot can be checked against its own evidence.
+    /// frozen pilot can be checked against its own evidence. The unit is the
+    /// highest level over the threshold; the effective N is the smaller of the
+    /// two levels' deflations, so a stronger correlation at the finer level is
+    /// never discarded by selecting the coarser one.
     fn projection(&self) -> Result<(ClusteringUnit, Ratio), StatisticsError> {
-        // Each affordable world lies in one family, so the campaign can realize
-        // at most that many family clusters, however many the pilot sampled.
-        let (clustering_unit, icc, clusters_at_max) = if self.icc_family > ICC_THRESHOLD {
-            (
-                ClusteringUnit::Family,
-                self.icc_family,
-                i128::from(self.n_families.min(self.max_affordable_worlds)),
-            )
+        let clustering_unit = if self.icc_family > ICC_THRESHOLD {
+            ClusteringUnit::Family
         } else {
-            (
-                ClusteringUnit::WorldSeed,
-                self.icc_world_seed,
-                i128::from(self.max_affordable_worlds),
-            )
+            ClusteringUnit::WorldSeed
         };
         let items_at_max = Ratio::try_new(
             i128::from(self.n_items) * i128::from(self.max_affordable_worlds),
             i128::from(self.n_worlds),
         )?;
-        let mean_cluster = items_at_max.checked_div(Ratio::try_new(clusters_at_max, 1)?)?;
-        Ok((clustering_unit, deflate(items_at_max, mean_cluster, icc)?))
+        // Each affordable world lies in one family, so the campaign can realize
+        // at most that many family clusters, however many the pilot sampled.
+        let levels = [
+            (
+                self.n_families.min(self.max_affordable_worlds),
+                self.icc_family,
+            ),
+            (self.max_affordable_worlds, self.icc_world_seed),
+        ];
+        let mut effective_n = items_at_max;
+        for (clusters, icc) in levels {
+            let mean_cluster =
+                items_at_max.checked_div(Ratio::try_new(i128::from(clusters), 1)?)?;
+            effective_n = effective_n.min(deflate(items_at_max, mean_cluster, icc)?);
+        }
+        Ok((clustering_unit, effective_n))
     }
 }
 
@@ -503,12 +558,14 @@ impl AnalysisFamily {
                 declared: self.endpoints.clone(),
             });
         }
-        // The pilot sampled the registered population: its family count is the
-        // registered family count, so the family-unit projection cannot spread
-        // items over families the campaign never runs.
+        // The pilot sampled the registered population: its families are the
+        // registered families, so its ICCs describe the campaign's clusters and
+        // the family-unit projection spreads items over exactly those.
         let registered: BTreeSet<&str> = self.families.iter().map(String::as_str).collect();
+        let sampled: Vec<&str> = self.icc_pilot.families.iter().map(String::as_str).collect();
         if registered.len() != self.families.len()
             || registered.len() != self.icc_pilot.n_families as usize
+            || sampled != registered.iter().copied().collect::<Vec<_>>()
         {
             return Err(StatisticsError::PilotInconsistent);
         }
@@ -518,13 +575,19 @@ impl AnalysisFamily {
         // `run_icc_pilot`, so it cannot carry a gate. The counts must also be
         // ones `intraclass_correlation` could have estimated both ICCs from: two
         // or more families, at least as many worlds, and replication within
-        // worlds.
+        // worlds; when every family holds exactly one world the two partitions
+        // coincide and their ICCs must agree. A required N of zero is no power
+        // target at all, so it is refused too.
         let pilot = &self.icc_pilot;
         if pilot.max_affordable_worlds == 0
+            || pilot.required_n_for_margin == 0
+            || pilot.icc_family > Ratio::ONE
+            || pilot.icc_world_seed > Ratio::ONE
             || pilot.n_families < 2
             || pilot.n_worlds < pilot.n_families
             || pilot.n_items <= pilot.n_worlds
-            || pilot.projection().ok() != Some((pilot.clustering_unit, pilot.effective_n_at_max))
+            || (pilot.n_worlds == pilot.n_families && pilot.icc_family != pilot.icc_world_seed)
+            || pilot.projection()? != (pilot.clustering_unit, pilot.effective_n_at_max)
         {
             return Err(StatisticsError::PilotInconsistent);
         }
@@ -536,6 +599,15 @@ impl AnalysisFamily {
         // Deflation only shrinks, so a table smaller than the required N cannot
         // reach it whatever the affordable worlds could have held.
         let StoppingRule::FixedN { pairs } = self.stopping_rule;
+        if pairs == 0 {
+            return Err(StatisticsError::NoPairs);
+        }
+        // The bootstrap draws once per replicate per cluster, and a campaign has
+        // at most `max_affordable_worlds` clusters at either unit.
+        let draws = u64::from(self.bootstrap_replicates) * u64::from(pilot.max_affordable_worlds);
+        if draws > MAX_BOOTSTRAP_DRAWS {
+            return Err(StatisticsError::TooManyDraws(draws));
+        }
         if pairs < pilot.required_n_for_margin {
             return Err(StatisticsError::PlanBelowRequiredN {
                 pairs,
@@ -679,21 +751,53 @@ impl PairCounts {
         self.aged_censored += other.aged_censored;
     }
 
-    fn over_n(&self, numerator: i64) -> Ratio {
-        Ratio::new(numerator, self.n.max(1))
+    /// Counts a pair table can produce: at least one pair; `b` and `c` are
+    /// disjoint cells; `b` and every censored aged arm exclude an aged pass
+    /// while `c` requires one; every censored fresh arm lands in `b` or in an
+    /// aged pass that `c` cannot also occupy; every count is over `n`; and `n`
+    /// is within the safe range, so no rate can overflow.
+    pub fn validate(&self) -> Result<(), StatisticsError> {
+        let PairCounts {
+            n,
+            b,
+            c,
+            aged_pass,
+            fresh_censored,
+            aged_censored,
+        } = *self;
+        if n == 0 {
+            return Err(StatisticsError::NoPairs);
+        }
+        if u128::from(n) > MAX_SAFE
+            || b > n
+            || c > n - b
+            || aged_pass > n - b
+            || c > aged_pass
+            || aged_censored > n - aged_pass
+            || fresh_censored > n
+            || fresh_censored + c > b + aged_pass
+        {
+            return Err(StatisticsError::InconsistentCounts);
+        }
+        Ok(())
+    }
+
+    fn over_n(&self, numerator: i128) -> Result<Ratio, StatisticsError> {
+        self.validate()?;
+        Ratio::try_new(numerator, i128::from(self.n))
     }
 
     /// `(b - c) / n`, signed: negative means the aged arm did better.
-    pub fn quality_loss(&self) -> Ratio {
-        self.over_n(self.b as i64 - self.c as i64)
+    pub fn quality_loss(&self) -> Result<Ratio, StatisticsError> {
+        self.over_n(i128::from(self.b) - i128::from(self.c))
     }
 
-    pub fn harm(&self) -> Ratio {
-        self.over_n(self.b as i64)
+    pub fn harm(&self) -> Result<Ratio, StatisticsError> {
+        self.over_n(i128::from(self.b))
     }
 
-    pub fn aged_pass_rate(&self) -> Ratio {
-        self.over_n(self.aged_pass as i64)
+    pub fn aged_pass_rate(&self) -> Result<Ratio, StatisticsError> {
+        self.over_n(i128::from(self.aged_pass))
     }
 }
 
@@ -716,34 +820,11 @@ pub struct Gates {
 
 impl Gates {
     pub fn of(counts: &PairCounts, rates: &ProfileRates) -> Result<Self, StatisticsError> {
-        if counts.n == 0 {
-            return Err(StatisticsError::NoPairs);
-        }
-        // `b` and `c` are disjoint cells, `b` and every censored aged arm exclude
-        // an aged pass while `c` requires one, and every count is over `n`;
-        // within the safe range the rate methods cannot overflow.
-        let PairCounts {
-            n,
-            b,
-            c,
-            aged_pass,
-            fresh_censored,
-            aged_censored,
-        } = *counts;
-        if u128::from(n) > MAX_SAFE
-            || b > n
-            || c > n - b
-            || aged_pass > n - b
-            || c > aged_pass
-            || aged_censored > n - aged_pass
-            || fresh_censored > n
-        {
-            return Err(StatisticsError::InconsistentCounts);
-        }
+        counts.validate()?;
         let (quality_loss, harm, floor) = (
-            counts.quality_loss(),
-            counts.harm(),
-            counts.aged_pass_rate(),
+            counts.quality_loss()?,
+            counts.harm()?,
+            counts.aged_pass_rate()?,
         );
         Ok(Self {
             quality_loss: GateVerdict {
@@ -817,6 +898,12 @@ pub fn cluster_bootstrap_interval(
     replicates: u32,
 ) -> Result<IntervalOutcome, StatisticsError> {
     let threshold = threshold.max(ITEM_COUNT_THRESHOLD);
+    check_seeds(pairs.iter().map(|pair| &pair.cluster))?;
+    distinct_pair_ids(pairs)?;
+    // The draw key carries the seed as a decimal the reference must reproduce.
+    if u128::from(seed) > MAX_SAFE {
+        return Err(StatisticsError::BootstrapSeedOutOfRange(seed));
+    }
     if replicates < MIN_BOOTSTRAP_REPLICATES {
         return Err(StatisticsError::TooFewReplicates(replicates));
     }
@@ -844,13 +931,17 @@ pub fn cluster_bootstrap_interval(
             reason: IntervalWithheld::FewerThanTwoClusters { n_clusters },
         });
     }
+    let draws = u64::from(replicates) * u64::from(n_clusters);
+    if draws > MAX_BOOTSTRAP_DRAWS {
+        return Err(StatisticsError::TooManyDraws(draws));
+    }
     let mut statistics = Vec::with_capacity(replicates as usize);
     for replicate in 0..replicates {
         let mut resample = PairCounts::default();
         for draw in 0..n_clusters {
             resample.absorb(cells[bootstrap_draw(seed, replicate, draw, n_clusters)]);
         }
-        statistics.push(resample.quality_loss());
+        statistics.push(resample.quality_loss()?);
     }
     statistics.sort();
     let replicates = replicates as usize;
@@ -927,8 +1018,20 @@ pub fn arm_miss_asymmetry(
     rates[0].max(rates[1]).checked_sub(rates[0].min(rates[1]))
 }
 
+/// The [`PAIR_TABLE_DIGEST_PROTOCOL`] digest of a pair table, ordered by pair
+/// id so the order of arrival does not enter it; the manifest records it as
+/// `result_digest` before the table is analyzed.
+pub fn pair_table_digest(pairs: &[PairOutcome]) -> Result<String, StatisticsError> {
+    let mut ordered: Vec<&PairOutcome> = pairs.iter().collect();
+    ordered.sort_by(|a, b| a.pair_id.cmp(&b.pair_id));
+    Ok(protocol_digest(
+        PAIR_TABLE_DIGEST_PROTOCOL,
+        &serde_json::to_value(ordered).expect("serializes"),
+    )?)
+}
+
 /// Analyzes a completed pair table under the family the manifest froze. The
-/// order is the contract: the freeze check, then the pilot's block, then the
+/// order is the contract: the run must have completed, then the freeze check, then the pilot's block, then the
 /// arm-miss asymmetry block over the manifest's own arm rates, then the
 /// table's conformance to the frozen plan (its size is the frozen pair count,
 /// every pair is in a frozen task family, and no pair id repeats), and only
@@ -938,6 +1041,12 @@ pub fn analyze(
     family: &AnalysisFamily,
     pairs: &[PairOutcome],
 ) -> Result<Analysis, StatisticsError> {
+    // The manifest is the run's authoritative record: it must be a valid one,
+    // and only a completed run's outcomes are evidence.
+    manifest.validate()?;
+    if manifest.status != RunStatus::Completed {
+        return Err(StatisticsError::RunNotCompleted(manifest.status));
+    }
     let frozen = FrozenFamily::from_manifest(manifest)?;
     frozen.check(family)?;
     if let Some(blocked) = family.is_blocked() {
@@ -952,6 +1061,9 @@ pub fn analyze(
             bound: rates.miss_asymmetry_bound,
         }));
     }
+    // The pre-outcome blocks above never read the table; every check from here
+    // on does.
+    check_seeds(pairs.iter().map(|pair| &pair.cluster))?;
     let StoppingRule::FixedN { pairs: expected } = family.stopping_rule;
     if pairs.len() != expected as usize {
         return Err(StatisticsError::PairCountMismatch {
@@ -968,34 +1080,66 @@ pub fn analyze(
             family: pair.cluster.family.clone(),
         });
     }
-    let mut seen = BTreeSet::new();
-    if let Some(repeat) = pairs.iter().find(|pair| !seen.insert(&pair.pair_id)) {
-        return Err(StatisticsError::DuplicatePair {
-            pair_id: repeat.pair_id.clone(),
+    let seen = distinct_pair_ids(pairs)?;
+    // The manifest's samples are the pairs; a table of other pairs, however
+    // many, is not this campaign's.
+    let samples: BTreeSet<&str> = manifest.sample_ids.iter().map(String::as_str).collect();
+    if seen != samples {
+        return Err(StatisticsError::PairsNotManifestSamples {
+            pairs: seen.len(),
+            samples: samples.len(),
+            first_unrecorded: seen.difference(&samples).next().map(|id| id.to_string()),
+        });
+    }
+    // The manifest's `result_digest` is the digest of the completed table, so
+    // rows cannot be relabeled or re-scored behind the recorded ids.
+    let found = pair_table_digest(pairs)?;
+    if found != manifest.result_digest {
+        return Err(StatisticsError::PairsNotManifestResult {
+            recorded: manifest.result_digest.clone(),
+            found,
+        });
+    }
+    // The plan's power claim was justified at `max_affordable_worlds`; a table
+    // over more worlds than that is not the registered campaign.
+    let pilot = &family.icc_pilot;
+    let worlds = pairs
+        .iter()
+        .map(|pair| &pair.cluster)
+        .collect::<BTreeSet<_>>()
+        .len();
+    if worlds > pilot.max_affordable_worlds as usize {
+        return Err(StatisticsError::WorldsExceedAffordable {
+            worlds,
+            max_affordable_worlds: pilot.max_affordable_worlds,
         });
     }
     // The plan's power claim was a projection; the table that arrived may span
-    // fewer clusters than projected, so its own deflated size is checked too.
-    let pilot = &family.icc_pilot;
-    let n_clusters = pairs
-        .iter()
-        .map(|pair| pair.cluster.at(pilot.clustering_unit))
-        .collect::<BTreeSet<_>>()
-        .len();
-    let icc = match pilot.clustering_unit {
-        ClusteringUnit::Family => pilot.icc_family,
-        ClusteringUnit::WorldSeed => pilot.icc_world_seed,
-    };
+    // fewer or unequal clusters, so its own deflated size is checked at both
+    // nesting levels with the size-weighted mean cluster `sum(m_i^2) / n`, and
+    // the smaller of the two is what the table can support.
     let n = Ratio::try_new(pairs.len() as i128, 1)?;
-    let effective_n = deflate(
-        n,
-        n.checked_div(Ratio::try_new(n_clusters as i128, 1)?)?,
-        icc,
-    )?;
+    let mut effective_n = n;
+    let mut n_clusters = 0;
+    for (unit, icc) in [
+        (ClusteringUnit::Family, pilot.icc_family),
+        (ClusteringUnit::WorldSeed, pilot.icc_world_seed),
+    ] {
+        let mut sizes: BTreeMap<ClusterKey, i128> = BTreeMap::new();
+        for pair in pairs {
+            *sizes.entry(pair.cluster.at(unit)).or_default() += 1;
+        }
+        let weighted_mean =
+            Ratio::try_new(sizes.values().map(|m| m * m).sum(), pairs.len() as i128)?;
+        effective_n = effective_n.min(deflate(n, weighted_mean, icc)?);
+        if unit == pilot.clustering_unit {
+            n_clusters = sizes.len() as u32;
+        }
+    }
     if effective_n < Ratio::try_new(i128::from(pilot.required_n_for_margin), 1)? {
         return Ok(Analysis::Blocked(BlockedReason::TableUnderpowered {
             effective_n,
-            n_clusters: n_clusters as u32,
+            n_clusters,
             required_n_for_margin: pilot.required_n_for_margin,
         }));
     }
@@ -1043,6 +1187,7 @@ pub enum StatisticsError {
     ItemCountThresholdBelowFloor(u32),
     TooFewReplicates(u32),
     TooManyReplicates(u32),
+    TooManyDraws(u64),
     EmptyFamilyField,
     FamilyChangedAfterResults {
         recorded: String,
@@ -1067,6 +1212,23 @@ pub enum StatisticsError {
         pair_id: String,
         family: String,
     },
+    PairsNotManifestSamples {
+        pairs: usize,
+        samples: usize,
+        first_unrecorded: Option<String>,
+    },
+    WorldsExceedAffordable {
+        worlds: usize,
+        max_affordable_worlds: u32,
+    },
+    PairsNotManifestResult {
+        recorded: String,
+        found: String,
+    },
+    WorldSeedOutOfRange(u64),
+    BootstrapSeedOutOfRange(u64),
+    RunNotCompleted(RunStatus),
+    InvalidManifest(ManifestError),
     DuplicatePair {
         pair_id: String,
     },
@@ -1098,5 +1260,11 @@ debug_display!(StatisticsError);
 impl From<ContractError> for StatisticsError {
     fn from(error: ContractError) -> Self {
         Self::NotCanonical(error)
+    }
+}
+
+impl From<ManifestError> for StatisticsError {
+    fn from(error: ManifestError) -> Self {
+        Self::InvalidManifest(error)
     }
 }

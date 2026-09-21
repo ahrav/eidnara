@@ -127,11 +127,18 @@ function groupBy(observations: readonly Observation[], key: (o: Observation) => 
   return [...groups.keys()].sort(compareKeys).map((k) => groups.get(k) ?? []);
 }
 const clusterKey = (family: string, seed: number) => `${family}\u0000${seed}`;
+// Families compare by UTF-8 bytes, the order Rust's `String` uses; JS `<` compares UTF-16 code
+// units, which disagrees for supplementary characters against private-use ones.
+// The seed follows the last NUL, so a family name that itself contains NUL splits correctly.
+function splitKey(key: string): [string, string] {
+  const at = key.lastIndexOf("\u0000");
+  return [key.slice(0, at), key.slice(at + 1)];
+}
 function compareKeys(left: string, right: string): number {
-  const [lf, ls] = left.split("\u0000");
-  const [rf, rs] = right.split("\u0000");
-  if (lf !== rf) return (lf ?? "") < (rf ?? "") ? -1 : 1;
-  return Number(ls ?? 0) - Number(rs ?? 0);
+  const [lf, ls] = splitKey(left);
+  const [rf, rs] = splitKey(right);
+  if (lf !== rf) return Buffer.compare(Buffer.from(lf, "utf8"), Buffer.from(rf, "utf8"));
+  return Number(ls) - Number(rs);
 }
 // The design effect is clamped at one, so deflation only ever shrinks N.
 function pilot(observations: readonly Observation[], maxAffordableWorlds: number) {
@@ -141,21 +148,26 @@ function pilot(observations: readonly Observation[], maxAffordableWorlds: number
   const iccWorld = icc(byWorld);
   const threshold = ratio(1n, 20n);
   const family = cmp(iccFamily, threshold) > 0;
-  const chosenIcc = family ? iccFamily : iccWorld;
-  // Each affordable world lies in one family, so at most that many family clusters are realized.
-  const clusters = family ? Math.min(byFamily.length, maxAffordableWorlds) : maxAffordableWorlds;
   const itemsAtMax = mul(ratio(BigInt(observations.length), BigInt(byWorld.length)), whole(maxAffordableWorlds));
-  const meanCluster = div(itemsAtMax, whole(clusters));
-  const positiveIcc = cmp(chosenIcc, whole(0)) < 0 ? whole(0) : chosenIcc;
-  const rawEffect = add(whole(1), mul(sub(meanCluster, whole(1)), positiveIcc));
-  const designEffect = cmp(rawEffect, whole(1)) < 0 ? whole(1) : rawEffect;
+  // Deflate at both nesting levels and keep the smaller, so a stronger finer-level correlation
+  // is never discarded by selecting the coarser unit. Each affordable world lies in one family,
+  // so at most that many family clusters are realized.
+  const deflate = (clusters: number, icc: Ratio): Ratio => {
+    const meanCluster = div(itemsAtMax, whole(clusters));
+    const positiveIcc = cmp(icc, whole(0)) < 0 ? whole(0) : icc;
+    const rawEffect = add(whole(1), mul(sub(meanCluster, whole(1)), positiveIcc));
+    const designEffect = cmp(rawEffect, whole(1)) < 0 ? whole(1) : rawEffect;
+    return div(itemsAtMax, designEffect);
+  };
+  const atFamily = deflate(Math.min(byFamily.length, maxAffordableWorlds), iccFamily);
+  const atWorld = deflate(maxAffordableWorlds, iccWorld);
   return {
     icc_family: emit(iccFamily),
     icc_world_seed: emit(iccWorld),
     clustering_unit: family ? "family" : "world_seed",
     n_families: byFamily.length,
     n_worlds: byWorld.length,
-    effective_n_at_max: emit(div(itemsAtMax, designEffect)),
+    effective_n_at_max: emit(cmp(atFamily, atWorld) <= 0 ? atFamily : atWorld),
   };
 }
 
