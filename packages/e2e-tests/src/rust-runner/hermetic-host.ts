@@ -26,9 +26,17 @@ import {
 } from "@eidnara/opencode/shared/host-lifecycle/paths";
 import { probeCapabilities } from "@eidnara/shm-native";
 import { waitForChildExit } from "../process-exit";
+import {
+    cargoBuildExampleArgs,
+    type DaemonExample,
+    DIRECT_HOST_FIXTURE,
+    invalidOverrideMessage,
+    missingExampleTargets,
+    prebuiltOverride,
+    workspaceExampleBinary,
+} from "./daemon-examples";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
-const FIXTURE_BINARY = join(REPO_ROOT, "target/debug/examples/direct_host_fixture");
 const CONTROL_FILE = "direct-host-control.sock";
 const PID_FILE = "rust-e2e-pids.json";
 const MAX_LINE_BYTES = 64 * 1024;
@@ -250,28 +258,11 @@ export function detectRustModePrereqs(): RustModePrereqs {
             skipReason: "cargo workspace does not resolve (missing path dependencies?)",
         };
     }
-    let fixtureAvailable = false;
-    try {
-        const parsed = JSON.parse(metadata.stdout) as {
-            packages?: Array<{
-                name?: string;
-                targets?: Array<{ name?: string; kind?: string[] }>;
-            }>;
-        };
-        fixtureAvailable =
-            parsed.packages
-                ?.find((pkg) => pkg.name === "daemon")
-                ?.targets?.some(
-                    (target) =>
-                        target.name === "direct_host_fixture" && target.kind?.includes("example"),
-                ) === true;
-    } catch {
-        fixtureAvailable = false;
-    }
-    if (!fixtureAvailable) {
+    const unavailable = missingExampleTargets(metadata.stdout);
+    if (unavailable.length > 0) {
         return {
             ok: false,
-            skipReason: "direct_host_fixture example is unavailable in this workspace",
+            skipReason: `${unavailable.map((example) => example.example).join(", ")} example is unavailable in this workspace`,
         };
     }
     // The plugin reaches the daemon only through the shared-memory channel, and OpenCode embeds the same Bun release this test runner uses, so a probe here predicts whether the plugin's channel can start inside OpenCode. A runtime that fails a gated mechanism skips the suite instead of reporting every pass as unchanged input; transfer prevention is reported by the probe, not gated.
@@ -284,8 +275,6 @@ export function detectRustModePrereqs(): RustModePrereqs {
     }
     return { ok: true };
 }
-
-let fixtureBuild: Promise<string> | null = null;
 
 function runCargo(args: string[]): Promise<{ ok: boolean; stderr: string }> {
     return new Promise((resolveRun) => {
@@ -302,31 +291,36 @@ function runCargo(args: string[]): Promise<{ ok: boolean; stderr: string }> {
     });
 }
 
+const exampleBuilds = new Map<string, Promise<string>>();
+
 /**
- * Resolves the fixture binary once per Bun process; Cargo caches builds across processes.
- * `EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN` names a prebuilt binary and skips the build.
+ * Resolves a daemon example binary once per Bun process; Cargo caches builds across processes.
+ * An `invalid` override throws; rejected builds are removed from the cache so later calls retry.
  */
-export function buildDirectHostFixture(): Promise<string> {
-    if (fixtureBuild) return fixtureBuild;
-    fixtureBuild = (async () => {
-        const configured = process.env.EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN;
-        if (configured && existsSync(configured)) return configured;
-        const build = await runCargo([
-            "build",
-            "-p",
-            "daemon",
-            "--example",
-            "direct_host_fixture",
-            "--features",
-            "direct-host-fixture",
-            "--locked",
-        ]);
-        if (!build.ok || !existsSync(FIXTURE_BINARY)) {
-            throw new Error(`direct host fixture build failed\n${build.stderr}`);
+export function buildDaemonExample(example: DaemonExample): Promise<string> {
+    const key = example.prebuiltEnv;
+    const cached = exampleBuilds.get(key);
+    if (cached) return cached;
+    const build = (async () => {
+        const override = prebuiltOverride(process.env, example);
+        if (override.kind === "invalid") {
+            throw new Error(invalidOverrideMessage(example, override.path));
         }
-        return FIXTURE_BINARY;
+        if (override.kind === "file") return override.path;
+        const binary = workspaceExampleBinary(REPO_ROOT, example);
+        const result = await runCargo(cargoBuildExampleArgs(example));
+        if (!result.ok || !existsSync(binary)) {
+            throw new Error(`${example.example} example build failed\n${result.stderr}`);
+        }
+        return binary;
     })();
-    return fixtureBuild;
+    exampleBuilds.set(key, build);
+    build.catch(() => exampleBuilds.delete(key));
+    return build;
+}
+
+export function buildDirectHostFixture(): Promise<string> {
+    return buildDaemonExample(DIRECT_HOST_FIXTURE);
 }
 
 function exactKeys(value: Record<string, unknown>, expected: string[]): boolean {

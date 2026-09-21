@@ -816,6 +816,50 @@ tested as an example target):
   the target path, `close` reports `Io` and the attempt's `.json.tmp` sibling
   is gone.
 
+OpenCode process driver (`packages/e2e-tests/tests/cassette-replay.test.ts`,
+rust-only tier; `rid-ts-cassette-never-falls-through-to-scripted`,
+`rid-opencode-provider-cassette-strict-miss`,
+`xc-captured-provider-requests-redacted-before-persistence`):
+
+- `records a tool loop, replays it faithfully, and stops at the first miss`:
+  a scripted `glob` tool loop is recorded through a real OpenCode process into
+  a cassette whose provenance digest matches the oracle's close report, whose
+  bytes contain no `x-api-key`, credential value, or session id, and whose
+  directory holds no other file. A fresh session replays it with the queue and
+  default loaded with sentinels: the same request count, tool call, arguments,
+  and final text, zero scripted selections, zero default hits, no miss, no
+  sentinel in any message. A further session's request is one typed miss
+  (`turn` = the recording length, `ModelRequestChanged`, nearest = the last
+  entry) that yields no assistant text; the close report shows one miss and no
+  unconsumed entry; the file is byte-identical after replay; a replay closed
+  without requests reports every entry unconsumed.
+- `a changed tool result is a ToolResultDrift miss`: a recorded `read` loop
+  replayed after the file's content changed misses at the tool-result turn
+  with `ToolResultDrift`, the replayed `tool_use` still ran, and no text
+  follows.
+- `refuses to persist a planted credential and writes no cassette`: a prompt
+  carrying an `sk-ant-` canary is `RedactionRefused` in record mode; the run
+  produces no assistant text, `close` refuses with the same kind, and no file
+  or temporary sibling is written.
+- `packages/e2e-tests/src/mock-provider/server.test.ts` drives the mock against
+  an in-memory oracle double with the real oracle's observable contract (a
+  latched terminal, `turn` as the lookup count, nearest as the last entry once
+  consumed): record mode forwards headers and body text and the produced frames
+  (including an `abortAfterFrames` truncation) before serving; a recording
+  refusal is a 400 naming only the kind with nothing recorded; a script bug (no
+  `usage` or `error`, or an error status `Response` cannot serve) is a 500
+  `mock_error` with nothing recorded; replay serves
+  recorded SSE and provider-error frames byte for byte, answers a miss with a
+  400 `cassette_miss` and repeats it after, never enters the scripted block,
+  hands a malformed body to the oracle as text, and turns any oracle failure,
+  typed or not, into a 400 with no message text; a request still in flight
+  across `reset()` (uploading, delayed, or awaiting the oracle) consumes,
+  counts, records, and logs in the run it began in, never in the next one;
+  `useCassette()` starts a new run the same way; concurrent
+  identical requests are admitted in capture order regardless of scripted
+  delays; a JSON body that is not an object is scripted as `{}` and
+  reaches the oracle as text; `reset()` unbinds.
+
 ## Gaps recorded here
 
 - The OpenCode cassette is bound to the environment that recorded it: the
@@ -842,10 +886,13 @@ tested as an example target):
   manifest declaration no runner enforces yet.
 - The Rust oracle's stdin protocol has three Rust-side tests (the projection
   latch, the unreadable-line latch, and the failed publication); its consumer
-  is the TypeScript MockProvider cassette mode. The `{kind, detail}` refusal
-  contract is pinned in `eval-core` (`no_wire_detail_carries_request_content`),
-  but the oracle's other variants (`UnsafePath`, `AlreadyOpen`,
-  `NoOpenCassette`) are exercised only through that consumer.
+  is the TypeScript MockProvider cassette mode, which the rust-only e2e suite
+  exercises through the real binary while the default `bun test` lane sees
+  only the in-memory double. The `{kind, detail}` refusal contract is pinned
+  in `eval-core` (`no_wire_detail_carries_request_content`), but the oracle's
+  other variants (`UnsafePath`, `AlreadyOpen`, `NoOpenCassette`) have no test:
+  the e2e suite opens each oracle once with an absolute temporary path and
+  issues no operation before `open` or after `close`.
 
 - Every ingestion entry point lacks a production caller. No world is labelled
   "validated real ingestion" until one exists; every manifest carries
