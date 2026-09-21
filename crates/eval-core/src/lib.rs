@@ -16,6 +16,7 @@ macro_rules! debug_display {
 }
 
 mod cassette;
+mod censoring;
 mod census;
 mod decimal;
 mod eligibility;
@@ -38,6 +39,10 @@ pub use cassette::{
     COVERED_FIELDS_VERSION, Cassette, CassetteError, CassetteFile, CassetteMiss, Entry, Location,
     Lookup, MissClass, OPENCODE_COVERED_FIELDS, OPENCODE_HEADER_ALLOWLIST, OpenCodeRequest,
     canonical_decimal_f64, request_digest,
+};
+pub use censoring::{
+    Attempt, BoundMethod, Counter, FailureRate, LatencySummary, P99_MIN_RUNS, PassK, PassKBounds,
+    Percentile, PercentileBound, pass_k,
 };
 pub use census::{
     Construction, HintBounds, Reachability, SURFACE1_HINT_BOUNDS, SURFACE1_STAGES, Surface1Stage,

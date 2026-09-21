@@ -43,7 +43,12 @@ const cmp = (a: Ratio, b: Ratio) => {
   return left < right ? -1 : left > right ? 1 : 0;
 };
 const whole = (n: number | bigint) => ratio(BigInt(n), 1n);
-const emit = (r: Ratio) => ({ numerator: Number(r.numerator), denominator: Number(r.denominator) });
+const MAX_SAFE = 2n ** 53n - 1n;
+// Rust refuses a component past the safe range, so the reference refuses too rather than round.
+const emit = (r: Ratio) => {
+  if (abs(r.numerator) > MAX_SAFE || r.denominator > MAX_SAFE) throw new Error(`ratio ${r.numerator}/${r.denominator} leaves the safe range`);
+  return { numerator: Number(r.numerator), denominator: Number(r.denominator) };
+};
 
 // Pair counts under the conservative rule: a censored arm never passes; a censored aged arm
 // is a loss; a censored fresh arm is neither a pass nor a fail.
@@ -288,7 +293,13 @@ const pilotCase = (id: string, observations: Observation[], maxAffordableWorlds:
   input: { max_affordable_worlds: maxAffordableWorlds, observations },
   expected: pilot(observations, maxAffordableWorlds),
 });
-const cases = [
+interface GoldenCase {
+  id: string;
+  kind: string;
+  input: unknown;
+  expected: unknown;
+}
+const cases: GoldenCase[] = [
   ...Object.entries(gateFixtures).map(([id, fixture]) => ({
     id: `gates-${id}`,
     kind: "pair_counts",
@@ -314,6 +325,112 @@ const cases = [
     expected: bootstrap(pairFixture, "world_seed", 7, 400),
   },
 ];
+
+// Right-censored latency. The reference derives the bound from first principles rather than
+// from the sorted prefix: a percentile is a point only when no censored attempt could have
+// changed the order statistic, that is when fewer censored attempts sort at or below the rank
+// than would be needed to displace it; equivalently, none does.
+interface Attempt {
+  duration_ms: number;
+  censored: string | null;
+}
+function latency(attempts: readonly Attempt[]) {
+  const sorted = [...attempts].sort((a, b) =>
+    a.duration_ms !== b.duration_ms ? a.duration_ms - b.duration_ms : Number(a.censored !== null) - Number(b.censored !== null),
+  );
+  const n = sorted.length;
+  const censored = sorted.filter((a) => a.censored !== null).length;
+  const percentile = (p: number) => {
+    const rank = Math.ceil((p * n) / 100);
+    const picked = sorted[rank - 1] ?? { duration_ms: 0, censored: null };
+    // Censored attempts strictly below the picked value, plus censored ties that sort before it.
+    const displacing = sorted.slice(0, rank).filter((a) => a.censored !== null).length;
+    return { p, value: picked.duration_ms, n, censored, bound: displacing === 0 ? "point" : "lower" };
+  };
+  const percentiles = n === 0 ? [] : [percentile(50), percentile(95), ...(n >= 299 ? [percentile(99)] : [])];
+  return { n, censored, percentiles };
+}
+const attempts = (completed: number, timeouts: number, duration: number, deadline: number): Attempt[] => [
+  ...Array.from({ length: completed }, (): Attempt => ({ duration_ms: duration, censored: null })),
+  ...Array.from({ length: timeouts }, (): Attempt => ({ duration_ms: deadline, censored: "timeout" })),
+];
+
+// Zero failures in n trials is the rule-of-three bound min(3/n, 1); otherwise the observed rate.
+// The rule approximates the exact one-sided bound 1 - 0.05^(1/n) from above, which the
+// generator checks so the convention itself is verified rather than copied.
+function counter(n: number, failures: number, unit: string) {
+  if (failures === 0) {
+    const exact = 1 - 0.05 ** (1 / n);
+    if (Math.min(3 / n, 1) < exact) throw new Error(`3/${n} is below the exact bound ${exact}`);
+    const bound = cmp(ratio(3n, BigInt(n)), whole(1)) > 0 ? whole(1) : ratio(3n, BigInt(n));
+    return { evidence_kind: "bound", upper_bound_95: emit(bound), bound_method: "rule_of_three", n, unit };
+  }
+  return { evidence_kind: "observed", rate: emit(ratio(BigInt(failures), BigInt(n))), n, unit };
+}
+
+// pass^k by exhaustive enumeration of every k-subset: the share whose members all passed.
+// Fewer than k attempts leave nothing to enumerate and the share is one.
+function subsets(n: number, k: number): number[][] {
+  if (k === 0) return [[]];
+  if (n < k) return [];
+  return [...subsets(n - 1, k).map((s) => s), ...subsets(n - 1, k - 1).map((s) => [...s, n - 1])];
+}
+function allPassShare(attempts: readonly Arm[], k: number): Ratio {
+  const picks = subsets(attempts.length, k);
+  if (picks.length === 0) return whole(1);
+  const passing = picks.filter((pick) => pick.every((i) => attempts[i] === "pass")).length;
+  return ratio(BigInt(passing), BigInt(picks.length));
+}
+function passK(k: number, attempts: readonly Arm[]) {
+  const repeats = attempts.length;
+  const passes = attempts.filter((a) => a === "pass").length;
+  const uncensored = attempts.filter((a) => !isCensored(a));
+  const censored = repeats - uncensored.length;
+  const pass_k =
+    censored === repeats
+      ? { kind: "indeterminate" }
+      : {
+          kind: "bounds",
+          censored_as_fail: emit(allPassShare(attempts, k)),
+          censored_excluded: emit(allPassShare(uncensored, k)),
+        };
+  return {
+    k,
+    repeats,
+    uncensored_repeats: uncensored.length,
+    pass_at_1: emit(ratio(BigInt(passes), BigInt(repeats))),
+    censoring_rate: emit(ratio(BigInt(censored), BigInt(repeats))),
+    pass_k,
+  };
+}
+const censoredCases: GoldenCase[] = [
+  ...Object.entries({
+    "five-timeouts": attempts(100, 5, 10, 1000),
+    "fifteen-timeouts": attempts(90, 15, 10, 1000),
+    "mixed-deadlines": [...attempts(3, 2, 10, 500), { duration_ms: 900, censored: null }],
+    "tie-at-the-rank": [...attempts(1, 1, 500, 500), { duration_ms: 900, censored: null }],
+    "single-attempt": attempts(0, 1, 0, 250),
+  }).map(([id, input]) => ({ id: `latency-${id}`, kind: "latency", input: { attempts: input }, expected: latency(input) })),
+  ...[
+    [400, 0],
+    [20, 0],
+    [2, 0],
+    [60, 3],
+  ].map(([n, failures]) => ({
+    id: `counter-${n}-${failures}`,
+    kind: "counter",
+    input: { n, failures, unit: "world_seed" },
+    expected: counter(n ?? 0, failures ?? 0, "world_seed"),
+  })),
+  ...Object.entries({
+    "clean": { k: 3, attempts: ["pass", "pass", "fail", "pass", "pass"] as Arm[] },
+    "some-censored": { k: 3, attempts: ["pass", "pass", { censored: "timeout" }, "pass", { censored: "max_model_calls" }] as Arm[] },
+    "fail-and-censored": { k: 3, attempts: ["pass", "pass", "pass", "fail", { censored: "max_tokens_out" }] as Arm[] },
+    "few-uncensored": { k: 3, attempts: ["pass", { censored: "timeout" }, { censored: "timeout" }] as Arm[] },
+    "all-censored": { k: 2, attempts: [{ censored: "timeout" }, { censored: "hard_deadline_ms" }] as Arm[] },
+  }).map(([id, input]) => ({ id: `pass-k-${id}`, kind: "pass_k", input, expected: passK(input.k, input.attempts) })),
+];
+cases.push(...censoredCases);
 
 // The Rust reader recomputes this hash over `serde_json::to_string_pretty` of the whole case
 // array, expectations included, whose maps sort keys; so keys are sorted here before hashing,

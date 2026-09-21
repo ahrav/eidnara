@@ -892,7 +892,7 @@ everything a result depends on: endpoints, task families, exclusions, the
 stopping rule (`fixed_n`), the multiplicity correction (`none`, `holm`,
 `benjamini_hochberg`), the profile, the interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
-seed, and the ICC pilot. `FrozenFamily::freeze` digests it
+seed, the live-trial repeat count `trials_k`, and the ICC pilot. `FrozenFamily::freeze` digests it
 (`eval-analysis-family-digest/v1`); the manifest records that digest as
 `analysis_family_digest` before the first outcome, and `FrozenFamily::check`
 refuses a family whose digest differs as
@@ -966,6 +966,55 @@ than the pilot had, and both bootstrap units), so a flipped sign or a drifted
 estimator on either side fails the differential. The reference reproduces the
 model, not the refusals: degenerate inputs the Rust side refuses are not
 fixtures.
+
+## Censored outcomes
+
+`censoring.rs` keeps every attempt that ended without a verdict in the
+denominator. `CensorReason` is the timeout or one of the six per-task budgets
+(`max_model_calls`, `max_tool_calls`, `max_tokens_in`, `max_tokens_out`,
+`hard_deadline_ms`, `max_no_progress_iterations`); an `Attempt` carries its
+duration, which for a censored attempt is the censoring point (the elapsed time
+at which the run was cut off), and its true duration is at least that.
+
+**Latency.** `LatencySummary::of` sorts attempts by duration with a censored
+attempt after a completed one of equal duration, takes the nearest rank
+`ceil(p n / 100)` for p50 and p95, and adds p99 only from `P99_MIN_RUNS` (299)
+attempts, because the third-largest of 299 sits at the 99th percentile rank.
+Every `Percentile` names `p`, `value`, `n`, `censored`, and `bound`. Raising a
+censored attempt's true value can only raise an order statistic, so a
+percentile is `point` only when no censored attempt sorts at or below its rank;
+otherwise it is `lower`, and the reported value is a lower bound on the truth
+even when the attempt at the rank itself completed. Nothing is dropped, so a
+summary with `n = 105, censored = 15` reports its p95 as at least the deadline
+rather than a fast number over the 90 that finished.
+
+**Zero failures.** `Counter {n, failures, unit}` renders through
+`Counter::rate`: with failures it is `FailureRate::Observed {rate, n, unit}`;
+with none it is `FailureRate::Bound {upper_bound_95, bound_method:
+rule_of_three, n, unit}` where the bound is `3/n` capped at one, tagged
+`evidence_kind: bound`, so zero observed failures in `n` trials at the named
+cluster unit is a bound, never a proof. A gate over a counter reads the bound
+where only a bound exists; sixty stall-free schedules cannot rule out one stall
+in twenty.
+
+**Repeated live trials.** `pass_k(attempts, k)` reads the repeat count `k` from
+the frozen family (`trials_k`) and summarizes as `PassK`: `pass_at_1` (passes
+over all repeats, so a censored attempt is not a pass), `repeats`,
+`uncensored_repeats`, `censoring_rate`, and `pass_k` under two censoring
+conventions rather than one confidence interval: `censored_as_fail` counts
+every censored attempt as a failure over all repeats (`C(passes, k) / C(n,
+k)`), and `censored_excluded` counts only the uncensored attempts (one when
+fewer than `k` remain, which `uncensored_repeats` makes visible). Every
+attempt censored is `indeterminate`, never zero. A `k` of zero, no attempts, or
+`k` past the repeat count is `MalformedTrials`; a binomial past the safe range
+is `RationalOverflow`.
+
+The TypeScript reference in `gen/gen-statistics-golden.ts` derives these
+independently where a second derivation exists: pass^k by exhaustive
+enumeration of every `k`-subset rather than binomials, and the rule of three
+checked against the exact one-sided bound `1 - 0.05^(1/n)` it approximates.
+`tests/censoring.rs` asserts equality on every latency, counter, and pass^k
+case in the golden.
 
 ## Coverage markers
 

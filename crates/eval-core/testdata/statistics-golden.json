@@ -15740,12 +15740,1298 @@
         "unit": "world_seed"
       },
       "kind": "cluster_bootstrap"
+    },
+    {
+      "expected": {
+        "censored": 5,
+        "n": 105,
+        "percentiles": [
+          {
+            "bound": "point",
+            "censored": 5,
+            "n": 105,
+            "p": 50,
+            "value": 10
+          },
+          {
+            "bound": "point",
+            "censored": 5,
+            "n": 105,
+            "p": 95,
+            "value": 10
+          }
+        ]
+      },
+      "id": "latency-five-timeouts",
+      "input": {
+        "attempts": [
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          }
+        ]
+      },
+      "kind": "latency"
+    },
+    {
+      "expected": {
+        "censored": 15,
+        "n": 105,
+        "percentiles": [
+          {
+            "bound": "point",
+            "censored": 15,
+            "n": 105,
+            "p": 50,
+            "value": 10
+          },
+          {
+            "bound": "lower",
+            "censored": 15,
+            "n": 105,
+            "p": 95,
+            "value": 1000
+          }
+        ]
+      },
+      "id": "latency-fifteen-timeouts",
+      "input": {
+        "attempts": [
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 1000
+          }
+        ]
+      },
+      "kind": "latency"
+    },
+    {
+      "expected": {
+        "censored": 2,
+        "n": 6,
+        "percentiles": [
+          {
+            "bound": "point",
+            "censored": 2,
+            "n": 6,
+            "p": 50,
+            "value": 10
+          },
+          {
+            "bound": "lower",
+            "censored": 2,
+            "n": 6,
+            "p": 95,
+            "value": 900
+          }
+        ]
+      },
+      "id": "latency-mixed-deadlines",
+      "input": {
+        "attempts": [
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": null,
+            "duration_ms": 10
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 500
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 500
+          },
+          {
+            "censored": null,
+            "duration_ms": 900
+          }
+        ]
+      },
+      "kind": "latency"
+    },
+    {
+      "expected": {
+        "censored": 1,
+        "n": 3,
+        "percentiles": [
+          {
+            "bound": "lower",
+            "censored": 1,
+            "n": 3,
+            "p": 50,
+            "value": 500
+          },
+          {
+            "bound": "lower",
+            "censored": 1,
+            "n": 3,
+            "p": 95,
+            "value": 900
+          }
+        ]
+      },
+      "id": "latency-tie-at-the-rank",
+      "input": {
+        "attempts": [
+          {
+            "censored": null,
+            "duration_ms": 500
+          },
+          {
+            "censored": "timeout",
+            "duration_ms": 500
+          },
+          {
+            "censored": null,
+            "duration_ms": 900
+          }
+        ]
+      },
+      "kind": "latency"
+    },
+    {
+      "expected": {
+        "censored": 1,
+        "n": 1,
+        "percentiles": [
+          {
+            "bound": "lower",
+            "censored": 1,
+            "n": 1,
+            "p": 50,
+            "value": 250
+          },
+          {
+            "bound": "lower",
+            "censored": 1,
+            "n": 1,
+            "p": 95,
+            "value": 250
+          }
+        ]
+      },
+      "id": "latency-single-attempt",
+      "input": {
+        "attempts": [
+          {
+            "censored": "timeout",
+            "duration_ms": 250
+          }
+        ]
+      },
+      "kind": "latency"
+    },
+    {
+      "expected": {
+        "bound_method": "rule_of_three",
+        "evidence_kind": "bound",
+        "n": 400,
+        "unit": "world_seed",
+        "upper_bound_95": {
+          "denominator": 400,
+          "numerator": 3
+        }
+      },
+      "id": "counter-400-0",
+      "input": {
+        "failures": 0,
+        "n": 400,
+        "unit": "world_seed"
+      },
+      "kind": "counter"
+    },
+    {
+      "expected": {
+        "bound_method": "rule_of_three",
+        "evidence_kind": "bound",
+        "n": 20,
+        "unit": "world_seed",
+        "upper_bound_95": {
+          "denominator": 20,
+          "numerator": 3
+        }
+      },
+      "id": "counter-20-0",
+      "input": {
+        "failures": 0,
+        "n": 20,
+        "unit": "world_seed"
+      },
+      "kind": "counter"
+    },
+    {
+      "expected": {
+        "bound_method": "rule_of_three",
+        "evidence_kind": "bound",
+        "n": 2,
+        "unit": "world_seed",
+        "upper_bound_95": {
+          "denominator": 1,
+          "numerator": 1
+        }
+      },
+      "id": "counter-2-0",
+      "input": {
+        "failures": 0,
+        "n": 2,
+        "unit": "world_seed"
+      },
+      "kind": "counter"
+    },
+    {
+      "expected": {
+        "evidence_kind": "observed",
+        "n": 60,
+        "rate": {
+          "denominator": 20,
+          "numerator": 1
+        },
+        "unit": "world_seed"
+      },
+      "id": "counter-60-3",
+      "input": {
+        "failures": 3,
+        "n": 60,
+        "unit": "world_seed"
+      },
+      "kind": "counter"
+    },
+    {
+      "expected": {
+        "censoring_rate": {
+          "denominator": 1,
+          "numerator": 0
+        },
+        "k": 3,
+        "pass_at_1": {
+          "denominator": 5,
+          "numerator": 4
+        },
+        "pass_k": {
+          "censored_as_fail": {
+            "denominator": 5,
+            "numerator": 2
+          },
+          "censored_excluded": {
+            "denominator": 5,
+            "numerator": 2
+          },
+          "kind": "bounds"
+        },
+        "repeats": 5,
+        "uncensored_repeats": 5
+      },
+      "id": "pass-k-clean",
+      "input": {
+        "attempts": [
+          "pass",
+          "pass",
+          "fail",
+          "pass",
+          "pass"
+        ],
+        "k": 3
+      },
+      "kind": "pass_k"
+    },
+    {
+      "expected": {
+        "censoring_rate": {
+          "denominator": 5,
+          "numerator": 2
+        },
+        "k": 3,
+        "pass_at_1": {
+          "denominator": 5,
+          "numerator": 3
+        },
+        "pass_k": {
+          "censored_as_fail": {
+            "denominator": 10,
+            "numerator": 1
+          },
+          "censored_excluded": {
+            "denominator": 1,
+            "numerator": 1
+          },
+          "kind": "bounds"
+        },
+        "repeats": 5,
+        "uncensored_repeats": 3
+      },
+      "id": "pass-k-some-censored",
+      "input": {
+        "attempts": [
+          "pass",
+          "pass",
+          {
+            "censored": "timeout"
+          },
+          "pass",
+          {
+            "censored": "max_model_calls"
+          }
+        ],
+        "k": 3
+      },
+      "kind": "pass_k"
+    },
+    {
+      "expected": {
+        "censoring_rate": {
+          "denominator": 5,
+          "numerator": 1
+        },
+        "k": 3,
+        "pass_at_1": {
+          "denominator": 5,
+          "numerator": 3
+        },
+        "pass_k": {
+          "censored_as_fail": {
+            "denominator": 10,
+            "numerator": 1
+          },
+          "censored_excluded": {
+            "denominator": 4,
+            "numerator": 1
+          },
+          "kind": "bounds"
+        },
+        "repeats": 5,
+        "uncensored_repeats": 4
+      },
+      "id": "pass-k-fail-and-censored",
+      "input": {
+        "attempts": [
+          "pass",
+          "pass",
+          "pass",
+          "fail",
+          {
+            "censored": "max_tokens_out"
+          }
+        ],
+        "k": 3
+      },
+      "kind": "pass_k"
+    },
+    {
+      "expected": {
+        "censoring_rate": {
+          "denominator": 3,
+          "numerator": 2
+        },
+        "k": 3,
+        "pass_at_1": {
+          "denominator": 3,
+          "numerator": 1
+        },
+        "pass_k": {
+          "censored_as_fail": {
+            "denominator": 1,
+            "numerator": 0
+          },
+          "censored_excluded": {
+            "denominator": 1,
+            "numerator": 1
+          },
+          "kind": "bounds"
+        },
+        "repeats": 3,
+        "uncensored_repeats": 1
+      },
+      "id": "pass-k-few-uncensored",
+      "input": {
+        "attempts": [
+          "pass",
+          {
+            "censored": "timeout"
+          },
+          {
+            "censored": "timeout"
+          }
+        ],
+        "k": 3
+      },
+      "kind": "pass_k"
+    },
+    {
+      "expected": {
+        "censoring_rate": {
+          "denominator": 1,
+          "numerator": 1
+        },
+        "k": 2,
+        "pass_at_1": {
+          "denominator": 1,
+          "numerator": 0
+        },
+        "pass_k": {
+          "kind": "indeterminate"
+        },
+        "repeats": 2,
+        "uncensored_repeats": 0
+      },
+      "id": "pass-k-all-censored",
+      "input": {
+        "attempts": [
+          {
+            "censored": "timeout"
+          },
+          {
+            "censored": "hard_deadline_ms"
+          }
+        ],
+        "k": 2
+      },
+      "kind": "pass_k"
     }
   ],
   "provenance": {
     "generator": "crates/eval-core/gen/gen-statistics-golden.ts",
     "generator_version": "statistics-reference-ts-v1",
-    "input_sha256": "33c57046b4d08e52528baf915519c17bc4f36132d340403ccd72e52b80bbfcf2"
+    "input_sha256": "9b57add39757b6421cc3ad497f05d317c6252a70b954f5bcb16ed814cad24f20"
   },
   "schema": 1
 }

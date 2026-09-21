@@ -65,6 +65,7 @@ fn family() -> AnalysisFamily {
         item_count_threshold: ITEM_COUNT_THRESHOLD,
         bootstrap_replicates: 400,
         bootstrap_seed: 7,
+        trials_k: 3,
         icc_pilot: pilot(ratio(400, 1), 385),
     }
 }
@@ -157,7 +158,7 @@ fn the_frozen_reference_agrees_on_every_golden_case() {
         json!(format!("{:x}", Sha256::digest(canonical.as_bytes())))
     );
     let cases = golden["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 12);
+    assert_eq!(cases.len(), 26);
     let rates = profile().rates().unwrap();
     for case in cases {
         let id = case["id"].as_str().unwrap();
@@ -207,6 +208,8 @@ fn the_frozen_reference_agrees_on_every_golden_case() {
                 assert_eq!(&actual, expected, "{id}");
                 assert_eq!(interval.method, IntervalMethod::ClusterBootstrap);
             }
+            // Censored-outcome cases are asserted by `tests/censoring.rs`.
+            "latency" | "counter" | "pass_k" => {}
             other => panic!("unknown golden kind {other}"),
         }
     }
@@ -391,6 +394,12 @@ fn the_family_is_frozen_before_outcomes_and_any_post_hoc_edit_refuses() {
     let mut empty = family.clone();
     empty.endpoints.clear();
     assert_eq!(empty.validate(), Err(StatisticsError::EmptyFamilyField));
+    let mut no_repeats = family.clone();
+    no_repeats.trials_k = 0;
+    assert_eq!(
+        no_repeats.validate(),
+        Err(StatisticsError::EmptyFamilyField)
+    );
     let mut extra = value;
     extra["interval_tolerance"] = json!("0");
     assert!(matches!(

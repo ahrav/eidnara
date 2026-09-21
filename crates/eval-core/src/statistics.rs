@@ -413,6 +413,8 @@ pub struct AnalysisFamily {
     pub item_count_threshold: u32,
     pub bootstrap_replicates: u32,
     pub bootstrap_seed: u64,
+    /// The repeat count `k` every live trial's pass^k is read at.
+    pub trials_k: u32,
     pub icc_pilot: IccPilot,
 }
 
@@ -431,7 +433,7 @@ impl AnalysisFamily {
         if self.bootstrap_replicates < MIN_BOOTSTRAP_REPLICATES {
             return Err(StatisticsError::TooFewReplicates(self.bootstrap_replicates));
         }
-        if self.endpoints.is_empty() || self.families.is_empty() {
+        if self.endpoints.is_empty() || self.families.is_empty() || self.trials_k == 0 {
             return Err(StatisticsError::EmptyFamilyField);
         }
         self.profile.rates()?;
@@ -838,6 +840,8 @@ pub enum StatisticsError {
     NoAffordableWorlds,
     NoPairs,
     TooFewArms(usize),
+    MalformedCounter { n: u64, failures: u64 },
+    MalformedTrials { k: u32, repeats: u32 },
     ZeroDenominator,
     RationalOverflow,
     NotCanonical(ContractError),
