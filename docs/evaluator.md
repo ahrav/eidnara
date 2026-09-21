@@ -1389,19 +1389,25 @@ read back, and parsed equal. The envelope is observed from the start as live
 counts: elapsed time, each arm's root with its store, WAL, and shm, the one
 process, the three roots held at a time (the arm's state root, the config
 tier its daemon reads, and the cassette directory), the report's bytes, and
-the one retained artifact, all charged before the envelope is copied into the
-report so the published peaks include the publication; the run finishes
-inside its bounds. Surface 1's task turn makes no model call, which the
-backend counters show.
+the one retained artifact. The report's size is charged from a serialization
+made before the envelope is copied into the report, so the published peaks
+include the publication, and once more from the bytes written, which carry
+the peaks and are the larger; the envelope refuses on either reading. The
+manifest's bytes and the clock after the report is written are not charged.
+Surface 1's task turn makes no model call, which the backend counters show;
+of the six task budgets only the deadline can censor here, since no model
+call, tool call, or token is spent on that turn.
 
-Every campaign test is `#[ignore]`d and runs only when its scale's
-environment variable grants a budget, which becomes the profile's elapsed
-bound so the envelope refuses the first reading past it; without one it
-records the `disabled {scale_not_budgeted}` terminal in a sample ledger and
-runs nothing, and a budget that is set but not a number is refused. This is
-the parent's nextest regression policy applied: the daemon's suite runs in
-about 28 seconds without the campaign binary and about 79 with it, because
-an S0 campaign drives sixteen fixture lives of 130 harness turns each, so the
+Every test that runs a campaign is `#[ignore]`d and runs only when its
+scale's environment variable grants a budget, which becomes the profile's
+elapsed bound so the envelope refuses the first reading past it; without one
+it records the `disabled {scale_not_budgeted}` terminal in a sample ledger
+and runs nothing, and a budget that is set but not a number is refused (the
+argument, rate, and refusal tests run in the shards). This is the parent's
+nextest regression policy applied: the daemon's suite runs in about 28
+seconds without the campaign binary and about 79 with it, because an S0
+campaign drives sixteen fixture lives, seven of them over the 130-turn aged
+history and nine over the twelve-turn control, so the
 S0 campaign runs in its own CI job (`eval-campaign`, under
 `EIDNARA_EVAL_S0_BUDGET_MS`) rather than in the default shards, and S1 runs
 where a developer grants `EIDNARA_EVAL_S1_BUDGET_MS`. What S1 found: over 400 turns the
@@ -1414,9 +1420,11 @@ the firing fails as a permanent producer error, and the recording fixture
 writes no cassette and says so at exit (after cleaning up its socket and
 publication). The aged structured arm then has nothing to replay: its three
 samples end `skipped {redaction_refused}`, the aged arm's refusal rate on the
-report is the cassette's refusals over the summarizer's firings (the firings
-the recording fixture's backend never saw, since a refused frame never
-reaches it), and the refusal gate fails at the profile's ceiling of zero. This is
+report is the cassette's refusals over the summarizer's firings (the
+recording answers each firing through the fixture's backend and then scans
+the exchange, so a refused frame is a firing the backend answered and the
+cassette would not keep; the fixture counts those refusals), and the refusal
+gate fails at the profile's ceiling of zero. This is
 the scanner's typed refusal doing its job on a production prompt corpus; a
 summarizer frame that carries that example cannot be recorded until the
 corpus or the scanner changes, and the campaign reports it rather than

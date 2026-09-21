@@ -1189,8 +1189,8 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   summarizer's document; the daemon's validator accepts it as two segments of
   five with the newest held back, `unprocessed_from` 11, the end message id
   anchored, and no alias marker in the summary.
-- `an_s1_campaign_runs_only_under_its_budget` (ignored, like every campaign
-  test: the S0 tests run in the `eval-campaign` CI job under
+- `an_s1_campaign_runs_only_under_its_budget` (ignored, like every test that
+  runs a campaign: the S0 tests run in the `eval-campaign` CI job under
   `EIDNARA_EVAL_S0_BUDGET_MS` because the campaign binary takes the daemon's
   suite from about 28 seconds to about 79, which the parent's regression
   policy moves out of the default shards): a 400-message
@@ -1213,8 +1213,9 @@ Campaign (`crates/daemon/tests/eval_campaign.rs`, `--all-features`):
   header against the mock; both rules are pinned from the cache oracle and the
   parent specification rather than from an observed frame.
 - Recording is against the mock's scripted responses; no recording against a
-  live provider exists, so the redaction gate has been exercised on planted
-  canaries only.
+  live provider exists. The redaction gate has been exercised on planted
+  canaries and, at S1, on a summarizer frame that drew a seed-corpus example
+  the scanner reads as a key.
 - The keyed reviewer peer holds its entries in memory; reviewer traffic is not
   yet persisted in the cassette file, and `memory_reviewer_model_calls` is a
   manifest declaration no runner enforces yet.

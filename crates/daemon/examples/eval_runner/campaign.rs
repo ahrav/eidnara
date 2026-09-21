@@ -1507,7 +1507,7 @@ fn identity(profile: &RunProfile, set: &PairSet) -> RunIdentity {
         scenario: serde_json::json!({
             "surface": EvaluatedSurface::Surface1,
             "tasks": set.pairs.iter().map(|p| p.task.id.clone()).collect::<Vec<_>>(),
-            "aged_messages": set.aged.events.len(),
+            "aged_events": set.aged.events.len(),
         }),
         root_seed: SEED,
         random_schema_version: RANDOM_SCHEMA_VERSION.to_string(),

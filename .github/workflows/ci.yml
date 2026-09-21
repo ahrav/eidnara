@@ -626,7 +626,7 @@ jobs:
         # The campaign drives every arm through the daemon's lifecycle and
         # takes longer than the rest of the daemon's suite, so it is ignored in
         # the shards and runs here under the budget that becomes its elapsed
-        # bound. S1 and S2 stay unbudgeted here and record themselves disabled.
+        # bound. S1 stays unbudgeted here and records itself disabled.
         env:
           EIDNARA_EVAL_S0_BUDGET_MS: "1800000"
         run: >
