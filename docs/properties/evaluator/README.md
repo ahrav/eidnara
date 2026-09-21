@@ -816,6 +816,10 @@ tested as an example target):
 - Recording is against the mock's scripted responses; no recording against a
   live provider exists, so the redaction gate has been exercised on planted
   canaries only.
+- The `cch=<nonce>;` rule applies to every string under `body.system`, so an
+  instruction file that happens to contain that exact form would normalize
+  too; the billing fragment's surrounding text is unobserved (1.18.31 emits
+  none), so the rule is not narrowed to a guessed prefix.
 - The keyed reviewer peer holds its entries in memory; reviewer traffic is not
   yet persisted in the cassette file, and `memory_reviewer_model_calls` is a
   manifest declaration no runner enforces yet.

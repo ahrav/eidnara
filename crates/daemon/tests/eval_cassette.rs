@@ -159,7 +159,7 @@ fn resigned(mut file: Value) -> Value {
     file
 }
 
-fn replay_preserves_the_transcript_and_the_declarations(coverage: &mut Coverage) {
+fn replay_preserves_the_transcript_and_the_declarations_scenario(coverage: &mut Coverage) {
     let (real, file, transcripts) = record_two();
     assert_eq!(real.calls.load(Ordering::SeqCst), 2);
     assert_eq!(file["cases"].as_array().unwrap().len(), 2);
@@ -209,7 +209,9 @@ fn miss(terminal: &BackendTerminal) -> &BackendError {
     }
 }
 
-fn one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not(coverage: &mut Coverage) {
+fn one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not_scenario(
+    coverage: &mut Coverage,
+) {
     let (_, file, _) = record_two();
     let mutations: Vec<Mutation> = vec![
         ("prompt", Box::new(|r| r.prompt.push('!'))),
@@ -290,7 +292,9 @@ fn one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not(coverage:
     }
 }
 
-fn a_regenerated_frame_or_another_namespace_refuses_before_any_request(coverage: &mut Coverage) {
+fn a_regenerated_frame_or_another_namespace_refuses_before_any_request_scenario(
+    coverage: &mut Coverage,
+) {
     let (_, file, _) = record_two();
     let mut regenerated = file.clone();
     regenerated["cases"][0]["response"]["events"][1]["assistant_text"]["text"] =
@@ -378,7 +382,7 @@ async fn send(sender: &Sender, request: &MessagesRequest) -> Result<String, Send
         .map(|answer| answer.text)
 }
 
-fn memory_reviewer_replays_through_the_keyed_peer(coverage: &mut Coverage) {
+fn memory_reviewer_replays_through_the_keyed_peer_scenario(coverage: &mut Coverage) {
     runtime().block_on(async {
         // Record: one scripted exchange yields the body the marker tuple is built from.
         let mut recording_peer = Peer::start().await;
@@ -489,19 +493,19 @@ fn scenarios() -> [(&'static str, Scenario); 4] {
     [
         (
             "replay_preserves_the_transcript_and_the_declarations",
-            replay_preserves_the_transcript_and_the_declarations,
+            replay_preserves_the_transcript_and_the_declarations_scenario,
         ),
         (
             "one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not",
-            one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not,
+            one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not_scenario,
         ),
         (
             "a_regenerated_frame_or_another_namespace_refuses_before_any_request",
-            a_regenerated_frame_or_another_namespace_refuses_before_any_request,
+            a_regenerated_frame_or_another_namespace_refuses_before_any_request_scenario,
         ),
         (
             "memory_reviewer_replays_through_the_keyed_peer",
-            memory_reviewer_replays_through_the_keyed_peer,
+            memory_reviewer_replays_through_the_keyed_peer_scenario,
         ),
     ]
 }
@@ -521,22 +525,22 @@ fn run_scenario(name: &str) {
 }
 
 #[test]
-fn transcript_and_declarations() {
+fn replay_preserves_the_transcript_and_the_declarations() {
     run_scenario("replay_preserves_the_transcript_and_the_declarations");
 }
 
 #[test]
-fn covered_field_misses() {
+fn one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not() {
     run_scenario("one_byte_in_each_covered_field_misses_and_the_dropped_fields_do_not");
 }
 
 #[test]
-fn provenance_and_namespace() {
+fn a_regenerated_frame_or_another_namespace_refuses_before_any_request() {
     run_scenario("a_regenerated_frame_or_another_namespace_refuses_before_any_request");
 }
 
 #[test]
-fn keyed_reviewer_peer() {
+fn memory_reviewer_replays_through_the_keyed_peer() {
     run_scenario("memory_reviewer_replays_through_the_keyed_peer");
 }
 
