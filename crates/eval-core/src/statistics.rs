@@ -489,17 +489,14 @@ impl IccPilot {
     }
 }
 
-/// The effective N of the best table a plan permits: `pairs` over `worlds`
-/// nested in `families`, deflated at each level by the pilot's ICC with the
-/// size-weighted mean cluster, the smaller level kept, maximized over the
-/// allocations. Families holding `base + 1` worlds share one total `x`, those
-/// holding `base` share the rest as evenly as whole pairs allow, and each
-/// family balances its pairs over its worlds; within a family type an uneven
-/// split is worse at both levels, so this one-dimensional family contains the
-/// optimum. The family level peaks at the balanced total and the world level at
-/// the world-proportional one, so their minimum is unimodal in `x` and a ternary
-/// search over the integers between the two peaks finds it in `O(log pairs)`
-/// closed-form evaluations.
+/// An upper bound on the effective N of any table the plan permits: `pairs`
+/// deflated at each level by the pilot's ICC with the level's own best
+/// (balanced) size-weighted mean cluster, the smaller level kept. Each level is
+/// taken at its optimum separately, so no realizable table exceeds this, and a
+/// plan below it can only ever block. The two optima need not be attainable at
+/// once, so a plan above it may still produce a table `analyze` refuses as
+/// `TableUnderpowered`; that decision belongs to the exact check on the table,
+/// where a false refusal here would have no remedy.
 fn attainable_effective_n(
     pairs: u32,
     worlds: u32,
@@ -508,51 +505,22 @@ fn attainable_effective_n(
 ) -> Result<Ratio, StatisticsError> {
     let (pairs, worlds, families) = (i128::from(pairs), i128::from(worlds), i128::from(families));
     let n = Ratio::try_new(pairs, 1)?;
-    let (base, extra) = (worlds / families, worlds % families);
-    let low = families - extra;
-    // `count` groups over `units`: `more` of `each + 1`, the rest of `each`.
-    let balanced_squares = |units: i128, count: i128| {
-        let (each, more) = (units / count, units % count);
+    // `count` clusters over `pairs`: `more` of `each + 1`, the rest of `each`.
+    let balanced_squares = |count: i128| {
+        let (each, more) = (pairs / count, pairs % count);
         more * (each + 1).pow(2) + (count - more) * each.pow(2)
     };
-    // The bound for `x` pairs in each of the `extra` larger families.
-    let at = |x: i128| -> Result<Ratio, StatisticsError> {
-        let rest = pairs - extra * x;
-        let (per, more) = (rest / low, rest % low);
-        let family_squares = extra * x.pow(2) + more * (per + 1).pow(2) + (low - more) * per.pow(2);
-        let world_squares = extra * balanced_squares(x, base + 1)
-            + more * balanced_squares(per + 1, base)
-            + (low - more) * balanced_squares(per, base);
-        let at_family = deflate(n, Ratio::try_new(family_squares, pairs)?, pilot.icc_family)?;
-        let at_world = deflate(
-            n,
-            Ratio::try_new(world_squares, pairs)?,
-            pilot.icc_world_seed,
-        )?;
-        Ok(at_family.min(at_world))
-    };
-    if extra == 0 {
-        return at(0);
-    }
-    let family_peak = pairs / families;
-    let world_peak = (base + 1) * pairs / worlds;
-    let (mut lo, mut hi) = (
-        (family_peak.min(world_peak) - 1).max(0),
-        (family_peak.max(world_peak) + 1).min(pairs / extra),
-    );
-    while hi - lo > 3 {
-        let (first, second) = (lo + (hi - lo) / 3, hi - (hi - lo) / 3);
-        if at(first)? < at(second)? {
-            lo = first + 1;
-        } else {
-            hi = second - 1;
-        }
-    }
-    let mut best = at(lo)?;
-    for x in lo + 1..=hi {
-        best = best.max(at(x)?);
-    }
-    Ok(best)
+    let at_family = deflate(
+        n,
+        Ratio::try_new(balanced_squares(families), pairs)?,
+        pilot.icc_family,
+    )?;
+    let at_world = deflate(
+        n,
+        Ratio::try_new(balanced_squares(worlds), pairs)?,
+        pilot.icc_world_seed,
+    )?;
+    Ok(at_family.min(at_world))
 }
 
 /// `items` deflated by the design effect `1 + (m - 1) ICC` of clusters of mean
@@ -681,12 +649,10 @@ impl AnalysisFamily {
         if draws > MAX_BOOTSTRAP_DRAWS {
             return Err(StatisticsError::TooManyDraws(draws));
         }
-        // The best table the plan permits: worlds spread as evenly as whole
-        // worlds allow over the families, pairs as evenly as whole pairs allow
-        // over the worlds, the larger worlds placed in the smaller families, and
-        // each level deflated exactly as a completed table would be. If even
-        // that falls short of the required N, the plan can only ever block, so
-        // it is refused now.
+        // No table the plan permits beats each level at its own optimum. If
+        // even that falls short of the required N, the plan can only ever
+        // block, so it is refused now; a plan that passes is decided exactly on
+        // the table it produces.
         let attainable = attainable_effective_n(pairs, worlds, families, pilot)?;
         if attainable < Ratio::try_new(i128::from(pilot.required_n_for_margin), 1)? {
             return Err(StatisticsError::PlanBelowRequiredN {
@@ -1245,9 +1211,9 @@ pub fn analyze(
 /// is refused rather than wrapped; `PilotTooSmall` means a clustering level
 /// had fewer than two groups or no replication; `PilotInconsistent` means a
 /// frozen pilot's unit or effective N is not what its own counts and ICCs
-/// imply; `PlanBelowRequiredN` means no table of the frozen pair count, however
-/// well spread over the clusters the plan permits, can reach the pilot's
-/// required N; `PairCountMismatch`, `PairOutsideFamilies`, and
+/// imply; `PlanBelowRequiredN` means no table of the frozen pair count can
+/// reach the pilot's required N, since even each level at its own best
+/// spread over the clusters the plan permits falls short; `PairCountMismatch`, `PairOutsideFamilies`, and
 /// `DuplicatePair` mean the pair table is not the one the plan froze;
 /// `InconsistentCounts` means a hand-built `PairCounts` violates `b + c <= n`
 /// or a count exceeds `n`; `UnsupportedEndpoints` means the frozen endpoint

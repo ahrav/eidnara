@@ -953,15 +953,15 @@ registered population, so its ICCs describe the campaign's clusters and the
 family-unit projection spreads items over exactly those families)
 (`PilotInconsistent`; a projection that leaves the safe range is reported as
 `RationalOverflow`), so a hand-written pilot cannot inflate its way past the
-block, and refuses a plan whose pair count is zero (`NoPairs`) or whose best
-attainable table (each level deflated by its ICC with the same size-weighted
-mean a completed table gets, the smaller level kept, maximized over the
-allocations: the larger families share one total, the others split the rest
-evenly, each balances its pairs over its worlds, and a ternary search over that
-total between the family-balanced and world-balanced peaks finds the optimum in
-`O(log pairs)` closed-form steps) falls short of the
-pilot's `required_n_for_margin` (`PlanBelowRequiredN {attainable, ..}`), since
-such a plan can only ever block after the campaign has run. `FrozenFamily::freeze` digests it
+block, and refuses a plan whose pair count is zero (`NoPairs`) or whose pair
+count, with each level at its own best spread over the clusters the plan
+permits (the balanced size-weighted mean, deflated by that level's ICC, the
+smaller level kept), falls short of the pilot's `required_n_for_margin`
+(`PlanBelowRequiredN {attainable, ..}`), since such a plan can only ever block
+after the campaign has run. That bound is necessary, not sufficient: the two
+levels' optima need not be attainable in one table, so an admitted plan may
+still produce a table `analyze` blocks as `TableUnderpowered`; the plan check
+never refuses a plan some table could satisfy, and the table check is exact. `FrozenFamily::freeze` digests it
 (`eval-analysis-family-digest/v1`); the manifest records that digest as
 `analysis_family_digest` before the first outcome, and `FrozenFamily::check`
 refuses a family whose digest differs as

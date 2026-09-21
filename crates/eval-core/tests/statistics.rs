@@ -1130,10 +1130,11 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
             required_n_for_margin: 150
         })
     );
-    // Worlds nest in families, so the bound is over one joint allocation: two
-    // families and three worlds put two worlds in one family, and a real pilot
-    // with family ICC 43/195 and world ICC 4/9 supports 1755/443 of six pairs,
-    // short of four, although each level balanced on its own would allow 54/13.
+    // The plan bound takes each level at its own best spread, which a table need
+    // not attain at once: two families and three worlds put two worlds in one
+    // family, and under a real pilot with family ICC 43/195 and world ICC 4/9
+    // the bound on six pairs is 54/13, so the plan is admitted, while the best
+    // table it permits reaches only 1755/443 and is refused exactly, as a table.
     let nested_pilot = run_icc_pilot(
         "p",
         &[
@@ -1156,16 +1157,37 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     nested_plan.families = vec!["a".into(), "b".into()];
     nested_plan.icc_pilot = nested_pilot;
     nested_plan.stopping_rule = StoppingRule::FixedN { pairs: 6 };
+    assert_eq!(nested_plan.validate(), Ok(()));
+    let nested_frozen = FrozenFamily::freeze(&nested_plan).unwrap();
+    let nested_table: Vec<PairOutcome> =
+        [("a", 0), ("a", 0), ("a", 1), ("a", 1), ("b", 0), ("b", 0)]
+            .iter()
+            .enumerate()
+            .map(|(i, (family, seed))| {
+                pair(
+                    &format!("n{i}"),
+                    family,
+                    *seed,
+                    ArmResult::Pass,
+                    ArmResult::Pass,
+                )
+            })
+            .collect();
     assert_eq!(
-        nested_plan.validate(),
-        Err(StatisticsError::PlanBelowRequiredN {
-            attainable: ratio(1755, 443),
+        analyze(
+            &recorded(&nested_frozen, rates.clone(), &nested_table),
+            &nested_plan,
+            &nested_table
+        )
+        .unwrap(),
+        Analysis::Blocked(BlockedReason::TableUnderpowered {
+            effective_n: ratio(1755, 443),
+            n_clusters: 2,
             required_n_for_margin: 4
         })
     );
-    // The larger worlds go where they even the family totals: 12 pairs over five
-    // worlds (3, 3, 2, 2, 2) and two families (two and three worlds) is 6 and 6,
-    // which under a family ICC of 2/5 is exactly the four required, not 5 and 7.
+    // 12 pairs over five worlds and two families under a family ICC of 2/5: the
+    // family level at its best spread (6 and 6) is exactly the four required.
     let mut lopsided = family.clone();
     lopsided.families = vec!["a".into(), "b".into()];
     lopsided.icc_pilot = IccPilot {
@@ -1183,10 +1205,9 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     };
     lopsided.stopping_rule = StoppingRule::FixedN { pairs: 12 };
     assert_eq!(lopsided.validate(), Ok(()));
-    // When the family level binds, uneven worlds can be the better table: a real
-    // pilot with family ICC 13/53 and world ICC -2/15 over six pairs, three
-    // worlds, and two families reaches 318/79 with world sizes 3, 2, 1 (family
-    // totals 3 and 3), although balanced worlds give only 477/125.
+    // A real pilot with family ICC 13/53 and world ICC -2/15 over six pairs,
+    // three worlds, and two families: the family level at 3 and 3 gives 318/79,
+    // above the four required, and a table with world sizes 3, 2, 1 attains it.
     let uneven_pilot = run_icc_pilot(
         "p",
         &[
@@ -1210,10 +1231,9 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     uneven_plan.icc_pilot = uneven_pilot;
     uneven_plan.stopping_rule = StoppingRule::FixedN { pairs: 6 };
     assert_eq!(uneven_plan.validate(), Ok(()));
-    // The bound searches the family totals between the two levels' peaks: 12 pairs
-    // over three worlds and two families under family ICC 11/20 and world ICC
-    // 9/10 reach 240/77 with world sizes 5 | 3, 4 (family totals 5 and 7), where
-    // both the world-balanced and the family-balanced tables fall under three.
+    // 12 pairs over three worlds and two families under family ICC 11/20 and
+    // world ICC 9/10: the family level allows 16/5 and the world level 120/37, so
+    // the bound is 16/5, above three and below four.
     let mut between = family.clone();
     between.families = vec!["a".into(), "b".into()];
     between.icc_pilot = IccPilot {
@@ -1235,13 +1255,33 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     assert_eq!(
         between.validate(),
         Err(StatisticsError::PlanBelowRequiredN {
-            attainable: ratio(240, 77),
+            attainable: ratio(16, 5),
             required_n_for_margin: 4
         })
     );
-    // The bound is closed form over the two family sizes, so a compact plan with
-    // billions of pairs and worlds is judged without a loop over either; this
-    // one's size-weighted family mean leaves the safe range and is refused.
+    // Seven pairs over five worlds and three families under ICCs of 1/10 and 1/5:
+    // family totals 2, 2, 3 over worlds 1, 1, 3 reach both levels' optima (49/8
+    // and 245/39) at once, so the plan for six is admitted.
+    let mut three_families = family.clone();
+    three_families.families = vec!["a".into(), "b".into(), "c".into()];
+    three_families.icc_pilot = IccPilot {
+        families: vec!["a".into(), "b".into(), "c".into()],
+        n_items: 35,
+        n_families: 3,
+        n_worlds: 5,
+        icc_family: ratio(1, 10),
+        icc_world_seed: ratio(1, 5),
+        clustering_unit: ClusteringUnit::Family,
+        max_affordable_worlds: 5,
+        effective_n_at_max: ratio(175, 11),
+        required_n_for_margin: 6,
+        ..family.icc_pilot.clone()
+    };
+    three_families.stopping_rule = StoppingRule::FixedN { pairs: 7 };
+    assert_eq!(three_families.validate(), Ok(()));
+    // The bound is closed form, so a compact plan with billions of pairs and
+    // worlds is decided without a loop over either; this one's size-weighted
+    // family mean leaves the safe range and is refused.
     let worlds = 2_000_000_001u32;
     let mut vast_nested = family.clone();
     vast_nested.families = vec!["a".into(), "b".into()];

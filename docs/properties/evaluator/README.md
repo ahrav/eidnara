@@ -963,18 +963,19 @@ Statistics core (`crates/eval-core/tests/statistics.rs`):
   of 300 is `PlanBelowRequiredN` (attainable 299), as is one of 300 pairs
   over at most 150 worlds under a world ICC of `1/10` (attainable
   `3000/11`) and one of 301 pairs over 150 worlds under a world ICC of one
-  (attainable `90601/605`, the whole-pair allocation, not 150), and a
-  six-pair plan over two families and three worlds under a real pilot's
-  family ICC `43/195` and world ICC `4/9` (attainable `1755/443`, the joint
-  allocation, not `54/13`), while 12 pairs over five worlds and two families
-  under a family ICC of `2/5` attain exactly the four required, the larger
-  worlds evening the family totals, and six pairs over three worlds and two
-  families under a family ICC of `13/53` reach `318/79` with world sizes
-  3, 2, 1 where balanced worlds would not, and 12 pairs over three worlds and
-  two families under ICCs of `11/20` and `9/10` reach `240/77` with world
-  sizes 5 | 3, 4, between the two balanced tables; a plan of four billion
-  pairs over two billion worlds is judged in logarithmic closed-form steps
-  (and refused as `RationalOverflow`); a repeated pilot observation is
+  (attainable `90601/605`, the whole-pair allocation, not 150), and 12 pairs
+  over three worlds and two families under ICCs of `11/20` and `9/10` against
+  a required N of four (attainable `16/5`); the plan bound takes each level at
+  its own best spread and is necessary, not sufficient: a six-pair plan over
+  two families and three worlds under a real pilot's family ICC `43/195` and
+  world ICC `4/9` is admitted (bound `54/13`) while its best table reaches
+  only `1755/443` and is blocked as `TableUnderpowered` with two clusters,
+  and plans whose levels' optima coincide in one table (12 pairs over five
+  worlds and two families under a family ICC of `2/5`, six pairs over three
+  worlds and two families under `13/53`, seven pairs over five worlds and
+  three families under `1/10` and `1/5`) are admitted; a plan of four billion
+  pairs over two billion worlds is decided in closed form (and refused as
+  `RationalOverflow`); a repeated pilot observation is
   `DuplicateObservation`; a miss or refusal rate of `2` is `RateOutOfRange`;
   hand-built counts with `b + c > n`, `b + aged_pass > n`, `c > aged_pass`,
   `aged_censored + aged_pass > n`, `fresh_censored + c > b + aged_pass`, a
