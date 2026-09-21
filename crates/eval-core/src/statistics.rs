@@ -13,6 +13,10 @@ use serde_json::{Value, json};
 use crate::manifest::{ArmRates, Manifest, is_canonical_decimal};
 
 pub const ANALYSIS_FAMILY_SCHEMA: &str = "eval-analysis-family/v1";
+/// The gates a report carries; a frozen family declares exactly these.
+pub const GATE_ENDPOINTS: [&str; 3] = ["quality_loss", "harm", "floor"];
+/// The two arms of every pair, the keys `arm_rates` must carry.
+pub const PAIRED_ARMS: [&str; 2] = ["aged", "fresh"];
 const ANALYSIS_FAMILY_DIGEST_PROTOCOL: &str = "eval-analysis-family-digest/v1";
 const BOOTSTRAP_PROTOCOL: &str = "eval-cluster-bootstrap/v1";
 /// The smallest item count an interval may be computed from.
@@ -461,6 +465,15 @@ impl AnalysisFamily {
         if self.endpoints.is_empty() || self.families.is_empty() {
             return Err(StatisticsError::EmptyFamilyField);
         }
+        // The report always carries the three gates, so the frozen declaration
+        // must name exactly those; a declaration the analyzer cannot honor is
+        // refused rather than silently analyzed as something else.
+        let declared: BTreeSet<&str> = self.endpoints.iter().map(String::as_str).collect();
+        if declared.len() != self.endpoints.len() || declared != BTreeSet::from(GATE_ENDPOINTS) {
+            return Err(StatisticsError::UnsupportedEndpoints {
+                declared: self.endpoints.clone(),
+            });
+        }
         self.profile.rates()?;
         // The pilot's unit and effective N are functions of its recorded counts
         // and ICCs; a pilot whose recorded values disagree did not come from
@@ -834,12 +847,18 @@ pub enum Analysis {
     Blocked(BlockedReason),
 }
 
-/// The gap between the highest and lowest arm cassette-miss rate. Both arm
-/// rates must be canonical decimals in `[0, 1]`. Fewer than two arms is
-/// missing evidence, which never passes a control.
+/// The gap between the aged and fresh arm cassette-miss rates, the two arms
+/// every pair has. Both rates of both arms must be canonical decimals in
+/// `[0, 1]`; any other arm set is missing evidence, which never passes a
+/// control.
 pub fn arm_miss_asymmetry(
     arm_rates: &BTreeMap<String, ArmRates>,
 ) -> Result<Ratio, StatisticsError> {
+    if arm_rates.keys().map(String::as_str).ne(PAIRED_ARMS) {
+        return Err(StatisticsError::ArmsNotPaired {
+            found: arm_rates.keys().cloned().collect(),
+        });
+    }
     let rates: Vec<Ratio> = arm_rates
         .values()
         .map(|rates| {
@@ -847,10 +866,7 @@ pub fn arm_miss_asymmetry(
             unit_rate("arm_rates.miss_rate", &rates.miss_rate)
         })
         .collect::<Result<_, _>>()?;
-    match (rates.iter().max(), rates.iter().min()) {
-        (Some(high), Some(low)) if rates.len() >= 2 => high.checked_sub(*low),
-        _ => Err(StatisticsError::TooFewArms(rates.len())),
-    }
+    rates[0].max(rates[1]).checked_sub(rates[0].min(rates[1]))
 }
 
 /// Analyzes a completed pair table under the frozen family. The order is the
@@ -924,7 +940,9 @@ pub fn analyze(
 /// pilot's required N; `PairCountMismatch`, `PairOutsideFamilies`, and
 /// `DuplicatePair` mean the pair table is not the one the plan froze;
 /// `InconsistentCounts` means a hand-built `PairCounts` violates `b + c <= n`
-/// or a count exceeds `n`.
+/// or a count exceeds `n`; `UnsupportedEndpoints` means the frozen endpoint
+/// list is not the three gates; `ArmsNotPaired` means `arm_rates` does not
+/// carry exactly the aged and fresh arms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatisticsError {
     Shape(String),
@@ -970,7 +988,12 @@ pub enum StatisticsError {
     InconsistentCounts,
     NoAffordableWorlds,
     NoPairs,
-    TooFewArms(usize),
+    ArmsNotPaired {
+        found: Vec<String>,
+    },
+    UnsupportedEndpoints {
+        declared: Vec<String>,
+    },
     ZeroDenominator,
     RationalOverflow,
     NotCanonical(ContractError),

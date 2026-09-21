@@ -918,7 +918,11 @@ product targets. The code and its refusal tests land without values; an
 empirical acceptance needs an approved profile.
 
 **Analysis family.** `AnalysisFamily` (`eval-analysis-family/v1`) fixes
-everything a result depends on: endpoints, task families, exclusions, the
+everything a result depends on: endpoints (exactly the three gates
+`quality_loss`, `harm`, `floor`, since the report always carries them; any
+other list is `UnsupportedEndpoints`), task families, exclusions (the
+pre-registered exclusion criteria as text; the freeze keeps them from changing
+after the fact, and the runner applies them when it assembles the table), the
 stopping rule (`fixed_n` with its pair count), the multiplicity correction (`none`, `holm`,
 `benjamini_hochberg`), the profile, the interval method (`cluster_bootstrap`),
 the item-count threshold (at least 300), the bootstrap replicate count and
@@ -991,10 +995,10 @@ report carries `IntervalOutcome::Withheld {reason: item_count_below_threshold}`
 **Report.** `analyze(frozen, family, pairs, arm_rates)` checks the freeze
 (`FrozenFamily::from_manifest` reads the manifest's recorded digest; a
 manifest without one is `FamilyNotRecorded`), then the pilot's block, then the
-per-arm cassette-miss asymmetry (the gap between the highest and lowest
-`arm_rates.*.miss_rate`; both arm rates are refused outside `[0, 1]`; fewer than two arms is
-`TooFewArms`, missing evidence
-that never passes) against `miss_asymmetry_bound`, which blocks as
+per-arm cassette-miss asymmetry (the gap between the `aged` and `fresh`
+arms' `miss_rate`, the two arms every pair has; both rates of both arms are
+refused outside `[0, 1]`; any other arm set is `ArmsNotPaired`, missing
+evidence that never passes) against `miss_asymmetry_bound`, which blocks as
 `arm_miss_asymmetry` with no gates computed; then the table's conformance to
 the plan (a size other than the frozen pair count is `PairCountMismatch`, a
 pair outside the frozen families is `PairOutsideFamilies`, a repeated pair id
