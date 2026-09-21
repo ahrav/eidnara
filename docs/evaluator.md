@@ -1063,25 +1063,22 @@ falsifier at or past the median (`TruthNotEarly`, checked before) or with a
 correction or retraction aimed at it anywhere in the aged history
 (`SupersededFalsifier`, naming the event), a set without a falsification pair
 or a positive control, and a duplicate or evidence-less task. `PairSet` is
-public on the wire, so `PairSet::validate(fixture)` re-checks a set read back
-against its own aged history: the policy version, the surface's bound, one
-query across the tasks, both control classes, evidence the reducer requires
-on the aged arm, early and unsuperseded falsification truths, the median
-and the window recomputed from `aged` under `fixture`, one independent
-history common to every pair's fresh arm (its units the aged history lacks;
-`Tampered {fresh}` when the pairs disagree, and the compile-time
-`NaturalFreshCopiedFromAged` and `EmptyNaturalFresh` checks run on it
-again), the widened query recomputed from that history (`Tampered {field}`
-names `aged_median_ms`, `recency_window`, or `fresh_query` when the
-recorded value differs), and both fresh arms re-judged under the reducer:
-evidence required on each (`EvidenceNotRequiredOnArm`), shared verdicts
-equal (`SharedVerdictDisagreement`), and the control competing
-(`NaturalFreshInert`). The fresh arms are the runner's inputs and are
-re-judged, not re-derived. `check_recency_baseline` runs the validation first, so an edited
-window cannot manufacture an `Established` verdict. The natural-fresh history
-is validated as supplied, before `on_distinct_entities` sorts and re-derives
-it, so a shuffled slice of the aged history cannot pass the copy check and be
-normalized back into the copy.
+public on the wire, so `PairSet::validate(fixture)` requires a set read back
+to be the one the compiler produces from the set's own parts: the policy
+version and the surface's bound are checked as recorded, then the compiler's
+assembly runs again over `aged`, the independent history common to every
+pair's fresh arm (its units and causal edges the aged history lacks;
+`Tampered {pairs}` when the pairs disagree), and the pairs' tasks under
+`fixture`. Every compile-time refusal applies again (`NaturalFreshCopiedFromAged`,
+`EmptyNaturalFresh`, `TruthNotEarly`, `NoPositiveControl`, and the rest), and
+`Tampered {field}` names `aged_median_ms`, `recency_window`, `fresh_query`,
+or `pairs` when the recorded value differs from the recomputation, so a
+fresh arm that gained a competitor, lost its evidence, or dropped an edge is
+refused as a whole. The natural-fresh history is validated as supplied,
+before `on_distinct_entities` sorts and re-derives it, so a shuffled slice
+of the aged history cannot pass the copy check and be normalized back into
+the copy. `check_recency_baseline` runs the validation first, so an edited
+window cannot manufacture an `Established` verdict.
 
 **Recency baseline.** `recency_bound` resolves the window: surface 1 pins the
 production hint candidate limit (100) and refuses any other declaration;

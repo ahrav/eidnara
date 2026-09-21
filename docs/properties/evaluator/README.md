@@ -953,16 +953,17 @@ Pairs (`crates/eval-core/tests/pairs.rs`):
   window) each refuse by name.
 - `a_set_read_back_must_be_one_the_compiler_could_have_produced`: another
   policy version, surface 1 under a bound of three, a zero bound, a window
-  wider than the bound, a relabelled positive control, emptied evidence, a
-  moved median, a duplicate task, a task at its own cut, evidence the aged
-  history lacks, a falsifier's evidence moved late (`TruthNotEarly` from the
-  wire), a window naming an event the aged history lacks, a window out of
-  order, a narrowed window, a widened query with its scope cleared or its
-  cut moved, a fresh arm or ceiling missing its evidence
-  (`EvidenceNotRequiredOnArm`), one competitor dropped from one pair's fresh
-  arm (`Tampered {fresh}`), the control emptied out of every fresh arm
-  (`EmptyNaturalFresh`), and a relabelled slice of the aged history carried
-  as every pair's control (`NaturalFreshCopiedFromAged`) each refuse from
+  wider than the bound, a widened query with its scope cleared or its cut
+  moved, a fresh arm or ceiling missing its evidence, an eligible aged unit
+  outside the closure added to one fresh arm, one competitor or one of its
+  causal edges dropped from one fresh arm (each `Tampered {pairs}`), the
+  control emptied out of every fresh arm (`EmptyNaturalFresh`), a relabelled
+  slice of the aged history carried as every pair's control
+  (`NaturalFreshCopiedFromAged`), a relabelled positive control, emptied
+  evidence, a moved median, a duplicate task, a task at its own cut,
+  evidence the aged history lacks, a falsifier's evidence moved late
+  (`TruthNotEarly` from the wire), a window naming an event the aged history
+  lacks, a window out of order, and a narrowed window each refuse from
   `PairSet::validate` and from `check_recency_baseline` before any
   judgement.
 - `a_window_edited_on_the_wire_cannot_manufacture_an_established_contrast`:

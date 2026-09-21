@@ -905,11 +905,7 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
             Box::new(|s| {
                 s.pairs[0].fresh = s.pairs[0].fresh.without(&id("repository:repository-0:0"))
             }),
-            PairError::EvidenceNotRequiredOnArm {
-                task: "early-commit".to_string(),
-                arm: ArmKind::Fresh,
-                id: id("repository:repository-0:0"),
-            },
+            PairError::Tampered { field: "pairs" },
         ),
         (
             "the control's evidence dropped from its ceiling",
@@ -918,11 +914,39 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
                     .fresh_minimal
                     .without(&id("repository:repository-0:11"))
             }),
-            PairError::EvidenceNotRequiredOnArm {
-                task: "last-rename".to_string(),
-                arm: ArmKind::FreshMinimal,
-                id: id("repository:repository-0:11"),
-            },
+            PairError::Tampered { field: "pairs" },
+        ),
+        (
+            "an eligible aged unit outside the closure added to one fresh arm",
+            Box::new(|s| {
+                let extra = s
+                    .aged
+                    .events
+                    .iter()
+                    .find(|e| e.id == id("session:session-1:4"))
+                    .unwrap()
+                    .clone();
+                assert!(!s.pairs[0].fresh.events.iter().any(|e| e.id == extra.id));
+                s.pairs[0].fresh.events.push(extra);
+                s.pairs[0]
+                    .fresh
+                    .events
+                    .sort_by(|a, b| a.key().cmp(&b.key()));
+            }),
+            PairError::Tampered { field: "pairs" },
+        ),
+        (
+            "one causal edge of the control dropped from one fresh arm",
+            Box::new(|s| {
+                let control = independent_of(&s.pairs[0])[0].entity_id.clone();
+                let edges = &mut s.pairs[0].fresh.causal_edges;
+                let at = edges
+                    .iter()
+                    .position(|e| e.from.0.contains(&control))
+                    .expect("the control has a causal edge");
+                edges.remove(at);
+            }),
+            PairError::Tampered { field: "pairs" },
         ),
         (
             "one competitor dropped from one pair's fresh arm",
@@ -932,7 +956,7 @@ fn a_set_read_back_must_be_one_the_compiler_could_have_produced() {
                 let competitor = independent_of(&s.pairs[0])[1].id.clone();
                 s.pairs[0].fresh = s.pairs[0].fresh.without(&competitor);
             }),
-            PairError::Tampered { field: "fresh" },
+            PairError::Tampered { field: "pairs" },
         ),
         (
             "the control emptied out of every fresh arm",
