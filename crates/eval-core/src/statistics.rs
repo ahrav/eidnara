@@ -3,8 +3,8 @@
 //! Censored arms resolve to the verdict least favorable to the aged arm.
 //! Inference the evidence cannot support is withheld or `Blocked`.
 
-use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
 use context_core::canonical_json::{ContractError, canonical_json_encode, protocol_digest};
 use serde::{Deserialize, Serialize};
@@ -490,9 +490,13 @@ impl IccPilot {
 }
 
 /// The effective N of the best table a plan permits: `pairs` over `worlds`
-/// nested in `families`, both allocations as even as whole units allow, with
-/// the larger worlds in the smaller families, deflated at each level by the
-/// pilot's ICC with the size-weighted mean cluster, the smaller kept.
+/// nested in `families`, deflated at each level by the pilot's ICC with the
+/// size-weighted mean cluster, the smaller level kept. Two realizable
+/// allocations are tried and the better one is the bound: pairs balanced over
+/// the worlds with the larger worlds evening the family totals (best when the
+/// world level binds), and pairs balanced over the families and then over each
+/// family's worlds (best when the family level binds). Everything is closed
+/// form over the two family sizes, so the work does not grow with the counts.
 fn attainable_effective_n(
     pairs: u32,
     worlds: u32,
@@ -500,43 +504,52 @@ fn attainable_effective_n(
     pilot: &IccPilot,
 ) -> Result<Ratio, StatisticsError> {
     let (pairs, worlds, families) = (i128::from(pairs), i128::from(worlds), i128::from(families));
-    // `remainder` worlds hold `quotient + 1` pairs, the rest `quotient`.
-    let (quotient, remainder) = (pairs / worlds, pairs % worlds);
-    // `extra` families hold `base + 1` worlds, the rest `base`; the smaller
-    // families come first so the larger worlds land in them.
-    let (base, extra) = (worlds / families, worlds % families);
-    // Each larger world goes to the family with the smallest pair total that
-    // still has a world to hold it, so the family totals end as even as the
-    // world sizes allow.
-    let mut totals: BinaryHeap<Reverse<(i128, i128)>> = (0..families)
-        .map(|i| {
-            let worlds = if i < families - extra { base } else { base + 1 };
-            Reverse((worlds * quotient, worlds))
-        })
-        .collect();
-    let mut placed: Vec<i128> = Vec::with_capacity(families as usize);
-    for _ in 0..remainder {
-        let Reverse((total, capacity)) = totals.pop().expect("a family per world");
-        if capacity > 1 {
-            totals.push(Reverse((total + 1, capacity - 1)));
-        } else {
-            placed.push(total + 1);
-        }
-    }
-    let family_squares: i128 = placed
-        .iter()
-        .chain(totals.iter().map(|Reverse((total, _))| total))
-        .map(|total| total.pow(2))
-        .sum();
-    let world_squares = remainder * (quotient + 1).pow(2) + (worlds - remainder) * quotient.pow(2);
     let n = Ratio::try_new(pairs, 1)?;
-    let at_family = deflate(n, Ratio::try_new(family_squares, pairs)?, pilot.icc_family)?;
-    let at_world = deflate(
-        n,
-        Ratio::try_new(world_squares, pairs)?,
-        pilot.icc_world_seed,
-    )?;
-    Ok(at_family.min(at_world))
+    // `extra` families hold `base + 1` worlds, the other `low` hold `base`.
+    let (base, extra) = (worlds / families, worlds % families);
+    let low = families - extra;
+    // Balanced sizes: `count` groups of `each` or `each + 1` units.
+    let balanced_squares = |units: i128, count: i128| {
+        let (each, more) = (units / count, units % count);
+        more * (each + 1).pow(2) + (count - more) * each.pow(2)
+    };
+    let bound = |family_squares: i128, world_squares: i128| -> Result<Ratio, StatisticsError> {
+        let at_family = deflate(n, Ratio::try_new(family_squares, pairs)?, pilot.icc_family)?;
+        let at_world = deflate(
+            n,
+            Ratio::try_new(world_squares, pairs)?,
+            pilot.icc_world_seed,
+        )?;
+        Ok(at_family.min(at_world))
+    };
+
+    // Worlds first: `remainder` worlds hold `quotient + 1` pairs. Each family
+    // takes `share` of them, `more` families one extra, the extras going to the
+    // smaller families unless only the larger ones have a world left for them.
+    let (quotient, remainder) = (pairs / worlds, pairs % worlds);
+    let (share, more) = (remainder / families, remainder % families);
+    let (low_more, extra_more) = if share + 1 > base {
+        (0, more)
+    } else {
+        (more.min(low), (more - low).max(0))
+    };
+    let family_squares = (low - low_more) * (base * quotient + share).pow(2)
+        + low_more * (base * quotient + share + 1).pow(2)
+        + (extra - extra_more) * ((base + 1) * quotient + share).pow(2)
+        + extra_more * ((base + 1) * quotient + share + 1).pow(2);
+    let worlds_first = bound(family_squares, balanced_squares(pairs, worlds))?;
+
+    // Families first: `rest` families hold `per + 1` pairs, the larger families
+    // taking them first; each family then balances its pairs over its worlds.
+    let (per, rest) = (pairs / families, pairs % families);
+    let (extra_rest, low_rest) = (rest.min(extra), (rest - extra).max(0));
+    let world_squares = (low - low_rest) * balanced_squares(per, base)
+        + low_rest * balanced_squares(per + 1, base)
+        + (extra - extra_rest) * balanced_squares(per, base + 1)
+        + extra_rest * balanced_squares(per + 1, base + 1);
+    let families_first = bound(balanced_squares(pairs, families), world_squares)?;
+
+    Ok(worlds_first.max(families_first))
 }
 
 /// `items` deflated by the design effect `1 + (m - 1) ICC` of clusters of mean

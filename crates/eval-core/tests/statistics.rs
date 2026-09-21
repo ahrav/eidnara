@@ -1183,6 +1183,61 @@ fn the_pair_table_and_the_pilot_must_match_the_frozen_plan() {
     };
     lopsided.stopping_rule = StoppingRule::FixedN { pairs: 12 };
     assert_eq!(lopsided.validate(), Ok(()));
+    // When the family level binds, uneven worlds can be the better table: a real
+    // pilot with family ICC 13/53 and world ICC -2/15 over six pairs, three
+    // worlds, and two families reaches 318/79 with world sizes 3, 2, 1 (family
+    // totals 3 and 3), although balanced worlds give only 477/125.
+    let uneven_pilot = run_icc_pilot(
+        "p",
+        &[
+            observation("a", 0, "t", 0),
+            observation("a", 0, "u", 0),
+            observation("a", 1, "t", 0),
+            observation("a", 1, "u", 1),
+            observation("b", 0, "t", 0),
+            observation("b", 0, "u", 4),
+        ],
+        3,
+        4,
+    )
+    .unwrap();
+    assert_eq!(
+        (uneven_pilot.icc_family, uneven_pilot.icc_world_seed),
+        (ratio(13, 53), ratio(-2, 15))
+    );
+    let mut uneven_plan = family.clone();
+    uneven_plan.families = vec!["a".into(), "b".into()];
+    uneven_plan.icc_pilot = uneven_pilot;
+    uneven_plan.stopping_rule = StoppingRule::FixedN { pairs: 6 };
+    assert_eq!(uneven_plan.validate(), Ok(()));
+    // The bound is closed form over the two family sizes, so a compact plan with
+    // billions of pairs and worlds is judged without a loop over either; this
+    // one's size-weighted family mean leaves the safe range and is refused.
+    let worlds = 2_000_000_001u32;
+    let mut vast_nested = family.clone();
+    vast_nested.families = vec!["a".into(), "b".into()];
+    vast_nested.icc_pilot = IccPilot {
+        families: vec!["a".into(), "b".into()],
+        n_items: 300,
+        n_families: 2,
+        n_worlds: 100,
+        icc_family: ratio(1, 10),
+        icc_world_seed: Ratio::ZERO,
+        clustering_unit: ClusteringUnit::Family,
+        max_affordable_worlds: worlds,
+        effective_n_at_max: Ratio::try_new(20 * i128::from(worlds), 6 + i128::from(worlds))
+            .unwrap(),
+        required_n_for_margin: 1,
+        ..family.icc_pilot.clone()
+    };
+    vast_nested.stopping_rule = StoppingRule::FixedN {
+        pairs: 4_000_000_001,
+    };
+    vast_nested.bootstrap_replicates = MIN_BOOTSTRAP_REPLICATES;
+    assert_eq!(
+        vast_nested.validate(),
+        Err(StatisticsError::RationalOverflow)
+    );
     // Nor can 300 pairs over at most 150 worlds: the best table has two pairs per
     // world, and under a world ICC of 1/10 that is 3000/11 effective items.
     let mut crowded = family.clone();
